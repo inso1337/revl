@@ -82,6 +82,9 @@ CONTRACT_KEYS = ("surface", "provider")
 #: The file an apply locks, exclusively, in its generation directory for its
 #: whole run. `deploy.settle_stranded` refuses to settle while it is held.
 LOCK_FILE = deploy.STATE_LOCK_FILE
+#: The `writer` on every decision record an apply writes, so settle can tell
+#: its decision file from `revl deploy`'s.
+WRITER = deploy.FEDERATION_APPLY_WRITER
 
 
 # ---------------------------------------------------------------------------
@@ -760,7 +763,7 @@ def _apply_locked(plan: Mapping, admitted: Mapping, state: Path,
     # decision file's last record, so a conductor killed before the approval
     # reads as "this run decided nothing" (roll back).
     deploy.write_decision_started(decision_path, federation_id=federation,
-                                  generation=generation)
+                                  generation=generation, writer=WRITER)
 
     def event(phase: str, identity: str, detail: dict) -> None:
         if phase == "commit" and not detail.get("ok"):
@@ -769,7 +772,8 @@ def _apply_locked(plan: Mapping, admitted: Mapping, state: Path,
             # the abort decision is made durable here, before `run_deploy`
             # sends any ABORT message, which is the order it keeps itself.
             deploy.write_abort_decision(
-                decision_path, federation_id=federation, generation=generation,
+                decision_path, writer=WRITER, federation_id=federation,
+                generation=generation,
                 reason=detail.get("reason"), failed=identity)
         if on_event is not None:
             on_event(phase, identity, detail)
@@ -816,7 +820,8 @@ def _apply_locked(plan: Mapping, admitted: Mapping, state: Path,
             # the update's health is unknown, so it is not kept. Decision
             # first, then the unwind, then the error goes on up.
             deploy.write_abort_decision(
-                decision_path, federation_id=federation, generation=generation,
+                decision_path, writer=WRITER, federation_id=federation,
+                generation=generation,
                 reason=(f"the health probes did not finish: "
                         f"{type(error).__name__}: {error}"),
                 failed=None)
@@ -826,14 +831,16 @@ def _apply_locked(plan: Mapping, admitted: Mapping, state: Path,
         failed = [probe for probe in probes if not probe.get("ok")]
         if not failed:
             deploy.write_commit_approval(
-                decision_path, federation_id=federation, generation=generation,
+                decision_path, writer=WRITER, federation_id=federation,
+                generation=generation,
                 participants=[p.identity for p in participants])
             return report
 
         # Durable decision FIRST, exactly as the protocol's abort path does, so a
         # participant stranded from here on settles against a record.
         deploy.write_abort_decision(
-            decision_path, federation_id=federation, generation=generation,
+            decision_path, writer=WRITER, federation_id=federation,
+            generation=generation,
             reason=("health probe failed for `" + failed[0]["composition"] + "`: "
                     + str(failed[0].get("reason") or "the probe failed")),
             failed=failed[0]["composition"])

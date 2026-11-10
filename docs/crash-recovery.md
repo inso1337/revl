@@ -780,8 +780,12 @@ model world unless `--composition` binds the real one:
   off, so it rolls forward and replays no inverse.
 - `federation-abort-decided`, `federation-decision-pending` (written when a
   newer run started and has not decided), or no file at all: the step did not
-  commit for this run. The WAL is recovered unchanged and rolls back LIFO,
-  even when it reached `activation-complete`.
+  commit for this run. The WAL is recovered unchanged under recovery's own
+  rule: it rolls back LIFO, or rolls forward when it reached
+  `activation-complete`. Under a `revl federation-apply` decision (records
+  carrying `"writer": "federation-apply"`) it rolls back even then, since that
+  apply uses its generation directory once; `revl deploy`'s reused WAL keeps
+  recovery's rule (issue #3147).
 - an unreadable record: fails closed as `unresolved` and settles nothing.
   Guessing between forward and back is the split-brain the record exists to
   prevent.

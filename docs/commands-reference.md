@@ -2518,13 +2518,16 @@ The run has the deploy protocol's shape:
    refuses or a participant cannot be launched.
 3. **Commit** through the coordinated PREPARE/COMMIT/ABORT protocol over one
    local participant per composition. The decision records are the ones
-   `revl deploy` writes, in its order: `federation-decision-pending` before the
+   `revl deploy` writes, each tagged `"writer": "federation-apply"`, in its
+   order: `federation-decision-pending` before the
    first participant is launched, `federation-abort-decided` before any abort
    message, and `federation-commit-approved` only after every participant
    committed and every declared probe passed. A conductor killed before that
    leaves the pending record or the abort decision last, so `revl recover
    --decision` never reads an approval for the run and returns `rolled-back`
-   for every stranded participant, including one whose own commit finished.
+   for every stranded participant, including one whose own commit finished
+   (that last case is federation-apply's only: `revl deploy` reuses its WAL,
+   issue #3147).
    That verdict is computed against a model world unless `--composition`
    binds the real one; it does not rewrite the participant's world file. It
    refuses (`unresolved`) while the apply still holds `<state-dir>/lock`.

@@ -1772,7 +1772,8 @@ def test_a_stranded_participant_rolls_back_on_an_explicit_abort_record(tmp_path)
 
 def _settle_complete(tmp_path, write_record):
     """A participant whose own activation completed (`activation-complete`) is
-    stranded, and the conductor's record is whatever `write_record` leaves."""
+    stranded, and the conductor's record is whatever `write_record` leaves.
+    `writer=FEDERATION_APPLY_WRITER` makes it a `revl federation-apply` file."""
     wal = str(tmp_path / "p.wal")
     decision = str(tmp_path / "decision.jsonl")
     _stranded_wal(wal, complete=True)
@@ -1780,26 +1781,51 @@ def _settle_complete(tmp_path, write_record):
     return deploy.settle_stranded(wal, decision)
 
 
-def test_a_completed_participant_rolls_back_on_an_abort_record(tmp_path):
+_APPLY = deploy.FEDERATION_APPLY_WRITER
+
+
+def test_an_applied_participant_that_completed_rolls_back_on_an_abort(tmp_path):
     """Its own `activation-complete` says the participant finished its slice,
-    not that the federation committed: the abort record decides (#2725)."""
+    not that the federation committed: under a `revl federation-apply` file,
+    whose generation directory no earlier run shares, the abort decides."""
     verdict = _settle_complete(tmp_path, lambda path: deploy.write_abort_decision(
         path, federation_id="fed", generation=1, reason="peer failed",
-        failed="edge"))
+        failed="edge", writer=_APPLY))
     assert verdict["verdict"] == "rolled-back"
     assert verdict["federationDecision"] == deploy.FEDERATION_ABORTED
 
 
-def test_a_completed_participant_rolls_back_on_a_pending_record(tmp_path):
+def test_an_applied_participant_that_completed_rolls_back_on_pending(tmp_path):
     verdict = _settle_complete(tmp_path, lambda path: deploy.write_decision_started(
-        path, federation_id="fed", generation=1))
+        path, federation_id="fed", generation=1, writer=_APPLY))
     assert verdict["verdict"] == "rolled-back"
     assert verdict["federationDecision"] == "none"
 
 
-def test_a_completed_participant_rolls_back_when_the_record_is_absent(tmp_path):
+# `revl deploy` reuses <wal-dir>/deploy/<map>/0 across runs (issue #3147), so a
+# completed WAL under its decision file may be an EARLIER approved run's. Until
+# that is fixed its files keep recovery's rule: `activation-complete` rolls
+# forward, whatever the last record says.
+def test_a_deploy_participant_that_completed_rolls_forward_on_abort(tmp_path):
+    verdict = _settle_complete(tmp_path, lambda path: deploy.write_abort_decision(
+        path, federation_id="fed", generation=1, reason="peer failed",
+        failed="edge"))
+    assert verdict["verdict"] == "rolled-forward"
+    assert verdict["federationDecision"] == deploy.FEDERATION_ABORTED
+
+
+def test_a_deploy_participant_that_completed_rolls_forward_on_pending(tmp_path):
+    verdict = _settle_complete(tmp_path, lambda path: deploy.write_decision_started(
+        path, federation_id="fed", generation=1))
+    assert verdict["verdict"] == "rolled-forward"
+    assert verdict["federationDecision"] == "none"
+
+
+def test_a_completed_participant_rolls_forward_when_no_record_exists(tmp_path):
+    """No file names no writer: recovery's rule. A federation-apply writes its
+    pending record before it launches any participant."""
     verdict = _settle_complete(tmp_path, lambda path: None)
-    assert verdict["verdict"] == "rolled-back"
+    assert verdict["verdict"] == "rolled-forward"
     assert verdict["federationDecision"] == "none"
 
 

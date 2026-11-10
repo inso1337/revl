@@ -442,8 +442,18 @@ the participant's own boundary state.
   participant's WAL is given the `commit-approved` marker recovery already keys
   roll-forward off, and `recovery.recover` rolls it forward.
 * absent, pending, or an explicit abort decision: `recovery.recover` reads the
-  WAL unchanged and rolls back LIFO, even when the WAL reached
-  `activation-complete`, reporting residue exactly as today.
+  WAL unchanged and applies its own rule, rolling back LIFO and reporting
+  residue exactly as today, or rolling forward a WAL that reached
+  `activation-complete`.
+* a `revl federation-apply` decision (its records carry
+  `"writer": "federation-apply"`) that is pending or an abort rolls back even a
+  WAL that reached `activation-complete`: the marker says the participant
+  finished its own slice, not that the federation committed, and an apply uses
+  its generation directory once, so the marker cannot be an earlier run's. This
+  rule applies to `federation-apply` only. `revl deploy` reuses one WAL across
+  runs, where the marker may be an earlier approved run's, so its
+  completed-participant case keeps recovery's rule and is tracked in issue
+  #3147.
 * unreadable: **fails closed** with `unresolved` and settles nothing. Guessing
   between roll-forward and roll-back is precisely the split-brain the durable
   record exists to prevent.

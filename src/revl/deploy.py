@@ -3339,6 +3339,11 @@ FEDERATION_ABORTED = "federation-abort-decided"
 #: run's approval (issue #2725). Recovery reads a pending record as "no
 #: decision was made", which rolls back.
 FEDERATION_PENDING = "federation-decision-pending"
+#: The `writer` field `revl federation-apply` puts on every decision record it
+#: writes. Its generation directory is used once, so no earlier run shares a
+#: participant's WAL, and `settle_stranded` lets the record outvote a WAL's own
+#: `activation-complete` only for a file this writer wrote.
+FEDERATION_APPLY_WRITER = "federation-apply"
 
 #: Why a plan is refused admission into a federation update.
 REFUSE_IRREVERSIBLE = "non-deferrable-irreversible-crossing"
@@ -3578,7 +3583,8 @@ def _fsync_append(path: str, record: dict) -> None:
 
 
 def write_commit_approval(path: str, *, federation_id: str, generation: int,
-                          participants: Sequence[str]) -> dict:
+                          participants: Sequence[str],
+                          writer: str | None = None) -> dict:
     """Make the federation's COMMIT decision durable, BEFORE any participant is
     allowed to flush a held irreversible emission. This record's existence is
     the whole anti-split-brain property: every stranded participant reads the
@@ -3587,24 +3593,27 @@ def write_commit_approval(path: str, *, federation_id: str, generation: int,
               "generation": int(generation),
               "participants": sorted(participants),
               "at": attest._now_iso(None)}
+    record = _with_writer(record, writer)
     _fsync_append(path, record)
     return record
 
 
 def write_abort_decision(path: str, *, federation_id: str, generation: int,
-                         reason: str | None, failed: str | None = None) -> dict:
+                         reason: str | None, failed: str | None = None,
+                         writer: str | None = None) -> dict:
     """Make the federation's ABORT decision durable. Written BEFORE any abort
     message goes out, so a participant stranded during the abort still settles
     against a record."""
     record = {"record": FEDERATION_ABORTED, "federation": federation_id,
               "generation": int(generation), "reason": reason,
               "failed": failed, "at": attest._now_iso(None)}
+    record = _with_writer(record, writer)
     _fsync_append(path, record)
     return record
 
 
 def write_decision_started(path: str, *, federation_id: str,
-                           generation: int) -> dict:
+                           generation: int, writer: str | None = None) -> dict:
     """Mark the durable decision file as belonging to a run that has not decided.
 
     `revl deploy` calls this before it launches a participant, so a conductor
@@ -3613,10 +3622,18 @@ def write_decision_started(path: str, *, federation_id: str,
     treats it as "no decision", the conservative roll-back answer (issue
     #2725).
     """
-    record = {"record": FEDERATION_PENDING, "federation": federation_id,
-              "generation": int(generation), "at": attest._now_iso(None)}
+    record = _with_writer({"record": FEDERATION_PENDING,
+                           "federation": federation_id,
+                           "generation": int(generation),
+                           "at": attest._now_iso(None)}, writer)
     _fsync_append(path, record)
     return record
+
+
+def _with_writer(record: dict, writer: str | None) -> dict:
+    """`record` with a `writer` field when one is named (see
+    :data:`FEDERATION_APPLY_WRITER`); `revl deploy` names none."""
+    return record if writer is None else {**record, "writer": writer}
 
 
 def read_decision(path: str) -> tuple[str | None, dict | None]:
@@ -3722,11 +3739,19 @@ def settle_stranded(wal_path: str, decision_path: str, *, world=None) -> dict:
       * the record is ABSENT (an explicit abort decision, a
         `federation-decision-pending` record from a newer run, or no file):
         the federation did not commit. `recovery.recover` reads the WAL
-        unchanged and rolls back LIFO (`committed=False`), reporting residue
-        exactly as it does today. That holds even when the WAL carries
-        `activation-complete`: the marker says this participant finished its
-        own slice, not that the federation committed, so it cannot outvote the
-        record.
+        unchanged and applies its own rule: roll back LIFO, reporting residue
+        exactly as it does today, unless the WAL carries `activation-complete`,
+        which it rolls forward.
+      * a `revl federation-apply` decision (its records carry
+        `writer: federation-apply`) that is not an approval rolls back even a
+        WAL that carries `activation-complete` (`committed=False`): the marker
+        says the participant finished its own slice, not that the federation
+        committed. That apply uses its generation directory once, so the
+        marker cannot be an earlier run's. `revl deploy` reuses its WAL across
+        runs (issue #3147), where the marker may be an earlier approved run's,
+        so its files keep recovery's rule.
+        A missing file is not attributed to it: the apply writes its pending
+        record before it launches any participant.
       * the record is UNREADABLE: there is no definite answer. Fails CLOSED with
         `unresolved` and settles nothing — a guess here is the split-brain.
       * the decision file's directory holds a `lock` another process holds
@@ -3778,7 +3803,10 @@ def _settle_stranded(wal_path: str, decision_path: str, *, world) -> dict:
         settled = recover(wal_path, world=world)
         settled["federationDecision"] = FEDERATION_APPROVED
         return settled
-    settled = recover(wal_path, world=world, committed=False)
+    if (record or {}).get("writer") == FEDERATION_APPLY_WRITER:
+        settled = recover(wal_path, world=world, committed=False)
+    else:
+        settled = recover(wal_path, world=world)
     settled["federationDecision"] = decision or "none"
     return settled
 

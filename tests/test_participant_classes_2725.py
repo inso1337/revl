@@ -359,8 +359,8 @@ def test_a_stranded_peer_settles_against_the_conductor_abort_decision(
 
 def test_a_committed_participant_settles_back_under_an_abort_decision(tmp_path):
     """A real participant runs its whole commit, so its WAL carries
-    `activation-complete`; the conductor then decides ABORT and dies before
-    sending it. The record decides the verdict: roll back. The inverses run
+    `activation-complete`; a `revl federation-apply` conductor then decides
+    ABORT and dies before sending it. The record decides the verdict: roll back. The inverses run
     against the world handed in, here the model, which ends empty; the
     participant's own world file is not what settle rewrites."""
     from revl import _deploy_participant as dp
@@ -379,10 +379,35 @@ def test_a_committed_participant_settles_back_under_an_abort_decision(tmp_path):
     decision = tmp_path / "decision.jsonl"
     deploy.write_abort_decision(str(decision), federation_id="app",
                                generation=0, reason="edge failed",
-                               failed="edge")
+                               failed="edge",
+                               writer=deploy.FEDERATION_APPLY_WRITER)
     world = DictWorld()
     settled = deploy.settle_stranded(str(wal), str(decision), world=world)
     assert settled["verdict"] == "rolled-back", settled
     assert settled["residue"]["clean"] is True, settled
     assert settled["world"] == "model"
     assert world.remaining() == []   # the model world, not db.world.json
+
+
+def test_a_redeploy_killed_before_it_commits_keeps_the_earlier_run(tmp_path):
+    """`revl deploy` reuses one WAL across runs (issue #3147). Run 1 commits
+    and is approved; run 2 writes its pending record and dies before the
+    participant writes anything. The WAL is still run 1's, so settle keeps it:
+    rolled forward, no inverse run."""
+    from revl import _deploy_participant as dp
+    from revl.recovery import DictWorld
+
+    spec = {"identity": "db", "world": str(tmp_path / "db.world.json"),
+            "wal": str(tmp_path / "db.wal"),
+            "effects": [{"name": "row1"}, {"name": "row2"}]}
+    decision = str(tmp_path / "decision.jsonl")
+    deploy.write_decision_started(decision, federation_id="m", generation=0)
+    assert dp._Participant(spec).commit()["ok"] is True
+    deploy.write_commit_approval(decision, federation_id="m", generation=0,
+                                 participants=["db"])
+    deploy.write_decision_started(decision, federation_id="m", generation=0)
+    settled = deploy.settle_stranded(spec["wal"], decision, world=DictWorld())
+    assert settled["verdict"] == "rolled-forward", settled
+    assert settled["federationDecision"] == "none"
+    assert settled["committedEffects"] == 2, settled
+    assert settled["worldCalls"] == 0, settled   # no inverse was run

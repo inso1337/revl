@@ -281,6 +281,12 @@ def test_a_healthy_update_reports_its_probes_and_keeps_the_commit(tmp_path):
     assert record["generation"] == 3
     assert _decision_kinds(state / "3") == [deploy.FEDERATION_PENDING,
                                             deploy.FEDERATION_APPROVED]
+    # every record names its writer, which is what lets settle roll back a
+    # completed participant under this file and not under `revl deploy`'s
+    lines = (state / "3" / "decision.jsonl").read_text(
+        encoding="utf-8").splitlines()
+    assert [json.loads(line).get("writer") for line in lines] == [
+        deploy.FEDERATION_APPLY_WRITER] * 2
 
 
 def test_a_composition_with_no_probe_is_reported_not_failed(tmp_path):
