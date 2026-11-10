@@ -29,6 +29,7 @@ are unchanged.
 from __future__ import annotations
 
 import heapq
+import re
 import unicodedata
 
 __all__ = ["HostBodyError", "body_lines", "check_host_body"]
@@ -67,14 +68,16 @@ _HOST = {
 _RUST_RAW_PREFIXES = ("br", "cr", "r")
 
 #: The ECMAScript keywords an expression may follow, so a `/` after them
-#: opens a regex literal, unless the word follows a `.` (then it is a
-#: property name): `case`, `default` (`export default`), `delete`, `do`,
-#: `else`, `extends`, `in`, `instanceof`, `new`, `return`, `throw`,
-#: `typeof`, `void`, and the contextual `await`, `yield` and `of`, which are
-#: also plain identifiers (see `_CONTEXTUAL_KEYWORDS`). The other keywords
-#: are followed by `(`, `{`, a name or a line end (`break`, `continue`,
-#: `debugger`), or are operands that divide (`this`, `super`, `null`,
-#: `true`, `false`); a line end after an operand is read both ways.
+#: opens a regex literal, unless the word follows a member-access `.` or
+#: `?.` (then it is a property name; a spread's `...` and the dot ending a
+#: number like `1.` are no member access): `case`, `default` (`export
+#: default`), `delete`, `do`, `else`, `extends`, `in`, `instanceof`, `new`,
+#: `return`, `throw`, `typeof`, `void`, and the contextual `await`,
+#: `yield` and `of`, which are also plain identifiers (see
+#: `_CONTEXTUAL_KEYWORDS`). The other keywords are followed by `(`, `{`, a
+#: name or a line end (`break`, `continue`, `debugger`), or are operands
+#: that divide (`this`, `super`, `null`, `true`, `false`); a line end after
+#: an operand is read both ways.
 #: `_Scan._js_code` covers the punctuation.
 _REGEX_KEYWORDS = frozenset({
     "await", "case", "default", "delete", "do", "else", "extends", "in",
@@ -241,12 +244,12 @@ class _Scan:
     lower bound is exact, so an underflow is never missed; a widened upper
     bound only adds refusals, never removes one. A body whose number of
     steps still exceeds `_STEPS_PER_CHAR` per character (readings that keep
-    disagreeing), or that nests more than `_MAX_NESTING` templates or
-    parentheses, is refused rather than scanned on.
+    disagreeing) is refused rather than scanned on, and so is a reading
+    that nests more than `_MAX_NESTING` templates or parentheses.
     """
 
     __slots__ = ("s", "n", "p", "depth", "underflow", "separator", "steps",
-                 "limit", "exhausted", "stops", "unterminated")
+                 "limit", "exhausted", "too_deep", "stops", "unterminated")
 
     def __init__(self, src: str, profile: dict) -> None:
         self.s = src
@@ -258,6 +261,7 @@ class _Scan:
         self.steps = 0
         self.limit = _STEPS_PER_CHAR * self.n + _STEPS_FLOOR
         self.exhausted = False
+        self.too_deep = False
         self.unterminated = False
         self.stops = _plain_stops(profile)
 
@@ -277,10 +281,10 @@ class _Scan:
                     self.exhausted = True
                     return
                 for nxt, nkey, ndepths in self._step(pos, key, depths):
-                    if self.underflow or self.exhausted:
+                    if self.underflow:
                         return
                     if nkey[1] > _MAX_NESTING or len(nkey[3]) > _MAX_NESTING:
-                        self.exhausted = True
+                        self.too_deep = True
                         return
                     if nxt >= self.n:
                         self._finish(nxt, nkey, ndepths)
@@ -401,12 +405,23 @@ class _Scan:
                 # statement, so the operand no longer proves division
                 before = _EITHER
             return i + 1, before, parens
+        number = _JS_NUMBER.match(s, i)
+        if number:
+            # `1.` ends a number, so `1. in /x/` is the `in` operator; `1..x`
+            # is a member access on `1.`
+            return number.end(), _DIV, parens
+        if s.startswith("...", i):
+            # a spread or rest element: an expression follows, and the
+            # keyword after it is no property name
+            return i + 3, _REGEX, parens
         if _js_word_char(c) or c == "#":
             j = i + 1
             while j < n and _js_word_char(s[j]):
                 j += 1
             return j, _word_before_slash(s[i:j], before), parens
         if c == ".":
+            # a member access, `.` or the dot of `?.` (a numeric literal and
+            # a spread are taken above): the name after it is a property
             return i + 1, _DOT, parens
         if c == "(":
             return i + 1, _REGEX, parens + (before == _HEAD,)
@@ -624,6 +639,13 @@ _JS_SPACE = frozenset(" \t\n\r\x0b\x0c\u00a0\ufeff\u2028\u2029")
 #: JavaScript line terminators (ECMA-262 12.3).
 _JS_LINE_ENDS = frozenset("\n\r\u2028\u2029")
 
+#: A JavaScript numeric literal, with the dot that may end it (`1.`) and the
+#: fraction, exponent, radix prefix, separators and `n` suffix it may carry.
+#: Over-reading `0x1.f` as one token is harmless: either way an operand ends
+#: there.
+_JS_NUMBER = re.compile(
+    r"(?:[0-9]\w*(?:\.\w*)?|\.[0-9]\w*)(?:(?<=[eE])[+-][0-9]\w*)?")
+
 #: Steps the scan may take per character of body before it refuses the body
 #: as too ambiguous to check (see `_Scan`). Ordinary bodies take about one.
 _STEPS_PER_CHAR = 8
@@ -744,7 +766,7 @@ def check_host_body(backend: str, body: str, *, where: str = "",
     try:
         scan.run()
     except RecursionError:
-        scan.exhausted = True
+        scan.too_deep = True
     prefix = f"{where}: " if where else ""
     if scan.unterminated:
         raise error(
@@ -757,11 +779,16 @@ def check_host_body(backend: str, body: str, *, where: str = "",
         raise error(
             f"{prefix}the @{backend} host body has more possible readings "
             f"under {_HOST[backend]} lexical rules than the scanner checks "
-            f"(at most {scan.limit} steps for {scan.n} characters, and "
-            f"{_MAX_NESTING} nested template literals or parentheses): too "
-            f"many `/` that may open a regex literal or divide, whose "
-            f"readings disagree. Split the body or simplify those "
-            f"expressions."
+            f"({scan.limit} steps for {scan.n} characters): too many `/` "
+            f"that may open a regex literal or divide, whose readings "
+            f"disagree. Split the body or simplify those expressions."
+        )
+    if scan.too_deep:
+        raise error(
+            f"{prefix}the @{backend} host body nests more than "
+            f"{_MAX_NESTING} template literals or parentheses in one reading "
+            f"under {_HOST[backend]} lexical rules, deeper than the scanner "
+            f"follows. Split the body or flatten those expressions."
         )
     if scan.underflow:
         raise error(

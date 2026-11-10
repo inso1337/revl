@@ -134,6 +134,50 @@ def test_ts_slash_with_one_reading_is_accepted(body):
     assert check_host_body("ts", body) is None
 
 
+# A keyword after a member-access `.` (or `?.`) is a property name, so the
+# `/` after it divides. The third dot of a spread and the dot that ends a
+# numeric literal are no member access: the keyword keeps its meaning.
+_TS_KEYWORDS = (
+    "await", "case", "default", "delete", "do", "else", "extends", "in",
+    "instanceof", "new", "of", "return", "throw", "typeof", "void", "yield",
+)
+_NOT_A_MEMBER_DOT = [
+    ("[...", "]"), ("[... ", "]"), ("{...", "}"), ("{... ", "}"),
+    ("[1. ", "]"),
+]
+
+
+def test_keyword_list_matches_the_scanner():
+    assert frozenset(_TS_KEYWORDS) == host_body._REGEX_KEYWORDS
+
+
+@pytest.mark.parametrize("keyword", _TS_KEYWORDS)
+@pytest.mark.parametrize("opener,closer", _NOT_A_MEMBER_DOT)
+def test_ts_keyword_after_a_spread_or_number_dot_is_no_property(
+        keyword, opener, closer):
+    body = (f"let q = {opener}{keyword} /[{{]/{closer}\n}}\n"
+            f"globalThis.PWNED = 1\n"
+            f"function pad() {{ let r = {opener}{keyword} /[}}]/{closer}")
+    with pytest.raises(HostBodyError):
+        check_host_body("ts", body)
+
+
+# Each body is accepted only when its `/` divides: read as a regex, the `/`
+# in the string closes it and the `{` after it opens a block.
+@pytest.mark.parametrize("expr", [
+    "a.typeof / b", "a?.in", "x.void", "o.new", "1.5", ".5", "1.5e+3",
+    "1..toString().length", "a\n  .in", "this.#in", "c ?.5", "0xFF", "10n",
+    "1 .in",
+])
+def test_ts_member_access_and_numbers_divide(expr):
+    assert check_host_body("ts", f'return {expr} / f("/{{")') is None
+
+
+def test_ts_division_control_is_refused_when_misread():
+    with pytest.raises(HostBodyError):
+        check_host_body("ts", 'return typeof / f("/{")')
+
+
 # ----------------------------------------------- Java unicode escapes (JLS 3.3)
 _JAVA_ESCAPED = [
     "return x; \\u007d static \\u007b System.out.println(1); \\u007d "
@@ -218,28 +262,47 @@ def _count_tokens(monkeypatch, bound):
     return calls
 
 
-@pytest.mark.parametrize("unit", ["`${(a)/[{]/}`;", "(a) /[{]/ ;\n"])
+# `a\n/[{]/` stays ambiguous (the line break may end the statement), so
+# every unit doubles the readings unless equal states are merged.
+@pytest.mark.parametrize("unit", [
+    "`${(a)/[{]/}`;", "(a) /[{]/ ;\n", "a\n/[{]/ ;\n",
+])
 def test_ambiguous_slashes_are_scanned_in_linear_work(monkeypatch, unit):
-    body = unit * 2000
-    calls = _count_tokens(monkeypatch, 2 * len(body))
-    with pytest.raises(HostBodyError):
-        check_host_body("ts", body)
-    assert calls[0] <= 2 * len(body)
+    counts = []
+    for repeat in (1000, 2000):
+        body = unit * repeat
+        calls = _count_tokens(monkeypatch, 2 * len(body))
+        with pytest.raises(HostBodyError):
+            check_host_body("ts", body)
+        assert calls[0] <= 2 * len(body)
+        counts.append(calls[0])
+        monkeypatch.undo()
+    # twice the body, at most twice the work (plus the fixed start)
+    assert counts[1] <= 2 * counts[0] + 64
 
 
 def test_readings_past_the_step_cap_are_refused(monkeypatch):
-    # every `/(/` may open a parenthesis, so the readings keep disagreeing
-    body = "{} /(/ ;\n" * 300
+    # each `/(/` may open a parenthesis and each `/)/` close one, so the
+    # readings keep disagreeing on which are open; none nests past 30
+    body = "{} /(/ ;\n" * 30 + "{} /)/ ;\n" * 30
     _count_tokens(monkeypatch, 16 * len(body) + 8192)
     with pytest.raises(HostBodyError) as excinfo:
         check_host_body("ts", body)
-    assert "more possible readings" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "more possible readings" in message
+    assert "nest" not in message
 
 
-def test_deeply_nested_templates_are_refused_without_recursion():
+@pytest.mark.parametrize("body", [
+    "return " + "`${" * 5000,
+    "return " + "(" * 65 + "1" + ")" * 65,
+])
+def test_deep_nesting_is_refused_without_recursion(body):
     with pytest.raises(HostBodyError) as excinfo:
-        check_host_body("ts", "return " + "`${" * 5000)
-    assert "more possible readings" in str(excinfo.value)
+        check_host_body("ts", body)
+    message = str(excinfo.value)
+    assert "nests more than 64 template literals or parentheses" in message
+    assert "possible readings" not in message
 
 
 # --------------------------------------------------------- separators (#3131)
