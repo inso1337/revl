@@ -668,6 +668,38 @@ def _assert_two_generated_files_chain_in_sequence(mod):
         assert _answer(twice, line, column) is not None, (line, column)
 
 
+def _assert_an_out_of_order_inner_line_is_answered_in_document_order(mod):
+    """Source Map v3 orders a line's segments by generated column, but the
+    composer tolerates a line that is not, and answers it the way a consumer
+    reading the document does: the last segment IN DOCUMENT ORDER at or before
+    the column. The inner line below has columns 4, 1, 3, so column 4 is
+    answered by the segment at 3, not the one at 4 that sorting would pick."""
+    inner = {
+        "version": 3,
+        "file": "gen.ts",
+        "sources": ["page.tpl"],
+        "sourcesContent": [None],
+        "names": [],
+        "mappings": _write_mappings(
+            [[(4, 0, 10, 0, None), (1, 0, 11, 0, None), (3, 0, 12, 0, None)]]),
+    }
+    outer = {
+        "version": 3,
+        "file": "bundle.js",
+        "sources": ["gen.ts"],
+        "sourcesContent": [None],
+        "names": [],
+        "mappings": _write_mappings(
+            [[(column, 0, 0, column, None) for column in range(6)]]),
+    }
+    composed = mod.compose(outer, inner, "gen.ts")
+    assert _by_hand(outer, inner, "gen.ts", 0, 4)[1] == 12, \
+        "the premise: in document order column 4 is answered by the segment at 3"
+    for column in range(6):
+        assert _answer(composed, 0, column) == \
+            _by_hand(outer, inner, "gen.ts", 0, column), column
+
+
 CHECKS = (
     ("the composed map answers the two-step walk",
      _assert_the_composed_map_answers_the_two_step_walk),
@@ -695,6 +727,8 @@ CHECKS = (
      _assert_composition_opens_no_path_a_map_names),
     ("two generated files chain in sequence",
      _assert_two_generated_files_chain_in_sequence),
+    ("an out-of-order inner line is answered in document order",
+     _assert_an_out_of_order_inner_line_is_answered_in_document_order),
 )
 
 
@@ -983,6 +1017,11 @@ MUTATIONS = {
         '        joined = root.rstrip("/") + "/" + source',
         '    if False:\n'
         '        joined = root.rstrip("/") + "/" + source'),
+    "N20 the out-of-order line index drops document order": _sub(
+        "        last = max(last, index)\n"
+        "        last_index_at_or_before.append(last)",
+        "        last = index\n"
+        "        last_index_at_or_before.append(last)"),
 }
 
 
