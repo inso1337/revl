@@ -258,16 +258,99 @@ def test_a_high_sev_svn_does_not_offset_a_low_one():
     assert "below" in reason and "component byte 0" in reason
 
 
-def test_a_sev_snp_report_at_every_svn_floor_is_admitted():
+# A SEV-SNP TCB_VERSION as a Milan or Genoa report carries it, in report byte
+# order: bootloader (byte 0), TEE (byte 1), four reserved bytes, SNP (byte 6),
+# microcode (byte 7). The floor an operator writes is the same eight bytes read
+# as a little-endian integer, the way AMD's tools print it, so microcode is the
+# most significant byte.
+COMPONENT_BYTES = {"bootloader": 0, "TEE": 1, "SNP": 6, "microcode": 7}
+
+
+def tcb_bytes(bootloader, tee_svn, snp, microcode, reserved=b"\x00" * 4):
+    return bytes([bootloader, tee_svn]) + reserved + bytes([snp, microcode])
+
+
+def tcb_value(raw):
+    return int.from_bytes(raw, "little")
+
+
+FLOOR_BYTES = tcb_bytes(bootloader=0x04, tee_svn=0x01, snp=0x16, microcode=0x73)
+FLOOR = 0x7316000000000104
+
+
+def sev_proof_at(raw):
+    """A SEV-SNP proof whose current_tcb and reported_tcb carry ``raw``, checked
+    against the report bytes the verifier reads (offsets 0x038 and 0x180)."""
     proof = build_sev_snp_evidence(
         evidence(measurement=SEV_MEASUREMENT), vcek_private_key=SEV_VCEK,
-        platform_key_id=SEV_VCEK_ID, current_tcb=0x0403000201,
-        reported_tcb=0x0403000201)
-    ok, reason = admits(
-        proof,
-        requirement(measurements=frozenset({SEV_MEASUREMENT}),
-                    sev_min_tcb=0x0403000201))
+        platform_key_id=SEV_VCEK_ID, current_tcb=tcb_value(raw),
+        reported_tcb=tcb_value(raw))
+    report = bytes.fromhex(proof[tee.QUOTE_FIELD])
+    assert report[0x038:0x040] == raw and report[0x180:0x188] == raw
+    return proof
+
+
+def sev_floor(floor):
+    return requirement(measurements=frozenset({SEV_MEASUREMENT}),
+                       sev_min_tcb=floor)
+
+
+def test_the_example_floor_is_the_layout_spelled_as_an_integer():
+    assert tcb_value(FLOOR_BYTES) == FLOOR
+
+
+def test_a_sev_snp_report_at_every_svn_floor_is_admitted():
+    ok, reason = admits(sev_proof_at(FLOOR_BYTES), sev_floor(FLOOR))
     assert ok, reason
+
+
+@pytest.mark.parametrize("component", sorted(COMPONENT_BYTES))
+def test_a_report_below_the_floor_in_one_component_is_refused(component):
+    """One below the floor in ``component`` and one above it in every other: the
+    others cannot offset it, so a higher bootloader does not hide an older
+    microcode, and the refusal names the component."""
+    raw = bytearray(FLOOR_BYTES)
+    for name, byte in COMPONENT_BYTES.items():
+        raw[byte] += -1 if name == component else 1
+    ok, reason = admits(sev_proof_at(bytes(raw)), sev_floor(FLOOR))
+    assert not ok
+    assert "below" in reason
+    assert f"the {component} SVN, component byte {COMPONENT_BYTES[component]}" \
+        in reason
+
+
+@pytest.mark.parametrize("floor, component", [
+    (0x0100000000000000, "microcode"),
+    (0x0005000000000000, "SNP"),
+])
+def test_a_report_with_tcb_zero_is_refused_by_a_microcode_or_snp_floor(
+        floor, component):
+    """The review's probes: a report whose TCB is 0 was admitted against both."""
+    ok, reason = admits(sev_proof_at(bytes(8)), sev_floor(floor))
+    assert not ok
+    assert f"the {component} SVN" in reason
+
+
+def test_reserved_report_bytes_do_not_count_toward_the_floor():
+    raw = tcb_bytes(bootloader=0x04, tee_svn=0x01, snp=0x15, microcode=0x73,
+                    reserved=b"\xff" * 4)
+    ok, reason = admits(sev_proof_at(raw), sev_floor(FLOOR))
+    assert not ok
+    assert "the SNP SVN" in reason
+
+
+@pytest.mark.parametrize("byte", [2, 3, 4, 5])
+def test_a_floor_with_a_reserved_byte_set_is_refused(byte):
+    raw = bytearray(FLOOR_BYTES)
+    raw[byte] = 1
+    with pytest.raises(TeeError, match=f"reserved byte {byte}"):
+        sev_floor(tcb_value(bytes(raw)))
+
+
+def test_the_placement_file_refuses_a_floor_with_a_reserved_byte_set():
+    table = attest_table(sev_min_tcb=0x0403000201)
+    _, problem = plc.parse_tee_requirement(placement_file(table), "worker")
+    assert problem and "reserved byte 3" in problem
 
 
 # ------------------------------------ a demand cannot be met by another format

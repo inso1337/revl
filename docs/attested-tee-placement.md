@@ -47,8 +47,9 @@ qe_mr_enclaves = ["<64 hex>"]      # optional permitted QE images
 # accept_mrtd_only = true          # the explicit narrower choice, instead of
                                    # runtime_measurements
 
-# SEV-SNP: optional TCB floor
-sev_min_tcb = 0x0403000201
+# SEV-SNP: optional TCB floor (microcode 0x73, SNP 0x16, TEE 0x01,
+# bootloader 0x04)
+sev_min_tcb = 0x7316000000000104
 ```
 
 `bundle` is a 64-hex SHA-256, `measurements` is a non-empty list of hex digests,
@@ -63,7 +64,13 @@ of them. A table that states any TDX key (`min_qe_svn` included) must name the
 permitted registers or say `accept_mrtd_only = true`: a TDX quote whose runtime
 registers are not compared is admitted only by that explicit acknowledgement, not
 by an omitted key. `sev_min_tcb` is the SEV-SNP TCB floor, compared on the report's
-SVN components.
+SVN components, each on its own: the TCB version is read little-endian, so byte 0
+is the least significant, and on Milan and Genoa the bootloader SVN is byte 0, TEE
+byte 1, SNP byte 6 and microcode byte 7, with bytes 2 to 5 reserved. A report below
+the floor in any one component is refused, whatever the others carry, and a floor
+that sets a reserved byte is refused when the table is read. Turin lays the TCB
+version out differently, and the report's processor family is not read, so a
+Turin-layout report is not covered by this floor.
 
 `nonce` is the challenge the attestation must answer. A placement may pin it; a
 caller may supply one instead; failing both, the surface mints a fresh one. An

@@ -234,11 +234,21 @@ _TCB_SVN_RE = re.compile(r"[0-9a-f]{32}")
 # A quoting enclave's MR_SIGNER / MR_ENCLAVE is an SGX measurement: 32 bytes.
 _QE_IDENTITY_RE = re.compile(r"[0-9a-f]{64}")
 
-# The SEV-SNP TCB version's SVN components, as AMD packs them: bootloader (byte
-# 0), TEE (byte 1), SNP (byte 3) and microcode (byte 4). Every other bit is
-# reserved, and masking them out means a set reserved bit cannot inflate a TCB
-# past a floor.
-SEV_TCB_VERSION_MASK = 0x000000FFFF00FFFF
+# The SEV-SNP TCB version (`TCB_VERSION`, 8 bytes at report offsets 0x038 and
+# 0x180) is read little-endian by `parse_sev_snp_report`, so report byte N is
+# bits 8N..8N+7 of the integer and byte 0 is its least significant byte. The
+# layout below is Milan's and Genoa's (AMD SEV-SNP firmware ABI, `union
+# tcb_version` in Linux): bootloader byte 0, TEE byte 1, bytes 2 to 5 reserved,
+# SNP byte 6, microcode byte 7. Turin moves the fields (an FMC byte first), and
+# this root does not read the processor family from a report, so a
+# Turin-layout report is not covered: it is compared on the Milan/Genoa bytes.
+# Each component is compared on its own byte, so a high SVN in one cannot offset
+# a low one in another, and the reserved bytes are never compared, so a set
+# reserved bit cannot inflate a TCB past a floor.
+SEV_TCB_COMPONENTS = (("bootloader", 0), ("TEE", 1), ("SNP", 6),
+                      ("microcode", 7))
+SEV_TCB_RESERVED_BYTES = (2, 3, 4, 5)
+SEV_TCB_VERSION_MASK = 0xFFFF00000000FFFF
 
 
 class TeeError(ValueError):
@@ -462,8 +472,10 @@ class TeeRequirement:
     (:class:`TdxPolicy`). A requirement with ``tdx=None`` proves no TDX runtime
     fact, so :func:`tee_admits` refuses a TDX quote rather than admitting it on
     MRTD alone. ``sev_min_tcb`` is the minimum SEV-SNP TCB version a report must
-    carry; its SVN components are compared, so firmware older than the floor is
-    refused.
+    carry; its bootloader, TEE, SNP and microcode SVNs are each compared, so
+    firmware older than the floor in any one of them is refused. A floor with a
+    reserved byte set is refused here: no report is compared on that byte, so it
+    would read as a demand that is never checked.
     """
 
     bundle: str
@@ -517,6 +529,14 @@ class TeeRequirement:
                 raise TeeError(
                     f"sev_min_tcb must be an unsigned 64-bit TCB version, got "
                     f"{self.sev_min_tcb!r}")
+            for byte in SEV_TCB_RESERVED_BYTES:
+                if (self.sev_min_tcb >> (8 * byte)) & 0xFF:
+                    raise TeeError(
+                        f"sev_min_tcb 0x{self.sev_min_tcb:016x} sets reserved byte "
+                        f"{byte} of the SEV-SNP TCB version; only the bootloader "
+                        f"(byte 0), TEE (byte 1), SNP (byte 6) and microcode "
+                        f"(byte 7) SVNs are compared, so that byte would be a "
+                        f"floor nothing checks")
 
 
 # --------------------------------------------------------------------------
@@ -1015,27 +1035,21 @@ def _tdx_policy_refusal(verdict: QuoteVerdict, policy: TdxPolicy) -> str:
 
 def _sev_tcb_refusal(verdict: QuoteVerdict, floor: int) -> str:
     """Compare the SEV-SNP report's TCB version against a floor, component by
-    component, so a high SVN in one byte cannot offset a low one in another. Only
-    the bootloader, TEE, SNP and microcode bytes are compared, so a set reserved
-    bit cannot inflate it past the floor."""
-    floor_svn = floor & SEV_TCB_VERSION_MASK
+    component (:data:`SEV_TCB_COMPONENTS`), so a high SVN in one component cannot
+    offset a low one in another. The reserved bytes are not compared, so a set
+    reserved bit cannot inflate a report past the floor."""
     for name, value in (("reported_tcb", verdict.sev_reported_tcb),
                         ("current_tcb", verdict.sev_current_tcb)):
-        reported_svn = value & SEV_TCB_VERSION_MASK
-        below = [
-            byte for byte in range(8)
-            if ((reported_svn >> (8 * byte)) & 0xFF
-                < (floor_svn >> (8 * byte)) & 0xFF)
-        ]
-        if below:
-            byte = below[0]
-            reported_byte = (reported_svn >> (8 * byte)) & 0xFF
-            floor_byte = (floor_svn >> (8 * byte)) & 0xFF
-            return (
-                f"the SEV-SNP report's {name} is 0x{value:016x}, below the "
-                f"requirement's minimum TCB 0x{floor:016x}: component byte {byte} "
-                f"is 0x{reported_byte:02x} where the floor is 0x{floor_byte:02x}, "
-                f"so the platform's firmware is older than the operator permits")
+        for component, byte in SEV_TCB_COMPONENTS:
+            reported_byte = (value >> (8 * byte)) & 0xFF
+            floor_byte = (floor >> (8 * byte)) & 0xFF
+            if reported_byte < floor_byte:
+                return (
+                    f"the SEV-SNP report's {name} is 0x{value:016x}, below the "
+                    f"requirement's minimum TCB 0x{floor:016x}: the {component} "
+                    f"SVN, component byte {byte}, is 0x{reported_byte:02x} where "
+                    f"the floor is 0x{floor_byte:02x}, so the platform's firmware "
+                    f"is older than the operator permits")
     return ""
 
 

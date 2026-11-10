@@ -92,7 +92,13 @@ when the operator wants them. A TDX quote presented to a requirement that states
 no `TdxPolicy` is REFUSED rather than admitted on MRTD alone;
 `TdxPolicy(accept_mrtd_only=True)` is the explicit acknowledgement that the
 runtime registers are not compared. For SEV-SNP, `sev_min_tcb` is the TCB floor,
-compared on the report's SVN components. The TDX policy is required where the
+compared on the report's SVN components, each on its own: the TCB version is read
+little-endian, and on Milan and Genoa the bootloader SVN is byte 0, TEE byte 1,
+SNP byte 6 and microcode byte 7, with bytes 2 to 5 reserved. A report below the
+floor in any one component is refused, and a floor that sets a reserved byte is
+refused when the requirement is built. Turin lays the TCB version out
+differently and the report's processor family is not read, so a Turin-layout
+report is not covered by this floor. The TDX policy is required where the
 SEV-SNP floor is optional because a SEV-SNP report's launch measurement covers
 the guest image it was launched with and has no runtime-register analogue, while
 MRTD covers only a TD's initial build. `docs/attested-tee-placement.md` is the
@@ -116,7 +122,8 @@ requirement = TeeRequirement(
         qe_mr_signers=frozenset({qe_mr_signer_hex}),
         qe_mr_enclaves=frozenset({qe_mr_enclave_hex}),
     ),
-    sev_min_tcb=0x0403000201,
+    # microcode 0x73, SNP 0x16, TEE 0x01, bootloader 0x04
+    sev_min_tcb=0x7316000000000104,
 )
 ```
 

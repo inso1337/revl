@@ -865,7 +865,10 @@ def _need_covered(kind: str, path: str | None, mode: str | None, env: dict) -> b
 #     min_pce_svn = 3                    # optional PCE SVN floor
 #     qe_mr_signers = ["<64 hex>"]       # optional permitted QE signers
 #     qe_mr_enclaves = ["<64 hex>"]      # optional permitted QE images
-#     sev_min_tcb = 0x0100000000000000   # optional SEV-SNP TCB floor
+#     sev_min_tcb = 0x7316000000000104   # optional SEV-SNP TCB floor: microcode
+#                                        # 0x73, SNP 0x16, TEE 0x01, bootloader
+#                                        # 0x04 (bytes 7, 6, 1, 0; 2 to 5 are
+#                                        # reserved and must be zero)
 #
 # This surface PARSES into the `TeeRequirement` that `tee_attestation.py` already
 # defines and is checked by the `tee_admits` it already has: there is no second
