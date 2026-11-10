@@ -145,6 +145,93 @@ _HOST_PINNED_COEFFECTS = frozenset({
     "fs", "proc", "exec", "socket", "net_local", "process", "clock",
 })
 
+# ------------------------------------------------------------ reserved names
+
+# Every name the emitted workflow module binds at MODULE scope (issue #3187):
+# the SDK import, the retry-policy constants, the residue types and redaction
+# helpers, the durable residue sink, the activities contract, and, per
+# component, the workflow function and its residue query. An extern whose
+# crossing becomes an activity, an activity name derived from a service-method
+# crossing, or a component would bind one of these at that same scope and
+# shadow or collide with the generated binding. Kept next to the template
+# below: a module-scope name added there must be added here.
+TEMPORAL_MODULE_RESERVED = frozenset({
+    # `import { proxyActivities, ApplicationFailure, setHandler, defineQuery }`
+    "proxyActivities", "ApplicationFailure", "setHandler", "defineQuery",
+    # `import type * as activities`
+    "activities",
+    # the retry policies and the workflow-side budget
+    "AT_MOST_ONCE", "DEDUP_SAFE_RETRY", "COMPENSATION_BUDGET_MS",
+    # the redaction funnel: constants, helpers, and the types they use
+    "REDACTED_ARG", "MIN_MATCHABLE_ARG", "argNeedles", "redactResidueError",
+    "SagaStep", "Residue", "SagaReport",
+    # the durable residue sink activity
+    "recordResidue",
+    # the activities.ts contract emitted after the workflow
+    "RevlActivities",
+})
+
+# The names the emitted activation body binds for itself: `saga` is the
+# compensation stack the body pushes to, `input` is the config object every
+# `config` read goes through, and `residue`/`step` are the drain's own
+# bindings. A component binding with one of these spellings shadows the
+# generated value in the same workflow activation; the whole set is reserved so
+# a later template change cannot turn a silent shadow back on.
+TEMPORAL_BODY_RESERVED = frozenset({"saga", "residue", "input", "step"})
+
+
+def _refuse_reserved(name: object, role: str) -> None:
+    raise EmitError(
+        f"--target temporal reserves the name {name!r}: the emitted workflow "
+        f"uses it for its own scaffolding, so {role} with that spelling would "
+        f"shadow or collide with generated code. Rename it."
+    )
+
+
+def _check_temporal_names(ir: dict) -> frozenset:
+    """Refuse user names that collide with the emitted workflow's module or
+    activation-body scope, and return every name either scope binds (issue
+    #3187).
+
+    Refusal, not renaming: an extern name is the activity contract written in
+    `RevlActivities`, and a component name is the workflow entry point, so
+    both are spellings a host implementation may already refer to; the target
+    says so loudly instead of silently emitting a different activity or
+    entry-point name. A binding is refused for the same fail-closed reason:
+    the activation body's own names are the target's, and a local rename would
+    have to be threaded through every read.
+
+    The body's reserved names are part of the refused set for an EXTERN too:
+    an activity is destructured at module scope but called inside the workflow
+    function, where the generated `const saga` / `const residue` / `input`
+    parameter would shadow it. A component is not checked against them: its
+    function is never called from inside its own body, so the local shadow is
+    harmless there.
+
+    A config FIELD needs no reservation: it is only ever a property key
+    (`input.<field>` and the `{Component}Input` interface), a namespace the
+    scaffolding never occupies."""
+    reserved = set(TEMPORAL_MODULE_RESERVED) | set(TEMPORAL_BODY_RESERVED)
+    components = ir.get("components") or []
+    component_names = [_ident(comp.get("name"), "component")
+                       for comp in components]
+    residue_names = {f"{name}Residue": name for name in component_names}
+    for comp in components:
+        name = _ident(comp.get("name"), "component")
+        if name in TEMPORAL_MODULE_RESERVED:
+            _refuse_reserved(name, "a component")
+        residue = f"{name}Residue"
+        # the component's `defineQuery` const; it shares module scope with the
+        # workflow functions and residue queries of every other component.
+        if residue in TEMPORAL_MODULE_RESERVED or residue in component_names:
+            _refuse_reserved(residue, f"the residue query for component {name!r}")
+        if name in residue_names:
+            _refuse_reserved(name, "a component")
+    for ext in ir.get("externs") or []:
+        if ext.get("name") in reserved:
+            _refuse_reserved(ext.get("name"), "an extern")
+    return frozenset(reserved | set(component_names) | set(residue_names))
+
 
 class TemporalRefusal(EmitError):
     """A construct outside the Slice-1 allowlist, refused with a why-trace.
@@ -575,7 +662,7 @@ def _crossing_signature(call: dict, comp: dict, index: "_Index",
 # ------------------------------------------------------------ component render
 
 def _render_component(comp: dict, ir: dict, ctx: "_Ctx", index: "_Index",
-                      activities: dict) -> list[str]:
+                      activities: dict, module_scope: frozenset) -> list[str]:
     name = _ident(comp.get("name"), "component")
     scope = _Scope(comp)
     for local in (comp.get("requires") or {}):
@@ -585,6 +672,13 @@ def _render_component(comp: dict, ir: dict, ctx: "_Ctx", index: "_Index",
 
     def register(call: dict) -> None:
         act = _crossing_signature(call, comp, index, known_types)
+        # An activity name is destructured out of `proxyActivities` at module
+        # scope and called inside the workflow function, so it may not land on
+        # a name either scope already binds (the residue sink, the saga stack,
+        # ...): the destructuring would redeclare it, or a local would shadow
+        # it at the call site.
+        if act.name in module_scope:
+            _refuse_reserved(act.name, "an activity name")
         seen = activities.get(act.name)
         if seen is None:
             activities[act.name] = act
@@ -645,6 +739,8 @@ def _render_component(comp: dict, ir: dict, ctx: "_Ctx", index: "_Index",
                 bind = step.get("bind") if kind == "let-effect" else None
                 if bind is not None:
                     bind = scope.bind(bind)
+                    if bind in TEMPORAL_BODY_RESERVED:
+                        _refuse_reserved(bind, "a binding")
                 if step.get("undo") is not None and bind is not None:
                     # A bracket whose inverse names the bound result: declare the
                     # holder first (undefined), push a no-op-if-absent inverse
@@ -823,8 +919,10 @@ def emit_temporal(ir: dict, *, runtime_import: str = "@temporalio/workflow") -> 
     services = ir.get("services") or {}
     index = _Index(ir)
 
-    # Refusal precedes emission (the closed allowlist, CRITICAL 2).
+    # Refusal precedes emission (the closed allowlist, CRITICAL 2; and the
+    # workflow module's own reserved names, issue #3187).
     _refuse_outside_allowlist(ir, index)
+    module_scope = _check_temporal_names(ir)
 
     doc_ctx = _Ctx(ir.get("types") or {}, ir.get("functions") or [],
                    ir.get("externs") or [], services=services)
@@ -836,7 +934,8 @@ def emit_temporal(ir: dict, *, runtime_import: str = "@temporalio/workflow") -> 
         if comp.get("name") in seen:
             raise EmitError(f"duplicate component name: {comp.get('name')!r}")
         seen.add(comp.get("name"))
-        rendered.extend(_render_component(comp, ir, doc_ctx, index, activities))
+        rendered.extend(_render_component(comp, ir, doc_ctx, index, activities,
+                                          module_scope))
         rendered.append("")
 
     # `recordResidue` is the durable residue sink activity every workflow drains

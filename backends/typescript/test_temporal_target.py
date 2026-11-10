@@ -247,6 +247,142 @@ def test_residue_sink_present():
     assert "worldRemaining" in got and "proof: 'revl-saga-abort'" in got
 
 
+# ------------------------------------------- reserved scaffolding names (#3187)
+
+def _extern_crossing_src(name: str) -> str:
+    return (
+        f'extern emission fn {name}(card: Str) -> Str = @ts {{ return "ok" }}\n'
+        f'component Pay {{ emit {name}("visa") }}\n'
+    )
+
+
+@pytest.mark.parametrize("name", [
+    "recordResidue",       # the abort sink's own activity name
+    "proxyActivities",     # SDK import; destructuring it is a TDZ error
+    "ApplicationFailure",  # SDK import; `throw ApplicationFailure.create`
+    "setHandler",          # SDK import
+    "defineQuery",         # SDK import
+    "redactResidueError",  # emitted module-level helper
+    "argNeedles",          # emitted module-level helper
+    "AT_MOST_ONCE",        # emitted retry policy
+    # the activation body's own bindings shadow the destructured activity at
+    # its call site even though the destructuring itself is legal
+    "saga", "residue", "input", "step",
+])
+def test_extern_named_temporal_scaffolding_refused(name):
+    """An extern name becomes a module-scope activity binding AND is called
+    inside the workflow function, so it may not land on a name the workflow
+    module or its activation body already binds (issue #3187)."""
+    ir = compile_source(_extern_crossing_src(name), f"{name}.rvl")
+    with pytest.raises(EMIT.EmitError, match="reserves"):
+        EMIT.emit(ir, target="temporal")
+
+
+def test_activity_named_input_refused_in_a_component_with_config():
+    """The `input` activity passes the module-scope check (the destructuring is
+    legal) but the generated `input: PayInput` parameter shadows it at the call
+    site; the body-reserved set must be applied to activity names too."""
+    src = (
+        'extern emission fn input(card: Str) -> Str = @ts { return "ok" }\n'
+        "component Pay {\n"
+        '  config { level: Str = "x" }\n'
+        '  emit input("visa")\n'
+        "}\n"
+    )
+    ir = compile_source(src, "input_activity.rvl")
+    with pytest.raises(EMIT.EmitError, match="reserves"):
+        EMIT.emit(ir, target="temporal")
+
+
+@pytest.mark.parametrize("name", [
+    "recordResidue", "proxyActivities", "RevlActivities", "SagaReport",
+])
+def test_component_named_temporal_scaffolding_refused(name):
+    ir = compile_source(f"component {name} {{ }}\n", f"{name}.rvl")
+    with pytest.raises(EMIT.EmitError, match="reserves"):
+        EMIT.emit(ir, target="temporal")
+
+
+def test_component_whose_residue_query_hits_the_sink_refused():
+    """`{component}Residue` is the component's `defineQuery` const, so a
+    component named `record` would emit a second `recordResidue` beside the
+    abort sink."""
+    ir = compile_source("component record { }\n", "record.rvl")
+    with pytest.raises(EMIT.EmitError, match="residue query"):
+        EMIT.emit(ir, target="temporal")
+
+
+def test_component_colliding_with_another_components_residue_query_refused():
+    ir = compile_source("component Trip { }\ncomponent TripResidue { }\n",
+                        "trip_residue.rvl")
+    with pytest.raises(EMIT.EmitError, match="reserves"):
+        EMIT.emit(ir, target="temporal")
+
+
+def test_service_method_activity_name_colliding_with_sink_refused():
+    """The activity name is DERIVED from a service-method crossing
+    (`record` + `residue` -> `recordResidue`), so the extern-only check is not
+    enough: the derived name is refused when the crossing registers."""
+    src = (
+        "service Ledger { emission fn residue(card: Str) -> Str }\n"
+        "component Pay requires record: Ledger {\n"
+        '  emit record.residue("visa")\n'
+        "}\n"
+    )
+    ir = compile_source(src, "ledger.rvl")
+    with pytest.raises(EMIT.EmitError, match="reserves"):
+        EMIT.emit(ir, target="temporal")
+
+
+@pytest.mark.parametrize("name", ["saga", "residue", "input", "step"])
+def test_binding_named_activation_scaffolding_refused(name):
+    """The activation body binds `saga` (the compensation stack), `input` (the
+    config object) and the drain's `residue`/`step` itself. `saga`/`input`
+    shadow a value the body reads today; the whole set is reserved so a
+    template change cannot turn a silent shadow back on."""
+    src = (
+        "extern pure fn r_close(h: RHandle) = @ts { return }\n"
+        "extern acquire fn r_open(n: Int) -> RHandle undo r_close(result)"
+        ' = @ts { return "h" }\n'
+        "component Pay {\n"
+        f"  let {name} = effect r_open(0) undo r_close({name})\n"
+        "}\n"
+    )
+    ir = compile_source(src, f"{name}_binding.rvl")
+    with pytest.raises(EMIT.EmitError, match="reserves"):
+        EMIT.emit(ir, target="temporal")
+
+
+def test_near_miss_extern_name_is_emitted_distinct_from_the_sink():
+    """Refusal is exact, not a prefix rule: `recordResidue_` is a different
+    activity and must keep working beside the `recordResidue` sink."""
+    ir = compile_source(_extern_crossing_src("recordResidue_"),
+                        "near_miss.rvl")
+    got = EMIT.emit(ir, target="temporal")
+    assert 'await recordResidue_("visa")' in got
+    assert "await recordResidue(report)" in got
+    assert "const { recordResidue, recordResidue_ } = proxyActivities" in got
+    assert "recordResidue_(card: string): Promise<string>" in got
+    assert "recordResidue(report: SagaReport): Promise<void>" in got
+
+
+def test_near_miss_binding_does_not_shadow_the_saga_stack():
+    src = (
+        "extern pure fn r_close(h: RHandle) = @ts { return }\n"
+        "extern acquire fn r_open(n: Int) -> RHandle undo r_close(result)"
+        ' = @ts { return "h" }\n'
+        "component Pay {\n"
+        "  let saga_ = effect r_open(0) undo r_close(saga_)\n"
+        "}\n"
+    )
+    got = _emit_temporal_module().emit_temporal(
+        compile_source(src, "near_miss_binding.rvl"))
+    assert "const saga: SagaStep[] = []" in got
+    assert "let saga_: unknown = undefined" in got
+    assert "saga_ = await r_open(0n)" in got
+    assert 'saga.push({ name: "saga_.undo"' in got
+
+
 # --------------------------------------------------------------- residue-error redaction (item 421 F7)
 
 def test_residue_error_static_shape_no_longer_bare_string_of_e():
