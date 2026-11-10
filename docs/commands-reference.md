@@ -808,8 +808,11 @@ nothing, the same offline-reader contract as `revl branch` and `revl compare`.
   composition; only `--probe` compares them.
 - `--probe` - with `--under`, print the probe report instead (issue 2806, Slice
   1): one row per `--candidate` composition with the candidate's content hash,
-  the number of recorded crossings regraded, the newly refused and newly allowed
-  counts, the first dangerous crossing and the bounds. It is ordering evidence
+  the number of recorded crossings regraded, the number the candidate does not
+  declare, the newly refused and newly allowed counts, the first dangerous
+  crossing and the bounds. A row that regraded fewer crossings than the record
+  holds, or a record with no crossings, is marked as a coverage gap rather than
+  read as clean. It is ordering evidence
   only: a clean row admits nothing and a refused admission does not fail the
   command, which exits 0 whenever the report is produced.
 - `--json` - machine-readable output.

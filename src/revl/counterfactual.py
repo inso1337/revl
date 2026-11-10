@@ -465,10 +465,35 @@ def replay_under(wal_path: str, policy_path: str,
 #: The probe row's stable keys, one row per candidate. The loop reads a row as
 #: ORDERING evidence only; nothing in this module reads it as an admission.
 PROBE_ROW_FIELDS = (
-    "candidate", "files", "recordedCrossings", "regraded", "newlyRefused",
-    "newlyAllowed", "firstDangerousCrossing", "admission", "answerable",
-    "bounds",
+    "candidate", "files", "recordedCrossings", "regraded", "undeclared",
+    "newlyRefused", "newlyAllowed", "firstDangerousCrossing", "admission",
+    "answerable", "bounds",
 )
+
+
+def sources_digest(sources: dict) -> str:
+    """The one candidate identity both probe surfaces use: a composition's
+    source texts keyed by path, sorted, compact JSON, UTF-8, hashed with
+    SHA-256. The CLI probe row's `candidate` field is this hash of the files it
+    read, and `evolve_loop.probe_order` keys its rows by this hash of a
+    `Candidate`'s sources, so the same composition carries the same identity on
+    both. Pure: it reads nothing."""
+    text = json.dumps({str(path): sources[path] for path in sources},
+                      sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def row_coverage_gap(row: dict) -> bool:
+    """Whether an answerable probe row regraded fewer crossings than the
+    record holds, or the record holds none.
+
+    A row that regraded nothing is not evidence of anything: a candidate that
+    declares none of the recorded crossings, or a recording with no crossings
+    at all, reads `newlyRefused 0` without having been checked against
+    anything. Such a row is marked, never read as clean."""
+    recorded = int(row.get("recordedCrossings") or 0)
+    return recorded == 0 or int(row.get("regraded") or 0) < recorded
 
 
 def candidate_hash(files: list) -> str:
@@ -488,9 +513,7 @@ def candidate_hash(files: list) -> str:
         except OSError as error:
             raise CounterfactualError(
                 f"cannot read candidate source {path}: {error}") from None
-    text = json.dumps(sources, sort_keys=True, separators=(",", ":"),
-                      ensure_ascii=False)
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return sources_digest(sources)
 
 
 def probe_row(wal_path: str, policy_path: str, candidate: list) -> dict:
@@ -500,7 +523,12 @@ def probe_row(wal_path: str, policy_path: str, candidate: list) -> dict:
     by, so it is one read of the WAL and one static compile, exactly like the
     counterfactual it summarizes. `regraded` is the number of recorded
     crossings the alternate policy decided for this candidate (permitted plus
-    refused); `newlyRefused` and `newlyAllowed` split that set.
+    refused); `newlyRefused` and `newlyAllowed` split that set. `undeclared`
+    is the number of recorded crossings the candidate does not declare at all
+    (no such component, or no emission with that label), so `regraded` plus
+    `undeclared` is `recordedCrossings`. A row with `undeclared` above zero, or
+    over a record with no crossings, is a coverage gap (`row_coverage_gap`),
+    not a clean row.
 
     Both counts are the alternate policy's verdict over the CANDIDATE's declared
     reach at a recorded crossing label, not a comparison with the scope the
@@ -517,11 +545,14 @@ def probe_row(wal_path: str, policy_path: str, candidate: list) -> dict:
     doc = replay_under(wal_path, policy_path, candidate=files)
     permitted = sum(1 for c in doc["crossings"] if c["verdict"] == "permitted")
     refused = sum(1 for c in doc["crossings"] if c["verdict"] == "refused")
+    undeclared = sum(1 for c in doc["crossings"]
+                     if c["verdict"] == "not-in-candidate")
     row = {
         "candidate": candidate_hash(files),
         "files": files,
         "recordedCrossings": doc["recordedCrossings"],
         "regraded": permitted + refused,
+        "undeclared": undeclared,
         "newlyRefused": refused,
         "newlyAllowed": permitted,
         "firstDangerousCrossing": doc["firstDangerousCrossing"],
@@ -574,7 +605,15 @@ def render_probe(doc: dict) -> str:
         lines.append("")
         lines.append(f"  candidate {row['candidate'][:16]}  "
                      f"({', '.join(row['files'])})")
-        lines.append(f"      recorded crossings regraded: {row['regraded']}")
+        lines.append(f"      recorded crossings regraded: {row['regraded']}"
+                     f"   not declared by the candidate: {row['undeclared']}")
+        if row_coverage_gap(row):
+            lines.append("      COVERAGE GAP: "
+                         + ("the record holds no crossing"
+                            if not row["recordedCrossings"] else
+                            f"{row['regraded']} of {row['recordedCrossings']} "
+                            f"recorded crossings regraded")
+                         + "; this row is not evidence the candidate is clean")
         lines.append(f"      newly refused: {row['newlyRefused']}"
                      f"   newly allowed: {row['newlyAllowed']}")
         dangerous = row["firstDangerousCrossing"]

@@ -258,9 +258,12 @@ attempt history.
   `candidate_digest` and the original brief.
 - **bounded rounds**: a failed round ends the run and keeps the last retained
   component; `budget` and `max_rounds` are validated and fixed before the run.
-- **probe ordering**: a candidate with a newly refused row is deferred and is
-  never offered to the Gate; a clean row only orders, so a clean probe with a
-  refusing Gate is still refused (`tests/test_2806_counterfactual_probe.py`).
+- **probe ordering**: a candidate with a newly refused row, or a row with a
+  coverage gap, is deferred and is never offered to the Gate; a clean row only
+  orders, so a clean probe with a refusing Gate is still refused; one result
+  carries every offered candidate's attempts and the deferred candidates; the
+  budget is shared across the ordered list
+  (`tests/test_2806_counterfactual_probe.py`).
 
 ## Probe ordering (item 2806, Slice 2)
 
@@ -270,18 +273,35 @@ candidate would newly refuse, the first dangerous crossing, and the bounds the
 record carries. The probe is evidence only, so the loop uses it in one direction:
 
 - `probe_order(candidates, probe)` calls `probe(candidate)` once per candidate and
-  returns `{"ordered", "deferred", "rows"}`, keyed by `candidate_digest`. A
-  candidate whose row names a first dangerous crossing, or whose `newlyRefused`
-  is above zero, is deferred; every other candidate keeps its relative order. An
+  returns `{"ordered", "deferred", "rows"}`. `rows` is positional, one
+  `{"candidate", "row"}` entry per candidate in the order given, so two equal
+  candidates keep two rows. The identity is `probe_identity(candidate)`, the
+  same hash (`counterfactual.sources_digest`) the CLI probe row carries as
+  `candidate` for the same files; it covers the sources only, because the probe
+  never reads the running manifest. A candidate whose row names a first
+  dangerous crossing, whose `newlyRefused` is above zero, or whose row has a
+  coverage gap (it regraded fewer crossings than the record holds, or the record
+  holds none) is deferred; every other candidate keeps its relative order. An
   absent or not-answerable row is not adverse: silence must not become a
   deferral.
-- `evolve_ordered(candidates, probe, ...)` is the loop that consumes it. Deferred
-  candidates are not offered to the Gate; every ordered candidate goes through
-  `evolve` unchanged, so the Gate is the only admission. A clean probe row never
-  admits a candidate, and a clean row with a refusing Gate is still refused.
-- The module does not import `revl.counterfactual`: the caller supplies the
-  `probe` callable, so a live WAL read stays at the edge and `evolve_loop` keeps
-  its gate-only dependency.
+- `evolve_ordered(candidates, probe, budget=...)` is the loop that consumes it.
+  Deferred candidates are not offered to the Gate; every ordered candidate goes
+  through `evolve` unchanged, so the Gate is the only admission. A clean probe
+  row never admits a candidate, and a clean row with a refusing Gate is still
+  refused.
+- `budget` is one budget of admit attempts shared across the whole ordered
+  list, not a budget per candidate. Each candidate's run is capped so every
+  later ordered candidate keeps at least one attempt; candidates the budget does
+  not reach are listed in `unoffered`.
+- It returns one `EvolveResult` for the run: every offered candidate's attempts
+  concatenated in order (`Attempt.n` counts across the run), the deferred
+  candidates with their probe rows (`deferred`), and `all_deferred`, which is
+  true when the probe deferred every candidate. That outcome has no attempts,
+  like an empty candidate list, and `all_deferred` is how a caller tells them
+  apart.
+- The module imports only the pure identity and coverage helpers from
+  `revl.counterfactual`: the caller supplies the `probe` callable, so a live WAL
+  read stays at the edge.
 
 Slice 3 (a two-arm continue-versus-reset experiment from a fork point) waits on
 the live replay executor in issue 2749 and the re-run seam in issue 2713.

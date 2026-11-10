@@ -53,6 +53,11 @@ from typing import Callable, Optional
 # with the machine-readable `rejection` payload (docs/evolve-loop.md).
 from revl.gate_service import admit_structured
 
+# The probe's candidate identity and its coverage test. Both are pure (no WAL
+# read, no compile), so the loop and the CLI probe row share one identity
+# without the loop reaching for a recording.
+from revl.counterfactual import row_coverage_gap, sources_digest
+
 # --------------------------------------------------------------------------
 # The candidate: sources + the running manifest it is admitted against.
 # --------------------------------------------------------------------------
@@ -283,25 +288,54 @@ class Attempt:
         }
 
 
+@dataclass(frozen=True)
+class Deferred:
+    """A candidate `evolve_ordered` did not offer to the Gate: its probe
+    identity (`probe_identity`) and the probe row that deferred it."""
+
+    candidate: Candidate
+    identity: str
+    row: Optional[dict]
+
+    def to_json(self) -> dict:
+        return {"candidate": self.identity, "sources": self.candidate.sources,
+                "row": self.row}
+
+
 @dataclass
 class EvolveResult:
     """The loop's outcome: whether the candidate was admitted, the full attempt
     history (every candidate offered, in order), and — on give-up — the final
-    rejection payload."""
+    rejection payload.
+
+    `evolve_ordered` also fills `deferred` (the candidates a probe row kept
+    from the Gate, with their rows) and `unoffered` (ordered candidates the
+    shared budget ran out before). `all_deferred` is true when the probe
+    deferred every candidate, so no attempt was made: a caller can tell that
+    apart from an empty candidate list, which has no attempts and no deferral."""
 
     admitted: bool
     attempts: list[Attempt] = field(default_factory=list)
     final_rejection: Optional[dict] = None
+    deferred: list[Deferred] = field(default_factory=list)
+    unoffered: list[Candidate] = field(default_factory=list)
 
     @property
     def final_candidate(self) -> Optional[Candidate]:
         return self.attempts[-1].candidate if self.attempts else None
+
+    @property
+    def all_deferred(self) -> bool:
+        return not self.attempts and not self.unoffered and bool(self.deferred)
 
     def to_json(self) -> dict:
         return {
             "admitted": self.admitted,
             "attempts": [a.to_json() for a in self.attempts],
             "final_rejection": self.final_rejection,
+            "deferred": [d.to_json() for d in self.deferred],
+            "unoffered": [c.sources for c in self.unoffered],
+            "all_deferred": self.all_deferred,
         }
 
 
@@ -438,18 +472,20 @@ def evolve(
 # proposer's biases, so a probe may order candidates and may never admit one.
 # This hook is that one direction and only that one.
 #
-#   * a candidate whose row names a first dangerous crossing, or whose row
-#     newly refuses a recorded crossing, is DEFERRED: `probe_order` returns it
-#     in `deferred` and `evolve_ordered` does not offer it to the Gate;
+#   * a candidate whose row names a first dangerous crossing, newly refuses a
+#     recorded crossing, or regraded fewer crossings than the record holds (or
+#     the record holds none), is DEFERRED: `probe_order` returns it in
+#     `deferred` and `evolve_ordered` does not offer it to the Gate;
 #   * a candidate with a clean row, or with no row at all (not answerable),
 #     keeps its place and is admitted by the Gate and nothing else;
 #   * a clean row never admits. `probe_order` never calls the Gate, and
 #     `evolve_ordered` sends every ordered candidate through `evolve`, whose
 #     only admission is the Gate's verdict.
 #
-# The rows are the counterfactual probe report's rows. This module does not
-# import `revl.counterfactual`: the caller supplies the `probe` callable, so
-# the loop takes a row-shaped value and a live WAL read stays at the edge.
+# The rows are the counterfactual probe report's rows. This module imports only
+# the pure identity and coverage helpers from `revl.counterfactual`: the caller
+# supplies the `probe` callable, so the loop takes a row-shaped value and a
+# live WAL read stays at the edge.
 # --------------------------------------------------------------------------
 
 
@@ -458,14 +494,30 @@ def probe_row_is_adverse(row: Optional[dict]) -> bool:
 
     Adverse means the recorded run crossed a boundary this candidate would not
     be permitted to cross: a first dangerous crossing, or any newly refused
-    recorded crossing. A row that is absent or not answerable is NOT adverse;
-    it carries no evidence either way and ordering must not turn silence into a
-    deferral."""
+    recorded crossing. An answerable row with a coverage gap is adverse too: a
+    row that regraded fewer crossings than the record holds, or a record with
+    no crossings, read `newlyRefused 0` without checking the candidate against
+    them, so it is not a clean row (`counterfactual.row_coverage_gap`). A row
+    that is absent or not answerable is NOT adverse; it carries no evidence
+    either way and ordering must not turn silence into a deferral."""
     if not row:
         return False
     if row.get("firstDangerousCrossing"):
         return True
-    return int(row.get("newlyRefused") or 0) > 0
+    if int(row.get("newlyRefused") or 0) > 0:
+        return True
+    if row.get("answerable") is False:
+        return False
+    return row_coverage_gap(row)
+
+
+def probe_identity(candidate: Candidate) -> str:
+    """The candidate's probe identity: `counterfactual.sources_digest` over its
+    sources, the same hash the CLI probe row carries as `candidate` for the
+    same files. The running manifest is not part of it because the probe never
+    reads it. This is deliberately not `candidate_digest`, which also hashes
+    the manifest and names a candidate inside a `ProposerPacket`."""
+    return sources_digest(candidate.sources)
 
 
 def probe_order(candidates: list[Candidate],
@@ -475,9 +527,10 @@ def probe_order(candidates: list[Candidate],
     One `probe(candidate)` call per candidate, in the order given, so the
     caller can batch a probe report over the same compositions. A candidate
     with an adverse row is returned in `deferred`; every other candidate keeps
-    its original relative order in `ordered`. The candidate's own identity is
-    `candidate_digest`, the same hash a `ProposerPacket` records as its
-    candidate digest, and it keys `rows`.
+    its original relative order in `ordered`. `rows` is positional, one entry
+    per candidate in the order given, each `{"candidate": probe_identity,
+    "row": row}`, so two equal candidates keep two rows rather than one
+    overwriting the other.
 
     This function never admits and never calls the Gate: it returns an ordering.
     `evolve_ordered` is the loop that consumes it."""
@@ -485,10 +538,10 @@ def probe_order(candidates: list[Candidate],
         raise TypeError("probe_order takes a list of candidates")
     ordered: list[Candidate] = []
     deferred: list[Candidate] = []
-    rows: dict[str, Optional[dict]] = {}
+    rows: list[dict] = []
     for candidate in candidates:
         row = probe(candidate)
-        rows[candidate_digest(candidate)] = row
+        rows.append({"candidate": probe_identity(candidate), "row": row})
         (deferred if probe_row_is_adverse(row) else ordered).append(candidate)
     return {"ordered": ordered, "deferred": deferred, "rows": rows}
 
@@ -506,18 +559,54 @@ def evolve_ordered(
     A candidate with an adverse probe row is deferred and is not offered to the
     Gate. Every other candidate goes through `evolve` unchanged, so the Gate is
     the only thing that can admit it; a clean probe row is never an admission.
-    Returns the first admitted result, or the last attempted result when none
-    admits, or an empty giving-up result when every candidate was deferred. The
-    deferred list is the caller's to re-probe or drop: this loop never offers
-    it to the Gate, and `probe_order` returns it for a later decision."""
+
+    `budget` is ONE budget of admit attempts shared across the whole ordered
+    list, so N candidates never spend more than `budget` attempts in total.
+    `evolve` spends its whole allowance on a refused candidate, so each
+    candidate's run is capped to leave one attempt for every later ordered
+    candidate: with `budget=3` and two ordered candidates the first gets at
+    most two attempts and the second one. When `budget` is smaller than the
+    ordered list, the candidates the budget does not reach are recorded in
+    `unoffered`.
+
+    The result is one `EvolveResult` for the whole run: the attempts of every
+    offered candidate concatenated in order (`Attempt.n` counts across the
+    run), the final rejection of the last refused attempt, the deferred
+    candidates with their probe rows, and `admitted` when some candidate was
+    admitted (the loop stops there). When every candidate is deferred there
+    are no attempts and `all_deferred` is true. The deferred list is the
+    caller's to re-probe or drop: this loop never offers it to the Gate."""
+    if budget < 1:
+        raise ValueError(f"evolve budget must be >= 1, got {budget}")
     order = probe_order(candidates, probe)
-    last = EvolveResult(admitted=False)
-    for candidate in order["ordered"]:
-        last = evolve(candidate, proposer=proposer, budget=budget, admit=admit,
-                      brief=brief)
-        if last.admitted:
-            return last
-    return last
+    result = EvolveResult(admitted=False)
+    rows = order["rows"]
+    for candidate, entry in zip(candidates, rows):
+        if probe_row_is_adverse(entry["row"]):
+            result.deferred.append(Deferred(
+                candidate=candidate, identity=entry["candidate"],
+                row=entry["row"]))
+
+    ordered = order["ordered"]
+    remaining = budget
+    for i, candidate in enumerate(ordered):
+        if remaining < 1:
+            result.unoffered.extend(ordered[i:])
+            break
+        later = len(ordered) - i - 1
+        run = evolve(candidate, proposer=proposer,
+                     budget=max(1, remaining - later), admit=admit,
+                     brief=brief)
+        for attempt in run.attempts:
+            attempt.n = len(result.attempts) + 1
+            result.attempts.append(attempt)
+        remaining -= len(run.attempts)
+        if run.admitted:
+            result.admitted = True
+            result.final_rejection = None
+            return result
+        result.final_rejection = run.final_rejection
+    return result
 
 
 def rounds(
