@@ -8765,6 +8765,9 @@ def test_the_spellings_around_3107_are_refused_in_the_reference_words(
 #   * `endorse_expression_in_verified`: the gate's expression reader cannot read
 #     an `endorse[...](...)` expression, so the verified fn's edge set may be
 #     short and the totality question is left open, loudly.
+#   * `endorse_expression_in_callee`: the same, in a callee of the verified fn:
+#     the gate's expression reader cannot read an `endorse[...](...)` expression
+#     there either, so the verified fn's edge set may be short.
 GATE_3107_LOUD_REFUSALS: dict[str, tuple[str, str]] = {
     "match_arm_recursion": (
         "type C = Red | Green\n"
@@ -8782,6 +8785,13 @@ GATE_3107_LOUD_REFUSALS: dict[str, tuple[str, str]] = {
         "  let s = endorse[web](n, reason = \"ok\")\n  return n\n}\n",
         "UNSUPPORTED|the totality of verified fn `f` is not checked by the "
         "self-host gate: a statement of fn `f` is one its call-graph reader "
+        "does not read"),
+    "endorse_expression_in_callee": (
+        "verified fn f(n: Int) -> Int { return g(n) }\n"
+        "fn g(n: Int) -> Int {\n"
+        "  let s = endorse[web](n, reason = \"ok\")\n  return n\n}\n",
+        "UNSUPPORTED|the totality of verified fn `f` is not checked by the "
+        "self-host gate: a statement of fn `g` is one its call-graph reader "
         "does not read"),
 }
 
