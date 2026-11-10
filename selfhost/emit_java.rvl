@@ -3387,7 +3387,7 @@ fn emit_component_stmts(comp: Any, services: Any, cname: Str, steps: List[Any], 
       var cargs = ["ctx", "fx"]
       if (needs_frame) { cargs = cargs.push("frame") }
       for (l of req_locals) { cargs = cargs.push(l) }
-      for (b of bind_names) { cargs = cargs.push(b) }
+      for (b of bind_names) { cargs = cargs.push(ident_binding(b)) }
       for (f of provider_config_fields(comp)) {
         cargs = cargs.push(mangle(value_str(value_field(f, "name"))))
       }
@@ -3784,7 +3784,7 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
   // The provide-method capture rename: each requirement AND each host bind is a
   // `this.<name>` field (item 238 adds the binds).
   var rn: Map[Str, Str] = Map.empty()
-  for (b of bind_names) { rn = rn.set(b, `this.${b}`) }
+  for (b of bind_names) { rn = rn.set(b, `this.${ident_binding(b)}`) }
   for (local of req_map.keys()) { rn = rn.set(local, `this.${mangle(local)}`) }
   let mctx = set_rn(base_ctx, rn)
   // `has_await` (a top-level `await` body step) colors the plugin async: the
@@ -3806,7 +3806,7 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
       out = out.push(`    private final ${value_str(value_field(reqs_m, map_get(req_map, b)))} ${mangle(b)};`)
     }
     for (b of bind_names) {
-      out = out.push(`    private final ${bind_type(comp, b, base_ctx, map_values)} ${b};`)
+      out = out.push(`    private final ${bind_type(comp, b, base_ctx, map_values)} ${ident_binding(b)};`)
     }
     // A provide method that reads `config.<f>` needs the field HERE, not only
     // on the plugin (see `provider_config_fields`).
@@ -3819,7 +3819,7 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
       cparams = cparams.push(`${value_str(value_field(reqs_m, map_get(req_map, b)))} ${mangle(b)}`)
     }
     for (b of bind_names) {
-      cparams = cparams.push(`${bind_type(comp, b, base_ctx, map_values)} ${b}`)
+      cparams = cparams.push(`${bind_type(comp, b, base_ctx, map_values)} ${ident_binding(b)}`)
     }
     for (f of provider_cfg) {
       cparams = cparams.push(`${java_v3_type(value_field(f, "type"), false)} ${mangle(value_str(value_field(f, "name")))}`)
@@ -3832,7 +3832,8 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
       out = out.push(`        this.${mangle(b)} = ${mangle(b)};`)
     }
     for (b of bind_names) {
-      out = out.push(`        this.${b} = ${b};`)
+      let field = ident_binding(b)
+      out = out.push(`        this.${field} = ${field};`)
     }
     for (f of provider_cfg) {
       let cfn = mangle(value_str(value_field(f, "name")))

@@ -565,6 +565,18 @@ class TaintModel:
     # `config.api_key` was seeded CLEAN and was therefore invisible to every §7
     # rule, the provide-method return crossing included.
     secret_config: dict[str, frozenset] = field(default_factory=dict)
+    # issues #3122/#3128: the declarations that make a lowered bare call an
+    # emission crossing. Lowering ERASES the `emit` marker on a call written in
+    # value position (`let r = emit svc.op(x)`, a nested `emit`, a ternary arm),
+    # so the flow walk cannot tell a crossing from an ordinary call by the node
+    # alone and has to re-derive it from the declaration. `emission_externs`
+    # names the host emissions; `service_emissions` maps a service name to the
+    # operations it declares `emission`; `component_requires` maps a component to
+    # its `requires` key -> service bindings, which is how a `target: req` call
+    # node resolves to the service whose declaration decides the question.
+    emission_externs: frozenset = field(default_factory=frozenset)
+    service_emissions: dict[str, frozenset] = field(default_factory=dict)
+    component_requires: dict[str, dict[str, str]] = field(default_factory=dict)
     # item 472: the validated `retention <name> { ... }` policies, keyed by name
     # (`revl.retention.RetentionPolicy`). Empty for every program that declares
     # none, which is what keeps the whole retention surface inert.
@@ -725,6 +737,17 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
     model.secret_caps = secret_caps
     model.extern_names = frozenset(
         ext.name for ext in getattr(program, "externs", ()) or ())
+    # issues #3122/#3128: which declarations are boundary crossings, recoverable
+    # from the lowered call node (the `emit` marker is gone in value position).
+    model.emission_externs = frozenset(
+        ext.name for ext in getattr(program, "externs", ()) or ()
+        if getattr(ext, "classification", None) == "emission")
+    model.service_emissions = {
+        svc.name: frozenset(
+            method.name for method in svc.methods.values()
+            if getattr(method, "emission", False))
+        for svc in getattr(program, "services", ()) or ()
+    }
 
     # item 472: the validated retention policies, and the ONE instant every
     # deadline in this program is compared against. Both are read once, here, so
@@ -1131,6 +1154,14 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
     # value out of the run log and the `revl_load` MCP response (item 256 Slice 3,
     # §7b). Byte-identical for a field with no qualifier.
     for comp in getattr(program, "components", ()):
+        # issues #3122/#3128: the component's `requires` bindings, as the lowered
+        # call node's `target: req` key resolves to a service declaration. Read
+        # here because the flow walk sees the lowered body only, where the key is
+        # a string and the service it names is not otherwise recoverable.
+        requires = getattr(comp, "requires", ()) or ()
+        if requires:
+            model.component_requires[comp.name] = {
+                local: service for (local, service, _line) in requires}
         confidential_fields: set = set()
         for cfield in getattr(comp, "config", ()) or ():
             # `mentions_secret`, not `top_qualifier`: a config field that holds
@@ -1521,7 +1552,8 @@ class _FlowChecker:
                  config_env: dict | None = None,
                  comp_config: dict | None = None,
                  component: str = "", action: str = "",
-                 scope_env: dict | None = None) -> None:
+                 scope_env: dict | None = None,
+                 requires_map: dict | None = None) -> None:
         self.model = model
         self.filename = filename
         self.line = line
@@ -1573,6 +1605,21 @@ class _FlowChecker:
         # applies that inferred signature exactly as a call site does.
         self.config_env: dict = config_env if config_env is not None else {}
         self.comp_config: dict = comp_config or {}
+        # issues #3122/#3128: the component's `requires` bindings (`key ->
+        # service`), so a `target: req` call node in this body resolves to the
+        # service declaration whose `emission` flag decides whether the call is a
+        # boundary crossing. Empty for a top-level `fn`, which has no requires.
+        self.requires_map: dict = requires_map or {}
+        # every operation name declared `emission` on any service, for the one
+        # receiver spelling the lowered node cannot resolve to a service (a
+        # service-typed local); see `_emission_callee`.
+        self._emission_ops = frozenset(
+            name for names in self.model.service_emissions.values()
+            for name in names)
+        # The `emit` statement node currently being walked, if any: its checks are
+        # the statement arm's, so the value-form check must stand down for it and
+        # not refuse the same crossing twice.
+        self._emit_stmt_node = None
         self.signatures = signatures or {}
         self.infer = infer
         self.qualname = qualname
@@ -1673,6 +1720,9 @@ class _FlowChecker:
           * `{kind:call, target:{kind:req}, method}`    a required-service method
             (`emit s.run(page)`) — the sink is keyed by the METHOD name, so a
             `Trusted[T]` service-operation parameter is enforced too.
+          * `{kind:call, callee:{kind:field, name, target:{kind:instance-get}}}`
+            a provision method called off a spawn handle (`s.<key>.<method>()`,
+            issue #3122) — the method is the call target exactly as above.
         """
         if node.get("kind") == "fn" and isinstance(node.get("name"), str):
             return node["name"]
@@ -1682,9 +1732,52 @@ class _FlowChecker:
             # name}` (top-level fn bodies) and `{kind:name, id}` (component bodies).
             if isinstance(callee, dict) and callee.get("kind") in ("var", "name"):
                 return callee.get("name") or callee.get("id")
+            # a provision method off a spawn handle: the receiver is a `field`
+            # callee over an `instance-get`, not the `target: req` slot.
+            if isinstance(callee, dict) and callee.get("kind") == "field":
+                recv = callee.get("target")
+                if (isinstance(recv, dict)
+                        and recv.get("kind") == "instance-get"):
+                    return callee.get("name")
             if isinstance(node.get("method"), str):
                 return node["method"]
         return None
+
+    def _emission_callee(self, node: dict) -> bool:
+        """Whether a lowered call node is a declared boundary crossing.
+
+        Issues #3122/#3128: lowering erases the `emit` marker on a call written
+        in value position, so the flow walk re-derives the crossing from the
+        declaration here: a host `emission` extern, or a service operation
+        declared `emission` reached through this body's `requires` binding, off
+        a spawn handle's provision (each naming its service on the node), or
+        through a service-typed local (resolved by operation name alone)."""
+        if node.get("kind") == "fn":
+            return node.get("name") in self.model.emission_externs
+        if node.get("kind") != "call":
+            return False
+        target = node.get("target")
+        if isinstance(target, dict):
+            if target.get("kind") == "req":
+                service = self.requires_map.get(target.get("name"))
+                return node.get("method") in self.model.service_emissions.get(
+                    service, ())
+            if target.get("kind") == "name":
+                # a service-TYPED local (`fn go(t: Till) { let r = emit
+                # t.ring(x) }`): the lowered node carries no type, so the
+                # walk cannot name the service. Any operation of that name
+                # declared `emission` is treated as one, which is the
+                # fail-closed direction and the same method-name keying
+                # `secret_receivers` and `sinks` already use.
+                return node.get("method") in self._emission_ops
+            return False
+        callee = node.get("callee")
+        if isinstance(callee, dict) and callee.get("kind") == "field":
+            recv = callee.get("target")
+            if isinstance(recv, dict) and recv.get("kind") == "instance-get":
+                return callee.get("name") in self.model.service_emissions.get(
+                    recv.get("service"), ())
+        return False
 
     @staticmethod
     def _var_name(node: dict) -> str | None:
@@ -2306,10 +2399,10 @@ class _FlowChecker:
             indirect = (node.get("kind") == "call"
                         and isinstance(callee_node, dict)
                         and callee_node.get("kind") in ("var", "name"))
-            return self._mint_reload(
-                callee,
-                self._taint_of_call(callee, node.get("args") or [], env, node,
-                                    indirect=indirect))
+            value = self._taint_of_call(callee, node.get("args") or [], env, node,
+                                        indirect=indirect)
+            self._check_value_crossing(node, callee)
+            return self._mint_reload(callee, value)
 
         # record construction is field-granular (Slice B): each field carries its
         # own taint, so a later read of a clean field stays clean even when a
@@ -2360,6 +2453,7 @@ class _FlowChecker:
                               if f in supplied else CLEAN
                               for f in fields]
                 self._check_sinks(f"{child}#config", arg_taints, node)
+                self._check_config_hand_off(child, fields, arg_taints, node)
             return self._union_children(node, env)
 
         # a `match`: each arm's binder is the scrutinee's payload, so it carries
@@ -2424,6 +2518,88 @@ class _FlowChecker:
                 continue
             result = _join(result, self.taint_of(value, env))
         return result
+
+    def _check_value_crossing(self, node: dict, callee: str) -> None:
+        """The statement-emit arm's checks for an emission written as a VALUE.
+
+        Issues #3122/#3128: `let r = emit svc.op(t)`, a nested `1 + (emit …)` and
+        an `emit` in a ternary arm all lower to a bare call — the marker leaves no
+        trace — so these crossings used to skip the receiver check and the
+        `reaches` edge the statement arm records. The crossing is re-derived from
+        the declaration (`_emission_callee`), and the checks are the arm's,
+        applied per argument: a `secret`-carrying argument is refused
+        unconditionally (G-SECRET), a `confidential` one is refused unless its
+        position is a declared `Secret[T]` receiver (G-SECRET-FLOW, §7b), and the
+        concrete origins the arguments carry are recorded on the audit surface.
+
+        The one `secret` crossing that is ADMITTED is the §4b same-capability
+        re-entry: handing the bound key back into an extern body of its own bound
+        capability (`let k = emit complete(d); let r = emit echo(k)`). The callee
+        there is exactly the emission whose return minted `secret`
+        (`model.sources[callee] == SECRET_ORIGIN`), so it stands down as the
+        statement arm's `model.sources` early return does.
+
+        The outer call of an `emit` STATEMENT is skipped: its expression reaches
+        here through `taint_of` too, and the statement arm is the one that owns
+        its diagnostic and its return-inclusive recording."""
+        if node is self._emit_stmt_node or not self._emission_callee(node):
+            return
+        args = self._emit_args or ()
+        if not self.infer and self.enforce:
+            # §4b: the bound capability's own body is the one receiver the bound
+            # key may re-enter, so this is the one callee whose secret arguments
+            # are admitted.
+            bound_reentry = (
+                self.model.sources.get(callee) == SECRET_ORIGIN)
+            if not bound_reentry:
+                for index, at in enumerate(args):
+                    if _carries_secret(at):
+                        self._refuse_secret(callee, "an emission crossing",
+                                            index, at, node)
+            receivers = self.model.secret_receivers.get(callee, set())
+            for index, at in enumerate(args):
+                if index not in receivers and _carries_confidential(at):
+                    self._refuse_confidential(
+                        callee,
+                        "an emission crossing (a capability boundary without a "
+                        "declared `Secret[T]` receiver)",
+                        index, at, node)
+        # the outbound edge the policy-gated tier reads: the origins the arguments
+        # carry OUT across the boundary (the emission's return comes IN, and the
+        # statement arm's return-inclusive union stays its own reading).
+        real: set = set()
+        for at in args:
+            real |= {o for o in at.origins if _param_index(o) is None}
+        if real:
+            self.reaches |= real
+
+    def _check_config_hand_off(self, child: str, fields, arg_taints,
+                               node) -> None:
+        """Issue #3132: a `spawn Child with { … }` config field is a receiver.
+
+        The hand-off crosses a component boundary, and §7b says a `confidential`
+        value crosses only at a receiver that declares it. A config field
+        declared `Secret[T]` is such a receiver; a plain field is an undeclared
+        one, so a `confidential` value supplied to it is refused at the hand-off
+        rather than laundered into the child's ordinary data. A `secret` bound
+        key is refused even at a declared `Secret[T]` field (A8 disjointness: the
+        receiver admits `confidential` only). The `Untrusted[T]` twin is the same
+        hand-off on the authority axis, already refused above through the child's
+        inferred config signature."""
+        if self.infer or not self.enforce:
+            return
+        declared = self.model.secret_config.get(child, frozenset())
+        for index, cname in enumerate(fields):
+            if index >= len(arg_taints):
+                continue
+            at = arg_taints[index]
+            if _carries_secret(at):
+                self._refuse_secret(f"{child}#config.{cname}",
+                                    "a spawn config hand-off", None, at, node)
+            elif cname not in declared and _carries_confidential(at):
+                self._refuse_confidential(
+                    f"{child}#config.{cname}", "a spawn config hand-off",
+                    None, at, node)
 
     def _taint_of_state_access(self, name: str, node, env: dict) -> Taint:
         """A call whose receiver is a component-state world (Slice B3). Every such
@@ -2500,12 +2676,21 @@ class _FlowChecker:
         # every argument position is a sink (what cannot be named cannot be proven
         # safe), but only when the program has a sink at all, so a sink-free program
         # is unaffected. This mirrors G4's `*` for a first-class dispatch.
-        if indirect and self.any_sink and self._is_unnameable(resolved):
-            kind = "an unnameable call (a first-class function value)"
-            for index, at in enumerate(arg_taints):
-                if _authority_dirty(at):
-                    self._on_sink("an unnamed callable", kind, index, at, node,
-                                  ("a first-class function value",))
+        #
+        # The RESULT taint is not gated on `any_sink` (issue #3128): a closure
+        # carries what it CAPTURED, and that capture is a value the emission
+        # crossing has to see whether or not the program happens to declare an
+        # authority sink. Gating the propagation let `let f = (x) => page;
+        # let r = emit s.send(f("z"))` carry nothing into the send, so the
+        # policy-gated tier recorded no edge in a sink-free composition. A
+        # wider taint is the fail-closed direction: it can only refuse.
+        if indirect and self._is_unnameable(resolved):
+            if self.any_sink:
+                kind = "an unnameable call (a first-class function value)"
+                for index, at in enumerate(arg_taints):
+                    if _authority_dirty(at):
+                        self._on_sink("an unnamed callable", kind, index, at,
+                                      node, ("a first-class function value",))
             result = CLEAN
             for t in arg_taints:
                 result = _join(result, t)
@@ -2770,7 +2955,13 @@ class _FlowChecker:
             return
         if step in ("return", "emit", "expr", "fail"):
             self._emit_args = None
-            result = self.taint_of(stmt.get("expr") or stmt.get("value"), env)
+            expr = stmt.get("expr") or stmt.get("value")
+            # issue #3122: the statement arm owns an `emit` statement's checks, so
+            # the value-form check stands down for exactly this node (its nested
+            # argument expressions are ordinary value positions and stay checked).
+            self._emit_stmt_node = expr if step == "emit" else None
+            result = self.taint_of(expr, env)
+            self._emit_stmt_node = None
             if step == "return" and self.infer:
                 # inference mode: the return value's taint (parameter markers
                 # and minted origins) feeds `flows_to_return` and `mints`.
@@ -3730,7 +3921,10 @@ def _walk_component_methods(body, model: TaintModel, source: str,
             # an activation-body `return` is not a crossing of the service / MCP
             # bridge, so the provide-method return rules do not apply here.
             provide_return=False, secret_config=secret_config,
-            comp_config=comp_config, scope_env=scope_env)
+            comp_config=comp_config, scope_env=scope_env,
+            # issues #3122/#3128: the activation body reaches the same required
+            # services, so its value-form emissions resolve their declarations.
+            requires_map=model.component_requires.get(component, {}))
         act.run(act_steps, {})
         reaches |= act.reaches
         declassified |= act.declassified
@@ -3753,6 +3947,8 @@ def _walk_component_methods(body, model: TaintModel, source: str,
                     state_names=state_names, untrusted=untrusted,
                     provide_return=True, secret_config=secret_config,
                     comp_config=comp_config, scope_env=scope_env,
+                    # issues #3122/#3128: same resolution as the activation body.
+                    requires_map=model.component_requires.get(component, {}),
                     # item 514: the action this body IS, so a model crossing it
                     # reaches is judged against the `route model` block keyed to
                     # this name.
