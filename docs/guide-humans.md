@@ -279,6 +279,7 @@ below; the exhaustive per-command flag reference is
 | `revl update check` | compare the running toolchain with the newest release on a GitHub release feed, its manifest and compatibility statement (exit 10 when an update is available, `--json`) | [updates.md](updates.md) |
 | `revl update fetch` | download a release, verify the artifact sha256 against its manifest, and stage it under the update home; nothing is compiled or executed | [updates.md](updates.md) |
 | `revl contract FILES` | federated contracts between sovereign compositions: export a consumer surface, or check a provider against a pinned one | [federation.md](federation.md) |
+| `revl federation-apply PLAN` | admit a federation plan (new sources, consumer contracts, health probes) and apply it as one all-or-nothing update of co-located compositions, restoring the prior generation when a health probe fails (`--dry-run` runs only the admission half, `--json`, `--state-dir`, `--probe-timeout`) | [commands-reference.md](commands-reference.md#revl-federation-apply) |
 | `revl erase-report FILES --realm R` | right-to-erasure evidence for one realm (`--json`, `--no-residue-proof`) | [erase-report.md](erase-report.md) |
 | `revl retention-receipt FILES --policy P --requester W` | sign an erasure receipt over a `retention` policy's replicas and derivatives, or `--verify` one | [commands-reference.md](commands-reference.md) |
 | `revl plan FILES` | dry run for admission (`--manifest RUNNING.json`, `--replacing`); `-o change.plan` serializes an executable plan | [plan.md](plan.md) |

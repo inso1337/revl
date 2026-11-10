@@ -16,7 +16,8 @@ migrate  contract  erase-report  retention-receipt  plan  apply  undo
 canary  promote  query  fmt  quarantine  analyze  test  mcp  gen-types
 import  export  sourcemap  serve  run  dev  recover  act  estop  slo
 branch  compare  replay  why  metrics  trace  profile  pool  attest
-dash  repair  bundle  emit  verify  deploy  deploy-admit  truc
+dash  repair  bundle  emit  verify  deploy  deploy-admit
+federation-apply  truc
 ```
 <!-- docgen:cli-verbs end -->
 
