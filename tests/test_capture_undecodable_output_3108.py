@@ -322,7 +322,7 @@ def test_the_seam_sets_utf8_stdio_for_a_python_child_without_mutating_the_env():
              "import os; print(os.environ.get('PYTHONIOENCODING', 'unset'))"]
     before = dict(os.environ)
     inherited = _childproc.run(probe, capture_output=True, timeout=120)
-    assert inherited.stdout.strip() == ("utf-8" if "PYTHONIOENCODING" not in before
+    assert inherited.stdout.strip() == ("utf-8:surrogateescape" if "PYTHONIOENCODING" not in before
                                         else before["PYTHONIOENCODING"])
     assert dict(os.environ) == before
 
@@ -330,7 +330,7 @@ def test_the_seam_sets_utf8_stdio_for_a_python_child_without_mutating_the_env():
                   if key != "PYTHONIOENCODING"}
     snapshot = dict(caller_env)
     given = _childproc.run(probe, capture_output=True, timeout=120, env=caller_env)
-    assert given.stdout.strip() == "utf-8"
+    assert given.stdout.strip() == "utf-8:surrogateescape"
     assert caller_env == snapshot
 
     own = dict(caller_env, PYTHONIOENCODING="latin-1")
@@ -347,3 +347,18 @@ def test_a_real_caller_survives_an_undecodable_byte():
 
     assert code == 0
     _assert_replaced(out, err)
+
+
+def test_a_python_child_with_a_lone_surrogate_still_exits_zero():
+    """A bare PYTHONIOENCODING=utf-8 would make the child's stdio strict, so
+    this print would raise under the C locale or UTF-8 mode, where the handler
+    is surrogateescape. The seam keeps that handler: the raw byte reaches the
+    parent and becomes U+FFFD there."""
+    child = [sys.executable, "-c", r'print("x\udc9d")']
+    base = {key: value for key, value in os.environ.items()
+            if key not in {"PYTHONIOENCODING", "PYTHONUTF8", "LC_ALL", "LANG"}}
+    for extra in ({"LC_ALL": "C", "PYTHONCOERCECLOCALE": "0"}, {"PYTHONUTF8": "1"}):
+        result = _childproc.run(child, capture_output=True, timeout=120,
+                                env={**base, **extra})
+        assert result.returncode == 0, (extra, result.stderr)
+        assert result.stdout == f"x{REPLACEMENT}\n", extra
