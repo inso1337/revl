@@ -589,6 +589,11 @@ def _run_recover(args) -> int:
     from ..recovery import recover, render, RecoveryError  # noqa: PLC0415
     from ..wal import WALIntegrityError  # noqa: PLC0415
 
+    # issue #2725: the conductor's ONE durable decision for a multi-node step.
+    # When given, the WAL is settled against that record through the same rule
+    # `deploy.settle_stranded` already implements — not a second rule.
+    decision_path = getattr(args, "decision", None)
+
     # item 440 §(b): the re-issue seam's operator knob rides the SAME `--policy`
     # file the roll-forward path already re-establishes, and is read whether or
     # not `--restore` was given (the seam acts on the owed-emission report, which
@@ -642,25 +647,52 @@ def _run_recover(args) -> int:
             print("error: resolve a crossing on its process WAL, not the placement index",
                   file=sys.stderr)
             return 2
+        if decision_path is not None:
+            print("error: `--decision` settles ONE participant's WAL; pass that "
+                  "process's own WAL, not the placement index", file=sys.stderr)
+            return 2
         return _recover_placement(args, index, reissue, session)
 
     world = None
+    if decision_path is not None:
+        # The decision settles the record; the other settle paths would each
+        # guess at the same question a second way.
+        if getattr(args, "restore", None) or session is not None:
+            print("error: `--decision` settles a stranded participant; it "
+                  "cannot be combined with `--restore`", file=sys.stderr)
+            return 2
+        if getattr(args, "operator_resolved", []):
+            print("error: `--decision` settles the WAL as one record; it cannot "
+                  "be combined with `--operator-resolved`", file=sys.stderr)
+            return 2
+        if getattr(args, "forward", False):
+            print("error: `--decision` decides roll-forward or roll-back; it "
+                  "cannot be combined with `--forward`", file=sys.stderr)
+            return 2
+        if reissue is not None:
+            print("error: `--decision` settles the record itself; a policy's "
+                  "re-issue seam does not apply", file=sys.stderr)
+            return 2
     try:
         # issue #1477: `--composition` binds the REAL world, the composition's
         # own host bodies and providers, checked against the WAL header's digest.
         if getattr(args, "composition", None):
             world = _bind_composition(args)
-        from ..wal import resolve_crossing
-        # Each ack is appended as it is validated, so one invalid seq in
-        # `--operator-resolved 1 --operator-resolved 2` leaves seq 1's ack
-        # on disk and then errors out below: partial application, which is
-        # acceptable because each ack only settles a crossing the operator named;
-        # re-run with the bad seq removed.
-        for seq in getattr(args, "operator_resolved", []):
-            resolve_crossing(args.wal, seq)
-        report = recover(args.wal, world=world, session=session,
-                         snapshot=snapshot, reissue=reissue,
-                         forward_admissions=getattr(args, "forward", False))
+        if decision_path is not None:
+            from ..deploy import settle_stranded  # noqa: PLC0415 — deploy owns the rule
+            report = settle_stranded(args.wal, decision_path, world=world)
+        else:
+            from ..wal import resolve_crossing
+            # Each ack is appended as it is validated, so one invalid seq in
+            # `--operator-resolved 1 --operator-resolved 2` leaves seq 1's ack
+            # on disk and then errors out below: partial application, which is
+            # acceptable because each ack only settles a crossing the operator named;
+            # re-run with the bad seq removed.
+            for seq in getattr(args, "operator_resolved", []):
+                resolve_crossing(args.wal, seq)
+            report = recover(args.wal, world=world, session=session,
+                             snapshot=snapshot, reissue=reissue,
+                             forward_admissions=getattr(args, "forward", False))
         if world is not None:
             report["binding"] = world.describe()
     except (RecoveryError, WALIntegrityError, OSError, ValueError) as error:
@@ -676,6 +708,17 @@ def _run_recover(args) -> int:
 
     if args.json:
         print(json.dumps(report, indent=2))
+    elif decision_path is not None and report.get("verdict") == "unresolved":
+        # `deploy.settle_stranded` fails CLOSED when the decision record cannot
+        # be read, with an explanation rather than a recovery report. Recovery's
+        # renderer expects its own residue shape, so say this one plainly: a
+        # split-brain guess is the one thing this path must not make.
+        print("verdict: UNRESOLVED — nothing was settled")
+        if report.get("decision"):
+            print(report["decision"])
+        proof = (report.get("residue") or {}).get("proof")
+        if proof:
+            print(f"  residue proof: {proof}")
     else:
         print(render(report))
     return _recover_exit_status(report, model_only=getattr(args, "model_only", False))
