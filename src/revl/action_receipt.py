@@ -773,8 +773,14 @@ def _keyring(keys: Any) -> dict:
         key = _require_key(keys, "a verification key")
         return {key_id(key): key}
     if isinstance(keys, Mapping):
-        items = ((kid, _require_key(key, "a verification key"))
-                 for kid, key in dict(keys).items())
+        items = []
+        for kid, key in dict(keys).items():
+            key = _require_key(key, "a verification key")
+            if kid != key_id(key):
+                raise ValueError(
+                    f"keyring id {str(kid)[:64]!r} is not the fingerprint of "
+                    "the key it maps to")
+            items.append((kid, key))
     elif isinstance(keys, Iterable):
         items = ((key_id(key), key) for key in
                  (_require_key(key, "a verification key") for key in keys))

@@ -364,15 +364,23 @@ def test_the_keyring_refuses_an_empty_key():
             R._keyring(keys)
 
 
-def test_verifying_with_an_empty_key_is_a_refusal():
-    chain = _chain()
-    for keys in (b"", [b""]):
+def test_a_chain_signed_with_an_empty_key_is_not_verified(monkeypatch):
+    """A MAC under an empty key is one anyone can compute. Build such a chain
+    by lifting the signer's own refusal, then check no key shape accepts it."""
+    monkeypatch.setattr(R, "_require_key", lambda key, what="": bytes(key),
+                        raising=False)
+    chain = R.export_chain(b"", session="s", actions=[], salt=SALT, now=NOW)
+    monkeypatch.undo()
+    for keys in (b"", [b""], {R.key_id(b""): b""}):
         verdict = R.verify_chain(chain, keys)
-        assert not verdict.ok
+        assert not verdict.ok, f"verified against {keys!r}"
         assert verdict.link == "key-unknown"
-        verdict = R.verify_receipt(chain["receipts"][0], keys)
-        assert not verdict.ok
-        assert verdict.link == "key-unknown"
+
+
+def test_a_keyring_id_must_be_the_fingerprint_of_its_key():
+    with pytest.raises(ValueError, match="fingerprint"):
+        R._keyring({"0" * 16: KEY})
+    assert R._keyring({R.key_id(KEY): KEY}) == {R.key_id(KEY): KEY}
 
 
 def test_an_approval_with_extra_members_is_refused_at_export():
