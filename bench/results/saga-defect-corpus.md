@@ -6,7 +6,9 @@ measured, never hand-edited. Do not edit it: rerun the command.
 revl 2.0.0; cordis-py @ 1c5e6f17abf5; macOS-26.2-arm64-arm-64bit.
 
 Each saga is a small composition with one known saga defect, seeded
-from the row's description before the saga was written. `compile`
+from the row's description before the saga was written, except for
+the rows named under "Changed after measurement" below, whose saga,
+description or expected verdict changed after a measurement. `compile`
 means the compiler refused the saga, either by a checker rule or by a
 parse error; a parse error is the parser's generic syntax refusal,
 which names no rule and which any typo would also earn, so it is
@@ -16,6 +18,8 @@ unit passed. The verdict is the catch point for the defect, not a
 statement that the saga is otherwise correct.
 
 Failure model: One failure is injected after a top-level step of the saga component completes, in program order (the `revl test --sweep` model; docs/fault-tests.md section 9). The sequential, single-fault model does not cover concurrency, clock or random coeffects.
+
+Changed after measurement: `partial-refund`: The first version's provider removed the whole row on any refund, so the defect could not show and the row was measured as `missed`. After that measurement the provider was changed to keep the amount, and the description and the expected verdict (now `fault-test`) were rewritten.
 
 | defect | group | kind | expected | verdict | evidence |
 |---|---|---|---|---|---|

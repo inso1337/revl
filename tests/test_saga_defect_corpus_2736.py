@@ -143,6 +143,29 @@ def test_each_compile_row_is_refused_with_its_code(row):
         f"row says {row.get('refusal', 'checker')}: {refusal.message}")
 
 
+def test_every_compile_row_pins_its_refused_line():
+    for row in COMPILE_ROWS:
+        _ir, refusal = R._compile(BENCH / row["file"])
+        assert refusal is not None and refusal.line == row["expectedLine"], row["id"]
+
+
+def test_a_changed_expected_line_is_drift():
+    row = next(row for row in COMPILE_ROWS if row["id"] == "emission-with-undo")
+    outcome = R.measure(row)
+    assert R.disagreements(row, outcome) == []
+    moved = {**row, "expectedLine": row["expectedLine"] + 1}
+    problems = R.disagreements(moved, outcome)
+    assert any("line" in problem for problem in problems), problems
+
+
+def test_the_results_name_the_rows_changed_after_measurement():
+    text = RESULTS.read_text(encoding="utf-8")
+    changed = [row["id"] for row in ROWS if row.get("changedAfterMeasurement")]
+    assert changed == ["partial-refund"]
+    header = text.split("| defect |")[0]
+    assert all(f"`{ident}`" in header for ident in changed)
+
+
 def test_a_generic_parse_error_is_a_parse_refusal_and_a_named_rule_is_not():
     # Controls for `refusal_kind`: a plain typo is a parse refusal, and the
     # parser-raised G4 missing-undo refusal is still a checker refusal.
@@ -310,7 +333,8 @@ def test_a_seeded_fault_failure_is_still_fault_test(monkeypatch):
 def _fake_outcome(row, drifting):
     if row["expected"] == "compile" and not drifting:
         return {"verdict": "compile", "refusal": row.get("refusal", "checker"),
-                "code": row["expectedCode"], "line": 1, "detail": "stub"}
+                "code": row["expectedCode"], "line": row["expectedLine"],
+                "detail": "stub"}
     verdict = "missed" if drifting else row["expected"]
     return {"verdict": verdict, "detail": "stub", "counts": {"steps": 1}}
 

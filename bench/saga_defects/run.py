@@ -100,6 +100,9 @@ def load_corpus() -> dict:
         if row["expected"] == "compile" and not row.get("expectedCode"):
             raise CorpusError(
                 f"{row['id']}: a compile row must record its `expectedCode`")
+        if row["expected"] == "compile" and not isinstance(row.get("expectedLine"), int):
+            raise CorpusError(
+                f"{row['id']}: a compile row must record its `expectedLine`")
         if "refusal" in row and (row["expected"] != "compile"
                                  or row["refusal"] not in REFUSALS):
             raise CorpusError(
@@ -226,6 +229,11 @@ def disagreements(row: dict, outcome: dict) -> list[str]:
     if expected_code and outcome.get("code") != expected_code:
         problems.append(
             f"expected code {expected_code}, got {outcome.get('code')}")
+    expected_line = row.get("expectedLine")
+    if expected_line is not None and outcome["verdict"] == "compile" \
+            and outcome.get("line") != expected_line:
+        problems.append(
+            f"expected the refusal on line {expected_line}, got line {outcome.get('line')}")
     if outcome["verdict"] == "compile" and row["expected"] == "compile":
         expected_refusal = row.get("refusal", "checker")
         if outcome.get("refusal") != expected_refusal:
@@ -386,6 +394,12 @@ def _cordis_pin() -> str:
     return match.group(1) if match else "unknown"
 
 
+def _changed_after(rows: list[dict]) -> str:
+    changed = [f"`{row['id']}`: {row['changedAfterMeasurement']}"
+               for row in rows if row.get("changedAfterMeasurement")]
+    return " ".join(changed) if changed else "none."
+
+
 def render_results(rows: list[dict], outcomes: dict[str, dict], data: dict) -> str:
     totals = tally(rows, outcomes)
     pin = _cordis_pin()
@@ -399,7 +413,9 @@ def render_results(rows: list[dict], outcomes: dict[str, dict], data: dict) -> s
         f"{platform.platform()}.",
         "",
         "Each saga is a small composition with one known saga defect, seeded",
-        "from the row's description before the saga was written. `compile`",
+        "from the row's description before the saga was written, except for",
+        "the rows named under \"Changed after measurement\" below, whose saga,",
+        "description or expected verdict changed after a measurement. `compile`",
         "means the compiler refused the saga, either by a checker rule or by a",
         "parse error; a parse error is the parser's generic syntax refusal,",
         "which names no rule and which any typo would also earn, so it is",
@@ -409,6 +425,8 @@ def render_results(rows: list[dict], outcomes: dict[str, dict], data: dict) -> s
         "statement that the saga is otherwise correct.",
         "",
         "Failure model: " + data.get("failureModel", ""),
+        "",
+        "Changed after measurement: " + _changed_after(rows),
         "",
         "| defect | group | kind | expected | verdict | evidence |",
         "|---|---|---|---|---|---|",
