@@ -22,8 +22,8 @@ names an entry in the repository's `claims.toml`:
 Three witness kinds:
 
     test:<path>              every test in that file
-    test:<path>::<test>      one pytest function, or a parametrized node
-                             (`...::test_x[param]`, matched by function)
+    test:<path>::<test>      one pytest function, or one parameter of it
+                             (`...::test_x[param]`, the real pytest id)
     docgen:<block>           a generated block in tools/docgen.py's BLOCKS
                              (`guarantees`, `vision-tiers`, ...)
     claim:<id>               another registered claim
@@ -38,9 +38,21 @@ findings stay here.
 WHAT THIS CANNOT KNOW. A witness that runs and passes does not mean the
 sentence states what the code does: a test can assert a weaker property than
 the comment claims. This narrows the window in which a dead claim goes
-unnoticed; it does not replace review of the sentence itself. A witness node's
-parametrization is resolved to its function, not to the parameter, so renaming
-a parameter while keeping the function is not a finding.
+unnoticed; it does not replace review of the sentence itself.
+
+The witness is judged by reading the test file, not by collecting it (the lint
+job that runs the gate has no pytest): the file must be one pytest collects
+(`test_*.py` or `*_test.py`, the defaults this repository keeps), the test must
+not be unconditionally skipped (`@pytest.mark.skip`, a `skip` in `pytestmark`,
+a module-level `pytest.skip(...)`), and a `[param]` must be one of the ids the
+function's `@pytest.mark.parametrize` produces. Those ids are read from the
+call when it is a literal (or a module-level literal, `sorted`/`list` of one,
+its `.items()`/`.keys()`), with `ids=` or pytest's plain-text default ids; any
+other shape (stacked or class-level parametrizations, parametrized fixtures,
+`pytest_generate_tests`, an id pytest would escape) is refused, and the fix is
+to name the function without the parameter. A conditional `skipif` is NOT
+decided: its condition is evaluated when pytest runs, so a witness skipped by
+one on every runner still passes this check.
 
 Claims are OPTIONAL. A comment without `revl:claim` is unaffected, so adoption
 is incremental; the generated-block contract in `tools/docgen.py` is the model
@@ -218,16 +230,47 @@ def _mask_fenced_code(text: str) -> str:
     return "".join(chars)
 
 
+_BACKTICKS = re.compile(r"`+")
+_PARAGRAPH_BREAK = re.compile(r"\n[ \t]*\n")
+
+
+def _html_comments(text: str):
+    """The HTML comments of `text` outside inline code spans.
+
+    Read left to right as Markdown does: whichever of a `<!--` and a backtick
+    run starts first owns the text, so a comment inside a code span is code,
+    and a backtick inside a comment is comment. A code span closes at the next
+    backtick run of the same length within its paragraph; a run with no closer
+    is a literal backtick.
+    """
+    index = 0
+    while True:
+        comment = _HTML_COMMENT.search(text, index)
+        ticks = _BACKTICKS.search(text, index)
+        if comment is None:
+            return
+        if ticks is not None and ticks.start() < comment.start():
+            width = len(ticks.group())
+            end = _PARAGRAPH_BREAK.search(text, ticks.end())
+            limit = end.start() if end is not None else len(text)
+            closer = next((run for run in _BACKTICKS.finditer(text, ticks.end(), limit)
+                           if len(run.group()) == width), None)
+            index = closer.end() if closer is not None else ticks.end()
+            continue
+        yield comment
+        index = comment.end()
+
+
 def parse_markdown_claims(path: str, text: str) -> list[ClaimSite]:
     """Every claim annotation in the HTML comments of one Markdown document.
 
-    Fenced code blocks are skipped, so documenting the syntax does not create a
-    claim. Only an HTML comment counts; prose that mentions `revl:claim` is
-    ordinary prose.
+    Fenced code blocks and inline code spans are skipped, so documenting the
+    syntax does not create a claim. Only an HTML comment counts; prose that
+    mentions `revl:claim` is ordinary prose.
     """
     masked = _mask_fenced_code(text)
     sites: list[ClaimSite] = []
-    for comment in _HTML_COMMENT.finditer(masked):
+    for comment in _html_comments(masked):
         body = comment.group(1)
         line = masked.count("\n", 0, comment.start()) + 1
         match = _CLAIM.search(body)
@@ -310,36 +353,277 @@ def _is_test_function(node: ast.stmt) -> bool:
         and node.name.startswith("test")
 
 
-def _has_a_test(tree: ast.Module) -> bool:
-    """True when the module defines a top-level `test_*` or a `Test*` class
-    with one: a witness file with no test left is not a witness."""
+#: The pytest defaults (`python_files`); the repository configures no other
+#: pattern, so a test function in any other file is never collected.
+_COLLECTED_FILE = re.compile(r"(test_.*|.*_test)\.py")
+
+
+def _is_test_function(node: ast.stmt) -> bool:
+    return isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+        and node.name.startswith("test")
+
+
+def _mark_name(decorator: ast.expr) -> str | None:
+    """`skip` for `@pytest.mark.skip`, `@pytest.mark.skip(...)` or
+    `@mark.skip`; None for anything that is not a pytest mark."""
+    if isinstance(decorator, ast.Call):
+        decorator = decorator.func
+    if not isinstance(decorator, ast.Attribute):
+        return None
+    owner = decorator.value
+    if isinstance(owner, ast.Attribute) and owner.attr == "mark" \
+            and isinstance(owner.value, ast.Name) and owner.value.id == "pytest":
+        return decorator.attr
+    if isinstance(owner, ast.Name) and owner.id == "mark":
+        return decorator.attr
+    return None
+
+
+def _marks(node: ast.expr) -> list[ast.expr]:
+    """The marks in a `pytestmark = ...` value: one mark or a list of them."""
+    if isinstance(node, (ast.List, ast.Tuple)):
+        return list(node.elts)
+    return [node]
+
+
+def _module_marks(tree: ast.Module) -> list[ast.expr]:
+    marks: list[ast.expr] = []
+    for item in tree.body:
+        if isinstance(item, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "pytestmark" for t in item.targets):
+            marks.extend(_marks(item.value))
+        elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name) \
+                and item.target.id == "pytestmark" and item.value is not None:
+            marks.extend(_marks(item.value))
+    return marks
+
+
+def _skips_the_module(tree: ast.Module) -> bool:
+    """A top-level `pytest.skip(...)` statement, or a `pytestmark` that holds
+    an unconditional `skip`: no test in the file runs."""
+    for item in tree.body:
+        if isinstance(item, ast.Expr) and isinstance(item.value, ast.Call):
+            func = item.value.func
+            if isinstance(func, ast.Attribute) and func.attr == "skip" \
+                    and isinstance(func.value, ast.Name) and func.value.id == "pytest":
+                return True
+    return any(_mark_name(mark) == "skip" for mark in _module_marks(tree))
+
+
+def _skipped(*nodes: ast.stmt) -> bool:
+    """An unconditional `skip` mark on the function or its class. A `skipif`
+    condition is not decided here: it is evaluated when pytest runs."""
+    return any(_mark_name(decorator) == "skip"
+               for node in nodes for decorator in node.decorator_list)
+
+
+def _tests(tree: ast.Module):
+    """Every collectable test as `(name, function, class or None)`."""
     for item in tree.body:
         if _is_test_function(item):
-            return True
-        if isinstance(item, ast.ClassDef) and item.name.startswith("Test"):
-            if any(_is_test_function(member) for member in item.body):
-                return True
+            yield item.name, item, None
+        elif isinstance(item, ast.ClassDef) and item.name.startswith("Test"):
+            for member in item.body:
+                if _is_test_function(member):
+                    yield f"{item.name}::{member.name}", member, item
+
+
+def _has_a_test(tree: ast.Module) -> bool:
+    """True when the module defines a top-level `test_*`, or a `Test*` class
+    with one, that is not unconditionally skipped: a witness file with no test
+    left to run is not a witness."""
+    return any(not _skipped(function, *([cls] if cls else []))
+               for _name, function, cls in _tests(tree))
+
+
+class _Unreadable(Exception):
+    """A parametrization whose ids this module cannot compute exactly."""
+
+
+#: Methods that leave a module-level literal as it was assigned.
+_READ_ONLY_METHODS = frozenset({"items", "keys", "values", "get", "copy", "count",
+                                "index"})
+
+
+def _module_literal(tree: ast.Module, name: str):
+    """The value of a module-level name bound once to a literal and never
+    changed afterwards, or `_Unreadable`."""
+    values = [item.value for item in tree.body
+              if isinstance(item, ast.Assign) and len(item.targets) == 1
+              and isinstance(item.targets[0], ast.Name) and item.targets[0].id == name]
+    if len(values) != 1:
+        raise _Unreadable(f"`{name}` is not bound once at module level")
+    stores = [node for node in ast.walk(tree)
+              if isinstance(node, ast.Name) and node.id == name
+              and isinstance(node.ctx, (ast.Store, ast.Del))]
+    if len(stores) != 1:
+        raise _Unreadable(f"`{name}` is rebound")
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Global, ast.Nonlocal)) and name in node.names:
+            raise _Unreadable(f"`{name}` is rebound")
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) \
+                and node.value.id == name and isinstance(node.ctx, (ast.Store, ast.Del)):
+            raise _Unreadable(f"`{name}` is changed in place")
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) \
+                and node.value.id == name and node.attr not in _READ_ONLY_METHODS:
+            raise _Unreadable(f"`{name}.{node.attr}` may change it")
+    return _static(values[0], tree)
+
+
+def _static(expr: ast.expr, tree: ast.Module):
+    """The value of `expr` when it is a literal, a module-level literal name,
+    `sorted`/`list`/`tuple` of one, or its `.items()`/`.keys()`/`.values()`."""
+    try:
+        return ast.literal_eval(expr)
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        pass
+    if isinstance(expr, ast.Name):
+        return _module_literal(tree, expr.id)
+    if isinstance(expr, ast.Call) and not expr.keywords and len(expr.args) == 1:
+        func = expr.func
+        if isinstance(func, ast.Name) and func.id in ("sorted", "list", "tuple"):
+            value = _static(expr.args[0], tree)
+            return {"sorted": sorted, "list": list, "tuple": tuple}[func.id](value)
+    if isinstance(expr, ast.Call) and not expr.keywords and not expr.args \
+            and isinstance(expr.func, ast.Attribute) \
+            and expr.func.attr in ("items", "keys", "values"):
+        value = _static(expr.func.value, tree)
+        if isinstance(value, dict):
+            return list(getattr(value, expr.func.attr)())
+    raise _Unreadable("the parametrization is not a literal this check can read")
+
+
+def _plain_id(value) -> str:
+    """pytest's id for one parameter value, for the values whose id is the
+    value itself; anything else is refused rather than guessed."""
+    if isinstance(value, bool) or value is None or isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str) and value and value.isascii() and value.isprintable() \
+            and "\\" not in value:
+        return value
+    raise _Unreadable(f"the id of parameter {value!r} is not its plain text")
+
+
+def _argument(call: ast.Call, index: int, keyword: str) -> ast.expr | None:
+    if len(call.args) > index:
+        return call.args[index]
+    return next((k.value for k in call.keywords if k.arg == keyword), None)
+
+
+def _parameter_ids(call: ast.Call, tree: ast.Module) -> set[str]:
+    """The ids of one `@pytest.mark.parametrize(...)`, exactly, or
+    `_Unreadable`."""
+    names_node = _argument(call, 0, "argnames")
+    values_node = _argument(call, 1, "argvalues")
+    if names_node is None or values_node is None:
+        raise _Unreadable("the parametrize call has no argnames/argvalues")
+    names = _static(names_node, tree)
+    if isinstance(names, str):
+        names = [n.strip() for n in names.split(",") if n.strip()]
+    values = list(_static(values_node, tree))
+    ids_node = next((k.value for k in call.keywords if k.arg == "ids"), None)
+    if ids_node is not None:
+        ids = list(_static(ids_node, tree))
+        if len(ids) != len(values):
+            raise _Unreadable("`ids` and the parameter values differ in length")
+        rendered = [_plain_id(i) if isinstance(i, str) else _bad_id(i) for i in ids]
+    elif len(names) == 1:
+        rendered = [_plain_id(value) for value in values]
+    else:
+        rendered = []
+        for value in values:
+            if not isinstance(value, (list, tuple)) or len(value) != len(names):
+                raise _Unreadable("a parameter set does not match the argnames")
+            rendered.append("-".join(_plain_id(part) for part in value))
+    if len(set(rendered)) != len(rendered):
+        raise _Unreadable("two parameter sets share an id, so pytest renames them")
+    return set(rendered)
+
+
+def _bad_id(value) -> str:
+    raise _Unreadable(f"`ids` entry {value!r} is not a string")
+
+
+def _parametrize_calls(*nodes: ast.stmt) -> list[ast.expr]:
+    return [decorator for node in nodes for decorator in node.decorator_list
+            if _mark_name(decorator) == "parametrize"]
+
+
+def _fixture_params(tree: ast.Module) -> bool:
+    """A `@pytest.fixture(params=...)` in the module: it multiplies the ids of
+    whichever tests reach it, which this check does not trace."""
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for decorator in node.decorator_list:
+                if isinstance(decorator, ast.Call) and any(
+                        k.arg == "params" for k in decorator.keywords):
+                    return True
     return False
 
 
-def _node_resolves(tree: ast.Module, node: str) -> bool:
-    """`test_x`, `test_x[param]` or `TestK::test_y`: the function (and class)
-    the node names exists as a test."""
-    parts = node.split("::")
-    name = parts[-1].split("[", 1)[0]
-    if not name.startswith("test"):
-        return False
-    if len(parts) == 1:
-        return any(_is_test_function(item) and item.name == name
-                   for item in tree.body)
-    if len(parts) == 2:
-        class_name, method = parts[0], name
-        return any(
-            isinstance(item, ast.ClassDef) and item.name == class_name
-            and any(_is_test_function(member) and member.name == method
-                    for member in item.body)
-            for item in tree.body)
-    return False
+def _conftests(root: Path, file: str) -> list[Path]:
+    """The `conftest.py` files pytest loads for a test file under `root`."""
+    found = []
+    directory = (root / file).parent
+    while True:
+        if (directory / "conftest.py").is_file():
+            found.append(directory / "conftest.py")
+        if directory == root or root not in directory.parents:
+            return found
+        directory = directory.parent
+
+
+def _parameter_reason(tree: ast.Module, function: ast.stmt, cls: ast.stmt | None,
+                      param: str, root: Path, file: str) -> str | None:
+    """Why `<function>[param]` is not one of the function's real parameter
+    ids, or None when it is. The ids are read from the parametrize call; a
+    shape whose ids cannot be computed exactly is refused, never guessed."""
+    calls = _parametrize_calls(function, *([cls] if cls else []))
+    if any(_mark_name(mark) == "parametrize" for mark in _module_marks(tree)):
+        return "a module `pytestmark` parametrizes it; name the function instead"
+    hooks = [tree]
+    for conftest in _conftests(root, file):
+        try:
+            hooks.append(ast.parse(conftest.read_text(encoding="utf-8")))
+        except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
+            return f"{conftest.relative_to(root).as_posix()} cannot be parsed"
+    for module in hooks:
+        if _fixture_params(module) or any(
+                isinstance(item, ast.FunctionDef)
+                and item.name == "pytest_generate_tests" for item in module.body):
+            return ("a parametrized fixture or `pytest_generate_tests` can add "
+                    "ids; name the function instead")
+    if not calls:
+        return "the function is not parametrized"
+    if len(calls) != 1 or not isinstance(calls[0], ast.Call):
+        return "stacked parametrizations are not read; name the function instead"
+    try:
+        ids = _parameter_ids(calls[0], tree)
+    except _Unreadable as exc:
+        return f"its parameter ids cannot be read statically ({exc})"
+    if param not in ids:
+        return f"[{param}] is not one of its {len(ids)} parameter ids"
+    return None
+
+
+def _node_reason(tree: ast.Module, node: str, root: Path, file: str) -> str | None:
+    """Why `test_x`, `test_x[param]` or `TestK::test_y[param]` does not name a
+    collectable, not unconditionally skipped test in `tree`, or None."""
+    bare, bracket, param = node.partition("[")
+    if bracket and not param.endswith("]"):
+        return f"test {node!r} is not a pytest node id"
+    param = param[:-1]
+    for name, function, cls in _tests(tree):
+        if name != bare:
+            continue
+        if _skipped(function, *([cls] if cls else [])):
+            return f"test {bare!r} in {file} is unconditionally skipped"
+        if bracket:
+            reason = _parameter_reason(tree, function, cls, param, root, file)
+            if reason is not None:
+                return f"test {node!r} in {file}: {reason}"
+        return None
+    return f"test {bare!r} is not a test function in {file}"
 
 
 # --------------------------------------------------------------------------- #
@@ -372,17 +656,20 @@ def _resolve(witness: Witness, registry: dict[str, Witness], root: Path,
         return f"test file {file!r} does not exist"
     if path.suffix != ".py":
         return f"{file!r} is not a Python test file"
+    if not _COLLECTED_FILE.fullmatch(path.name):
+        return (f"{file!r} is not collected by pytest "
+                "(the file name is not `test_*.py` or `*_test.py`)")
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
         return f"test file {file!r} cannot be parsed"
+    if _skips_the_module(tree):
+        return f"test file {file!r} is unconditionally skipped"
     if not separator:
         if _has_a_test(tree):
             return None
-        return f"test file {file!r} defines no test function"
-    if not _node_resolves(tree, node):
-        return f"test {node!r} is not a test function in {file}"
-    return None
+        return f"test file {file!r} defines no test function that runs"
+    return _node_reason(tree, node, root, file)
 
 
 def _terminal(witness: Witness, registry: dict[str, Witness],
@@ -462,6 +749,33 @@ def check(sites: list[ClaimSite], registry: dict[str, Witness], root: str | Path
                         f"`{terminal.target}`, which is not selected when "
                         f"{site.path} changes; extend tools/affected_tests.py "
                         "or register a witness that is"))
+    findings.extend(_unnamed_entries(sites, registry, root, docgen_blocks))
+    return findings
+
+
+def _unnamed_entries(sites: list[ClaimSite], registry: dict[str, Witness],
+                     root: Path, docgen_blocks: frozenset[str]) -> list[Finding]:
+    """A finding for every registry entry no annotation reaches whose witness
+    does not resolve. An entry may be registered before any sentence names
+    it, but a dead witness in it is reported all the same; an entry on the
+    `claim:` chain of an annotation is already judged at that annotation."""
+    reached: set[str] = set()
+    pending = [site.id for site in sites if site.id in registry]
+    while pending:
+        claim_id = pending.pop()
+        if claim_id in reached or claim_id not in registry:
+            continue
+        reached.add(claim_id)
+        if registry[claim_id].kind == "claim":
+            pending.append(registry[claim_id].target)
+    findings = []
+    for claim_id in sorted(set(registry) - reached):
+        witness = registry[claim_id]
+        reason = _resolve(witness, registry, root, docgen_blocks, frozenset({claim_id}))
+        if reason is not None:
+            findings.append(Finding(
+                "claim-witness-missing", "claims.toml",
+                f"`{claim_id}` (named by no annotation) witness `{witness}`: {reason}"))
     return findings
 
 

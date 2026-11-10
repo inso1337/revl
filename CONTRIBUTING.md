@@ -375,7 +375,8 @@ json-canonical-bytes = "test:tests/test_json_cross_tier_bytes.py"
 ```
 
 A witness is one of `test:<path>` (a test file), `test:<path>::<test>` (one
-pytest function; a parametrized node is matched by function), `docgen:<block>`
+pytest function, or one parameter by its real pytest id, such as
+`test_rejection[g4_emission_widens_declared_capability.rvl]`), `docgen:<block>`
 (a generated block in `tools/docgen.py`) or `claim:<id>` (another claim, which
 is how a doc can rest on the same evidence as the code). `python3
 tools/check_claims.py --check` reports a named failure for an annotation with
@@ -384,6 +385,16 @@ whose test witness the affected selection would not run when that file changes.
 `--list` prints every annotation beside its witness, and `--self-test` plants
 each failure in a synthetic tree. Claims are optional: a comment without an
 annotation is unaffected.
+
+The check reads the test file instead of collecting it, so the lint job needs
+no pytest. A witness in a file pytest does not collect (not `test_*.py` or
+`*_test.py`), an unconditionally skipped test, and a parameter id the
+function's `@pytest.mark.parametrize` does not produce are refused. Parameter
+ids are read from the call, so give it `ids=` when the default ids are long or
+not plain text; a shape whose ids cannot be read exactly is refused, and naming
+the function without the parameter always works. A `skipif` is not decided:
+its condition runs only under pytest. A `.rvl` claim under `examples/` gets a
+FULL affected selection, so the selection half is satisfied by the full run.
 
 The gate can prove the witness exists and runs. It cannot prove the sentence
 states what the code does: a passing test can be weaker than the comment. Keep

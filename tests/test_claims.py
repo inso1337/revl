@@ -312,3 +312,189 @@ def test_witness_selected_matches_a_file_a_bare_node_and_a_prefix(
 def test_finding_renders_its_code_and_site():
     assert str(Finding("claim-unknown-id", "a.rvl:2", "no entry")) == \
         "claim-unknown-id: a.rvl:2: no entry"
+
+
+# ---------------------------------------------- witnesses pytest really runs
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _witness_findings(root: Path, target: str) -> list[Finding]:
+    return check([ClaimSite("docs/d.md", 1, "ok")], {"ok": Witness("test", target)},
+                 root)
+
+
+def _test_file(tmp_path: Path, name: str, body: str) -> Path:
+    (tmp_path / "tests").mkdir(exist_ok=True)
+    (tmp_path / "tests" / name).write_text(body, encoding="utf-8")
+    return tmp_path
+
+
+def test_a_parameter_the_real_parametrize_does_not_produce_is_refused():
+    # the function exists; the parameter id does not, so running the
+    # registered node would run nothing
+    findings = _witness_findings(
+        ROOT, "tests/test_frontend.py::test_rejection[no_such_file.rvl]")
+    assert [finding.code for finding in findings] == ["claim-witness-missing"]
+    assert "not one of its" in findings[0].detail
+
+
+def test_the_registered_rejection_ids_are_real_parameter_ids():
+    for name in ("g4_emission_widens_declared_capability.rvl",
+                 "g9_service_return_launders_taint.rvl",
+                 "gsecret_service_return_discloses.rvl"):
+        assert _witness_findings(
+            ROOT, f"tests/test_frontend.py::test_rejection[{name}]") == [], name
+
+
+_PARAMETRIZED = '''import pytest
+
+CASES = {"a.rvl": "x", "b.rvl": "y"}
+
+
+@pytest.mark.parametrize("name,text", sorted(CASES.items()), ids=sorted(CASES))
+def test_named(name, text):
+    assert name
+
+
+@pytest.mark.parametrize("name,text", [("a", "x"), ("b", "y")])
+def test_default(name, text):
+    assert name
+
+
+@pytest.mark.parametrize("n", [1, 2])
+@pytest.mark.parametrize("m", [3])
+def test_stacked(n, m):
+    assert n
+
+
+def test_plain():
+    assert True
+'''
+
+
+@pytest.mark.parametrize("node,ok", [
+    ("test_named[a.rvl]", True),
+    ("test_named[c.rvl]", False),
+    ("test_default[a-x]", True),
+    ("test_default[a]", False),
+    ("test_stacked[3-1]", False),     # stacked ids are not read: refused
+    ("test_stacked", True),
+    ("test_plain[a]", False),         # not parametrized at all
+    ("test_named", True),
+])
+def test_a_bracketed_witness_is_checked_against_the_parameter_ids(
+        tmp_path, node, ok):
+    root = _test_file(tmp_path, "test_p.py", _PARAMETRIZED)
+    findings = _witness_findings(root, f"tests/test_p.py::{node}")
+    assert (findings == []) is ok, findings
+
+
+def test_a_parametrized_fixture_makes_a_bracketed_witness_unreadable(tmp_path):
+    root = _test_file(tmp_path, "test_p.py", _PARAMETRIZED)
+    (root / "tests" / "conftest.py").write_text(
+        "import pytest\n\n@pytest.fixture(params=[1, 2])\ndef n(request):\n"
+        "    return request.param\n", encoding="utf-8")
+    findings = _witness_findings(root, "tests/test_p.py::test_named[a.rvl]")
+    assert [finding.code for finding in findings] == ["claim-witness-missing"]
+
+
+def test_a_mutated_module_literal_makes_the_ids_unreadable(tmp_path):
+    root = _test_file(tmp_path, "test_p.py", _PARAMETRIZED + 'CASES["c.rvl"] = "z"\n')
+    findings = _witness_findings(root, "tests/test_p.py::test_named[a.rvl]")
+    assert [finding.code for finding in findings] == ["claim-witness-missing"]
+    assert "cannot be read statically" in findings[0].detail
+
+
+def test_a_test_function_in_a_file_pytest_does_not_collect_is_refused(tmp_path):
+    root = _test_file(tmp_path, "helper_probe.py",
+                      "def test_never_collected():\n    pass\n")
+    for target in ("tests/helper_probe.py::test_never_collected",
+                   "tests/helper_probe.py"):
+        findings = _witness_findings(root, target)
+        assert [finding.code for finding in findings] == ["claim-witness-missing"]
+        assert "not collected by pytest" in findings[0].detail
+
+
+def test_a_suffix_test_file_is_collected(tmp_path):
+    root = _test_file(tmp_path, "probe_test.py", "def test_x():\n    pass\n")
+    assert _witness_findings(root, "tests/probe_test.py::test_x") == []
+
+
+@pytest.mark.parametrize("body,target", [
+    ("import pytest\n@pytest.mark.skip(reason='x')\ndef test_s():\n    pass\n",
+     "test_s"),
+    ("import pytest\n@pytest.mark.skip\ndef test_s():\n    pass\n", "test_s"),
+    ("import pytest\n@pytest.mark.skip\nclass TestK:\n    def test_s(self):\n"
+     "        pass\n", "TestK::test_s"),
+    ("import pytest\npytestmark = pytest.mark.skip\ndef test_s():\n    pass\n",
+     "test_s"),
+    ("import pytest\npytestmark = [pytest.mark.skip(reason='x')]\n"
+     "def test_s():\n    pass\n", "test_s"),
+    ("import pytest\npytest.skip('x', allow_module_level=True)\n"
+     "def test_s():\n    pass\n", "test_s"),
+    ("import pytest\n@pytest.mark.skip\ndef test_s():\n    pass\n", None),
+], ids=["mark-call", "mark-bare", "class-mark", "pytestmark", "pytestmark-list",
+        "module-skip", "file-witness"])
+def test_an_unconditionally_skipped_witness_is_refused(tmp_path, body, target):
+    root = _test_file(tmp_path, "test_s.py", body)
+    node = "tests/test_s.py" + (f"::{target}" if target else "")
+    findings = _witness_findings(root, node)
+    assert [finding.code for finding in findings] == ["claim-witness-missing"]
+    assert "skipped" in findings[0].detail or "no test function that runs" \
+        in findings[0].detail
+
+
+def test_a_conditional_skip_is_not_decided(tmp_path):
+    # the documented limit: a `skipif` condition is evaluated only by pytest
+    root = _test_file(
+        tmp_path, "test_s.py",
+        "import sys\nimport pytest\n@pytest.mark.skipif(sys.platform == 'x', "
+        "reason='x')\ndef test_s():\n    pass\n")
+    assert _witness_findings(root, "tests/test_s.py::test_s") == []
+
+
+# ----------------------------------------------------- inline code in Markdown
+
+def test_markdown_inline_code_syntax_documentation_is_not_a_claim():
+    text = ("Inline: `<!-- revl:claim ghost -->` is how you write one.\n"
+            "Double: `` <!-- revl:claim ghost2 --> `` too.\n")
+    assert parse_markdown_claims("d.md", text) == []
+
+
+def test_markdown_comment_after_a_code_span_is_still_a_claim():
+    text = "Use `x` here.\n<!-- revl:claim real -->\n"
+    assert parse_markdown_claims("d.md", text) == [ClaimSite("d.md", 2, "real")]
+
+
+def test_markdown_backtick_inside_a_comment_does_not_hide_it():
+    text = "<!-- the `x` path; revl:claim real -->\nand a `span`\n"
+    assert [s.id for s in parse_markdown_claims("d.md", text)] == ["real"]
+
+
+def test_markdown_unclosed_backtick_is_literal():
+    text = "a stray ` tick\n\n<!-- revl:claim real -->\n"
+    assert [s.id for s in parse_markdown_claims("d.md", text)] == ["real"]
+
+
+# ------------------------------------------------ entries no annotation names
+
+def test_a_registry_entry_no_annotation_names_is_still_resolved(tmp_path):
+    root = _good_tree(tmp_path)
+    registry = {
+        "named": Witness("test", "tests/test_a.py"),
+        "orphan-dead": Witness("test", "tests/gone.py::test_gone"),
+        "orphan-live": Witness("test", "tests/test_a.py::test_x"),
+    }
+    findings = check([ClaimSite("src/a.rvl", 1, "named")], registry, root)
+    assert [(f.code, f.where) for f in findings] == \
+        [("claim-witness-missing", "claims.toml")]
+    assert "orphan-dead" in findings[0].detail
+
+
+def test_an_entry_on_an_annotation_s_chain_is_reported_once(tmp_path):
+    root = _good_tree(tmp_path)
+    registry = {"a": Witness("claim", "b"), "b": Witness("test", "tests/gone.py")}
+    findings = check([ClaimSite("src/a.rvl", 1, "a")], registry, root)
+    assert [(f.code, f.where) for f in findings] == \
+        [("claim-witness-missing", "src/a.rvl:1")]

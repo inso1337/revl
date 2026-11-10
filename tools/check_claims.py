@@ -19,9 +19,15 @@ WHAT IS CHECKED, and the named failure for each:
                                  table, or holds a value that is not
                                  `test:`/`docgen:`/`claim:<target>`.
   claim-unknown-id               the id is not an entry in `claims.toml`.
-  claim-witness-missing          `test:` file or function absent, `docgen:`
-                                 block absent, or a `claim:` chain whose entry
-                                 is absent or cyclic.
+  claim-witness-missing          `test:` file or function absent, a file
+                                 pytest does not collect, a test that is
+                                 unconditionally skipped, a `[param]` that is
+                                 not one of the function's parameter ids (or
+                                 whose ids cannot be read statically), a
+                                 `docgen:` block absent, or a `claim:` chain
+                                 whose entry is absent or cyclic. A registry
+                                 entry no annotation names is judged too,
+                                 reported at `claims.toml`.
   claim-witness-not-selected     a `.rvl` annotation whose test witness is not
                                  in the affected selection for its own file, so
                                  editing the code would not run the test.
@@ -30,16 +36,19 @@ The selection check is for `.rvl` code, not prose: a Markdown claim points at a
 docgen block (whose byte gate the `docs` selection runs) or at a test whose
 existence is judged, not at a test the doc edit has to execute. A full
 selection (`FULL`) contains every witness, so it is reported as selected; the
-selector is conservative by design and this check does not narrow it.
+selector is conservative by design and this check does not narrow it. For a
+claim in `examples/**` (the `examples/rejections` annotations among them) the
+selection is always FULL, so the selection half adds nothing there: those
+claims rely on the full run.
 
 `claims.toml` is at the repository root:
 
     [claims]
     json-canonical-bytes = "test:tests/test_json_cross_tier_bytes.py"
 
-A `[claims]` value that no annotation names is not a finding: the registry may
-be adopted before the sentence that repeats it, and a claim is registered to be
-citable.
+A `[claims]` value that no annotation names is allowed: the registry may be
+adopted before the sentence that repeats it, and a claim is registered to be
+citable. Its witness is still resolved, so a dead one is reported.
 
 EXIT STATUS: 0 clean, 1 findings (including a missing or invalid registry),
 2 the check could not run (the affected selector failed, or an alternate
@@ -180,6 +189,8 @@ _GOOD_RVL = "// revl:claim known\nfn f() -> Int { return 1 }\n"
 _GOOD_MD = "<!-- revl:claim block -->\n"
 _GOOD_TOML = ('[claims]\nknown = "test:tests/test_comp.py"\n'
               'block = "docgen:guarantees"\n')
+_PARAM_TEST = ('import pytest\n\n\n@pytest.mark.parametrize("x", ["a", "b"])\n'
+               'def test_p(x):\n    assert x\n')
 
 
 def _tree(root: Path, *, rvl: str = _GOOD_RVL, md: str = _GOOD_MD,
@@ -193,6 +204,7 @@ def _tree(root: Path, *, rvl: str = _GOOD_RVL, md: str = _GOOD_MD,
         (root / REGISTRY).write_text(toml, encoding="utf-8")
     if test is not None:
         (root / "tests" / "test_comp.py").write_text(test, encoding="utf-8")
+        (root / "tests" / "helper_comp.py").write_text(_GOOD_TEST, encoding="utf-8")
 
 
 def _case(root: Path, *, expected: set[str], selected=None, **files) -> set[str]:
@@ -283,6 +295,29 @@ def _self_test() -> int:
         case("markdown-html-comment", expected={"claim-unknown-id"},
              selected=lambda _p: {"tests/test_comp.py"},
              md="<!-- revl:claim ghost -->\n")
+        case("markdown-inline-code-is-not-a-claim", expected=set(),
+             selected=lambda _p: {"tests/test_comp.py"},
+             md="Write `<!-- revl:claim ghost -->` at the sentence.\n")
+        case("parameter-id-absent", expected={"claim-witness-missing"},
+             selected=lambda _p: {"tests/test_comp.py"},
+             test=_PARAM_TEST,
+             toml='[claims]\nknown = "test:tests/test_comp.py::test_p[nope]"\n'
+                  'block = "docgen:guarantees"\n')
+        case("parameter-id-present", expected=set(),
+             selected=lambda _p: {"tests/test_comp.py"},
+             test=_PARAM_TEST,
+             toml='[claims]\nknown = "test:tests/test_comp.py::test_p[a]"\n'
+                  'block = "docgen:guarantees"\n')
+        case("skipped-witness", expected={"claim-witness-missing"},
+             selected=lambda _p: {"tests/test_comp.py"},
+             test="import pytest\n@pytest.mark.skip\n" + _GOOD_TEST)
+        case("not-collected", expected={"claim-witness-missing"},
+             selected=lambda _p: {"tests/helper_comp.py"},
+             toml='[claims]\nknown = "test:tests/helper_comp.py::test_ok"\n'
+                  'block = "docgen:guarantees"\n')
+        case("unnamed-entry-dead-witness", expected={"claim-witness-missing"},
+             selected=lambda _p: {"tests/test_comp.py"},
+             toml=_GOOD_TOML + 'dead = "test:tests/gone.py"\n')
 
     print(f"claims self-test: OK ({cases} cases)")
     return 0

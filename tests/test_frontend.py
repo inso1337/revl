@@ -650,7 +650,8 @@ def test_every_rejection_file_is_covered():
     assert on_disk == set(REJECTIONS) | REFUSED_ONLY
 
 
-@pytest.mark.parametrize("filename,expected", sorted(REJECTIONS.items()))
+@pytest.mark.parametrize("filename,expected", sorted(REJECTIONS.items()),
+                         ids=sorted(REJECTIONS))
 def test_rejection(filename, expected):
     with pytest.raises(RevlError) as excinfo:
         compile_files([str(EXAMPLES / "rejections" / filename)])
