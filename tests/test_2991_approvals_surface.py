@@ -263,6 +263,21 @@ def test_the_tool_is_read_only_and_returns_the_list_shape(tmp_path, monkeypatch)
         assert _approval_state(session) == before, args
 
 
+@pytest.mark.parametrize("bad_hash", [["sha256:x"], {"hash": "sha256:x"}, 7])
+def test_show_refuses_a_hash_that_is_not_a_string(tmp_path, monkeypatch,
+                                                   bad_hash):
+    """A non-string `hash` is an argument error, never an unhandled
+    `TypeError` from the ticket-table lookup."""
+    session = _harness(tmp_path)
+    _ticket(session)
+    monkeypatch.setattr(server, "SESSION", session)
+
+    out = server._tool_approvals({"action": "show", "hash": bad_hash})
+
+    assert out["ok"] is False
+    assert "must be a string" in out["diagnostics"][0]["message"]
+
+
 def test_the_tool_is_gated_on_the_approve_verb(tmp_path):
     session = _harness(tmp_path)
     _ticket(session)

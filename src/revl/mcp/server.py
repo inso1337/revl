@@ -3709,6 +3709,10 @@ def _tool_approvals(arguments: dict) -> dict:
                 return _session_error(SessionError(
                     "`revl_approvals` with `action: \"show\"` needs the ticket "
                     "`hash` the approvalRequired response carried"))
+            if not isinstance(ticket_hash, str):
+                return _session_error(SessionError(
+                    "`revl_approvals` `hash` must be a string, the ticket "
+                    "hash the approvalRequired response carried"))
             return {"ok": True, **approvals_surface.show_approval(
                 SESSION, ticket_hash, diff=bool(arguments.get("diff")))}
         if action == "stats":

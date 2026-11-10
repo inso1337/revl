@@ -2089,9 +2089,12 @@ It reads the session's own fields and writes nothing. It is gated by the
 questions and their blast radius is the same authority as answering them, and a
 `show` hash scopes to its crossing component while `list`/`stats` name no one
 component and need the literal `may approve on *`, whatever other target keys
-the call carries. A scoped operator's `show` of another component's ticket gets
-the same refusal as an unknown hash, so the refusal does not reveal which
-tickets exist. There is no model
+the call carries. For `revl_approvals`, a scoped operator's `show` of another
+component's ticket gets the same refusal as an unknown hash, so its refusal
+does not reveal which tickets exist. The other hash-taking approval verbs do not
+give that guarantee yet: `revl_approve`, `revl_escalate`, `revl_override` and
+`revl_revoke` refuse another component's hash by naming that component and an
+unknown hash differently, and `revl_quorum` is not gated. There is no model
 recommendation for approvals anywhere in the tree, so `advice.model` is `null`
 and says so; the actions are the deterministic next steps the facts support.
 
