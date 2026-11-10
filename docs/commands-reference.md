@@ -899,6 +899,14 @@ reports whether the WAL's durable model decisions carry enough to inform that
 mode and what a live executor would still need. It reads the record and runs
 nothing, the same offline-reader contract as `revl branch` and `revl compare`.
 
+For each verified decision it also reports two per-entry replay verdicts
+(issue #2808): `fromRecord` (the recorded answer can be served without calling
+the model, true only when the evidence retained the completion) and
+`rederivable` (the answer can be reproduced from the prompt, false when the
+host returned only a summary or kept the reasoning span hidden). The plan
+names which crossings had an opaque reasoning span and how many; the span
+itself is never written, only its visibility and the host-reported size.
+
 - `WAL` - a write-ahead log, ideally one written by a Slice-3a runtime that
   recorded its model decisions (required).
 - `--mode <mode>` - report readiness for one mode only, instead of all four.
