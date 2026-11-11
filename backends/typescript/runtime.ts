@@ -1350,9 +1350,29 @@ export class Frame {
     return this.seqCounter
   }
 
+  /** Render a thrown value as the residue schema's `{type, message}`. A host
+   *  may throw anything, including `Object.create(null)` (which has no
+   *  `String()` conversion at all) or an object whose `toString` throws;
+   *  recording a residue must never throw out of the unwind loop, so every step
+   *  falls back (#3235). */
   private static errorOf(err: unknown): { type: string; message: string } {
-    if (err instanceof Error) return { type: err.constructor.name, message: err.message }
-    return { type: 'Error', message: String(err) }
+    const fallback = { type: 'Error', message: '<unprintable>' }
+    try {
+      if (err instanceof Error) {
+        try {
+          return { type: err.constructor.name, message: err.message }
+        } catch {
+          return fallback
+        }
+      }
+      try {
+        return { type: 'Error', message: String(err) }
+      } catch {
+        return fallback
+      }
+    } catch {
+      return fallback
+    }
   }
 
   /** One argument of a residue referent as text. `Int` is a `bigint` on this
@@ -1360,14 +1380,27 @@ export class Frame {
    *  decimal digits (no `n`, no quotes: the text the config echo and the other
    *  tiers write), at any depth. Anything the encoder still cannot render
    *  falls back to `String(...)`, so recording a residue never throws. */
-  private static showArg(value: unknown): string {
+  private static showArg(value: unknown, seen: Set<object> = new Set()): string {
     try {
       if (typeof value === 'bigint') return value.toString()
-      if (Array.isArray(value)) return `[${value.map(Frame.showArg).join(',')}]`
-      if (value !== null && typeof value === 'object'
-          && Object.getPrototypeOf(value) === Object.prototype) {
-        const o = value as Record<string, unknown>
-        return `{${Object.keys(o).map((k) => `${JSON.stringify(k)}:${Frame.showArg(o[k])}`).join(',')}}`
+      if (value !== null && typeof value === 'object') {
+        // a circular argument used to recurse until the stack overflowed: a
+        // value already on the current path renders as a marker instead, and
+        // the set is unwound after the branch so a shared (non-cyclic) value
+        // still renders in full
+        if (seen.has(value)) return '<circular>'
+        seen.add(value)
+        try {
+          if (Array.isArray(value)) {
+            return `[${value.map((v) => Frame.showArg(v, seen)).join(',')}]`
+          }
+          if (Object.getPrototypeOf(value) === Object.prototype) {
+            const o = value as Record<string, unknown>
+            return `{${Object.keys(o).map((k) => `${JSON.stringify(k)}:${Frame.showArg(o[k], seen)}`).join(',')}}`
+          }
+        } finally {
+          seen.delete(value)
+        }
       }
       return JSON.stringify(value) ?? String(value)
     } catch {
@@ -1376,7 +1409,7 @@ export class Frame {
   }
 
   private static referentOf(crossing: Crossing): string {
-    const args = crossing.args.map(Frame.showArg).join(', ')
+    const args = crossing.args.map((a) => Frame.showArg(a)).join(', ')
     return `${crossing.key}.${crossing.method}(${args})`
   }
 

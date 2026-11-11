@@ -123,7 +123,8 @@ def _read_text(path: str) -> str:
 
 def build_snapshot(ir: dict | None, origin: dict | None,
                    config: dict | None, record: bool = False,
-                   approval: dict | None = None) -> dict | None:
+                   approval: dict | None = None,
+                   applied_release: dict | None = None) -> dict | None:
     """`{sources, manifest, meta}` from *explicit* admission inputs, not a live
     session — the shared core of :func:`snapshot` and of the generation-history
     entries (roadmap item 65, docs/generation-history.md).
@@ -139,6 +140,11 @@ def build_snapshot(ir: dict | None, origin: dict | None,
     than boot the recovered generation ungated (see :func:`restore`). A composition
     admitted with no operator-flag posture stamps nothing, so the meta stays
     byte-identical off-policy.
+
+    `applied_release` is the update release the generation runs, stamped into
+    meta beside `approval` so a restored generation keeps the version gate the
+    journal is no longer trusted to hold. A generation admitted without an
+    update stamps nothing, so its meta stays byte-identical.
     """
     if not origin:
         return None
@@ -155,6 +161,8 @@ def build_snapshot(ir: dict | None, origin: dict | None,
     }
     if approval:
         meta["approval"] = dict(approval)
+    if applied_release:
+        meta["appliedRelease"] = dict(applied_release)
     return {
         "sources": _materialize(origin),
         "manifest": manifest,
@@ -206,7 +214,9 @@ def snapshot(session) -> dict:
 
     snap = build_snapshot(session.ir, session.origin, session.config,
                           session.recorder is not None,
-                          approval=_approval_posture(session))
+                          approval=_approval_posture(session),
+                          applied_release=getattr(session,
+                                                  "applied_release", None))
     # component leases (item 61): reflect the active workspace claims into the
     # persisted meta, so a snapshot records who was iterating on what. Leases
     # are wall-clock TTL claims, so only the still-live ones are carried and
@@ -422,6 +432,13 @@ def restore(session, snap: dict, profile=None,
             f"longer reproduce the snapshotted composition")
 
     state = session.load(ir, config, record=record, origin=_origin_from(sources))
+    # the version gate travels with the generation: an operator restore of a
+    # snapshot that names an applied release puts that release back on the
+    # restored generation. An agent-supplied snapshot does not get to name it.
+    applied = meta.get("appliedRelease")
+    if (profile is None and isinstance(applied, dict)
+            and isinstance(applied.get("version"), str)):
+        session.record_applied_release(applied)
     # rehydrate still-live component leases (item 61) onto the fresh book; ones
     # whose wall-clock TTL has elapsed since the snapshot are silently dropped.
     _restore_leases(session, meta.get("leases") or [])
@@ -431,6 +448,8 @@ def restore(session, snap: dict, profile=None,
         "loadOrder": (ir.get("manifest") or {}).get("loadOrder") or [],
         "reAdmitted": True,
         **state,
+        **({"appliedRelease": dict(applied)}
+           if profile is None and isinstance(applied, dict) else {}),
     }
 
 

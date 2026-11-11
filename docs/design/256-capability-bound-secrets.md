@@ -717,6 +717,14 @@ it already applies to every origin), and rejects `endorse[secret]` unconditional
 downgrade, the typed `Secret[T]` value has an audited one, and they carry disjoint
 origins so no declassifier can confuse them.
 
+A `verified fn` returning `Trusted[T]` is a G9 parser declassifier for the
+`untrusted` authority origin, not a §7c downgrade: it does NOT clear the
+`confidential` origin, and a `confidential`-carrying argument handed to one is
+refused at that call the same way a `secret`-carrying argument is (4a.3). Without
+that refusal an identity `verified fn wash(x: Str) -> Trusted[Str]` was a one-line
+route from a `Secret[T]` payment token to a log or an LLM prompt, with no declared
+slot.
+
 ### 7d. What `Secret[T]` does NOT cover: a config field with a literal default
 
 `Secret[T]` is a statement about where a value may GO, not about where it IS.
