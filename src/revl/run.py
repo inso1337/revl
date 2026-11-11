@@ -1139,24 +1139,58 @@ class _LivenessMonitor:
 # The most turns `_Driver._flush` gives the loop to settle what a step started.
 _FLUSH_TURNS = 20
 
+# How far ahead of the loop's clock a timer still keeps `_flush` turning, in
+# seconds: about what twenty idle turns took, so a timer that the twenty turns
+# let fire is still waited for (issue #3379).
+_FLUSH_TIMER_HORIZON = 0.002
+
+# The loop attribute that counts the executor jobs it has in flight.
+_IN_FLIGHT = "_revl_executor_in_flight"
+
+
+def _track_executor_work(loop) -> None:
+    """Count the jobs `loop` hands to an executor until each one is done
+    (issue #3379), so `_flush` keeps turning while a thread is still working
+    for the loop. `asyncio.to_thread` and `loop.run_in_executor` both submit
+    through `loop.run_in_executor`, which this wraps on the loop itself.
+    Idempotent. A loop that does not take the wrapper is left as it is, and
+    `_loop_has_runnable` then reads it as always runnable."""
+    if getattr(loop, _IN_FLIGHT, None) is not None:
+        return
+    submit = loop.run_in_executor
+
+    def run_in_executor(executor, func, *args):
+        future = submit(executor, func, *args)
+        setattr(loop, _IN_FLIGHT, getattr(loop, _IN_FLIGHT) + 1)
+        future.add_done_callback(
+            lambda _: setattr(loop, _IN_FLIGHT, getattr(loop, _IN_FLIGHT) - 1))
+        return future
+
+    try:
+        loop.run_in_executor = run_in_executor
+        setattr(loop, _IN_FLIGHT, 0)
+    except (AttributeError, TypeError):
+        pass
+
 
 def _loop_has_runnable(loop) -> bool:
-    """True when `loop` has a callback ready to run or a timer already due:
-    the only states in which one more turn can move any work (issue #3379).
+    """True while one more turn of `loop` may still move work a step started
+    (issue #3379): a callback is ready to run, a job the loop handed to an
+    executor is not done, or a timer is due within `_FLUSH_TIMER_HORIZON`.
 
-    Reads the asyncio base loop's own ready queue and timer heap. A loop that
-    does not expose them is read as always runnable, so `_flush` keeps its
-    full bound there."""
+    Reads the asyncio base loop's own ready queue and timer heap, and the
+    executor count `_track_executor_work` keeps. A loop that exposes none of
+    them is read as always runnable, so `_flush` keeps its full bound there."""
     ready = getattr(loop, "_ready", None)
     scheduled = getattr(loop, "_scheduled", None)
-    if ready is None or scheduled is None:
+    in_flight = getattr(loop, _IN_FLIGHT, None)
+    if ready is None or scheduled is None or in_flight is None:
         return True
-    if ready:
+    if ready or in_flight > 0:
         return True
     if not scheduled:
         return False
-    # the same horizon `_run_once` uses to move a timer to the ready queue
-    horizon = loop.time() + getattr(loop, "_clock_resolution", 0.0)
+    horizon = loop.time() + _FLUSH_TIMER_HORIZON
     if scheduled[0].when() > horizon:      # a heap: the earliest timer is first
         return False
     return any(not timer.cancelled() and timer.when() <= horizon
@@ -1677,13 +1711,16 @@ class _Driver:
         turns of the loop, as many as a fiber's activation or disposal chain
         takes to quiesce (each hop is an `ensure_future`, one turn).
 
-        Issue #3379: the turns stop as soon as the loop has nothing left to
-        run, so a call that started nothing pays one turn, not twenty. A turn
-        taken with nothing ready and no timer due cannot move anything (no
-        task is runnable, so none can schedule another), which is why stopping
-        there settles exactly what the twenty turns settled: work that still
-        has a step to take keeps the loop turning, up to the same bound."""
+        Issue #3379: the turns stop as soon as nothing is left that one more
+        turn could move, so a call that started nothing pays one turn, not
+        twenty. The loop keeps turning, up to the same bound, while a callback
+        is ready (a task with a step to take), a job it handed to an executor
+        (`asyncio.to_thread`) is in flight, or a timer is due within
+        `_FLUSH_TIMER_HORIZON`. What is no longer waited for is I/O that
+        completes while nothing else is pending: the twenty turns caught it
+        only when it happened to arrive in time."""
         loop = asyncio.get_running_loop()
+        _track_executor_work(loop)
         for _ in range(_FLUSH_TURNS):
             await asyncio.sleep(0)
             if not _loop_has_runnable(loop):
@@ -1900,6 +1937,9 @@ class _Driver:
         return record
 
     async def _load(self, ir: dict, module: types.ModuleType) -> None:
+        # issue #3379: count the loop's executor jobs from the first load, so
+        # `_flush` sees a thread job started by an activation
+        _track_executor_work(asyncio.get_running_loop())
         by_name = {c["name"]: c for c in _components(ir)}
         load_causes = why_runtime.load_causes(ir) if self.tracing else {}
         # Ambient host provisions are installed above (in `__init__`); their

@@ -116,3 +116,142 @@ def test_work_a_call_spawns_still_settles_before_it_returns():
         assert runtime.Clock.pending() == timers + 1, "the Worker armed its timer"
     finally:
         session.unload()
+
+
+# ---------------------------------------------------------------------------
+# What the loop is still waiting on when no callback is ready: a job handed to
+# a worker thread (`asyncio.to_thread`, what an async model method uses) and a
+# real loop timer due within the next couple of milliseconds. The twenty turns
+# let both finish; the early stop must not cut them off.
+# ---------------------------------------------------------------------------
+
+MODEL = """
+model role local on_device reaches []
+service Model { emission[model.local] async fn say(a: Str, b: Int) -> Str }
+service Loop { emission fn run(p: Str) -> Int }
+component Agent requires model: Model provides agent: Loop {
+  provide agent { fn run(p) { return 1 } }
+}
+"""
+
+
+def _fake_model_host(tmp_path):
+    """An async model host whose adapter answers on its worker thread without
+    leaving the process."""
+    from revl.compiler import compile_files
+    from revl.parser import Parser
+    from revl.providers import build_hosts, parse_config, placement_of_program
+    from revl.providers.completion import Completion
+
+    path = tmp_path / "model.rvl"
+    path.write_text(MODEL)
+    ir = compile_files([str(path)])
+    config = parse_config({"roles": {"local": {
+        "provider": "openai-compatible", "base_url": "http://127.0.0.1:9/v1",
+        "model": "m"}}})
+    placement = placement_of_program(Parser(MODEL, "model.rvl").parse())
+    host = build_hosts(ir, placement, config)["model"]
+    for _, adapter in host._revl_routes.values():
+        adapter.complete = lambda request: Completion(text="from the fake")
+    return host
+
+
+@needs_cordis
+def test_an_async_model_call_a_spawn_awaits_still_settles(tmp_path):
+    """A task the call left behind awaits an async model method, so its next
+    step waits on a worker thread with nothing in the loop's ready queue.
+    The flush keeps turning until the thread is done and the task finished,
+    as the twenty turns did. Counted over 20 runs: a thread can be slower
+    than twenty turns on a loaded machine, under either flush."""
+    import asyncio
+
+    host = _fake_model_host(tmp_path)
+    session = _session(ECHO, "echo.rvl")
+    driver = session._driver
+    try:
+        async def spawn_and_flush():
+            answers: list = []
+
+            async def activation():
+                answers.append(await host.say("x", 2))
+
+            asyncio.ensure_future(activation())
+            await driver._flush()
+            return answers
+
+        settled = sum(session._run(spawn_and_flush()) == ["from the fake"]
+                      for _ in range(20))
+        assert settled >= 15, f"{settled}/20 settled before the flush returned"
+    finally:
+        session.unload()
+
+
+def test_a_thread_job_in_flight_keeps_the_loop_runnable():
+    import asyncio
+    import threading
+
+    from revl.run import _loop_has_runnable, _track_executor_work
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        _track_executor_work(loop)
+        release = threading.Event()
+        job = asyncio.ensure_future(asyncio.to_thread(release.wait, 10))
+        await asyncio.sleep(0)               # the job is submitted
+        while_running = _loop_has_runnable(loop)
+        release.set()
+        await job
+        await asyncio.sleep(0)               # its done callbacks have run
+        return while_running, _loop_has_runnable(loop)
+
+    assert asyncio.run(scenario()) == (True, False)
+
+
+def test_a_timer_due_within_the_horizon_keeps_the_loop_runnable():
+    import asyncio
+
+    from revl.run import _loop_has_runnable, _track_executor_work
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        _track_executor_work(loop)         # as `_load` and `_flush` do
+        soon = loop.call_later(0.001, lambda: None)
+        near = _loop_has_runnable(loop)
+        soon.cancel()
+        late = loop.call_later(60, lambda: None)
+        far = _loop_has_runnable(loop)
+        late.cancel()
+        return near, far
+
+    assert asyncio.run(scenario()) == (True, False)
+
+
+def test_the_flush_waits_for_a_near_timer_as_the_twenty_turns_did():
+    """A 1 ms loop timer either fires during the flush, or the flush takes
+    all twenty turns waiting for it: it never stops early with the timer
+    pending."""
+    import asyncio
+
+    from revl.run import _Driver
+
+    driver = object.__new__(_Driver)
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        fired: list = []
+        turns = [0]
+        run_once = loop._run_once
+
+        def counted():
+            turns[0] += 1
+            run_once()
+
+        loop._run_once = counted
+        loop.call_later(0.001, fired.append, 1)
+        await driver._flush()
+        del loop._run_once
+        return bool(fired), turns[0]
+
+    for _ in range(20):
+        fired, turns = asyncio.run(scenario())
+        assert fired or turns >= 20, (fired, turns)
