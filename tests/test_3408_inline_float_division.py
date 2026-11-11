@@ -14,7 +14,6 @@ is what the change must not move; the shape is what it moves.
 """
 
 import math
-import os
 import sys
 from pathlib import Path
 
