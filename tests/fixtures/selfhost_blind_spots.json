@@ -287,7 +287,7 @@
   },
   "wasm": {
     "blind": {
-      "Issue #3295: the WASM reference lowers `/` as f64.div, since Float is a native f64 and `/` yields Float even over two Ints. selfhost/emit_wasm.rvl has no f64 lowering and names `/` as <<UNSUPPORTED-TRUE-DIVISION:Float>> in `render_bin`, a named port gap. No CORPUS document can reach either arm, because a corpus document is a byte-agreement case and the port cannot agree on f64 output: `ratio` in tests/fixtures/emit_wasm_refusals/true_division.rvl is the one document in the tree that reaches both, and tests/test_selfhost_emit_wasm.py::test_true_division_lowers_on_the_reference_but_is_a_named_port_gap pins f64.div on the reference and the named gap on the port. `%` stays covered by arith.rvl.": [
+      "Issue #3295: the WASM reference lowers `/` as f64.div, since Float is a native f64 and `/` yields Float even over two Ints. selfhost/emit_wasm.rvl has no f64 lowering and names `/` as <<UNSUPPORTED-TRUE-DIVISION:Float>> in `render_bin`, a named port gap. No CORPUS document can reach either arm, because a corpus document is a byte-agreement case and the port cannot agree on f64 output: `ratio` in tests/fixtures/wasm_true_division_port_gap.rvl is the one document in the tree that reaches both, and tests/test_selfhost_emit_wasm.py::test_true_division_lowers_on_the_reference_but_is_a_named_port_gap pins f64.div on the reference and the named gap on the port. `%` stays covered by arith.rvl.": [
         "op=/"
       ],
       "Tagged reads are explicitly deferred: coalescing and match require tag/payload loads and arm binding. WASM tagged construction is covered; it does not implement the match wildcard/Any-payload inference paths.": [

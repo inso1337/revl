@@ -494,8 +494,7 @@ def test_a_ui_transaction_unit_is_refused_by_name_on_both_sides(emitted, referen
     ], "the port names what it cannot lower rather than answering with a module"
 
 
-TRUE_DIVISION = (
-    ROOT / "tests" / "fixtures" / "emit_wasm_refusals" / "true_division.rvl")
+TRUE_DIVISION = ROOT / "tests" / "fixtures" / "wasm_true_division_port_gap.rvl"
 
 
 def test_true_division_lowers_on_the_reference_but_is_a_named_port_gap(

@@ -10,8 +10,12 @@
 // render_bin gap), and `half` is the interpolation (the port refuses
 // `<<UNSUPPORTED-EXPR:interp>>` before it reaches the division).
 //
-// It is not a byte-agreement case, so it cannot live in the tier's CORPUS; the
-// reference-side facts (f64.div, never i64.div_s) are asserted by
+// It is not a byte-agreement case, so it cannot live in the tier's CORPUS, and
+// the reference EMITS it, so it cannot live in tests/fixtures/emit_wasm_refusals/
+// either: that directory holds only documents the reference refuses, and
+// tests/test_selfhost_line_coverage.py fails on one it emits. It sat there
+// while the reference refused `/` (issue #2201) and left when Float lowered.
+// The reference-side facts (f64.div, never i64.div_s) are asserted by
 // tests/test_selfhost_emit_wasm.py::
 // test_true_division_lowers_on_the_reference_but_is_a_named_port_gap.
 fn ratio(a: Int, b: Int) { return a / b }

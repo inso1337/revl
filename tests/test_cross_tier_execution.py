@@ -64,7 +64,10 @@ that way on openjdk 26.0.2.
 
 import importlib.util
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -1753,19 +1756,36 @@ def test_ieee_float_semantics_slow(tier: str):
     assert status == "pass", f"{tier} is not IEEE 754: {message}"
 
 
-def test_wasm_refuses_float_by_name():
-    """The wasm tier lowers Int/Bool and nothing else numeric, so `Float` is a
-    *deliberate* limit — it must refuse with a reason rather than emit
-    something that quietly is not IEEE.
+def test_wasm_float_is_ieee_binary64():
+    """`Float` is a native `f64` on the wasm tier (issue #3295), so the claim
+    this test used to make (Float is refused by name rather than emitted as
+    something that quietly is not IEEE) turned into the positive half: what is
+    emitted IS IEEE binary64. A Float literal is an exact `f64.const`, an
+    addition is a run-time `f64.add` rather than an exactly folded constant,
+    and on wasmtime `0.1 + 0.2` answers `0.30000000000000004`, the binary64
+    result, not `0.3`. The tier's remaining numeric-adjacent refusal by name is
+    `Map`, pinned by `test_wasm_has_no_map_to_index`.
     """
-    from revl.errors import RevlError
     import importlib.util as _il
     spec = _il.spec_from_file_location("emit_wasm_ieee", ROOT / "backends" / "wasm" / "emit.py")
     module = _il.module_from_spec(spec)
     spec.loader.exec_module(module)
-    with pytest.raises((RevlError, Exception)) as failure:
-        module.emit(compile_source("pub fn f() -> Float { return 1.5 }", "f.rvl"))
-    assert "Float" in str(failure.value)
+    literal = module.emit(compile_source("pub fn f() -> Float { return 1.5 }", "f.rvl"))
+    literal = literal["functions"] if isinstance(literal, dict) else literal
+    assert "(result f64)" in literal and "(f64.const 0x1.8000000000000p+0)" in literal, literal
+    wat = module.emit(compile_source(
+        "pub fn f(a: Float, b: Float) -> Float { return a + b }", "f.rvl"))
+    wat = wat["functions"] if isinstance(wat, dict) else wat
+    assert "(f64.add)" in wat, wat
+    if shutil.which("wasmtime") is None:
+        pytest.skip("wasmtime not installed: emitted f64 checked, not executed")
+    with tempfile.TemporaryDirectory() as scratch:
+        path = Path(scratch) / "f.wat"
+        path.write_text(wat, encoding="utf-8")
+        out = subprocess.run(["wasmtime", "--invoke", "f", str(path), "0.1", "0.2"],
+                             capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip().splitlines()[-1] == "0.30000000000000004", out.stdout
 
 
 def test_go_equality_is_not_native_comparison():
