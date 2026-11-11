@@ -1136,6 +1136,32 @@ class _LivenessMonitor:
 # the runtime driver (py tier)
 # --------------------------------------------------------------------------
 
+# The most turns `_Driver._flush` gives the loop to settle what a step started.
+_FLUSH_TURNS = 20
+
+
+def _loop_has_runnable(loop) -> bool:
+    """True when `loop` has a callback ready to run or a timer already due:
+    the only states in which one more turn can move any work (issue #3379).
+
+    Reads the asyncio base loop's own ready queue and timer heap. A loop that
+    does not expose them is read as always runnable, so `_flush` keeps its
+    full bound there."""
+    ready = getattr(loop, "_ready", None)
+    scheduled = getattr(loop, "_scheduled", None)
+    if ready is None or scheduled is None:
+        return True
+    if ready:
+        return True
+    if not scheduled:
+        return False
+    # the same horizon `_run_once` uses to move a timer to the ready queue
+    horizon = loop.time() + getattr(loop, "_clock_resolution", 0.0)
+    if scheduled[0].when() > horizon:      # a heap: the earliest timer is first
+        return False
+    return any(not timer.cancelled() and timer.when() <= horizon
+               for timer in scheduled)
+
 
 class _Driver:
     """Boots and holds one composition on a cordis.Context, with a compact
@@ -1647,8 +1673,21 @@ class _Driver:
         return {name: len(cbs) for name, cbs in self.root.events._hooks.items() if cbs}
 
     async def _flush(self) -> None:
-        for _ in range(20):
+        """Let the work the last step started settle: up to `_FLUSH_TURNS`
+        turns of the loop, as many as a fiber's activation or disposal chain
+        takes to quiesce (each hop is an `ensure_future`, one turn).
+
+        Issue #3379: the turns stop as soon as the loop has nothing left to
+        run, so a call that started nothing pays one turn, not twenty. A turn
+        taken with nothing ready and no timer due cannot move anything (no
+        task is runnable, so none can schedule another), which is why stopping
+        there settles exactly what the twenty turns settled: work that still
+        has a step to take keeps the loop turning, up to the same bound."""
+        loop = asyncio.get_running_loop()
+        for _ in range(_FLUSH_TURNS):
             await asyncio.sleep(0)
+            if not _loop_has_runnable(loop):
+                return
 
     # -- emit + load -------------------------------------------------------
 
