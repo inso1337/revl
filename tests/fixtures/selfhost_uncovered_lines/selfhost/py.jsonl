@@ -90,10 +90,6 @@
 
 ["function", "lifecycle-step-marker-item-391-lifecycle-step-answers", "lifecycle_step", 1, 1]
 
-["reason", "line-s-empty-text-return-is-bypassed-by", "line's empty-text return is bypassed by callers which append blank lines directly; reference _Lines.add has the same empty-line spelling. This formatter branch does not represent omitted source behavior."]
-
-["function", "line-s-empty-text-return-is-bypassed-by", "line", 1, 1]
-
 ["reason", "map-has-membership-and-unknown-builtin-marker-render", "Map.has membership and unknown-builtin marker: render_builtin matches reference key-in-map output, although current map functions use lookup/set/keys/size/remove. Unknown method names are frontend-invalid. This is an inspected equivalent branch, not a supported-operation waiver."]
 
 ["function", "map-has-membership-and-unknown-builtin-marker-render", "render_builtin", 2, 2]
