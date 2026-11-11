@@ -40,7 +40,7 @@ import threading
 import time
 import types
 import weakref
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from typing import Any, Callable, Optional
 
 # The confidentiality choke point (item 256 Slice 3): `confidential.py`, the
@@ -7829,7 +7829,12 @@ class Stream:
 class TimerHandle:
     """One armed timer. Live until it is cancelled (`every`, and an `after`
     before it fires) or has fired to completion (`after`). Cancellation is the
-    schedule's inverse — idempotent, and a no-op once the timer is spent."""
+    schedule's inverse: idempotent, and a no-op once the timer is spent.
+
+    Issue #3377: the clock holds a handle only while it is live. Cancelling
+    it, or an `after` firing, releases it from ``Clock._timers`` and drops its
+    body, so a host that swaps for hours neither scans dead handles on every
+    ``advance`` nor keeps the generation that armed them alive."""
 
     __slots__ = ("serial", "mode", "interval_ms", "_body", "state", "next_at", "fired")
 
@@ -7860,8 +7865,17 @@ class TimerHandle:
         if self.state != "live":
             return False
         self.state = "cancelled"
+        self._release()
         _record(f"{self._tag}.cancel")
         return True
+
+    def _release(self) -> None:
+        """Leave the clock's live list and drop the body (issue #3377)."""
+        try:
+            Clock._timers.remove(self)
+        except ValueError:
+            pass  # already released (an `after` body that cancelled itself)
+        self._body = None
 
     def _fire(self) -> None:
         self.fired += 1
@@ -7873,6 +7887,7 @@ class TimerHandle:
             # the same `cancel` verb so the residue trace stays balanced and the
             # teardown's own `handle.cancel()` is a clean no-op.
             self.state = "done"
+            self._release()
             _record(f"{self._tag}.cancel")
 
     def __repr__(self) -> str:  # pragma: no cover — debugging aid
@@ -7884,10 +7899,14 @@ class Clock:
     :meth:`advance`; timer firings are deterministic timeline steps, not
     wall-clock races (docs/time-coeffect.md)."""
 
+    #: How many of the most recent firings :meth:`firings` keeps (issue
+    #: #3377). The log is a test aid; a host that runs for hours never reads it.
+    FIRINGS_CAP = 1024
+
     _now_ms = 0
     _serial = 0
-    _timers: list = []      # every TimerHandle ever armed, registration order
-    _firings: list = []     # (timer serial, now_ms) per firing, in fire order
+    _timers: list = []      # the live TimerHandles, registration order
+    _firings: deque = deque(maxlen=FIRINGS_CAP)  # (timer serial, now_ms), fire order
 
     @classmethod
     def now(cls) -> int:
@@ -7925,11 +7944,22 @@ class Clock:
     def pending(cls) -> int:
         """Live timers — a teardown that abandons one leaves this > 0 (mirrors
         ``Job.pending``); the countable form of the no-orphaned-interval proof."""
-        return sum(1 for t in cls._timers if t.state == "live")
+        return len(cls._timers)
+
+    @classmethod
+    def next_due(cls) -> int | None:
+        """Milliseconds from :meth:`now` until the earliest live timer is due,
+        or ``None`` with no live timer. A host pumping :meth:`advance` from a
+        real monotonic source sleeps this long, then advances by it, so a
+        timer fires on its tick rather than on a fixed slice (issue #3377)."""
+        if not cls._timers:
+            return None
+        return min(t.next_at for t in cls._timers) - cls._now_ms
 
     @classmethod
     def firings(cls) -> list:
-        """The recorded firing log: ``(timer serial, fired-at ms)`` in order."""
+        """The recorded firing log: ``(timer serial, fired-at ms)`` in order,
+        the most recent :attr:`FIRINGS_CAP` firings only."""
         return list(cls._firings)
 
     @classmethod
@@ -7937,7 +7967,7 @@ class Clock:
         cls._now_ms = 0
         cls._serial = 0
         cls._timers = []
-        cls._firings = []
+        cls._firings = deque(maxlen=cls.FIRINGS_CAP)
 
 
 def schedule_every(interval_ms: int, body: Callable[[], Any]) -> TimerHandle:
