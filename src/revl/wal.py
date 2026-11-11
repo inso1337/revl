@@ -127,6 +127,25 @@ WAL_GUARANTEE = (
 )
 
 
+def header_record(generation: int = 1) -> dict:
+    """The WAL's first line, in the ONE schema every tier's writer emits.
+
+    A writer that assembled this mapping itself would be a second copy of a
+    closed vocabulary (``record``/``walVersion``/``generation``/``guarantee``)
+    with nothing comparing the two copies; deriving both sides from here keeps
+    the header byte-identical across the py, wasm and drift writers as the
+    schema moves. `generation` starts at 1 and only moves on a generation swap,
+    so a fresh WAL never claims generation 0.
+    """
+    if not isinstance(generation, int) or isinstance(generation, bool) \
+            or generation < 1:
+        raise ValueError(
+            f"a WAL header generation is a positive integer, got {generation!r}"
+        )
+    return {"record": "header", "walVersion": WAL_VERSION,
+            "generation": generation, "guarantee": WAL_GUARANTEE}
+
+
 # ---------------------------------------------------------------------------
 # the step-kind vocabulary and the fork's scope gate (item 250, Slice 2)
 # ---------------------------------------------------------------------------

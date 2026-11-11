@@ -92,6 +92,9 @@ __all__ = [
     # item 443: the operator E-Stop (docs/design/443-estop.md)
     "arm_estop_latch", "clear_estop", "estop", "estop_engaged",
     "estop_from_latch", "estop_latch_path", "estop_residue", "estop_state",
+    # issue #2758: the drift control's read-only actuator
+    "ReadOnlyRefused", "arm_read_only_latch", "read_only_engaged",
+    "read_only_latch_path",
     # issue #1932: the built-in `Result` cases, defined ONCE for every module
     "Ok", "Err",
 ]
@@ -1703,8 +1706,11 @@ def extern_emit(ctx, name: "str", fn, args: "tuple", caps: "tuple" = (),
     transparent frame keeps a recorded site on the emitted module's own line
     rather than on this helper."""
     _revl_transparent_frame = True
-    # issue #1504: refuse BEFORE the crossing is recorded or its host body runs
+    # issue #1504: refuse BEFORE the crossing is recorded or its host body runs.
+    # issue #2758: a read-only hold refuses the same new crossing, AFTER the
+    # E-Stop so a suspend is never masked by a read-only hold.
     _estop_check(name)
+    _read_only_check(name)
     # issue #2688: the declared ceiling, enforced at the same seam and before
     # the same point. Only a crossing that DECLARES a budget meters (and only a
     # budgeted crossing traces), so an undeclared one is byte-identical.
@@ -3340,6 +3346,10 @@ def _hold_for_session(entry: Any) -> bool:
 
 _ESTOP_LATCH_ENV = "REVL_ESTOP_LATCH"
 
+#: The ambient read-only latch (issue #2758): the drift control's narrowing
+#: response. An explicit path may also be armed with `arm_read_only_latch`.
+_READ_ONLY_LATCH_ENV = "REVL_READ_ONLY_LATCH"
+
 #: The merged residue schema's two E-Stop `kind` discriminators (docs/design/
 #: teardown-contract.md, "The merged residue schema"). `estop-stranded` is a
 #: registered entry whose inverse or compensation was NEVER ATTEMPTED;
@@ -3358,6 +3368,12 @@ _ESTOP: Optional[dict] = None
 #: crossing seam stats it, so an operator in another terminal can halt a
 #: running composition without a control socket.
 _ESTOP_LATCH: Optional[str] = None
+
+#: An explicit read-only latch path (`arm_read_only_latch`), or None to fall
+#: back to `REVL_READ_ONLY_LATCH`. The drift monitor writes the file when it
+#: fires the `read-only` response; every EFFECTFUL crossing seam refuses while
+#: it is present, while a pure read still proceeds (issue #2758).
+_READ_ONLY_LATCH: Optional[str] = None
 
 #: The crossings currently DISPATCHED and unconfirmed, innermost last. At most
 #: one is unconfirmed per activation at any instant, which is what bounds the
@@ -3441,6 +3457,28 @@ class EstopHalted(RuntimeError):
         self.halt = dict(halt)
 
 
+class ReadOnlyRefused(RuntimeError):
+    """Raised at an effectful crossing seam while a drift control has narrowed
+    the composition to read-only (issue #2758).
+
+    Deliberately NOT an `EstopHalted`: the instance is alive, its reads still
+    work, and nothing is stranded. Only a crossing that could change the world
+    is refused. The refusal happens BEFORE the host body runs, the same seam
+    `estop_gated` uses, so a read-only hold cannot leak one effect while the
+    control is arming."""
+
+    def __init__(self, where: str, record: Optional[dict] = None) -> None:
+        hold = record or {}
+        super().__init__(
+            f"READ-ONLY engaged: `{where}` was refused. "
+            f"reason: {hold.get('reason', 'drift control: read-only')}; "
+            f"operator: {hold.get('operator', 'unknown')}. The composition may "
+            "still read; a fresh admission or an operator clearing the latch is "
+            "the way back (issue #2758).")
+        self.where = where
+        self.record = dict(hold)
+
+
 def arm_estop_latch(path: Optional[str]) -> None:
     """Point the crossing seams at a cross-process E-Stop latch file.
 
@@ -3455,6 +3493,65 @@ def arm_estop_latch(path: Optional[str]) -> None:
 def estop_latch_path() -> Optional[str]:
     """The latch file this process watches, or None."""
     return _ESTOP_LATCH or (os.environ.get(_ESTOP_LATCH_ENV) or None)
+
+
+def arm_read_only_latch(path: Optional[str]) -> None:
+    """Point the NEW effectful crossing seams at a cross-process read-only hold.
+
+    The drift monitor (`revl.drift_monitor`) writes the file when it fires the
+    `read-only` response; a host may also arm the path explicitly. Passing None
+    disarms the explicit path and falls back to `REVL_READ_ONLY_LATCH`. No hold
+    armed means no extra open at any crossing, so a run that never engages drift
+    control is byte-identical."""
+    global _READ_ONLY_LATCH
+    _READ_ONLY_LATCH = path
+
+
+def read_only_latch_path() -> Optional[str]:
+    """The read-only latch file this process watches, or None."""
+    return _READ_ONLY_LATCH or (os.environ.get(_READ_ONLY_LATCH_ENV) or None)
+
+
+def _read_only_latch_record() -> Optional[dict]:
+    """The read-only hold at the latch path, or None when no latch is armed.
+
+    Same fail-closed rule as `_latch_record` and `revl.drift_monitor.
+    read_read_only`: a latch that exists but does not parse, or cannot be read,
+    still narrows authority. Only a genuinely absent latch (FileNotFoundError)
+    reads as absent; a corrupted hold that could be read as "no hold" would let
+    a drift response be switched off by damaging one file."""
+    path = read_only_latch_path()
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            record = json.load(handle)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return {"readOnly": True, "reason": "read-only latch (unreadable)",
+                "operator": "unknown"}
+    except (ValueError, TypeError):
+        return {"readOnly": True, "reason": "read-only latch (unreadable)",
+                "operator": "unknown"}
+    if not isinstance(record, dict):
+        return {"readOnly": True, "reason": "read-only latch (unreadable)",
+                "operator": "unknown"}
+    return record
+
+
+def read_only_engaged() -> bool:
+    """Whether a drift control has narrowed this process to read-only."""
+    return _read_only_latch_record() is not None
+
+
+def _read_only_check(where: str) -> None:
+    """The effectful seam: refuse a new crossing while the read-only hold is in
+    force. Reads do not come through here, so the narrowing is exactly "no new
+    world-changing crossing" rather than a second E-Stop."""
+    record = _read_only_latch_record()
+    if record is not None:
+        raise ReadOnlyRefused(where, record)
 
 
 def _latch_record() -> Optional[dict]:
@@ -3546,11 +3643,13 @@ def estop_gated(name: str):
         if inspect.iscoroutinefunction(fn):
             async def _gated_async(*args, **kwargs):
                 _estop_check(name)
+                _read_only_check(name)
                 return await fn(*args, **kwargs)
             wrapped = _gated_async
         else:
             def _gated(*args, **kwargs):
                 _estop_check(name)
+                _read_only_check(name)
                 return fn(*args, **kwargs)
             wrapped = _gated
         wrapped.__name__ = fn.__name__
@@ -4349,6 +4448,7 @@ class Frame:
         """A ``let-effect`` step inside a provide-method body: run the
         acquisition through the effect protocol, adopt it, return the value."""
         _estop_check(f"{self.name}.{label}")   # item 443
+        _read_only_check(f"{self.name}.{label}")   # issue #2758
         holder: list = []
 
         frame = self
@@ -4766,6 +4866,7 @@ class Frame:
         the driver is always the owner, so this refusal is a guard against a
         misconfigured embedding, never a normal path."""
         _estop_check(f"{receiver}.{method}")   # item 443
+        _read_only_check(f"{receiver}.{method}")   # issue #2758
         if self._owner is None:
             raise RuntimeError(
                 "a deferred emission needs a session owner runtime (the deferral "
@@ -4837,6 +4938,7 @@ class Frame:
         # is the scenario the E-Stop exists for. Refused before the token is
         # spent, so a halt never leaves an approval consumed-but-unfired.
         _estop_check(f"{self.name}.{capability}")
+        _read_only_check(f"{self.name}.{capability}")   # issue #2758
         owner = self._owner
         if owner is None or not owner.approval_enforced \
                 or (isinstance(handle, dict) and handle.get("passthrough")):
@@ -5673,6 +5775,7 @@ class _Deferred:
         # crosses after the button. The queue entry is left owed and enumerated,
         # never quietly dropped.
         _estop_check(f"{self.receiver}.{self.method}")
+        _read_only_check(f"{self.receiver}.{self.method}")   # issue #2758
         self.fired = True
         fire, self._fire = self._fire, None
         if fire is not None:
