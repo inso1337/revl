@@ -261,25 +261,40 @@ def test_the_flush_turns_to_the_cap_while_a_thread_job_is_held():
     """Deterministic: the thread job waits on an Event that is only released
     after the flush returns, so the job is in flight for every turn. The
     flush must take all twenty turns, not stop at the first empty ready
-    queue."""
+    queue.
+
+    The mechanism is asserted, not only the count, so the test cannot pass
+    vacuously: the loop is an asyncio base loop (a loop without `_ready` and
+    `_scheduled` reads as always runnable), the executor count is installed,
+    and after every pass the ready queue holds nothing but the flush's own
+    next step while the count is 1. Only the in-flight job keeps the flush
+    turning. A failure names the `revl.run` it ran against."""
     import asyncio
     import threading
 
-    from revl.run import _FLUSH_TURNS, _Driver
+    import revl.run as run_mod
+    from revl.run import _FLUSH_TURNS, _IN_FLIGHT, _Driver
 
     driver = object.__new__(_Driver)
+    where = run_mod.__file__
 
     async def scenario():
         loop = asyncio.get_running_loop()
+        assert isinstance(loop, asyncio.BaseEventLoop), (type(loop), where)
+        assert hasattr(loop, "_ready") and hasattr(loop, "_scheduled"), where
         release = threading.Event()
         await driver._flush()                # installs the executor count
+        assert getattr(loop, _IN_FLIGHT, None) == 0, where
         job = asyncio.ensure_future(asyncio.to_thread(release.wait, 10))
-        turns = [0]
+        await asyncio.sleep(0)               # the job submits to the thread
+        assert getattr(loop, _IN_FLIGHT) == 1, where
+        seen: list = []
         run_once = loop._run_once
 
         def counted():
-            turns[0] += 1
             run_once()
+            # after the pass: what `_flush` reads when it wakes
+            seen.append((len(loop._ready), getattr(loop, _IN_FLIGHT)))
 
         loop._run_once = counted
         try:
@@ -288,6 +303,12 @@ def test_the_flush_turns_to_the_cap_while_a_thread_job_is_held():
             del loop._run_once
             release.set()
         await job
-        return turns[0]
+        return seen
 
-    assert asyncio.run(scenario()) >= _FLUSH_TURNS
+    seen = asyncio.run(scenario())
+    assert len(seen) >= _FLUSH_TURNS, (len(seen), seen, where)
+    # every pass left only the flush's own next step ready (the twentieth
+    # leaves nothing: the flush returned) and the job still in flight
+    turns = seen[:_FLUSH_TURNS]
+    assert all(in_flight == 1 for _, in_flight in turns), seen
+    assert [ready for ready, _ in turns[:-1]] == [1] * (_FLUSH_TURNS - 1), seen
