@@ -754,17 +754,20 @@ def _capturing_driver_class():
 
     class _CapturingDriver(_Driver):
         def __init__(self, *args, **kwargs):
+            from ..fault import _HostResources  # noqa: PLC0415
             self.events: list[dict] = []
-            # issue #1859: every host-stub event of the driver's life, never
-            # drained, so teardown can pair each acquire with its release
-            self.host_events: list[str] = []
+            # issue #1859: every host-stub event of the driver's life is
+            # paired as it is logged, never drained, so teardown can name each
+            # acquire with no release. Issue #3382: only the handles still
+            # open are kept, not the events themselves.
+            self.host_resources = _HostResources()
             super().__init__(*args, **kwargs)
 
         def _log(self, channel: str, subject: str, detail: str = "") -> None:
             self.events.append({"channel": channel, "subject": subject,
                                 "detail": detail})
             if channel == "host":
-                self.host_events.append(f"{subject} {detail}".rstrip())
+                self.host_resources.record(f"{subject} {detail}".rstrip())
 
         def drain_events(self) -> list[dict]:
             events, self.events = self.events, []
@@ -5144,12 +5147,13 @@ class Session:
         (`fault._unreleased_host_resources`, the lifecycle `no_residue`
         rule), so it is the fifth check. With no host trace the check cannot
         run: it is returned as unverified, and `noResidue` is never true on a
-        check that did not run."""
-        events = getattr(driver, "host_events", None)
-        if events is None:
+        check that did not run. Issue #3382: the driver pairs the events as
+        they are logged (`fault._HostResources`), so this reads the handles
+        left open rather than replaying the driver's whole host trace."""
+        resources = getattr(driver, "host_resources", None)
+        if resources is None:
             return ["hostResources"]
-        from ..fault import _unreleased_host_resources  # noqa: PLC0415
-        unreleased = _unreleased_host_resources(events)
+        unreleased = resources.unreleased()
         checks["hostResources"] = not unreleased
         detail["unreleased"] = unreleased
         return []
