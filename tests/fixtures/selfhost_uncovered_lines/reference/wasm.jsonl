@@ -40,27 +40,29 @@
 
 ["function", "extern-declared-compensate-item-254-issue-1979-declared", "_as_fn_call", 5, 5]
 
-["reason", "float-valued-module-signatures-operands-are-refused-by", "Float-valued module signatures/operands are refused by this backend. Residual Float formatting/finite-value validation is not evidence of a supported arithmetic family; _refuse_float_operands explicitly raises for operands=Float."]
+["reason", "issue-3425-float-is-a-native-f64-on", "Issue #3425: Float is a native f64 on the WASM reference since #3295, and selfhost/emit_wasm.rvl has no f64 lowering, so a document carrying a Float value is a named port gap, not a byte-agreement case, and no CORPUS document can reach these statements. The reference EMITS such a document, so it cannot sit in tests/fixtures/emit_wasm_refusals/ either (tests/fixtures/wasm_true_division_port_gap.rvl left that directory for this reason). `_f64_literal` (the bit-exact f64.const payload) and `_finite_float` (the issue #312 refusal of a non-finite literal, which the frontend already rejects) are the Float literal path and sit here for the same reason. The Float paths are asserted by tests/test_wasm_backend.py, tests/test_wasm_true_division_2201.py and tests/test_458_float_division_and_remainder.py instead; these records leave when the port learns f64."]
 
-["function", "float-valued-module-signatures-operands-are-refused-by", "_f64_literal", 1, 1]
+["function", "issue-3425-float-is-a-native-f64-on", "_V3Emitter._float_operand", 8, 8]
 
-["function", "float-valued-module-signatures-operands-are-refused-by", "_finite_float", 3, 3]
+["function", "issue-3425-float-is-a-native-f64-on", "_V3Emitter._helper_f64_mod", 1, 1]
 
-["reason", "issue-3295-float-is-a-native-f64-on", "Issue #3295: Float is a native f64 on the WASM reference, and selfhost/emit_wasm.rvl has no f64 lowering, so a document carrying a Float value is a named port gap, not a byte-agreement case, and no CORPUS document can reach these statements. The reference EMITS such a document, so it cannot sit in tests/fixtures/emit_wasm_refusals/ either (tests/fixtures/wasm_true_division_port_gap.rvl left that directory for this reason). The Float paths are asserted by tests/test_wasm_backend.py, tests/test_wasm_true_division_2201.py and tests/test_458_float_division_and_remainder.py instead; these records leave when the port learns f64."]
+["function", "issue-3425-float-is-a-native-f64-on", "_V3Emitter._slot_load", 1, 1]
 
-["function", "issue-3295-float-is-a-native-f64-on", "_V3Emitter._float_operand", 8, 8]
+["function", "issue-3425-float-is-a-native-f64-on", "_V3Emitter._slot_value", 1, 1]
 
-["function", "issue-3295-float-is-a-native-f64-on", "_V3Emitter._helper_f64_mod", 1, 1]
+["function", "issue-3425-float-is-a-native-f64-on", "_f64_literal", 1, 1]
 
-["function", "issue-3295-float-is-a-native-f64-on", "_V3Emitter._slot_load", 1, 1]
+["function", "issue-3425-float-is-a-native-f64-on", "_finite_float", 3, 3]
 
-["function", "issue-3295-float-is-a-native-f64-on", "_V3Emitter._slot_value", 1, 1]
-
-["function", "issue-3295-float-is-a-native-f64-on", "_wasm_ty", 1, 1]
+["function", "issue-3425-float-is-a-native-f64-on", "_wasm_ty", 1, 1]
 
 ["reason", "item-459-f6-refuse-bodyless-extern-states-by", "Item 459 F6. `_refuse_bodyless_extern` states, by name, that a DECLARED extern carrying no `@wasm` body is not portable to this tier, naming the tiers that do carry one - the sentence the other five emitters have always given, where wasm answered `callee 'x' is not a lowerable function`, which is also what it says for a MISSPELLED callee. EVERY statement of it is on a refusal path: it raises on every input that reaches it, and its one quiet arm returns straight into the caller's own raise, so NO successfully emitted document executes a line of it. A corpus document therefore cannot reach it, and that is structural rather than inconvenient - the corpus is the list of documents the reference EMITS and holds byte-identical against the port, and tools/selfhost_line_coverage.py::measure() calls emit() with no `except`, so a refusing document would abort the measurement itself. WHAT WOULD HAVE TO CHANGE for a document to be possible, stated so this is a decision and not a shrug: (1) the oracle would need a REFUSAL workload beside `CORPUS` holding both sides to the same diagnostic rather than to the same bytes, the diagnostic-agreement shape tests/test_selfhost_lower.py already has and this tier's emit oracle does not; (2) measure() would need to run that workload and count the lines executed before the raise, which measure_full_tree() in the same module already does deliberately (a refusal path is reference logic too), so this half is small; and (3) selfhost/emit_wasm.rvl would have to be able to REFUSE at all. It cannot: a pure self-host emitter fn cannot `fail`, which is why every deferred family on this tier answers with an `<<UNSUPPORTED-...>>` marker instead (test_fn_type_param_refused, test_deferred_families_remain_explicit). (3) is the real blocker and it is a PORT property, not a corpus one. Until it lifts the refusal is pinned by tests/test_selfhost_emit_wasm.py::test_reference_refuses_a_bodyless_extern_by_name, which drives BOTH entry points (_call_expr for a call in expression position, _call_type for a `let` initializer; they refuse independently), by tests/test_json_stdlib.py::test_wasm_tier_refuses_extern_without_body, and by tests/test_asset_runtime_load_459.py's per-tier refusal sweep."]
 
 ["function", "item-459-f6-refuse-bodyless-extern-states-by", "_V3Emitter._refuse_bodyless_extern", 3, 3]
+
+["reason", "one-refusal-no-corpus-document-can-carry-the", "One refusal no corpus document can carry: the raise in `_declare_local` that rejects rebinding one emitted local name at incompatible WASM widths. Valid typed source locals retain their declared width, so a document the reference emits never reaches it, and a document that does reach it is refused, so it has no bytes for the oracle to hold."]
+
+["function", "one-refusal-no-corpus-document-can-carry-the", "_V3Emitter._declare_local", 1, 1]
 
 ["reason", "only-the-negative-lookup-for-a-nonvariant-non", "Only the negative lookup for a nonvariant, non-Opt/Result type remains. The no-expected-type lookup is covered by bare Some; typed tagged constructors supply a valid tagged layout."]
 
@@ -357,7 +359,3 @@
 ["function", "these-helper-text-generators-are-demanded-only-by", "_V3Emitter._helper_str_of_code_point", 1, 1]
 
 ["function", "these-helper-text-generators-are-demanded-only-by", "_V3Emitter._helper_str_split", 1, 1]
-
-["reason", "two-refusals-neither-of-which-a-corpus-document", "Two refusals, neither of which a corpus document can carry: the raise that rejects rebinding one emitted local name at incompatible WASM widths, and the raise that rejects a `Float` BINDING by name. Valid typed source locals retain their declared width. A Float local cannot become a corpus case for the same reason every other Float position cannot — the emitter REFUSES it, and a corpus document is one the reference emits and holds byte-identical against the port. Before that refusal the binding emitted an f64 into an i32 local and the module failed wasmtime validation at load; tests/test_458_conversion_dispatch.py and tests/test_wasm_backend.py execute both halves instead."]
-
-["function", "two-refusals-neither-of-which-a-corpus-document", "_V3Emitter._declare_local", 1, 1]

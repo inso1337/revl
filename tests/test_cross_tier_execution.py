@@ -1416,6 +1416,7 @@ def test_wasm_has_no_map_to_index():
     with pytest.raises(Exception) as excinfo:
         _emit("wasm", MAP_INDEX_MISS)
     assert "is not lowerable" in str(excinfo.value)
+    assert "Map[" in str(excinfo.value), excinfo.value
 
 
 def test_str_ordering_agrees_everywhere():

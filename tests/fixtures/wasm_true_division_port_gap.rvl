@@ -5,10 +5,11 @@
 //
 // This document now pins a PORT gap, not a reference refusal: the revl port in
 // selfhost/emit_wasm.rvl carries the scalar Int/Bool subset only and names `/`
-// as `<<UNSUPPORTED-TRUE-DIVISION:Float>>`. Both positions are here because
-// they reach different code: `ratio` is the scalar binding (the port's
-// render_bin gap), and `half` is the interpolation (the port refuses
-// `<<UNSUPPORTED-EXPR:interp>>` before it reaches the division).
+// as `<<UNSUPPORTED-TRUE-DIVISION:Float>>`; that port gap is issue #3425.
+// Both positions are here because they reach different code: `ratio` is the
+// scalar binding (the port's render_bin gap), and `half` is the
+// interpolation (the port refuses `<<UNSUPPORTED-EXPR:interp>>` before it
+// reaches the division).
 //
 // It is not a byte-agreement case, so it cannot live in the tier's CORPUS, and
 // the reference EMITS it, so it cannot live in tests/fixtures/emit_wasm_refusals/

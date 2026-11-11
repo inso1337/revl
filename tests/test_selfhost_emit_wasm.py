@@ -506,7 +506,7 @@ def test_true_division_lowers_on_the_reference_but_is_a_named_port_gap(
     Float became a native f64 value (issue #3295, docs/wasm-capabilities.md).
     The revl port in `selfhost/emit_wasm.rvl` still carries only the scalar
     Int/Bool subset and names `/` as `<<UNSUPPORTED-TRUE-DIVISION:Float>>`, so
-    this document is a named PORT gap, not a reference refusal; it is not a
+    this document is a named PORT gap (issue #3425), not a reference refusal; it is not a
     byte-agreement case and stays out of CORPUS.
 
     The pinned reference facts are the ones that keep the fix honest: `/` is
