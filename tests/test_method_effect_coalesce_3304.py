@@ -8,15 +8,15 @@ game that calls `tick` every frame kept one record per frame for the life of
 the generation: memory grew per call and a swap walked every record.
 
 WHAT HOLDS NOW. When a bracket's forward write journals exactly one `(map,
-key)` and its `undo` is an ABSOLUTE table inverse (`insert -> remove`,
-`insert_if_absent -> remove`, the #1980 `match prev` restore) on a literal or
-named key, and the frame already holds such a record for that key with only
+key)` and its `undo` is an ABSOLUTE table inverse (`insert -> remove`, the
+#1980 `match prev` restore) on a literal or named key, and the frame already holds such a record for that key with only
 records of the same kind adopted since, the new record is released without
 running. The kept, older record restores the value the key held before it,
 which is the value every newer record's replay would have been overwritten
 with, so the world, the `NotReversed` verdict and every other key are the
 same. Anything else adopted in between (an asserted, declared or computed
-inverse, a method `let-effect`) ends the run, and a recorded timeline (whose
+inverse, a method `let-effect`, which is also how the `insert_if_absent`
+CAS is written, so it is never coalesced) ends the run, and a recorded timeline (whose
 `step_back` replays its own per-step list) is never coalesced.
 
 The #2640 computed list-append inverse is `table` too but RELATIVE (it reads

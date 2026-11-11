@@ -4351,16 +4351,19 @@ class Frame:
         """Join an effect created while ACTIVE to this component's accumulator."""
         # issue #3304: a record that is not an absolute table inverse may read
         # or write any key when it replays, so no later record is coalesced
-        # across it
+        # across it, and no bracket's slots carry over to a later adopt
         self._coalesce.clear()
+        self._bracket_slots = None
         self._adopted.append(effect)
         return effect
 
     def adopt_bracket(self, effect: Any) -> Any:
         """`adopt` for a provide-method bracket whose `undo` the emitter proved
         an ABSOLUTE table inverse on a literal or named key (issue #3304):
-        `insert -> remove`, `insert_if_absent -> remove`, or the #1980 restore
-        `match prev { Some(v) => m.insert(k, v), None => m.remove(k) }`. Such
+        `insert -> remove`, or the #1980 restore `match prev { Some(v) =>
+        m.insert(k, v), None => m.remove(k) }`. (The `insert_if_absent` CAS
+        must be bound, `let ok = effect ...`, so it is a method `let-effect`
+        adopted through `acquire` and plain `adopt`, never coalesced.) Such
         an inverse writes only its own `(map, key)`, reads nothing the frame
         changes, and sets the key to one fixed value.
 

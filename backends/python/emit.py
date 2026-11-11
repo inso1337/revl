@@ -635,7 +635,7 @@ def _pins(step: dict, slot: str) -> str:
 def _coalescable_bracket(step: dict) -> bool:
     """Whether a provide-method bracket's `undo` is an ABSOLUTE table inverse
     on a literal or named key (issue #3304, `Frame.adopt_bracket`): `remove`
-    after `insert`/`insert_if_absent`, or the #1980 `match prev` restore. Both
+    after `insert`, or the #1980 `match prev` restore. Both
     set the key to a value fixed when the bracket registered, so a frame's
     older record for the key does the newer one's work. The #2640 computed
     list-append inverse is `table` too but drops one item from the list it
