@@ -514,8 +514,11 @@ def test_outside_refusal_through_the_stdlib_body_3184(workspace, outside, tmp_pa
     for name in ("canary.txt", "no_such_file.txt"):
         given = str(link / name)
         r = mod.lexists(given)
-        assert r.kind == "Err" if hasattr(r, "kind") else True
-        err = r.value if hasattr(r, "value") else r
+        # the py tier's Result carries its case in the class, not a `kind`
+        # field: assert the failure case directly instead of the vacuous
+        # `hasattr` fallback that could never fail (#3235)
+        assert isinstance(r, mod.Err)
+        err = r.value
         code = err["code"] if isinstance(err, dict) else err.code
         path = err["path"] if isinstance(err, dict) else err.path
         assert code == "EOUTSIDE"
@@ -527,3 +530,93 @@ def test_outside_refusal_through_the_stdlib_body_3184(workspace, outside, tmp_pa
 def test_inside_resolution_is_unchanged_3184(workspace):
     got = ws.resolve_within("artifact.txt")
     assert got == os.path.join(os.path.realpath(str(workspace)), "artifact.txt")
+
+
+# ===========================================================================
+# #3235: a `..` AFTER a symlink must not move the boundary. The ts tier
+# collapses `..` lexically (path.resolve); this tier applied it to the link's
+# target, so the same path was Ok or EOUTSIDE depending on whether an outside
+# name was a symlink and where it pointed.
+# ===========================================================================
+
+def test_dotdot_after_a_symlink_is_not_a_symlink_oracle_3235(workspace, outside):
+    """`O/dlink/../../../ws/in.txt` was EOUTSIDE for a plain directory `dlink`
+    and Ok for a symlink one. Both tiers must collapse the `..` before
+    resolving any link, so both spellings are refused the same way."""
+    (workspace / "a" / "b" / "c").mkdir(parents=True)
+    (workspace / "in.txt").write_text("in\n", encoding="utf-8")
+    plain = outside / "dlink_plain"
+    plain.mkdir()
+    link = outside / "dlink_link"
+    # deep enough that three `..` land back at the workspace root
+    link.symlink_to(workspace / "a" / "b" / "c", target_is_directory=True)
+    traversal = os.path.join("..", "..", "..", "ws", "in.txt")
+    for dlink in (plain, link):
+        given = os.path.join(str(dlink), traversal)
+        with pytest.raises(ws.ConfinementError) as ei:
+            ws.resolve_within(given)
+        assert ei.value.code == "EOUTSIDE"
+
+
+# ===========================================================================
+# #3284: peers of the ts cases of the same number, so both tiers answer these
+# setups identically. A `..` in link text applies to the RESOLVED component
+# before it, and a walk that cannot finish is EOUTSIDE with the caller's path.
+# ===========================================================================
+
+def _assert_outside_refusal(mod, given):
+    with pytest.raises(ws.ConfinementError) as ei:
+        ws.resolve_within(given)
+    assert ei.value.code == "EOUTSIDE"
+    assert ei.value.path == given
+    r = mod.lexists(given)
+    assert isinstance(r, mod.Err)
+    err = r.value
+    code = err["code"] if isinstance(err, dict) else err.code
+    path = err["path"] if isinstance(err, dict) else err.path
+    assert code == "EOUTSIDE"
+    assert path == given
+
+
+def test_dotdot_in_link_text_is_no_existence_oracle_3284(workspace, outside):
+    """`ws/D -> <ws>/inlink/../X` with `inlink` leaving the root is `<outside>/X`:
+    refused the same whether `<outside>/X` is absent, a directory or a file."""
+    mod = _fs_module()
+    (outside / "deep").mkdir()
+    (workspace / "inlink").symlink_to(outside / "deep", target_is_directory=True)
+    (workspace / "D").symlink_to(f"{workspace}/inlink/../X")
+    given = str(workspace / "D" / "x")
+    _assert_outside_refusal(mod, given)
+    (outside / "X").mkdir()
+    _assert_outside_refusal(mod, given)
+    (outside / "X").rmdir()
+    (outside / "X").write_text("x\n", encoding="utf-8")
+    _assert_outside_refusal(mod, given)
+
+
+def test_dotdot_in_link_text_back_inside_resolves_inside_3284(workspace):
+    (workspace / "sub").mkdir()
+    (workspace / "sublink").symlink_to(workspace / "sub", target_is_directory=True)
+    (workspace / "back").symlink_to(f"{workspace}/sublink/../missing")
+    got = ws.resolve_within(str(workspace / "back" / "leaf"))
+    assert got == os.path.join(os.path.realpath(str(workspace)), "missing", "leaf")
+
+
+def test_inside_link_into_an_outside_cycle_is_eoutside_3284(workspace, outside):
+    mod = _fs_module()
+    (outside / "c1").symlink_to(outside / "c2")
+    (outside / "c2").symlink_to(outside / "c1")
+    (workspace / "cyc").symlink_to(outside / "c1")
+    for given in (str(workspace / "cyc"), str(workspace / "cyc" / "x")):
+        _assert_outside_refusal(mod, given)
+
+
+def test_link_chain_past_the_budget_is_eoutside_3284(workspace, outside):
+    """l0 -> l1 -> ... -> l44 -> <outside>/end, every link outside the root."""
+    mod = _fs_module()
+    for i in range(45):
+        target = outside / ("end" if i == 44 else f"l{i + 1}")
+        (outside / f"l{i}").symlink_to(target)
+    (workspace / "chain").symlink_to(outside / "l0")
+    for given in (str(workspace / "chain"), str(workspace / "chain" / "x")):
+        _assert_outside_refusal(mod, given)
