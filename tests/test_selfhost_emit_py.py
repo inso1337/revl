@@ -367,6 +367,7 @@ CORPUS = [
     # which is what the line-coverage ledger reported.
     "keyword_config_value_field.rvl",
     "services_method_effects.rvl",  # method-body `effect` + saga `emit ... compensate`: the `_revl_frame.adopt` accumulator + `_label`/`_effect_N`/`_emit_N` counter
+    "method_effect_coalesce.rvl",  # issue #3304: `adopt_bracket` for an absolute table inverse, `adopt` for a computed key
     # item 383 / 391 (self-host port) — the `.map`/`.filter`/`.reduce` transforms
     # desugar (frontend) to `list_map`/`list_filter`/`list_reduce` free calls; the
     # py tier lowers the function-value params, arrow args, and `f(x)` calls.

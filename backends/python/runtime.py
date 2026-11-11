@@ -3839,6 +3839,12 @@ class Frame:
         # before the frame's first write to it.
         self._open_journal: Any = None
         self._journal: dict = {}
+        # issue #3304: the (map, key) slots the open bracket's forward write
+        # journaled (None: no bracket opened since the last adopt), and the
+        # slots whose newest adopted record is an absolute table inverse with
+        # only such records adopted since (`adopt_bracket`)
+        self._bracket_slots: Optional[set] = None
+        self._coalesce: set = set()
         # Phase-2 residue (teardown-contract.md's `compensation-residue`):
         # one record per compensation that raised or was skipped past the
         # budget. Best-effort introspection for this activation; the merged
@@ -4204,6 +4210,7 @@ class Frame:
             self._take_journal()      # a forward that raised left it open
         prev = _JOURNAL.get()
         self._open_journal = prev
+        self._bracket_slots = set()
         _JOURNAL.set(prev + (self,))
 
     def _take_journal(self) -> bool:
@@ -4342,7 +4349,44 @@ class Frame:
 
     def adopt(self, effect: Any) -> Any:
         """Join an effect created while ACTIVE to this component's accumulator."""
+        # issue #3304: a record that is not an absolute table inverse may read
+        # or write any key when it replays, so no later record is coalesced
+        # across it
+        self._coalesce.clear()
         self._adopted.append(effect)
+        return effect
+
+    def adopt_bracket(self, effect: Any) -> Any:
+        """`adopt` for a provide-method bracket whose `undo` the emitter proved
+        an ABSOLUTE table inverse on a literal or named key (issue #3304):
+        `insert -> remove`, `insert_if_absent -> remove`, or the #1980 restore
+        `match prev { Some(v) => m.insert(k, v), None => m.remove(k) }`. Such
+        an inverse writes only its own `(map, key)`, reads nothing the frame
+        changes, and sets the key to one fixed value.
+
+        When the forward write journaled exactly one `(map, key)` and the frame
+        already holds such a record for it, with only such records adopted
+        since, the new record is released WITHOUT RUNNING. Inverses replay
+        LIFO: the new record would run first and the kept one after it, with
+        only records on other keys between them, so the key ends at the kept
+        record's value either way. The world, the `NotReversed` verdict (it
+        compares against the same value from before the frame's first write)
+        and every other key are the same, and the frame holds one record per
+        key instead of one per call.
+
+        Not coalesced: a recorded timeline (its `step_back` replays its own
+        per-step list, which may already have run the kept record), a forward
+        that journaled more or fewer keys, and anything `adopt` adopted since
+        the kept record."""
+        slots, self._bracket_slots = self._bracket_slots, None
+        if slots is None or len(slots) != 1 \
+                or getattr(self.ctx, "_revl_timeline", None) is not None:
+            return self.adopt(effect)
+        (slot,) = slots
+        if slot in self._coalesce and _release_unrun(effect):
+            return effect
+        self._adopted.append(effect)
+        self._coalesce.add(slot)
         return effect
 
     def acquire(self, label: str, get: Callable[[], Any], undo: Callable[[Any], Any]) -> Any:
@@ -5058,6 +5102,7 @@ class Frame:
 
     def _dispose_adopted(self) -> Any:
         adopted, self._adopted = self._adopted, []
+        self._coalesce.clear()
         if not adopted:
             return None
 
@@ -7992,10 +8037,29 @@ def _journal_note(store: Any, key: Any, verb: str) -> None:
     if not stack:
         return
     prior = store.data.get(key, _ABSENT)
+    slot = (id(store), key)
     for frame in stack:
-        frame._journal.setdefault((id(store), key), (store, key, prior, verb))
+        frame._journal.setdefault(slot, (store, key, prior, verb))
+        # issue #3304: the keys an open bracket's forward write touched (an
+        # `undo` replaying under the journal has no bracket open)
+        if frame._open_journal is not None and frame._bracket_slots is not None:
+            frame._bracket_slots.add(slot)
     if key not in store._journaled:
         store._journaled[key] = (prior, stack[0], verb)
+
+
+def _release_unrun(effect: Any) -> bool:
+    """Take a cordis effect off its fiber without running its disposers
+    (issue #3304, `Frame.adopt_bracket`); whether it was one. Anything else (a
+    simulated context's `None`) is left alone and adopted as before."""
+    fiber = getattr(getattr(effect, "_ctx", None), "fiber", None)
+    disposables = getattr(fiber, "_disposables", None)
+    runner = getattr(effect, "_runner", None)
+    if disposables is None or runner is None or not disposables.delete(effect):
+        return False
+    effect._remove = None
+    runner.epoch = False      # a stray call is a no-op, never the inverse
+    return True
 
 
 def _not_reversed(frame: Any, store: Any, key: Any, prior: Any, verb: str,

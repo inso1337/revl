@@ -632,6 +632,26 @@ def _pins(step: dict, slot: str) -> str:
     return ", ".join(f"{_mangle(n)}={_mangle(n)}" for n in names)
 
 
+def _coalescable_bracket(step: dict) -> bool:
+    """Whether a provide-method bracket's `undo` is an ABSOLUTE table inverse
+    on a literal or named key (issue #3304, `Frame.adopt_bracket`): `remove`
+    after `insert`/`insert_if_absent`, or the #1980 `match prev` restore. Both
+    set the key to a value fixed when the bracket registered, so a frame's
+    older record for the key does the newer one's work. The #2640 computed
+    list-append inverse is `table` too but drops one item from the list it
+    reads at undo time, so it is relative and never coalesced; so is a key the
+    undo would evaluate again (a call)."""
+    if step.get("inverse") != "table":
+        return False
+    acquire, undo = step.get("acquire") or {}, step.get("undo") or {}
+    key = (acquire.get("args") or [None])[0]
+    if not (isinstance(key, dict) and key.get("kind") in ("lit", "name")):
+        return False
+    if undo.get("kind") == "call":
+        return undo.get("method") == "remove"
+    return undo.get("kind") == "match"
+
+
 def _inverse_lambda(step: dict, slot: str, params: str = "") -> str:
     """`lambda …:`'s header for a derived inverse, with its by-value pins."""
     pins = _pins(step, slot)
@@ -4002,7 +4022,10 @@ class _ComponentEmitter:
                 out.add(indent + 1,
                         f"yield _revl_frame._guard({_inverse_lambda(step, 'undo')}: "
                         f"{self._inverse_expr(step.get('undo'), where)})")
-                out.add(indent, f"_revl_frame.adopt(_revl_ctx.effect({fn}, {self._label(label)!r}))")
+                # issue #3304: an absolute table inverse may be coalesced with
+                # the frame's older record for the same key
+                adopt = "adopt_bracket" if _coalescable_bracket(step) else "adopt"
+                out.add(indent, f"_revl_frame.{adopt}(_revl_ctx.effect({fn}, {self._label(label)!r}))")
         elif kind == "let-effect":
             wit = self._witnessed_extern(step.get("acquire"))
             if wit is not None:
