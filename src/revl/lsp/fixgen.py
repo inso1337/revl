@@ -395,6 +395,78 @@ def _site_inverse(bind: str | None, target: str | None,
     return None
 
 
+_G4_RELEASE_HANDLE = re.compile(
+    r"^the `undo` of `let (?P<bind>[A-Za-z_]\w*) = effect [^`]+` must release "
+    r"THAT handle: write `undo (?P<inverse>[A-Za-z_][\w.]*\(\))`")
+_TRAILING_UNDO = re.compile(
+    r"\bundo\s+(?P<expr>[A-Za-z_][\w.]*\s*\([^()]*\))\s*$")
+
+
+def _g4_release_handle(text: str, diagnostic: dict, filename: str) -> Fix | None:
+    """G4: a host acquisition's `undo` that does not release the bound handle.
+
+    The refusal names the one inverse in its message (write `undo
+    store.drop()`), so the repair replaces the call after `undo` with it:
+    `let store = effect Map.new() undo Map.drop()` becomes `... undo
+    store.drop()`. Only the single-line shape is rewritten: the `let`, the
+    acquisition and exactly one trailing `undo <call>` on the refused line.
+    A multi-line acquisition, a second `undo` or a comment on the line
+    declines."""
+    first_line = (diagnostic.get("message", "").splitlines() or [""])[0]
+    match = _G4_RELEASE_HANDLE.match(first_line)
+    if match is None:
+        return None
+    line0 = diagnostic["range"]["start"]["line"]
+    row = line_text(text, line0)
+    if "//" in row or len(re.findall(r"\bundo\b", row)) != 1:
+        return None
+    site = re.search(rf"\blet\s+{re.escape(match.group('bind'))}\s*=\s*effect\b", row)
+    trailing = _TRAILING_UNDO.search(row)
+    if site is None or trailing is None or trailing.start() < site.end():
+        return None
+    acquire = row[site.end():trailing.start()]
+    if acquire.count("(") != acquire.count(")"):
+        return None
+    inverse = match.group("inverse")
+    start, end = trailing.span("expr")
+    edit = _replace_edit(line0, start, end, inverse)
+    return Fix("G4", f"Release the bound handle: `undo {inverse}`", [edit])
+
+
+def _fix_g4(text: str, diagnostic: dict, filename: str) -> Fix | None:
+    """G4 dispatch: the wrong-handle `undo` when the message names it, else
+    the missing-undo site repair."""
+    first_line = (diagnostic.get("message", "").splitlines() or [""])[0]
+    if _G4_RELEASE_HANDLE.match(first_line):
+        return _g4_release_handle(text, diagnostic, filename)
+    return _g4_site_undo(text, diagnostic, filename)
+
+
+_PROVIDER_EMISSION = re.compile(r"^expected fn, found 'emission'")
+
+
+def _fix_syntax_provider_emission(text: str, diagnostic: dict,
+                                  filename: str) -> Fix | None:
+    """SYNTAX: `emission fn` inside a `provide` block.
+
+    Provider methods are plain `fn`; emission-ness comes from the service
+    declaration. The repair deletes the one `emission ` before `fn` on the
+    refused line. Every other SYNTAX refusal (a top-level `emission fn`
+    included) has a different message and gets nothing; a line with zero or
+    several `emission fn` spellings declines."""
+    first_line = (diagnostic.get("message", "").splitlines() or [""])[0]
+    if not _PROVIDER_EMISSION.match(first_line):
+        return None
+    line0 = diagnostic["range"]["start"]["line"]
+    row = line_text(text, line0)
+    hits = list(re.finditer(r"\bemission\s+(?=fn\b)", row))
+    if len(hits) != 1:
+        return None
+    start, end = hits[0].span()
+    edit = _replace_edit(line0, start, end, "")
+    return Fix("SYNTAX", "Provider methods are plain `fn`: drop `emission`", [edit])
+
+
 def _walk_nodes(value, seen: set[int] | None = None):
     """Yield dataclass nodes in the parser tree without following cycles."""
     if value is None or isinstance(value, (str, bytes, int, float, bool)):
@@ -443,8 +515,9 @@ def _parse(text: str, filename: str) -> Program | None:
 _GENERATORS = {
     "T2": _fix_t2_null,
     "A9": _fix_a9_provide_key,
-    "G4": _g4_site_undo,
+    "G4": _fix_g4,
     "REVL": _fix_zero_arg_sized_receiver,
+    "SYNTAX": _fix_syntax_provider_emission,
 }
 
 
