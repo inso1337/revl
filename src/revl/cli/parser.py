@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 
 from .._run_backends import KNOWN_BACKENDS, RUNNABLE_BACKENDS
+from .._update_consents import UPDATE_OPERATOR_CONSENTS
 from ..tiers import tier_metavar, tier_type
 
 # The backends `revl bundle` can emit (the emitter package names under
@@ -123,6 +124,10 @@ def _add_update_feed_arguments(sub) -> None:
                      help="read the release manifest from this file or URL "
                           "instead of resolving the feed; the same validation "
                           "runs")
+    sub.add_argument("--trust-unsigned", action="store_true",
+                     help="accept a manifest fetched over the network that "
+                          "carries no signature at all; a manifest that does "
+                          "carry one is still verified")
     sub.add_argument("--home", default=None, metavar="DIR",
                      help="update home (default $REVL_UPDATE_HOME or "
                           "~/.revl/updates)")
@@ -1454,6 +1459,21 @@ def build_parser() -> argparse.ArgumentParser:
                                 "fallback) as applicable; such a release has no "
                                 "declared sha256 and is never applied "
                                 "automatically")
+    mcp_serve.add_argument("--update-trust-unsigned", action="store_true",
+                           help="accept a networked release manifest that "
+                                "carries no signature at all (UPDATE_UNSIGNED "
+                                "otherwise); a manifest that does carry a "
+                                "signature is still verified, and the accepted "
+                                "manifest is as authentic as the channel that "
+                                "served it")
+    mcp_serve.add_argument("--update-allow-consent", action="append", default=[],
+                           choices=UPDATE_OPERATOR_CONSENTS, metavar="NAME",
+                           help="honour this consent flag from "
+                                "revl_update_apply, repeated for each: "
+                                + ", ".join(UPDATE_OPERATOR_CONSENTS) +
+                                ". Without a grant the caller passing the flag "
+                                "is refused (UPDATE_CONSENT_NOT_GRANTED); "
+                                "force needs none")
     mcp_serve.add_argument("--update-replacing", action="append", default=[],
                            metavar="COMPONENT",
                            help="a provider the release takes over, repeated "

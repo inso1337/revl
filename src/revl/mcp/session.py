@@ -2110,6 +2110,9 @@ class Session:
         (`_abort_swap`) so the running system keeps serving."""
         old_ir, new_map = plan.old_ir, plan.new_map
         pre, handoff_pre = plan.pre, plan.handoff_pre
+        # an aborted swap restores the generation that was running, so its
+        # update release (if any) comes back with it
+        prior_applied = self.applied_release
         saved_previous, saved_previous_origin = self.previous, self.previous_origin
         self.previous = self.ir
         self.previous_origin = self.origin
@@ -2166,6 +2169,7 @@ class Session:
             self._abort_swap(old_ir, pre, saved_previous, saved_previous_origin,
                              handoff_pre)
             self._record_generation()
+            self._set_last_applied_release(prior_applied)
             if not isinstance(exc, _activation_error()):
                 raise
             raise SessionError(
@@ -2822,6 +2826,10 @@ class Session:
         # operator retries it (item 372's activation health gate refuses a
         # rollback to a generation that no longer activates).
         restored, restored_origin = self.previous, self.previous_origin
+        # the restored generation runs whatever release it was updated to; the
+        # version gate travels with the generation, not with the journal
+        restored_release = (self._history[-2].get("appliedRelease")
+                            if len(self._history) >= 2 else None)
         # issue #2525: the restored generation is a candidate like any other.
         # An untrusted author (`profile`, None for an operator) may not use it
         # to move an admitted provider out of its realm; refused here, before
@@ -2855,6 +2863,7 @@ class Session:
                     outcome="refused" if isinstance(error, SessionError)
                     else "failed")
             raise
+        self._set_last_applied_release(restored_release)
         return result | {
             "rolledBack": True,
             "stateDropped": self._rollback_state_dropped(held, unread, withdrawn)}
@@ -3301,6 +3310,70 @@ class Session:
         if len(self._history) > HISTORY_LIMIT:
             del self._history[:-HISTORY_LIMIT]
 
+    def _set_last_applied_release(self, release: dict | None) -> None:
+        """Stamp (or clear) the update release the newest generation runs.
+
+        The release is part of the generation, not of the update journal: the
+        journal is a log, and a writer who can append to it must not be able to
+        move the version gate. The stamp lives on the history entry and in its
+        snapshot meta beside `approval`, so an undo or a restore carries it.
+        """
+        if not self._history:
+            return
+        entry = self._history[-1]
+        snapshot = entry.get("snapshot")
+        if release is None:
+            entry.pop("appliedRelease", None)
+            if snapshot is not None:
+                (snapshot.get("meta") or {}).pop("appliedRelease", None)
+            return
+        entry["appliedRelease"] = dict(release)
+        if snapshot is not None:
+            snapshot.setdefault("meta", {})["appliedRelease"] = dict(release)
+
+    def record_applied_release(self, release: dict | None) -> None:
+        """Record the update release the generation that just became live runs.
+
+        Called by the update apply after its swap passed the health check. A
+        generation a swap or restore admitted without an update carries no
+        release, so the version gate reads it as unknown rather than trusting a
+        journal a local writer can append to.
+        """
+        self._set_last_applied_release(release)
+
+    @property
+    def applied_release(self) -> dict | None:
+        """The release the running generation was updated to, or None."""
+        if not self._history:
+            return None
+        release = self._history[-1].get("appliedRelease")
+        return dict(release) if release else None
+
+    @property
+    def last_applied_release(self) -> dict | None:
+        """The newest release any retained generation was updated to."""
+        for entry in reversed(self._history):
+            release = entry.get("appliedRelease")
+            if release:
+                return dict(release)
+        return None
+
+    def forget_applied_release(self, plan_hash: str | None) -> None:
+        """Drop an applied release a rollback consumed from the history.
+
+        The generation it produced stays in the history (it ran), but it is no
+        longer the last applied release: a rollback consumes its apply, so the
+        version gate must not keep counting it.
+        """
+        for entry in self._history:
+            release = entry.get("appliedRelease")
+            if not release or release.get("planHash") != plan_hash:
+                continue
+            entry.pop("appliedRelease", None)
+            snapshot = entry.get("snapshot")
+            if snapshot is not None:
+                (snapshot.get("meta") or {}).pop("appliedRelease", None)
+
     def history_document(self) -> dict:
         """The retained history as a portable document: the generation numbers
         and their re-admittable snapshots. A consumer (the `revl undo` CLI)
@@ -3313,6 +3386,11 @@ class Session:
             "current": self._generation,
             "generations": [
                 {"generation": e["generation"], "snapshot": e["snapshot"],
+                 # item 65: the update release this generation runs, when it
+                 # was admitted by an update apply. Additive and
+                 # omit-by-default, so a history with no update is unchanged.
+                 **({"appliedRelease": e["appliedRelease"]}
+                    if e.get("appliedRelease") is not None else {}),
                  # item 473: the generation's own signed SLO receipt, present
                  # only when it ran under a declared contract and a signing key
                  # was configured. Additive and omit-by-default, so a history of
@@ -3508,6 +3586,8 @@ class Session:
             error.host_bodies = list(
                 origin.get(AUTHORED_HOST_BODIES_KEY) or [])
             raise
+        # undo restores a generation, so it restores that generation's release
+        self._set_last_applied_release(target.get("appliedRelease"))
         return {
             "undone": True,
             "toGeneration": target["generation"],
