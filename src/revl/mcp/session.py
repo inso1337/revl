@@ -21,6 +21,8 @@ import asyncio
 import copy
 import dataclasses
 import hashlib
+import io
+import pickle
 import sys
 import weakref
 from fnmatch import fnmatchcase
@@ -646,6 +648,105 @@ def _name_the_candidate(exc: BaseException, ir: dict) -> None:
         exc.candidate = ir
 
 
+#: How many rendered documents a session keeps (issue #3383): enough for undo
+#: and redo across a few generations and for a reverted edit, small enough that
+#: the table never grows with the session.
+RENDER_CACHE_SIZE = 4
+
+
+class _PlainPickler(pickle.Pickler):
+    """Pickles plain data and refuses everything else. `reducer_override` is
+    not called for exact dicts, lists, tuples, strings, numbers, booleans and
+    None, so any other object (a dict subclass, a custom instance, whose
+    pickle might not carry everything an emitter reads) raises here."""
+
+    def reducer_override(self, obj):
+        raise pickle.PicklingError(f"not plain data: {type(obj).__name__}")
+
+
+def _ir_bytes(ir: dict) -> bytes | None:
+    """`ir` as bytes that are equal only for documents the emitter cannot tell
+    apart, or None when there is no such spelling (then nothing is cached).
+
+    A pickle, not the canonical JSON: the JSON spelling sorts keys and folds a
+    tuple into a list, and the emitter reads both the order of a dict and the
+    type of a value. Equal pickles mean equal types, values, key order and
+    sharing, so an equal key can only name an equal document; two equal
+    documents built differently may still pickle apart, which costs a render,
+    never a wrong one."""
+    out = io.BytesIO()
+    try:
+        _PlainPickler(out, protocol=5).dump(ir)
+    except Exception:  # noqa: BLE001 - anything unpicklable is just not cached
+        return None
+    return out.getvalue()
+
+
+@dataclasses.dataclass(frozen=True)
+class _Rendered:
+    """A document rendered by the py emitter for a load or a swap: its source
+    text, the code object an earlier generation compiled from that text (None
+    until one has), and the render cache key it is kept under (None when the
+    document has no key, and then it is not kept)."""
+    source: str
+    code: object = None
+    key: tuple | None = None
+
+
+class _RenderCache:
+    """The rendered text and compiled code of the last `RENDER_CACHE_SIZE`
+    documents a session loaded or swapped in (issue #3383).
+
+    The key is everything the render and the compile read: the document (as
+    `_ir_bytes`), the emitter module and its `emit` function (held, compared by
+    identity, so a reloaded or replaced emitter misses). The compile reads only
+    the text, the file name (renamed on reuse, `run.renamed_code`) and the
+    process's own interpreter flags. Nothing about a generation is kept: each
+    one still gets its own module and namespace, and every gate still runs on
+    every swap.
+
+    A class of its own and not a dict, so `_LoadCheckpoint` leaves it as it is:
+    what it holds is right for its key whether or not the load that rendered it
+    went on to succeed."""
+
+    def __init__(self, size: int = RENDER_CACHE_SIZE) -> None:
+        self.size = size
+        self._entries: list[tuple[tuple, str, object]] = []
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    @staticmethod
+    def key(emitter, ir: dict) -> tuple | None:
+        document = _ir_bytes(ir)
+        if document is None:
+            return None
+        return (hashlib.sha256(document).digest(), emitter,
+                getattr(emitter, "emit", None))
+
+    def get(self, key: tuple | None) -> tuple[str, object] | None:
+        if key is None:
+            return None
+        for index, (held, source, code) in enumerate(self._entries):
+            if _same_key(held, key):
+                self._entries.append(self._entries.pop(index))
+                return source, code
+        return None
+
+    def put(self, key: tuple | None, source: str, code) -> None:
+        if key is None or code is None:
+            return
+        self._entries = [entry for entry in self._entries
+                         if not _same_key(entry[0], key)]
+        self._entries.append((key, source, code))
+        del self._entries[:-self.size]
+
+
+def _same_key(held: tuple, key: tuple) -> bool:
+    return (held[0] == key[0] and held[1] is key[1]
+            and held[2] is key[2])
+
+
 @dataclasses.dataclass(frozen=True)
 class _SwapPlan:
     """What `Session._plan_swap` settled before the teardown, for `_cut_over`:
@@ -654,7 +755,7 @@ class _SwapPlan:
     still live."""
     old_ir: dict
     new_map: dict
-    source: str
+    rendered: _Rendered
     pre: dict
     handoff_pre: dict
     pre_resolved: set
@@ -863,6 +964,9 @@ class Session:
     def __init__(self) -> None:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._driver = None
+        # issue #3383: the rendered text and compiled code of the last few
+        # documents loaded or swapped in, so a swap back onto one skips both
+        self._renders = _RenderCache()
         # item 457: the emitted module of the live generation (set at load), so a
         # caller can rebuild native ADT/Result case instances from the canonical
         # wire encoding. None until a composition is loaded.
@@ -1527,7 +1631,8 @@ class Session:
         self._install_session_owner(ir)
         booting = False
         try:
-            module = self._prepare_module(ir)
+            module = self._prepare_module(
+                ir, self._render_cached(self._driver, ir))
             # item 457: keep the emitted module so a caller that must rebuild
             # native ADT/Result case instances from the canonical wire encoding
             # (the HTTP face binding a typed `Request`) can reach the case
@@ -1889,7 +1994,7 @@ class Session:
             raise SessionError(str(error).split("\n")[0])
 
     def _emit_or_refuse(self, driver, ir: dict,
-                        source: str | None = None):
+                        source: str | None = None, code=None):
         """`driver._emit_module(ir)`, with the py tier's REFUSAL turned into a
         `SessionError` (issue #1406).
 
@@ -1907,9 +2012,12 @@ class Session:
         nothing wider. An emitter FAULT stays uncaught and still reaches the
         transport's generic handler, which is where a compiler bug belongs.
 
-        `source`, when given, is `ir` already rendered by `_render_or_refuse`.
+        `source`, when given, is `ir` already rendered by `_render_or_refuse`,
+        and `code`, when given, that text compiled by an earlier generation.
         """
         rendered = {} if source is None else {"source": source}
+        if code is not None:
+            rendered["code"] = code
         try:
             return driver._emit_module(ir, **rendered)
         except refusals(driver.emit) as refusal:
@@ -1929,19 +2037,39 @@ class Session:
         except refusals(driver.emit) as refusal:
             raise _emitter_refused(refusal) from refusal
 
-    def _prepare_module(self, ir: dict, source: str | None = None):
+    def _render_cached(self, driver, ir: dict) -> _Rendered:
+        """`ir` rendered, from the session's render cache when it holds this
+        document (issue #3383), else by `_render_or_refuse`. A hit also carries
+        the code object, so the generation that runs it skips the compile too.
+        Nothing here touches the running generation, so a swap still runs it
+        before the teardown."""
+        key = _RenderCache.key(driver.emit, ir)
+        held = self._renders.get(key)
+        if held is not None:
+            source, code = held
+            return _Rendered(source=source, code=code, key=key)
+        return _Rendered(source=self._render_or_refuse(driver, ir), key=key)
+
+    def _prepare_module(self, ir: dict, rendered: _Rendered | None = None):
         """Emit the module and, when recording, instrument it before load.
 
         Instrumentation has to happen between emit and `plugin`, because it
         replaces each component's `apply` — the fiber's context chain is fixed
         at plugin time and there is no way in afterwards.
 
-        `source` is `ir` already rendered, from a swap that rendered it before
-        teardown.
+        `rendered` is `ir` already rendered (`_render_cached`), from a load, or
+        from a swap that rendered it before teardown. Its text and the code
+        this generation compiled from it are then kept for the next load or
+        swap onto the same document.
         """
         driver = self._driver
-        module = (self._emit_or_refuse(driver, ir) if source is None
-                  else self._emit_or_refuse(driver, ir, source))
+        if rendered is None:
+            module = self._emit_or_refuse(driver, ir)
+        else:
+            module = self._emit_or_refuse(driver, ir, rendered.source,
+                                          rendered.code)
+            self._renders.put(rendered.key, rendered.source,
+                              getattr(driver, "emitted_code", None))
         if self.recorder is not None:
             filename, source = driver.emitted
             self.recorder.register_source(filename, source)
@@ -2060,7 +2188,9 @@ class Session:
         # cannot lower is refused with gen N untouched and serving. It used to be
         # raised from `_prepare_module` after `_dispose_all`, which left the
         # session pointing at the refused composition with nothing providing.
-        source = self._render_or_refuse(driver, ir)
+        # issue #3383: a document this session has already rendered (undo, redo,
+        # a reverted edit, a swap onto its own code) is not rendered again.
+        rendered = self._render_cached(driver, ir)
         # capture BEFORE teardown — while the old instances are still live and
         # their state still exists (Q2). Empty unless something spawned, so a
         # non-instance swap is byte-identical to before. `declared` captures
@@ -2098,7 +2228,8 @@ class Session:
         pre_pending = frozenset(
             name for name, fiber in driver.fibers.items()
             if driver.FiberState(fiber.state).name == "PENDING")
-        return _SwapPlan(old_ir=old_ir, new_map=new_map, source=source, pre=pre,
+        return _SwapPlan(old_ir=old_ir, new_map=new_map, rendered=rendered,
+                         pre=pre,
                          handoff_pre=handoff_pre, pre_resolved=pre_resolved,
                          agent_authored=(migrate == "declared" or agent_authored),
                          pre_pending=pre_pending, policy=migrate)
@@ -2143,7 +2274,7 @@ class Session:
         # aborted (it was made permanent — the swap-owner-scoping data-loss bug).
         self._install_session_owner(ir)
         try:
-            self._run(driver._load(ir, self._prepare_module(ir, plan.source)))
+            self._run(driver._load(ir, self._prepare_module(ir, plan.rendered)))
             # item 334 (EDGE 1): the POST-ACTIVATION HEALTH GATE. `driver._load`
             # returns WITHOUT raising for the two most likely candidate faults —
             # item 372 makes a mid-body FAILED activation "honest and observable"
@@ -2451,7 +2582,9 @@ class Session:
         # swap successor had). Cleared once the reload's frames are all built.
         self._install_session_owner(old_ir)
         try:
-            self._run(driver._load(old_ir, self._prepare_module(old_ir)))
+            rendered = self._render_cached(driver, old_ir)
+            self._run(driver._load(old_ir,
+                                   self._prepare_module(old_ir, rendered)))
         finally:
             driver.runtime.clear_session_owner()
         for name, info in pre.items():
