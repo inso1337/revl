@@ -171,6 +171,41 @@ def _snapshot(root) -> dict:
 _ACQUIRE_VERBS = {"new": "drop", "open": "close"}
 
 
+class _HostResources:
+    """The host resources acquired and not yet released, kept as each host
+    event is recorded (issue #3382): a `new`/`open` adds its handle, a
+    `drop`/`close` removes it. Only the handles still open are held, so a
+    long-lived session keeps what the teardown check reads, not one string
+    per host event of its life. Fed the same events in the same order, it
+    names exactly what `_unreleased_host_resources` names."""
+
+    def __init__(self) -> None:
+        self._live: dict = {}
+
+    def record(self, event: str) -> None:
+        head, _, rest = event.partition(" ")
+        tag, _, verb = head.rpartition(".")
+        if not tag:
+            return
+        if rest.startswith("refused"):
+            # `pool.open refused <url>`: the acquisition raised, so nothing
+            # was acquired and there is nothing to release (issue #1859)
+            return
+        if verb in _ACQUIRE_VERBS:
+            self._live[tag] = verb
+        elif verb in _ACQUIRE_VERBS.values():
+            self._live.pop(tag, None)
+
+    def __len__(self) -> int:
+        return len(self._live)
+
+    def unreleased(self) -> list:
+        return sorted(
+            "{} ({}() with no {}())".format(tag, verb, _ACQUIRE_VERBS[verb])
+            for tag, verb in self._live.items()
+        )
+
+
 def _unreleased_host_resources(events: list) -> list:
     """Host resources acquired inside the capture window and never released
     (R1): the same acquire/release pairing the lifecycle `assert no_residue`
@@ -183,24 +218,10 @@ def _unreleased_host_resources(events: list) -> list:
     in the host process. Only the trace sees the unpaired `new`. Without
     this, a fault test passes a component the lifecycle test condemns.
     """
-    live: dict = {}
+    resources = _HostResources()
     for event in events:
-        head, _, rest = event.partition(" ")
-        tag, _, verb = head.rpartition(".")
-        if not tag:
-            continue
-        if rest.startswith("refused"):
-            # `pool.open refused <url>`: the acquisition raised, so nothing
-            # was acquired and there is nothing to release (issue #1859)
-            continue
-        if verb in _ACQUIRE_VERBS:
-            live[tag] = verb
-        elif verb in _ACQUIRE_VERBS.values():
-            live.pop(tag, None)
-    return sorted(
-        "{} ({}() with no {}())".format(tag, verb, _ACQUIRE_VERBS[verb])
-        for tag, verb in live.items()
-    )
+        resources.record(event)
+    return resources.unreleased()
 
 
 async def _flush() -> None:

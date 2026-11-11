@@ -1146,6 +1146,67 @@ class _LivenessMonitor:
 # the runtime driver (py tier)
 # --------------------------------------------------------------------------
 
+# The most turns `_Driver._flush` gives the loop to settle what a step started.
+_FLUSH_TURNS = 20
+
+# How far ahead of the loop's clock a timer still keeps `_flush` turning, in
+# seconds: about what twenty idle turns took on an idle machine, so a timer
+# that the twenty turns let fire there is still waited for (issue #3379).
+# Under load the twenty turns took longer and let later timers fire too.
+_FLUSH_TIMER_HORIZON = 0.002
+
+# The loop attribute that counts the executor jobs it has in flight.
+_IN_FLIGHT = "_revl_executor_in_flight"
+
+
+def _track_executor_work(loop) -> None:
+    """Count the jobs `loop` hands to an executor until each one is done
+    (issue #3379), so `_flush` keeps turning while a thread is still working
+    for the loop. `asyncio.to_thread` and `loop.run_in_executor` both submit
+    through `loop.run_in_executor`, which this wraps on the loop itself.
+    Idempotent. A loop that does not take the wrapper is left as it is, and
+    `_loop_has_runnable` then reads it as always runnable."""
+    if getattr(loop, _IN_FLIGHT, None) is not None:
+        return
+    submit = loop.run_in_executor
+
+    def run_in_executor(executor, func, *args):
+        future = submit(executor, func, *args)
+        setattr(loop, _IN_FLIGHT, getattr(loop, _IN_FLIGHT) + 1)
+        future.add_done_callback(
+            lambda _: setattr(loop, _IN_FLIGHT, getattr(loop, _IN_FLIGHT) - 1))
+        return future
+
+    try:
+        loop.run_in_executor = run_in_executor
+        setattr(loop, _IN_FLIGHT, 0)
+    except (AttributeError, TypeError):
+        pass
+
+
+def _loop_has_runnable(loop) -> bool:
+    """True while one more turn of `loop` may still move work a step started
+    (issue #3379): a callback is ready to run, a job the loop handed to an
+    executor is not done, or a timer is due within `_FLUSH_TIMER_HORIZON`.
+
+    Reads the asyncio base loop's own ready queue and timer heap, and the
+    executor count `_track_executor_work` keeps. A loop that exposes none of
+    them is read as always runnable, so `_flush` keeps its full bound there."""
+    ready = getattr(loop, "_ready", None)
+    scheduled = getattr(loop, "_scheduled", None)
+    in_flight = getattr(loop, _IN_FLIGHT, None)
+    if ready is None or scheduled is None or in_flight is None:
+        return True
+    if ready or in_flight > 0:
+        return True
+    if not scheduled:
+        return False
+    horizon = loop.time() + _FLUSH_TIMER_HORIZON
+    if scheduled[0].when() > horizon:      # a heap: the earliest timer is first
+        return False
+    return any(not timer.cancelled() and timer.when() <= horizon
+               for timer in scheduled)
+
 
 class _Driver:
     """Boots and holds one composition on a cordis.Context, with a compact
@@ -1658,8 +1719,34 @@ class _Driver:
         return {name: len(cbs) for name, cbs in self.root.events._hooks.items() if cbs}
 
     async def _flush(self) -> None:
-        for _ in range(20):
+        """Let the work the last step started settle: up to `_FLUSH_TURNS`
+        turns of the loop, as many as a fiber's activation or disposal chain
+        takes to quiesce (each hop is an `ensure_future`, one turn).
+
+        Issue #3379: the turns stop as soon as nothing is left that one more
+        turn could move, so a call that started nothing pays one turn, not
+        twenty. The loop keeps turning, up to the same bound, while a callback
+        is ready (a task with a step to take), a job it handed to an executor
+        (`asyncio.to_thread`) is in flight, or a timer is due within
+        `_FLUSH_TIMER_HORIZON`.
+
+        Three kinds of work the twenty turns caught only when it happened to
+        arrive in time are no longer waited for once nothing else is pending:
+        I/O that completes then; a timer due later than the horizon (on a
+        loaded machine the twenty turns took long enough to let some fire);
+        and work a thread hands back without `loop.run_in_executor`
+        (`executor.submit` with `asyncio.wrap_future`, `call_soon_threadsafe`
+        or `run_coroutine_threadsafe` from a plain thread, or a
+        `run_in_executor` bound before `_track_executor_work` wrapped it).
+        Nothing this flush settles hands work back those ways today: the one
+        thread hand-back in src, the process runner's control reader, runs on
+        that runner's own loop, which does not use this flush."""
+        loop = asyncio.get_running_loop()
+        _track_executor_work(loop)
+        for _ in range(_FLUSH_TURNS):
             await asyncio.sleep(0)
+            if not _loop_has_runnable(loop):
+                return
 
     # -- emit + load -------------------------------------------------------
 
@@ -1885,6 +1972,9 @@ class _Driver:
         return record
 
     async def _load(self, ir: dict, module: types.ModuleType) -> None:
+        # issue #3379: count the loop's executor jobs from the first load, so
+        # `_flush` sees a thread job started by an activation
+        _track_executor_work(asyncio.get_running_loop())
         by_name = {c["name"]: c for c in _components(ir)}
         load_causes = why_runtime.load_causes(ir) if self.tracing else {}
         # Ambient host provisions are installed above (in `__init__`); their
