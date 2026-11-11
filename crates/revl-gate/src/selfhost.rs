@@ -35971,6 +35971,178 @@ fn adt_case_row(ts: Vec<Token>, i: i64, al: std::collections::HashMap<String, St
     return tenv_put(&acc, String::from("cases ").revl_concat(&nm), names);
 }
 
+fn tk_provided_cases(head: &str) -> String {
+    if (head == "Aggregate") {
+        return String::from("Agreed,Split,Inquorate");
+    }
+    if (head == "Answer") {
+        return String::from("Says,Abstains,Unreachable");
+    }
+    return String::from("");
+}
+
+fn tk_provided_ty(t: &str) -> bool {
+    let s = ty_trim(t);
+    if (s == "") {
+        return false;
+    }
+    let h = parse_head(s.clone());
+    let a = type_args(&s);
+    if (((h == "Aggregate") || (h == "Answer")) && (a.revl_length() > 0i64)) {
+        return true;
+    }
+    let mut i = 0i64;
+    while (i < a.revl_length()) {
+        if tk_provided_ty(&(a)[(i) as usize]) {
+            return true;
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return false;
+}
+
+fn tk_provided_params(ps: &[ParamN], al: std::collections::HashMap<String, String>) -> bool {
+    let mut i = 0i64;
+    while (i < ps.revl_length()) {
+        if tk_provided_ty(&alias_subst((ps)[(i) as usize].ty.clone(), al.clone())) {
+            return true;
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return false;
+}
+
+fn tk_provided_rows(rows: &[Bind]) -> bool {
+    let mut i = 0i64;
+    while (i < rows.revl_length()) {
+        if tk_provided_ty(&(rows)[(i) as usize].ty) {
+            return true;
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return false;
+}
+
+fn tk_provided_service(ts: Vec<Token>, i: i64, al: std::collections::HashMap<String, String>) -> bool {
+    let mut j = (i).checked_add(2i64).expect("revl: Int overflow");
+    if (!atk(&ts, j.clone(), "{")) {
+        return false;
+    }
+    let bend = close_brace(&ts, j.clone());
+    if (bend == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+        return false;
+    }
+    let mut k = (j).checked_add(1i64).expect("revl: Int overflow");
+    while (k < bend) {
+        if (atw(&ts, k.clone(), "fn") && atk(&ts, (k).checked_add(2i64).expect("revl: Int overflow"), "(")) {
+            let ps = params_at(ts.clone(), (k).checked_add(3i64).expect("revl: Int overflow"));
+            if ps.ok {
+                if tk_provided_params(&ps.ps, al.clone()) {
+                    return true;
+                }
+                let mut nx = ps.i;
+                if atk(&ts, nx, "arrow") {
+                    let tr = type_at(ts.clone(), (nx).checked_add(1i64).expect("revl: Int overflow"));
+                    if (tr.ok && tk_provided_ty(&alias_subst(tr.ty.clone(), al.clone()))) {
+                        return true;
+                    }
+                    nx = tr.i;
+                }
+                k = if (nx > k) { nx } else { (k).checked_add(1i64).expect("revl: Int overflow") };
+            } else {
+                k = (k).checked_add(1i64).expect("revl: Int overflow");
+            }
+        } else {
+            k = (k).checked_add(1i64).expect("revl: Int overflow");
+        }
+    }
+    return false;
+}
+
+fn tk_provided_mentioned(ts: Vec<Token>, al: std::collections::HashMap<String, String>) -> bool {
+    let mut i = 0i64;
+    while ((i < ts.revl_length()) && (!atk(&ts, i, "eof"))) {
+        let t = tkc(&ts, i);
+        if at_boot(&ts, i) {
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        } else {
+            if at_event(&ts, i) {
+                if tk_provided_rows(&event_field_binds(ts.clone(), i, vec![], al.clone())) {
+                    return true;
+                }
+                i = event_decl_end(&ts, i);
+            } else {
+                if at_qual_test(&ts, i) {
+                    let qe = qual_test_end(&ts, i);
+                    i = if (qe == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { skip_line(&ts, i) } else { qe };
+                } else {
+                    if (t.kind != "kw") {
+                        i = skip_line(&ts, i);
+                    } else {
+                        if at_pub_prefix(&ts, i) {
+                            i = (i).checked_add(1i64).expect("revl: Int overflow");
+                        } else {
+                            if (t.text == "use") {
+                                i = skip_line(&ts, i);
+                            } else {
+                                if (t.text == "type") {
+                                    let d = decl_cases(ts.clone(), i, CaseAcc { binds: vec![], amb: vec![] }, al.clone());
+                                    if tk_provided_rows(&d.a.binds) {
+                                        return true;
+                                    }
+                                    i = if (d.i > i) { d.i } else { (i).checked_add(1i64).expect("revl: Int overflow") };
+                                } else {
+                                    if (t.text == "test") {
+                                        let e = test_block_end(&ts, i);
+                                        i = if (e == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { skip_line(&ts, i) } else { e };
+                                    } else {
+                                        if (t.text == "extern") {
+                                            let h = ext_head(ts.clone(), i);
+                                            let nx = p_extern(ts.clone(), i, empty_prog()).i;
+                                            if (h.ok && (tk_provided_params(&h.ps, al.clone()) || tk_provided_ty(&alias_subst(h.ret.clone(), al.clone())))) {
+                                                return true;
+                                            }
+                                            i = if (nx > i) { nx } else { (i).checked_add(1i64).expect("revl: Int overflow") };
+                                        } else {
+                                            if (t.text == "service") {
+                                                if tk_provided_service(ts.clone(), i, al.clone()) {
+                                                    return true;
+                                                }
+                                                let nx = p_service(ts.clone(), i, empty_prog()).i;
+                                                i = if (nx > i) { nx } else { (i).checked_add(1i64).expect("revl: Int overflow") };
+                                            } else {
+                                                if (t.text == "component") {
+                                                    let nx = p_component(ts.clone(), i, empty_prog()).i;
+                                                    i = if (nx > i) { nx } else { (i).checked_add(1i64).expect("revl: Int overflow") };
+                                                } else {
+                                                    if (t.text == "fn") {
+                                                        let sp = fb_span(ts.clone(), i);
+                                                        if (!sp.ok) {
+                                                            i = skip_line(&ts, i);
+                                                        } else {
+                                                            if (tk_provided_params(&sp.ps, al.clone()) || tk_provided_ty(&alias_subst(sp.ret.clone(), al.clone()))) {
+                                                                return true;
+                                                            }
+                                                            i = if (sp.next > i) { sp.next } else { (i).checked_add(1i64).expect("revl: Int overflow") };
+                                                        }
+                                                    } else {
+                                                        i = skip_line(&ts, i);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
 fn case_binds(ts: Vec<Token>, al: std::collections::HashMap<String, String>) -> Vec<Bind> {
     let mut b = vec![];
     b.push(Bind { name: String::from("case Some"), ty: String::from("Opt[Any]") });
@@ -35981,7 +36153,16 @@ fn case_binds(ts: Vec<Token>, al: std::collections::HashMap<String, String>) -> 
     b.push(Bind { name: String::from("payload Ok"), ty: String::from("") });
     b.push(Bind { name: String::from("case Err"), ty: String::from("Result[Any, Any]") });
     b.push(Bind { name: String::from("payload Err"), ty: String::from("") });
-    return case_binds_walk(ts, 0i64, CaseAcc { binds: b, amb: vec![] }, al).binds;
+    let mut env = case_binds_walk(ts.clone(), 0i64, CaseAcc { binds: b.clone(), amb: vec![] }, al.clone()).binds;
+    if tk_provided_mentioned(ts.clone(), al.clone()) {
+        if (tenv_get(&env, "cases Aggregate") == "") {
+            env = tenv_put(&env, String::from("cases Aggregate"), tk_provided_cases("Aggregate"));
+        }
+        if (tenv_get(&env, "cases Answer") == "") {
+            env = tenv_put(&env, String::from("cases Answer"), tk_provided_cases("Answer"));
+        }
+    }
+    return env;
 }
 
 fn tagged_case_adt(env: &[Bind], name: &str) -> String {

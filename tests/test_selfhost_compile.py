@@ -2533,31 +2533,10 @@ GENERIC_VARIANT_LOUD_REFUSALS: dict[str, str] = {
 # them: silent verdict differences, recorded so they cannot read as agreement.
 # The `arm_binds_*` pair (issue #2402) is refused on payload typing (an arm
 # over `Mb[Int]` binds `Int`, so returning it as `Str` is a mismatch); both
-# were admitted by the reference too before the fix. `aggregate_missing_agreed`
-# is issue #2981: the reference refuses the program (a match over a provided
-# `Aggregate[Str]` that leaves out `Agreed`, PR #2934's
-# `test_aggregate_missing_agreed_is_refused`) while the self-host gate admits
-# it. Each entry fails in either direction, on the reference or on the gate.
-GENERIC_VARIANT_SILENT_ADMITS = ("aggregate_missing_agreed",
-                                 "arm_binds_second_parameter",
+# were admitted by the reference too before the fix. Each entry fails in either
+# direction, on the reference or on the gate.
+GENERIC_VARIANT_SILENT_ADMITS = ("arm_binds_second_parameter",
                                  "arm_binds_substituted_payload")
-
-# The reference's program for a difference the docs table does not carry:
-# tests/test_generic_variant_construction.py spells the exhaustiveness case
-# inline in `test_aggregate_missing_agreed_is_refused` rather than in
-# `REFUSED`, so its source and message are recorded here beside the registry.
-GENERIC_VARIANT_INLINE_REFUSED = {
-    "aggregate_missing_agreed": (
-        """fn settle(a: Aggregate[Str]) -> Str {
-  return match a {
-    Split(d) => "no",
-    Inquorate(d) => "no",
-  }
-}
-""",
-        "non-exhaustive match: missing case `Agreed`",
-    ),
-}
 
 
 def _generic_variant_docs():
@@ -2567,10 +2546,7 @@ def _generic_variant_docs():
 
 
 def _generic_variant_silent_admit_doc(name):
-    docs = _generic_variant_docs()
-    if name in docs.REFUSED:
-        return docs.REFUSED[name]
-    return GENERIC_VARIANT_INLINE_REFUSED[name]
+    return _generic_variant_docs().REFUSED[name]
 
 
 @pytest.mark.parametrize("name", sorted(GENERIC_VARIANT_LOUD_REFUSALS))
@@ -2589,8 +2565,8 @@ def test_generic_variant_program_is_refused_loudly_by_the_native_chain(
 
 @pytest.mark.parametrize("name", GENERIC_VARIANT_SILENT_ADMITS)
 def test_generic_variant_difference_is_a_known_silent_admit(compile_to, name):
-    """Issues #2402 and #2981: the reference refuses it, the native chain still
-    emits. Fails the day the native chain refuses too, so the entry is removed."""
+    """Issue #2402: the reference refuses it, the native chain still emits.
+    Fails the day the native chain refuses too, so the entry is removed."""
     source, message = _generic_variant_silent_admit_doc(name)
     with pytest.raises(RevlError) as refused:
         compile_source(source)
@@ -2600,6 +2576,43 @@ def test_generic_variant_difference_is_a_known_silent_admit(compile_to, name):
         f"{name}: the native chain now refuses ({got[:160]!r}); if that is "
         f"the reference's message, DELETE the entry from "
         f"GENERIC_VARIANT_SILENT_ADMITS.")
+
+
+# Issue #3107: two fn spellings the reference parser admits and the gate's
+# parser refuses before any later stage runs, so a gate test cannot be written
+# in either form (the #2981 regression cases above use the long `{ ... }` body
+# for that reason). These are fail-closed differences: the gate refuses a
+# program the reference admits. Each is pinned to the exact refusal so the day
+# the gate parser admits the spelling, the pin fails and is DELETED, and the
+# #2981 cases can be added in that spelling too.
+GATE_PARSER_REFUSALS_ISSUE_3107: dict[str, tuple[str, str]] = {
+    "shorthand_fn_body": ("fn inc(x: Int) -> Int = x + 1\n",
+                          "BAD|expected { after fn signature"),
+    "verified_fn": ("verified fn inc(x: Int) -> Int {\n  return x + 1\n}\n",
+                    "BAD|unexpected declaration"),
+}
+
+
+def _assert_gate_parser_refusal_issue_3107(admit, name):
+    source, expected = GATE_PARSER_REFUSALS_ISSUE_3107[name]
+    compile_source(source)  # the reference admits it
+    got = admit(source)
+    assert got == expected, (
+        f"{name}: pinned as the gate parser's refusal {expected!r} (issue "
+        f"#3107), now {got!r}. If the gate admits this spelling, DELETE the "
+        f"pin and add the #2981 cases in this spelling.")
+
+
+def test_shorthand_fn_body_is_a_known_gate_parser_refusal(admit):
+    """Issue #3107: the reference admits `fn f(...) -> T = expr` and the gate's
+    parser refuses it fail-closed. Fails the day #3107 lands."""
+    _assert_gate_parser_refusal_issue_3107(admit, "shorthand_fn_body")
+
+
+def test_verified_fn_is_a_known_gate_parser_refusal(admit):
+    """Issue #3107: the reference admits a `verified fn` declaration and the
+    gate's parser refuses it fail-closed. Fails the day #3107 lands."""
+    _assert_gate_parser_refusal_issue_3107(admit, "verified_fn")
 
 
 # The four checking positions a transparent type alias has to be erased at, plus
