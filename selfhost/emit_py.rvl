@@ -1186,6 +1186,12 @@ fn expr_inner(node: Any) -> Str {
   }
   if (kind == "field") {
     if (value_bool(value_field(node, "sized_length"))) { return `len(${expr(value_field(node, "target"))})` }
+    // issue #3407: a receiver this document built is a dict (`dr_stamp`).
+    if (value_bool(value_field(node, "__direct__"))) {
+      let got = expr(value_field(node, "target"))
+      if (value_bool(value_field(node, "opt"))) { return `${got}.get(${py_repr(value_field(node, "name"))})` }
+      return `${got}[${py_repr(value_field(node, "name"))}]`
+    }
     // A bare-variable target reads twice with no re-eval, so it needs no
     // `_fv :=` temp (item 436 F4: drop the measured `inline field _fv :=`).
     let atom = node_kind(value_field(node, "target")) == "var"
@@ -1531,8 +1537,313 @@ fn emit_memo_wrapper(name: Str, params: List[Any], is_async: Bool) -> List[Str] 
 }
 
 // `_emit_functions`: each module fn as a Python `def`, blank-line separated.
+// ------------------------------------------------- direct field reads (#3407)
+// The port of the reference's `_dict_receivers`: per fn, the local names a
+// field read may read DIRECTLY (`f['x']`, no `isinstance` dispatch), because
+// every value the name can hold was built by a record literal in this
+// document. The rules, and why each one holds, are on the reference
+// (backends/python/emit.py); this port decides the same facts up front and
+// `emit_functions` stamps each qualifying field node `__direct__`.
+type DrScan = { ok: Bool, lets: List[Any] }
+type DrCall = { ctx: Int, callee: Str, args: Any }
+type DrParam = { fn_name: Str, at: Int }
+type DrCtx = {
+  fn_name: Str, params: List[Any], pnames: List[Str],
+  cands: List[Str], cvals: List[List[Any]], plain: List[Str]
+}
+
+// `_dict_reads_occurrences`: is every spelling of `name` under `node` a `var`
+// read or a `field` label? A `let` / plain `assign` of it is collected instead.
+fn dr_scan(node: Any, name: Str) -> DrScan {
+  var lets: List[Any] = []
+  if (value_is_list(node)) {
+    for (v of value_list(node)) {
+      if (value_kind(v) == "str" && value_str(v) == name) { return { ok: false, lets: [] } }
+      let sub = dr_scan(v, name)
+      if (!sub.ok) { return sub }
+      lets = lets.concat(sub.lets)
+    }
+    return { ok: true, lets: lets }
+  }
+  if (!value_is_object(node)) { return { ok: true, lets: lets } }
+  let keys = value_keys(node)
+  for (k of keys) {
+    if (k == name) { return { ok: false, lets: [] } }
+    let v = value_field(node, k)
+    if (value_kind(v) == "str" && value_str(v) == name) {
+      let nk = node_kind(node)
+      let st = value_str(value_field(node, "step"))
+      if (k == "name" && (nk == "var" || nk == "field")) { continue }
+      if (k == "name" && (st == "let" || st == "assign") && list_contains(keys, "value") && !list_contains(keys, "op")) {
+        lets = lets.push(node)
+        continue
+      }
+      return { ok: false, lets: [] }
+    }
+    let sub = dr_scan(v, name)
+    if (!sub.ok) { return sub }
+    lets = lets.concat(sub.lets)
+  }
+  return { ok: true, lets: lets }
+}
+
+// Every object under `node` whose `step` is `step`.
+fn dr_steps(node: Any, step: Str) -> List[Any] {
+  var found: List[Any] = []
+  if (value_is_object(node) && value_str(value_field(node, "step")) == step) { found = found.push(node) }
+  for (child of value_children(node)) { found = found.concat(dr_steps(child, step)) }
+  return found
+}
+
+// Every direct call under `node` of a fn in `fns`: a `call` whose callee is a
+// bare two-key `var` node.
+fn dr_calls(node: Any, fns: Map[Str, Any], ctx: Int) -> List[DrCall] {
+  var found: List[DrCall] = []
+  if (value_is_object(node) && node_kind(node) == "call") {
+    let c = value_field(node, "callee")
+    let n = value_str(value_field(c, "name"))
+    if (node_kind(c) == "var" && value_keys(c).length() == 2 && fns.has(n)) {
+      found = found.push({ ctx: ctx, callee: n, args: value_field(node, "args") })
+    }
+  }
+  for (child of value_children(node)) { found = found.concat(dr_calls(child, fns, ctx)) }
+  return found
+}
+
+// How often each name already in `counts` is spelled anywhere (key or value).
+fn dr_count(node: Any, counts: Map[Str, Any]) -> Map[Str, Any] {
+  var out = counts
+  if (value_is_object(node)) {
+    for (k of value_keys(node)) {
+      if (out.has(k)) { out = out.set(k, value_int(value_field(out, k)) + 1) }
+      out = dr_count(value_field(node, k), out)
+    }
+    return out
+  }
+  if (value_is_list(node)) {
+    for (v of value_list(node)) { out = dr_count(v, out) }
+    return out
+  }
+  if (value_kind(node) == "str" && out.has(value_str(node))) {
+    out = out.set(value_str(node), value_int(value_field(out, value_str(node))) + 1)
+  }
+  return out
+}
+
+fn dr_has(params_ok: List[DrParam], fn_name: Str, at: Int) -> Bool {
+  for (p of params_ok) { if (p.fn_name == fn_name && p.at == at) { return true } }
+  return false
+}
+
+fn dr_fn_index(functions: List[Any], name: Str) -> Int {
+  var i = 0
+  for (f of functions) {
+    if (value_str(value_field(f, "name")) == name) { return i }
+    i += 1
+  }
+  return 0
+}
+
+fn dr_is_param(params: List[Any], name: Str) -> Bool {
+  for (p of params) { if (value_str(value_field(p, "name")) == name) { return true } }
+  return false
+}
+
+// `builds`: does evaluating `node` give a dict this document built?
+fn dr_builds(node: Any, plain: List[Str], local: List[Str], rets: List[Str]) -> Bool {
+  let k = node_kind(node)
+  if (k == "record" || k == "record_update") { return true }
+  if (k == "var") { return list_contains(local, value_str(value_field(node, "name"))) }
+  if (k == "call") {
+    let c = value_field(node, "callee")
+    if (node_kind(c) != "var" || value_keys(c).length() != 2) { return false }
+    let n = value_str(value_field(c, "name"))
+    return list_contains(rets, n) && list_contains(plain, n)
+  }
+  return false
+}
+
+fn dr_all_build(values: List[Any], cx: DrCtx, local: List[Str], rets: List[Str]) -> Bool {
+  for (v of values) { if (!dr_builds(v, cx.plain, local, rets)) { return false } }
+  return true
+}
+
+// `locals_of`: the qualifying names of one body under the current assumptions.
+fn dr_locals(cx: DrCtx, params_ok: List[DrParam], rets: List[Str]) -> List[Str] {
+  var local: List[Str] = []
+  var i = 0
+  for (p of cx.params) {
+    let pn = value_str(value_field(p, "name"))
+    if (cx.fn_name != "" && dr_has(params_ok, cx.fn_name, i) && list_contains(cx.pnames, pn)) { local = local.push(pn) }
+    i += 1
+  }
+  local = local.concat(cx.cands)
+  var changed = true
+  while (changed) {
+    changed = false
+    var j = 0
+    for (name of cx.cands) {
+      if (list_contains(local, name) && !dr_all_build(cx.cvals[j], cx, local, rets)) {
+        var kept: List[Str] = []
+        for (n of local) { if (n != name) { kept = kept.push(n) } }
+        local = kept
+        changed = true
+      }
+      j += 1
+    }
+  }
+  return local
+}
+
+fn dr_context(fn_name: Str, params: List[Any], body: Any, calls: List[DrCall]) -> DrCtx {
+  var pnames: List[Str] = []
+  for (p of params) {
+    let pn = value_str(value_field(p, "name"))
+    let sc = dr_scan(body, pn)
+    if (sc.ok && sc.lets.length() == 0) { pnames = pnames.push(pn) }
+  }
+  var cands: List[Str] = []
+  var cvals: List[List[Any]] = []
+  for (s of dr_steps(body, "let")) {
+    let n = value_field(s, "name")
+    if (value_kind(n) != "str" || list_contains(cands, value_str(n)) || dr_is_param(params, value_str(n))) { continue }
+    let sc = dr_scan(body, value_str(n))
+    var lets = 0
+    var vals: List[Any] = []
+    for (b of sc.lets) {
+      if (value_str(value_field(b, "step")) == "let") { lets += 1 }
+      vals = vals.push(value_field(b, "value"))
+    }
+    if (sc.ok && lets == 1) {
+      cands = cands.push(value_str(n))
+      cvals = cvals.push(vals)
+    }
+  }
+  var plain: List[Str] = []
+  for (c of calls) {
+    if (list_contains(plain, c.callee) || dr_is_param(params, c.callee)) { continue }
+    let sc = dr_scan(body, c.callee)
+    if (sc.ok && sc.lets.length() == 0) { plain = plain.push(c.callee) }
+  }
+  return { fn_name: fn_name, params: params, pnames: pnames, cands: cands, cvals: cvals, plain: plain }
+}
+
+fn dict_receivers(ir: Any) -> Map[Str, Any] {
+  var result: Map[Str, Any] = Map.empty()
+  let types = value_field(ir, "types")
+  var functions: List[Any] = []
+  for (f of value_list(value_field(ir, "functions"))) {
+    if (value_is_object(f) && value_kind(value_field(f, "name")) == "str") { functions = functions.push(f) }
+  }
+  var by_name: Map[Str, Any] = Map.empty()
+  var counts: Map[Str, Any] = Map.empty()
+  for (f of functions) {
+    by_name = by_name.set(value_str(value_field(f, "name")), f)
+    counts = counts.set(value_str(value_field(f, "name")), 0)
+  }
+  if (by_name.size() != functions.length()) { return result }
+  counts = dr_count(ir, counts)
+  let tests = value_list(value_field(ir, "tests"))
+  for (t of tests) {
+    let tn = value_str(value_field(t, "name"))
+    if (value_is_object(t) && counts.has(tn)) { counts = counts.set(tn, value_int(value_field(counts, tn)) - 1) }
+  }
+  var calls: List[DrCall] = []
+  var bodies: List[Any] = []
+  for (f of functions) { bodies = bodies.push(value_field(f, "body")) }
+  for (t of tests) { if (value_is_object(t)) { bodies = bodies.push(value_field(t, "body")) } }
+  var ci = 0
+  for (b of bodies) {
+    calls = calls.concat(dr_calls(b, by_name, ci))
+    ci += 1
+  }
+  var ctxs: List[DrCtx] = []
+  ci = 0
+  for (b of bodies) {
+    var own: List[DrCall] = []
+    for (c of calls) { if (c.ctx == ci) { own = own.push(c) } }
+    let is_fn = ci < functions.length()
+    let fname = is_fn ? value_str(value_field(functions[ci], "name")) : ""
+    let params = is_fn ? value_list(value_field(functions[ci], "params")) : []
+    ctxs = ctxs.push(dr_context(fname, params, b, own))
+    ci += 1
+  }
+  var params_ok: List[DrParam] = []
+  var rets: List[Str] = []
+  for (f of functions) {
+    let name = value_str(value_field(f, "name"))
+    var n = 0
+    for (c of calls) { if (c.callee == name) { n += 1 } }
+    if (!value_bool(value_field(f, "public")) && n > 0 && value_int(value_field(counts, name)) == 1 + n) {
+      var i = 0
+      for (p of value_list(value_field(f, "params"))) {
+        let spec = value_field(types, value_str(value_field(p, "type")))
+        if (value_is_object(spec) && value_str(value_field(spec, "kind")) == "record") { params_ok = params_ok.push({ fn_name: name, at: i }) }
+        i += 1
+      }
+    }
+    let returns = dr_steps(value_field(f, "body"), "return")
+    var all_expr = returns.length() > 0
+    for (r of returns) { if (!list_contains(value_keys(r), "expr")) { all_expr = false } }
+    if (!value_bool(value_field(f, "async")) && !is_cache_pure_fn(f) && all_expr) { rets = rets.push(name) }
+  }
+  var locals: List[List[Str]] = []
+  var stable = false
+  while (!stable) {
+    locals = []
+    for (cx of ctxs) { locals = locals.push(dr_locals(cx, params_ok, rets)) }
+    var kept_params: List[DrParam] = []
+    for (key of params_ok) {
+      var ok = true
+      let nparams = value_list(value_field(functions[dr_fn_index(functions, key.fn_name)], "params")).length()
+      for (c of calls) {
+        if (c.callee != key.fn_name) { continue }
+        let args = value_list(c.args)
+        if (!value_is_list(c.args) || args.length() != nparams || !dr_builds(args[key.at], ctxs[c.ctx].plain, locals[c.ctx], rets)) { ok = false }
+      }
+      if (ok) { kept_params = kept_params.push(key) }
+    }
+    var kept_rets: List[Str] = []
+    for (name of rets) {
+      let fidx = dr_fn_index(functions, name)
+      var ok = true
+      for (r of dr_steps(value_field(functions[fidx], "body"), "return")) {
+        if (!dr_builds(value_field(r, "expr"), ctxs[fidx].plain, locals[fidx], rets)) { ok = false }
+      }
+      if (ok) { kept_rets = kept_rets.push(name) }
+    }
+    stable = kept_params.length() == params_ok.length() && kept_rets.length() == rets.length()
+    params_ok = kept_params
+    rets = kept_rets
+  }
+  var k = 0
+  for (f of functions) {
+    if (locals[k].length() > 0) { result = result.set(value_str(value_field(f, "name")), locals[k]) }
+    k += 1
+  }
+  return result
+}
+
+// `dr_stamp`: mark each field read whose receiver is a qualifying name.
+fn dr_stamp(node: Any, names: List[Str]) -> Any {
+  if (value_is_list(node)) {
+    var items: List[Any] = []
+    for (item of value_list(node)) { items = items.push(dr_stamp(item, names)) }
+    return items
+  }
+  if (!value_is_object(node)) { return node }
+  var fields: Map[Str, Any] = Map.empty()
+  for (key of value_keys(node)) { fields = fields.set(key, dr_stamp(value_field(node, key), names)) }
+  let t = value_field(node, "target")
+  if (node_kind(node) == "field" && node_kind(t) == "var" && list_contains(names, value_str(value_field(t, "name")))) {
+    fields = fields.set("__direct__", true)
+  }
+  return fields
+}
+
 fn emit_functions(source_functions: List[Any], ir: Any) -> List[Str] {
   var out = []
+  let direct = dict_receivers(ir)
   // one destructure counter for the whole functions section
   let functions = value_list(number_patterns(source_functions, 0).node)
   for (fnode of functions) {
@@ -1549,7 +1860,10 @@ fn emit_functions(source_functions: List[Any], ir: Any) -> List[Str] {
     for (p of value_list(value_field(fnode, "params"))) {
       if (is_async_fn_type(value_str(value_field(p, "type")))) { locals = locals.push(value_str(value_field(p, "name"))) }
     }
-    let body = value_list(colour(value_field(fnode, "body"), doc_colour(ir, None, locals, false), is_async, false))
+    var dnames: List[Str] = []
+    for (d of value_list(value_field(direct, value_str(value_field(fnode, "name"))))) { dnames = dnames.push(value_str(d)) }
+    let stamped = dnames.length() > 0 ? dr_stamp(value_field(fnode, "body"), dnames) : value_field(fnode, "body")
+    let body = value_list(colour(stamped, doc_colour(ir, None, locals, false), is_async, false))
     out = out.push(`${is_async ? "async def" : "def"} ${body_name}(${params}):`)
     out = out.concat(fn_block(body, 1))
     out = out.push("")

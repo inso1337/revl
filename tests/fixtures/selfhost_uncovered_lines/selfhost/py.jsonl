@@ -132,6 +132,18 @@
 
 ["function", "owned-map-set-computed-key-order-inplace-stmts", "inplace_stmts", 1, 1]
 
+["reason", "partially-exercised-the-corpus-does-call-this-function", "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs."]
+
+["function", "partially-exercised-the-corpus-does-call-this-function", "dict_receivers", 2, null]
+
+["function", "partially-exercised-the-corpus-does-call-this-function", "dr_context", 1, null]
+
+["function", "partially-exercised-the-corpus-does-call-this-function", "dr_fn_index", 1, null]
+
+["function", "partially-exercised-the-corpus-does-call-this-function", "dr_is_param", 1, null]
+
+["function", "partially-exercised-the-corpus-does-call-this-function", "dr_scan", 1, null]
+
 ["reason", "reference-bootstrap-inlining-artifacts-not-dead-helpers-ind", "Reference bootstrap inlining artifacts, not dead helpers: ind is folded into line and checked_quotient into checked_div_block when this .rvl compiles to Python. Their declared def bodies remain but no caller invokes them. arithmetic corpus covers the folded checked division/remainder preambles; generated helper scaffolding is excluded from the denominator, these declared functions are deliberately retained."]
 
 ["function", "reference-bootstrap-inlining-artifacts-not-dead-helpers-ind", "checked_quotient", 7, 7]

@@ -1,0 +1,51 @@
+// Issue #3407: a field read whose receiver this document built reads the dict
+// directly. `move` is reached only from record literals (the loop in `run`,
+// the recursion in `walk`, the test), so its parameter qualifies; `step`
+// hands it a host value, so `drift` (same body, other callers) keeps the
+// `isinstance` dispatch, and so does a read through a shadowing arrow.
+type Fly = { x: Float, y: Float, k: Float }
+type Got = Hit(Fly) | Miss
+
+fn move(f: Fly, tx: Float, dt: Float) -> Fly {
+  let dx = tx - f.x
+  return { x: f.x + dx * dt, y: f.y, k: f.k }
+}
+
+fn drift(f: Fly, tx: Float) -> Fly {
+  return { x: f.x + tx, y: f.y, k: f.k }
+}
+
+fn walk(f: Fly, n: Int) -> Fly {
+  if (n == 0) { return f }
+  return walk(move(f, 1.0, 0.5), n - 1)
+}
+
+pub fn run(n: Int, tx: Float) -> Float {
+  var f = { x: 1.0, y: 2.0, k: 3.0 }
+  var i = 0
+  while (i < n) {
+    f = move(f, tx, 0.5)
+    i += 1
+  }
+  let g = { f | k = 0.0 }
+  return walk(g, 2).x + g.y
+}
+
+pub fn step(h: Fly, g: Got) -> Float {
+  let f = { x: 1.0, y: 2.0, k: 3.0 }
+  let pick = (f: Fly) => f.x
+  let a = match g { Hit(p) => drift(p, 1.0).x, Miss => 0.0 }
+  return drift(h, 1.0).x + pick(h) + f.y + a
+}
+
+test "move" {
+  assert move({ x: 0.0, y: 0.0, k: 1.0 }, 2.0, 0.5).x == 1.0
+}
+
+// An `Opt` field on a built record reads TOTAL and direct: `t.get('label')`.
+type Tag = { n: Int, label: Opt[Str] }
+
+pub fn tag() -> Str {
+  let t = { n: 1, label: Some("a") }
+  return t.label ?? "none"
+}
