@@ -1407,6 +1407,8 @@
    "tests/fixtures/emit_py_refusals/ceiling_wrapper_shapes.rvl",
    "tests/fixtures/emit_py_refusals/host_identifier_collision.rvl",
    "tests/fixtures/emit_py_refusals/pub_fn_temp_name.rvl",
+   "tests/fixtures/emit_rust_corpus/checked_arith.rvl",
+   "tests/fixtures/emit_rust_corpus/checked_arith_read.rvl",
    "tests/fixtures/emit_rust_corpus/comp_opt_restore_undo_local.rvl",
    "tests/fixtures/emit_rust_corpus/comp_provide_generic.rvl",
    "tests/fixtures/emit_rust_corpus/comp_provide_generic_add.rvl",
