@@ -1447,8 +1447,7 @@ def _dict_receivers(ir: dict) -> dict:
                 params_ok.add((f["name"], i))
     returns_ok = {f["name"] for f in functions
                   if not f.get("async") and not _is_cache_pure(f)
-                  and returns[f["name"]]
-                  and all("expr" in r for r in returns[f["name"]])}
+                  and returns[f["name"]]}
     params_of = {key: params for key, params, _body in contexts}
     spellings: dict = {}
     for key, _params, body in contexts:

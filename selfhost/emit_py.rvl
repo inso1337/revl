@@ -1546,7 +1546,7 @@ fn emit_memo_wrapper(name: Str, params: List[Any], is_async: Bool) -> List[Str] 
 // `emit_functions` stamps each qualifying field node `__direct__`.
 type DrScan = { ok: Bool, lets: List[Any] }
 type DrCall = { ctx: Int, callee: Str, args: Any }
-type DrParam = { fn_name: Str, at: Int }
+type DrParam = { fn_name: Str, at: Int, nparams: Int }
 type DrCtx = {
   fn_name: Str, params: List[Any], pnames: List[Str],
   cands: List[Str], cvals: List[List[Any]], plain: List[Str]
@@ -1635,15 +1635,6 @@ fn dr_has(params_ok: List[DrParam], fn_name: Str, at: Int) -> Bool {
   return false
 }
 
-fn dr_fn_index(functions: List[Any], name: Str) -> Int {
-  var i = 0
-  for (f of functions) {
-    if (value_str(value_field(f, "name")) == name) { return i }
-    i += 1
-  }
-  return 0
-}
-
 fn dr_is_param(params: List[Any], name: Str) -> Bool {
   for (p of params) { if (value_str(value_field(p, "name")) == name) { return true } }
   return false
@@ -1704,9 +1695,9 @@ fn dr_context(fn_name: Str, params: List[Any], body: Any, calls: List[DrCall]) -
   }
   var cands: List[Str] = []
   var cvals: List[List[Any]] = []
+  // a name a second `let` binds is never a candidate, so no name repeats here
   for (s of dr_steps(body, "let")) {
     let n = value_field(s, "name")
-    if (value_kind(n) != "str" || list_contains(cands, value_str(n)) || dr_is_param(params, value_str(n))) { continue }
     let sc = dr_scan(body, value_str(n))
     var lets = 0
     var vals: List[Any] = []
@@ -1714,7 +1705,7 @@ fn dr_context(fn_name: Str, params: List[Any], body: Any, calls: List[DrCall]) -
       if (value_str(value_field(b, "step")) == "let") { lets += 1 }
       vals = vals.push(value_field(b, "value"))
     }
-    if (sc.ok && lets == 1) {
+    if (sc.ok && lets == 1 && value_kind(n) == "str" && !dr_is_param(params, value_str(n))) {
       cands = cands.push(value_str(n))
       cvals = cvals.push(vals)
     }
@@ -1778,14 +1769,13 @@ fn dict_receivers(ir: Any) -> Map[Str, Any] {
       var i = 0
       for (p of value_list(value_field(f, "params"))) {
         let spec = value_field(types, value_str(value_field(p, "type")))
-        if (value_is_object(spec) && value_str(value_field(spec, "kind")) == "record") { params_ok = params_ok.push({ fn_name: name, at: i }) }
+        if (value_is_object(spec) && value_str(value_field(spec, "kind")) == "record") { params_ok = params_ok.push({ fn_name: name, at: i, nparams: value_list(value_field(f, "params")).length() }) }
         i += 1
       }
     }
+    // a return with no `expr` builds nothing, which `dr_builds` already says
     let returns = dr_steps(value_field(f, "body"), "return")
-    var all_expr = returns.length() > 0
-    for (r of returns) { if (!list_contains(value_keys(r), "expr")) { all_expr = false } }
-    if (!value_bool(value_field(f, "async")) && !is_cache_pure_fn(f) && all_expr) { rets = rets.push(name) }
+    if (!value_bool(value_field(f, "async")) && !is_cache_pure_fn(f) && returns.length() > 0) { rets = rets.push(name) }
   }
   var locals: List[List[Str]] = []
   var stable = false
@@ -1795,22 +1785,25 @@ fn dict_receivers(ir: Any) -> Map[Str, Any] {
     var kept_params: List[DrParam] = []
     for (key of params_ok) {
       var ok = true
-      let nparams = value_list(value_field(functions[dr_fn_index(functions, key.fn_name)], "params")).length()
       for (c of calls) {
         if (c.callee != key.fn_name) { continue }
         let args = value_list(c.args)
-        if (!value_is_list(c.args) || args.length() != nparams || !dr_builds(args[key.at], ctxs[c.ctx].plain, locals[c.ctx], rets)) { ok = false }
+        if (!value_is_list(c.args) || args.length() != key.nparams || !dr_builds(args[key.at], ctxs[c.ctx].plain, locals[c.ctx], rets)) { ok = false }
       }
       if (ok) { kept_params = kept_params.push(key) }
     }
     var kept_rets: List[Str] = []
-    for (name of rets) {
-      let fidx = dr_fn_index(functions, name)
-      var ok = true
-      for (r of dr_steps(value_field(functions[fidx], "body"), "return")) {
-        if (!dr_builds(value_field(r, "expr"), ctxs[fidx].plain, locals[fidx], rets)) { ok = false }
+    var fidx = 0
+    for (f of functions) {
+      let name = value_str(value_field(f, "name"))
+      if (list_contains(rets, name)) {
+        var ok = true
+        for (r of dr_steps(value_field(f, "body"), "return")) {
+          if (!dr_builds(value_field(r, "expr"), ctxs[fidx].plain, locals[fidx], rets)) { ok = false }
+        }
+        if (ok) { kept_rets = kept_rets.push(name) }
       }
-      if (ok) { kept_rets = kept_rets.push(name) }
+      fidx += 1
     }
     stable = kept_params.length() == params_ok.length() && kept_rets.length() == rets.length()
     params_ok = kept_params

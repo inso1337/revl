@@ -49,3 +49,30 @@ pub fn tag() -> Str {
   let t = { n: 1, label: Some("a") }
   return t.label ?? "none"
 }
+
+// A fn called twice in one body; a name spelled as an IR key (`value`), which
+// the analysis cannot tell from the node's own key, so it keeps the dispatch;
+// and a name two sibling `let`s bind, which keeps it too.
+pub fn twice(b: Bool) -> Float {
+  let value = { x: 1.0, y: 2.0, k: 3.0 }
+  let a = move(move({ x: 0.0, y: 0.0, k: 0.0 }, 2.0, 0.5), 2.0, 0.5)
+  if (b) {
+    let t = { x: 1.0, y: 1.0, k: 1.0 }
+    return t.x + a.x
+  }
+  let t = { x: 2.0, y: 1.0, k: 1.0 }
+  return t.x + value.x + a.y
+}
+
+// A match bind that reuses a built `let`'s spelling: the bind is whatever the
+// payload is, so both reads of `q` keep the dispatch.
+pub fn rebind(g: Got) -> Float {
+  let q = { x: 1.0, y: 2.0, k: 3.0 }
+  return match g { Hit(q) => q.x, Miss => q.y }
+}
+
+// A bare `return` is a return with no value: the fn builds no record.
+pub fn early(n: Int) {
+  if (n > 0) { return }
+  return
+}
