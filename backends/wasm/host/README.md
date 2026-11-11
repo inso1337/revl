@@ -20,6 +20,9 @@ carries the part of the cordis-wasm seam a browser page needs:
   it publishes nothing, `error(name)` says why, and only its own `load`
   rejects. One that activates later, while another component's load or a
   `provideHost` call drives the host, fails without rejecting that call;
+* only a FUNCTION export named `provide:<key>.<op>` is a provision: a memory
+  or global exported under such a name is not published and does not count
+  in a conflict;
 * scalar values cross as native WebAssembly values, so a `Float` is an `f64`
   (a JavaScript `number`) with no marshalling. An `Int` is a wasm `i64`, which
   the JS API represents as a `BigInt`, and `Bool`/`Int32` as `number`/`i32`.

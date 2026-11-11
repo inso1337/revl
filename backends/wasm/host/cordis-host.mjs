@@ -39,7 +39,10 @@ export class CordisHost {
     return this;
   }
 
-  /** The state of a loaded component: absent | gated | active | failed. */
+  /**
+   * The state of a component: absent | loading (compiling) | gated |
+   * activating | active | failed.
+   */
   state(name) {
     return this.#components.get(name)?.state ?? "absent";
   }
@@ -65,43 +68,40 @@ export class CordisHost {
     if (this.#components.has(name)) {
       throw new Error(`component ${JSON.stringify(name)} is already loaded`);
     }
-    const module = await compile(source);
-    const imports = WebAssembly.Module.imports(module);
-    for (const imp of imports) {
-      if (imp.kind !== "function") {
-        throw new Error(`${name}: unsupported import kind ${imp.kind} from ${imp.module}`);
-      }
-      if (imp.module.startsWith(COEFFECT_PREFIX)) continue;
-      if (imp.module === "host") {
-        throw new Error(
-          `${name}: host import ${JSON.stringify(imp.name)} is not carried by the ` +
-          "browser host (the async inertia layer and the route/spawn host ops need " +
-          "the cordis-wasm runtime)");
-      }
-      throw new Error(
-        `${name}: unsupported import namespace ${JSON.stringify(imp.module)}; the ` +
-        "browser host carries coeffect imports only");
-    }
+    // The name is reserved BEFORE the await, so a second concurrent load of
+    // the same name is refused instead of replacing this one.
     const record = {
       name,
-      module,
-      imports,
-      state: "gated",
+      module: null,
+      imports: [],
+      state: "loading",
       missing: [],
       instance: null,
       exports: null,
       error: null,
     };
     this.#components.set(name, record);
+    try {
+      record.module = await compile(source);
+      record.imports = checkedImports(name, record.module);
+    } catch (error) {
+      if (this.#components.get(name) === record) this.#components.delete(name);
+      throw error;
+    }
+    if (this.#components.get(name) !== record) {
+      throw new Error(`component ${JSON.stringify(name)} was unloaded while it was loading`);
+    }
+    record.state = "gated";
     // Only THIS component's failure rejects this load; a failure the pump
     // meets in another component is recorded on that component instead.
-    this.#tryInstantiate(record);
+    this.#attempt(record);
     this.#pump();
     return record;
   }
 
   /** Call an export on an ACTIVE component, e.g. `provide:motion.step`. */
   call(componentName, exportName, ...args) {
+
     const record = this.#components.get(componentName);
     if (!record) throw new Error(`component ${JSON.stringify(componentName)} is not loaded`);
     if (record.state !== "active") {
@@ -167,18 +167,10 @@ export class CordisHost {
     // A provision conflict is decided from the module's export list, before
     // anything is instantiated, so a conflicting component never runs its
     // activation (or its coeffect calls) and has nothing to undo.
-    const provisions = [];
-    for (const exp of WebAssembly.Module.exports(record.module)) {
-      if (exp.kind !== "function" || !exp.name.startsWith(PROVIDE_PREFIX)) continue;
-      const opKey = exp.name.slice(PROVIDE_PREFIX.length);
-      const existing = this.#providers.get(opKey);
-      if (existing) {
-        this.#fail(record, new Error(
-          `${record.name}: provision conflict on ${opKey}: ` +
-          `${existing.component} already provides it`));
-      }
-      provisions.push([opKey, exp.name]);
-    }
+    const provisions = this.#provisions(record);
+    // `activating` is skipped by #pump, so a host op that re-enters the host
+    // (provideHost, load) while this component activates cannot retry it.
+    record.state = "activating";
     let instance;
     try {
       instance = new WebAssembly.Instance(record.module, imports);
@@ -203,6 +195,13 @@ export class CordisHost {
         }
       }
     }
+    // a host op may have unloaded this component while it activated
+    if (record.state !== "activating" || this.#components.get(record.name) !== record) {
+      return false;
+    }
+    // Checked again: a nested pump during activation may have published one
+    // of these ops for another component.
+    this.#provisions(record, { undo: true });
     record.state = "active";
     record.missing = [];
     for (const [opKey, exportName] of provisions) {
@@ -213,25 +212,66 @@ export class CordisHost {
   }
 
   /**
-   * Mark `record` failed and throw `error`. With `undo`, the partly activated
-   * instance runs `deactivate` first; a trap there is logged and does not
-   * replace the original error. The instance is released either way, so a
-   * failed component holds no live instance and is never retried.
+   * The component's provisions as [opKey, exportName], read from the module's
+   * export list, failing the component on a conflict. Only FUNCTION exports
+   * named `provide:<key>.<op>` count: a memory or global under that name is
+   * neither published nor a conflict. Checked before instantiation, so a
+   * conflicting component never runs its activation or its coeffect calls.
+   */
+  #provisions(record, { undo = false } = {}) {
+    const provisions = [];
+    for (const exp of WebAssembly.Module.exports(record.module)) {
+      if (exp.kind !== "function" || !exp.name.startsWith(PROVIDE_PREFIX)) continue;
+      const opKey = exp.name.slice(PROVIDE_PREFIX.length);
+      const existing = this.#providers.get(opKey);
+      if (existing && existing.component !== record.name) {
+        this.#fail(record, new Error(
+          `${record.name}: provision conflict on ${opKey}: ` +
+          `${existing.component} already provides it`), { undo });
+      }
+      provisions.push([opKey, exp.name]);
+    }
+    return provisions;
+  }
+
+  /** Try to instantiate; whatever throws, the record ends up failed. */
+  #attempt(record) {
+    try {
+      return this.#tryInstantiate(record);
+    } catch (error) {
+      if (record.state !== "failed") {
+        try {
+          this.#fail(record, error, { undo: true });
+        } catch {
+          // #fail rethrows the same error, thrown below
+        }
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Mark `record` failed and throw `error`. The bookkeeping comes first, so
+   * nothing after it can leave the record half failed. With `undo`, a partly
+   * activated instance then runs `deactivate`; whatever that throws (even a
+   * non-Error) is logged and does not replace the original error. A failed
+   * component holds no live instance and is never retried.
    */
   #fail(record, error, { undo = false } = {}) {
-    if (undo && typeof record.exports?.deactivate === "function") {
-      try {
-        record.exports.deactivate();
-      } catch (undoError) {
-        this.#log(`${record.name}: deactivate after a failed activation threw: ${undoError.message}`);
-      }
-    }
+    const exports = record.exports;
     record.state = "failed";
     record.missing = [];
     record.instance = null;
     record.exports = null;
-    record.error = error instanceof Error ? error.message : String(error);
+    record.error = describe(error);
     this.#log(`failed ${record.name}: ${record.error}`);
+    if (undo && typeof exports?.deactivate === "function") {
+      try {
+        exports.deactivate();
+      } catch (undoError) {
+        this.#log(`${record.name}: deactivate after a failed activation threw: ${describe(undoError)}`);
+      }
+    }
     throw error;
   }
 
@@ -251,14 +291,41 @@ export class CordisHost {
       for (const record of this.#components.values()) {
         if (record.state !== "gated") continue;
         try {
-          if (this.#tryInstantiate(record)) changed = true;
+          if (this.#attempt(record)) changed = true;
         } catch {
-          // recorded on the record by #fail; it is that component's failure,
-          // not the caller's, so the pump goes on with the others
+          // #attempt has failed the record and recorded why; it is that
+          // component's failure, not the caller's, so the pump goes on
+          changed = true;
         }
       }
     }
   }
+}
+
+/** An error's message, for any thrown value (a host op may throw null). */
+function describe(error) {
+  return error instanceof Error ? error.message : String(error?.message ?? error);
+}
+
+/** The module's imports, refused by name unless every one is a coeffect function. */
+function checkedImports(name, module) {
+  const imports = WebAssembly.Module.imports(module);
+  for (const imp of imports) {
+    if (imp.kind !== "function") {
+      throw new Error(`${name}: unsupported import kind ${imp.kind} from ${imp.module}`);
+    }
+    if (imp.module.startsWith(COEFFECT_PREFIX)) continue;
+    if (imp.module === "host") {
+      throw new Error(
+        `${name}: host import ${JSON.stringify(imp.name)} is not carried by the ` +
+        "browser host (the async inertia layer and the route/spawn host ops need " +
+        "the cordis-wasm runtime)");
+    }
+    throw new Error(
+      `${name}: unsupported import namespace ${JSON.stringify(imp.module)}; the ` +
+      "browser host carries coeffect imports only");
+  }
+  return imports;
 }
 
 async function compile(source) {

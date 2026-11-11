@@ -46,23 +46,26 @@ console.log("browser host: ok");
 // returns a constant, calls a function index, or runs `raw` opcodes
 // (`[0x00]` is `unreachable`, a trap).
 
-function wasmModule({ imports = [], funcs = [] }) {
+function wasmModule({ imports = [], funcs = [], start = null }) {
   const text = (s) => [s.length, ...new TextEncoder().encode(s)];
   const section = (id, items) => {
     const body = [items.length, ...items.flat()];
     return [id, body.length, ...body];
   };
-  const code = funcs.map((f) => {
+  const code = [...funcs, ...(start ? [start] : [])].map((f) => {
     const ops = f.raw ?? ("call" in f ? [0x10, f.call] : [0x41, f.value]);
     const body = [0x00, ...ops, 0x0b];
     return [body.length, ...body];
   });
+  // type 0 is () -> i32 for every listed function; type 1 is () -> () for
+  // the optional start function, which runs while the instance is created
   return new Uint8Array([
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
-    ...section(1, [[0x60, 0x00, 0x01, 0x7f]]),
+    ...section(1, [[0x60, 0x00, 0x01, 0x7f], [0x60, 0x00, 0x00]]),
     ...section(2, imports.map(([mod, name]) => [...text(mod), ...text(name), 0x00, 0x00])),
-    ...section(3, funcs.map(() => [0x00])),
+    ...section(3, [...funcs.map(() => [0x00]), ...(start ? [[0x01]] : [])]),
     ...section(7, funcs.map((f, i) => [...text(f.export), 0x00, imports.length + i])),
+    ...(start ? [0x08, 0x01, imports.length + funcs.length] : []),
     ...section(10, code),
   ]);
 }
@@ -217,6 +220,113 @@ function wasmModule({ imports = [], funcs = [] }) {
   edge.provideHost("clock", { frame_dt: () => clock.frame_dt() });
   assert.equal(edge.state("C"), "active");
   assert.equal(edge.call("C", "p"), 7);
+}
+
+// A host op that calls provideHost while X is activating must not re-enter
+// X: the nested pump activates Y (which provides m.b too), so X then fails
+// on the conflict instead of going active with no exports over Y's provider.
+{
+  const edge = new CordisHost();
+  let once = false;
+  await edge.load("Y", wasmModule({
+    imports: [["coeffect:z", "w"]],
+    funcs: [{ export: "p", call: 0 }, { export: "provide:m.b", value: 2 }],
+  }));
+  edge.provideHost("k", { go: () => {
+    if (!once) { once = true; edge.provideHost("z", { w: () => 0 }); }
+    return 0;
+  } });
+  await assert.rejects(
+    edge.load("X", wasmModule({
+      imports: [["coeffect:k", "go"]],
+      funcs: [
+        { export: "activate_step", raw: [0x10, 0x00, 0x1a, 0x41, 0x00] },
+        { export: "provide:m.b", value: 1 },
+      ],
+    })),
+    /provision conflict on m\.b: Y already provides it/);
+  assert.equal(edge.state("Y"), "active");
+  assert.equal(edge.state("X"), "failed");
+  await edge.load("U", wasmModule({
+    imports: [["coeffect:m", "b"]],
+    funcs: [{ export: "p", call: 0 }],
+  }));
+  assert.equal(edge.call("U", "p"), 2, "m.b is still Y's provision");
+}
+
+// A deactivate whose host op throws a non-Error (null) while undoing a failed
+// activation: the original trap is what the load rejects with, and the
+// component is failed rather than left gated with a live instance.
+{
+  const edge = new CordisHost();
+  edge.provideHost("k", { go: () => { throw null; } });
+  await assert.rejects(
+    edge.load("T", wasmModule({
+      imports: [["coeffect:k", "go"]],
+      funcs: [
+        { export: "activate_step", raw: [0x00] },
+        { export: "deactivate", call: 0 },
+      ],
+    })),
+    /unreachable/);
+  assert.equal(edge.state("T"), "failed");
+  assert.match(edge.error("T"), /unreachable/);
+}
+
+// An error that does not come from the component itself (here an ops object
+// whose own getter throws) still fails that component, with its reason
+// recorded, instead of leaving it gated with nothing said.
+{
+  const edge = new CordisHost();
+  await edge.load("G", wasmModule({
+    imports: [["coeffect:k", "go"]],
+    funcs: [{ export: "p", call: 0 }],
+  }));
+  edge.provideHost("k", { get go() { throw new Error("getter boom"); } });
+  assert.equal(edge.state("G"), "failed");
+  assert.match(edge.error("G"), /getter boom/);
+}
+
+// Two concurrent loads of one name: the name is reserved before the module
+// is compiled, so the second rejects instead of replacing the first.
+{
+  const edge = new CordisHost();
+  let undone = 0;
+  edge.provideHost("k", { go: () => { undone++; return 0; } });
+  const module = () => wasmModule({
+    imports: [["coeffect:k", "go"]],
+    funcs: [{ export: "provide:m.b", value: 1 }, { export: "deactivate", call: 0 }],
+  });
+  const [first, second] = await Promise.allSettled(
+    [edge.load("A", module()), edge.load("A", module())]);
+  assert.equal(first.status, "fulfilled");
+  assert.equal(second.status, "rejected");
+  assert.match(second.reason.message, /already loaded/);
+  assert.equal(edge.state("A"), "active");
+  assert.equal(edge.unload("A"), true);
+  assert.equal(undone, 1, "unload deactivates the one instance that exists");
+}
+
+// A trap in the module's start function, which runs while the instance is
+// being created, takes the same failure path: failed, reason recorded, and
+// an unrelated later load is not rejected by it.
+{
+  const edge = new CordisHost();
+  await assert.rejects(
+    edge.load("S", wasmModule({
+      funcs: [{ export: "provide:m.s", value: 1 }],
+      start: { raw: [0x00] },
+    })),
+    /unreachable/);
+  assert.equal(edge.state("S"), "failed");
+  assert.match(edge.error("S"), /unreachable/);
+  await edge.load("Z", wasmModule({ funcs: [{ export: "p", value: 0 }] }));
+  assert.equal(edge.state("Z"), "active");
+  await edge.load("U", wasmModule({
+    imports: [["coeffect:m", "s"]],
+    funcs: [{ export: "p", call: 0 }],
+  }));
+  assert.equal(edge.state("U"), "gated", "a failed instance publishes no provision");
 }
 
 console.log("browser host edge cases: ok");

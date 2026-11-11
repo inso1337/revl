@@ -414,6 +414,9 @@ instead of only on the Python cordis-wasm runtime:
   compiled but no instance is created. Supplying the op activates it;
 - `activate_step()` drives activation, `deactivate()` runs the compiled
   inverses on unload, and provisions are published only after activation;
+- a component that cannot activate (a provision conflict, a trap, the step
+  limit) is `failed`: it publishes nothing, `host.error(name)` says why, and
+  only its own `load` rejects;
 - scalars cross as native wasm values, so `Float` is an `f64` and arrives in
   JavaScript as a `number`. No linear-memory marshalling is needed for the
   scalar boundary.
