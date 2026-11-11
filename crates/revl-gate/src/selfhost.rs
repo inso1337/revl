@@ -11072,6 +11072,49 @@ fn fn_params_i(ts: &[Token], i: i64) -> i64 {
     return (j).checked_add(1i64).expect("revl: Int overflow");
 }
 
+fn spec_outside_fn_msg(where__: &str) -> String {
+    return String::from("a spec (`ensures`) is only supported on a top-level `fn`, not on ").revl_concat(&where__);
+}
+
+fn spec_sig_in(ts: Vec<Token>, lo: i64, hi: i64) -> bool {
+    let mut k = lo;
+    while (k < hi) {
+        if (atw(&ts, k, "fn") && atk(&ts, (k).checked_add(2i64).expect("revl: Int overflow"), "(")) {
+            let cp = close_paren(&ts, (k).checked_add(2i64).expect("revl: Int overflow"));
+            if ((cp != (0i64).checked_sub(1i64).expect("revl: Int overflow")) && ati(&ts, ret_at(ts.clone(), cp), "ensures")) {
+                return true;
+            }
+        }
+        k = (k).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return false;
+}
+
+fn spec_in_provides(ts: Vec<Token>, lo: i64, hi: i64) -> bool {
+    let mut k = lo;
+    while (k < hi) {
+        if atw(&ts, k, "provide") {
+            let mut b = (k).checked_add(1i64).expect("revl: Int overflow");
+            while ((b < hi) && (!atk(&ts, b.clone(), "{"))) {
+                b = (b).checked_add(1i64).expect("revl: Int overflow");
+            }
+            let e = close_brace(&ts, b.clone());
+            if ((e != (0i64).checked_sub(1i64).expect("revl: Int overflow")) && spec_sig_in(ts.clone(), b.clone(), e)) {
+                return true;
+            }
+        }
+        k = (k).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return false;
+}
+
+fn ext_classified_at(ts: &[Token], i: i64) -> bool {
+    let c = tkc(ts, (i).checked_add(1i64).expect("revl: Int overflow"));
+    let named = (((((c.text == "pure") || (c.text == "acquire")) || (c.text == "emission")) || (c.text == "witnessed")) || (c.text == "local"));
+    let shaped = (((c.kind == "kw") || at_word(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "witnessed")) || at_word(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "local"));
+    return (named && shaped);
+}
+
 fn p_extern(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
     let mut j = (i).checked_add(1i64).expect("revl: Int overflow");
     let mut isAcq = false;
@@ -11124,6 +11167,9 @@ fn p_extern(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
     let nm = tkc(&ts, (j).checked_add(1i64).expect("revl: Int overflow")).text;
     let ps = params_at(ts.clone(), (j).checked_add(3i64).expect("revl: Int overflow"));
     let mut k = ret_at(ts.clone(), ps.i);
+    if (ati(&ts, k, "ensures") && ext_classified_at(&ts, i)) {
+        return PStep { pg: bad_prog(pg, spec_outside_fn_msg("an extern")), i: skip_line(&ts, k) };
+    }
     let inv = if isAcq { declared_inverse_at(&ts, k) } else { String::from("") };
     while ((((((((k < ts.revl_length()) && (!atw(&ts, k, "service"))) && (!atw(&ts, k, "component"))) && (!atw(&ts, k, "extern"))) && (!atw(&ts, k, "fn"))) && (!atw(&ts, k, "pub"))) && (!atw(&ts, k, "type"))) && (!atk(&ts, k, "eof"))) {
         if atk(&ts, k, "{") {
@@ -11171,10 +11217,21 @@ fn inverse_slots(ts: &[Token], i: i64, depth: i64, acc: String, fresh: bool) -> 
     return inverse_slots(ts, (i).checked_add(1i64).expect("revl: Int overflow"), ((depth).checked_add(up).expect("revl: Int overflow")).checked_sub(down).expect("revl: Int overflow"), acc, false);
 }
 
+fn fn_spec_unsupported() -> String {
+    return String::from("a function spec (`ensures`) is not supported by the self-host compiler");
+}
+
+fn bad_verdict(msg: &str) -> String {
+    return tagged(&(if (msg == fn_spec_unsupported()) { String::from("UNSUPPORTED") } else { String::from("BAD") }), msg);
+}
+
 fn p_fn(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
     let nm = tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text;
     let ps = fn_params_at(ts.clone(), fn_params_i(&ts, i));
     let mut rti = ret_at(ts.clone(), ps.i);
+    if ati(&ts, rti, "ensures") {
+        return mk_step(bad_prog(pg, fn_spec_unsupported()), rti);
+    }
     let cachePure = (ati(&ts, rti, "cache") && atw(&ts, (rti).checked_add(1i64).expect("revl: Int overflow"), "pure"));
     if cachePure {
         rti = (rti).checked_add(2i64).expect("revl: Int overflow");
@@ -11423,7 +11480,8 @@ fn p_service(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
     }
     let ms = p_methods(ts.clone(), (i).checked_add(3i64).expect("revl: Int overflow"), (end).checked_sub(1i64).expect("revl: Int overflow"), vec![]);
     if (!ms.ok) {
-        return PStep { pg: bad_prog(pg, String::from("bad method signature in service ").revl_concat(&nm)), i: end };
+        let why = if spec_sig_in(ts.clone(), (i).checked_add(3i64).expect("revl: Int overflow"), (end).checked_sub(1i64).expect("revl: Int overflow")) { spec_outside_fn_msg("a service operation") } else { String::from("bad method signature in service ").revl_concat(&nm) };
+        return PStep { pg: bad_prog(pg, why), i: end };
     }
     return PStep { pg: push_svc(pg, SvcD { name: nm, methods: ms.xs.clone() }), i: end };
 }
@@ -11885,7 +11943,8 @@ fn p_component(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
     }
     let body = p_comp_body(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"), (end).checked_sub(1i64).expect("revl: Int overflow"), &provh, &reqs, &nm, vec![], vec![], vec![], vec![], &(vec![]), no_hoff(), false);
     if (!body.ok) {
-        return PStep { pg: bad_prog(pg, String::from("bad provide block in component ").revl_concat(&nm)), i: end };
+        let why = if spec_in_provides(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"), (end).checked_sub(1i64).expect("revl: Int overflow")) { spec_outside_fn_msg("a provided method") } else { String::from("bad provide block in component ").revl_concat(&nm) };
+        return PStep { pg: bad_prog(pg, why), i: end };
     }
     let pkeys = sort_strs(&bind_names(&provh, 0i64, vec![]));
     let mut pks: Vec<ProvKey> = vec![];
@@ -28898,10 +28957,7 @@ fn stmt_parse_scan(ts: Vec<Token>) -> Verd {
             return mk_verd(tagged("BAD", "dynamic realm labels are not supported — a realm is a static string literal"), ln);
         }
         if atw(&ts, i, "extern") {
-            let c = tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow"));
-            let named = (((((c.text == "pure") || (c.text == "acquire")) || (c.text == "emission")) || (c.text == "witnessed")) || (c.text == "local"));
-            let shaped = (((c.kind == "kw") || at_word(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "witnessed")) || at_word(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "local"));
-            if ((!named) || (!shaped)) {
+            if (!ext_classified_at(&ts, i)) {
                 return mk_verd(tagged("G8", &ext_unclassified_msg()), ln);
             }
             let ui = sp_ui_teardown(&ts, i);
@@ -28929,7 +28985,7 @@ pub fn parse_refusal(src: String) -> String {
     }
     let pg = parse_prog_ts(ts.clone());
     if (pg.bad != "") {
-        return tagged("BAD", &pg.bad);
+        return bad_verdict(&pg.bad);
     }
     let pps = first_parse_verd(verified_parse_scan(&ts), effect_no_undo_scan(&ts));
     if (pps.v != "") {
@@ -29080,7 +29136,7 @@ pub fn admit_src(src: String) -> String {
     }
     let pg = parse_prog_ts(ts.clone());
     if (pg.bad != "") {
-        return tagged("BAD", &pg.bad);
+        return bad_verdict(&pg.bad);
     }
     let pps = first_parse_verd(verified_parse_scan(&ts), effect_no_undo_scan(&ts));
     if (pps.v != "") {
@@ -29124,7 +29180,7 @@ pub fn admit_all(src: String) -> String {
     }
     let pg = parse_prog_ts(ts.clone());
     if (pg.bad != "") {
-        return fmt_all(&(vec![mk_verd(tagged("BAD", &pg.bad), 0i64)]));
+        return fmt_all(&(vec![mk_verd(bad_verdict(&pg.bad), 0i64)]));
     }
     let pps = first_parse_verd(verified_parse_scan(&ts), effect_no_undo_scan(&ts));
     if (pps.v != "") {
@@ -29602,7 +29658,7 @@ pub fn admit_ambient(src: String, manifest: String) -> String {
     }
     let pg = parse_prog_ts(ts.clone());
     if (pg.bad != "") {
-        return tagged("BAD", &pg.bad);
+        return bad_verdict(&pg.bad);
     }
     let pps = first_parse_verd(verified_parse_scan(&ts), effect_no_undo_scan(&ts));
     if (pps.v != "") {

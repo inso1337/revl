@@ -2567,11 +2567,19 @@ def prop_units(ir: dict) -> list:
     """
     units: list = []
     for unit in ir.get("prop_tests") or []:
-        units.append({
+        entry = {
             "name": unit.get("name"),
             "params": [dict(p) for p in unit.get("params") or []],
             "body": unit.get("body") or [],
-        })
+        }
+        # issue #2705: a unit generated from a fn's `ensures` clause carries
+        # the function it belongs to and the clause's display spelling, so the
+        # runner's report and the audit can attribute the result
+        # (docs/function-specs.md).
+        if unit.get("spec_of"):
+            entry["spec_of"] = unit["spec_of"]
+            entry["spec"] = unit.get("spec")
+        units.append(entry)
     return units
 
 

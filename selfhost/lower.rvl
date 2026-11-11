@@ -2690,6 +2690,53 @@ fn fn_params_i(ts: List[Token], i: Int) -> Int {
 // operation's compare in the same namespace. Only the FIRST bracket is the
 // scope — the reference refuses a second one at parse, and a type-parameter
 // bracket sits after `fn <name>`, never here.
+// The reference's parse refusal for `ensures` after a signature that is not a
+// top-level `fn` (issue #2705, `parser.py::_spec_outside_fn`), byte for byte.
+fn spec_outside_fn_msg(where_: Str) -> Str {
+  return "a spec (`ensures`) is only supported on a top-level `fn`, not on "
+    .concat(where_)
+}
+
+// Whether a method signature in `lo..hi` writes `ensures` after its return
+// type: a `fn NAME (` head whose `-> T` slot is followed by the clause.
+fn spec_sig_in(ts: List[Token], lo: Int, hi: Int) -> Bool {
+  var k = lo
+  while (k < hi) {
+    if (atw(ts, k, "fn") && atk(ts, k + 2, "(")) {
+      let cp = close_paren(ts, k + 2)
+      if (cp != 0 - 1 && ati(ts, ret_at(ts, cp), "ensures")) { return true }
+    }
+    k += 1
+  }
+  return false
+}
+
+// The same, over the `provide` blocks of a component body in `lo..hi`.
+fn spec_in_provides(ts: List[Token], lo: Int, hi: Int) -> Bool {
+  var k = lo
+  while (k < hi) {
+    if (atw(ts, k, "provide")) {
+      var b = k + 1
+      while (b < hi && !atk(ts, b, "{")) { b += 1 }
+      let e = close_brace(ts, b)
+      if (e != 0 - 1 && spec_sig_in(ts, b, e)) { return true }
+    }
+    k += 1
+  }
+  return false
+}
+
+// Whether the extern at `i` names its class right after `extern`, the shape the
+// reference's parser requires before it reads anything else (the G8 rule
+// `stmt_parse_scan` applies).
+fn ext_classified_at(ts: List[Token], i: Int) -> Bool {
+  let c = tkc(ts, i + 1)
+  let named = (c.text == "pure") || (c.text == "acquire") || (c.text == "emission")
+    || (c.text == "witnessed") || (c.text == "local")
+  let shaped = (c.kind == "kw") || at_word(ts, i + 1, "witnessed") || at_word(ts, i + 1, "local")
+  return named && shaped
+}
+
 fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
   var j = i + 1
   var isAcq = false
@@ -2733,6 +2780,16 @@ fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
   let nm = tkc(ts, j + 1).text
   let ps = params_at(ts, j + 3)
   var k = ret_at(ts, ps.i)
+  // issue #2705: a spec is checked as a generated `prop test` that calls the
+  // fn, which an extern cannot be; the reference refuses the clause at parse
+  // (`parser.py::_spec_outside_fn`), in these words. The host-body skip below
+  // would otherwise step over it and admit the extern silently. The reference
+  // reads the classification first, so an UNCLASSIFIED extern is left to the
+  // G8 refusal `stmt_parse_scan` reports, exactly as without the clause.
+  if (ati(ts, k, "ensures") && ext_classified_at(ts, i)) {
+    return { pg: bad_prog(pg, spec_outside_fn_msg("an extern")),
+             i: skip_line(ts, k) }
+  }
   let inv = isAcq ? declared_inverse_at(ts, k) : ""
   // skip any `= @host { ... }` bodies without letting a brace end the decl early.
   //
@@ -2793,10 +2850,29 @@ fn inverse_slots(ts: List[Token], i: Int, depth: Int, acc: Str, fresh: Bool) -> 
   return inverse_slots(ts, i + 1, depth + up - down, acc, false)
 }
 
+// The named refusal for a `fn` that states a spec (issue #2705). Every
+// verdict entry reports it under the UNSUPPORTED tag, the family of the other constructs
+// the reference admits and this compiler does not mirror.
+fn fn_spec_unsupported() -> Str {
+  return "a function spec (`ensures`) is not supported by the self-host compiler"
+}
+
+// A parse-stage refusal as a verdict: BAD, except the named spec refusal.
+fn bad_verdict(msg: Str) -> Str {
+  return tagged(msg == fn_spec_unsupported() ? "UNSUPPORTED" : "BAD", msg)
+}
+
 fn p_fn(ts: List[Token], i: Int, pg: Prog) -> PStep {
   let nm = tkc(ts, i + 1).text
   let ps = fn_params_at(ts, fn_params_i(ts, i))
   var rti = ret_at(ts, ps.i)
+  // issue #2705: the `ensures` clause the reference accepts here is lowered
+  // to a generated `prop test`, a section this producer does not emit. It is
+  // refused BY NAME rather than read as a missing `{`, so the gap is a named
+  // refusal and never a misleading parse error or a silently dropped fn.
+  if (ati(ts, rti, "ensures")) {
+    return mk_step(bad_prog(pg, fn_spec_unsupported()), rti)
+  }
   let cachePure = ati(ts, rti, "cache") && atw(ts, rti + 1, "pure")
   if (cachePure) { rti += 2 }
   if (!atk(ts, rti, "{")) {
@@ -3110,8 +3186,10 @@ fn p_service(ts: List[Token], i: Int, pg: Prog) -> PStep {
   }
   let ms = p_methods(ts, i + 3, end - 1, [])
   if (!ms.ok) {
-    return { pg: bad_prog(pg, "bad method signature in service ".concat(nm)),
-             i: end }
+    // issue #2705: the reference names a spec on an operation
+    let why = spec_sig_in(ts, i + 3, end - 1) ? spec_outside_fn_msg("a service operation")
+      : "bad method signature in service ".concat(nm)
+    return { pg: bad_prog(pg, why), i: end }
   }
   return { pg: push_svc(pg, { name: nm, methods: ms.xs }), i: end }
 }
@@ -3790,8 +3868,10 @@ fn p_component(ts: List[Token], i: Int, pg: Prog) -> PStep {
   let body = p_comp_body(ts, j + 1, end - 1, provh, reqs, nm, [], [], [], [],
                          [], no_hoff(), false)
   if (!body.ok) {
-    return { pg: bad_prog(pg, "bad provide block in component ".concat(nm)),
-             i: end }
+    // issue #2705: the reference names a spec on a provided method
+    let why = spec_in_provides(ts, j + 1, end - 1) ? spec_outside_fn_msg("a provided method")
+      : "bad provide block in component ".concat(nm)
+    return { pg: bad_prog(pg, why), i: end }
   }
   // each declared provision key carries the realm its `isolate` names (shared
   // when unisolated); the linker's per-(key, realm) G2 reads these. Keys are
@@ -23327,11 +23407,7 @@ fn stmt_parse_scan(ts: List[Token]) -> Verd {
         "dynamic realm labels are not supported — a realm is a static string literal"), ln)
     }
     if (atw(ts, i, "extern")) {
-      let c = tkc(ts, i + 1)
-      let named = (c.text == "pure") || (c.text == "acquire") || (c.text == "emission")
-        || (c.text == "witnessed") || (c.text == "local")
-      let shaped = (c.kind == "kw") || at_word(ts, i + 1, "witnessed") || at_word(ts, i + 1, "local")
-      if (!named || !shaped) { return mk_verd(tagged("G8", ext_unclassified_msg()), ln) }
+      if (!ext_classified_at(ts, i)) { return mk_verd(tagged("G8", ext_unclassified_msg()), ln) }
       let ui = sp_ui_teardown(ts, i)
       if (ui != "") { return mk_verd(tagged("G4", ui), ln) }
     }
@@ -23353,7 +23429,7 @@ pub fn parse_refusal(src: Str) -> Str {
   let cav = closure_assign_scan(ts)
   if (cav.v != "") { return cav.v }
   let pg = parse_prog_ts(ts)
-  if (pg.bad != "") { return tagged("BAD", pg.bad) }
+  if (pg.bad != "") { return bad_verdict(pg.bad) }
   let pps = first_parse_verd(verified_parse_scan(ts), effect_no_undo_scan(ts))
   if (pps.v != "") { return pps.v }
   let rph = realm_placeholder_scan(ts)
@@ -23530,7 +23606,7 @@ pub fn admit_src(src: Str) -> Str {
   let cav = closure_assign_scan(ts)
   if (cav.v != "") { return cav.v }
   let pg = parse_prog_ts(ts)
-  if (pg.bad != "") { return tagged("BAD", pg.bad) }
+  if (pg.bad != "") { return bad_verdict(pg.bad) }
   // issue #1897 (`verified` heading anything but `effect`) and issue #1963
   // (an undo-less dotted `effect`): parser refusals, the earlier line first.
   let pps = first_parse_verd(verified_parse_scan(ts), effect_no_undo_scan(ts))
@@ -23580,7 +23656,7 @@ pub fn admit_all(src: Str) -> Str {
   let cav = closure_assign_scan(ts)
   if (cav.v != "") { return fmt_all([cav]) }
   let pg = parse_prog_ts(ts)
-  if (pg.bad != "") { return fmt_all([mk_verd(tagged("BAD", pg.bad), 0)]) }
+  if (pg.bad != "") { return fmt_all([mk_verd(bad_verdict(pg.bad), 0)]) }
   let pps = first_parse_verd(verified_parse_scan(ts), effect_no_undo_scan(ts))
   if (pps.v != "") { return fmt_all([mk_verd(pps.v, 0)]) }
   let rph = realm_placeholder_scan(ts)
@@ -24502,7 +24578,7 @@ pub fn admit_ambient(src: Str, manifest: Str) -> Str {
   let cav = closure_assign_scan(ts)
   if (cav.v != "") { return cav.v }
   let pg = parse_prog_ts(ts)
-  if (pg.bad != "") { return tagged("BAD", pg.bad) }
+  if (pg.bad != "") { return bad_verdict(pg.bad) }
   // issues #1897 and #1963, as in `admit_src`: parser refusals.
   let pps = first_parse_verd(verified_parse_scan(ts), effect_no_undo_scan(ts))
   if (pps.v != "") { return pps.v }

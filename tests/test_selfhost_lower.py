@@ -4479,7 +4479,27 @@ component C provides ops: Ops {
 # statement grammar ported the reference's `type_` rule (issue #2396).
 PARSE_REFUSED_PROGRAMS = [
     ("issue 2396: a return arrow with no type", "fn f() -> { }"),
+    # the gate's host-body skip stepped over the clause and admitted it
+    ("issue 2705: a spec on an extern",
+     "extern pure fn f(x: Int) -> Int ensures result == x = @py { return x }"),
+    ("issue 2705: a spec on a service operation",
+     "service Ops { fn f(x: Int) -> Int ensures result == x }"),
+    ("issue 2705: a spec on a provided method",
+     "service Ops { fn f(x: Int) -> Int }\n"
+     "component C provides s: Ops {\n"
+     "  provide s { fn f(x) ensures result == x { return x } }\n"
+     "}"),
 ]
+
+
+def test_an_unclassified_extern_with_a_spec_is_refused_as_unclassified(admit):
+    """Issue #2705: the reference reads an extern's classification before its
+    signature, so a spec on an unclassified extern is the G8 refusal, not the
+    spec one."""
+    src = "extern fn f(x: Int) -> Int ensures result == x = @py { return x }"
+    ref_tag, ref_msg = _ref(src)
+    assert ref_tag == "G8", (ref_tag, ref_msg)
+    assert admit(src) == f"G8|{ref_msg}"
 
 
 @pytest.mark.parametrize("case", PARSE_REFUSED_PROGRAMS,
@@ -7577,6 +7597,26 @@ def test_a_defaulted_parameter_list_is_marked_sigd_so_its_arity_is_not_counted(a
     assert got.startswith("UNSUPPORTED|"), got
     assert "self-host compiler" in got, got
     assert "argument(s)" not in got, got
+
+
+def test_a_fn_spec_is_a_named_refusal_not_a_parse_error_or_a_dropped_fn(ns, admit):
+    """Issue #2705: the reference accepts `ensures` on a `fn` and lowers it to a
+    generated `prop test`, a section the self-host producer does not emit. The
+    gate refuses the program BY NAME, under UNSUPPORTED, where it used to answer
+    `BAD|expected { after fn signature` while `lower_to_ir` dropped the fn. The
+    controls pin that only the clause is refused: the same fn without it, and
+    `ensures` as an ordinary name, are admitted by both stages."""
+    spec = "fn f(x: Int) -> Int ensures result == x { return x }\n"
+    assert _ref(spec) == ("", "")
+    expected = ("UNSUPPORTED|a function spec (`ensures`) is not supported by "
+                "the self-host compiler")
+    assert admit(spec) == expected
+    assert ns["parse_refusal"](spec) == expected
+    for control in ("fn f(x: Int) -> Int { return x }\n",
+                    "fn ensures(x: Int) -> Int { let ensures = x\n"
+                    "  return ensures }\n"):
+        assert _ref(control) == ("", ""), control
+        assert admit(control) == "", control
 
 
 def test_the_call_layer_stays_silent_where_it_cannot_prove_the_premise(admit):

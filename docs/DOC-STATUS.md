@@ -97,6 +97,7 @@ regenerated rather than edited.
 | fix-code.md | needs-work | 10 |  |
 | fmt.md | needs-work | 12 |  |
 | frontend-assets.md | needs-work | 13 |  |
+| function-specs.md | needs-work | 0 |  |
 | function-types.md | needs-work | 31 |  |
 | gate-as-a-service.md | needs-work | 21 | yes |
 | gate-dependency-contract.md | stale-fixed | 0 |  |
