@@ -1336,11 +1336,12 @@ def _field_read(target: str, name: str, opt: bool = False,
 #
 # - a `let` bound to a dict-building expression, every later assignment of
 #   it (a `var`) assigning one too;
-# - a record-typed parameter of a fn that is not `pub` (a host calls a `pub fn`
-#   by name, issue #2913), whose every reference in the document is a direct
-#   call from a fn or `test` body passing a dict-building argument there. A fn
-#   with no call site gets nothing: only a host could be calling it (the
-#   `prop test` wrapper is one).
+# - a record-typed parameter of a fn that is not `pub` (a `pub fn` is the
+#   exported surface a host calls, docs/syntax-2.0.md), whose every reference
+#   in the document, counting every identifier-like word of every string (an
+#   extern's `@py` body is one), is a direct call from a fn or `test` body
+#   passing a dict-building argument there. A fn with no call site gets
+#   nothing: only a host could be calling it (the `prop test` wrapper is one).
 #
 # A dict-building expression is a record literal or update, a qualifying name, or a call
 # to a fn (not async, not `cache pure`) whose every `return` is one. Both facts
@@ -1349,6 +1350,13 @@ def _field_read(target: str, name: str, opt: bool = False,
 # spells it nowhere but as a read (a `var` node), so an arrow parameter, a match
 # bind or a capture of the same spelling disqualifies it rather than being
 # resolved here. Anything this does not recognise keeps the dispatch.
+#
+# Host text that reaches a module-private fn other than by its spelled name (a
+# computed `globals()` key, `sys._getframe`, `getattr(sys.modules[...], ...)`)
+# is outside the closed world, as it is already outside the typed boundary; a
+# record-typed value handed across the typed boundary (an extern's return, a
+# `pub fn` call, a service argument, a component's state, a container element)
+# keeps the dispatch.
 def _dict_read_spellings(node: Any, bad: set, lets: dict) -> None:
     """One pass over a body: `bad` collects every name spelled somewhere other
     than as a read (a `var` node's name) or a `field` node's label; `lets`
