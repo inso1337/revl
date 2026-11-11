@@ -255,3 +255,39 @@ def test_the_flush_waits_for_a_near_timer_as_the_twenty_turns_did():
     for _ in range(20):
         fired, turns = asyncio.run(scenario())
         assert fired or turns >= 20, (fired, turns)
+
+
+def test_the_flush_turns_to_the_cap_while_a_thread_job_is_held():
+    """Deterministic: the thread job waits on an Event that is only released
+    after the flush returns, so the job is in flight for every turn. The
+    flush must take all twenty turns, not stop at the first empty ready
+    queue."""
+    import asyncio
+    import threading
+
+    from revl.run import _FLUSH_TURNS, _Driver
+
+    driver = object.__new__(_Driver)
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        release = threading.Event()
+        await driver._flush()                # installs the executor count
+        job = asyncio.ensure_future(asyncio.to_thread(release.wait, 10))
+        turns = [0]
+        run_once = loop._run_once
+
+        def counted():
+            turns[0] += 1
+            run_once()
+
+        loop._run_once = counted
+        try:
+            await driver._flush()
+        finally:
+            del loop._run_once
+            release.set()
+        await job
+        return turns[0]
+
+    assert asyncio.run(scenario()) >= _FLUSH_TURNS

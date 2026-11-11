@@ -1140,8 +1140,9 @@ class _LivenessMonitor:
 _FLUSH_TURNS = 20
 
 # How far ahead of the loop's clock a timer still keeps `_flush` turning, in
-# seconds: about what twenty idle turns took, so a timer that the twenty turns
-# let fire is still waited for (issue #3379).
+# seconds: about what twenty idle turns took on an idle machine, so a timer
+# that the twenty turns let fire there is still waited for (issue #3379).
+# Under load the twenty turns took longer and let later timers fire too.
 _FLUSH_TIMER_HORIZON = 0.002
 
 # The loop attribute that counts the executor jobs it has in flight.
@@ -1716,9 +1717,19 @@ class _Driver:
         twenty. The loop keeps turning, up to the same bound, while a callback
         is ready (a task with a step to take), a job it handed to an executor
         (`asyncio.to_thread`) is in flight, or a timer is due within
-        `_FLUSH_TIMER_HORIZON`. What is no longer waited for is I/O that
-        completes while nothing else is pending: the twenty turns caught it
-        only when it happened to arrive in time."""
+        `_FLUSH_TIMER_HORIZON`.
+
+        Three kinds of work the twenty turns caught only when it happened to
+        arrive in time are no longer waited for once nothing else is pending:
+        I/O that completes then; a timer due later than the horizon (on a
+        loaded machine the twenty turns took long enough to let some fire);
+        and work a thread hands back without `loop.run_in_executor`
+        (`executor.submit` with `asyncio.wrap_future`, `call_soon_threadsafe`
+        or `run_coroutine_threadsafe` from a plain thread, or a
+        `run_in_executor` bound before `_track_executor_work` wrapped it).
+        Nothing this flush settles hands work back those ways today: the one
+        thread hand-back in src, the process runner's control reader, runs on
+        that runner's own loop, which does not use this flush."""
         loop = asyncio.get_running_loop()
         _track_executor_work(loop)
         for _ in range(_FLUSH_TURNS):
