@@ -52,8 +52,14 @@ export class CordisHost {
   #depth = 0; // > 0 while user code runs inside a host operation
   #deferred = []; // mutations requested at #depth > 0, applied in order
   #draining = false;
-  #queuedLoads = new Map(); // name -> count of deferred loads not yet started
+  // name -> whether it will be loaded once the queued mutations for it have
+  // run; only names with something queued are here, cleared by the drain
+  #predicted = new Map();
   #violations = []; // invariant 3 and 5 breaches, seen when they happen
+  // Records activated (fully or partly) with a `deactivate` export that has
+  // not run yet. At rest each must be a registered `active` component, or
+  // invariant 5 is broken; this does not rely on any cleanup path running.
+  #undeactivated = new Set();
 
   constructor({ log = () => {} } = {}) {
     this.#log = log;
@@ -107,18 +113,15 @@ export class CordisHost {
    * deactivation or the log callback, the load starts when the outer
    * operation finishes; the returned promise settles as usual. It resolves
    * to a frozen snapshot `{ name, state, missing }`, never the host's own
-   * record: `call` is the only way into a component.
+   * record: `call` is the only way into a component. The snapshot is the
+   * state when the load resolves, before mutations deferred during it run,
+   * so read `state(name)` for the current one.
    */
   load(name, source) {
     if (this.#depth > 0) {
-      this.#queuedLoads.set(name, (this.#queuedLoads.get(name) ?? 0) + 1);
+      this.#predicted.set(name, true);
       return new Promise((resolve, reject) => {
-        this.#deferred.push(() => {
-          const left = this.#queuedLoads.get(name) - 1;
-          if (left) this.#queuedLoads.set(name, left);
-          else this.#queuedLoads.delete(name);
-          this.#load(name, source).then(resolve, reject);
-        });
+        this.#deferred.push(() => this.#load(name, source).then(resolve, reject));
       });
     }
     return this.#load(name, source);
@@ -203,7 +206,10 @@ export class CordisHost {
       // Queued even when the name is not loaded yet, so a deferred load
       // followed by this unload is applied in that order. The result says
       // whether the name will be loaded when the unload runs.
-      const willExist = Boolean(record) || this.#queuedLoads.has(name);
+      const willExist = this.#predicted.has(name)
+        ? this.#predicted.get(name)
+        : Boolean(record) && !record.unloadRequested;
+      this.#predicted.set(name, false);
       this.#deferred.push(() => this.unload(name));
       return willExist;
     }
@@ -263,6 +269,12 @@ export class CordisHost {
           `for ${record.activations} activation(s)`);
       }
     }
+    for (const record of this.#undeactivated) {
+      if (this.#components.get(record.name) !== record || record.state !== "active") {
+        problems.push(`${record.name} left ${this.#components.get(record.name) === record
+          ? record.state : "the host"} without running deactivate`);
+      }
+    }
     if (this.#deferred.length) problems.push(`${this.#deferred.length} deferred mutation(s) not applied`);
     if (problems.length) throw new Error(`host invariant broken:\n  ${problems.join("\n  ")}`);
   }
@@ -290,6 +302,7 @@ export class CordisHost {
           this.#note(`a deferred host call threw: ${describe(error)}`);
         }
       }
+      this.#predicted.clear();
     } finally {
       this.#draining = false;
     }
@@ -368,6 +381,7 @@ export class CordisHost {
     record.instance = instance;
     record.exports = instance.exports;
     record.activations++;
+    if (typeof instance.exports.deactivate === "function") this.#undeactivated.add(record);
     this.#stopIfUnloaded(record);
     if (typeof instance.exports.activate_step === "function") {
       let steps = 0;
@@ -411,19 +425,9 @@ export class CordisHost {
     throw new Error(`${record.name}: was unloaded while it was activating`);
   }
 
-  /**
-   * A record leaving for good (failed or removed). Checks invariant 5 now,
-   * while the record is still in hand, so the check needs no history.
-   */
+  /** A record leaving for good (failed or removed): no unload is pending. */
   #retire(record) {
     record.unloadRequested = false;
-    // a record unloaded while still loading has no module yet
-    const hasDeactivate = record.module !== null && WebAssembly.Module.exports(record.module)
-      .some((exp) => exp.kind === "function" && exp.name === "deactivate");
-    if (hasDeactivate && record.activations > 0 && record.deactivations !== record.activations) {
-      this.#violations.push(`${record.name} left ${record.state} with deactivate run ` +
-        `${record.deactivations} time(s) for ${record.activations} activation(s)`);
-    }
   }
 
   /** The last step of a successful activation: the ONLY place that publishes. */
@@ -455,6 +459,7 @@ export class CordisHost {
       return;
     }
     record.deactivations++;
+    this.#undeactivated.delete(record);
     try {
       this.#user(() => exports.deactivate());
     } catch (error) {
@@ -548,7 +553,17 @@ function provisionsOf(module) {
 
 /** An error's message, for any thrown value (a host op may throw null). */
 function describe(error) {
-  return error instanceof Error ? error.message : String(error?.message ?? error);
+  // Total: a null-prototype object, a throwing `message` getter or a Proxy
+  // must not turn the host's own bookkeeping into a second failure.
+  try {
+    return String(error instanceof Error ? error.message : (error?.message ?? error));
+  } catch {
+    try {
+      return Object.prototype.toString.call(error);
+    } catch {
+      return "an unprintable thrown value";
+    }
+  }
 }
 
 /** The module's imports, refused by name unless every one is a coeffect function. */

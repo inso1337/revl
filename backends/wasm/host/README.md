@@ -39,7 +39,9 @@ carries the part of the cordis-wasm seam a browser page needs:
   so if that operation publishes what the component was waiting for, it may
   activate (and run its own activation) before the unload removes it;
 * `load` resolves to a frozen snapshot `{ name, state, missing }`, not the
-  host's record: `call` is the only way into a component's exports;
+  host's record: `call` is the only way into a component's exports. It is
+  the state at resolve time, before mutations deferred during that load run,
+  so `state(name)` may already differ;
 * `deactivate` runs at most once per activation. A `log` callback that throws
   on the `active <name>` line fails that component (nothing was published
   yet); a throw on any other line is ignored;

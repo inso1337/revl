@@ -412,6 +412,90 @@ function wasmModule({ imports = [], funcs = [], start = null }) {
   edge.__checkInvariant();
 }
 
+// A host op that throws a value String() cannot convert (a null-prototype
+// object, an Error whose `message` getter throws) still fails the component
+// completely: error() says something, deactivate runs once, the load
+// rejects with the thrown value, and the invariant holds.
+for (const [label, make] of [
+  ["a null-prototype object", () => Object.create(null)],
+  ["an Error with a throwing message getter", () => {
+    const error = new Error("unused");
+    Object.defineProperty(error, "message", { get() { throw new Error("no message"); } });
+    return error;
+  }],
+]) {
+  let undo = 0;
+  let thrown;
+  const edge = new CordisHost();
+  edge.provideHost("k", {
+    go: () => { thrown = make(); throw thrown; },
+    undo: () => { undo++; return 0; },
+  });
+  await edge.load("Q", wasmModule({
+    imports: [["coeffect:k", "go"], ["coeffect:k", "undo"]],
+    funcs: [
+      { export: "activate_step", raw: [0x10, 0x00] },
+      { export: "deactivate", call: 1 },
+    ],
+  })).then(() => assert.fail(`${label}: the load must reject`), (error) => {
+    assert.equal(error, thrown, `${label}: the load rejects with the thrown value`);
+  });
+  assert.equal(edge.state("Q"), "failed", label);
+  assert.equal(typeof edge.error("Q"), "string", label);
+  assert.equal(undo, 1, `${label}: deactivate runs once`);
+  edge.__checkInvariant();
+}
+
+// The same unconvertible value thrown by a deactivate during a deferred
+// unload is logged, and the mutations queued after that unload still run.
+{
+  const lines = [];
+  const edge = new CordisHost({ log: (line) => lines.push(line) });
+  edge.provideHost("k", { go: () => 0, undo: () => { throw Object.create(null); } });
+  await edge.load("Y", wasmModule({
+    imports: [["coeffect:k", "go"], ["coeffect:k", "undo"]],
+    funcs: [{ export: "deactivate", call: 1 }, { export: "provide:y.y", value: 1 }],
+  }));
+  edge.provideHost("j", { go: () => {
+    edge.unload("Y");
+    edge.provideHost("late", { a: () => 0 });
+    return 0;
+  } });
+  await edge.load("W", wasmModule({
+    imports: [["coeffect:j", "go"]],
+    funcs: [{ export: "activate_step", raw: [0x10, 0x00, 0x1a, 0x41, 0x00] }],
+  }));
+  assert.equal(edge.state("Y"), "absent");
+  assert.ok(lines.some((line) => line.startsWith("a deferred host call threw:")));
+  await edge.load("L", wasmModule({ imports: [["coeffect:late", "a"]], funcs: [{ export: "p", call: 0 }] }));
+  assert.equal(edge.state("L"), "active", "the provideHost queued after the unload ran");
+  edge.__checkInvariant();
+}
+
+// Queued unloads of one name report as the direct calls would: the first
+// finds it loaded, the second finds it already gone, also behind a queued
+// load of that name.
+{
+  const edge = new CordisHost();
+  const results = [];
+  let pending;
+  await edge.load("Y", wasmModule({ funcs: [{ export: "p", value: 0 }] }));
+  edge.provideHost("j", { go: () => {
+    results.push(edge.unload("Y"), edge.unload("Y"));
+    pending = edge.load("Z", wasmModule({ funcs: [{ export: "p", value: 0 }] }));
+    results.push(edge.unload("Z"), edge.unload("Z"));
+    return 0;
+  } });
+  await edge.load("W", wasmModule({
+    imports: [["coeffect:j", "go"]],
+    funcs: [{ export: "activate_step", raw: [0x10, 0x00, 0x1a, 0x41, 0x00] }],
+  }));
+  await assert.rejects(pending, /"Z" was unloaded while it was loading/);
+  assert.deepEqual(results, [true, false, true, false]);
+  assert.equal(edge.state("Y"), "absent");
+  assert.equal(edge.state("Z"), "absent");
+}
+
 // load resolves to a frozen snapshot, not the host's own record: writing to
 // it changes nothing, and no export is reachable except through call().
 {
@@ -499,6 +583,12 @@ console.log("browser host edge cases: ok");
         return wasmModule({ imports: [counter], funcs: [
           { export: "provide:n.c", value: 6 },
           { export: "deactivate", raw: countThen([0x00]) }] });
+      case 8: // a host op that throws a value String() cannot convert, from
+        // activate_step when the seed says so, and always from deactivate
+        return wasmModule({ imports: [counter, ["coeffect:k", "weird"]], funcs: [
+          { export: "activate_step", raw: [...callDrop(1), ...ret0] },
+          { export: "provide:m.b", value: 9 },
+          { export: "deactivate", raw: countThen([...callDrop(1), ...ret0]) }] });
       case 7: // activate_step calls k.go, then traps
         return wasmModule({ imports: [counter, go], funcs: [
           { export: "activate_step", raw: [...callDrop(1), 0x00] },
@@ -512,7 +602,7 @@ console.log("browser host edge cases: ok");
             { export: "deactivate", raw: countThen([...callDrop(1), ...ret0]) }] });
     }
   };
-  const KINDS = 9;
+  const KINDS = 10;
   const failures = [];
   for (let seed = 1; seed <= SEEDS; seed++) {
     const pick = rng(seed);
@@ -526,6 +616,7 @@ console.log("browser host edge cases: ok");
     for (let g = 0; g < GENERATIONS; g++) counters[`g${g}`] = () => { deactivations[g]++; return 0; };
     let gen = 0;
     let budget = 4; // nested mutations per sequence
+    let weirdNow = pick(2) === 0;
     const pending = [];
     const trace = [];
     const loadOne = (name, kind) => {
@@ -567,6 +658,11 @@ console.log("browser host edge cases: ok");
         return 0;
       }])),
       nul: () => { throw null; },
+      weird: () => {
+        if (weirdNow) throw Object.create(null);
+        weirdNow = true; // the first call (an activation) passes, later ones throw
+        return 0;
+      },
     });
     const steps = 1 + pick(MAX_STEPS);
     try {
