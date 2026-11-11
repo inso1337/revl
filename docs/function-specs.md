@@ -107,14 +107,15 @@ function specs (last recorded result):
   fn min1 ensures result <= 0  (last result: fail)
 ```
 
-Each recorded row carries a `digest`: a sha256 over the clause, the function's
+Each recorded row carries a `digest`: a sha256 over the revl version (input
+generation and shrinking are revl's), the clause, the function's
 signature and body, every function, extern and type declaration it reaches
 (its transitive callees and the types its parameters and callees use), and the
 path of its file relative to the project root (the working directory). The
 audit
 recomputes it from the program it is auditing and shows a recorded result only
-when the two agree. A record taken before the body, the clause, a callee or a
-reached type changed, a record for a function of the same name in another
+when the two agree. A record taken under another revl version, or before the
+body, the clause, a callee or a reached type changed, a record for a function of the same name in another
 file, and a record with no digest all read `unrun`, never the old result. A
 report recorded in another checkout of the same tree, on CI say, still matches
 when both runs start from the project root.

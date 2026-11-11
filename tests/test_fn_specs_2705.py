@@ -377,6 +377,18 @@ def test_a_recorded_pass_is_not_shown_after_a_parameter_type_gains_a_variant(
     assert _audit_line(capsys, src, report, "g").endswith("(last result: unrun)")
 
 
+def test_a_record_made_under_another_revl_version_does_not_match(
+        tmp_path, capsys, monkeypatch):
+    import revl._version
+
+    code, src, report = _record(tmp_path, capsys, "spec.rvl", CLAMP)
+    assert code == 0
+    assert _audit_line(capsys, src, report).endswith("(last result: pass)")
+    # the same program audited by a revl whose generator may draw differently
+    monkeypatch.setattr(revl._version, "version", lambda: "0.0.0+another")
+    assert _audit_line(capsys, src, report).endswith("(last result: unrun)")
+
+
 def test_a_record_still_matches_when_the_checkout_moves(tmp_path, capsys,
                                                         monkeypatch):
     """The digest names the file relative to the project root (the working

@@ -4351,7 +4351,24 @@ PARSE_REFUSED_PROGRAMS = [
     # the gate's host-body skip stepped over the clause and admitted it
     ("issue 2705: a spec on an extern",
      "extern pure fn f(x: Int) -> Int ensures result == x = @py { return x }"),
+    ("issue 2705: a spec on a service operation",
+     "service Ops { fn f(x: Int) -> Int ensures result == x }"),
+    ("issue 2705: a spec on a provided method",
+     "service Ops { fn f(x: Int) -> Int }\n"
+     "component C provides s: Ops {\n"
+     "  provide s { fn f(x) ensures result == x { return x } }\n"
+     "}"),
 ]
+
+
+def test_an_unclassified_extern_with_a_spec_is_refused_as_unclassified(admit):
+    """Issue #2705: the reference reads an extern's classification before its
+    signature, so a spec on an unclassified extern is the G8 refusal, not the
+    spec one."""
+    src = "extern fn f(x: Int) -> Int ensures result == x = @py { return x }"
+    ref_tag, ref_msg = _ref(src)
+    assert ref_tag == "G8", (ref_tag, ref_msg)
+    assert admit(src) == f"G8|{ref_msg}"
 
 
 @pytest.mark.parametrize("case", PARSE_REFUSED_PROGRAMS,

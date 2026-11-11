@@ -295,7 +295,7 @@ def _project_path(path: str | None) -> str | None:
 def function_spec_digest(ir: dict, unit: dict) -> str:
     """The identity a recorded spec result is bound to (issue #2705).
 
-    A sha256 over the clause, the generated property, every lowered function,
+    A sha256 over the revl version, the clause, the generated property, every lowered function,
     extern and type declaration the property reaches (the fn's own signature
     and body, its transitive callees and the types its parameters and callees
     use) and the path of the fn's file relative to the project root.
@@ -303,7 +303,12 @@ def function_spec_digest(ir: dict, unit: dict) -> str:
     it from the program being audited, so a result recorded before any of
     those changed is never attributed to what the audit is showing now.
     """
+    from ._version import version  # noqa: PLC0415
+
     document = {
+        # the generator and the shrinker are revl's: a result recorded under
+        # another revl version is not a result for this one
+        "revl": version(),
         "file": _project_path(unit.get("spec_file")),
         "function": unit.get("spec_of"),
         "spec": unit.get("spec") or "",
