@@ -597,6 +597,13 @@ class TaintModel:
     # against (`retention.evaluation_instant`). Held on the model so the whole
     # program is checked against one clock reading rather than one per call site.
     retention_as_of: object = None
+    # issue #2695: callable name -> the validated `retention.Derivation` its
+    # `derives <class> of <param>` clause declares. The result of a call to the
+    # callable carries `Derivation.origin`, a retention origin under the named
+    # parameter's policy with the declaration appended, so the persistence
+    # refusal follows the derivative and can name it. Empty for every program
+    # that declares no derivation, which keeps the whole surface inert.
+    derivations: dict = field(default_factory=dict)
     # item 514: callable name -> the `model.*` capability token its declared
     # capability grants (`model_route.model_crossing_of`). The model-placement
     # sibling of `persistence_sinks`, derived the same way and for the same
@@ -644,7 +651,7 @@ class TaintModel:
                     or self.declassifiers or self.declared_endorse
                     or self.secret_receivers or self.secret_config
                     or self.retained_params or self.retention_policies
-                    or self.model_routes)
+                    or self.derivations or self.model_routes)
 
 
 def _sink_kind_for(name: str, capabilities) -> str:
@@ -687,7 +694,7 @@ def _retention_hint(policy, scope: str) -> str:
 
 
 def _refuse_retention_declaration(filename: str, ext, index: int, policy,
-                                  scope: str, as_of) -> None:
+                                  scope: str, as_of, derivation=None) -> None:
     """A crossing DECLARES that it persists a `Retained[T, P]` value whose
     deadline has passed (G-RETAIN).
 
@@ -700,15 +707,157 @@ def _refuse_retention_declaration(filename: str, ext, index: int, policy,
     retention deadline" a static checker can hold (see `revl.retention`'s module
     docstring for why, and for what this does not claim)."""
     param = ext.params[index]
+    # issue #2695: when the crossing itself DECLARES that this argument is what
+    # its derivative is made from, the refusal says so. One sentence rather than
+    # a second code: the guarantee is still "past-deadline data may not be
+    # written", and the derivation is the fact that identifies the write.
+    made = ""
+    if derivation is not None and derivation.source == param.name:
+        made = (f" The argument is declared as the source of the "
+                f"`{derivation.kind}` derivative (`derives {derivation.kind} "
+                f"of {derivation.source}`), so this crossing writes that "
+                "derivative.")
     raise RevlError(
         filename, ext.line,
         f"`{ext.name}` declares a persistence sink (`{scope}`) whose argument "
         f"{index + 1} (`{param.name}`) is `Retained[T, {policy.name}]`, and "
         f"that policy's retention deadline passed at "
         f"{as_of.isoformat().replace('+00:00', 'Z')} — data past its retention "
-        f"deadline may not be written to durable storage (G-RETAIN)",
+        f"deadline may not be written to durable storage (G-RETAIN)." + made,
         hint=_retention_hint(policy, scope),
         code="G-RETAIN", category="retention")
+
+
+def _resolve_policy_label(label: str, policies, filename: str, name: str,
+                          line: int):
+    """The policy a `Retained[T, <label>]` names, or a refusal by name.
+
+    Shared by the qualifier read and the `derives` clause (issue #2695), so the
+    two cannot drift apart on what "the policy this declaration names" means. A
+    `Retained[T]` with no policy argument and one naming an undeclared policy
+    are both refusals: an unresolvable policy is an annotation nothing can
+    enforce, and shipping one would put a retention guarantee in the language
+    the checker does not honour."""
+    if not label:
+        raise RevlError(
+            filename, line,
+            f"`{name}` declares `Retained[T]` with no retention policy",
+            hint="write `Retained[T, <policy>]` naming a `retention "
+                 "<policy> { ... }` declaration — a retention qualifier "
+                 "with no policy carries no deadline, no residence and no "
+                 "deleters, so nothing could enforce it (item 472)")
+    policy = policies.get(label)
+    if policy is None:
+        declared = ", ".join(f"`{k}`" for k in sorted(policies)) or "none"
+        raise RevlError(
+            filename, line,
+            f"`{name}` names retention policy `{label}`, which this program "
+            f"does not declare",
+            hint=f"declared policies: {declared}. Add `retention {label} "
+                 "{ until: ..., residence: ..., deleters: ... }` (item 472)")
+    return policy
+
+
+def _derivation_of(decl, policies, filename: str):
+    """Validate the `derives <class> of <param>` clause on `decl` (issue #2695).
+
+    Returns the `retention.Derivation` the clause declares, or None for a
+    declaration that carries no clause. Every rule is a REFUSAL at the point of
+    DECLARATION, which is what the item asks for: the named input must be a real
+    parameter declared `Retained[T, <policy>]`, the class must be one of the
+    closed `DERIVATIVE_CLASSES`, and the policy must COVER that class. A
+    derivative of a class the policy does not cover is refused here rather than
+    enumerated as `not-covered` at erasure time, because a declaration the
+    receipt could never claim erased is not one the erasure can reach.
+
+    A callable whose return already carries `Retained[T, <policy>]` may not
+    also declare a derivation: the qualifier and the clause would be two claims
+    about the same result, and the second one is what the receipt would trust."""
+    clause = getattr(decl, "derivation", None)
+    if clause is None:
+        return None
+    name = decl.name
+    line = getattr(decl, "line", 0)
+    if clause.kind not in _retention.DERIVATIVE_CLASSES:
+        known = ", ".join(f"`{k}`" for k in _retention.DERIVATIVE_CLASSES)
+        raise RevlError(
+            filename, clause.line,
+            f"`{name}` declares `derives {clause.kind} of {clause.source}`, "
+            f"but `{clause.kind}` is not a derivative class",
+            hint=f"the vocabulary is closed: {known}. A class no erasure path "
+                 "can enumerate would read as a guarantee without being one "
+                 "(item 472, issue #2695)",
+            code="G-RETAIN", category="retention")
+    params = {p.name: p.type for p in decl.params}
+    if clause.source not in params:
+        declared = ", ".join(f"`{p}`" for p in params) or "none"
+        raise RevlError(
+            filename, clause.line,
+            f"`{name}` declares `derives {clause.kind} of {clause.source}`, "
+            f"but `{name}` has no parameter `{clause.source}`",
+            hint=f"it declares {declared}; a derivation names the parameter "
+                 "that carries the retained value the derivative is made from "
+                 "(issue #2695)",
+            code="G-RETAIN", category="retention")
+    label = retained_policy(params[clause.source])
+    if label is None:
+        raise RevlError(
+            filename, clause.line,
+            f"`{name}` declares `derives {clause.kind} of {clause.source}`, "
+            f"but parameter `{clause.source}` is not `Retained[T, <policy>]`",
+            hint="write the parameter as `" + clause.source + ": Retained[T, "
+                 "<policy>]` — a derivation names the RETAINED value it is made "
+                 "from, because that is where the policy, the deadline and the "
+                 "covered derivative classes come from (issue #2695)",
+            code="G-RETAIN", category="retention")
+    policy = _resolve_policy_label(label, policies, filename, name, line)
+    if not policy.covers_derivative(clause.kind):
+        covered = ", ".join(f"`{k}`" for k in policy.derivatives) or "none"
+        raise RevlError(
+            filename, clause.line,
+            f"`{name}` declares `derives {clause.kind} of {clause.source}`, "
+            f"but `retention {policy.name}` does not cover `{clause.kind}` "
+            f"derivatives (it covers {covered})",
+            hint="add `" + clause.kind + "` to the policy's `derivatives` "
+                 "list, or declare a derivative class the policy covers. A "
+                 "derivative the policy does not cover is refused HERE rather "
+                 "than reported `not-covered` at erasure time, because the "
+                 "receipt could not claim it erased (item 472, issue #2695)",
+            code="G-RETAIN", category="retention")
+    if retained_policy(getattr(decl, "returns", None)) is not None:
+        raise RevlError(
+            filename, line,
+            f"`{name}` declares both a `Retained` return and `derives "
+            f"{clause.kind} of {clause.source}`",
+            hint="the derivation already gives the result the named "
+                 "parameter's policy and the class it makes, so drop one of the "
+                 "two: keep `derives <class> of <param>` and a bare return "
+                 "type, or keep `Retained[T, <policy>]` and no derivation "
+                 "(issue #2695)",
+            code="G-RETAIN", category="retention")
+    return _retention.Derivation(callee=name, kind=clause.kind,
+                                 source=clause.source, policy=policy.name,
+                                 line=clause.line)
+
+
+def declared_derivations(program, filename=None) -> list:
+    """Every `derives <class> of <param>` the program declares, validated.
+
+    Reads a FRESHLY PARSED program, before `extract_and_normalize` strips the
+    qualifiers: the clause's source parameter has to still be spelled
+    `Retained[T, <policy>]` for the policy to resolve. The refusals are the same
+    ones admission issues, because they are the same function (`_derivation_of`);
+    a program that reaches here has nothing an operator could enumerate that the
+    checker would not have admitted."""
+    where = filename or getattr(program, "filename", "<derivation>")
+    policies = _retention.policies(program, where)
+    out: list = []
+    for decl in (*(getattr(program, "externs", ()) or ()),
+                 *(getattr(program, "fn_decls", ()) or ())):
+        derivation = _derivation_of(decl, policies, where)
+        if derivation is not None:
+            out.append(derivation)
+    return out
 
 
 def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
@@ -770,25 +919,8 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
         label = retained_policy(type_str)
         if label is None:
             return None
-        if not label:
-            raise RevlError(
-                program.filename, line,
-                f"`{name}` declares `Retained[T]` with no retention policy",
-                hint="write `Retained[T, <policy>]` naming a `retention "
-                     "<policy> { ... }` declaration — a retention qualifier "
-                     "with no policy carries no deadline, no residence and no "
-                     "deleters, so nothing could enforce it (item 472)")
-        policy = model.retention_policies.get(label)
-        if policy is None:
-            declared = ", ".join(f"`{k}`" for k in
-                                 sorted(model.retention_policies)) or "none"
-            raise RevlError(
-                program.filename, line,
-                f"`{name}` names retention policy `{label}`, which this "
-                f"program does not declare",
-                hint=f"declared policies: {declared}. Add `retention {label} "
-                     "{ until: ..., residence: ..., deleters: ... }` (item 472)")
-        return policy
+        return _resolve_policy_label(label, model.retention_policies,
+                                     program.filename, name, line)
 
     def _note_params(name: str, typed_params, line: int = 0) -> set:
         """`typed_params` is a list of (index, type_string, setter). Records
@@ -915,6 +1047,21 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
         _model_cap = _model_crossing_of(ext.capabilities)
         if _model_cap is not None:
             model.model_crossings[ext.name] = _model_cap
+        # issue #2695: the `derives <class> of <param>` clause, validated BEFORE
+        # the parameter sweep strips the `Retained[T, <policy>]` spelling off the
+        # source parameter. The crossing's RESULT is the derivative: the call
+        # site ADDS `Derivation.origin` (a retention origin under the source
+        # parameter's policy, with the declaration appended) to whatever
+        # provenance the result already carries, so the persistence refusal
+        # follows the value at every sink and names the derivation there. It is
+        # deliberately NOT put in `model.sources`: that map REPLACES a result's
+        # origin set, which would drop the `Untrusted`/`Secret`/`Trusted`
+        # provenance a return qualifier minted for the same callable and launder
+        # G9 / G-SECRET-FLOW (retention is orthogonal, not exclusive).
+        _derivation = _derivation_of(ext, model.retention_policies,
+                                     program.filename)
+        if _derivation is not None:
+            model.derivations[ext.name] = _derivation
         params = []
         for i, p in enumerate(ext.params):
             params.append((i, p.type, _fnparam_setter(p)))
@@ -933,7 +1080,7 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
                 if _pol is not None and _pol.expired(model.retention_as_of):
                     _refuse_retention_declaration(
                         program.filename, ext, _i, _pol, _persist,
-                        model.retention_as_of)
+                        model.retention_as_of, model.derivations.get(ext.name))
         # Slice D (D1/D3): derive sinks and sources from the crossing's declared
         # capability scope, under strict mode, for any parameter/return the author
         # left unqualified. Additive to the annotated surface above — an already
@@ -967,6 +1114,18 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
         endorse_origins = getattr(fn, "endorse_origins", frozenset())
         if endorse_origins:
             model.declared_endorse[fn.name] = frozenset(endorse_origins)
+        # issue #2695: the `derives <class> of <param>` clause, read before the
+        # parameter sweep strips the `Retained[T, <policy>]` spelling off the
+        # source parameter. A call to the fn ADDS `Derivation.origin` to the
+        # result the body's own signature minted, so a result the flow would not
+        # otherwise carry the retention fact to (a body that reads the record
+        # through an opaque host call, say) is still retained, and a body that
+        # DOES carry untrusted provenance keeps it: the derivation adds a
+        # retention fact, it never replaces another one.
+        _derivation = _derivation_of(fn, model.retention_policies,
+                                     program.filename)
+        if _derivation is not None:
+            model.derivations[fn.name] = _derivation
         params = []
         for i, p in enumerate(fn.params):
             params.append((i, p.type, _fnparam_setter(p)))
@@ -2241,6 +2400,20 @@ class _FlowChecker:
                                        else (sink_name,))
         chain = " -> ".join(chain_parts) if chain_parts else "a Retained value"
         as_of = self.model.retention_as_of
+        # issue #2695: a DECLARED derivation says more than "retained": it names
+        # the class and the declaration that made the value. Read off the origin
+        # the derivation minted, so the sentence survives any number of hops the
+        # value took on the way to the sink.
+        made = ""
+        for _origin in sorted(arg_taint.origins):
+            _d = _retention.derivation_of_origin(_origin)
+            if _d is not None and _retention.policy_of_origin(
+                    _origin) == policy.name:
+                _kind, _callee, _source = _d
+                made = (f" The value is a declared `{_kind}` derivative of "
+                        f"`{_source}`, made by `{_callee}` (`derives {_kind} "
+                        f"of {_source}`).")
+                break
         raise RevlError(
             self.filename, self._line_of(node),
             f"a `Retained[T, {policy.name}]` value flows into the persistence "
@@ -2248,7 +2421,7 @@ class _FlowChecker:
             f"{index + 1}, and that policy's retention deadline passed at "
             f"{as_of.isoformat().replace('+00:00', 'Z')} — data past its "
             f"retention deadline may not be written to durable storage "
-            f"(G-RETAIN). The retaining path is {chain}",
+            f"(G-RETAIN)." + made + f" The retaining path is {chain}",
             hint=_retention_hint(policy, scope),
             code="G-RETAIN", category="retention")
 
@@ -2727,6 +2900,27 @@ class _FlowChecker:
                 and name not in self.model.declassifiers
                 and name != "endorse")
 
+    def _with_derivation(self, callee: str, result: Taint) -> Taint:
+        """Add the origin a DECLARED derivation's result carries (issue #2695).
+
+        ADDED to whatever the callee's return qualifier, signature, declared
+        source or declassifier already minted, never in place of it: a derivation
+        says the value was MADE FROM a retained one, and says nothing about the
+        provenance or confidentiality the value also carries. Replacing the
+        origin set here would launder G9 and G-SECRET-FLOW for any callable that
+        combines `derives` with another qualifier, which is the defect this
+        helper exists to prevent.
+
+        A derivation callable is always a nameable callable, so the resolution
+        above (`callee = resolved`) has already happened wherever this is
+        reached; an unnameable indirect call is a different rule and never a
+        derivation.
+        """
+        derivation = self.model.derivations.get(callee)
+        if derivation is None:
+            return result
+        return _join(result, Taint({derivation.origin}, (f"{callee}()",)))
+
     def _taint_of_call(self, callee: str, args, env: dict, node,
                        indirect: bool = False) -> Taint:
         arg_taints = [self.taint_of(a, env) for a in args]
@@ -2919,7 +3113,8 @@ class _FlowChecker:
         if callee in self.model.sources:
             origin = self.model.sources[callee]
             also = self.model.source_also.get(callee, frozenset())
-            return Taint(frozenset({origin}) | also, (f"{callee}()",))
+            return self._with_derivation(
+                callee, Taint(frozenset({origin}) | also, (f"{callee}()",)))
 
         # the scoped `endorse[<origin>]` declassifier (Slice C): the downgrade is
         # granted only where the enclosing declaration declared the slot, its
@@ -2957,7 +3152,7 @@ class _FlowChecker:
                 self._on_declassifier(callee, arg_taints, ())
             for t in arg_taints:
                 self.declassified |= {o for o in t.origins if _param_index(o) is None}
-            return CLEAN
+            return self._with_derivation(callee, CLEAN)
 
         # a callable with an inferred signature (a top-level fn or a provide
         # method): propagate precisely — the result carries the taint of exactly
@@ -2980,9 +3175,7 @@ class _FlowChecker:
                     origins = origins | contributed
                     if not via:
                         via = arg_taints[index].via + (f"{callee}()",)
-            if origins:
-                return Taint(origins, via)
-            return CLEAN
+            return self._with_derivation(callee, Taint(origins, via))
 
         # item 256 (4a.2 kind 2): a plain (non-declared-sink, non-source) extern
         # call is a host crossing. A `secret`-carrying argument to it is refused -
@@ -3018,7 +3211,7 @@ class _FlowChecker:
                       else {})
             result = Taint(result.origins, result.via + (f"{callee}()",),
                            fields)
-        return result
+        return self._with_derivation(callee, result)
 
     # -- statement / block walk ------------------------------------------------
     def run(self, body, env: dict) -> None:
