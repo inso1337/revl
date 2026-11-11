@@ -225,3 +225,109 @@ pub fn run(h: Fly) -> Float {
     run = _def(text, "run")
     assert "isinstance(f, dict)" in run, run
     assert _load(text).run(_Host(1.0, 2.0, 3.0)) == 3.0
+
+
+# ------------------------------------- host text emitted verbatim into the module
+#
+# An extern's `@py` body is host text the emitter writes into the module as it
+# is, so a call made by name there reaches the module fn with whatever the host
+# hands it. The IR carries that text as one opaque string, inline or spliced
+# from a file (`= @py file`), so the reference count reads every word of every
+# string. A `= @py ref` symbol lives in its own host module, where the module
+# fn's name is not bound at all.
+
+HOST_CALL = FLY + """
+fn rd(f: Fly, t: Float) -> Float {
+  let d = t - f.x
+  return d * f.y
+}
+extern pure fn poke(h: Value) -> Float = @py { return rd(h, 1.0) }
+pub fn go(h: Value) -> Float {
+  return poke(h) + rd({ x: 1.0, y: 1.0, k: 1.0 }, 2.0)
+}
+"""
+
+
+def _host_reads(text: str):
+    rd = _def(text, "rd")
+    assert DISPATCH in rd, rd
+    module = _load(text)
+    got = module.go(_Host(5.0, 1.0, 1.0))
+    with pytest.raises(AttributeError):
+        module.go(object())
+    return got
+
+
+def test_a_fn_an_inline_py_body_calls_keeps_the_dispatch():
+    assert _host_reads(_emit(HOST_CALL)) == -3.0
+
+
+def test_a_fn_a_spliced_py_file_calls_keeps_the_dispatch(tmp_path):
+    from revl.compiler import compile_files
+    (tmp_path / "poke_body.py").write_text("return rd(h, 1.0)\n", encoding="utf-8")
+    app = tmp_path / "app.rvl"
+    app.write_text(HOST_CALL.replace(
+        "= @py { return rd(h, 1.0) }", '= @py file "poke_body.py"'), encoding="utf-8")
+    assert _host_reads(EMIT.emit(compile_files([str(app)]))) == -3.0
+
+
+def test_a_ref_host_module_cannot_call_a_module_fn_by_name(tmp_path, monkeypatch):
+    """The ref'd symbol runs in its own module: a bare `rd` there is unbound
+    on base and here alike, so it is no route to the module fn."""
+    from revl.compiler import compile_files
+    pkg = f"poke_ref_3407_{tmp_path.name}"
+    (tmp_path / pkg).mkdir()
+    (tmp_path / pkg / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / pkg / "host.py").write_text(
+        "def poke(h):\n    return rd(h, 1.0)\n", encoding="utf-8")
+    app = tmp_path / "app.rvl"
+    app.write_text(HOST_CALL.replace(
+        "= @py { return rd(h, 1.0) }", f'= @py ref poke from "{pkg}/host.py"'),
+        encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    text = EMIT.emit(compile_files([str(app)]))
+    try:
+        with pytest.raises(NameError, match="'rd'"):
+            _load(text).go(_Host(5.0, 1.0, 1.0))
+    finally:
+        for name in (pkg, f"{pkg}.host"):
+            sys.modules.pop(name, None)
+
+
+def test_a_word_of_a_string_literal_keeps_the_dispatch():
+    """Conservative by construction: any string with the fn name as a word
+    opens it. The values are dicts here, so only the shape changes."""
+    text = _emit(FLY + MOVE + """
+pub fn once() -> Str {
+  let a = move({ x: 1.0, y: 2.0, k: 3.0 }, 5.0, 0.5)
+  return "move(a)"
+}
+""")
+    assert DISPATCH in _def(text, "move")
+    assert _load(text).once() == "move(a)"
+
+
+def test_a_test_title_containing_the_name_is_not_a_reference():
+    text = _emit(FLY + MOVE + """
+test "move halves the gap" {
+  assert move({ x: 0.0, y: 0.0, k: 1.0 }, 2.0, 0.5).x == 1.0
+}
+""")
+    assert "isinstance" not in _def(text, "move")
+
+
+def test_a_call_folded_by_inlining_leaves_no_call_site():
+    """A single-return pure fn is folded into its fn callers before the
+    analysis runs, so the emitted `def` has no remaining call site and keeps the
+    dispatch; the folded caller still computes the same value."""
+    source = FLY + """
+fn rd(f: Fly) -> Float { return f.x }
+pub fn go() -> Float { return rd({ x: 1.0, y: 1.0, k: 1.0 }) }
+"""
+    ir = compile_source(source, "direct_read_3407.rvl")
+    assert EMIT._dict_receivers(EMIT._inline_pure_fns(ir)) == {}
+    text = EMIT.emit(ir)
+    assert "isinstance(f, dict)" in _def(text, "rd")
+    module = _load(text)
+    assert module.go() == 1.0
+    assert module.rd(_Host(4.0, 0.0, 0.0)) == 4.0

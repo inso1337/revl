@@ -1384,17 +1384,31 @@ def _dict_read_walk(node: Any, visit) -> None:
             _dict_read_walk(v, visit)
 
 
+# a word of a string: a maximal run of ASCII identifier characters
+_DICT_READ_WORD = re.compile(r"[A-Za-z0-9_]+")
+
+
+def _dict_read_tally(text: str, counts: dict, delta: int) -> None:
+    for word in _DICT_READ_WORD.findall(text):
+        counts[word] = counts.get(word, 0) + delta
+
+
 def _dict_read_strings(node: Any, counts: dict) -> None:
-    """Count every string (value or key) in the document."""
+    """Count every word of every string (value or key) in the document. A
+    string is counted by its words, not as a whole, because some strings are
+    host text emitted verbatim into the module (an extern's `@py` body, inline
+    or spliced from a file), and a call made by name there is a reference the
+    IR does not otherwise show. Any other string that happens to contain the
+    name (a string literal, a test title) only costs the fast path."""
     if isinstance(node, dict):
         for k, v in node.items():
-            counts[k] = counts.get(k, 0) + 1
+            _dict_read_tally(k, counts, 1)
             _dict_read_strings(v, counts)
     elif isinstance(node, list):
         for v in node:
             _dict_read_strings(v, counts)
     elif isinstance(node, str):
-        counts[node] = counts.get(node, 0) + 1
+        _dict_read_tally(node, counts, 1)
 
 
 def _dict_receivers(ir: dict) -> dict:
@@ -1417,7 +1431,7 @@ def _dict_receivers(ir: dict) -> dict:
     for t in ir.get("tests") or []:
         # a test's title is a label, never a reference (`test "move" {..}`)
         if isinstance(t, dict) and isinstance(t.get("name"), str):
-            counts[t["name"]] -= 1
+            _dict_read_tally(t["name"], counts, -1)
     calls: dict = {name: [] for name in by_name}
     for key, _params, body in contexts:
         def visit(node, key=key):
@@ -1433,8 +1447,9 @@ def _dict_receivers(ir: dict) -> dict:
         _dict_read_walk(f.get("body") or [], lambda n, found=found:
                         found.append(n) if n.get("step") == "return" else None)
         returns[f["name"]] = found
-    # a reference that is not a recognised call site (a value use, a string
-    # naming the fn anywhere else) closes the world for that fn
+    # a reference that is not a recognised call site (a value use, a word of
+    # any string, an extern's `@py` body calling it by name) opens the world
+    # for that fn
     closed = {name for name in by_name
               if calls[name] and counts.get(name, 0) == 1 + len(calls[name])}
     params_ok = set()

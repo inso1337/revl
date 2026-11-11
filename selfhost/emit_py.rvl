@@ -1610,12 +1610,36 @@ fn dr_calls(node: Any, fns: Map[Str, Any], ctx: Int) -> List[DrCall] {
   return found
 }
 
-// How often each name already in `counts` is spelled anywhere (key or value).
+fn dr_word_char(ch: Str) -> Bool {
+  return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_".indexOf(ch) >= 0
+}
+
+// Add `delta` to the count of each word of `text` already in `counts`. A word
+// is a maximal run of ASCII identifier characters, so a call made by name in
+// host text (an extern's `@py` body) is counted too.
+fn dr_tally(text: Str, counts: Map[Str, Any], delta: Int) -> Map[Str, Any] {
+  var out = counts
+  let n = text.length()
+  var start = 0
+  var i = 0
+  while (i <= n) {
+    if (i == n || !dr_word_char(text.slice(i, i + 1))) {
+      let w = text.slice(start, i)
+      if (i > start && out.has(w)) { out = out.set(w, value_int(value_field(out, w)) + delta) }
+      start = i + 1
+    }
+    i += 1
+  }
+  return out
+}
+
+// How often each name already in `counts` is spelled anywhere (a word of a key
+// or of a string value).
 fn dr_count(node: Any, counts: Map[Str, Any]) -> Map[Str, Any] {
   var out = counts
   if (value_is_object(node)) {
     for (k of value_keys(node)) {
-      if (out.has(k)) { out = out.set(k, value_int(value_field(out, k)) + 1) }
+      out = dr_tally(k, out, 1)
       out = dr_count(value_field(node, k), out)
     }
     return out
@@ -1624,9 +1648,7 @@ fn dr_count(node: Any, counts: Map[Str, Any]) -> Map[Str, Any] {
     for (v of value_list(node)) { out = dr_count(v, out) }
     return out
   }
-  if (value_kind(node) == "str" && out.has(value_str(node))) {
-    out = out.set(value_str(node), value_int(value_field(out, value_str(node))) + 1)
-  }
+  if (value_kind(node) == "str") { out = dr_tally(value_str(node), out, 1) }
   return out
 }
 
@@ -1736,8 +1758,7 @@ fn dict_receivers(ir: Any) -> Map[Str, Any] {
   counts = dr_count(ir, counts)
   let tests = value_list(value_field(ir, "tests"))
   for (t of tests) {
-    let tn = value_str(value_field(t, "name"))
-    if (value_is_object(t) && counts.has(tn)) { counts = counts.set(tn, value_int(value_field(counts, tn)) - 1) }
+    if (value_is_object(t) && value_kind(value_field(t, "name")) == "str") { counts = dr_tally(value_str(value_field(t, "name")), counts, 0 - 1) }
   }
   var calls: List[DrCall] = []
   var bodies: List[Any] = []
