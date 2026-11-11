@@ -32,6 +32,7 @@ import json
 import os
 import re
 
+from ._paths import relpath_or_abs
 from .cardinality import cardinality
 from .distribute import distributability
 from .inverse import inverse_class, inverse_rank
@@ -289,7 +290,7 @@ def _project_path(path: str | None) -> str | None:
     checkout matches an audit run in another."""
     if not path:
         return None
-    return os.path.relpath(os.path.abspath(path)).replace(os.sep, "/")
+    return relpath_or_abs(os.path.abspath(path)).replace(os.sep, "/")
 
 
 def function_spec_digest(ir: dict, unit: dict) -> str:
