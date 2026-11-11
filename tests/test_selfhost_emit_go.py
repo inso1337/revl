@@ -235,6 +235,9 @@ CORPUS = [
     # an untyped `[]` typed from the method's declared return and its pin, and
     # a user variant held at its interface type by a later match
     "comp_provide_empty_list.rvl",
+    # issues #3161 and #3168: locals spelled like Go builtins or in the
+    # emitter's `revl` helper namespace take one `_`
+    "reserved_builtins.rvl",
 ]
 
 # The combined-path and live-path documents, which import stc-go and are built

@@ -1,0 +1,45 @@
+// Issue #3127: a module-scope fn or extern spelled like a JS global, a name the
+// emitted module imports, an emitted helper or the emitter's scaffolding is
+// renamed one rung up at its declaration and at every read, so the names the
+// emitted module reads bare stay the host's (the `!== undefined` of a match on
+// an Opt, the `BigInt` of `length()`). `undefined_` takes the next rung, so the
+// ladder stays injective, and a local spelled exactly like a module name takes
+// that name's spelling. A `pub fn` keeps its source name, because a host calls
+// it by that name: the pub fns here are spelled outside the family, and
+// tests/fixtures/emit_ts_refusals/pub_fn_module_name.rvl holds one inside it.
+
+fn undefined(x: Int) -> Int = x
+fn undefined_(x: Int) -> Int = x + 1
+fn BigInt(x: Int) -> Int = 999
+fn revlI64(x: Int) -> Int = 7
+fn REVL_LIMIT(x: Int) -> Int = x
+fn _revlTmp(x: Int) -> Int = x
+fn _REVL_SEED(x: Int) -> Int = x
+fn host(x: Int) -> Int = x * 2
+fn record(x: Int) -> Int = x
+extern pure fn fetch(n: Int) -> Int = @ts { return n }
+
+// An extern parameter keeps the keyword ladder and the scaffolding names
+// (`static_` -> `static__`), and the verbatim body reads the emitted spelling.
+extern pure fn keyword_param(static_: Int) -> Int = @ts { return static__ }
+
+pub fn pick(o: Opt[Str]) -> Str = match o {
+    Some(v) => v,
+    None => "denied"
+}
+
+pub fn count(xs: List[Int]) -> Int = xs.length()
+
+pub fn count_(xs: List[Int]) -> Int = count(xs) + 1
+
+pub fn __(x: Int) -> Int = x
+
+pub fn shadow(x: Int) -> Int {
+  let fetch = x + 1
+  return fetch
+}
+
+pub fn total(x: Int) -> Int =
+  undefined(x) + undefined_(x) + BigInt(x) + revlI64(x) + REVL_LIMIT(x)
+    + _revlTmp(x) + _REVL_SEED(x) + host(x) + record(x) + fetch(x)
+    + keyword_param(x) + __(x)

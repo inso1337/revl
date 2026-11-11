@@ -1,0 +1,49 @@
+// The rust helper namespace and the prelude constructors at value positions
+// (issues #3159 and #3168), held to byte agreement by
+// tests/test_selfhost_emit_rust.py.
+//
+//   - The emitted module declares `revl_concat`, `REVL_JOURNAL_DEPTH`, ...,
+//     so a user fn, extern, parameter, local, loop or match binding, or arrow
+//     parameter spelled in `revl[A-Z_]`, `REVL_`, `_revl` or `_REVL` takes one
+//     `_`, at its declaration and at every read.
+//   - `revlate` and `rev` are outside the namespace (a lower case letter after
+//     `revl`, a name shorter than the prefix) and keep their spelling.
+//   - A module `fn Err` emits `fn Err_`, so `Err("denied")` still names the
+//     constructor; `Some_` shifts one rung up the ladder to `Some__`.
+//   - An extern parameter keeps its source name, because the verbatim `@rs`
+//     body spells it; a service parameter takes the rename.
+
+service Meter { fn add(revl_n: Int) -> Int }
+
+extern pure fn revlHost(revl_n: Int) -> Int = @rs { revl_n + 1 }
+
+fn revl_double(x: Int) -> Int = x * 2
+fn REVL_N(x: Int) -> Int = x + 3
+fn _revlTmp(x: Int) -> Int = x
+fn _REVLX(x: Int) -> Int = x
+fn revlTotal(x: Int) -> Int = x
+fn revlate(x: Int) -> Int = x
+fn rev(x: Int) -> Int = x
+fn Err(e: Str) -> Result[Int, Str] = Ok(1)
+fn Some_(x: Int) -> Int = x
+fn __(x: Int) -> Int = x
+
+pub fn check(allowed: Bool) -> Result[Int, Str] = allowed ? Ok(7) : Err("denied")
+
+pub fn pick(o: Opt[Int]) -> Int = match o {
+  Some(revl_v) => revl_v,
+  None => 0
+}
+
+pub fn walk(revl_xs: List[Int]) -> Int {
+  var revl_sum = 0
+  for (revl_item of revl_xs) {
+    revl_sum = revl_sum + revl_item
+  }
+  let REVL_K = revl_sum + 1
+  return ((revl_x: Int) => revl_x + REVL_K)(revl_sum)
+}
+
+pub fn total(x: Int) -> Int =
+  revl_double(x) + REVL_N(x) + _revlTmp(x) + _REVLX(x) + revlTotal(x)
+    + revlate(x) + rev(x) + Some_(x) + __(x) + revlHost(x)

@@ -1968,6 +1968,45 @@ pub fn emit_rust_from_ir(ir_text: String) -> String {
     return emit_rust_src(json_parse(ir_text));
 }
 
+fn in_revl_namespace(name: &str) -> bool {
+    if (name.revl_starts_with("REVL_") || name.revl_starts_with("_REVL")) {
+        return true;
+    }
+    if (name.revl_starts_with("_revl") || name.revl_starts_with("revl_")) {
+        return true;
+    }
+    if ((name.revl_length() < 5i64) || (!name.revl_starts_with("revl"))) {
+        return false;
+    }
+    let c = { name.chars().nth((4i64) as usize).unwrap() as u32 as i64 };
+    return ((c >= 65i64) && (c <= 90i64));
+}
+
+fn value_ident(name: String) -> String {
+    if in_revl_namespace(&name) {
+        return name.revl_concat("_");
+    }
+    return mangle(name);
+}
+
+fn fn_ident(name: String) -> String {
+    if in_revl_namespace(&name) {
+        return name.revl_concat("_");
+    }
+    let reserved = vec![String::from("Ok"), String::from("Err"), String::from("Some"), String::from("None")];
+    let mut root_ = name.clone();
+    while (root_ != "") {
+        if (reserved.revl_index_of(&root_) >= 0i64) {
+            return name.revl_concat("_");
+        }
+        if (!root_.revl_ends_with("_")) {
+            return mangle(name);
+        }
+        root_ = root_.revl_slice(0i64, (root_.revl_length()).checked_sub(1i64).expect("revl: Int overflow"));
+    }
+    return mangle(name);
+}
+
 fn mname(n: String) -> String {
     let mut root_ = n.clone();
     while (root_.revl_length() > 0i64) {
@@ -3477,14 +3516,14 @@ fn match_pattern(ctx_: Ctx__m1, arm: Value) -> String {
         }
     }
     if (bind != "") {
-        return format!("{}({})", prefix, mangle(bind));
+        return format!("{}({})", prefix, value_ident(bind));
     }
     return prefix;
 }
 
 fn render_var(node: Value, ctx_: Ctx__m1) -> String {
     let name = value_str(value_field(node.clone(), String::from("name")));
-    let mangled = mangle(name.clone());
+    let mangled = value_ident(name.clone());
     let adt = map_get(ctx_.ca, name.clone());
     if resolved(&adt) {
         return format!("{}::{}", type_ident(adt), mangled);
@@ -3719,7 +3758,7 @@ fn render_arrow(node: Value, ctx_: Ctx__m1) -> String {
         rn.remove(&name);
         bp.remove(&name);
         lp.remove(&name);
-        let mut param = mangle(name.clone());
+        let mut param = value_ident(name.clone());
         if ((ptype != "") && (!is_fn_type(&ptype))) {
             param = format!("{}: {}", param, rust_type_t(Value::new(serde_json::Value::from(ptype.clone())), ctx_.tn.clone()));
         }
@@ -3841,7 +3880,7 @@ fn render_inner(node: Value, ctx_: Ctx__m1) -> String {
         if ctx_.rn.contains_key(&idv) {
             return map_get(ctx_.rn.clone(), idv);
         }
-        return mangle(idv);
+        return value_ident(idv);
     }
     if (kind == "var") {
         return render_var(node, ctx_);
@@ -3862,7 +3901,7 @@ fn render_inner(node: Value, ctx_: Ctx__m1) -> String {
     }
     if (kind == "fn") {
         let raw = value_str(value_field(node.clone(), String::from("name")));
-        let fname = mangle(raw.clone());
+        let fname = value_ident(raw.clone());
         let anodes = value_list(value_field(node.clone(), String::from("args")));
         let mut parts: Vec<String> = vec![];
         let mut i = 0i64;
@@ -4154,7 +4193,7 @@ fn stream_stage_arrow(stage: Value, ctx_: Ctx__m1) -> String {
         return format!("<<UNSUPPORTED-stream-stage-arrow:{}>>", value_str(value_field(stage, String::from("stage"))));
     }
     let raw = value_str((params)[(0i64) as usize].clone());
-    let pname = mangle(raw.clone());
+    let pname = value_ident(raw.clone());
     let mut ret = String::from("String");
     if (value_str(value_field(stage.clone(), String::from("stage"))) == "filter") {
         ret = String::from("bool");
@@ -4252,7 +4291,7 @@ fn v3_stmt(node: Value, ctx_: Ctx__m1, indent: i64) -> Sout {
     let step = value_str(value_field(node.clone(), String::from("step")));
     if ((step == "let") || (step == "assign")) {
         let raw = value_str(value_field(node.clone(), String::from("name")));
-        let nm = mangle(raw.clone());
+        let nm = value_ident(raw.clone());
         let valnode = value_field(node.clone(), String::from("value"));
         let inferred = v3_infer_type(valnode.clone(), ctx_.clone());
         let value = by_value_tail(valnode.clone(), render_expr_to(valnode.clone(), ctx_.clone(), map_get(ctx_.vt.clone(), raw.clone())), ctx_.clone());
@@ -4330,7 +4369,7 @@ fn v3_stmt(node: Value, ctx_: Ctx__m1, indent: i64) -> Sout {
         return Sout { lines: out, ctx_: bodyR.ctx_.clone() };
     }
     if (step == "for") {
-        let bind = mangle(value_str(value_field(node.clone(), String::from("bind"))));
+        let bind = value_ident(value_str(value_field(node.clone(), String::from("bind"))));
         let iterable_node = value_field(node.clone(), String::from("iterable"));
         let iterable_type = v3_infer_type(iterable_node.clone(), ctx_.clone());
         let element_type = list_element_type(&iterable_type);
@@ -4691,7 +4730,7 @@ fn emit_v3_functions(functions: Vec<Value>, fr: std::collections::HashMap<String
     let fp = fn_params_map(functions.clone());
     for fnode in functions {
         let raw = value_str(value_field(fnode.clone(), String::from("name")));
-        let name = mangle(raw.clone());
+        let name = fn_ident(raw.clone());
         let params = value_list(value_field(fnode.clone(), String::from("params")));
         let mut vt = std::collections::HashMap::new();
         for p in params.clone() {
@@ -4717,7 +4756,7 @@ fn emit_v3_functions(functions: Vec<Value>, fr: std::collections::HashMap<String
                     lp.insert(pname.clone(), String::from("1"));
                 }
             }
-            ps.push(format!("{}: {}", mangle(pname.clone()), ptype));
+            ps.push(format!("{}: {}", value_ident(pname.clone()), ptype));
             i = (i).checked_add(1i64).expect("revl: Int overflow");
         }
         let ctx_ = Ctx__m1 { vt: vt.clone(), fr: fr.clone(), ca: tables.ca.clone(), cp: tables.cp.clone(), rbf: tables.rbf.clone(), tn: tn.clone(), rn: std::collections::HashMap::new(), fb: borrow.clone(), bp: bp.clone(), flb: list_borrow.clone(), lp: lp.clone(), ft: tables.ft.clone(), mu: reused_names(body.clone()), mf: movable_for_iterables(body.clone(), reused_names(body.clone())), fo: 0i64, fp: fp.clone(), tp: tparams.clone(), dz: dead_lets(body.clone()), cr: value_str(value_field(fnode.clone(), String::from("returns"))), rm: std::collections::HashMap::new() };
@@ -5054,7 +5093,7 @@ fn extern_body_defer(ext: Value, body: &str) -> String {
 fn emit_v3_externs(externs: Vec<Value>, tnames: std::collections::HashMap<String, String>) -> Vec<String> {
     let mut out: Vec<String> = vec![];
     for ext in externs {
-        let name = mangle(value_str(value_field(ext.clone(), String::from("name"))));
+        let name = fn_ident(value_str(value_field(ext.clone(), String::from("name"))));
         let mut ps: Vec<String> = vec![];
         for p in value_list(value_field(ext.clone(), String::from("params"))) {
             ps.push(format!("{}: {}", mangle(value_str(value_field(p.clone(), String::from("name")))), rust_type_pos(value_field(p.clone(), String::from("type")), tnames.clone())));
@@ -5100,7 +5139,7 @@ fn emit_service_traits(services: Value, tnames: std::collections::HashMap<String
             let method = value_field(methods.clone(), mn.clone());
             let mut ps: Vec<String> = vec![];
             for p in value_list(value_field(method.clone(), String::from("params"))) {
-                ps.push(format!("{}: {}", mangle(value_str(value_field(p.clone(), String::from("name")))), rust_type_t(value_field(p.clone(), String::from("type")), tnames.clone())));
+                ps.push(format!("{}: {}", value_ident(value_str(value_field(p.clone(), String::from("name")))), rust_type_t(value_field(p.clone(), String::from("type")), tnames.clone())));
             }
             let mut ret = String::from("()");
             let r = value_field(method.clone(), String::from("returns"));
@@ -6853,12 +6892,12 @@ fn pure_stmts(steps: Vec<Value>, ctx_: Ctx__m1, params: Vec<String>) -> Vec<Stri
         let kind = value_str(value_field(step.clone(), String::from("step")));
         if (kind == "let") {
             let nm = value_str(value_field(step.clone(), String::from("name")));
-            let cshadow = set_rn(c.clone(), { let mut c = c.rn.clone(); c.insert(nm.clone(), mangle(nm.clone())); c });
+            let cshadow = set_rn(c.clone(), { let mut c = c.rn.clone(); c.insert(nm.clone(), value_ident(nm.clone())); c });
             let mut mut_ = String::from("");
             if value_bool(value_field(step.clone(), String::from("mutable"))) {
                 mut_ = String::from("mut ");
             }
-            parts.push(format!("let {}{} = {};", mut_, mangle(nm.clone()), render_expr(value_field(step.clone(), String::from("value")), cshadow.clone())));
+            parts.push(format!("let {}{} = {};", mut_, value_ident(nm.clone()), render_expr(value_field(step.clone(), String::from("value")), cshadow.clone())));
             c = cshadow.clone();
         } else {
             parts.push(pure_stmt(step.clone(), &kind, c.clone(), params.clone()));
@@ -6877,7 +6916,7 @@ fn params_cloned(rn: std::collections::HashMap<String, String>, params: Vec<Stri
 
 fn pure_stmt(step: Value, kind: &str, c: Ctx__m1, params: Vec<String>) -> String {
     if (kind == "assign") {
-        return format!("{} = {};", mangle(value_str(value_field(step.clone(), String::from("name")))), render_expr(value_field(step.clone(), String::from("value")), c));
+        return format!("{} = {};", value_ident(value_str(value_field(step.clone(), String::from("name")))), render_expr(value_field(step.clone(), String::from("value")), c));
     }
     if (kind == "return") {
         let e = value_field(step.clone(), String::from("expr"));
@@ -6902,10 +6941,10 @@ fn pure_stmt(step: Value, kind: &str, c: Ctx__m1, params: Vec<String>) -> String
     }
     if (kind == "for") {
         let bind = value_str(value_field(step.clone(), String::from("bind")));
-        let inner = set_rn(c.clone(), { let mut c = c.rn.clone(); c.insert(bind.clone(), mangle(bind.clone())); c });
+        let inner = set_rn(c.clone(), { let mut c = c.rn.clone(); c.insert(bind.clone(), value_ident(bind.clone())); c });
         let iterable = render_expr(value_field(step.clone(), String::from("iterable")), c.clone());
         let body = pure_stmts(value_list(value_field(step.clone(), String::from("body"))), inner.clone(), params.clone()).revl_join(" ");
-        return format!("for {} in {}.iter().cloned() {{ {} }}", mangle(bind), iterable, body);
+        return format!("for {} in {}.iter().cloned() {{ {} }}", value_ident(bind), iterable, body);
     }
     if (kind == "emit") {
         return format!("let _ = {};", render_expr(value_field(step, String::from("expr")), set_rn(c.clone(), params_cloned(c.rn.clone(), params))));
@@ -7523,9 +7562,9 @@ fn method_scope_rename(comp: Value, services: Value, ctx_: Ctx__m1) -> std::coll
     let mut rn = std::collections::HashMap::new();
     for b in binds(comp.clone()) {
         if (held_bind_type(comp.clone(), &b, services.clone(), ctx_.clone()) != "") {
-            rn.insert(b.clone(), format!("self.{}.clone()", mangle(b.clone())));
+            rn.insert(b.clone(), format!("self.{}.clone()", value_ident(b.clone())));
         } else {
-            rn.insert(b.clone(), format!("self.{}", mangle(b.clone())));
+            rn.insert(b.clone(), format!("self.{}", value_ident(b.clone())));
         }
     }
     for raw in value_keys(value_field(comp.clone(), String::from("requires"))) {
@@ -7557,7 +7596,7 @@ fn method_undo_clones(comp: Value, method: Value, indent: i64) -> Vec<String> {
     let pad = ind(indent);
     let mut out: Vec<String> = vec![];
     for b in binds(comp.clone()) {
-        out.push(format!("{}let {}_undo = self.{}.clone();", pad, b, mangle(b.clone())));
+        out.push(format!("{}let {}_undo = self.{}.clone();", pad, b, value_ident(b.clone())));
     }
     for raw in value_keys(value_field(comp.clone(), String::from("requires"))) {
         let req = key_binding(&raw);
@@ -7747,7 +7786,7 @@ fn method_body_lines(comp: Value, method: Value, services: Value, ctx_: Ctx__m1,
                     let inferred = provide_let_type(value_field(step.clone(), String::from("value")), c.clone(), comp.clone(), services.clone());
                     let param = bare_param(value_field(step.clone(), String::from("value")), method.clone());
                     if (kind == "let") {
-                        let cshadow = set_rn(c.clone(), { let mut c = c.rn.clone(); c.insert(nm.clone(), mangle(nm.clone())); c });
+                        let cshadow = set_rn(c.clone(), { let mut c = c.rn.clone(); c.insert(nm.clone(), value_ident(nm.clone())); c });
                         let mut cvalue = cshadow.clone();
                         if (param != "") {
                             cvalue = set_rn(cshadow.clone(), { let mut c = cshadow.rn.clone(); c.insert(param.clone(), format!("{}.clone()", param)); c });
@@ -7756,14 +7795,14 @@ fn method_body_lines(comp: Value, method: Value, services: Value, ctx_: Ctx__m1,
                         if value_bool(value_field(step.clone(), String::from("mutable"))) {
                             mut_ = String::from("mut ");
                         }
-                        out.push(format!("{}let {}{} = {};", pad, mut_, mangle(nm.clone()), render_expr(value_field(step.clone(), String::from("value")), cvalue.clone())));
+                        out.push(format!("{}let {}{} = {};", pad, mut_, value_ident(nm.clone()), render_expr(value_field(step.clone(), String::from("value")), cvalue.clone())));
                         c = cshadow.clone();
                     } else {
                         let mut cvalue = c.clone();
                         if (param != "") {
                             cvalue = set_rn(c.clone(), { let mut c = c.rn.clone(); c.insert(param.clone(), format!("{}.clone()", param)); c });
                         }
-                        out.push(format!("{}{} = {};", pad, mangle(nm.clone()), render_expr(value_field(step.clone(), String::from("value")), cvalue.clone())));
+                        out.push(format!("{}{} = {};", pad, value_ident(nm.clone()), render_expr(value_field(step.clone(), String::from("value")), cvalue.clone())));
                     }
                     if (inferred != "") {
                         c = set_vt(c.clone(), nm.clone(), inferred.clone());
@@ -7852,7 +7891,7 @@ fn emit_provide_construction(comp: Value, step: Value, effectful: bool, indent: 
     let plocal = if (key.revl_index_of("::") < 0i64) { key.clone() } else { host_key(key.clone()) };
     let mut fields: Vec<String> = vec![];
     for b in binds(comp.clone()) {
-        fields.push(format!("{}: {}.clone()", mangle(b.clone()), mangle(b.clone())));
+        fields.push(format!("{}: {}.clone()", value_ident(b.clone()), value_ident(b.clone())));
     }
     for local in value_keys(value_field(comp.clone(), String::from("requires"))) {
         fields.push(format!("{}: {}.clone()", mangle(host_key(local.clone())), mangle(host_key(local.clone()))));
@@ -8039,7 +8078,7 @@ fn emit_let_effect_step(comp: Value, step: Value, ir: Value, ctx_: Ctx__m1, map_
     let pad = ind(indent);
     let mut out: Vec<String> = vec![];
     let raw_bind = value_str(value_field(step.clone(), String::from("bind")));
-    let bind = mangle(raw_bind.clone());
+    let bind = value_ident(raw_bind.clone());
     let acq_node = value_field(step.clone(), String::from("acquire"));
     if (value_list(value_field(step.clone(), String::from("setup"))).revl_length() > 0i64) {
         out.push(format!("{}<<UNSUPPORTED-let-effect-setup:{}>>", pad, raw_bind));
@@ -8181,7 +8220,7 @@ fn emit_comp_step(comp: Value, step: Value, ir: Value, ctx_: Ctx__m1, map_values
     if (kind == "stream-iter") {
         let subject = render_expr(value_field(step.clone(), String::from("subject")), ctx_.clone());
         let raw_bind = value_str(value_field(step.clone(), String::from("bind")));
-        let bind = mangle(raw_bind.clone());
+        let bind = value_ident(raw_bind.clone());
         let body = value_list(value_field(step.clone(), String::from("body")));
         if (body.revl_length() == 0i64) {
             return vec![format!("{}<<UNSUPPORTED-stream-iter-empty:{}>>", pad, name)];
@@ -8301,7 +8340,7 @@ fn emit_component(comp: Value, services: Value, ir: Value) -> Vec<String> {
         let struct_ = format!("{}{}", cname, camel(host_key(key.clone())));
         out.push(format!("struct {} {{", struct_));
         for b in binds(comp.clone()) {
-            out.push(format!("    {}: {},", mangle(b.clone()), bind_field_type(comp.clone(), b.clone(), map_values.clone(), services.clone(), plain_ctx(tables.clone(), fr.clone(), functions.clone()))));
+            out.push(format!("    {}: {},", value_ident(b.clone()), bind_field_type(comp.clone(), b.clone(), map_values.clone(), services.clone(), plain_ctx(tables.clone(), fr.clone(), functions.clone()))));
         }
         for local in value_keys(reqs.clone()) {
             out.push(format!("    {}: Arc<Box<dyn {}>>,", mangle(host_key(local.clone())), require_ty(value_str(value_field(reqs.clone(), local.clone())))));
@@ -8375,7 +8414,7 @@ fn emit_component_new(comp: Value, services: Value, ir: Value) -> Vec<String> {
         let struct_ = format!("{}{}", cname, camel(host_key(key.clone())));
         out.push(format!("struct {} {{", struct_));
         for b in binds(comp.clone()) {
-            out.push(format!("    {}: {},", mangle(b.clone()), bind_field_type(comp.clone(), b.clone(), map_values.clone(), services.clone(), plain_ctx(tables.clone(), fr.clone(), functions.clone()))));
+            out.push(format!("    {}: {},", value_ident(b.clone()), bind_field_type(comp.clone(), b.clone(), map_values.clone(), services.clone(), plain_ctx(tables.clone(), fr.clone(), functions.clone()))));
         }
         for local in value_keys(reqs.clone()) {
             out.push(format!("    {}: Arc<Box<dyn {}>>,", mangle(host_key(local.clone())), require_ty(value_str(value_field(reqs.clone(), local.clone())))));
@@ -9237,10 +9276,10 @@ fn emit_v3_tests(tests: Vec<Value>, functions: Vec<Value>, externs: Vec<Value>, 
     let mut out: Vec<String> = vec![];
     let mut used: Vec<String> = vec![];
     for f in functions.clone() {
-        used.push(mangle(value_str(value_field(f.clone(), String::from("name")))));
+        used.push(fn_ident(value_str(value_field(f.clone(), String::from("name")))));
     }
     for e in externs {
-        used.push(mangle(value_str(value_field(e.clone(), String::from("name")))));
+        used.push(fn_ident(value_str(value_field(e.clone(), String::from("name")))));
     }
     let borrow = compute_str_param_borrows(functions.clone());
     let list_borrow = compute_list_param_borrows(functions.clone());

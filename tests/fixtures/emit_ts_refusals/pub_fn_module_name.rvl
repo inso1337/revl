@@ -1,0 +1,8 @@
+// Issue #3127: a `pub fn` is called by the host under its source name, so one
+// spelled in the module family (here one rung above the JS global `BigInt`)
+// cannot be renamed. backends/typescript/emit.py::_emit_ts_functions refuses
+// the document; the port has no refusal channel, so selfhost/emit_ts.rvl names
+// the fn with `<<UNSUPPORTED-PUB-FN-MODULE-NAME:BigInt_>>` instead. Pinned by
+// tests/test_selfhost_emit_ts.py::test_a_reference_refusal_is_named_by_the_port.
+
+pub fn BigInt_(x: Int) -> Int = x
