@@ -238,9 +238,10 @@ the write-ahead discipline). Three record shapes:
  "label": "file_host", "within": {"seq": 4, "component": "Agent",
                                   "label": "tickets.file", "process": "agent"}, …}
 
-// 3. activation marker — present iff activation finished cleanly. NOT the end
-//    of the log: the WAL stays open for the whole run, so steady-state effects
-//    (below) are appended AFTER this line.
+// 3. activation marker: present iff THIS opening's activation finished
+//    cleanly (a later opening's `generation` record starts the next opening's
+//    marker, issue #3147). NOT the end of the log: the WAL stays open for the
+//    whole run, so steady-state effects (below) are appended AFTER this line.
 {"record": "activation-complete", "generation": 7, "components": ["PgDatabase","UserCache"]}
 
 // 3b. shutdown marker — written at ORDERLY teardown, so its ABSENCE tells a
@@ -514,6 +515,36 @@ without `--composition`, `revl recover` runs against the model, and the proof
 is a proof about the model. Section 5b says what that means for the output and
 the exit status, and section 5c how to recover against the real world.
 
+### A reused WAL is decided per opening (issue #3147)
+
+`--wal PATH` appends to a file an earlier run left (#641/#642), and a service
+that restarts under the same `--wal` path reuses it the same way. A later
+opening that is opened with a composition writes a `generation` record before
+its first effect (section 5c; a bare reopen records no boundary, so its file
+still reads as one opening). The go, java and rust sinks append to an existing
+`REVL_WAL` with a second `header` instead, and a repeated `header` is read as
+the same boundary. The earlier opening's `activation-complete` and
+`commit-approved` prove only that the EARLIER opening finished. They are scoped
+to their own opening:
+
+- the LATEST opening's own `activation-complete` rolls forward; its own
+  `commit-approved` rolls the approved-to-discharged window forward;
+- otherwise the latest opening is rolled back like any mid-activation crash;
+- a roll-back walks back from the latest opening and stops at the last opening
+  that committed: several crashed openings in a row (a crash-looping service
+  leaves one per restart) are all rolled back, but an uncommitted opening
+  BEFORE a committed one is not, because an earlier recover already rolled it
+  back or the committed opening ran on top of it. An opening that did commit is
+  committed work and is never inverted;
+- an EARLIER opening that crashed in the approved-to-discharged window is a
+  committed session: its missing `discharge` is rolled forward and its owed
+  flushes are reported (under `priorWindows`), next to the latest opening's
+  verdict.
+
+So the reported crash of a later run mid-activation is `ROLLED-BACK` even
+though the file still carries the prior run's marker, and its uncommitted
+writes are re-issued their inverses instead of being declared finished.
+
 ### 5b. The model is not the world (issue #1477)
 
 Every inverse, compensation, re-issue and shared reclaim recover performs goes
@@ -758,6 +789,36 @@ successor would write a WAL the index does not name. An existing index is
 reused only for the same processes and components; recover a different
 placement's run first, or name a new path. `--restore` does not apply to a
 placement run.
+
+### 5e. Settling a stranded deploy participant (issue #2725)
+
+`revl deploy` drives one participant process per deploy-map process, each with
+its own WAL, and writes ONE durable decision next to its deploy state
+(`<wal-dir>/deploy/<map-stem>/0/decision.jsonl`). A conductor killed after
+deciding and before telling a peer leaves that record, and the stranded
+participant is settled against it, not against a guess:
+
+```
+revl recover --wal <participant>.wal --decision decision.jsonl
+```
+
+The record is read by `deploy.settle_stranded`, which applies `recovery.py`'s
+existing rule:
+
+- `federation-commit-approved` (present): the step committed. The participant's
+  WAL is given the `commit-approved` marker recovery already keys roll-forward
+  off, so it rolls forward and replays no inverse.
+- `federation-abort-decided`, `federation-decision-pending` (written when a
+  newer run started and has not decided), or no file at all: the step did not
+  commit for this run. The WAL is recovered unchanged and rolls back LIFO.
+- an unreadable record: fails closed as `unresolved` and settles nothing.
+  Guessing between forward and back is the split-brain the record exists to
+  prevent.
+
+This is a settlement of one participant's recorded effects, not global
+atomicity. A participant the conductor could not reach is still reported
+`unresolved` by the deploy verdict, and recovering its WAL is a separate step
+that the deploy never claims to have performed.
 
 ### Recovering a session that was forked (item 250)
 

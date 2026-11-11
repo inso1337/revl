@@ -181,6 +181,16 @@ def _load_config(path: str | None) -> dict:
     return data
 
 
+def renamed_code(code: types.CodeType, filename: str) -> types.CodeType:
+    """`code` with `filename` as the file name of it and of every code object
+    nested in its constants (each function, class body and comprehension it
+    defines). Everything else, line numbers included, is unchanged."""
+    consts = tuple(renamed_code(const, filename)
+                   if isinstance(const, types.CodeType) else const
+                   for const in code.co_consts)
+    return code.replace(co_filename=filename, co_consts=consts)
+
+
 def _components(ir: dict) -> list[dict]:
     return ir.get("components") or []
 
@@ -1136,6 +1146,67 @@ class _LivenessMonitor:
 # the runtime driver (py tier)
 # --------------------------------------------------------------------------
 
+# The most turns `_Driver._flush` gives the loop to settle what a step started.
+_FLUSH_TURNS = 20
+
+# How far ahead of the loop's clock a timer still keeps `_flush` turning, in
+# seconds: about what twenty idle turns took on an idle machine, so a timer
+# that the twenty turns let fire there is still waited for (issue #3379).
+# Under load the twenty turns took longer and let later timers fire too.
+_FLUSH_TIMER_HORIZON = 0.002
+
+# The loop attribute that counts the executor jobs it has in flight.
+_IN_FLIGHT = "_revl_executor_in_flight"
+
+
+def _track_executor_work(loop) -> None:
+    """Count the jobs `loop` hands to an executor until each one is done
+    (issue #3379), so `_flush` keeps turning while a thread is still working
+    for the loop. `asyncio.to_thread` and `loop.run_in_executor` both submit
+    through `loop.run_in_executor`, which this wraps on the loop itself.
+    Idempotent. A loop that does not take the wrapper is left as it is, and
+    `_loop_has_runnable` then reads it as always runnable."""
+    if getattr(loop, _IN_FLIGHT, None) is not None:
+        return
+    submit = loop.run_in_executor
+
+    def run_in_executor(executor, func, *args):
+        future = submit(executor, func, *args)
+        setattr(loop, _IN_FLIGHT, getattr(loop, _IN_FLIGHT) + 1)
+        future.add_done_callback(
+            lambda _: setattr(loop, _IN_FLIGHT, getattr(loop, _IN_FLIGHT) - 1))
+        return future
+
+    try:
+        loop.run_in_executor = run_in_executor
+        setattr(loop, _IN_FLIGHT, 0)
+    except (AttributeError, TypeError):
+        pass
+
+
+def _loop_has_runnable(loop) -> bool:
+    """True while one more turn of `loop` may still move work a step started
+    (issue #3379): a callback is ready to run, a job the loop handed to an
+    executor is not done, or a timer is due within `_FLUSH_TIMER_HORIZON`.
+
+    Reads the asyncio base loop's own ready queue and timer heap, and the
+    executor count `_track_executor_work` keeps. A loop that exposes none of
+    them is read as always runnable, so `_flush` keeps its full bound there."""
+    ready = getattr(loop, "_ready", None)
+    scheduled = getattr(loop, "_scheduled", None)
+    in_flight = getattr(loop, _IN_FLIGHT, None)
+    if ready is None or scheduled is None or in_flight is None:
+        return True
+    if ready or in_flight > 0:
+        return True
+    if not scheduled:
+        return False
+    horizon = loop.time() + _FLUSH_TIMER_HORIZON
+    if scheduled[0].when() > horizon:      # a heap: the earliest timer is first
+        return False
+    return any(not timer.cancelled() and timer.when() <= horizon
+               for timer in scheduled)
+
 
 class _Driver:
     """Boots and holds one composition on a cordis.Context, with a compact
@@ -1232,6 +1303,7 @@ class _Driver:
         # still the very object this driver put there (#1046).
         self._gen_modules: dict[str, _Generation] = {}
         self.emitted: tuple = ("", "")  # (filename, source) of the last emit
+        self.emitted_code: types.CodeType | None = None  # and its code object
         # crash-recovery WAL (roadmap item 47): --wal implies recording, since
         # the accumulator it persists is what recording captures.
         self.wal_path = wal_path
@@ -1647,8 +1719,34 @@ class _Driver:
         return {name: len(cbs) for name, cbs in self.root.events._hooks.items() if cbs}
 
     async def _flush(self) -> None:
-        for _ in range(20):
+        """Let the work the last step started settle: up to `_FLUSH_TURNS`
+        turns of the loop, as many as a fiber's activation or disposal chain
+        takes to quiesce (each hop is an `ensure_future`, one turn).
+
+        Issue #3379: the turns stop as soon as nothing is left that one more
+        turn could move, so a call that started nothing pays one turn, not
+        twenty. The loop keeps turning, up to the same bound, while a callback
+        is ready (a task with a step to take), a job it handed to an executor
+        (`asyncio.to_thread`) is in flight, or a timer is due within
+        `_FLUSH_TIMER_HORIZON`.
+
+        Three kinds of work the twenty turns caught only when it happened to
+        arrive in time are no longer waited for once nothing else is pending:
+        I/O that completes then; a timer due later than the horizon (on a
+        loaded machine the twenty turns took long enough to let some fire);
+        and work a thread hands back without `loop.run_in_executor`
+        (`executor.submit` with `asyncio.wrap_future`, `call_soon_threadsafe`
+        or `run_coroutine_threadsafe` from a plain thread, or a
+        `run_in_executor` bound before `_track_executor_work` wrapped it).
+        Nothing this flush settles hands work back those ways today: the one
+        thread hand-back in src, the process runner's control reader, runs on
+        that runner's own loop, which does not use this flush."""
+        loop = asyncio.get_running_loop()
+        _track_executor_work(loop)
+        for _ in range(_FLUSH_TURNS):
             await asyncio.sleep(0)
+            if not _loop_has_runnable(loop):
+                return
 
     # -- emit + load -------------------------------------------------------
 
@@ -1708,8 +1806,14 @@ class _Driver:
             if sys.modules.get(name) is gen.module:
                 del sys.modules[name]
 
-    def _emit_module(self, ir: dict,
-                     source: str | None = None) -> types.ModuleType:
+    def _emit_module(self, ir: dict, source: str | None = None,
+                     code: types.CodeType | None = None) -> types.ModuleType:
+        # `code`, when given, is `source` already compiled for an earlier
+        # generation (issue #3383: a session swapping back onto a document it
+        # has run). It is renamed to THIS generation's file name before it
+        # runs, so a traceback and the replay recorder quote `<revl-run genN>`
+        # with the new N, and it is executed into a fresh module like any
+        # other. Only the code object is reused, never a module or namespace.
         # `source` is the emitter's output for `ir` when the caller has already
         # rendered it. A session swap renders the successor BEFORE it tears the
         # running generation down, so an emitter refusal leaves that generation
@@ -1760,7 +1864,14 @@ class _Driver:
         # all disposed.
         self._gen_modules[module.__name__] = _Generation(
             module, frozenset(c["name"] for c in _components(ir)))
-        exec(compile(source, filename, "exec"), module.__dict__)
+        if code is None:
+            code = compile(source, filename, "exec")
+        else:
+            code = renamed_code(code, filename)
+        # the code object this generation runs, so a session can keep it for
+        # a later swap onto the same document (issue #3383)
+        self.emitted_code = code
+        exec(code, module.__dict__)
         # item 379 / option (b) of docs/design/378-sync-extern-service-reach.md:
         # install the resolved config for each document-global config extern into
         # the module's `_REVL_EXTERN_CONFIG` map, so a host body reads typed
@@ -1861,6 +1972,9 @@ class _Driver:
         return record
 
     async def _load(self, ir: dict, module: types.ModuleType) -> None:
+        # issue #3379: count the loop's executor jobs from the first load, so
+        # `_flush` sees a thread job started by an activation
+        _track_executor_work(asyncio.get_running_loop())
         by_name = {c["name"]: c for c in _components(ir)}
         load_causes = why_runtime.load_causes(ir) if self.tracing else {}
         # Ambient host provisions are installed above (in `__init__`); their
@@ -2790,6 +2904,49 @@ def _fail(exc_text: str, stage: str, code: int = 1) -> int:
     return code
 
 
+def _load_run_policy(path: str):
+    """The boundary policy a `revl run --policy` names, loaded once for every
+    tier. A file that does not load is a configuration failure, so the run
+    refuses rather than booting with the policy silently absent."""
+    from .policy import load_policy  # noqa: PLC0415 - lazy
+    return load_policy(path)
+
+
+def _policy_refusal(policy, ir: dict) -> str | None:
+    """The `revl audit --policy` decision for `revl run --policy` (issue
+    #3185), or None when the composition is within the policy.
+
+    The same two calls the audit gate makes, over the same audit graph: every
+    rule kind `policy.evaluate` applies (deny, allow-list, pair, evidence) plus
+    `approval_admission`. Before this the run read the policy on the wasm tier
+    only, and there through the allow-list alone, so a composition the audit
+    refused booted and ran its host bodies on py, rust, ts, java and go. No
+    `--mcp-scope` and no evidence inputs exist on `run`; both default empty, as
+    they do for an audit run without those flags."""
+    from .audit_diff import audit_report  # noqa: PLC0415 - lazy
+    from .policy import (approval_admission, evaluate,  # noqa: PLC0415 - lazy
+                         render_report)
+    violations = evaluate(policy, audit_report(ir)) \
+        + approval_admission(policy, ir)
+    return render_report(policy, violations) if violations else None
+
+
+def _policy_check(policy):
+    """The reload check for `--policy` under `--watch`: an edit that the policy
+    refuses is rejected like any other bad edit, so the running generation is
+    never replaced by one the boot would have refused."""
+    if policy is None:
+        return None
+    return lambda ir: _policy_refusal(policy, ir)
+
+
+def _both_checks(first, second):
+    """Compose two reload checks; the first problem found wins."""
+    if first is None or second is None:
+        return first or second
+    return lambda ir: first(ir) or second(ir)
+
+
 def _model_host_check(args, model_hosts):
     """The reload check for `--providers` model hosts (issue #1569), or None
     when the run binds none."""
@@ -2936,6 +3093,20 @@ def run_command(args, hold_once: bool = False) -> int:
                   "there is no single --backend for the whole composition; drop "
                   "--backend, or run without --placement", file=sys.stderr)
             return 2
+        if getattr(args, "policy", None):
+            # issue #3185: the policy binds the composition, whatever process
+            # each component lands in; refuse before any process starts.
+            try:
+                placed_ir = compile_files(args.files)
+            except RevlError as exc:
+                return _fail(str(exc), lifecycle.COMPILE)
+            try:
+                refusal = _policy_refusal(_load_run_policy(args.policy),
+                                          placed_ir)
+            except (RevlError, OSError) as exc:
+                return _fail(f"cannot apply policy: {exc}", lifecycle.CONFIG)
+            if refusal is not None:
+                return _fail(refusal, lifecycle.ADMISSION)
         from .placement import run_placement  # noqa: PLC0415 — lazy: no cordis needed to orchestrate
         # item 443: `--estop-latch` means the same thing for a placement as for
         # a single process — an operator in another terminal halts it — but the
@@ -2963,6 +3134,21 @@ def run_command(args, hold_once: bool = False) -> int:
         refuse_admission(ir)
     except RevlError as exc:
         return _fail(str(exc), lifecycle.ADMISSION)
+    # issue #3185: `--policy` is the `revl audit --policy` gate, applied to
+    # every tier before anything is imported or booted. A violation refuses
+    # the run with the audit's own report.
+    run_policy = None
+    if getattr(args, "policy", None):
+        try:
+            run_policy = _load_run_policy(args.policy)
+        except (RevlError, OSError) as exc:
+            return _fail(f"cannot load policy: {exc}", lifecycle.CONFIG)
+        try:
+            refusal = _policy_refusal(run_policy, ir)
+        except RevlError as exc:
+            return _fail(f"cannot apply policy: {exc}", lifecycle.CONFIG)
+        if refusal is not None:
+            return _fail(refusal, lifecycle.ADMISSION)
     # issue #2730 slice 1: an attestation supplied for the record must bind THIS
     # composition, checked before a runtime is imported or anything loads. The
     # header it yields is written on the trace's first event and every OTel
@@ -3067,20 +3253,13 @@ def run_command(args, hold_once: bool = False) -> int:
         if backend == "go":
             from .run_go import run_go  # noqa: PLC0415 — lazy: no go toolchain needed to compile/plan
             return run_go(ir, config, args.files, once=once, interactive=interactive)
-        # item 289: with a boundary policy in force, the wasm tier enforces the
-        # full least-authority chain (host imports subset-of declared caps
-        # subset-of policy-allowed) before booting; all three sets are
-        # statically decidable for a wasm module.
-        policy = None
-        if getattr(args, "policy", None):
-            from .policy import load_policy  # noqa: PLC0415
-            try:
-                policy = load_policy(args.policy)
-            except (RevlError, OSError) as exc:
-                return _fail(f"cannot load policy: {exc}", lifecycle.CONFIG)
+        # item 289: with a boundary policy in force, the wasm tier ALSO
+        # enforces the least-authority chain over the emitted import section
+        # (host imports subset-of declared caps subset-of policy-allowed) before
+        # booting, on top of the every-tier gate above (issue #3185).
         from .run_wasm import run_wasm  # noqa: PLC0415 — lazy: no wasmtime needed to compile/plan
         return run_wasm(ir, config, args.files, once=once,
-                        interactive=interactive, policy=policy)
+                        interactive=interactive, policy=run_policy)
 
     backend_dir = backends_root() / "python"
     try:
@@ -3153,7 +3332,9 @@ def run_command(args, hold_once: bool = False) -> int:
                          estop_latch=getattr(args, "estop_latch", None),
                          root_dirs=root_dirs,
                          ambient=ambient,
-                         ambient_check=_model_host_check(args, model_hosts),
+                         ambient_check=_both_checks(
+                             _model_host_check(args, model_hosts),
+                             _policy_check(run_policy)),
                          run_header=run_header)
     except UnsettledWalError as exc:
         print(f"error: {exc}", file=sys.stderr)

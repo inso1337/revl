@@ -48,6 +48,21 @@ flag is the grant that no caller over the transport can supply.
 `revl_update_status` also answers when updates are disabled, so an operator
 can see why.
 
+The feed is the server's configuration too, and its manifests are
+signature-checked: a networked `release.json` that carries a signature is
+verified against a key pinned in `src/revl/update/release_keys.py`.
+`--update-trust-unsigned` is the operator escape for a mirror whose manifest
+carries no signature at all; a present signature is still verified. It is a
+serve-time flag, never a caller argument.
+
+The caller's consent flags `allowDowngrade`, `acceptNotLive`,
+`acceptIncompatible`, `acceptUnknownVersion` and `acknowledgeWidening` are
+operator grants too. The server enables one only with
+`--update-allow-consent NAME`; without that grant the caller passing the flag
+is refused with `UPDATE_CONSENT_NOT_GRANTED` where the flag would have lifted
+a refusal, never silently ignored. `force` needs no grant: it re-plans the
+release the composition already runs and opts into nothing else.
+
 ## The operator profile
 
 A profile declares one or more **operators**. Each operator has a token and a
@@ -390,12 +405,13 @@ The target set is computed **before** the action runs, from the session's IR:
   removed, or whose IR entry differs (modulo provenance) from the running
   composition. So "may swap within tenant_a" permits changing a `tenant_a`
   component in a multi-realm composition, and refuses changing a `tenant_b`
-  one. An allow is matched against the realms the candidate puts a changed
-  component in. A `may not` is matched against those and the realms the
-  running composition puts it in, so a swap that moves a component out of a
-  realm is still selected by a `may not` rule on the realm it leaves, and the
-  realm it leaves never counts toward an allow. A no-op or server-side
-  re-admit targets the whole composition.
+  one. An allow must select a changed component on **both** sides: the realms
+  the running composition puts it in and the realms the candidate puts it in,
+  so a candidate cannot add a realm its grant matches to a component the grant
+  does not already cover. A `may not` is matched against the union of both
+  sides, so a swap that moves a component out of a realm is still selected by
+  a `may not` rule on the realm it leaves. A no-op or server-side re-admit
+  targets the whole composition.
 * **load** — every component in the candidate (a cold boot instantiates all).
 * **restore** — every component named in the snapshot manifest.
 * **unload / edit / snapshot / undo / rollback** — the whole running

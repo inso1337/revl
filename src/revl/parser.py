@@ -1078,12 +1078,12 @@ class RemoteRowDecl:
     `docs/interop-bridge.md` §3 already states for a seam ("manifest data, not
     source text"), applied to a callee that is in no manifest at all.
 
-    `remote`, `at`, `host`, `through`, `on_failure` and `redirect` are
-    CONTEXTUAL keywords,
-    recognised only in this one position inside a `composition` block. The
-    lexer's KEYWORDS set is untouched, so the self-host lexer needs no sync and
-    no program using any of those words as an ordinary name is broken. `in` and
-    `realm` are already keywords and are reused verbatim from `isolate`.
+    `remote`, `at`, `host`, `through`, `on_failure`, `redirect`, `pinned` and
+    `long_running` are CONTEXTUAL keywords, recognised only in this one position
+    inside a `composition` block. The lexer's KEYWORDS set is untouched, so the
+    self-host lexer needs no sync and no program using any of those words as an
+    ordinary name is broken. `in` and `realm` are already keywords and are
+    reused verbatim from `isolate`.
     """
     label: str
     key: str                       # the provision key the row claims
@@ -1118,6 +1118,16 @@ class RemoteRowDecl:
     # The line the address itself is written on, so an address refusal points at
     # the address rather than at the row's first line.
     host_line: int = 0
+    # Issue #2719: `pinned "<sha256-hex>"` — the FULL SHA-256 hex of the peer's
+    # TLS leaf SubjectPublicKeyInfo, the key the wire already presents. The pin
+    # adds no signature to the canonical envelope and no revocation source: a
+    # peer presenting any other key is a transport fault naming both
+    # fingerprints. `None` == the clause was not written, so a row with no pin
+    # behaves exactly as it did before this clause existed. `pinned` is a
+    # CONTEXTUAL keyword read only here, so the lexer's KEYWORDS set is
+    # untouched (docs/composition-rows.md).
+    pin: str | None = None
+    pin_line: int = 0
 
 
 @dataclass
@@ -1620,6 +1630,23 @@ class HostRef:
     root_kind: str | None = None
 
 
+@dataclass(frozen=True)
+class Derivation:
+    """The `derives <class> of <param>` trailing clause (issue #2695).
+
+    It DECLARES that the value a callable produces is a derivative of the named
+    `Retained[T, <policy>]` parameter: a summary, an index entry, an embedding,
+    a backup, an export or a cache entry. Structural only here: the parameter
+    exists and the class is one the named policy covers are checked in
+    `revl.taint`, beside the rest of the retention admission surface, so the
+    rule and the refusal that carries it sit in one file.
+    """
+
+    kind: str
+    source: str
+    line: int
+
+
 @dataclass
 class ExternDecl:
     name: str
@@ -1746,6 +1773,14 @@ class ExternDecl:
     # IR); `retry N` sets it to a positive literal. Legal only alongside
     # `validated`, checked in lower.
     retry: int = 0
+    # issue #2695: the `derives <class> of <param>` trailing clause, after the
+    # return type and before `cache`/`undo`/`compensate`. A DECLARED derivative
+    # relation (never inferred through a host body): the value this crossing
+    # produces is a derivative of the named `Retained[T, <policy>]` parameter,
+    # and carries that same policy. `None` unless written, so every existing
+    # extern is unaffected; the validation and the refusals that carry it live
+    # in `revl.taint` with the rest of the retention admission surface.
+    derivation: "Derivation | None" = None
 
 
 @dataclass
@@ -1811,6 +1846,11 @@ class FnDecl:
     # body. `try` desugars through fresh locals (`try_<k>`), and a fresh name
     # must be one this fn does not spell anywhere, read, bound or called.
     idents: frozenset = field(default_factory=frozenset)
+    # issue #2695: the `derives <class> of <param>` trailing clause (the
+    # declaration's result is a derivative of the named `Retained[T, <policy>]`
+    # parameter and carries that policy). `None` unless written, so every
+    # existing fn is unaffected. Validated in `revl.taint`.
+    derivation: "Derivation | None" = None
 
 
 # pure-expression AST (§3.2 — the TS-subset stratum)
@@ -3610,6 +3650,21 @@ class Parser:
         if self.at("arrow"):
             self.next()
             returns = self.type_()
+        # issue #2695: the `derives <class> of <param>` trailing clause, after
+        # the return type and before the teardown clauses. Recognised here on
+        # the IDENT, like `cache`, so no program that used `derives` as an
+        # ordinary name is broken; a second clause is refused by name rather
+        # than left to a confusing "expected {".
+        derivation = None
+        if self.at("ident", "derives"):
+            derivation = self._derives_clause()
+            if self.at("ident", "derives"):
+                raise self.err(
+                    self.peek().line,
+                    f"extern `{name}` declares `derives` twice",
+                    hint="one derivative class per crossing; a crossing that "
+                         "writes two classes is two declarations, so the "
+                         "receipt can name each (issue #2695)")
         # item 310: the `cache` trailing clause, after the return type and before
         # the teardown clauses (design §Surface: "before `=` or `undo`"). Grammar-
         # legal but admission-refused for externs until the interior-crossing slice
@@ -3744,7 +3799,8 @@ class Parser:
                           undo_idempotent=undo_idempotent, undo_read=undo_read,
                           idempotent=idempotent,
                           idempotency_key=idempotency_key, cache=cache,
-                          validated=validated, retry=retry_budget)
+                          validated=validated, retry=retry_budget,
+                          derivation=derivation)
 
     def _retry_budget(self) -> int:
         """The positive integer literal after a `retry` modifier (item 257 §5.2).
@@ -3765,6 +3821,36 @@ class Parser:
                 hint="`retry N` sets the attempts BEYOND the first; omit the "
                      "clause for no retry (the budget defaults to 0, one attempt)")
         return ntok.value
+
+    def _derives_clause(self) -> Derivation:
+        """`derives <class> of <param>` (issue #2695), a trailing clause after a
+        callable's return type.
+
+        `derives` and `of` are CONTEXTUAL keywords (matched on the ident, the
+        discipline `cache`/`deferred`/`validated` use), so the lexer's KEYWORDS
+        set needs no sync and no program that used either word as an ordinary
+        name is broken. Structural parse only: that the named parameter exists,
+        that it is `Retained[T, <policy>]`, and that the policy covers the class
+        are checked in `revl.taint`, next to the retention refusal they enrich,
+        with honest messages naming the declaration.
+        """
+        line = self.peek().line
+        self.expect("ident", "derives",
+                    what="the `derives <class> of <param>` clause")
+        kind = self.expect(
+            "ident",
+            what="a derivative class after `derives` (summary, index, "
+                 "embedding, backup, export or cache)").value
+        self.expect(
+            "kw", "of",
+            what="`of <param>` after the derivative class — the "
+                 "`Retained[T, <policy>]` parameter the derivative is made "
+                 "from")
+        source = self.expect(
+            "ident",
+            what="the `Retained[T, <policy>]` parameter the derivative is "
+                 "made from").value
+        return Derivation(kind, source, line)
 
     def _reach_clause(self) -> tuple[str, str]:
         """`(confined: <param>)` after an emission classification — item 373.
@@ -5897,8 +5983,9 @@ class Parser:
         return out
     def remote_row_decl(self, composition: str) -> RemoteRowDecl:
         """`remote @label provides <key>: <Service> [in realm("r")]
-        at host("h:port") [through <ident>] [on_failure(withdraw|result)]
-        [redirect(refuse|same_origin)] [long_running]`
+        at host("h:port") [pinned "<sha256-hex>"] [through <ident>]
+        [on_failure(withdraw|result)] [redirect(refuse|same_origin)]
+        [long_running]`
 
         Item 424 D-424c.1, slice C2. Every word this clause introduces is a
         CONTEXTUAL keyword read only here (`remote`, `at`, `host`, `through`,
@@ -5959,6 +6046,8 @@ class Parser:
         redirect_line = line
         long_running = False
         long_running_line = line
+        pin: str | None = None
+        pin_line = line
         while True:
             if self.at("kw", "in"):
                 iline = self.next().line
@@ -5994,6 +6083,22 @@ class Parser:
                 host = self.next().value
                 host_line = tok.line
                 self.expect(")")
+            elif self.at("ident", "pinned"):
+                pline = self.next().line
+                if pin is not None:
+                    raise self.err(pline, f"duplicate `pinned` clause on "
+                                          f"remote row `@{label}`")
+                tok = self.peek()
+                if tok.kind != "string":
+                    raise self.err(
+                        tok.line,
+                        "a pinned identity is a static string literal",
+                        hint='write `pinned "<64 hex characters>"` — the FULL '
+                             "SHA-256 hex of the peer's TLS leaf "
+                             "SubjectPublicKeyInfo, the key the wire presents "
+                             "(issue #2719)")
+                pin = self.next().value
+                pin_line = tok.line
             elif self.at("ident", "through"):
                 tline = self.next().line
                 if transport is not None:
@@ -6062,7 +6167,7 @@ class Parser:
                              redirect=redirect, redirect_line=redirect_line,
                              long_running=long_running,
                              long_running_line=long_running_line,
-                             host_line=host_line)
+                             host_line=host_line, pin=pin, pin_line=pin_line)
 
     def host_row_decl(self, composition: str) -> HostRowDecl:
         """`host @label provides <key>: <Service> [in realm("r")]`
@@ -8074,6 +8179,20 @@ class Parser:
         if self.at("arrow"):
             self.next()
             returns = self.type_()
+        # issue #2695: the `derives <class> of <param>` trailing clause, between
+        # the return type and the body. Recognised on the IDENT, like `cache`,
+        # so an existing fn that used `derives` as an ordinary name is
+        # unaffected. A second clause is refused by name.
+        derivation = None
+        if self.at("ident", "derives"):
+            derivation = self._derives_clause()
+            if self.at("ident", "derives"):
+                raise self.err(
+                    self.peek().line,
+                    f"`{name}` declares `derives` twice",
+                    hint="one derivative class per fn; a fn that makes two "
+                         "classes is two declarations, so the receipt can name "
+                         "each (issue #2695)")
         # item 310: the `cache` trailing clause, between the return type and the
         # body. Only `cache pure` is legal on a plain `fn` (checked in lower); the
         # clause slot is unambiguous (a fn body opens with `{`, never `cache`).
@@ -8100,7 +8219,8 @@ class Parser:
             return FnDecl(name, params, returns, body, public, line, verified,
                           source=self.filename, type_params=type_params,
                           endorse_origins=endorse_origins, cache=cache,
-                          idents=_idents_between(self.toks, start, self.pos))
+                          idents=_idents_between(self.toks, start, self.pos),
+                          derivation=derivation)
         self.expect("{")
         body = []
         while True:
@@ -8112,7 +8232,8 @@ class Parser:
         return FnDecl(name, params, returns, body, public, line, verified,
                       source=self.filename, type_params=type_params,
                       endorse_origins=endorse_origins, cache=cache,
-                      idents=_idents_between(self.toks, start, self.pos))
+                      idents=_idents_between(self.toks, start, self.pos),
+                      derivation=derivation)
 
 
     def test_decl(self, lifecycle: bool = False) -> TestDecl:

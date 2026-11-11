@@ -708,3 +708,20 @@ def test_cli_still_imports_wit(tmp_path):
     assert main(["import", "wit", str(ROOT / "tests/fixtures/wit/greeter.wit"),
                  "-o", str(out)]) == 0
     assert compile_files([str(out)])["services"]["Greeter"]
+
+
+def test_yaml_hint_has_no_backslash_quote_and_pins_the_encoding(monkeypatch):
+    """The conversion command is printed inside a double-quoted `python -c`.
+    Windows PowerShell does not treat a backslash as an escape, so an inner
+    `\\"` ends the argument there. The pin uses single quotes instead, which
+    every shell passes through untouched. The rendered refusal is checked, not
+    the source text, and PyYAML is made unimportable so the refusal is reached
+    whether or not it is installed."""
+    monkeypatch.setitem(sys.modules, "yaml", None)
+    with pytest.raises(RevlError) as excinfo:
+        load_document("openapi: '3.0.3'\n", filename="spec.yaml")
+    rendered = str(excinfo.value)
+    assert "yaml.safe_load" in rendered
+    assert 'python -c "' in rendered
+    assert "encoding='utf-8'" in rendered
+    assert '\\"' not in rendered
