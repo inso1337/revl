@@ -44,6 +44,11 @@ export class CordisHost {
     return this.#components.get(name)?.state ?? "absent";
   }
 
+  /** Why a failed component failed (its error message), or null. */
+  error(name) {
+    return this.#components.get(name)?.error ?? null;
+  }
+
   /** The coeffect imports still unresolved for a gated component. */
   missing(name) {
     return [...(this.#components.get(name)?.missing ?? [])];
@@ -85,8 +90,11 @@ export class CordisHost {
       missing: [],
       instance: null,
       exports: null,
+      error: null,
     };
     this.#components.set(name, record);
+    // Only THIS component's failure rejects this load; a failure the pump
+    // meets in another component is recorded on that component instead.
     this.#tryInstantiate(record);
     this.#pump();
     return record;
@@ -156,47 +164,75 @@ export class CordisHost {
         return fn(...args);
       };
     }
+    // A provision conflict is decided from the module's export list, before
+    // anything is instantiated, so a conflicting component never runs its
+    // activation (or its coeffect calls) and has nothing to undo.
+    const provisions = [];
+    for (const exp of WebAssembly.Module.exports(record.module)) {
+      if (exp.kind !== "function" || !exp.name.startsWith(PROVIDE_PREFIX)) continue;
+      const opKey = exp.name.slice(PROVIDE_PREFIX.length);
+      const existing = this.#providers.get(opKey);
+      if (existing) {
+        this.#fail(record, new Error(
+          `${record.name}: provision conflict on ${opKey}: ` +
+          `${existing.component} already provides it`));
+      }
+      provisions.push([opKey, exp.name]);
+    }
     let instance;
     try {
       instance = new WebAssembly.Instance(record.module, imports);
     } catch (error) {
-      record.state = "failed";
-      throw error;
+      this.#fail(record, error);
     }
     record.instance = instance;
     record.exports = instance.exports;
     if (typeof instance.exports.activate_step === "function") {
       let steps = 0;
-      while (instance.exports.activate_step() !== 0) {
-        if (++steps > MAX_ACTIVATION_STEPS) {
-          record.state = "failed";
-          throw new Error(`${record.name}: activation did not finish in ${MAX_ACTIVATION_STEPS} steps`);
+      let done = false;
+      while (!done) {
+        try {
+          done = instance.exports.activate_step() === 0;
+        } catch (error) {
+          this.#fail(record, error, { undo: true });
+        }
+        if (!done && ++steps > MAX_ACTIVATION_STEPS) {
+          this.#fail(record, new Error(
+            `${record.name}: activation did not finish in ${MAX_ACTIVATION_STEPS} steps`),
+            { undo: true });
         }
       }
     }
-    // Every provision is checked for a conflict BEFORE any is published, so a
-    // component that fails here leaves nothing registered for another
-    // component to activate against or call into.
-    const provisions = [];
-    for (const [exportName, fn] of Object.entries(instance.exports)) {
-      if (!exportName.startsWith(PROVIDE_PREFIX)) continue;
-      const opKey = exportName.slice(PROVIDE_PREFIX.length);
-      const existing = this.#providers.get(opKey);
-      if (existing) {
-        record.state = "failed";
-        if (typeof instance.exports.deactivate === "function") instance.exports.deactivate();
-        throw new Error(
-          `provision conflict on ${opKey}: ${existing.component} already provides it`);
-      }
-      provisions.push([opKey, fn]);
-    }
     record.state = "active";
     record.missing = [];
-    for (const [opKey, fn] of provisions) {
-      this.#providers.set(opKey, { component: record.name, fn });
+    for (const [opKey, exportName] of provisions) {
+      this.#providers.set(opKey, { component: record.name, fn: instance.exports[exportName] });
     }
     this.#log(`active ${record.name}`);
     return true;
+  }
+
+  /**
+   * Mark `record` failed and throw `error`. With `undo`, the partly activated
+   * instance runs `deactivate` first; a trap there is logged and does not
+   * replace the original error. The instance is released either way, so a
+   * failed component holds no live instance and is never retried.
+   */
+  #fail(record, error, { undo = false } = {}) {
+    if (undo && typeof record.exports?.deactivate === "function") {
+      try {
+        record.exports.deactivate();
+      } catch (undoError) {
+        this.#log(`${record.name}: deactivate after a failed activation threw: ${undoError.message}`);
+      }
+    }
+    record.state = "failed";
+    record.missing = [];
+    record.instance = null;
+    record.exports = null;
+    record.error = error instanceof Error ? error.message : String(error);
+    this.#log(`failed ${record.name}: ${record.error}`);
+    throw error;
   }
 
   #resolve(key, op) {
@@ -213,7 +249,13 @@ export class CordisHost {
     while (changed) {
       changed = false;
       for (const record of this.#components.values()) {
-        if (record.state === "gated" && this.#tryInstantiate(record)) changed = true;
+        if (record.state !== "gated") continue;
+        try {
+          if (this.#tryInstantiate(record)) changed = true;
+        } catch {
+          // recorded on the record by #fail; it is that component's failure,
+          // not the caller's, so the pump goes on with the others
+        }
       }
     }
   }

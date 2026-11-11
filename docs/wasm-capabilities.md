@@ -407,7 +407,9 @@ instead of only on the Python cordis-wasm runtime:
 
 - a module's `coeffect:<key>` imports are bound to host operations
   (`host.provideHost(key, ops)`) or to another loaded component's
-  `provide:<key>.<op>` export;
+  `provide:<key>.<op>` export. The ops are the host object's OWN function
+  properties, so a class instance whose methods live on its prototype is
+  passed as a plain object: `provideHost("clock", { now: () => clock.now() })`;
 - a component whose imports do not resolve is **gated**: its module is
   compiled but no instance is created. Supplying the op activates it;
 - `activate_step()` drives activation, `deactivate()` runs the compiled

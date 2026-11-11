@@ -5,12 +5,21 @@ carries the part of the cordis-wasm seam a browser page needs:
 
 * a module's `coeffect:<key>` imports are its dependencies. The host resolves
   one from `provideHost(key, ops)` or from another loaded component's
-  `provide:<key>.<op>` export;
+  `provide:<key>.<op>` export. The ops are the OWN function properties of
+  `ops`: an inherited name (`constructor`, `toString`, a class instance's
+  prototype method) is not an op, so pass a class instance as a plain object,
+  e.g. `provideHost("clock", { now: () => clock.now() })`;
 * a component whose coeffects are unresolved is **gated**: its module is
   compiled but no instance is created. Supplying the missing op activates it,
   exactly as cordis-wasm's linker refuses to instantiate it;
 * activation is driven by `activate_step() -> i32`, teardown by `deactivate()`,
   and `provide:` exports are published only after activation;
+* a component that cannot activate (a provision conflict, found from its
+  export list before it is instantiated; a trap in `activate_step`; the step
+  limit) is **failed**: a partly run activation is undone with `deactivate`,
+  it publishes nothing, `error(name)` says why, and only its own `load`
+  rejects. One that activates later, while another component's load or a
+  `provideHost` call drives the host, fails without rejecting that call;
 * scalar values cross as native WebAssembly values, so a `Float` is an `f64`
   (a JavaScript `number`) with no marshalling. An `Int` is a wasm `i64`, which
   the JS API represents as a `BigInt`, and `Bool`/`Int32` as `number`/`i32`.
