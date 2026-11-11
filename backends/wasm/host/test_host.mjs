@@ -223,8 +223,9 @@ function wasmModule({ imports = [], funcs = [], start = null }) {
 }
 
 // A host op that calls provideHost while X is activating must not re-enter
-// X: the nested pump activates Y (which provides m.b too), so X then fails
-// on the conflict instead of going active with no exports over Y's provider.
+// X: the provideHost is deferred to the end of X's load, so X goes active
+// first with m.b published, and the drained pump then fails Y (which
+// provides m.b too) on the conflict instead of publishing over X.
 {
   const edge = new CordisHost();
   let once = false;
@@ -236,22 +237,22 @@ function wasmModule({ imports = [], funcs = [], start = null }) {
     if (!once) { once = true; edge.provideHost("z", { w: () => 0 }); }
     return 0;
   } });
-  await assert.rejects(
-    edge.load("X", wasmModule({
-      imports: [["coeffect:k", "go"]],
-      funcs: [
-        { export: "activate_step", raw: [0x10, 0x00, 0x1a, 0x41, 0x00] },
-        { export: "provide:m.b", value: 1 },
-      ],
-    })),
-    /provision conflict on m\.b: Y already provides it/);
-  assert.equal(edge.state("Y"), "active");
-  assert.equal(edge.state("X"), "failed");
+  await edge.load("X", wasmModule({
+    imports: [["coeffect:k", "go"]],
+    funcs: [
+      { export: "activate_step", raw: [0x10, 0x00, 0x1a, 0x41, 0x00] },
+      { export: "provide:m.b", value: 1 },
+    ],
+  }));
+  assert.equal(edge.state("X"), "active");
+  assert.equal(edge.state("Y"), "failed");
+  assert.match(edge.error("Y"), /provision conflict on m\.b: X already provides it/);
+  edge.__checkInvariant();
   await edge.load("U", wasmModule({
     imports: [["coeffect:m", "b"]],
     funcs: [{ export: "p", call: 0 }],
   }));
-  assert.equal(edge.call("U", "p"), 2, "m.b is still Y's provision");
+  assert.equal(edge.call("U", "p"), 1, "m.b is X's provision");
 }
 
 // A deactivate whose host op throws a non-Error (null) while undoing a failed
@@ -330,3 +331,127 @@ function wasmModule({ imports = [], funcs = [], start = null }) {
 }
 
 console.log("browser host edge cases: ok");
+
+// RANDOMIZED SEQUENCES. Fixed seeds, so every run is the same sequences. Each
+// sequence is up to 12 steps of load / unload / provideHost over components
+// that trap in activate_step, run past the step limit, call a host op that
+// itself loads, unloads or provides, have a deactivate that traps or throws
+// null, or provide the same op as another. The log callback throws on some
+// lines. After every step (and once the loads it started have settled) the
+// host's invariant must hold; `__checkInvariant` is a test-only method.
+// Deactivations are also counted from outside: load number n gets its own
+// host op u.g<n>, which its deactivate calls, so a second deactivate of one
+// activation is seen whatever the host's own bookkeeping says.
+{
+  const SEEDS = 300;
+  const MAX_STEPS = 12;
+  const GENERATIONS = 64;
+  const NAMES = ["A", "B", "C", "D"];
+  const rng = (seed) => {
+    let x = (seed * 2654435761 + 1) >>> 0;
+    return (n) => {
+      x = (Math.imul(x, 1664525) + 1013904223) >>> 0;
+      return x % n;
+    };
+  };
+  const callDrop = (i) => [0x10, i, 0x1a];
+  const ret0 = [0x41, 0x00];
+  // kind -> module bytes; import 0 is always u.g<gen> (the deactivate counter)
+  const component = (kind, gen) => {
+    const counter = ["coeffect:u", `g${gen}`];
+    const countThen = (tail) => [...callDrop(0), ...tail];
+    switch (kind) {
+      case 0: // plain provider of m.b
+        return wasmModule({ imports: [counter], funcs: [
+          { export: "provide:m.b", value: 1 },
+          { export: "deactivate", raw: countThen(ret0) }] });
+      case 1: // gated on z.w, provides m.b too (a same-name conflict)
+        return wasmModule({ imports: [counter, ["coeffect:z", "w"]], funcs: [
+          { export: "provide:m.b", value: 2 }, { export: "p", call: 1 },
+          { export: "deactivate", raw: countThen(ret0) }] });
+      case 2: // a dependent of m.b
+        return wasmModule({ imports: [counter, ["coeffect:m", "b"]], funcs: [
+          { export: "p", call: 1 }, { export: "deactivate", raw: countThen(ret0) }] });
+      case 3: // activation and deactivation call k.go, a re-entrant host op
+        return wasmModule({ imports: [counter, ["coeffect:k", "go"]], funcs: [
+          { export: "activate_step", raw: [...callDrop(1), ...ret0] },
+          { export: "provide:n.c", value: 3 },
+          { export: "deactivate", raw: countThen([...callDrop(1), ...ret0]) }] });
+      case 4: // activate_step traps
+        return wasmModule({ imports: [counter], funcs: [
+          { export: "activate_step", raw: [0x00] }, { export: "provide:m.b", value: 4 },
+          { export: "deactivate", raw: countThen(ret0) }] });
+      case 5: // activate_step never finishes: the step limit
+        return wasmModule({ imports: [counter], funcs: [
+          { export: "activate_step", value: 1 }, { export: "provide:n.c", value: 5 },
+          { export: "deactivate", raw: countThen(ret0) }] });
+      case 6: // deactivate traps
+        return wasmModule({ imports: [counter], funcs: [
+          { export: "provide:n.c", value: 6 },
+          { export: "deactivate", raw: countThen([0x00]) }] });
+      default: // deactivate's host op throws null; activation calls k.go once
+        return wasmModule({ imports: [counter, ["coeffect:k", "nul"], ["coeffect:k", "go"]],
+          funcs: [
+            { export: "activate_step", raw: [...callDrop(2), ...ret0] },
+            { export: "provide:m.b", value: 7 },
+            { export: "deactivate", raw: countThen([...callDrop(1), ...ret0]) }] });
+    }
+  };
+  const KINDS = 8;
+  const failures = [];
+  for (let seed = 1; seed <= SEEDS; seed++) {
+    const pick = rng(seed);
+    const nested = rng(seed + 100000);
+    const throwOn = pick(3) === 0 ? null : `${["active", "failed"][pick(2)]} ${NAMES[pick(4)]}`;
+    const host = new CordisHost({ log: (line) => {
+      if (throwOn && line.startsWith(throwOn)) throw new Error(`log refused: ${line}`);
+    } });
+    const deactivations = new Array(GENERATIONS).fill(0);
+    const counters = {};
+    for (let g = 0; g < GENERATIONS; g++) counters[`g${g}`] = () => { deactivations[g]++; return 0; };
+    let gen = 0;
+    let budget = 4; // nested mutations per sequence
+    const pending = [];
+    const trace = [];
+    const loadOne = (name, kind) => {
+      if (gen >= GENERATIONS) return;
+      const g = gen++;
+      trace.push(`load ${name} kind ${kind}`);
+      pending.push(host.load(name, component(kind, g)).catch(() => {}));
+    };
+    const mutate = (choose) => {
+      const what = choose(3);
+      const name = NAMES[choose(4)];
+      try {
+        if (what === 0) loadOne(name, choose(KINDS));
+        else if (what === 1) { trace.push(`unload ${name}`); host.unload(name); }
+        else { trace.push("provide z"); host.provideHost("z", { w: () => 0 }); }
+      } catch {
+        // an unload whose deactivate traps throws to its caller; expected
+      }
+    };
+    host.provideHost("u", counters);
+    host.provideHost("k", {
+      go: () => { if (budget > 0) { budget--; trace.push("  nested:"); mutate(nested); } return 0; },
+      nul: () => { throw null; },
+    });
+    const steps = 1 + pick(MAX_STEPS);
+    try {
+      for (let s = 0; s < steps; s++) {
+        mutate(pick);
+        while (pending.length) await pending.shift();
+        host.__checkInvariant();
+        const twice = deactivations.findIndex((n) => n > 1);
+        if (twice >= 0) {
+          throw new Error(`load #${twice} ran deactivate ${deactivations[twice]} times`);
+        }
+      }
+    } catch (error) {
+      failures.push(`seed ${seed}: ${String(error?.message ?? error).split("\n").join(" | ")}` +
+        `\n    after: ${trace.join("; ")}`);
+    }
+  }
+  assert.equal(failures.length, 0,
+    `${failures.length} of ${SEEDS} seeds broke the invariant:\n${failures.slice(0, 5).join("\n")}`);
+  console.log(`browser host randomized sequences: ok (${SEEDS} seeds)`);
+}

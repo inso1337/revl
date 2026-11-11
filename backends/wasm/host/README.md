@@ -20,6 +20,24 @@ carries the part of the cordis-wasm seam a browser page needs:
   it publishes nothing, `error(name)` says why, and only its own `load`
   rejects. One that activates later, while another component's load or a
   `provideHost` call drives the host, fails without rejecting that call;
+* the states are `loading` (compiling; the name is already reserved),
+  `gated`, `activating` (the instance exists and `activate_step` is running;
+  nothing is published and `call` refuses), `active` and `failed`. A failed
+  component holds no instance and is never retried;
+* re-entrant calls are deferred: a `load`, `unload` or `provideHost` made from
+  inside `activate_step`, `deactivate`, a start function or the `log`
+  callback is applied when the outer host operation finishes, in the order it
+  was made (`load` still returns a promise, which settles then). The one
+  exception is `unload` of the component that is activating: its activation
+  stops at the next step, `deactivate` runs once, and its `load` rejects with
+  "was unloaded while it was activating";
+* `deactivate` runs at most once per activation. A `log` callback that throws
+  on the `active <name>` line fails that component (nothing was published
+  yet); a throw on any other line is ignored;
+* `__checkInvariant()` is for tests only: it throws when the invariant written
+  at the top of `CordisHost` does not hold (every published op belongs to an
+  `active` component, every `active` component has its instance and all its
+  provisions published, a `failed` or removed one has neither);
 * only a FUNCTION export named `provide:<key>.<op>` is a provision: a memory
   or global exported under such a name is not published and does not count
   in a conflict;

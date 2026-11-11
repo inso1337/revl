@@ -417,6 +417,12 @@ instead of only on the Python cordis-wasm runtime:
 - a component that cannot activate (a provision conflict, a trap, the step
   limit) is `failed`: it publishes nothing, `host.error(name)` says why, and
   only its own `load` rejects;
+- the other states are `loading` (compiling) and `activating` (instantiated,
+  `activate_step` running, nothing published yet). A `load`, `unload` or
+  `provideHost` made from inside activation, `deactivate` or the log
+  callback is deferred to the end of the outer host operation, except an
+  `unload` of the activating component itself, which stops its activation
+  at the next step and runs `deactivate` once;
 - scalars cross as native wasm values, so `Float` is an `f64` and arrives in
   JavaScript as a `number`. No linear-memory marshalling is needed for the
   scalar boundary.

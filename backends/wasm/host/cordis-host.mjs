@@ -20,23 +20,57 @@ const PROVIDE_PREFIX = "provide:";
 const MAX_ACTIVATION_STEPS = 100000;
 
 export class CordisHost {
+  // THE INVARIANT. It holds whenever no host operation is running (between
+  // any two calls into the public API), and `__checkInvariant` checks it:
+  //
+  //   1. every entry in #providers belongs to a component whose state is
+  //      `active`, and is that component's own export;
+  //   2. every `active` component has a live instance and exports, and every
+  //      one of its provisions is in #providers under its name;
+  //   3. `deactivate` runs at most once per activation, successful or partial;
+  //   4. a component that is `failed` or removed holds no instance and no
+  //      provision.
+  //
+  // Two rules keep it true. Provisions are published only by #publish, the
+  // last step of a successful activation, and withdrawn only by #withdraw,
+  // the first step of #fail and of an unload. And no host mutation runs
+  // NESTED inside user code: a load, unload or provideHost called while the
+  // host is inside activate_step, deactivate, a start function or the log
+  // callback is queued and applied when the outer operation finishes.
+  // The one exception is unloading the component that is activating: that
+  // marks it, and its step loop stops at the next step.
+
   #hostCoeffects = new Map(); // key -> { op: fn }
   #components = new Map(); // name -> record
-  #providers = new Map(); // "key.op" -> { component, fn }
+  #providers = new Map(); // "key.op" -> { component, exportName, fn }
   #log;
+  #depth = 0; // > 0 while user code runs inside a host operation
+  #deferred = []; // mutations requested at #depth > 0, applied in order
+  #draining = false;
+  #violations = []; // deactivate calls beyond one per activation
 
   constructor({ log = () => {} } = {}) {
     this.#log = log;
   }
 
-  /** The keys a host provides (a browser resource, a clock, a test stub). */
+  /**
+   * The keys a host provides (a browser resource, a clock, a test stub). The
+   * ops are the OWN function properties of `ops`. Deferred when called from
+   * inside activation, deactivation or the log callback.
+   */
   provideHost(key, ops) {
     if (!ops || typeof ops !== "object") {
       throw new TypeError(`provideHost(${JSON.stringify(key)}) expects an object of ops`);
     }
-    this.#hostCoeffects.set(key, ops);
-    this.#pump();
-    return this;
+    if (this.#depth > 0) {
+      this.#deferred.push(() => this.provideHost(key, ops));
+      return this;
+    }
+    return this.#outer(() => {
+      this.#hostCoeffects.set(key, ops);
+      this.#pump();
+      return this;
+    });
   }
 
   /**
@@ -60,11 +94,23 @@ export class CordisHost {
   /**
    * Compile and (if its coeffects resolve) instantiate a component.
    *
-   * `source` is a fetchable URL string, a Response, an ArrayBuffer or a typed
-   * array. A gated component's module is compiled and kept; it instantiates as
-   * soon as `provideHost` or another component publishes the missing ops.
+   * `source` is a fetchable URL string, a Response, an ArrayBuffer, a typed
+   * array or a compiled WebAssembly.Module. A gated component's module is
+   * compiled and kept; it instantiates as soon as `provideHost` or another
+   * component publishes the missing ops. Called from inside activation,
+   * deactivation or the log callback, the load starts when the outer
+   * operation finishes; the returned promise settles as usual.
    */
-  async load(name, source) {
+  load(name, source) {
+    if (this.#depth > 0) {
+      return new Promise((resolve, reject) => {
+        this.#deferred.push(() => this.#load(name, source).then(resolve, reject));
+      });
+    }
+    return this.#load(name, source);
+  }
+
+  async #load(name, source) {
     if (this.#components.has(name)) {
       throw new Error(`component ${JSON.stringify(name)} is already loaded`);
     }
@@ -79,6 +125,9 @@ export class CordisHost {
       instance: null,
       exports: null,
       error: null,
+      unloadRequested: false,
+      activations: 0,
+      deactivations: 0,
     };
     this.#components.set(name, record);
     try {
@@ -91,17 +140,18 @@ export class CordisHost {
     if (this.#components.get(name) !== record) {
       throw new Error(`component ${JSON.stringify(name)} was unloaded while it was loading`);
     }
-    record.state = "gated";
-    // Only THIS component's failure rejects this load; a failure the pump
-    // meets in another component is recorded on that component instead.
-    this.#attempt(record);
-    this.#pump();
-    return record;
+    return this.#outer(() => {
+      record.state = "gated";
+      // Only THIS component's failure rejects this load; a failure the pump
+      // meets in another component is recorded on that component instead.
+      this.#attempt(record);
+      this.#pump();
+      return record;
+    });
   }
 
   /** Call an export on an ACTIVE component, e.g. `provide:motion.step`. */
   call(componentName, exportName, ...args) {
-
     const record = this.#components.get(componentName);
     if (!record) throw new Error(`component ${JSON.stringify(componentName)} is not loaded`);
     if (record.state !== "active") {
@@ -117,22 +167,122 @@ export class CordisHost {
   }
 
   /**
-   * Unload a component: its compiled inverses run through `deactivate`, and its
-   * provisions are withdrawn. Dependents already instantiated are left for the
-   * caller to unload first (there is no reactive withdrawal in this host).
+   * Unload a component: its provisions are withdrawn and its compiled
+   * inverses run through `deactivate`. Dependents already instantiated are
+   * left for the caller to unload first (there is no reactive withdrawal in
+   * this host). Returns whether a component of that name was loaded.
+   *
+   * Unloading the component that is activating stops its activation at the
+   * next step. Any other unload called from inside activation, deactivation
+   * or the log callback is applied when the outer operation finishes.
    */
   unload(name) {
     const record = this.#components.get(name);
     if (!record) return false;
-    if (record.state === "active" && typeof record.exports.deactivate === "function") {
-      record.exports.deactivate();
+    if (record.state === "activating") {
+      record.unloadRequested = true;
+      return true;
     }
-    // withdrawn in every state, so no provision can outlive its component
+    if (this.#depth > 0) {
+      this.#deferred.push(() => this.unload(name));
+      return true;
+    }
+    return this.#outer(() => {
+      this.#withdraw(record);
+      const wasActive = record.state === "active";
+      const exports = record.exports;
+      this.#components.delete(name);
+      record.state = "absent";
+      record.instance = null;
+      record.exports = null;
+      if (wasActive) this.#deactivate(record, exports);
+      return true;
+    });
+  }
+
+  /**
+   * TEST ONLY. Throws when the invariant at the top of this class does not
+   * hold. Call it between host operations, never from inside one.
+   */
+  __checkInvariant() {
+    const problems = [...this.#violations];
     for (const [opKey, provider] of this.#providers) {
-      if (provider.component === name) this.#providers.delete(opKey);
+      const record = this.#components.get(provider.component);
+      if (!record || record.state !== "active") {
+        problems.push(`provider ${opKey} belongs to ${provider.component}, which is ` +
+          `${record?.state ?? "absent"}`);
+      } else if (record.exports?.[provider.exportName] !== provider.fn) {
+        problems.push(`provider ${opKey} is not ${provider.component}'s own export`);
+      }
     }
-    this.#components.delete(name);
-    return true;
+    for (const record of this.#components.values()) {
+      if (record.state === "active") {
+        if (!record.instance || !record.exports) {
+          problems.push(`${record.name} is active with no live instance`);
+          continue;
+        }
+        for (const [opKey] of provisionsOf(record.module)) {
+          if (this.#providers.get(opKey)?.component !== record.name) {
+            problems.push(`${record.name} is active but ${opKey} is not published for it`);
+          }
+        }
+      } else if (record.instance || record.exports) {
+        problems.push(`${record.name} is ${record.state} but holds an instance`);
+      }
+      if (record.deactivations > record.activations) {
+        problems.push(`${record.name}: deactivate ran ${record.deactivations} times ` +
+          `for ${record.activations} activation(s)`);
+      }
+    }
+    if (this.#deferred.length) problems.push(`${this.#deferred.length} deferred mutation(s) not applied`);
+    if (problems.length) throw new Error(`host invariant broken:\n  ${problems.join("\n  ")}`);
+  }
+
+  // ------------------------------------------------------------- internals
+
+  /** Run a top-level operation, then apply what user code deferred during it. */
+  #outer(fn) {
+    try {
+      return fn();
+    } finally {
+      this.#drain();
+    }
+  }
+
+  #drain() {
+    if (this.#draining || this.#depth > 0) return;
+    this.#draining = true;
+    try {
+      while (this.#deferred.length) {
+        const mutation = this.#deferred.shift();
+        try {
+          mutation();
+        } catch (error) {
+          this.#note(`a deferred host call threw: ${describe(error)}`);
+        }
+      }
+    } finally {
+      this.#draining = false;
+    }
+  }
+
+  /** Run user code (wasm activation, deactivation, the log callback). */
+  #user(fn) {
+    this.#depth++;
+    try {
+      return fn();
+    } finally {
+      this.#depth--;
+    }
+  }
+
+  /** The log callback; one that throws is ignored, it never changes state. */
+  #note(line) {
+    try {
+      this.#user(() => this.#log(line));
+    } catch {
+      // a logger's failure is not a component's failure
+    }
   }
 
   #missingImports(record) {
@@ -142,6 +292,19 @@ export class CordisHost {
       if (!this.#resolve(key, imp.name)) missing.push(`${key}.${imp.name}`);
     }
     return missing;
+  }
+
+  /** Conflicts are decided from the module's export list, so a conflicting
+   *  component never runs its activation or its coeffect calls. */
+  #checkConflicts(record, { undo = false } = {}) {
+    for (const [opKey] of provisionsOf(record.module)) {
+      const existing = this.#providers.get(opKey);
+      if (existing && existing.component !== record.name) {
+        this.#fail(record, new Error(
+          `${record.name}: provision conflict on ${opKey}: ` +
+          `${existing.component} already provides it`), { undo });
+      }
+    }
   }
 
   #tryInstantiate(record) {
@@ -164,30 +327,29 @@ export class CordisHost {
         return fn(...args);
       };
     }
-    // A provision conflict is decided from the module's export list, before
-    // anything is instantiated, so a conflicting component never runs its
-    // activation (or its coeffect calls) and has nothing to undo.
-    const provisions = this.#provisions(record);
-    // `activating` is skipped by #pump, so a host op that re-enters the host
-    // (provideHost, load) while this component activates cannot retry it.
+    this.#checkConflicts(record);
     record.state = "activating";
+    record.missing = [];
     let instance;
     try {
-      instance = new WebAssembly.Instance(record.module, imports);
+      instance = this.#user(() => new WebAssembly.Instance(record.module, imports));
     } catch (error) {
       this.#fail(record, error);
     }
     record.instance = instance;
     record.exports = instance.exports;
+    record.activations++;
+    this.#stopIfUnloaded(record);
     if (typeof instance.exports.activate_step === "function") {
       let steps = 0;
       let done = false;
       while (!done) {
         try {
-          done = instance.exports.activate_step() === 0;
+          done = this.#user(() => instance.exports.activate_step()) === 0;
         } catch (error) {
           this.#fail(record, error, { undo: true });
         }
+        this.#stopIfUnloaded(record);
         if (!done && ++steps > MAX_ACTIVATION_STEPS) {
           this.#fail(record, new Error(
             `${record.name}: activation did not finish in ${MAX_ACTIVATION_STEPS} steps`),
@@ -195,51 +357,73 @@ export class CordisHost {
         }
       }
     }
-    // a host op may have unloaded this component while it activated
-    if (record.state !== "activating" || this.#components.get(record.name) !== record) {
-      return false;
-    }
-    // Checked again: a nested pump during activation may have published one
-    // of these ops for another component.
-    this.#provisions(record, { undo: true });
-    record.state = "active";
-    record.missing = [];
-    for (const [opKey, exportName] of provisions) {
-      this.#providers.set(opKey, { component: record.name, fn: instance.exports[exportName] });
-    }
-    this.#log(`active ${record.name}`);
+    // Nested mutations are deferred, so nothing can have published one of
+    // these ops meanwhile; checked again so a slip cannot double-publish.
+    this.#checkConflicts(record, { undo: true });
+    // The log callback is the last user code of an activation. If it throws,
+    // the component fails (deactivate runs once) and nothing was published.
+    this.#user(() => this.#log(`active ${record.name}`));
+    this.#stopIfUnloaded(record);
+    this.#publish(record);
     return true;
   }
 
-  /**
-   * The component's provisions as [opKey, exportName], read from the module's
-   * export list, failing the component on a conflict. Only FUNCTION exports
-   * named `provide:<key>.<op>` count: a memory or global under that name is
-   * neither published nor a conflict. Checked before instantiation, so a
-   * conflicting component never runs its activation or its coeffect calls.
-   */
-  #provisions(record, { undo = false } = {}) {
-    const provisions = [];
-    for (const exp of WebAssembly.Module.exports(record.module)) {
-      if (exp.kind !== "function" || !exp.name.startsWith(PROVIDE_PREFIX)) continue;
-      const opKey = exp.name.slice(PROVIDE_PREFIX.length);
-      const existing = this.#providers.get(opKey);
-      if (existing && existing.component !== record.name) {
-        this.#fail(record, new Error(
-          `${record.name}: provision conflict on ${opKey}: ` +
-          `${existing.component} already provides it`), { undo });
-      }
-      provisions.push([opKey, exp.name]);
-    }
-    return provisions;
+  /** An unload requested while activating: undo once, remove, and throw. */
+  #stopIfUnloaded(record) {
+    if (!record.unloadRequested) return;
+    const exports = record.exports;
+    this.#withdraw(record);
+    if (this.#components.get(record.name) === record) this.#components.delete(record.name);
+    record.state = "absent";
+    record.instance = null;
+    record.exports = null;
+    this.#deactivate(record, exports, { quiet: true });
+    throw new Error(`${record.name}: was unloaded while it was activating`);
   }
 
-  /** Try to instantiate; whatever throws, the record ends up failed. */
+  /** The last step of a successful activation: the ONLY place that publishes. */
+  #publish(record) {
+    record.state = "active";
+    for (const [opKey, exportName] of provisionsOf(record.module)) {
+      this.#providers.set(opKey, {
+        component: record.name, exportName, fn: record.exports[exportName] });
+    }
+  }
+
+  /** The ONLY place that withdraws; by component name, in every state. */
+  #withdraw(record) {
+    for (const [opKey, provider] of this.#providers) {
+      if (provider.component === record.name) this.#providers.delete(opKey);
+    }
+  }
+
+  /**
+   * Run `deactivate` for one activation. A second call for the same
+   * activation is refused (and recorded, which the invariant check reports).
+   * With `quiet`, whatever it throws (even a non-Error) is logged rather than
+   * thrown.
+   */
+  #deactivate(record, exports, { quiet = false } = {}) {
+    if (typeof exports?.deactivate !== "function") return;
+    if (record.deactivations >= record.activations) {
+      this.#violations.push(`${record.name}: deactivate requested again for one activation`);
+      return;
+    }
+    record.deactivations++;
+    try {
+      this.#user(() => exports.deactivate());
+    } catch (error) {
+      if (!quiet) throw error;
+      this.#note(`${record.name}: deactivate after a failed activation threw: ${describe(error)}`);
+    }
+  }
+
+  /** Try to instantiate; whatever throws, the record ends up failed or removed. */
   #attempt(record) {
     try {
       return this.#tryInstantiate(record);
     } catch (error) {
-      if (record.state !== "failed") {
+      if (record.state !== "failed" && record.state !== "absent") {
         try {
           this.#fail(record, error, { undo: true });
         } catch {
@@ -251,27 +435,22 @@ export class CordisHost {
   }
 
   /**
-   * Mark `record` failed and throw `error`. The bookkeeping comes first, so
-   * nothing after it can leave the record half failed. With `undo`, a partly
-   * activated instance then runs `deactivate`; whatever that throws (even a
-   * non-Error) is logged and does not replace the original error. A failed
+   * Mark `record` failed and throw `error`. Withdrawal and the bookkeeping
+   * come first, so nothing after them can leave the record half failed. With
+   * `undo`, a partly activated instance then runs `deactivate` once; whatever
+   * that throws is logged and does not replace the original error. A failed
    * component holds no live instance and is never retried.
    */
   #fail(record, error, { undo = false } = {}) {
+    this.#withdraw(record);
     const exports = record.exports;
     record.state = "failed";
     record.missing = [];
     record.instance = null;
     record.exports = null;
     record.error = describe(error);
-    this.#log(`failed ${record.name}: ${record.error}`);
-    if (undo && typeof exports?.deactivate === "function") {
-      try {
-        exports.deactivate();
-      } catch (undoError) {
-        this.#log(`${record.name}: deactivate after a failed activation threw: ${describe(undoError)}`);
-      }
-    }
+    if (undo) this.#deactivate(record, exports, { quiet: true });
+    this.#note(`failed ${record.name}: ${record.error}`);
     throw error;
   }
 
@@ -288,18 +467,31 @@ export class CordisHost {
     let changed = true;
     while (changed) {
       changed = false;
-      for (const record of this.#components.values()) {
+      for (const record of [...this.#components.values()]) {
         if (record.state !== "gated") continue;
         try {
           if (this.#attempt(record)) changed = true;
         } catch {
           // #attempt has failed the record and recorded why; it is that
           // component's failure, not the caller's, so the pump goes on
-          changed = true;
         }
       }
     }
   }
+}
+
+/**
+ * A module's provisions as [opKey, exportName]. Only FUNCTION exports named
+ * `provide:<key>.<op>` count: a memory or global under that name is neither
+ * published nor a conflict.
+ */
+function provisionsOf(module) {
+  const out = [];
+  for (const exp of WebAssembly.Module.exports(module)) {
+    if (exp.kind !== "function" || !exp.name.startsWith(PROVIDE_PREFIX)) continue;
+    out.push([exp.name.slice(PROVIDE_PREFIX.length), exp.name]);
+  }
+  return out;
 }
 
 /** An error's message, for any thrown value (a host op may throw null). */
