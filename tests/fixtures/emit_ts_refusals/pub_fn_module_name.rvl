@@ -5,4 +5,4 @@
 // the fn with `<<UNSUPPORTED-PUB-FN-MODULE-NAME:BigInt_>>` instead. Pinned by
 // tests/test_selfhost_emit_ts.py::test_a_reference_refusal_is_named_by_the_port.
 
-pub fn BigInt_(x: Int) -> Int = x
+pub fn BigInt_(x: Int) -> Int { return x }

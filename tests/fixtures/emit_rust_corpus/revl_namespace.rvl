@@ -35,22 +35,24 @@ component Gauge provides meter: Meter {
 
 extern pure fn revlHost(revl_n: Int) -> Int = @rs { revl_n + 1 }
 
-fn revl_double(x: Int) -> Int = x * 2
-fn REVL_N(x: Int) -> Int = x + 3
-fn _revlTmp(x: Int) -> Int = x
-fn _REVLX(x: Int) -> Int = x
-fn revlTotal(x: Int) -> Int = x
-fn revlate(x: Int) -> Int = x
-fn rev(x: Int) -> Int = x
-fn Err(e: Str) -> Result[Int, Str] = Ok(1)
-fn Some_(x: Int) -> Int = x
-fn __(x: Int) -> Int = x
+fn revl_double(x: Int) -> Int { return x * 2 }
+fn REVL_N(x: Int) -> Int { return x + 3 }
+fn _revlTmp(x: Int) -> Int { return x }
+fn _REVLX(x: Int) -> Int { return x }
+fn revlTotal(x: Int) -> Int { return x }
+fn revlate(x: Int) -> Int { return x }
+fn rev(x: Int) -> Int { return x }
+fn Err(e: Str) -> Result[Int, Str] { return Ok(1) }
+fn Some_(x: Int) -> Int { return x }
+fn __(x: Int) -> Int { return x }
 
-pub fn check(allowed: Bool) -> Result[Int, Str] = allowed ? Ok(7) : Err("denied")
+pub fn check(allowed: Bool) -> Result[Int, Str] { return allowed ? Ok(7) : Err("denied") }
 
-pub fn pick(o: Opt[Int]) -> Int = match o {
-  Some(revl_v) => revl_v,
-  None => 0
+pub fn pick(o: Opt[Int]) -> Int {
+  return match o {
+    Some(revl_v) => revl_v,
+    None => 0
+  }
 }
 
 pub fn walk(revl_xs: List[Int]) -> Int {
@@ -62,6 +64,7 @@ pub fn walk(revl_xs: List[Int]) -> Int {
   return ((revl_x: Int) => revl_x + REVL_K)(revl_sum)
 }
 
-pub fn total(x: Int) -> Int =
-  revl_double(x) + REVL_N(x) + _revlTmp(x) + _REVLX(x) + revlTotal(x)
+pub fn total(x: Int) -> Int {
+  return revl_double(x) + REVL_N(x) + _revlTmp(x) + _REVLX(x) + revlTotal(x)
     + revlate(x) + rev(x) + Some_(x) + __(x) + revlHost(x)
+}

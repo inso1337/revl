@@ -8,38 +8,41 @@
 // it by that name: the pub fns here are spelled outside the family, and
 // tests/fixtures/emit_ts_refusals/pub_fn_module_name.rvl holds one inside it.
 
-fn undefined(x: Int) -> Int = x
-fn undefined_(x: Int) -> Int = x + 1
-fn BigInt(x: Int) -> Int = 999
-fn revlI64(x: Int) -> Int = 7
-fn REVL_LIMIT(x: Int) -> Int = x
-fn _revlTmp(x: Int) -> Int = x
-fn _REVL_SEED(x: Int) -> Int = x
-fn host(x: Int) -> Int = x * 2
-fn record(x: Int) -> Int = x
+fn undefined(x: Int) -> Int { return x }
+fn undefined_(x: Int) -> Int { return x + 1 }
+fn BigInt(x: Int) -> Int { return 999 }
+fn revlI64(x: Int) -> Int { return 7 }
+fn REVL_LIMIT(x: Int) -> Int { return x }
+fn _revlTmp(x: Int) -> Int { return x }
+fn _REVL_SEED(x: Int) -> Int { return x }
+fn host(x: Int) -> Int { return x * 2 }
+fn record(x: Int) -> Int { return x }
 extern pure fn fetch(n: Int) -> Int = @ts { return n }
 
 // An extern parameter keeps the keyword ladder and the scaffolding names
 // (`static_` -> `static__`), and the verbatim body reads the emitted spelling.
 extern pure fn keyword_param(static_: Int) -> Int = @ts { return static__ }
 
-pub fn pick(o: Opt[Str]) -> Str = match o {
+pub fn pick(o: Opt[Str]) -> Str {
+  return match o {
     Some(v) => v,
     None => "denied"
+  }
 }
 
-pub fn count(xs: List[Int]) -> Int = xs.length()
+pub fn count(xs: List[Int]) -> Int { return xs.length() }
 
-pub fn count_(xs: List[Int]) -> Int = count(xs) + 1
+pub fn count_(xs: List[Int]) -> Int { return count(xs) + 1 }
 
-pub fn __(x: Int) -> Int = x
+pub fn __(x: Int) -> Int { return x }
 
 pub fn shadow(x: Int) -> Int {
   let fetch = x + 1
   return fetch
 }
 
-pub fn total(x: Int) -> Int =
-  undefined(x) + undefined_(x) + BigInt(x) + revlI64(x) + REVL_LIMIT(x)
+pub fn total(x: Int) -> Int {
+  return undefined(x) + undefined_(x) + BigInt(x) + revlI64(x) + REVL_LIMIT(x)
     + _revlTmp(x) + _REVL_SEED(x) + host(x) + record(x) + fetch(x)
     + keyword_param(x) + __(x)
+}

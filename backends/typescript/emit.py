@@ -684,10 +684,6 @@ def _ident(name: object, role: str, extra: frozenset = frozenset()) -> str:
         return _mangle_module(name)
     if role in _LOCAL_ROLES:
         return _mangle_local(name, extra)
-    if role == "component":
-        # The placement spec names the component to the runner, so its
-        # spelling is host-visible and cannot be renamed.
-        _refuse_module_collision(name, "component", "a JS global or emitted helper")
     if role == "extern name":
         # An extern is bound inside this module (its config/secret/ref
         # machinery keys on the declaration, not on the emitted spelling), so
@@ -3053,6 +3049,13 @@ def _refuse_required_stream(component: dict, tier: str) -> None:
 
 def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
     name = _ident(component.get("name"), "component")
+    # The placement spec names the component to the runner, so its spelling is
+    # host-visible and cannot be renamed (issue #3127). This is the cordis
+    # module's own family; the temporal target reserves the names its workflow
+    # module reads in `emit_temporal.py` (#3375), so the check lives here and
+    # not in the `_ident` both targets share.
+    _refuse_module_collision(component.get("name"), "component",
+                             "a JS global or emitted helper")
     _refuse_required_stream(component, "cordis-ts")
     requires = component.get("requires") or {}
     provides = component.get("provides") or {}
