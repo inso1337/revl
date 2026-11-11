@@ -419,10 +419,12 @@ instead of only on the Python cordis-wasm runtime:
   only its own `load` rejects;
 - the other states are `loading` (compiling) and `activating` (instantiated,
   `activate_step` running, nothing published yet). A `load`, `unload` or
-  `provideHost` made from inside activation, `deactivate` or the log
-  callback is deferred to the end of the outer host operation, except an
-  `unload` of the activating component itself, which stops its activation
-  at the next step and runs `deactivate` once;
+  `provideHost` made from inside activation, `deactivate`, an export reached
+  through `host.call` or the log callback is deferred, in order, to the end
+  of the outer host operation, except an `unload` of the activating
+  component itself, which stops its activation at the next step and runs
+  `deactivate` once. `host.load` resolves to a frozen `{ name, state,
+  missing }` snapshot, not the host's record;
 - scalars cross as native wasm values, so `Float` is an `f64` and arrives in
   JavaScript as a `number`. No linear-memory marshalling is needed for the
   scalar boundary.

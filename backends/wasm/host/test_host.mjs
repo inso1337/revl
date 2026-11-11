@@ -330,34 +330,143 @@ function wasmModule({ imports = [], funcs = [], start = null }) {
   assert.equal(edge.state("U"), "gated", "a failed instance publishes no provision");
 }
 
+// An unload of X from inside its own activation, after which the step traps
+// anyway: the unload wins. The name is released, deactivate ran once, and
+// the load rejects with the unload, not the trap.
+{
+  let undo = 0;
+  const edge = new CordisHost();
+  edge.provideHost("k", {
+    go: () => { assert.equal(edge.unload("X"), true); return 0; },
+    undo: () => { undo++; return 0; },
+  });
+  await assert.rejects(edge.load("X", wasmModule({
+    imports: [["coeffect:k", "go"], ["coeffect:k", "undo"]],
+    funcs: [
+      { export: "activate_step", raw: [0x10, 0x00, 0x1a, 0x00] },
+      { export: "deactivate", call: 1 },
+      { export: "provide:m.b", value: 1 },
+    ],
+  })), /X: was unloaded while it was activating/);
+  assert.equal(edge.state("X"), "absent");
+  assert.equal(undo, 1);
+  edge.__checkInvariant();
+  await edge.load("X", wasmModule({ funcs: [{ export: "p", value: 4 }] }));
+  assert.equal(edge.call("X", "p"), 4, "the name is free to load again");
+}
+
+// A host op reached through call() runs while the component's code is on
+// the stack, so the unload it asks for is applied after the export returns:
+// deactivate runs after the op the export calls next, not between the two.
+{
+  const order = [];
+  const edge = new CordisHost();
+  edge.provideHost("k", {
+    go: () => { order.push("go"); edge.unload("X"); return 0; },
+    after: () => { order.push("after"); return 5; },
+    undo: () => { order.push("undo"); return 0; },
+  });
+  await edge.load("X", wasmModule({
+    imports: [["coeffect:k", "go"], ["coeffect:k", "after"], ["coeffect:k", "undo"]],
+    funcs: [
+      { export: "p", raw: [0x10, 0x00, 0x1a, 0x10, 0x01] },
+      { export: "deactivate", call: 2 },
+    ],
+  }));
+  assert.equal(edge.call("X", "p"), 5);
+  assert.deepEqual(order, ["go", "after", "undo"]);
+  assert.equal(edge.state("X"), "absent");
+  edge.__checkInvariant();
+}
+
+// A load then an unload of the same name, both made from inside an
+// activation, are applied in that order: Z is cancelled, as it is when the
+// two calls are made directly.
+{
+  const edge = new CordisHost();
+  let pending;
+  let unloaded;
+  edge.provideHost("k", { go: () => {
+    pending = edge.load("Z", wasmModule({ funcs: [{ export: "p", value: 0 }] }));
+    unloaded = edge.unload("Z");
+    return 0;
+  } });
+  await edge.load("X", wasmModule({
+    imports: [["coeffect:k", "go"]],
+    funcs: [{ export: "activate_step", raw: [0x10, 0x00, 0x1a, 0x41, 0x00] }],
+  }));
+  await assert.rejects(pending, /"Z" was unloaded while it was loading/);
+  assert.equal(unloaded, true, "Z is loaded by the time the unload runs");
+  assert.equal(edge.state("Z"), "absent");
+  edge.__checkInvariant();
+}
+
+// An unload while the module is still compiling releases the name without
+// throwing (there is no module to inspect yet), and its load rejects.
+{
+  const edge = new CordisHost();
+  const pending = edge.load("L", wasmModule({ funcs: [{ export: "p", value: 1 }] }));
+  assert.equal(edge.state("L"), "loading");
+  assert.equal(edge.unload("L"), true);
+  await assert.rejects(pending, /"L" was unloaded while it was loading/);
+  edge.__checkInvariant();
+}
+
+// load resolves to a frozen snapshot, not the host's own record: writing to
+// it changes nothing, and no export is reachable except through call().
+{
+  const edge = new CordisHost();
+  const loaded = await edge.load("S", wasmModule({
+    imports: [["coeffect:z", "w"]],
+    funcs: [{ export: "p", call: 0 }, { export: "deactivate", value: 0 }],
+  }));
+  assert.deepEqual(Object.keys(loaded).sort(), ["missing", "name", "state"]);
+  assert.equal(loaded.state, "gated");
+  assert.ok(Object.isFrozen(loaded) && Object.isFrozen(loaded.missing));
+  assert.throws(() => { "use strict"; loaded.state = "active"; }, TypeError);
+  assert.equal(edge.state("S"), "gated");
+  edge.provideHost("z", { w: () => 6 });
+  assert.equal(loaded.state, "gated", "a snapshot, not a live view");
+  assert.equal(edge.call("S", "p"), 6);
+}
+
 console.log("browser host edge cases: ok");
 
-// RANDOMIZED SEQUENCES. Fixed seeds, so every run is the same sequences. Each
-// sequence is up to 12 steps of load / unload / provideHost over components
-// that trap in activate_step, run past the step limit, call a host op that
-// itself loads, unloads or provides, have a deactivate that traps or throws
-// null, or provide the same op as another. The log callback throws on some
-// lines. After every step (and once the loads it started have settled) the
+// RANDOMIZED SEQUENCES. Fixed seeds and a mulberry32 generator, so every run
+// is the same sequences. Each sequence is up to 12 steps of load / unload /
+// provideHost (also with an empty ops object) / call / state reads, over
+// components that trap in activate_step (also right after a host op), run
+// past the step limit, call a host op that itself loads, unloads, provides
+// or calls, depend on m.b and call a host op while activating, have a
+// deactivate that traps or throws null, or provide the same op as another.
+// The log callback throws on some lines. After every step (and once the loads it started have settled) the
 // host's invariant must hold; `__checkInvariant` is a test-only method.
 // Deactivations are also counted from outside: load number n gets its own
 // host op u.g<n>, which its deactivate calls, so a second deactivate of one
 // activation is seen whatever the host's own bookkeeping says.
 {
-  const SEEDS = 300;
+  const SEEDS = 1000;
   const MAX_STEPS = 12;
   const GENERATIONS = 64;
   const NAMES = ["A", "B", "C", "D"];
+  // mulberry32: every output bit mixes the whole state, so small ranges do
+  // not cycle the way an LCG's low bits do
   const rng = (seed) => {
-    let x = (seed * 2654435761 + 1) >>> 0;
+    let a = seed >>> 0;
     return (n) => {
-      x = (Math.imul(x, 1664525) + 1013904223) >>> 0;
-      return x % n;
+      a = (a + 0x6d2b79f5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return (((t ^ (t >>> 14)) >>> 0) / 4294967296 * n) | 0;
     };
   };
   const callDrop = (i) => [0x10, i, 0x1a];
   const ret0 = [0x41, 0x00];
-  // kind -> module bytes; import 0 is always u.g<gen> (the deactivate counter)
-  const component = (kind, gen) => {
+  // name -> module bytes for that kind; import 0 is always u.g<gen>, and
+  // `go` is k.go_<name>, the re-entrant host op, so the op knows its caller
+  const component = (kind, gen, name) => {
+    const go = ["coeffect:k", `go_${name}`];
     const counter = ["coeffect:u", `g${gen}`];
     const countThen = (tail) => [...callDrop(0), ...tail];
     switch (kind) {
@@ -369,11 +478,12 @@ console.log("browser host edge cases: ok");
         return wasmModule({ imports: [counter, ["coeffect:z", "w"]], funcs: [
           { export: "provide:m.b", value: 2 }, { export: "p", call: 1 },
           { export: "deactivate", raw: countThen(ret0) }] });
-      case 2: // a dependent of m.b
-        return wasmModule({ imports: [counter, ["coeffect:m", "b"]], funcs: [
+      case 2: // a dependent of m.b that calls it, then k.go, while activating
+        return wasmModule({ imports: [counter, ["coeffect:m", "b"], go], funcs: [
+          { export: "activate_step", raw: [...callDrop(1), ...callDrop(2), ...callDrop(1), ...ret0] },
           { export: "p", call: 1 }, { export: "deactivate", raw: countThen(ret0) }] });
       case 3: // activation and deactivation call k.go, a re-entrant host op
-        return wasmModule({ imports: [counter, ["coeffect:k", "go"]], funcs: [
+        return wasmModule({ imports: [counter, go], funcs: [
           { export: "activate_step", raw: [...callDrop(1), ...ret0] },
           { export: "provide:n.c", value: 3 },
           { export: "deactivate", raw: countThen([...callDrop(1), ...ret0]) }] });
@@ -389,15 +499,20 @@ console.log("browser host edge cases: ok");
         return wasmModule({ imports: [counter], funcs: [
           { export: "provide:n.c", value: 6 },
           { export: "deactivate", raw: countThen([0x00]) }] });
+      case 7: // activate_step calls k.go, then traps
+        return wasmModule({ imports: [counter, go], funcs: [
+          { export: "activate_step", raw: [...callDrop(1), 0x00] },
+          { export: "provide:n.c", value: 8 }, { export: "p", call: 1 },
+          { export: "deactivate", raw: countThen(ret0) }] });
       default: // deactivate's host op throws null; activation calls k.go once
-        return wasmModule({ imports: [counter, ["coeffect:k", "nul"], ["coeffect:k", "go"]],
+        return wasmModule({ imports: [counter, ["coeffect:k", "nul"], go],
           funcs: [
             { export: "activate_step", raw: [...callDrop(2), ...ret0] },
             { export: "provide:m.b", value: 7 },
             { export: "deactivate", raw: countThen([...callDrop(1), ...ret0]) }] });
     }
   };
-  const KINDS = 8;
+  const KINDS = 9;
   const failures = [];
   for (let seed = 1; seed <= SEEDS; seed++) {
     const pick = rng(seed);
@@ -417,22 +532,40 @@ console.log("browser host edge cases: ok");
       if (gen >= GENERATIONS) return;
       const g = gen++;
       trace.push(`load ${name} kind ${kind}`);
-      pending.push(host.load(name, component(kind, g)).catch(() => {}));
+      pending.push(host.load(name, component(kind, g, name)).catch(() => {}));
     };
-    const mutate = (choose) => {
-      const what = choose(3);
-      const name = NAMES[choose(4)];
+    // `self` is the component whose code made the call, when there is one:
+    // half the nested mutations aim at it (an unload of itself while it
+    // activates, a call into itself)
+    const mutate = (choose, self = null) => {
+      const what = choose(6);
+      const name = self && choose(2) === 0 ? self : NAMES[choose(4)];
       try {
         if (what === 0) loadOne(name, choose(KINDS));
         else if (what === 1) { trace.push(`unload ${name}`); host.unload(name); }
-        else { trace.push("provide z"); host.provideHost("z", { w: () => 0 }); }
+        else if (what === 2) { trace.push("provide z"); host.provideHost("z", { w: () => 0 }); }
+        else if (what === 3) { trace.push("provide z empty"); host.provideHost("z", {}); }
+        else if (what === 4) {
+          const exportName = ["p", "provide:m.b", "provide:n.c"][choose(3)];
+          trace.push(`call ${name}.${exportName}`);
+          host.call(name, exportName);
+        } else {
+          trace.push(`read ${name}`);
+          host.state(name);
+          host.error(name);
+          host.missing(name);
+        }
       } catch {
-        // an unload whose deactivate traps throws to its caller; expected
+        // an unload whose deactivate traps, or a call on a component that is
+        // not active, throws to its caller; expected
       }
     };
     host.provideHost("u", counters);
     host.provideHost("k", {
-      go: () => { if (budget > 0) { budget--; trace.push("  nested:"); mutate(nested); } return 0; },
+      ...Object.fromEntries(NAMES.map((self) => [`go_${self}`, () => {
+        if (budget > 0) { budget--; trace.push(`  nested from ${self}:`); mutate(nested, self); }
+        return 0;
+      }])),
       nul: () => { throw null; },
     });
     const steps = 1 + pick(MAX_STEPS);

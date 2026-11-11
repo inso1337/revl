@@ -29,14 +29,19 @@ export class CordisHost {
   //      one of its provisions is in #providers under its name;
   //   3. `deactivate` runs at most once per activation, successful or partial;
   //   4. a component that is `failed` or removed holds no instance and no
-  //      provision.
+  //      provision;
+  //   5. liveness: a component that was activated (fully or partly), has a
+  //      `deactivate` export and is now `failed` or removed ran `deactivate`
+  //      exactly once for that activation;
+  //   6. no component at rest is `activating` or carries a pending unload.
   //
   // Two rules keep it true. Provisions are published only by #publish, the
   // last step of a successful activation, and withdrawn only by #withdraw,
   // the first step of #fail and of an unload. And no host mutation runs
   // NESTED inside user code: a load, unload or provideHost called while the
-  // host is inside activate_step, deactivate, a start function or the log
-  // callback is queued and applied when the outer operation finishes.
+  // host is inside activate_step, deactivate, a start function, an export
+  // reached through `call`, or the log callback is queued and applied, in
+  // the order it was made, when the outer operation finishes.
   // The one exception is unloading the component that is activating: that
   // marks it, and its step loop stops at the next step.
 
@@ -47,7 +52,8 @@ export class CordisHost {
   #depth = 0; // > 0 while user code runs inside a host operation
   #deferred = []; // mutations requested at #depth > 0, applied in order
   #draining = false;
-  #violations = []; // deactivate calls beyond one per activation
+  #queuedLoads = new Map(); // name -> count of deferred loads not yet started
+  #violations = []; // invariant 3 and 5 breaches, seen when they happen
 
   constructor({ log = () => {} } = {}) {
     this.#log = log;
@@ -99,12 +105,20 @@ export class CordisHost {
    * compiled and kept; it instantiates as soon as `provideHost` or another
    * component publishes the missing ops. Called from inside activation,
    * deactivation or the log callback, the load starts when the outer
-   * operation finishes; the returned promise settles as usual.
+   * operation finishes; the returned promise settles as usual. It resolves
+   * to a frozen snapshot `{ name, state, missing }`, never the host's own
+   * record: `call` is the only way into a component.
    */
   load(name, source) {
     if (this.#depth > 0) {
+      this.#queuedLoads.set(name, (this.#queuedLoads.get(name) ?? 0) + 1);
       return new Promise((resolve, reject) => {
-        this.#deferred.push(() => this.#load(name, source).then(resolve, reject));
+        this.#deferred.push(() => {
+          const left = this.#queuedLoads.get(name) - 1;
+          if (left) this.#queuedLoads.set(name, left);
+          else this.#queuedLoads.delete(name);
+          this.#load(name, source).then(resolve, reject);
+        });
       });
     }
     return this.#load(name, source);
@@ -146,7 +160,7 @@ export class CordisHost {
       // meets in another component is recorded on that component instead.
       this.#attempt(record);
       this.#pump();
-      return record;
+      return snapshot(record);
     });
   }
 
@@ -163,7 +177,10 @@ export class CordisHost {
     if (typeof fn !== "function") {
       throw new Error(`${componentName} has no exported function ${JSON.stringify(exportName)}`);
     }
-    return fn(...args);
+    // The component's code is on the stack for the whole call, so a host op
+    // it reaches that loads, unloads or provides is applied after it returns.
+    if (this.#depth > 0) return this.#user(() => fn(...args));
+    return this.#outer(() => this.#user(() => fn(...args)));
   }
 
   /**
@@ -178,15 +195,19 @@ export class CordisHost {
    */
   unload(name) {
     const record = this.#components.get(name);
-    if (!record) return false;
-    if (record.state === "activating") {
+    if (record?.state === "activating") {
       record.unloadRequested = true;
       return true;
     }
     if (this.#depth > 0) {
+      // Queued even when the name is not loaded yet, so a deferred load
+      // followed by this unload is applied in that order. The result says
+      // whether the name will be loaded when the unload runs.
+      const willExist = Boolean(record) || this.#queuedLoads.has(name);
       this.#deferred.push(() => this.unload(name));
-      return true;
+      return willExist;
     }
+    if (!record) return false;
     return this.#outer(() => {
       this.#withdraw(record);
       const wasActive = record.state === "active";
@@ -195,7 +216,11 @@ export class CordisHost {
       record.state = "absent";
       record.instance = null;
       record.exports = null;
-      if (wasActive) this.#deactivate(record, exports);
+      try {
+        if (wasActive) this.#deactivate(record, exports);
+      } finally {
+        this.#retire(record);
+      }
       return true;
     });
   }
@@ -228,6 +253,10 @@ export class CordisHost {
         }
       } else if (record.instance || record.exports) {
         problems.push(`${record.name} is ${record.state} but holds an instance`);
+      }
+      if (record.state === "activating") problems.push(`${record.name} is activating at rest`);
+      if (record.unloadRequested) {
+        problems.push(`${record.name} has a pending unload but is still ${record.state}`);
       }
       if (record.deactivations > record.activations) {
         problems.push(`${record.name}: deactivate ran ${record.deactivations} times ` +
@@ -378,7 +407,23 @@ export class CordisHost {
     record.instance = null;
     record.exports = null;
     this.#deactivate(record, exports, { quiet: true });
+    this.#retire(record);
     throw new Error(`${record.name}: was unloaded while it was activating`);
+  }
+
+  /**
+   * A record leaving for good (failed or removed). Checks invariant 5 now,
+   * while the record is still in hand, so the check needs no history.
+   */
+  #retire(record) {
+    record.unloadRequested = false;
+    // a record unloaded while still loading has no module yet
+    const hasDeactivate = record.module !== null && WebAssembly.Module.exports(record.module)
+      .some((exp) => exp.kind === "function" && exp.name === "deactivate");
+    if (hasDeactivate && record.activations > 0 && record.deactivations !== record.activations) {
+      this.#violations.push(`${record.name} left ${record.state} with deactivate run ` +
+        `${record.deactivations} time(s) for ${record.activations} activation(s)`);
+    }
   }
 
   /** The last step of a successful activation: the ONLY place that publishes. */
@@ -423,12 +468,9 @@ export class CordisHost {
     try {
       return this.#tryInstantiate(record);
     } catch (error) {
+      // #fail throws: the same error, or the unload's when one was pending
       if (record.state !== "failed" && record.state !== "absent") {
-        try {
-          this.#fail(record, error, { undo: true });
-        } catch {
-          // #fail rethrows the same error, thrown below
-        }
+        this.#fail(record, error, { undo: true });
       }
       throw error;
     }
@@ -442,6 +484,9 @@ export class CordisHost {
    * component holds no live instance and is never retried.
    */
   #fail(record, error, { undo = false } = {}) {
+    // Unloaded while activating, then the activation failed anyway: the
+    // unload wins, so the name is released and the load says why.
+    if (record.unloadRequested) this.#stopIfUnloaded(record);
     this.#withdraw(record);
     const exports = record.exports;
     record.state = "failed";
@@ -450,6 +495,7 @@ export class CordisHost {
     record.exports = null;
     record.error = describe(error);
     if (undo) this.#deactivate(record, exports, { quiet: true });
+    this.#retire(record);
     this.#note(`failed ${record.name}: ${record.error}`);
     throw error;
   }
@@ -478,6 +524,12 @@ export class CordisHost {
       }
     }
   }
+}
+
+/** What `load` hands back: a frozen copy, never the host's own record. */
+function snapshot(record) {
+  return Object.freeze({
+    name: record.name, state: record.state, missing: Object.freeze([...record.missing]) });
 }
 
 /**

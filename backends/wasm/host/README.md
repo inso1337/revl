@@ -25,19 +25,30 @@ carries the part of the cordis-wasm seam a browser page needs:
   nothing is published and `call` refuses), `active` and `failed`. A failed
   component holds no instance and is never retried;
 * re-entrant calls are deferred: a `load`, `unload` or `provideHost` made from
-  inside `activate_step`, `deactivate`, a start function or the `log`
-  callback is applied when the outer host operation finishes, in the order it
-  was made (`load` still returns a promise, which settles then). The one
-  exception is `unload` of the component that is activating: its activation
-  stops at the next step, `deactivate` runs once, and its `load` rejects with
-  "was unloaded while it was activating";
+  inside `activate_step`, `deactivate`, a start function, an export reached
+  through `call`, or the `log` callback is applied when the outer host
+  operation finishes, in the order it was made (`load` still returns a
+  promise, which settles then). The one exception is `unload` of the
+  component that is activating: its activation stops at the next step,
+  `deactivate` runs once, and its `load` rejects with "was unloaded while it
+  was activating", even if the activation then traps;
+* a deferred `unload` returns true when the name will be loaded by the time
+  it runs. If that component's `deactivate` then throws, the caller has
+  already seen true, and the error goes to the `log` callback;
+* a deferred `unload` of a gated component runs after the outer operation,
+  so if that operation publishes what the component was waiting for, it may
+  activate (and run its own activation) before the unload removes it;
+* `load` resolves to a frozen snapshot `{ name, state, missing }`, not the
+  host's record: `call` is the only way into a component's exports;
 * `deactivate` runs at most once per activation. A `log` callback that throws
   on the `active <name>` line fails that component (nothing was published
   yet); a throw on any other line is ignored;
 * `__checkInvariant()` is for tests only: it throws when the invariant written
   at the top of `CordisHost` does not hold (every published op belongs to an
   `active` component, every `active` component has its instance and all its
-  provisions published, a `failed` or removed one has neither);
+  provisions published, a `failed` or removed one has neither and ran its
+  `deactivate` exactly once if it was activated, and nothing at rest is
+  `activating` or has a pending unload);
 * only a FUNCTION export named `provide:<key>.<op>` is a provision: a memory
   or global exported under such a name is not published and does not count
   in a conflict;
