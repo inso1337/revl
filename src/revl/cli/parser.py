@@ -2297,10 +2297,19 @@ def build_parser() -> argparse.ArgumentParser:
              "reports that the question is not answerable from the record, "
              "because a crossing's capability token is not on the WAL")
     replay_cmd.add_argument(
-        "--candidate", nargs="+", default=None, metavar="FILE",
+        "--candidate", action="append", nargs="+", default=None, metavar="FILE",
         help="the candidate composition to resolve each recorded crossing's "
-             "capability token from, and to admit under --under. Compiled "
-             "statically: no live effect fires")
+             "capability token from, and to admit under --under. Repeat it to "
+             "compare competing compositions with --probe. Compiled statically: "
+             "no live effect fires")
+    replay_cmd.add_argument(
+        "--probe", action="store_true",
+        help="with --under, print the probe report instead of the "
+             "counterfactual: one row per --candidate composition with its "
+             "content hash, the recorded crossings regraded, the newly refused "
+             "and newly allowed counts, the first dangerous crossing and the "
+             "bounds. Ordering evidence only; a clean row admits nothing and a "
+             "refusal does not fail the command")
     replay_cmd.add_argument("--json", action="store_true",
                             help="machine-readable output")
 

@@ -918,13 +918,26 @@ itself is never written, only its visibility and the host-reported size.
   the WAL, and the command says so and exits 1.
 - `--candidate FILE...` - the candidate composition to resolve each recorded
   crossing's capability token from and to admit under `--under`. It is compiled
-  statically, so no live effect fires.
+  statically, so no live effect fires. Repeat the flag to give more than one
+  composition; only `--probe` compares them.
+- `--probe` - with `--under`, print the probe report instead (issue 2806, Slice
+  1): one row per `--candidate` composition with the candidate's content hash,
+  the number of recorded crossings regraded, the number the candidate does not
+  declare, the newly refused and newly allowed counts, the first dangerous
+  crossing and the bounds. A row that regraded fewer crossings than the record
+  holds, or a record with no crossings, is marked as a coverage gap rather than
+  read as clean: a `COVERAGE GAP` line in the text report and `coverageGap:
+  true` in the `--json` row. It is ordering evidence
+  only: a clean row admits nothing and a refused admission does not fail the
+  command, which exits 0 whenever the report is produced.
 - `--json` - machine-readable output.
 
 ```bash
 revl replay run.wal
 revl replay run.wal --mode exact --json
 revl replay incident.wal --under policy/new.toml --candidate candidate.rvl
+revl replay incident.wal --under policy/new.toml --probe --json \
+  --candidate narrow.rvl --candidate wide.rvl
 ```
 
 ### `revl diff`
