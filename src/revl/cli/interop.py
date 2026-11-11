@@ -370,6 +370,10 @@ def _run_mcp(args) -> int:
                 home=getattr(args, "update_home", None),
                 api_base=getattr(args, "update_api_base", None),
                 trust_tags=bool(getattr(args, "update_trust_tags", False)),
+                trust_unsigned=bool(getattr(args, "update_trust_unsigned",
+                                            False)),
+                consents=tuple(getattr(args, "update_allow_consent", None)
+                               or ()),
                 replacing=tuple(getattr(args, "update_replacing", None) or ()))
         # issue #2524: the files this server reads as operator configuration.
         # No export may replace one, whichever directory it sits in.

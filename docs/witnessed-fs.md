@@ -73,6 +73,8 @@ The guard has three properties that make it real rather than decorative:
 1. **Realpath before the check.** `resolve_within` realpaths the target, which
    resolves every symlink in the path, and only then tests root membership. A
    symlink placed inside the root that points outside is caught, not followed.
+   `..` components are collapsed lexically before any link is resolved, on both
+   tiers, so a symlink cannot move the directory a following `..` applies to.
 2. **The inverse path is guarded too, at BOTH endpoints.** `restore`, `unrm`,
    `unmove`, and `rmdir_if_empty` re-run the same check on the path they are
    about to write. A witness that (through tampering or a moved root) now

@@ -269,6 +269,89 @@ def test_multiple_timers_fire_in_deterministic_time_order(rt):
     assert order == ["a", "b", "a", "a", "b"]           # 10a 15b 20a 30a 30b
 
 
+# ------------------------------------------- a long-running host (issue #3377)
+
+
+def test_next_due_names_the_ms_to_the_earliest_live_timer(rt):
+    """A host pumping `advance` from a real clock asks when the next live timer
+    is due instead of stepping in fixed slices or reading the timer list:
+    ms from `now()`, and None with no live timer."""
+    C = rt.Clock
+    assert C.next_due() is None                          # nothing armed
+    every = rt.schedule_every(30, lambda: None)          # due at 30, 60, ...
+    rt.schedule_after(50, lambda: None)                  # due at 50
+    assert C.next_due() == 30
+    C.advance(10)
+    assert C.next_due() == 20
+    C.advance(25)                                        # now 35: every -> 60
+    assert C.next_due() == 15                            # the after, at 50
+    every.cancel()
+    assert C.next_due() == 15
+    C.advance(15)                                        # the after fires
+    assert C.next_due() is None                          # spent and cancelled
+
+
+class _CountingList(list):
+    """A timer list that counts the handles a scan visits."""
+
+    visited = 0
+
+    def __iter__(self):
+        for item in super().__iter__():
+            type(self).visited += 1
+            yield item
+
+
+def test_spent_and_cancelled_handles_leave_the_timer_list(rt):
+    """A cancelled `every` and a fired `after` are released: the clock holds
+    only live handles, and a released handle drops its body, so the
+    generation that armed it is not kept alive through the timer."""
+    C = rt.Clock
+    cancelled = [rt.schedule_every(10, lambda: None) for _ in range(20)]
+    spent = [rt.schedule_after(5, lambda: None) for _ in range(20)]
+    live = rt.schedule_every(7, lambda: None)
+    for h in cancelled:
+        h.cancel()
+    assert C.advance(5) == 20                            # every `after` fires
+    assert C._timers == [live]
+    assert C.pending() == 1
+    assert all(h._body is None for h in cancelled + spent)
+    assert all(h.cancel() is False for h in cancelled + spent)
+
+
+def test_firing_log_is_bounded(rt):
+    """The firing log keeps the most recent FIRINGS_CAP entries, so a host
+    that fires a 16ms timer for hours does not grow it without bound."""
+    C = rt.Clock
+    cap = C.FIRINGS_CAP
+    rt.schedule_every(1, lambda: None)
+    assert C.advance(cap * 3) == cap * 3
+    log = C.firings()
+    assert len(log) == cap
+    assert log[0] == (1, cap * 2 + 1) and log[-1] == (1, cap * 3)
+
+
+def test_advance_cost_does_not_grow_with_swaps(rt):
+    """A swap cancels the old generation's timer and arms the new one. After
+    500 swaps an `advance` visits as many handles as after none (a count, not
+    a wall-clock time)."""
+    def visits_after(swaps):
+        C = rt.Clock
+        C.reset()
+        h = rt.schedule_every(16, lambda: None)
+        for _ in range(swaps):
+            C.advance(16)
+            h.cancel()
+            h = rt.schedule_every(16, lambda: None)
+        C._timers = _CountingList(C._timers)
+        _CountingList.visited = 0
+        assert C.advance(16) == 1
+        assert C.pending() == 1
+        return _CountingList.visited
+
+    assert visits_after(500) == visits_after(0)
+
+
 # --------------------------------------------------------- emitted-code shape
 
 def test_python_emit_schedules_and_yields_cancel():

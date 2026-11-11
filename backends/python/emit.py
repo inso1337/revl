@@ -1211,6 +1211,69 @@ def _bounded(operation: str, width: int) -> str:
             f"<= _REVL_I{width}_MAX else _revl_i{width}({tmp}))")
 
 
+# The true-division temps (issue #3408). Both sit in the `_revl*` namespace the
+# emitter already reserves (`_EMITTER_TEMP_RE`), so a user name cannot reach them.
+_DIV_NUM_TMP = "_revl_dn"
+_DIV_DEN_TMP = "_revl_dd"
+_DIV_ZERO_TEXT = frozenset({"0", "0.0", "-0.0"})
+# Kinds a division may read twice for free: a local and a literal.
+_DIV_TRIVIAL = frozenset({"var", "name", "lit"})
+# A dividend this short is written into both branches rather than bound.
+_DIV_DUP_MAX = 120
+
+
+def _inline_div(node: dict, render) -> str:
+    """Render `a / b` with the nonzero divisor INLINE (issue #3408).
+
+    `_revl_div(a, b)` entered a python frame for every division, and a divisor
+    is nonzero in every answer but the rare one. The call stays as the tail for
+    a zero divisor, so the IEEE value written once in `_revl_div` is still the
+    only place that builds it, and a nonzero divisor gives the same `a / b`
+    the helper's first line returned.
+
+    Each operand is evaluated exactly once, the dividend before the divisor, as
+    the call did. A name or a literal is read again for free; anything else is
+    bound by a walrus. The condition runs first, so:
+
+      * a nonzero literal divisor: `(a / 2.0)`, no test at all (a zero literal
+        keeps the call);
+      * a name divisor and a short dividend: `(A / d if d else _revl_div(A, d))`,
+        where the dividend is a sub-expression of the one branch taken, so it
+        runs once and after nothing it could be ordered against. A long one
+        (a division chained on a division would double the text per level) is
+        bound first: `(n / d if (n := A) is n and d else _revl_div(n, d))`;
+      * any other divisor with a name or literal dividend (nothing to evaluate,
+        so reading it after the divisor is unobservable):
+        `(a / dd if (dd := B) else _revl_div(a, dd))`;
+      * any other divisor with an evaluated dividend: both are bound in order,
+        `(dn / dd if (dn := A) is dn and (dd := B) else _revl_div(dn, dd))`.
+        The temps are single names, so a divisor that itself binds `dn` (a
+        nested division) would rebind it before it is read; that one keeps the
+        call. `is` on the value just bound is always true; it is there so the
+        walrus is a condition operand without building a tuple.
+    """
+    left, right = node["left"], node["right"]
+    ra, rb = render(left), render(right)
+    left_trivial = left.get("kind") in _DIV_TRIVIAL
+    dn, dd = _DIV_NUM_TMP, _DIV_DEN_TMP
+    if right.get("kind") == "lit":
+        if rb in _DIV_ZERO_TEXT:
+            return f"_revl_div({ra}, {rb})"
+        return f"({ra} / {rb})"
+    if right.get("kind") in _DIV_TRIVIAL:
+        if left_trivial or (len(ra) <= _DIV_DUP_MAX and dn not in ra
+                            and "_revl_div" not in ra):
+            return f"({ra} / {rb} if {rb} else _revl_div({ra}, {rb}))"
+        return (f"({dn} / {rb} if ({dn} := {ra}) is {dn} and {rb} "
+                f"else _revl_div({dn}, {rb}))")
+    if left_trivial:
+        return f"({ra} / {dd} if ({dd} := {rb}) else _revl_div({ra}, {dd}))"
+    if dn in rb:
+        return f"_revl_div({ra}, {rb})"
+    return (f"({dn} / {dd} if ({dn} := {ra}) is {dn} and ({dd} := {rb}) "
+            f"else _revl_div({dn}, {dd}))")
+
+
 def _annotated_bin(node: dict, render) -> str | None:
     """Render an arithmetic `bin` node from its `operands` annotation, or
     `None` when the annotation asks for nothing special.
@@ -1245,7 +1308,7 @@ def _annotated_bin(node: dict, render) -> str | None:
     if op == "/":
         # true division, IEEE at zero (docs/arithmetic.md), regardless of the
         # operand type, since `Int / Int` is Float.
-        return f"_revl_div({render(node['left'])}, {render(node['right'])})"
+        return _inline_div(node, render)
     if op == "%" and operands == "Float":
         # The Float remainder is IEEE `fmod`, and IEEE gives it a VALUE at a
         # zero divisor: `x % 0.0` is NaN, not a fault. python's own `%` raises

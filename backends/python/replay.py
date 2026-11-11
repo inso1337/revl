@@ -152,6 +152,8 @@ __all__ = [
     "boundary_of",
     # item 250 Slice 3a: the durable model-decision record
     "RECORD_MODEL_DECISION",
+    # issue #2713: the determinism fact a value re-run rests on
+    "RECORD_DETERMINISM",
 ]
 
 
@@ -188,6 +190,14 @@ HOST_CONFINED_CAPS = frozenset({"fs"})
 #: ``test_wal_core_agrees_with_py_replay`` so the writer and the offline reader
 #: cannot drift on the name.
 RECORD_MODEL_DECISION = "model-decision"
+
+#: Issue #2713: the WAL record kind that makes a recorded VALUE re-run sound.
+#: Written by :meth:`WriteAheadLog.record_determinism`, it names the RNG seed and
+#: the clock readings the run ran under. Mirrored into
+#: ``revl.wal.RECORD_DETERMINISM``; the reader reports its absence as the
+#: `seedsAndClock` fact rather than assuming a determinism the record does not
+#: establish.
+RECORD_DETERMINISM = "determinism"
 
 
 # ---------------------------------------------------------------------------
@@ -1504,7 +1514,16 @@ def _record_emission_outcome(ref: dict, outcome: str,
         return
     detail = None
     if error is not None:
-        detail = {"type": type(error).__name__, "message": _describe(str(error))}
+        # issue #3142: a host error's text is free-form and may QUOTE a
+        # registered `Secret[T]` value inside a longer sentence (a client
+        # library that puts the URL, header or credential into its message).
+        # `_describe` matches the whole value, so on its own it saw nothing in
+        # "upstream rejected credential <v>"; `redact_text` is the text funnel
+        # that matches the value inside that sentence. Both match exact
+        # registered values, never a pattern, so an ordinary diagnostic is
+        # recorded verbatim.
+        message = confidential.redact_text(_describe(str(error)))
+        detail = {"type": type(error).__name__, "message": message}
         # A ceiling fault carries the token, kind, limit and observed count;
         # name them individually so a reader does not parse the message.
         for field in ("capability", "kind", "limit", "observed"):
@@ -3209,6 +3228,23 @@ class WriteAheadLog:
         self._write(record)
         return record
 
+    def record_determinism(self, *, seed, clock) -> dict:
+        """Append ``determinism``, the fact a value re-run rests on (issue
+        #2713): the RNG seed and the clock readings the recording ran under.
+
+        Neither is on a WAL today, so a diff over recorded VALUES has no sound
+        basis: `revl simulate swap` reads this record and refuses a history
+        without one, naming `seedsAndClock` rather than guessing. Absent by
+        default, so every caller that does not record determinism writes a
+        byte-identical WAL and no golden moves. ``clock`` is the caller's own
+        JSON-shaped reading (a start/end pair or a named table), kept opaque
+        here because the reading is the embedding host's and this writer does
+        not invent its schema. Consumes no seq: it names a fact about the run,
+        it is not an effect."""
+        record = {"record": RECORD_DETERMINISM, "seed": seed, "clock": clock}
+        self._write(record)
+        return record
+
     def append_timeline(self, timeline: "Timeline") -> list:
         """Write every committed step of one component's accumulator, in order."""
         return [self.append_step(step, timeline.component)
@@ -3243,10 +3279,12 @@ class WriteAheadLog:
     def read(path: str) -> dict:
         """Load a WAL from disk into ``{header, records, complete, torn}``.
 
-        ``complete`` is whether the terminal ``activation-complete`` marker is
-        present.  A trailing half-written line (a genuine ``kill -9`` can leave
-        one) is tolerated and reported as ``torn`` rather than crashing the
-        recovery that exists to handle exactly that.
+        ``complete`` is whether the LATEST opening's ``activation-complete``
+        marker is present: a later run reusing the file writes a ``generation``
+        record and owns its own marker, so a prior opening's marker must not read
+        as this one's (issue #3147).  A trailing half-written line (a genuine
+        ``kill -9`` can leave one) is tolerated and reported as ``torn`` rather
+        than crashing the recovery that exists to handle exactly that.
 
         Two integrity gates run first (item 413), fail-closed via
         :class:`WALIntegrityError`: a header ``walVersion`` outside
@@ -3284,6 +3322,12 @@ class WriteAheadLog:
                 ) from None
             kind = entry.get("record")
             if kind == "header":
+                if header:
+                    # issue #3147: a REPEATED header is a later opening's
+                    # boundary (a compiled tier appending to REVL_WAL); kept
+                    # in the record list, in step with revl.wal.read_wal.
+                    complete = False
+                    records.append(entry)
                 header = entry
                 version = header.get("walVersion")
                 if version not in SUPPORTED_WAL_VERSIONS:
@@ -3294,6 +3338,14 @@ class WriteAheadLog:
                     )
             elif kind == "activation-complete":
                 complete = True
+                records.append(entry)
+            elif kind == "generation":
+                # issue #3147: a later opening writes this record and then owns
+                # its own terminal marker. Reset, so a reused file's
+                # `activation-complete` (an EARLIER opening's) is not read as the
+                # latest opening's; a crash mid-activation must not borrow the
+                # prior run's completion.
+                complete = False
                 records.append(entry)
             else:
                 records.append(entry)

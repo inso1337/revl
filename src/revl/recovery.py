@@ -27,6 +27,14 @@ The WAL's terminal ``activation-complete`` marker is the whole decision:
   newest-first (LIFO, exactly as an L-Raise teardown would), then states a
   checked verdict with a residue proof.
 
+The marker is scoped to the OPENING it belongs to (issue #3147). A WAL appended
+to by a later run (``--wal PATH`` reuses the file, #641/#642) starts that run
+with a ``generation`` record when it is opened with a composition, and the prior
+run's marker or ``commit-approved`` proves only that the PRIOR run finished.
+Recovery decides by the latest opening's own marker and rolls back every opening
+that never committed; a committed opening's effects are never inverted. A
+single-opening WAL reads exactly as it always did.
+
 Why boundary state is the real cargo (the honest analysis)
 ----------------------------------------------------------
 After a crash the process memory is gone. An inverse that closes over an
@@ -294,6 +302,96 @@ def _referent_key(record: dict, world: World) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
+def _scoped_wal(wal: dict, records: list) -> dict:
+    """A copy of ``wal`` whose record list is the subset a decision acts on.
+
+    ``recover`` decides and acts per OPENING (issue #3147): the latest opening's
+    marker picks roll-forward vs roll-back, and a roll-back walks only the
+    openings that never committed. The header, ``torn`` and the caller map are
+    kept unchanged; only ``records`` is narrowed, so every helper that walks the
+    record list sees exactly the interval it is recovering and nothing from an
+    opening whose writes were already committed or already recovered."""
+    return {**wal, "records": records}
+
+
+def _approval(interval: list) -> Optional[dict]:
+    """The ``commit-approved`` record ONE opening's interval holds, or None."""
+    return next((r for r in interval
+                 if r.get("record") == "commit-approved"), None)
+
+
+def _trailing_open(intervals: list) -> list:
+    """The records of the uncommitted openings AFTER the last committed one.
+
+    A roll-back walks back from the latest opening and stops at the first one
+    that committed (issue #3147). An uncommitted opening BEFORE a committed one
+    is not this crash's work: either an earlier recover already rolled it back
+    (and later work may have rewritten its referents, so replaying its inverse
+    again would undo committed work), or the committed opening ran on top of it.
+    Several uncommitted openings in a row (a crash-looping service) are all
+    rolled back, as one opening would be."""
+    from .wal import interval_committed  # noqa: PLC0415 - tier-agnostic core, lazy
+    start = len(intervals)
+    while start > 0 and not interval_committed(intervals[start - 1]):
+        start -= 1
+    return [record for interval in intervals[start:] for record in interval]
+
+
+#: The records recover itself appends for an approved opening's window
+#: (`_roll_forward_window`). They land at the END of the file, so after a later
+#: opening they sit in THAT opening's interval; a second recover must still see
+#: them as the earlier opening's, or it re-appends the discharge and, worse,
+#: misses a spent `reissue-fence` and fires a re-issue twice.
+_WINDOW_BOOKKEEPING = ("discharge", "reissue-fence")
+
+
+def _prior_windows(wal_path: str, wal: dict, intervals: list, *,
+                   world: World, reissue: Optional[str]) -> list:
+    """Roll forward every EARLIER opening that crashed in the approved-to-
+    discharged window (item 245, Decision 3; issue #3147).
+
+    An opening whose interval holds ``commit-approved`` but no
+    ``activation-complete`` is a COMMITTED session whose bookkeeping the crash
+    interrupted. A later opening on the same file does not change that: recover
+    appends its missing ``discharge`` and reports its flush state exactly as it
+    would for the latest opening. The latest opening is decided by ``recover``
+    itself, so only the earlier ones are walked here; none on a single-opening
+    WAL, so every such report is byte-identical."""
+    windows = []
+    for index, interval in enumerate(intervals[:-1]):
+        approved = _approval(interval)
+        if approved is None or any(r.get("record") == "activation-complete"
+                                   for r in interval):
+            continue
+        later = [r for after in intervals[index + 1:] for r in after
+                 if r.get("record") in _WINDOW_BOOKKEEPING]
+        window = _roll_forward_window(wal_path,
+                                      _scoped_wal(wal, interval + later),
+                                      approved, world=world, reissue=reissue)
+        window.pop("guarantee", None)
+        window.pop("decision", None)
+        windows.append({"opening": index + 1, **window})
+    return windows
+
+
+def _with_prior_windows(report: dict, windows: list) -> None:
+    """Attach the earlier approved openings' roll-forwards to ``report``; an
+    owed flush among them is residue and moves the verdict's residue proof."""
+    report["priorWindows"] = windows
+    residue = report.get("residue")
+    if residue is None:
+        return
+    for window in windows:
+        own = window["residue"]
+        if not own["clean"]:
+            residue["clean"] = False
+            residue.setdefault("outstanding", []).extend(own["outstanding"])
+        residue["proof"] = (residue.get("proof", "")
+                            + (" | " if residue.get("proof") else "")
+                            + f"earlier opening {window['opening']} was approved "
+                            f"(committed): {own['proof']}")
+
+
 def recover(wal_path: str, *, world: Optional[World] = None,
             session=None, snapshot: Optional[dict] = None,
             reissue: Optional[str] = None,
@@ -330,8 +428,8 @@ def recover(wal_path: str, *, world: Optional[World] = None,
     call's crossing (`within.process`), and is counted with it when the caller's
     WAL holds it (:func:`_split_nested`). ``None`` for a single-process WAL.
     """
-    from .wal import read_wal  # noqa: PLC0415 — tier-agnostic core, lazy
-    from .wal import (expired_tickets, revoked_tickets)  # noqa: PLC0415
+    from .wal import (  # noqa: PLC0415 - tier-agnostic core, lazy
+        expired_tickets, opening_intervals, read_wal, revoked_tickets)
 
     try:
         wal = read_wal(wal_path)
@@ -364,20 +462,36 @@ def recover(wal_path: str, *, world: Optional[World] = None,
         if expired:
             report["expiredTickets"] = expired
         return _with_world(report, world, tally)
-    approved = next((r for r in records
-                     if r.get("record") == "commit-approved"), None)
-    if wal["complete"]:
-        report = _roll_forward(wal, session=session, snapshot=snapshot)
+    # issue #3147: one WAL file can hold more than one OPENING (a later run
+    # reusing the same `--wal` path, or a --watch reload). A later opening
+    # starts at its own `generation` record (or, from a compiled tier, at a
+    # repeated `header`), and the prior opening's `activation-complete` /
+    # `commit-approved` prove only that THAT opening finished. Recover the
+    # latest opening by its OWN marker; roll back only the uncommitted openings
+    # after the last committed one; roll every earlier approved-but-unfinished
+    # opening forward (`_prior_windows`). A single-opening WAL yields one
+    # interval, so every pre-#3147 report is byte-identical.
+    intervals = opening_intervals(records)
+    latest = intervals[-1]
+    approved = _approval(latest)
+    if any(r.get("record") == "activation-complete" for r in latest):
+        report = _roll_forward(_scoped_wal(wal, latest),
+                               session=session, snapshot=snapshot)
     elif approved is not None:
         # item 245, Decision 3, the approved-to-discharged window: a crash after
         # `commit-approved` and before `activation-complete` is a COMMITTED
         # session. The durable approval, not the discharge record, is the commit
         # proof; recover replays no inverse and rolls the missing discharge
         # forward. This dominates the discharge-set skip for a session-owned WAL.
-        report = _roll_forward_window(wal_path, wal, approved,
-                                      world=bound(), reissue=reissue)
+        report = _roll_forward_window(wal_path, _scoped_wal(wal, latest),
+                                      approved, world=bound(), reissue=reissue)
     else:
-        report = _roll_back(wal, world=bound(), wal_path=wal_path)
+        report = _roll_back(_scoped_wal(wal, _trailing_open(intervals)),
+                            world=bound(), wal_path=wal_path)
+    windows = _prior_windows(wal_path, wal, intervals, world=bound(),
+                             reissue=reissue)
+    if windows:
+        _with_prior_windows(report, windows)
 
     # issue #2991: name the approval questions a halt or an operator left in a
     # TERMINAL disposition, and keep `revoked` apart from `expired`. Both are
@@ -2876,6 +2990,18 @@ def render(report: dict) -> str:
                 f"  {tag} {entry['handle']:<20} shared last holder gone "
                 f"({entry['basis']}, holders={entry['holders']}) — "
                 f"{entry['outcome']}{tag}")
+    # issue #3147: an earlier opening that crashed in the approved-to-discharged
+    # window is a committed session, rolled forward next to the latest
+    # opening's verdict. Absent on a single-opening WAL.
+    for window in report.get("priorWindows") or []:
+        lines.append(f"  committed earlier opening {window['opening']}: rolled "
+                     f"forward discharge "
+                     + (", ".join(str(s) for s in window["rolledForwardDischarge"])
+                        or "(none)"))
+        for entry in window.get("owedFlushes") or []:
+            lines.append(f"  OWED     seq {entry['seq']:<3} {entry['referent']} "
+                         f"- {entry['outcome']} (earlier opening "
+                         f"{window['opening']})")
     residue = report["residue"]
     state = "CLEAN" if residue["clean"] else "RESIDUE"
     where = " in the model" if model else ""
