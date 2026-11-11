@@ -352,28 +352,84 @@ function makeTotal<F extends (...a: never[]) => unknown>(name: string, fn: F): F
   return total
 }
 
+/** The kernel's own symlink budget for one resolution. A walk that follows more
+ * links than this is refused, never answered with the raw `ELOOP` (whose
+ * `path` would name an outside link, #3284). */
+const SYMLINK_BUDGET = 40
+
+/** The name components of `p` after its filesystem root (a relative `p` has
+ * none), in order and NOT normalized. Link text on Windows may use either
+ * separator. */
+function pathComponents(p: string): string[] {
+  const rest = p.slice(path.parse(p).root.length)
+  return rest.split(path.sep === '\\' ? /[\\/]/ : '/')
+}
+
 /** `os.path.realpath` for a path whose LEAF may not exist yet (a write/mkdir
- * target). node's `fs.realpathSync` throws ENOENT on a missing path, so this
- * resolves the longest existing prefix (symlinks and all) and re-appends the
- * non-existent tail, exactly as py's `os.path.realpath` normalizes a missing
- * leaf. Symlinks in every existing component are therefore resolved BEFORE the
- * membership test (must #1). */
-function realpathish(p: string): string {
+ * target). node's `fs.realpathSync` throws ENOENT on a missing path, so when it
+ * fails this walks the path the way py's `os.path.realpath` does: one component
+ * at a time from the filesystem root, `lstat` on each, a symlink replaced by its
+ * text pushed back onto the walk (so every component of the TEXT is resolved in
+ * turn too), a missing component kept as written. Symlinks in every existing
+ * component are therefore resolved BEFORE the membership test (must #1).
+ *
+ * Two answers this walk must give exactly as py does (#3235, #3284):
+ * - a DANGLING link is not a missing leaf. Its target is what the containment
+ *   check must see, so a link inside the root pointing outside is refused,
+ *   never answered as an in-root miss (the Ok(true)/EOUTSIDE oracle).
+ * - a `..` inside link text applies to the RESOLVED component before it. A
+ *   lexical join (`<ws>/inlink/../X` collapsed to `<ws>/X`) would answer
+ *   EOUTSIDE or Ok depending on whether `<outside>/X` exists.
+ *
+ * Every lstat/readlink failure is an ordinary missing component, as in py's
+ * non-strict realpath, so the walk itself throws only when the symlink budget
+ * runs out: `ConfinementError('EOUTSIDE')` naming `spelled`, the caller's own
+ * path, never the outside link the walk had reached. */
+function realpathish(p: string, spelled: string = p): string {
   const abs = path.resolve(p)
-  const tail: string[] = []
-  let cur = abs
-  for (;;) {
-    try {
-      const real = fs.realpathSync.native(cur)
-      if (tail.length === 0) return real
-      return path.join(real, ...tail.slice().reverse())
-    } catch {
-      const parent = path.dirname(cur)
-      if (parent === cur) return path.normalize(abs)
-      tail.push(path.basename(cur))
-      cur = parent
-    }
+  try {
+    return fs.realpathSync.native(abs)
+  } catch {
+    // a missing leaf, a dangling link or a loop: walk it as py does
   }
+  // a stack of components still to walk; the next one is at the end
+  const rest = pathComponents(abs).reverse()
+  let cur = path.parse(abs).root
+  let links = 0
+  while (rest.length > 0) {
+    const name = rest.pop() as string
+    if (name === '' || name === '.') continue
+    if (name === '..') {
+      cur = path.dirname(cur)
+      continue
+    }
+    const next = path.join(cur, name)
+    let link: string | null = null
+    try {
+      if (fs.lstatSync(next).isSymbolicLink()) link = fs.readlinkSync(next)
+    } catch {
+      // not there, not a directory, or it vanished between the two calls
+    }
+    if (link === null) {
+      cur = next
+      continue
+    }
+    if (++links > SYMLINK_BUDGET) {
+      throw new ConfinementError(
+        'EOUTSIDE',
+        'path follows more symlinks than one resolution allows, so it cannot be '
+        + 'shown to stay inside the session workspace root',
+        sanitized(spelled),
+      )
+    }
+    // a RELATIVE target resolves against the link's REAL parent, `cur`, so a
+    // symlinked directory cannot launder a relative target into an in-root miss
+    if (path.isAbsolute(link)) cur = path.parse(link).root
+    // the text is split, never normalized: a `..` in it must meet the resolved
+    // component before it, not be collapsed lexically against the spelled one
+    for (const part of pathComponents(link).reverse()) rest.push(part)
+  }
+  return cur
 }
 
 /** The configured session workspace root, realpath-resolved. Throws
@@ -429,7 +485,7 @@ function rawResolveWithin(p: string): string {
   refuseUnusablePath(p)
   const root = workspaceRoot()
   const target = path.isAbsolute(p) ? p : path.join(root, p)
-  const real = realpathish(target)
+  const real = realpathish(target, p)
   if (!isWithin(root, real)) {
     throw new ConfinementError(
       'EOUTSIDE',

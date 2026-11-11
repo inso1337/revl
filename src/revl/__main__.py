@@ -1675,6 +1675,12 @@ def _dispatch(args) -> int:
     if args.command == "pool":
         from .peer_pool import pool_command  # noqa: PLC0415 — lazy
         return pool_command(args)
+    # issue #2757: export and verify signed action-receipt chains. Routed
+    # before the shared compile step because both verbs read a JSON document,
+    # not `.rvl` sources.
+    if args.command == "receipts":
+        from .cli.receipts import _run_receipts  # noqa: PLC0415
+        return _run_receipts(args)
     if args.command == "attest":
         return _run_attest(args)
     if args.command == "dash":

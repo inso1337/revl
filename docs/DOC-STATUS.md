@@ -79,7 +79,7 @@ regenerated rather than edited.
 | composition-rows.md | needs-work | 24 |  |
 | conformance.md | needs-work | 0 |  |
 | contract-errata.md | needs-work | 56 | yes |
-| crash-recovery.md | needs-work | 52 |  |
+| crash-recovery.md | needs-work | 51 |  |
 | dash.md | current | 9 |  |
 | delivery-semantics.md | needs-work | 0 |  |
 | deploy.md | needs-work | 12 |  |

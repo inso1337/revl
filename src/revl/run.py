@@ -181,6 +181,16 @@ def _load_config(path: str | None) -> dict:
     return data
 
 
+def renamed_code(code: types.CodeType, filename: str) -> types.CodeType:
+    """`code` with `filename` as the file name of it and of every code object
+    nested in its constants (each function, class body and comprehension it
+    defines). Everything else, line numbers included, is unchanged."""
+    consts = tuple(renamed_code(const, filename)
+                   if isinstance(const, types.CodeType) else const
+                   for const in code.co_consts)
+    return code.replace(co_filename=filename, co_consts=consts)
+
+
 def _components(ir: dict) -> list[dict]:
     return ir.get("components") or []
 
@@ -1232,6 +1242,7 @@ class _Driver:
         # still the very object this driver put there (#1046).
         self._gen_modules: dict[str, _Generation] = {}
         self.emitted: tuple = ("", "")  # (filename, source) of the last emit
+        self.emitted_code: types.CodeType | None = None  # and its code object
         # crash-recovery WAL (roadmap item 47): --wal implies recording, since
         # the accumulator it persists is what recording captures.
         self.wal_path = wal_path
@@ -1708,8 +1719,14 @@ class _Driver:
             if sys.modules.get(name) is gen.module:
                 del sys.modules[name]
 
-    def _emit_module(self, ir: dict,
-                     source: str | None = None) -> types.ModuleType:
+    def _emit_module(self, ir: dict, source: str | None = None,
+                     code: types.CodeType | None = None) -> types.ModuleType:
+        # `code`, when given, is `source` already compiled for an earlier
+        # generation (issue #3383: a session swapping back onto a document it
+        # has run). It is renamed to THIS generation's file name before it
+        # runs, so a traceback and the replay recorder quote `<revl-run genN>`
+        # with the new N, and it is executed into a fresh module like any
+        # other. Only the code object is reused, never a module or namespace.
         # `source` is the emitter's output for `ir` when the caller has already
         # rendered it. A session swap renders the successor BEFORE it tears the
         # running generation down, so an emitter refusal leaves that generation
@@ -1760,7 +1777,14 @@ class _Driver:
         # all disposed.
         self._gen_modules[module.__name__] = _Generation(
             module, frozenset(c["name"] for c in _components(ir)))
-        exec(compile(source, filename, "exec"), module.__dict__)
+        if code is None:
+            code = compile(source, filename, "exec")
+        else:
+            code = renamed_code(code, filename)
+        # the code object this generation runs, so a session can keep it for
+        # a later swap onto the same document (issue #3383)
+        self.emitted_code = code
+        exec(code, module.__dict__)
         # item 379 / option (b) of docs/design/378-sync-extern-service-reach.md:
         # install the resolved config for each document-global config extern into
         # the module's `_REVL_EXTERN_CONFIG` map, so a host body reads typed

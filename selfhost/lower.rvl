@@ -31481,6 +31481,148 @@ fn adt_case_row(ts: List[Token], i: Int, al: Map[Str, Str],
   return tenv_put(acc, "cases ".concat(nm), names)
 }
 
+// The PROVIDED variant rows, in `model_answer.ANSWER_TYPES`' declaration
+// order: the case list the reference's seeded type table carries for a program
+// that NAMES a provided type. "" for a head this gate does not provide.
+fn tk_provided_cases(head: Str) -> Str {
+  if (head == "Aggregate") { return "Agreed,Split,Inquorate" }
+  if (head == "Answer") { return "Says,Abstains,Unreachable" }
+  return ""
+}
+
+// `model_answer.mentions`: does this type spelling name a provided type
+// APPLIED at any depth (`Aggregate[Str]`, `List[Answer[Str]]`)? A bare head is
+// not a use of the generic provided type, and the reference admits a match over
+// one because its table holds no entry for it.
+fn tk_provided_ty(t: Str) -> Bool {
+  let s = ty_trim(t)
+  if (s == "") { return false }
+  let h = parse_head(s)
+  let a = type_args(s)
+  if ((h == "Aggregate" || h == "Answer") && a.length() > 0) { return true }
+  var i = 0
+  while (i < a.length()) {
+    if (tk_provided_ty(a[i])) { return true }
+    i += 1
+  }
+  return false
+}
+
+// One declaration's parameter types, aliases erased exactly as
+// `_resolve_type_aliases` erases them before the reference reads the strings.
+fn tk_provided_params(ps: List[ParamN], al: Map[Str, Str]) -> Bool {
+  var i = 0
+  while (i < ps.length()) {
+    if (tk_provided_ty(alias_subst(ps[i].ty, al))) { return true }
+    i += 1
+  }
+  return false
+}
+
+// The field and case-payload rows one `type` or `event` declaration
+// contributes, which `decl_cases` and `event_field_binds` already erase.
+fn tk_provided_rows(rows: List[Bind]) -> Bool {
+  var i = 0
+  while (i < rows.length()) {
+    if (tk_provided_ty(rows[i].ty)) { return true }
+    i += 1
+  }
+  return false
+}
+
+// A `service` body's method signatures, the third position
+// `_declared_type_strings` reads. A service block holds declarations only, so
+// this is a header walk and never an expression one.
+fn tk_provided_service(ts: List[Token], i: Int, al: Map[Str, Str]) -> Bool {
+  var j = i + 2
+  if (!atk(ts, j, "{")) { return false }
+  let bend = close_brace(ts, j)
+  if (bend == 0 - 1) { return false }
+  var k = j + 1
+  while (k < bend) {
+    if (atw(ts, k, "fn") && atk(ts, k + 2, "(")) {
+      let ps = params_at(ts, k + 3)
+      if (ps.ok) {
+        if (tk_provided_params(ps.ps, al)) { return true }
+        var nx = ps.i
+        if (atk(ts, nx, "arrow")) {
+          let tr = type_at(ts, nx + 1)
+          if (tr.ok && tk_provided_ty(alias_subst(tr.ty, al))) { return true }
+          nx = tr.i
+        }
+        k = nx > k ? nx : k + 1
+      } else { k += 1 }
+    } else { k += 1 }
+  }
+  return false
+}
+
+// Does the program NAME a provided type APPLIED in one of the positions
+// `model_answer.seeded` reads? `_declared_type_strings` is that list: module
+// `fn` and `extern` signatures, service methods, and declared record fields
+// and case payloads, all after `_resolve_type_aliases` has erased aliases into
+// their targets. A `let` annotation inside a body is NOT one of them, so a
+// program whose only mention sits in a body must keep its table unseeded (a
+// bare `Aggregate` match there is one the reference admits); the same holds for
+// a mention in a `component` or `test` body, and the walk steps those whole.
+// Reading each position through its own reader is what applies alias erasure by
+// construction, so a declared position spelled through an alias counts and an
+// unused alias declaration does not.
+fn tk_provided_mentioned(ts: List[Token], al: Map[Str, Str]) -> Bool {
+  var i = 0
+  while (i < ts.length() && !atk(ts, i, "eof")) {
+    let t = tkc(ts, i)
+    if (at_boot(ts, i)) { i += 1 }
+    else if (at_event(ts, i)) {
+      if (tk_provided_rows(event_field_binds(ts, i, [], al))) { return true }
+      i = event_decl_end(ts, i)
+    }
+    else if (at_qual_test(ts, i)) {
+      let qe = qual_test_end(ts, i)
+      i = qe == 0 - 1 ? skip_line(ts, i) : qe
+    }
+    else if (t.kind != "kw") { i = skip_line(ts, i) }
+    else if (at_pub_prefix(ts, i)) { i += 1 }
+    else if (t.text == "use") { i = skip_line(ts, i) }
+    else if (t.text == "type") {
+      let d = decl_cases(ts, i, { binds: [], amb: [] }, al)
+      if (tk_provided_rows(d.a.binds)) { return true }
+      i = d.i > i ? d.i : i + 1
+    }
+    else if (t.text == "test") {
+      let e = test_block_end(ts, i)
+      i = e == 0 - 1 ? skip_line(ts, i) : e
+    }
+    else if (t.text == "extern") {
+      let h = ext_head(ts, i)
+      let nx = p_extern(ts, i, empty_prog()).i
+      if (h.ok && (tk_provided_params(h.ps, al)
+                   || tk_provided_ty(alias_subst(h.ret, al)))) { return true }
+      i = nx > i ? nx : i + 1
+    }
+    else if (t.text == "service") {
+      if (tk_provided_service(ts, i, al)) { return true }
+      let nx = p_service(ts, i, empty_prog()).i
+      i = nx > i ? nx : i + 1
+    }
+    else if (t.text == "component") {
+      let nx = p_component(ts, i, empty_prog()).i
+      i = nx > i ? nx : i + 1
+    }
+    else if (t.text == "fn") {
+      let sp = fb_span(ts, i)
+      if (!sp.ok) { i = skip_line(ts, i) }
+      else {
+        if (tk_provided_params(sp.ps, al)
+            || tk_provided_ty(alias_subst(sp.ret, al))) { return true }
+        i = sp.next > i ? sp.next : i + 1
+      }
+    }
+    else { i = skip_line(ts, i) }
+  }
+  return false
+}
+
 // The built-in half of `_case_table`, declared first so a user ADT can shadow
 // `Ok`/`Err` and a user reuse of `Some`/`None` collides with something.
 fn case_binds(ts: List[Token], al: Map[Str, Str]) -> List[Bind] {
@@ -31493,7 +31635,23 @@ fn case_binds(ts: List[Token], al: Map[Str, Str]) -> List[Bind] {
   b = b.push({ name: "payload Ok", ty: "" })
   b = b.push({ name: "case Err", ty: "Result[Any, Any]" })
   b = b.push({ name: "payload Err", ty: "" })
-  return case_binds_walk(ts, 0, { binds: b, amb: [] }, al).binds
+  var env = case_binds_walk(ts, 0, { binds: b, amb: [] }, al).binds
+  // `model_answer.seeded`: the provided types join the table when the program
+  // names one, so `tk_exhaustive`'s head lookup finds the case list the
+  // reference's seeded table carries. A provided type is never a `type`
+  // declaration here, so without these rows the general rule found nothing for
+  // an applied scrutinee and stayed silent where the reference refuses the
+  // missing case (issue #2981). The user's own declaration wins a name
+  // collision, as `{**ANSWER_TYPES, **types}` does in the reference.
+  if (tk_provided_mentioned(ts, al)) {
+    if (tenv_get(env, "cases Aggregate") == "") {
+      env = tenv_put(env, "cases Aggregate", tk_provided_cases("Aggregate"))
+    }
+    if (tenv_get(env, "cases Answer") == "") {
+      env = tenv_put(env, "cases Answer", tk_provided_cases("Answer"))
+    }
+  }
+  return env
 }
 
 // `_tagged_case`: the ADT a name constructs, or "" when it constructs none.

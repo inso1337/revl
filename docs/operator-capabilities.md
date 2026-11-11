@@ -48,6 +48,21 @@ flag is the grant that no caller over the transport can supply.
 `revl_update_status` also answers when updates are disabled, so an operator
 can see why.
 
+The feed is the server's configuration too, and its manifests are
+signature-checked: a networked `release.json` that carries a signature is
+verified against a key pinned in `src/revl/update/release_keys.py`.
+`--update-trust-unsigned` is the operator escape for a mirror whose manifest
+carries no signature at all; a present signature is still verified. It is a
+serve-time flag, never a caller argument.
+
+The caller's consent flags `allowDowngrade`, `acceptNotLive`,
+`acceptIncompatible`, `acceptUnknownVersion` and `acknowledgeWidening` are
+operator grants too. The server enables one only with
+`--update-allow-consent NAME`; without that grant the caller passing the flag
+is refused with `UPDATE_CONSENT_NOT_GRANTED` where the flag would have lifted
+a refusal, never silently ignored. `force` needs no grant: it re-plans the
+release the composition already runs and opts into nothing else.
+
 ## The operator profile
 
 A profile declares one or more **operators**. Each operator has a token and a
