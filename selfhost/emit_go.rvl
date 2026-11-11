@@ -928,7 +928,7 @@ fn builtin_ret_type(method: Str, recv: Str) -> Str {
   if (method == "to_str" || method == "to_char") { return "Str" }
   if (method == "to_int32") { return "Int32" }
   if (method == "startsWith" || method == "endsWith") { return "Bool" }
-  if (is_checked_div(method)) { return "Result[Int, Str]" }
+  if (is_checked_form(method)) { return "Result[Int, Str]" }
   if (method == "charAt" || method == "repeat" || method == "join") { return "Str" }
   if (method == "split") { return "List[Str]" }
   if (method == "slice" || method == "concat" || method == "push") { return recv }
@@ -949,6 +949,17 @@ fn builtin_ret_type(method: Str, recv: Str) -> Str {
 fn is_checked_div(method: Str) -> Bool {
   if (method == "checked_div_trunc" || method == "checked_div_floor") { return true }
   return method == "checked_div_euclid" || method == "checked_mod"
+}
+
+// The total arithmetic forms (docs/arithmetic.md): the overflow answered as a
+// value.
+fn is_checked_arith(method: Str) -> Bool {
+  return method == "checked_add" || method == "checked_sub" || method == "checked_mul"
+}
+
+// The reference's `_GO_CHECKED_FORMS`: every total form produces a Result.
+fn is_checked_form(method: Str) -> Bool {
+  return is_checked_arith(method) || is_checked_div(method)
 }
 
 // -------------------------------------------------------------- expressions
@@ -2593,8 +2604,32 @@ fn builtin_text_tail(method: Str, rt: Str, target: Str, args: List[Str], alias: 
   if (method == "div_floor") { return `revlDivFloor(${target}, ${args[0]})` }
   if (method == "div_euclid") { return `revlDivEuclid(${target}, ${args[0]})` }
   if (method == "mod") { return `revlMod(${target}, ${args[0]})` }
+  if (is_checked_arith(method)) { return checked_arith_text(method, target, args[0]) }
   if (is_checked_div(method)) { return checked_div_text(method, target, args[0]) }
   return ""
+}
+
+// The total arithmetic forms (docs/arithmetic.md): the overflow tests the
+// trapping `revlAdd/revlSub/revlMul` helpers use, with the fault carried out
+// as an Err arm instead of a panic. An immediately-applied func literal
+// evaluates each operand exactly once.
+fn checked_arith_text(method: Str, target: Str, arg: Str) -> Str {
+  let err = "return RevlResult[int64, string]{ErrV: \"revl: Int overflow\"} }; "
+  let ok = "return RevlResult[int64, string]{OkV: _r, Ok: true}"
+  var body = ""
+  if (method == "checked_add") {
+    body = "_r := _a + _b; if (_a > 0 && _b > 0 && _r < 0) || (_a < 0 && _b < 0 && _r >= 0) { "
+      .concat(err).concat(ok)
+  } else if (method == "checked_sub") {
+    body = "_r := _a - _b; if (_b < 0 && _r < _a) || (_b > 0 && _r > _a) { "
+      .concat(err).concat(ok)
+  } else {
+    body = "if _a == 0 || _b == 0 { return RevlResult[int64, string]{OkV: 0, Ok: true} }; "
+      .concat("if (_a == (-9223372036854775807 - 1) && _b == -1) || ")
+      .concat("(_a == -1 && _b == (-9223372036854775807 - 1)) { ").concat(err)
+      .concat("_r := _a * _b; if _r/_b != _a { ").concat(err).concat(ok)
+  }
+  return `func(_a, _b int64) RevlResult[int64, string] { ${body} }(${target}, ${arg})`
 }
 
 // The total division forms (docs/arithmetic.md): the faulting quotient, but a
@@ -4719,7 +4754,9 @@ fn emit_module(ir: Any, combined: Bool) -> Str {
   for (sec of sections) {
     if (ir_text_is(sec, ["maplit"]) || ir_has_method(sec, ["set", "lookup", "has", "size", "keys", "remove"])) { used_map = true }
     if (ir_text_has(sec, ["Opt["]) || ir_text_is(sec, ["optfield", "optcall"])) { used_opt = true }
-    if (ir_text_has(sec, ["Result[", "checked_div_", "checked_mod"])) { used_result = true }
+    // The total forms produce a Result without the source ever spelling
+    // `Result[`: a node whose `method` is one of them puts Result in too.
+    if (ir_text_has(sec, ["Result["]) || ir_has_method(sec, ["checked_add", "checked_sub", "checked_mul", "checked_div_trunc", "checked_div_floor", "checked_div_euclid", "checked_mod"])) { used_result = true }
   }
   if (used_map) { used_opt = true }
   if (comp_result) { used_result = true }

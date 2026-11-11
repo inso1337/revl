@@ -132,11 +132,11 @@
 
 ["function", "owned-map-set-computed-key-order-inplace-stmts", "inplace_stmts", 1, 1]
 
-["reason", "reference-bootstrap-inlining-artifacts-not-dead-helpers-ind", "Reference bootstrap inlining artifacts, not dead helpers: ind is folded into line and checked_quotient into checked_div_block when this .rvl compiles to Python. Their declared def bodies remain but no caller invokes them. arithmetic corpus covers the folded checked division/remainder preambles; generated helper scaffolding is excluded from the denominator, these declared functions are deliberately retained."]
-
-["function", "reference-bootstrap-inlining-artifacts-not-dead-helpers-ind", "checked_quotient", 7, 7]
+["reason", "reference-bootstrap-inlining-artifacts-not-dead-helpers-ind", "Reference bootstrap inlining artifacts, not dead helpers: ind is folded into line and is_checked_div into is_checked_form and checked_block when this .rvl compiles to Python. Their declared def bodies remain but no caller invokes them. The checked_div and checked_arith corpus documents cover the folded predicates; generated helper scaffolding is excluded from the denominator, these declared functions are deliberately retained."]
 
 ["function", "reference-bootstrap-inlining-artifacts-not-dead-helpers-ind", "ind", 1, 1]
+
+["function", "reference-bootstrap-inlining-artifacts-not-dead-helpers-ind", "is_checked_div", 1, 1]
 
 ["reason", "runtime-ref-frame-configschema-aliases-are-hardcoded-directl", "runtime_ref Frame/ConfigSchema aliases are hardcoded directly by current module/component scaffolds; the final identity fallback handles runtime names outside the alias set. Reference _runtime_ref uses the same alias-or-name rule. Imported Frame/ConfigSchema behavior is covered by services_basic/config fixtures."]
 

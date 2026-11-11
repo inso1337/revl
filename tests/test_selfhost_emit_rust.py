@@ -132,6 +132,8 @@ CORPUS = [
     "arith.rvl",     # bounded int/int32, / widening, %, comparisons, unary, ??
     "float_pub.rvl", # finite Float literals/arithmetic, Int->Float widening, pub fn
     "checked_div.rvl", # total checked division/modulo and Result matching
+    "../emit_py_corpus/checked_arith.rvl",  # total checked_add/sub/mul (docs/arithmetic.md)
+    "../emit_py_corpus/checked_arith_read.rvl",  # the same forms bound by a let and matched
     "str_borrows.rvl",  # fixpoint signatures, owned boundaries, &str call sites
     "borrow_boundaries.rvl",  # callbacks, escaping captures, nested-list needles
     "borrow_shadowing.rvl",  # later/sibling bindings cannot hide function values

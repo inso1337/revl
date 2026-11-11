@@ -16839,7 +16839,8 @@ fn tk_bsig_family(m: Str, th: Str) -> Str {
       || m == "is_alnum" || m == "is_digit" || m == "is_alpha"
       || m == "is_space") { return "Str" }
   if (m == "div_trunc" || m == "div_floor" || m == "div_euclid" || m == "mod"
-      || m == "to_int32" || m == "to_char" || m == "checked_div_trunc"
+      || m == "to_int32" || m == "to_char" || m == "checked_add"
+      || m == "checked_sub" || m == "checked_mul" || m == "checked_div_trunc"
       || m == "checked_div_floor" || m == "checked_div_euclid"
       || m == "checked_mod") { return "Int" }
   if (m == "set" || m == "lookup" || m == "has" || m == "size"
@@ -16861,6 +16862,7 @@ fn tk_bsig_params(m: Str) -> List[Str] {
   if (m == "split" || m == "join" || m == "startsWith"
       || m == "endsWith") { return ["Str"] }
   if (m == "div_trunc" || m == "div_floor" || m == "div_euclid" || m == "mod"
+      || m == "checked_add" || m == "checked_sub" || m == "checked_mul"
       || m == "checked_div_trunc" || m == "checked_div_floor"
       || m == "checked_div_euclid" || m == "checked_mod") { return ["Int"] }
   if (m == "set") { return ["Str", "@elem"] }
@@ -30049,7 +30051,8 @@ fn is_builtin_method(m: Str) -> Bool {
     || m == "join" || m == "repeat" || m == "startsWith" || m == "endsWith"
     || m == "is_alnum" || m == "is_digit" || m == "is_alpha" || m == "is_space"
     || m == "div_trunc" || m == "div_floor" || m == "div_euclid" || m == "mod"
-    || m == "to_int" || m == "to_int32" || m == "checked_div_trunc"
+    || m == "to_int" || m == "to_int32" || m == "checked_add" || m == "checked_sub"
+    || m == "checked_mul" || m == "checked_div_trunc"
     || m == "checked_div_floor" || m == "checked_div_euclid" || m == "checked_mod"
     || m == "set" || m == "lookup" || m == "has" || m == "size" || m == "keys"
     || m == "remove" || m == "to_str"
@@ -30124,7 +30127,8 @@ fn builtin_ret(method: Str, recvTy: Str) -> Str {
   if (method == "field") { return "Value" }
   if (method == "str") { return "Str" }
   if (method == "list") { return "List[Value]" }
-  if (method == "checked_div_trunc" || method == "checked_div_floor"
+  if (method == "checked_add" || method == "checked_sub" || method == "checked_mul"
+      || method == "checked_div_trunc" || method == "checked_div_floor"
       || method == "checked_div_euclid" || method == "checked_mod") {
     return "Result[Int, Str]"
   }

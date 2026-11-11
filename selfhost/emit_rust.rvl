@@ -68,7 +68,8 @@
 //     on `record_update` (only python/typescript emit it today), so it is a
 //     structural exclusion, not merely un-ported;
 //   * `let_pattern` (record/list destructuring) — see the structural note below;
-//   * the STDLIB surface beyond length, checked division, `to_str`, and the six
+//   * the STDLIB surface beyond length, the checked arithmetic and division
+//     forms, `to_str`, and the six
 //     read-only string-argument builtins (including List `indexOf` conversion).
 //     The shared `_stdlib_helper_traits` block is emitted for these builtins;
 //   * the Value/serde ERASURE surface — `_emit_bridge` (the interop RPC proxy),
@@ -1002,6 +1003,7 @@ fn builtin_return_type(node: Any, ctx: Ctx) -> Str {
   if (m == "to_int32") { return "Int32" }
   if (m == "field") { return "Any" }
   if (m == "list") { return "List[Any]" }
+  if (m == "checked_add" || m == "checked_sub" || m == "checked_mul") { return "Result[Int, Str]" }
   if (m == "checked_div_trunc" || m == "checked_div_floor" || m == "checked_div_euclid"
       || m == "checked_mod") { return "Result[Int, Str]" }
   if (m == "slice" || m == "concat" || m == "push" || m == "set" || m == "remove") {
@@ -2135,6 +2137,14 @@ fn checked_div_expr(method: Str, target: Str, arg: Str) -> Str {
   return `{ let a = (${target}); let b = (${arg}); if b == 0 { Err::<i64, String>("revl: division by zero".to_string()) } ${overflow}else { Ok::<i64, String>(${ok}) } }`
 }
 
+// The total arithmetic forms (docs/arithmetic.md): `i64::checked_add` and
+// friends answer `Option<i64>`, so the lowering is that native operation with
+// `None` carried out as `Err`. The turbofish pins `Result<i64, String>` so the
+// expression is context-free; the operands are bound once.
+fn checked_arith_expr(method: Str, target: Str, arg: Str) -> Str {
+  return `{ let a = (${target}); let b = (${arg}); match a.${method}(b) { Some(v) => Ok::<i64, String>(v), None => Err::<i64, String>("revl: Int overflow".to_string()) } }`
+}
+
 fn render_builtin(node: Any, ctx: Ctx) -> Str {
   let method = value_str(value_field(node, "method"))
   let target_node = value_field(node, "target")
@@ -2177,6 +2187,9 @@ fn render_builtin(node: Any, ctx: Ctx) -> Str {
     var r = render_expr(a, ctx)
     if (method != "lookup" && method != "has" && method != "remove") { r = by_value_reuse(a, r, ctx) }
     rendered = rendered.push(r)
+  }
+  if (method == "checked_add" || method == "checked_sub" || method == "checked_mul") {
+    return checked_arith_expr(method, target, rendered[0])
   }
   if (method == "checked_div_trunc" || method == "checked_div_floor" || method == "checked_div_euclid" || method == "checked_mod") {
     return checked_div_expr(method, target, rendered[0])

@@ -667,6 +667,9 @@ fn render_builtin(method: Str, target: Str, args: List[Str], arg_nodes: List[Any
   if (method == "checked_div_floor") { return { text: `revlCheckedDivFloor(${target}, ${args[0]})`, counter: counter } }
   if (method == "checked_div_euclid") { return { text: `revlCheckedDivEuclid(${target}, ${args[0]})`, counter: counter } }
   if (method == "checked_mod") { return { text: `revlCheckedMod(${target}, ${args[0]})`, counter: counter } }
+  if (method == "checked_add") { return { text: `revlCheckedAdd(${target}, ${args[0]})`, counter: counter } }
+  if (method == "checked_sub") { return { text: `revlCheckedSub(${target}, ${args[0]})`, counter: counter } }
+  if (method == "checked_mul") { return { text: `revlCheckedMul(${target}, ${args[0]})`, counter: counter } }
   if (method == "to_int") {
     if (recv == "Str") { return { text: `revlParseInt(${target})`, counter: counter } }
     // reached through `?.`, whose node carries no receiver type: split the Str
@@ -3746,6 +3749,20 @@ fn revl_int_arith_helper() -> Str {
   return o.join(newline())
 }
 
+// The total arithmetic forms (docs/arithmetic.md): BigInt computes the exact
+// value, so an i64 bound check on the result is the whole overflow test.
+fn revl_checked_arith_helper() -> Str {
+  var o = []
+  for (pair of [["Add", "+"], ["Sub", "-"], ["Mul", "*"]]) {
+    o = o.push(`function revlChecked${pair[0]}(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | { kind: "Err"; value: string } {`)
+    o = o.push(`  const r = a ${pair[1]} b`)
+    o = o.push(`  if (r < REVL_I64_MIN || r > REVL_I64_MAX) return { kind: "Err", value: 'revl: Int overflow' }`)
+    o = o.push(`  return { kind: "Ok", value: r }`)
+    o = o.push("}")
+  }
+  return o.join(newline())
+}
+
 fn revl_str_helper() -> Str {
   var o = []
   // The code-point view is memoised (item 435(c), issue #2313): a string with
@@ -4311,6 +4328,17 @@ fn uses_int_arith(n: Any) -> Bool {
   return false
 }
 
+// `_uses_checked_arith`: does this IR call one of the total `+`/`-`/`*`
+// forms? They need only the i64 bound constants, not the division helpers.
+fn uses_checked_arith(n: Any) -> Bool {
+  let m = node_method(n)
+  if (m == "checked_add" || m == "checked_sub" || m == "checked_mul") { return true }
+  for (c of value_children(n)) {
+    if (uses_checked_arith(c)) { return true }
+  }
+  return false
+}
+
 fn is_str_method(m: Str) -> Bool {
   return m == "length" || m == "slice" || m == "charAt" || m == "charCodeAt"
       || m == "codepoint_at" || m == "indexOf"
@@ -4410,13 +4438,14 @@ fn revl_helpers(ir: Any) -> List[Str] {
   // backends/typescript/emit.py.
   if (uses_equality(ir) || uses_str_methods(ir)) { out = out.push(revl_eq_helper()); out = out.push("") }
   if (uses_assert(ir)) { out = out.push(revl_show_helper()); out = out.push("") }
-  if (uses_bounded_int(ir) || uses_int_arith(ir)) { out = out.push(revl_i64_helper()); out = out.push("") }
+  if (uses_bounded_int(ir) || uses_int_arith(ir) || uses_checked_arith(ir)) { out = out.push(revl_i64_helper()); out = out.push("") }
   // issue #2147: the result-side coercion of a verbatim `@ts` body declared
   // `Int`. Gated by the same predicate the wrapper itself uses, and emitted at
   // the reference's position (after `revlI64`, before `revlI32`).
   if (uses_extern_int_coercion(ir)) { out = out.push(revl_to_bigint_helper()); out = out.push("") }
   if (uses_bounded_int32(ir)) { out = out.push(revl_i32_helper()); out = out.push("") }
   if (uses_int_arith(ir)) { out = out.push(revl_int_arith_helper()); out = out.push("") }
+  if (uses_checked_arith(ir)) { out = out.push(revl_checked_arith_helper()); out = out.push("") }
   if (uses_str_methods(ir)) { out = out.push(revl_str_helper()); out = out.push("") }
   if (uses_split(ir)) { out = out.push(revl_split_helper()); out = out.push("") }
   if (uses_str_cmp(ir)) { out = out.push(revl_str_cmp_helper()); out = out.push("") }

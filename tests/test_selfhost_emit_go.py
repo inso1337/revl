@@ -134,6 +134,8 @@ CORPUS = [
     "../emit_wasm_corpus/inference.rvl",
     "../emit_java_corpus/match_ignored.rvl",
     "../emit_py_corpus/checked_div.rvl",
+    "../emit_py_corpus/checked_arith.rvl",  # total checked_add/sub/mul (docs/arithmetic.md)
+    "../emit_py_corpus/checked_arith_read.rvl",  # the same forms bound by a let and matched
     "../emit_py_corpus/declared_type_shapes.rvl",
     "../emit_py_corpus/optionals.rvl",
     "../emit_py_corpus/maps.rvl",

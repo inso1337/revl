@@ -168,7 +168,7 @@ fn a_frontier_gap_and_an_oversized_source_are_undecided() {
     // assertion outlived the gap it was asserting. `None` here means both
     // lexical rows are empty at this generation, which is a legitimate state —
     // the size bound below is the always-live trigger.
-    let probe: Option<&str> = Some("checked_add");
+    let probe: Option<&str> = None;
     if let Some(name) = probe {
         let src = format!("fn f(s: Str) -> Int {{\n  return s.{}(0)\n}}\n", name);
         let gap = symbols(&src);

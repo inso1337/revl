@@ -132,6 +132,8 @@ from _boundary_witness import (  # noqa: E402
 
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_java_corpus"
 CORPUS = [
+    "../emit_py_corpus/checked_arith.rvl",  # total checked_add/sub/mul (docs/arithmetic.md)
+    "../emit_py_corpus/checked_arith_read.rvl",  # the same forms bound by a let and matched
     # slice 1 (item 199) — functions-only base surface
     "arith.rvl",     # bounded int/int32, /, %, comparisons, ==/!=, unary, ??
     "bitwise.rvl",  # Int32 bitwise & | ^ << >> and unary ~ (item 366, item 391 self-host port)

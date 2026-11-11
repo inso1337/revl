@@ -66,11 +66,7 @@ pub(crate) const EXCLUDED_KEYWORDS: &[&str] = &[];
 /// selfhost/lower.rvl::is_builtin_method`. A call to one of these lowers
 /// differently in the two compilers, so the crate refuses to decide the
 /// program at all rather than risk deciding it wrongly.
-pub(crate) const EXCLUDED_BUILTINS: &[&str] = &[
-    "checked_add",
-    "checked_mul",
-    "checked_sub",
-];
+pub(crate) const EXCLUDED_BUILTINS: &[&str] = &[];
 
 /// Reserved capability namespace roots whose admission rules the self-host
 /// gate does not run. Derived as `revl.ui_family.ROOTS -

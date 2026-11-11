@@ -76,7 +76,7 @@
 
 ["reason", "remaining-branches-are-checked-division-indexof-split-join", "Remaining branches are checked division, indexOf/split/join/to_char helper demand, Map operations rejected by this backend, and wrong/void receiver or unsupported-method refusals. Covered length/concat/push and arithmetic conversions must not be conflated with these precise deferred families. Item 458 adds four: the `Int.MIN / -1` arm of checked division, which answers Err(\"revl: Int overflow\") as a value where `i64.div_s` used to trap. Same deferred family as the rest of the arm; the reference half is executed on all six tiers by tests/test_int_min_edges_cross_tier.py."]
 
-["function", "remaining-branches-are-checked-division-indexof-split-join", "_V3Emitter._builtin_expr", 54, 54]
+["function", "remaining-branches-are-checked-division-indexof-split-join", "_V3Emitter._builtin_expr", 44, 44]
 
 ["function", "remaining-branches-are-checked-division-indexof-split-join", "_V3Emitter._builtin_type", 26, 26]
 
@@ -108,7 +108,7 @@
 
 ["reason", "remaining-expression-paths-are-malformed-unbound-unsupported", "Remaining expression paths are malformed/unbound/unsupported literals, component-injected __wat, Float, interpolation/tagged reads, and explicit refusals of escaping arrow values, Map, optional chaining and record update."]
 
-["function", "remaining-expression-paths-are-malformed-unbound-unsupported", "_V3Emitter._expr", 18, 18]
+["function", "remaining-expression-paths-are-malformed-unbound-unsupported", "_V3Emitter._expr", 17, 17]
 
 ["reason", "remaining-fallback-declines-folding-when-textual-constant-wi", "Remaining fallback declines folding when textual constant width disagrees with the typed operand width; canonical rendering and widening select matching widths before this call."]
 
@@ -128,7 +128,7 @@
 
 ["reason", "remaining-literal-pool-branches-collect-checked-division-err", "Remaining literal-pool branches collect checked-division error text and interpolation/legacy-format text; checked division and interpolation are deferred, and format is component vocabulary. Item 458 adds two: the pooling of that arm's second Err reason (`revl: Int overflow`), which only the three quotient forms carry."]
 
-["function", "remaining-literal-pool-branches-collect-checked-division-err", "_V3Emitter._collect_string_literals.walk", 7, 7]
+["function", "remaining-literal-pool-branches-collect-checked-division-err", "_V3Emitter._collect_string_literals.walk", 5, 5]
 
 ["reason", "remaining-loop-pools-extra-component-descriptor-strings-pass", "Remaining loop pools extra component descriptor strings passed by component planning; pure function literals use the covered tree traversal."]
 
@@ -221,10 +221,6 @@
 ["reason", "remaining-scanner-paths-attach-the-comments-preceding-deferr", "Remaining scanner paths attach the comments preceding deferred str_concatN helpers to their removable function block, skip escaped export-string characters, or terminate an EOF comment. Pure named exports do not need escaped names; noncanonical/raw-WAT text belongs to the explicitly deferred extern/component paths."]
 
 ["function", "remaining-scanner-paths-attach-the-comments-preceding-deferr", "_top_level_funcs", 4, 4]
-
-["reason", "remaining-scratch-local-collection-is-for-checked-div", "Remaining scratch-local collection is for checked_div_* returning tagged Result; that builtin family is explicitly deferred."]
-
-["function", "remaining-scratch-local-collection-is-for-checked-div", "_V3Emitter._collect_cdiv_locals", 3, 3]
 
 ["reason", "remaining-signature-scanner-recognizes-parenthesized-declare", "Remaining signature scanner recognizes parenthesized declared function types; _check_type refuses them because this MVP module ABI has no function values."]
 

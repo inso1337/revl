@@ -2669,6 +2669,9 @@ fn builtin_return_type(node: Value, ctx_: Ctx__m1) -> String {
     if (m == "list") {
         return String::from("List[Any]");
     }
+    if (((m == "checked_add") || (m == "checked_sub")) || (m == "checked_mul")) {
+        return String::from("Result[Int, Str]");
+    }
     if ((((m == "checked_div_trunc") || (m == "checked_div_floor")) || (m == "checked_div_euclid")) || (m == "checked_mod")) {
         return String::from("Result[Int, Str]");
     }
@@ -3951,6 +3954,10 @@ fn checked_div_expr(method: &str, target: &str, arg: &str) -> String {
     return format!("{{ let a = ({}); let b = ({}); if b == 0 {{ Err::<i64, String>(\"revl: division by zero\".to_string()) }} {}else {{ Ok::<i64, String>({}) }} }}", target, arg, overflow, ok);
 }
 
+fn checked_arith_expr(method: &str, target: &str, arg: &str) -> String {
+    return format!("{{ let a = ({}); let b = ({}); match a.{}(b) {{ Some(v) => Ok::<i64, String>(v), None => Err::<i64, String>(\"revl: Int overflow\".to_string()) }} }}", target, arg, method);
+}
+
 fn render_builtin(node: Value, ctx_: Ctx__m1) -> String {
     let method = value_str(value_field(node.clone(), String::from("method")));
     let target_node = value_field(node.clone(), String::from("target"));
@@ -4001,6 +4008,9 @@ fn render_builtin(node: Value, ctx_: Ctx__m1) -> String {
             r = by_value_reuse(a.clone(), r.clone(), ctx_.clone());
         }
         rendered.push(r.clone());
+    }
+    if (((method == "checked_add") || (method == "checked_sub")) || (method == "checked_mul")) {
+        return checked_arith_expr(&method, &target, &(rendered)[(0i64) as usize]);
     }
     if ((((method == "checked_div_trunc") || (method == "checked_div_floor")) || (method == "checked_div_euclid")) || (method == "checked_mod")) {
         return checked_div_expr(&method, &target, &(rendered)[(0i64) as usize]);
@@ -22681,7 +22691,7 @@ fn tk_bsig_family(m: &str, th: String) -> String {
     if (((((((((((m == "charAt") || (m == "charCodeAt")) || (m == "codepoint_at")) || (m == "split")) || (m == "repeat")) || (m == "startsWith")) || (m == "endsWith")) || (m == "is_alnum")) || (m == "is_digit")) || (m == "is_alpha")) || (m == "is_space")) {
         return String::from("Str");
     }
-    if ((((((((((m == "div_trunc") || (m == "div_floor")) || (m == "div_euclid")) || (m == "mod")) || (m == "to_int32")) || (m == "to_char")) || (m == "checked_div_trunc")) || (m == "checked_div_floor")) || (m == "checked_div_euclid")) || (m == "checked_mod")) {
+    if (((((((((((((m == "div_trunc") || (m == "div_floor")) || (m == "div_euclid")) || (m == "mod")) || (m == "to_int32")) || (m == "to_char")) || (m == "checked_add")) || (m == "checked_sub")) || (m == "checked_mul")) || (m == "checked_div_trunc")) || (m == "checked_div_floor")) || (m == "checked_div_euclid")) || (m == "checked_mod")) {
         return String::from("Int");
     }
     if (((((m == "set") || (m == "lookup")) || (m == "has")) || (m == "size")) || (m == "remove")) {
@@ -22712,7 +22722,7 @@ fn tk_bsig_params(m: &str) -> Vec<String> {
     if ((((m == "split") || (m == "join")) || (m == "startsWith")) || (m == "endsWith")) {
         return vec![String::from("Str")];
     }
-    if ((((((((m == "div_trunc") || (m == "div_floor")) || (m == "div_euclid")) || (m == "mod")) || (m == "checked_div_trunc")) || (m == "checked_div_floor")) || (m == "checked_div_euclid")) || (m == "checked_mod")) {
+    if (((((((((((m == "div_trunc") || (m == "div_floor")) || (m == "div_euclid")) || (m == "mod")) || (m == "checked_add")) || (m == "checked_sub")) || (m == "checked_mul")) || (m == "checked_div_trunc")) || (m == "checked_div_floor")) || (m == "checked_div_euclid")) || (m == "checked_mod")) {
         return vec![String::from("Int")];
     }
     if (m == "set") {
@@ -34681,7 +34691,7 @@ fn struct_field(t: &str, name: &str) -> String {
 }
 
 fn is_builtin_method(m: &str) -> bool {
-    return ((((((((((((((((((((((((((((((((((((((m == "length") || (m == "push")) || (m == "slice")) || (m == "charAt")) || (m == "charCodeAt")) || (m == "codepoint_at")) || (m == "indexOf")) || (m == "concat")) || (m == "split")) || (m == "join")) || (m == "repeat")) || (m == "startsWith")) || (m == "endsWith")) || (m == "is_alnum")) || (m == "is_digit")) || (m == "is_alpha")) || (m == "is_space")) || (m == "div_trunc")) || (m == "div_floor")) || (m == "div_euclid")) || (m == "mod")) || (m == "to_int")) || (m == "to_int32")) || (m == "checked_div_trunc")) || (m == "checked_div_floor")) || (m == "checked_div_euclid")) || (m == "checked_mod")) || (m == "set")) || (m == "lookup")) || (m == "has")) || (m == "size")) || (m == "keys")) || (m == "remove")) || (m == "to_str")) || (m == "to_char")) || (m == "field")) || (m == "str")) || (m == "list"));
+    return (((((((((((((((((((((((((((((((((((((((((m == "length") || (m == "push")) || (m == "slice")) || (m == "charAt")) || (m == "charCodeAt")) || (m == "codepoint_at")) || (m == "indexOf")) || (m == "concat")) || (m == "split")) || (m == "join")) || (m == "repeat")) || (m == "startsWith")) || (m == "endsWith")) || (m == "is_alnum")) || (m == "is_digit")) || (m == "is_alpha")) || (m == "is_space")) || (m == "div_trunc")) || (m == "div_floor")) || (m == "div_euclid")) || (m == "mod")) || (m == "to_int")) || (m == "to_int32")) || (m == "checked_add")) || (m == "checked_sub")) || (m == "checked_mul")) || (m == "checked_div_trunc")) || (m == "checked_div_floor")) || (m == "checked_div_euclid")) || (m == "checked_mod")) || (m == "set")) || (m == "lookup")) || (m == "has")) || (m == "size")) || (m == "keys")) || (m == "remove")) || (m == "to_str")) || (m == "to_char")) || (m == "field")) || (m == "str")) || (m == "list"));
 }
 
 fn is_host_root(n: &str) -> bool {
@@ -34765,7 +34775,7 @@ fn builtin_ret(method: &str, recvTy: String) -> String {
     if (method == "list") {
         return String::from("List[Value]");
     }
-    if ((((method == "checked_div_trunc") || (method == "checked_div_floor")) || (method == "checked_div_euclid")) || (method == "checked_mod")) {
+    if (((((((method == "checked_add") || (method == "checked_sub")) || (method == "checked_mul")) || (method == "checked_div_trunc")) || (method == "checked_div_floor")) || (method == "checked_div_euclid")) || (method == "checked_mod")) {
         return String::from("Result[Int, Str]");
     }
     return String::from("");

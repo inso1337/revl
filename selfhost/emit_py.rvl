@@ -664,10 +664,11 @@ fn render_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
   }
   if (method == "to_int32") { return `_revl_i32(${target})` }
   // The total forms (docs/arithmetic.md, item 391 self-host port): the same
-  // quotient as the faulting operation, but a zero divisor yields Err(reason)
-  // instead of raising — a pure fn cannot `fail`, so the error travels as a
-  // value. The helper is emitted into the preamble by `checked_div_block`.
-  if (is_checked_div(method)) { return `_revl_${method}(${target}, ${args[0]})` }
+  // value as the faulting operation, but an overflow (or a zero divisor)
+  // yields Err(reason) instead of raising: a pure fn cannot `fail`, so the
+  // error travels as a value. The helper is emitted into the preamble by
+  // `checked_block`.
+  if (is_checked_form(method)) { return `_revl_${method}(${target}, ${args[0]})` }
   if (method == "to_str") {
     // A Float `.to_str()` renders through `_revl_ftoa`, the same canonical
     // ECMAScript Number::toString a `${aFloat}` interpolation uses, so
@@ -1993,13 +1994,17 @@ fn str_to_int_block() -> List[Str] {
   return o
 }
 
-// item 391 (self-host port): the preamble helper behind a total division form
-// (docs/arithmetic.md). Same quotient as the faulting operation, but a zero
-// divisor answers `Err(reason)` instead of raising, and a quotient that leaves
-// the i64 range (Int.MIN / -1) answers `Err` rather than a wrong value. `Ok`/
-// `Err` are the tagged classes the module imports from the runtime whenever
-// `uses_builtin_result` is true, so the helper never names a missing class.
-fn checked_quotient(method: Str) -> Str {
+// item 391 (self-host port): the preamble helper behind a total form
+// (docs/arithmetic.md). Same value as the faulting operation where it fits; a
+// zero divisor answers `Err(reason)` instead of raising, and a value that
+// leaves the i64 range (an overflowing `+ - *`, or Int.MIN / -1) answers `Err`
+// rather than a wrong value. `Ok`/`Err` are the tagged classes the module
+// imports from the runtime whenever `uses_builtin_result` is true, so the
+// helper never names a missing class.
+fn checked_value(method: Str) -> Str {
+  if (method == "checked_add") { return "a + b" }
+  if (method == "checked_sub") { return "a - b" }
+  if (method == "checked_mul") { return "a * b" }
   if (method == "checked_div_trunc") {
     return "abs(a) // abs(b) if (a < 0) == (b < 0) else -(abs(a) // abs(b))"
   }
@@ -2008,21 +2013,28 @@ fn checked_quotient(method: Str) -> Str {
   return "a % abs(b)"
 }
 
-fn checked_div_block(method: Str) -> List[Str] {
+fn checked_block(method: Str) -> List[Str] {
   let short = method.slice(8, method.length())
   var o = []
   o = o.push("def _revl_".concat(method).concat("(a, b):"))
-  o = o.push("    \"\"\"Total `".concat(short)
-    .concat("`: a zero divisor is Err(reason), never a raise.\"\"\""))
-  o = o.push("    if b == 0:")
-  o = o.push("        return Err('revl: division by zero')")
-  o = o.push("    q = ".concat(checked_quotient(method)))
+  if (is_checked_div(method)) {
+    o = o.push("    \"\"\"Total `".concat(short)
+      .concat("`: a zero divisor is Err(reason), never a raise.\"\"\""))
+    o = o.push("    if b == 0:")
+    o = o.push("        return Err('revl: division by zero')")
+  } else {
+    o = o.push("    \"\"\"Total `".concat(short)
+      .concat("`: an overflow is Err(reason), never a raise.\"\"\""))
+  }
+  o = o.push("    v = ".concat(checked_value(method)))
   if (method == "checked_mod") {
     // a remainder cannot leave the range its operands are already in
-    o = o.push("    return Ok(q)")
+    o = o.push("    return Ok(v)")
   } else {
-    o = o.push("    if -(2**63) <= q <= 2**63 - 1:")
-    o = o.push("        return Ok(q)")
+    // an Int result that leaves i64 (an overflowing product, or the one
+    // overflowing quotient Int.MIN/-1) does not fit -> Err, not a value
+    o = o.push("    if -(2**63) <= v <= 2**63 - 1:")
+    o = o.push("        return Ok(v)")
     o = o.push("    return Err('revl: Int overflow')")
   }
   o = o.push("")
@@ -4030,12 +4042,18 @@ fn emit_types(types: Any) -> List[Str] {
 
 // ---------------------------------------------- built-in Result (Ok/Err)
 // `_uses_builtin_result`: does the IR construct or match the built-in Result?
-// An `adt` typed `Result*`, a `match` arm on Ok/Err, or a checked-division
-// builtin (which produces a Result). Recurses over every node exactly as the
+// An `adt` typed `Result*`, a `match` arm on Ok/Err, or a total-form builtin
+// (which produces a Result). Recurses over every node exactly as the
 // reference `any(walk(v) …)` does.
 fn is_checked_div(m: Str) -> Bool {
   return m == "checked_div_trunc" || m == "checked_div_floor"
       || m == "checked_div_euclid" || m == "checked_mod"
+}
+// The reference's `_CHECKED_FORMS`: the total arithmetic forms, then the
+// total division forms.
+fn is_checked_form(m: Str) -> Bool {
+  return m == "checked_add" || m == "checked_sub" || m == "checked_mul"
+      || is_checked_div(m)
 }
 fn walk_result(n: Any) -> Bool {
   let k = node_kind(n)
@@ -4046,7 +4064,7 @@ fn walk_result(n: Any) -> Bool {
       if (p == "Ok" || p == "Err") { return true }
     }
   }
-  if (is_checked_div(value_str(value_field(n, "method")))) { return true }
+  if (is_checked_form(value_str(value_field(n, "method")))) { return true }
   for (c of value_children(n)) { if (walk_result(c)) { return true } }
   return false
 }
@@ -5051,11 +5069,12 @@ pub fn emit_py_src(source_ir: Any) -> Str {
     if (uses_opt_to_int(ir)) { out = out.concat(opt_to_int_block()) }
   }
   if (uses_opt_to_str(ir)) { out = out.concat(opt_to_str_block()) }
-  // The total division forms, in the reference's `_CHECKED_DIVS` order.
-  for (checked of ["checked_div_trunc", "checked_div_floor",
+  // The total forms, in the reference's `_CHECKED_FORMS` order.
+  for (checked of ["checked_add", "checked_sub", "checked_mul",
+                   "checked_div_trunc", "checked_div_floor",
                    "checked_div_euclid", "checked_mod"]) {
     if (uses_builtin_method(ir, checked)) {
-      out = out.concat(checked_div_block(checked))
+      out = out.concat(checked_block(checked))
     }
   }
   if (uses_float_interp(ir)) { out = out.concat(ftoa_block()) }

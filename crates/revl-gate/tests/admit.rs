@@ -208,7 +208,7 @@ fn a_construct_outside_the_frontier_is_declined() {
 /// empty. GENERATED alongside the table itself, so it can never name a
 /// construct the self-host has since ported.
 fn frontier_probe() -> Option<&'static str> {
-    Some("checked_add")
+    None
 }
 
 #[test]

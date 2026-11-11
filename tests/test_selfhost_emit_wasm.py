@@ -106,6 +106,7 @@ CORPUS = [
                              # `str_concat` beside the helpers of those names
     "scratch_names.rvl",
     "widening.rvl",
+    "../emit_py_corpus/checked_arith.rvl",  # total checked_add/sub/mul (docs/arithmetic.md)
     "residuals.rvl",
     "folding.rvl",
     "calls.rvl",
