@@ -34,6 +34,10 @@ RevL.G3.linkOK_no_cycles	necessity	RevL.G3.g3_not_vacuous,RevL.G3.mutual_cycle_r
 RevL.G3.self_provision_refused	concrete	-	the Ouroboros shape, refused
 RevL.G3.mutual_cycle_refused	concrete	-	g3_dependency_cycle.rvl refused in both orderings
 RevL.G3.layering_exists_for_admitted	concrete	-	the layering certificate is reachable, not only refutable
+RevL.Lemmas.linkOK_append_tail	instance	RevL.Lemmas.append_compose_witness	a base store links and a cache is admitted over it, so the union links and withdrawing the cache recovers the base unchanged
+RevL.Lemmas.linkOK_append_of_admittedOver	instance	RevL.Lemmas.append_compose_witness,RevL.Lemmas.append_conflict_refused	extension applies to the base plus cache; with a second provider of the same slot the side condition fails and so does the union it would build
+RevL.Lemmas.append_compose_witness	concrete	-	computes LinkOK and AdmittedOver on the shape of one store plus a cache admitted over it
+RevL.Lemmas.append_conflict_refused	concrete	-	the same shape with a second kv provider, refused by the extension side condition and by LinkOK
 RevL.G4.inverse_or_emit	instance	RevL.G4.g4_shape_not_vacuous,RevL.G4Classified.g4_not_vacuous	Typed and IsMutation hold together in both conclusion branches; the raw branch closes because Typed has no constructor for it, which is why the lattice restatement carries the real refusal
 RevL.G5.teardown_registers_nothing	contentless	RevL.G5.registrations_ignores_its_argument,RevL.G5Classified.registrations_depends_on_its_argument	FINDING: registrations is the constant zero function, so the conclusion holds by definition and not by any property of undo bodies. The counting statement is G5Classified's
 RevL.G6.confinement	instance	RevL.G6.g6_not_vacuous,RevL.G6.g6_row_not_vacuous	TypedIn admits a statement with a non-empty reach surface and refuses the same shape reaching an undeclared key; the oracle C row's verdict flips when that undeclared head is accepted
@@ -144,6 +148,14 @@ RevL.A8.double_apply_observable	concrete	-	a non-idempotent inverse's second app
 RevL.A8.crash_cut_witness	concrete	-	four cuts at one seq: clean abort, abort-then-crash, completed abort, committed
 RevL.A8.commit_witness	concrete	-	a witnessed inverse does not replay on a clean commit
 RevL.A8.mixed_disposition_admitted	concrete	-	committed-and-retained beside rolled-back in one verdict
+RevL.A8.abort_drops_deferred	instance	RevL.A8.deferred_abort_run	a real step settles on abort from a non-empty queue, so the inversion is not about a frame born settled
+RevL.A8.abort_run_drops_deferred	instance	RevL.A8.deferred_abort_run	the whole run enqueues seq 2 and then settles on abort, so the fired-unchanged half is not a claim about the empty run
+RevL.A8.commit_discharges_deferred	instance	RevL.A8.deferred_commit_run	a real step settles on commit with queued seqs 2 and 4, so the FIFO firing and the flushed records are not about an empty queue
+RevL.A8.commit_run_queue_empty	instance	RevL.A8.deferred_commit_run	the whole run enqueues two entries and then settles on commit
+RevL.A8.commit_run_discharges_deferred	instance	RevL.A8.deferred_commit_run_from_queued	a whole run from a frame already holding seq 2 enqueues seq 4 and settles on commit, firing 2 then 4 with a flushed record each, so neither the queued-at-start part nor the run-enqueued part is empty
+RevL.A8.deferred_abort_run	concrete	-	the abort step on a non-empty deferral queue, and the whole run that reaches it
+RevL.A8.deferred_commit_run	concrete	-	the commit step fires the queue in program order and the whole run that reaches it
+RevL.A8.deferred_commit_run_from_queued	concrete	-	the same commit reached from a frame with seq 2 already queued, the run enqueueing seq 4
 RevL.A8.revert_witness	concrete	-	the step relation genuinely takes the run
 RevL.A8.revert_witness_restores	concrete	-	replaying that trace empties the world again
 RevL.Lemmas.reach_mono_fuel	instance	RevL.G5Classified.fold_must_run_to_stability	fuel 0 and fuel 1 give different verdicts on the wrapped program, so monotonicity is not over a constant fold

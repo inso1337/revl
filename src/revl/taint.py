@@ -565,6 +565,18 @@ class TaintModel:
     # `config.api_key` was seeded CLEAN and was therefore invisible to every §7
     # rule, the provide-method return crossing included.
     secret_config: dict[str, frozenset] = field(default_factory=dict)
+    # issues #3122/#3128: the declarations that make a lowered bare call an
+    # emission crossing. Lowering ERASES the `emit` marker on a call written in
+    # value position (`let r = emit svc.op(x)`, a nested `emit`, a ternary arm),
+    # so the flow walk cannot tell a crossing from an ordinary call by the node
+    # alone and has to re-derive it from the declaration. `emission_externs`
+    # names the host emissions; `service_emissions` maps a service name to the
+    # operations it declares `emission`; `component_requires` maps a component to
+    # its `requires` key -> service bindings, which is how a `target: req` call
+    # node resolves to the service whose declaration decides the question.
+    emission_externs: frozenset = field(default_factory=frozenset)
+    service_emissions: dict[str, frozenset] = field(default_factory=dict)
+    component_requires: dict[str, dict[str, str]] = field(default_factory=dict)
     # item 472: the validated `retention <name> { ... }` policies, keyed by name
     # (`revl.retention.RetentionPolicy`). Empty for every program that declares
     # none, which is what keeps the whole retention surface inert.
@@ -585,6 +597,13 @@ class TaintModel:
     # against (`retention.evaluation_instant`). Held on the model so the whole
     # program is checked against one clock reading rather than one per call site.
     retention_as_of: object = None
+    # issue #2695: callable name -> the validated `retention.Derivation` its
+    # `derives <class> of <param>` clause declares. The result of a call to the
+    # callable carries `Derivation.origin`, a retention origin under the named
+    # parameter's policy with the declaration appended, so the persistence
+    # refusal follows the derivative and can name it. Empty for every program
+    # that declares no derivation, which keeps the whole surface inert.
+    derivations: dict = field(default_factory=dict)
     # item 514: callable name -> the `model.*` capability token its declared
     # capability grants (`model_route.model_crossing_of`). The model-placement
     # sibling of `persistence_sinks`, derived the same way and for the same
@@ -632,7 +651,7 @@ class TaintModel:
                     or self.declassifiers or self.declared_endorse
                     or self.secret_receivers or self.secret_config
                     or self.retained_params or self.retention_policies
-                    or self.model_routes)
+                    or self.derivations or self.model_routes)
 
 
 def _sink_kind_for(name: str, capabilities) -> str:
@@ -675,7 +694,7 @@ def _retention_hint(policy, scope: str) -> str:
 
 
 def _refuse_retention_declaration(filename: str, ext, index: int, policy,
-                                  scope: str, as_of) -> None:
+                                  scope: str, as_of, derivation=None) -> None:
     """A crossing DECLARES that it persists a `Retained[T, P]` value whose
     deadline has passed (G-RETAIN).
 
@@ -688,15 +707,157 @@ def _refuse_retention_declaration(filename: str, ext, index: int, policy,
     retention deadline" a static checker can hold (see `revl.retention`'s module
     docstring for why, and for what this does not claim)."""
     param = ext.params[index]
+    # issue #2695: when the crossing itself DECLARES that this argument is what
+    # its derivative is made from, the refusal says so. One sentence rather than
+    # a second code: the guarantee is still "past-deadline data may not be
+    # written", and the derivation is the fact that identifies the write.
+    made = ""
+    if derivation is not None and derivation.source == param.name:
+        made = (f" The argument is declared as the source of the "
+                f"`{derivation.kind}` derivative (`derives {derivation.kind} "
+                f"of {derivation.source}`), so this crossing writes that "
+                "derivative.")
     raise RevlError(
         filename, ext.line,
         f"`{ext.name}` declares a persistence sink (`{scope}`) whose argument "
         f"{index + 1} (`{param.name}`) is `Retained[T, {policy.name}]`, and "
         f"that policy's retention deadline passed at "
         f"{as_of.isoformat().replace('+00:00', 'Z')} — data past its retention "
-        f"deadline may not be written to durable storage (G-RETAIN)",
+        f"deadline may not be written to durable storage (G-RETAIN)." + made,
         hint=_retention_hint(policy, scope),
         code="G-RETAIN", category="retention")
+
+
+def _resolve_policy_label(label: str, policies, filename: str, name: str,
+                          line: int):
+    """The policy a `Retained[T, <label>]` names, or a refusal by name.
+
+    Shared by the qualifier read and the `derives` clause (issue #2695), so the
+    two cannot drift apart on what "the policy this declaration names" means. A
+    `Retained[T]` with no policy argument and one naming an undeclared policy
+    are both refusals: an unresolvable policy is an annotation nothing can
+    enforce, and shipping one would put a retention guarantee in the language
+    the checker does not honour."""
+    if not label:
+        raise RevlError(
+            filename, line,
+            f"`{name}` declares `Retained[T]` with no retention policy",
+            hint="write `Retained[T, <policy>]` naming a `retention "
+                 "<policy> { ... }` declaration — a retention qualifier "
+                 "with no policy carries no deadline, no residence and no "
+                 "deleters, so nothing could enforce it (item 472)")
+    policy = policies.get(label)
+    if policy is None:
+        declared = ", ".join(f"`{k}`" for k in sorted(policies)) or "none"
+        raise RevlError(
+            filename, line,
+            f"`{name}` names retention policy `{label}`, which this program "
+            f"does not declare",
+            hint=f"declared policies: {declared}. Add `retention {label} "
+                 "{ until: ..., residence: ..., deleters: ... }` (item 472)")
+    return policy
+
+
+def _derivation_of(decl, policies, filename: str):
+    """Validate the `derives <class> of <param>` clause on `decl` (issue #2695).
+
+    Returns the `retention.Derivation` the clause declares, or None for a
+    declaration that carries no clause. Every rule is a REFUSAL at the point of
+    DECLARATION, which is what the item asks for: the named input must be a real
+    parameter declared `Retained[T, <policy>]`, the class must be one of the
+    closed `DERIVATIVE_CLASSES`, and the policy must COVER that class. A
+    derivative of a class the policy does not cover is refused here rather than
+    enumerated as `not-covered` at erasure time, because a declaration the
+    receipt could never claim erased is not one the erasure can reach.
+
+    A callable whose return already carries `Retained[T, <policy>]` may not
+    also declare a derivation: the qualifier and the clause would be two claims
+    about the same result, and the second one is what the receipt would trust."""
+    clause = getattr(decl, "derivation", None)
+    if clause is None:
+        return None
+    name = decl.name
+    line = getattr(decl, "line", 0)
+    if clause.kind not in _retention.DERIVATIVE_CLASSES:
+        known = ", ".join(f"`{k}`" for k in _retention.DERIVATIVE_CLASSES)
+        raise RevlError(
+            filename, clause.line,
+            f"`{name}` declares `derives {clause.kind} of {clause.source}`, "
+            f"but `{clause.kind}` is not a derivative class",
+            hint=f"the vocabulary is closed: {known}. A class no erasure path "
+                 "can enumerate would read as a guarantee without being one "
+                 "(item 472, issue #2695)",
+            code="G-RETAIN", category="retention")
+    params = {p.name: p.type for p in decl.params}
+    if clause.source not in params:
+        declared = ", ".join(f"`{p}`" for p in params) or "none"
+        raise RevlError(
+            filename, clause.line,
+            f"`{name}` declares `derives {clause.kind} of {clause.source}`, "
+            f"but `{name}` has no parameter `{clause.source}`",
+            hint=f"it declares {declared}; a derivation names the parameter "
+                 "that carries the retained value the derivative is made from "
+                 "(issue #2695)",
+            code="G-RETAIN", category="retention")
+    label = retained_policy(params[clause.source])
+    if label is None:
+        raise RevlError(
+            filename, clause.line,
+            f"`{name}` declares `derives {clause.kind} of {clause.source}`, "
+            f"but parameter `{clause.source}` is not `Retained[T, <policy>]`",
+            hint="write the parameter as `" + clause.source + ": Retained[T, "
+                 "<policy>]` — a derivation names the RETAINED value it is made "
+                 "from, because that is where the policy, the deadline and the "
+                 "covered derivative classes come from (issue #2695)",
+            code="G-RETAIN", category="retention")
+    policy = _resolve_policy_label(label, policies, filename, name, line)
+    if not policy.covers_derivative(clause.kind):
+        covered = ", ".join(f"`{k}`" for k in policy.derivatives) or "none"
+        raise RevlError(
+            filename, clause.line,
+            f"`{name}` declares `derives {clause.kind} of {clause.source}`, "
+            f"but `retention {policy.name}` does not cover `{clause.kind}` "
+            f"derivatives (it covers {covered})",
+            hint="add `" + clause.kind + "` to the policy's `derivatives` "
+                 "list, or declare a derivative class the policy covers. A "
+                 "derivative the policy does not cover is refused HERE rather "
+                 "than reported `not-covered` at erasure time, because the "
+                 "receipt could not claim it erased (item 472, issue #2695)",
+            code="G-RETAIN", category="retention")
+    if retained_policy(getattr(decl, "returns", None)) is not None:
+        raise RevlError(
+            filename, line,
+            f"`{name}` declares both a `Retained` return and `derives "
+            f"{clause.kind} of {clause.source}`",
+            hint="the derivation already gives the result the named "
+                 "parameter's policy and the class it makes, so drop one of the "
+                 "two: keep `derives <class> of <param>` and a bare return "
+                 "type, or keep `Retained[T, <policy>]` and no derivation "
+                 "(issue #2695)",
+            code="G-RETAIN", category="retention")
+    return _retention.Derivation(callee=name, kind=clause.kind,
+                                 source=clause.source, policy=policy.name,
+                                 line=clause.line)
+
+
+def declared_derivations(program, filename=None) -> list:
+    """Every `derives <class> of <param>` the program declares, validated.
+
+    Reads a FRESHLY PARSED program, before `extract_and_normalize` strips the
+    qualifiers: the clause's source parameter has to still be spelled
+    `Retained[T, <policy>]` for the policy to resolve. The refusals are the same
+    ones admission issues, because they are the same function (`_derivation_of`);
+    a program that reaches here has nothing an operator could enumerate that the
+    checker would not have admitted."""
+    where = filename or getattr(program, "filename", "<derivation>")
+    policies = _retention.policies(program, where)
+    out: list = []
+    for decl in (*(getattr(program, "externs", ()) or ()),
+                 *(getattr(program, "fn_decls", ()) or ())):
+        derivation = _derivation_of(decl, policies, where)
+        if derivation is not None:
+            out.append(derivation)
+    return out
 
 
 def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
@@ -725,6 +886,17 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
     model.secret_caps = secret_caps
     model.extern_names = frozenset(
         ext.name for ext in getattr(program, "externs", ()) or ())
+    # issues #3122/#3128: which declarations are boundary crossings, recoverable
+    # from the lowered call node (the `emit` marker is gone in value position).
+    model.emission_externs = frozenset(
+        ext.name for ext in getattr(program, "externs", ()) or ()
+        if getattr(ext, "classification", None) == "emission")
+    model.service_emissions = {
+        svc.name: frozenset(
+            method.name for method in svc.methods.values()
+            if getattr(method, "emission", False))
+        for svc in getattr(program, "services", ()) or ()
+    }
 
     # item 472: the validated retention policies, and the ONE instant every
     # deadline in this program is compared against. Both are read once, here, so
@@ -747,25 +919,8 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
         label = retained_policy(type_str)
         if label is None:
             return None
-        if not label:
-            raise RevlError(
-                program.filename, line,
-                f"`{name}` declares `Retained[T]` with no retention policy",
-                hint="write `Retained[T, <policy>]` naming a `retention "
-                     "<policy> { ... }` declaration — a retention qualifier "
-                     "with no policy carries no deadline, no residence and no "
-                     "deleters, so nothing could enforce it (item 472)")
-        policy = model.retention_policies.get(label)
-        if policy is None:
-            declared = ", ".join(f"`{k}`" for k in
-                                 sorted(model.retention_policies)) or "none"
-            raise RevlError(
-                program.filename, line,
-                f"`{name}` names retention policy `{label}`, which this "
-                f"program does not declare",
-                hint=f"declared policies: {declared}. Add `retention {label} "
-                     "{ until: ..., residence: ..., deleters: ... }` (item 472)")
-        return policy
+        return _resolve_policy_label(label, model.retention_policies,
+                                     program.filename, name, line)
 
     def _note_params(name: str, typed_params, line: int = 0) -> set:
         """`typed_params` is a list of (index, type_string, setter). Records
@@ -892,6 +1047,21 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
         _model_cap = _model_crossing_of(ext.capabilities)
         if _model_cap is not None:
             model.model_crossings[ext.name] = _model_cap
+        # issue #2695: the `derives <class> of <param>` clause, validated BEFORE
+        # the parameter sweep strips the `Retained[T, <policy>]` spelling off the
+        # source parameter. The crossing's RESULT is the derivative: the call
+        # site ADDS `Derivation.origin` (a retention origin under the source
+        # parameter's policy, with the declaration appended) to whatever
+        # provenance the result already carries, so the persistence refusal
+        # follows the value at every sink and names the derivation there. It is
+        # deliberately NOT put in `model.sources`: that map REPLACES a result's
+        # origin set, which would drop the `Untrusted`/`Secret`/`Trusted`
+        # provenance a return qualifier minted for the same callable and launder
+        # G9 / G-SECRET-FLOW (retention is orthogonal, not exclusive).
+        _derivation = _derivation_of(ext, model.retention_policies,
+                                     program.filename)
+        if _derivation is not None:
+            model.derivations[ext.name] = _derivation
         params = []
         for i, p in enumerate(ext.params):
             params.append((i, p.type, _fnparam_setter(p)))
@@ -910,7 +1080,7 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
                 if _pol is not None and _pol.expired(model.retention_as_of):
                     _refuse_retention_declaration(
                         program.filename, ext, _i, _pol, _persist,
-                        model.retention_as_of)
+                        model.retention_as_of, model.derivations.get(ext.name))
         # Slice D (D1/D3): derive sinks and sources from the crossing's declared
         # capability scope, under strict mode, for any parameter/return the author
         # left unqualified. Additive to the annotated surface above — an already
@@ -944,6 +1114,18 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
         endorse_origins = getattr(fn, "endorse_origins", frozenset())
         if endorse_origins:
             model.declared_endorse[fn.name] = frozenset(endorse_origins)
+        # issue #2695: the `derives <class> of <param>` clause, read before the
+        # parameter sweep strips the `Retained[T, <policy>]` spelling off the
+        # source parameter. A call to the fn ADDS `Derivation.origin` to the
+        # result the body's own signature minted, so a result the flow would not
+        # otherwise carry the retention fact to (a body that reads the record
+        # through an opaque host call, say) is still retained, and a body that
+        # DOES carry untrusted provenance keeps it: the derivation adds a
+        # retention fact, it never replaces another one.
+        _derivation = _derivation_of(fn, model.retention_policies,
+                                     program.filename)
+        if _derivation is not None:
+            model.derivations[fn.name] = _derivation
         params = []
         for i, p in enumerate(fn.params):
             params.append((i, p.type, _fnparam_setter(p)))
@@ -1131,6 +1313,14 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
     # value out of the run log and the `revl_load` MCP response (item 256 Slice 3,
     # §7b). Byte-identical for a field with no qualifier.
     for comp in getattr(program, "components", ()):
+        # issues #3122/#3128: the component's `requires` bindings, as the lowered
+        # call node's `target: req` key resolves to a service declaration. Read
+        # here because the flow walk sees the lowered body only, where the key is
+        # a string and the service it names is not otherwise recoverable.
+        requires = getattr(comp, "requires", ()) or ()
+        if requires:
+            model.component_requires[comp.name] = {
+                local: service for (local, service, _line) in requires}
         confidential_fields: set = set()
         for cfield in getattr(comp, "config", ()) or ():
             # `mentions_secret`, not `top_qualifier`: a config field that holds
@@ -1448,11 +1638,19 @@ class _Signature:
     # one hop further in, inside a top-level fn or a provider body that names no
     # route of its own.
     models_at: dict = field(default_factory=dict)
+    # issue #3113: parameter index -> `(declassifier_name, via)`, the verified-fn
+    # parser declassifiers an argument reaches transitively. The declassifier
+    # sibling of `persists_at`, and the reason the `secret` / `confidential`
+    # refusal at a declassifier does not stop at a plain wrapper fn: the
+    # declassifier returns CLEAN, so without this record the wrapper's signature
+    # says its parameter goes nowhere and the caller's value comes back clean.
+    declassifies_at: dict = field(default_factory=dict)
 
     def merge(self, flows: set, mints: set, sink_hits: dict,
               clears: dict | None = None,
               persistence_hits: dict | None = None,
-              model_hits: dict | None = None) -> bool:
+              model_hits: dict | None = None,
+              declassify_hits: dict | None = None) -> bool:
         """Fold one body-walk's findings in. Returns whether the monotone part
         (the parameter sets, the per-parameter cleared-origin sets, and the sink
         key set) grew — the fixed point's `changed` signal. A shorter `via` for an
@@ -1492,6 +1690,13 @@ class _Signature:
                 changed = True
             elif len(hit[2]) < len(prev[2]):
                 self.models_at[index] = hit  # shorter chain, not a growth
+        for index, hit in (declassify_hits or {}).items():
+            prev = self.declassifies_at.get(index)
+            if prev is None:
+                self.declassifies_at[index] = hit
+                changed = True
+            elif len(hit[1]) < len(prev[1]):
+                self.declassifies_at[index] = hit  # shorter chain, not a growth
         return changed
 
 
@@ -1521,7 +1726,8 @@ class _FlowChecker:
                  config_env: dict | None = None,
                  comp_config: dict | None = None,
                  component: str = "", action: str = "",
-                 scope_env: dict | None = None) -> None:
+                 scope_env: dict | None = None,
+                 requires_map: dict | None = None) -> None:
         self.model = model
         self.filename = filename
         self.line = line
@@ -1573,6 +1779,21 @@ class _FlowChecker:
         # applies that inferred signature exactly as a call site does.
         self.config_env: dict = config_env if config_env is not None else {}
         self.comp_config: dict = comp_config or {}
+        # issues #3122/#3128: the component's `requires` bindings (`key ->
+        # service`), so a `target: req` call node in this body resolves to the
+        # service declaration whose `emission` flag decides whether the call is a
+        # boundary crossing. Empty for a top-level `fn`, which has no requires.
+        self.requires_map: dict = requires_map or {}
+        # every operation name declared `emission` on any service, for the one
+        # receiver spelling the lowered node cannot resolve to a service (a
+        # service-typed local); see `_emission_callee`.
+        self._emission_ops = frozenset(
+            name for names in self.model.service_emissions.values()
+            for name in names)
+        # The `emit` statement node currently being walked, if any: its checks are
+        # the statement arm's, so the value-form check must stand down for it and
+        # not refuse the same crossing twice.
+        self._emit_stmt_node = None
         self.signatures = signatures or {}
         self.infer = infer
         self.qualname = qualname
@@ -1584,7 +1805,10 @@ class _FlowChecker:
         # (top-level fns, externs, service ops, constructors). A `{kind:call}`
         # through a `var` callee that is none of these and resolves to no known
         # fn value is an UNNAMEABLE indirect call — over-approximated as a sink on
-        # every argument when the program has any sink at all (`any_sink`).
+        # every argument when the program has any sink at all (`any_sink`), and
+        # its callee VALUE's taint always joins the result, so a captured
+        # `secret`, `confidential` or `retained` value is never dropped (issue
+        # #3110).
         self.known_callables = known_callables
         self.any_sink = any_sink
         # Slice B4: local bindings that hold a reference to a NAMED callable
@@ -1643,6 +1867,10 @@ class _FlowChecker:
         # crossing an argument reaches with the naming chain behind it. The
         # placement sibling of `persistence_hits`. See `_on_model_crossing`.
         self.model_hits: dict[int, tuple] = {}
+        # inference-mode accumulator (issue #3113): per parameter index, the
+        # verified-fn declassifier an argument reaches with the naming chain
+        # behind it. See `_check_declassifier_reach`.
+        self.declassify_hits: dict[int, tuple] = {}
         # inference-mode accumulator (item 249, Finding 1): per parameter index,
         # the concrete origins a body-internal `endorse[<origin>]` on that
         # parameter downgrades. Folded into the callable's `_Signature.clears` so
@@ -1673,6 +1901,9 @@ class _FlowChecker:
           * `{kind:call, target:{kind:req}, method}`    a required-service method
             (`emit s.run(page)`) — the sink is keyed by the METHOD name, so a
             `Trusted[T]` service-operation parameter is enforced too.
+          * `{kind:call, callee:{kind:field, name, target:{kind:instance-get}}}`
+            a provision method called off a spawn handle (`s.<key>.<method>()`,
+            issue #3122) — the method is the call target exactly as above.
         """
         if node.get("kind") == "fn" and isinstance(node.get("name"), str):
             return node["name"]
@@ -1682,9 +1913,52 @@ class _FlowChecker:
             # name}` (top-level fn bodies) and `{kind:name, id}` (component bodies).
             if isinstance(callee, dict) and callee.get("kind") in ("var", "name"):
                 return callee.get("name") or callee.get("id")
+            # a provision method off a spawn handle: the receiver is a `field`
+            # callee over an `instance-get`, not the `target: req` slot.
+            if isinstance(callee, dict) and callee.get("kind") == "field":
+                recv = callee.get("target")
+                if (isinstance(recv, dict)
+                        and recv.get("kind") == "instance-get"):
+                    return callee.get("name")
             if isinstance(node.get("method"), str):
                 return node["method"]
         return None
+
+    def _emission_callee(self, node: dict) -> bool:
+        """Whether a lowered call node is a declared boundary crossing.
+
+        Issues #3122/#3128: lowering erases the `emit` marker on a call written
+        in value position, so the flow walk re-derives the crossing from the
+        declaration here: a host `emission` extern, or a service operation
+        declared `emission` reached through this body's `requires` binding, off
+        a spawn handle's provision (each naming its service on the node), or
+        through a service-typed local (resolved by operation name alone)."""
+        if node.get("kind") == "fn":
+            return node.get("name") in self.model.emission_externs
+        if node.get("kind") != "call":
+            return False
+        target = node.get("target")
+        if isinstance(target, dict):
+            if target.get("kind") == "req":
+                service = self.requires_map.get(target.get("name"))
+                return node.get("method") in self.model.service_emissions.get(
+                    service, ())
+            if target.get("kind") == "name":
+                # a service-TYPED local (`fn go(t: Till) { let r = emit
+                # t.ring(x) }`): the lowered node carries no type, so the
+                # walk cannot name the service. Any operation of that name
+                # declared `emission` is treated as one, which is the
+                # fail-closed direction and the same method-name keying
+                # `secret_receivers` and `sinks` already use.
+                return node.get("method") in self._emission_ops
+            return False
+        callee = node.get("callee")
+        if isinstance(callee, dict) and callee.get("kind") == "field":
+            recv = callee.get("target")
+            if isinstance(recv, dict) and recv.get("kind") == "instance-get":
+                return callee.get("name") in self.model.service_emissions.get(
+                    recv.get("service"), ())
+        return False
 
     @staticmethod
     def _var_name(node: dict) -> str | None:
@@ -1863,6 +2137,53 @@ class _FlowChecker:
                 prev = self.persistence_hits.get(pidx)
                 if prev is None or len(via) < len(prev[2]):
                     self.persistence_hits[pidx] = (sink_name, scope, via)
+
+    def _on_declassifier(self, declassifier: str, arg_taints: list,
+                         internal_via: tuple) -> None:
+        """A parameter of this body reaches a verified-fn declassifier (issue
+        #3113). Inference mode only, the exact shape of `_on_persistence`: the
+        refusal needs the CONCRETE `secret` / `confidential` origin, and only the
+        symbolic parameter marker is in hand while a body is walked for its shape.
+        Recording the reach on this callable's signature is what lets the refusal
+        happen at the caller that hands the value to a wrapper of the
+        declassifier, rather than nowhere."""
+        for at in arg_taints:
+            for origin in at.origins:
+                pidx = _param_index(origin)
+                if pidx is None:
+                    continue
+                via = ((self.qualname,) + internal_via if self.qualname
+                       else internal_via)
+                prev = self.declassify_hits.get(pidx)
+                if prev is None or len(via) < len(prev[1]):
+                    self.declassify_hits[pidx] = (declassifier, via)
+
+    def _check_declassifier_reach(self, callee: str, arg_taints: list,
+                                  node) -> None:
+        """A call whose callee's inferred signature says an argument reaches a
+        verified-fn declassifier (issue #3113). In inference mode the reach is
+        carried onto this body's own signature, so a wrapper of a wrapper is
+        covered; in refusal mode a `secret` or `confidential` argument at that
+        position is refused here, exactly as it is at a direct call of the
+        declassifier (4a.3)."""
+        sig = self.signatures.get(callee)
+        if not sig or not sig.declassifies_at:
+            return
+        for index, (declassifier, via) in sorted(sig.declassifies_at.items()):
+            if index >= len(arg_taints):
+                continue
+            at = arg_taints[index]
+            if self.infer:
+                self._on_declassifier(declassifier, [at], via)
+                continue
+            if not self.enforce:
+                continue
+            chain = " -> ".join(via + (declassifier,))
+            kind = f"a verified-fn declassifier (`{declassifier}`, via {chain})"
+            if _carries_secret(at):
+                self._refuse_secret(callee, kind, index, at, node)
+            if _carries_confidential(at):
+                self._refuse_confidential(callee, kind, index, at, node)
 
     def _on_model_crossing(self, crossing: str, capability: str,
                            arg_taints: list, node, internal_via: tuple) -> None:
@@ -2079,6 +2400,20 @@ class _FlowChecker:
                                        else (sink_name,))
         chain = " -> ".join(chain_parts) if chain_parts else "a Retained value"
         as_of = self.model.retention_as_of
+        # issue #2695: a DECLARED derivation says more than "retained": it names
+        # the class and the declaration that made the value. Read off the origin
+        # the derivation minted, so the sentence survives any number of hops the
+        # value took on the way to the sink.
+        made = ""
+        for _origin in sorted(arg_taint.origins):
+            _d = _retention.derivation_of_origin(_origin)
+            if _d is not None and _retention.policy_of_origin(
+                    _origin) == policy.name:
+                _kind, _callee, _source = _d
+                made = (f" The value is a declared `{_kind}` derivative of "
+                        f"`{_source}`, made by `{_callee}` (`derives {_kind} "
+                        f"of {_source}`).")
+                break
         raise RevlError(
             self.filename, self._line_of(node),
             f"a `Retained[T, {policy.name}]` value flows into the persistence "
@@ -2086,7 +2421,7 @@ class _FlowChecker:
             f"{index + 1}, and that policy's retention deadline passed at "
             f"{as_of.isoformat().replace('+00:00', 'Z')} — data past its "
             f"retention deadline may not be written to durable storage "
-            f"(G-RETAIN). The retaining path is {chain}",
+            f"(G-RETAIN)." + made + f" The retaining path is {chain}",
             hint=_retention_hint(policy, scope),
             code="G-RETAIN", category="retention")
 
@@ -2306,10 +2641,10 @@ class _FlowChecker:
             indirect = (node.get("kind") == "call"
                         and isinstance(callee_node, dict)
                         and callee_node.get("kind") in ("var", "name"))
-            return self._mint_reload(
-                callee,
-                self._taint_of_call(callee, node.get("args") or [], env, node,
-                                    indirect=indirect))
+            value = self._taint_of_call(callee, node.get("args") or [], env, node,
+                                        indirect=indirect)
+            self._check_value_crossing(node, callee)
+            return self._mint_reload(callee, value)
 
         # record construction is field-granular (Slice B): each field carries its
         # own taint, so a later read of a clean field stays clean even when a
@@ -2360,6 +2695,7 @@ class _FlowChecker:
                               if f in supplied else CLEAN
                               for f in fields]
                 self._check_sinks(f"{child}#config", arg_taints, node)
+                self._check_config_hand_off(child, fields, arg_taints, node)
             return self._union_children(node, env)
 
         # a `match`: each arm's binder is the scrutinee's payload, so it carries
@@ -2374,7 +2710,34 @@ class _FlowChecker:
         if kind in ("bin", "interp", "template", "concat"):
             return self._union_children(node, env)
 
-        # everything else (record/list/field/index/if/match/arrow/...) is walked
+        # `arrow`: a parameter SHADOWS an outer binding of the same name for the
+        # body, so the capture join must read the body against an env that seeds
+        # a shadowing parameter clean. Without this, `(t: Str) => t` over a
+        # tainted outer `t` is read as CAPTURING it, and the closure is tainted
+        # by a value its body never reads. The over-approximation predates the
+        # callee-value join, but it only produced a refusal when `any_sink` was
+        # true; now that the join runs for every unnameable indirect call,
+        # seeding the parameters is what keeps a shadowing closure clean.
+        #
+        # The body is ALSO walked against the enclosing environment, as it
+        # always was. That walk is what keeps a sink INSIDE the arrow body
+        # judged where it is written: `(row: Str) => db_put(row)` called with a
+        # retained `row` still sees the retained origin and refuses, so seeding
+        # the parameter for the VALUE cannot hide a write behind a shadowing
+        # parameter. The two walks are the pre-existing body walk (for sinks and
+        # for inference) and the exact capture join (for the closure's value).
+        if kind == "arrow":
+            shadowed = [p for p in _param_names(node.get("params") or [])
+                        if env.get(p, CLEAN).dirty]
+            if not shadowed:
+                return self._union_children(node, env)
+            inner = dict(env)
+            for pname in shadowed:
+                inner[pname] = CLEAN
+            self._union_children(node, env)
+            return self._union_children(node, inner)
+
+        # everything else (record/list/field/index/if/...) is walked
         # with a union fallback: taint only ever *disappears* at a literal or a
         # declassifier, never by falling through an unmodelled node. This is the
         # no-false-clean invariant (Decision 2 propagation, residual risk 3).
@@ -2425,6 +2788,88 @@ class _FlowChecker:
             result = _join(result, self.taint_of(value, env))
         return result
 
+    def _check_value_crossing(self, node: dict, callee: str) -> None:
+        """The statement-emit arm's checks for an emission written as a VALUE.
+
+        Issues #3122/#3128: `let r = emit svc.op(t)`, a nested `1 + (emit …)` and
+        an `emit` in a ternary arm all lower to a bare call — the marker leaves no
+        trace — so these crossings used to skip the receiver check and the
+        `reaches` edge the statement arm records. The crossing is re-derived from
+        the declaration (`_emission_callee`), and the checks are the arm's,
+        applied per argument: a `secret`-carrying argument is refused
+        unconditionally (G-SECRET), a `confidential` one is refused unless its
+        position is a declared `Secret[T]` receiver (G-SECRET-FLOW, §7b), and the
+        concrete origins the arguments carry are recorded on the audit surface.
+
+        The one `secret` crossing that is ADMITTED is the §4b same-capability
+        re-entry: handing the bound key back into an extern body of its own bound
+        capability (`let k = emit complete(d); let r = emit echo(k)`). The callee
+        there is exactly the emission whose return minted `secret`
+        (`model.sources[callee] == SECRET_ORIGIN`), so it stands down as the
+        statement arm's `model.sources` early return does.
+
+        The outer call of an `emit` STATEMENT is skipped: its expression reaches
+        here through `taint_of` too, and the statement arm is the one that owns
+        its diagnostic and its return-inclusive recording."""
+        if node is self._emit_stmt_node or not self._emission_callee(node):
+            return
+        args = self._emit_args or ()
+        if not self.infer and self.enforce:
+            # §4b: the bound capability's own body is the one receiver the bound
+            # key may re-enter, so this is the one callee whose secret arguments
+            # are admitted.
+            bound_reentry = (
+                self.model.sources.get(callee) == SECRET_ORIGIN)
+            if not bound_reentry:
+                for index, at in enumerate(args):
+                    if _carries_secret(at):
+                        self._refuse_secret(callee, "an emission crossing",
+                                            index, at, node)
+            receivers = self.model.secret_receivers.get(callee, set())
+            for index, at in enumerate(args):
+                if index not in receivers and _carries_confidential(at):
+                    self._refuse_confidential(
+                        callee,
+                        "an emission crossing (a capability boundary without a "
+                        "declared `Secret[T]` receiver)",
+                        index, at, node)
+        # the outbound edge the policy-gated tier reads: the origins the arguments
+        # carry OUT across the boundary (the emission's return comes IN, and the
+        # statement arm's return-inclusive union stays its own reading).
+        real: set = set()
+        for at in args:
+            real |= {o for o in at.origins if _param_index(o) is None}
+        if real:
+            self.reaches |= real
+
+    def _check_config_hand_off(self, child: str, fields, arg_taints,
+                               node) -> None:
+        """Issue #3132: a `spawn Child with { … }` config field is a receiver.
+
+        The hand-off crosses a component boundary, and §7b says a `confidential`
+        value crosses only at a receiver that declares it. A config field
+        declared `Secret[T]` is such a receiver; a plain field is an undeclared
+        one, so a `confidential` value supplied to it is refused at the hand-off
+        rather than laundered into the child's ordinary data. A `secret` bound
+        key is refused even at a declared `Secret[T]` field (A8 disjointness: the
+        receiver admits `confidential` only). The `Untrusted[T]` twin is the same
+        hand-off on the authority axis, already refused above through the child's
+        inferred config signature."""
+        if self.infer or not self.enforce:
+            return
+        declared = self.model.secret_config.get(child, frozenset())
+        for index, cname in enumerate(fields):
+            if index >= len(arg_taints):
+                continue
+            at = arg_taints[index]
+            if _carries_secret(at):
+                self._refuse_secret(f"{child}#config.{cname}",
+                                    "a spawn config hand-off", None, at, node)
+            elif cname not in declared and _carries_confidential(at):
+                self._refuse_confidential(
+                    f"{child}#config.{cname}", "a spawn config hand-off",
+                    None, at, node)
+
     def _taint_of_state_access(self, name: str, node, env: dict) -> Taint:
         """A call whose receiver is a component-state world (Slice B3). Every such
         call is treated at the whole-container grain: a tainted argument is a WRITE
@@ -2454,6 +2899,27 @@ class _FlowChecker:
                 and name not in self.model.sources
                 and name not in self.model.declassifiers
                 and name != "endorse")
+
+    def _with_derivation(self, callee: str, result: Taint) -> Taint:
+        """Add the origin a DECLARED derivation's result carries (issue #2695).
+
+        ADDED to whatever the callee's return qualifier, signature, declared
+        source or declassifier already minted, never in place of it: a derivation
+        says the value was MADE FROM a retained one, and says nothing about the
+        provenance or confidentiality the value also carries. Replacing the
+        origin set here would launder G9 and G-SECRET-FLOW for any callable that
+        combines `derives` with another qualifier, which is the defect this
+        helper exists to prevent.
+
+        A derivation callable is always a nameable callable, so the resolution
+        above (`callee = resolved`) has already happened wherever this is
+        reached; an unnameable indirect call is a different rule and never a
+        derivation.
+        """
+        derivation = self.model.derivations.get(callee)
+        if derivation is None:
+            return result
+        return _join(result, Taint({derivation.origin}, (f"{callee}()",)))
 
     def _taint_of_call(self, callee: str, args, env: dict, node,
                        indirect: bool = False) -> Taint:
@@ -2496,30 +2962,47 @@ class _FlowChecker:
                         "an unnameable callable",
                         "a first-class function value revl cannot name",
                         index, at, node)
-        # Slice B4: an indirect call the checker cannot name is over-approximate —
-        # every argument position is a sink (what cannot be named cannot be proven
-        # safe), but only when the program has a sink at all, so a sink-free program
-        # is unaffected. This mirrors G4's `*` for a first-class dispatch.
-        if indirect and self.any_sink and self._is_unnameable(resolved):
-            kind = "an unnameable call (a first-class function value)"
-            for index, at in enumerate(arg_taints):
-                if _authority_dirty(at):
-                    self._on_sink("an unnamed callable", kind, index, at, node,
-                                  ("a first-class function value",))
+        # Slice B4: an indirect call the checker cannot name is over-approximate.
+        # When the program has a sink at all, every argument position is a sink
+        # too (what cannot be named cannot be proven safe); this mirrors G4's `*`
+        # for a first-class dispatch. A sink-free program keeps the argument
+        # over-approximation off.
+        #
+        # The RESULT taint is not gated on `any_sink` (issue #3128): a closure
+        # carries what it CAPTURED, and that capture is a value the emission
+        # crossing has to see whether or not the program happens to declare an
+        # authority sink. Gating the propagation let `let f = (x) => page;
+        # let r = emit s.send(f("z"))` carry nothing into the send, so the
+        # policy-gated tier recorded no edge in a sink-free composition. A
+        # wider taint is the fail-closed direction: it can only refuse.
+        if indirect and self._is_unnameable(resolved):
+            if self.any_sink:
+                kind = "an unnameable call (a first-class function value)"
+                for index, at in enumerate(arg_taints):
+                    if _authority_dirty(at):
+                        self._on_sink("an unnamed callable", kind, index, at,
+                                      node, ("a first-class function value",))
             result = CLEAN
             for t in arg_taints:
                 result = _join(result, t)
-            # ... AND the callee VALUE's own taint. A closure carries what it
-            # CAPTURED, and the capture is not an argument: `let f = (x) => d`
-            # over an `Untrusted[Str]` `d`, then `f("z")`, produced `d`'s value
-            # from clean arguments alone, so `emit run(f("z"))` reached a
-            # `Trusted[Str]` shell sink with no declassification (G9). The
-            # binding already holds the join of the arrow's free names
-            # (`_union_children` walks an arrow body), and an arrow MINTED by a
-            # fn (`fn mk(d) -> (Str) -> Str { return (x) => d }`) carries the
-            # same join out through `mk`'s return — so reading the binding here
-            # covers both shapes with one join, and stays exact for a closure
-            # that captured nothing.
+            # ... AND the callee VALUE's own taint, INDEPENDENT of `any_sink`. A
+            # closure carries what it CAPTURED, and the capture is not an
+            # argument: `let f = (x) => d` over an `Untrusted[Str]` `d`, then
+            # `f("z")`, produced `d`'s value from clean arguments alone, so
+            # `emit run(f("z"))` reached a `Trusted[Str]` shell sink with no
+            # declassification (G9). The same carrier also hid a `Secret[T]`, a
+            # capability-bound provider key and a `Retained[T, P]` value from a
+            # sink-free program: the join used to sit inside the `any_sink`
+            # branch, so a program whose only taint was `confidential`/`secret`
+            # judged the call from its arguments alone. G-SECRET, G-SECRET-FLOW
+            # and G-RETAIN are flow guarantees about the value, not about the
+            # presence of an unrelated `Trusted[T]` declaration, so the callee
+            # value joins here always. The binding already holds the join of the
+            # arrow's free names (`_union_children` walks an arrow body), and an
+            # arrow MINTED by a fn (`fn mk(d) -> (Str) -> Str { return (x) => d
+            # }`) carries the same join out through `mk`'s return — so reading
+            # the binding here covers both shapes with one join, and stays exact
+            # for a closure whose captured values are clean.
             result = _join(result, env.get(callee, CLEAN))
             if result.dirty:
                 result = Taint(result.origins, result.via + (f"{callee}()",))
@@ -2602,6 +3085,7 @@ class _FlowChecker:
         # sink checks (both tiers): a directly-declared `Trusted[T]` parameter,
         # and a parameter a callee's inferred signature reaches transitively.
         self._check_sinks(callee, arg_taints, node)
+        self._check_declassifier_reach(callee, arg_taints, node)
 
         # item 472 follow-up: the same retention refusal THROUGH a call. The
         # direct lookup above finds a sink the CALLER names; this finds one the
@@ -2629,7 +3113,8 @@ class _FlowChecker:
         if callee in self.model.sources:
             origin = self.model.sources[callee]
             also = self.model.source_also.get(callee, frozenset())
-            return Taint(frozenset({origin}) | also, (f"{callee}()",))
+            return self._with_derivation(
+                callee, Taint(frozenset({origin}) | also, (f"{callee}()",)))
 
         # the scoped `endorse[<origin>]` declassifier (Slice C): the downgrade is
         # granted only where the enclosing declaration declared the slot, its
@@ -2647,14 +3132,27 @@ class _FlowChecker:
             # launder a `secret`-carrying argument - the parser-declassifier clean
             # is SKIPPED for the bound key and the crossing is refused. There is no
             # declassifier for a bound provider key, verified-fn or otherwise.
+            # Issue #3113: it does NOT launder a `confidential` argument either.
+            # The parser declassifier is a G9 downgrade for the `untrusted`
+            # authority origin, not a §7c downgrade for `confidential`: without
+            # this check a one-line identity `verified fn wash(x) -> Trusted[Str]`
+            # cleared a `Secret[T]` payment token and the value reached a log or
+            # an LLM prompt with no declared, audited `endorse[confidential]`.
+            # A `confidential` value downgrades ONLY at that declared slot, so
+            # the crossing is refused here exactly as the bound key is.
             if not self.infer and self.enforce:
                 for index, at in enumerate(arg_taints):
                     if _carries_secret(at):
                         self._refuse_secret(callee, "a verified-fn declassifier",
                                             index, at, node)
+                    if _carries_confidential(at):
+                        self._refuse_confidential(
+                            callee, "a verified-fn declassifier", index, at, node)
+            if self.infer:
+                self._on_declassifier(callee, arg_taints, ())
             for t in arg_taints:
                 self.declassified |= {o for o in t.origins if _param_index(o) is None}
-            return CLEAN
+            return self._with_derivation(callee, CLEAN)
 
         # a callable with an inferred signature (a top-level fn or a provide
         # method): propagate precisely — the result carries the taint of exactly
@@ -2677,9 +3175,7 @@ class _FlowChecker:
                     origins = origins | contributed
                     if not via:
                         via = arg_taints[index].via + (f"{callee}()",)
-            if origins:
-                return Taint(origins, via)
-            return CLEAN
+            return self._with_derivation(callee, Taint(origins, via))
 
         # item 256 (4a.2 kind 2): a plain (non-declared-sink, non-source) extern
         # call is a host crossing. A `secret`-carrying argument to it is refused -
@@ -2715,7 +3211,7 @@ class _FlowChecker:
                       else {})
             result = Taint(result.origins, result.via + (f"{callee}()",),
                            fields)
-        return result
+        return self._with_derivation(callee, result)
 
     # -- statement / block walk ------------------------------------------------
     def run(self, body, env: dict) -> None:
@@ -2770,7 +3266,18 @@ class _FlowChecker:
             return
         if step in ("return", "emit", "expr", "fail"):
             self._emit_args = None
-            result = self.taint_of(stmt.get("expr") or stmt.get("value"), env)
+            expr = stmt.get("expr") or stmt.get("value")
+            if step == "fail":
+                # a `fail` step carries its message at `message`, not at
+                # `expr`/`value`; without this the walk never saw the value
+                # the error text is built from (issue #3141).
+                expr = stmt.get("message") or expr
+            # issue #3122: the statement arm owns an `emit` statement's checks, so
+            # the value-form check stands down for exactly this node (its nested
+            # argument expressions are ordinary value positions and stay checked).
+            self._emit_stmt_node = expr if step == "emit" else None
+            result = self.taint_of(expr, env)
+            self._emit_stmt_node = None
             if step == "return" and self.infer:
                 # inference mode: the return value's taint (parameter markers
                 # and minted origins) feeds `flows_to_return` and `mints`.
@@ -2799,6 +3306,29 @@ class _FlowChecker:
                     "(an MCP tool return, or a placement-seam reply - the Err "
                     "half of a Result included, which is marshalled BY VALUE "
                     "like any other return)", None, result, stmt)
+            if step == "fail" and self.enforce and not self.infer:
+                # issue #3141: a `fail` step's message is recorded on the
+                # FAILED fiber and read back as the error text of
+                # `revl_load` / `revl_state` (and prints in the run trace), so
+                # it is a DISCLOSURE SINK. The runtime funnels the built
+                # message through `confidential.redact_text` as a backstop;
+                # this rule refuses the statically visible form so an author
+                # cannot write the disclosure in the first place. A value
+                # DERIVED from a secret is refused too: the taint join carries
+                # the origin through the expression, and redacting the
+                # registered value out of a reformatted sentence is not
+                # guaranteed (a case fold or truncation is a different string).
+                if _carries_secret(result):
+                    self._refuse_secret(
+                        "this fail step",
+                        "the error text a failed activation reports to the "
+                        "caller", None, result, stmt)
+                if _carries_confidential(result):
+                    self._refuse_confidential(
+                        "this fail step",
+                        "the error text a failed activation reports to the "
+                        "caller (`revl_load`, `revl_state`, the run trace)",
+                        None, result, stmt)
             if step == "emit":
                 self._emit_crossing(result, stmt)
                 # the step's `compensate` slot is a crossing too: it runs on an
@@ -3106,7 +3636,9 @@ def _known_callables(program, fns, components, model: TaintModel) -> frozenset:
     top-level fns, externs, service operations, constructors, and everything the
     taint model already knows. A `var`-callee outside this set (and unresolved by
     a fn-value binding) is an unnameable indirect call, over-approximated as a
-    sink on every argument."""
+    sink on every argument when the program has any sink at all, and its callee
+    VALUE's taint always joins the result so a closure's capture is never
+    dropped."""
     known: set = set(_BUILTIN_CALLABLE_NAMES)
     known |= {fn.get("name") for fn in fns if fn.get("name")}
     for ext in getattr(program, "externs", ()) or ():
@@ -3346,7 +3878,8 @@ def _infer_signatures(fns, components, model: TaintModel, filename: str,
             if signatures[key].merge(flows, mints, checker.sink_hits,
                                      checker.endorse_clears,
                                      checker.persistence_hits,
-                                     checker.model_hits):
+                                     checker.model_hits,
+                                     checker.declassify_hits):
                 changed = True
     return signatures
 
@@ -3361,7 +3894,7 @@ def _lattice_size(signatures: dict, scope_env: dict) -> int:
     for sig in signatures.values():
         total += (len(sig.flows_to_return) + len(sig.mints)
                   + len(sig.reaches_sink) + len(sig.persists_at)
-                  + len(sig.models_at))
+                  + len(sig.models_at) + len(sig.declassifies_at))
         total += sum(len(v) for v in sig.clears.values())
     for taint in scope_env.values():
         total += len(taint.origins)
@@ -3730,7 +4263,10 @@ def _walk_component_methods(body, model: TaintModel, source: str,
             # an activation-body `return` is not a crossing of the service / MCP
             # bridge, so the provide-method return rules do not apply here.
             provide_return=False, secret_config=secret_config,
-            comp_config=comp_config, scope_env=scope_env)
+            comp_config=comp_config, scope_env=scope_env,
+            # issues #3122/#3128: the activation body reaches the same required
+            # services, so its value-form emissions resolve their declarations.
+            requires_map=model.component_requires.get(component, {}))
         act.run(act_steps, {})
         reaches |= act.reaches
         declassified |= act.declassified
@@ -3753,6 +4289,8 @@ def _walk_component_methods(body, model: TaintModel, source: str,
                     state_names=state_names, untrusted=untrusted,
                     provide_return=True, secret_config=secret_config,
                     comp_config=comp_config, scope_env=scope_env,
+                    # issues #3122/#3128: same resolution as the activation body.
+                    requires_map=model.component_requires.get(component, {}),
                     # item 514: the action this body IS, so a model crossing it
                     # reaches is judged against the `route model` block keyed to
                     # this name.

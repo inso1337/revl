@@ -57,7 +57,7 @@ from ._once_proof import SPEC_FLAG, OnceProof
 from ._paths import backends_root, venv_python
 from .errors import RevlError
 from .refusal import refusals
-from .wal import WAL_GUARANTEE
+from .wal import header_record
 
 _BACKENDS_DIR = backends_root()
 _WASM_DIR = _BACKENDS_DIR / "wasm"
@@ -86,11 +86,10 @@ _WAL_FRAME_PREFIX = "[wal] "
 
 
 def wal_header() -> dict:
-    """The WAL's first line — byte-for-byte the schema the go/py tiers write
-    (``walVersion``/``generation``/``guarantee``), so recover reads a wasm WAL
+    """The WAL's first line: the schema the go/py tiers write, from the one
+    shared builder (:func:`revl.wal.header_record`), so recover reads a wasm WAL
     through the tier-agnostic core with no wasm-specific casing."""
-    return {"record": "header", "walVersion": 1, "generation": 1,
-            "guarantee": WAL_GUARANTEE}
+    return header_record(1)
 
 
 def wal_descriptor(seq: int, receiver: str, method: str, witness) -> dict:

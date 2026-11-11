@@ -888,10 +888,17 @@ class _Client:
         # before anything is encoded or sent, through the same runtime check
         # every other crossing path calls. The bridge stays importable without
         # the runtime; with none loaded there is no halt to honour.
+        # issue #2758: a read-only hold refuses the same call, AFTER the E-Stop
+        # so a suspend is never masked by it. The service IR carries each
+        # method's declared class (`emission`, `witnessed`), but this slice does
+        # not hand it to the bridge, so under the hold every remote call
+        # refuses (fail closed). Passing a per-method `writes` set the way
+        # `async_methods` is passed would let reads through.
         runtime = _sys.modules.get("runtime")
-        check = getattr(runtime, "_estop_check", None)
-        if callable(check):
-            check(f"{key}.{method}")
+        for name in ("_estop_check", "_read_only_check"):
+            check = getattr(runtime, name, None)
+            if callable(check):
+                check(f"{key}.{method}")
         seconds = self.deadline_for(method, deadline)
         # Encode the arguments through the SAME fail-closed marshaller the return
         # path uses (Finding B): a scalar/list/dict/record/ADT arg encodes (byte-

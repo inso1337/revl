@@ -74,7 +74,8 @@
         "known",
         "meaning",
         "message",
-        "ok"
+        "ok",
+        "repairs"
       ],
       "note": "The `explain` result envelope, produced by `diagnostics.explain` and re-spelled field by field by the CLI renderer. A field added to the producer and not read by the renderer is invisible."
     },
@@ -769,16 +770,18 @@
     {
       "sites": [
         "tools/evolution_controller.py::measured_diff",
+        "tools/evolution_progress.py::changed_paths",
         "tools/evolution_reward.py::changed_files"
       ],
       "tokens": [
         "--exclude-standard",
         "--name-only",
+        "--no-renames",
         "--others",
         "diff",
         "ls-files"
       ],
-      "note": "Two copies of the changed-files listing, one in the controller and one in the reward. Near-clones down to the git argument vector; a flag added to one changes what one half of the loop measures."
+      "note": "Three copies of the changed-files listing: the reward's scope probe, the controller's authority precondition and the progress counter. Each measures the diff inside its own module's error handling, but the git argument vector must stay identical or one part of the loop signs off paths another part never saw. `--no-renames` is the flag all three carry, so a move is judged under both of its paths, and a move out of a domain, a scope or the operator grant is measured."
     },
     {
       "sites": [
