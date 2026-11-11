@@ -554,19 +554,19 @@ def test_a_lapsed_quorum_is_expired_not_revoked(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_recover_reports_a_revoked_ticket_distinct_from_an_expired_one(tmp_path):
-    wal = _replay.WriteAheadLog(str(tmp_path / "run.wal"))
-    wal.open()
-    wal.record_ticket_revoked({
+    log = _replay.WriteAheadLog(str(tmp_path / "run.wal"))
+    log.open()
+    log.record_ticket_revoked({
         "hash": "revoked-hash", "component": "Agent",
         "candidateHash": "cand-1", "kind": "call", "round": 1,
         "proposers": ["alice"], "by": "alice", "reason": "operator halt",
         "estop": True, "at": 200, "state": "revoked"})
-    wal.record_quorum_event("quorum-expired", {
+    log.record_quorum_event("quorum-expired", {
         "requestId": "expired-id", "hash": "expired-hash",
         "candidateHash": "cand-2", "component": "Payments", "kind": "call",
         "round": 1, "openedAt": 100, "expiresAt": 150, "resolvedAt": 160,
         "counted": 0, "require": 2})
-    wal.close()
+    log.close()
 
     report = recovery.recover(str(tmp_path / "run.wal"))
 
