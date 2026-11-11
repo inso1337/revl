@@ -123,6 +123,27 @@ class EmitError(ValueError):
     """The IR document cannot be lowered by this backend."""
 
 
+def _host_body_scanner():
+    """The shared host-body scanner (`src/revl/host_body.py`).
+
+    Imported lazily so a standalone `python3 emit.py <ir.json>` keeps working:
+    when the emitter runs through the compiler `revl` is importable, and a bare
+    script run falls back to the source tree beside this file. The scanner is
+    the one place every tier splits an extern body and checks that it cannot
+    leave the function it is spliced into (#3130, #3131, #3162, #3164, #3166).
+    """
+    try:
+        from revl.host_body import body_lines, check_host_body
+    except ModuleNotFoundError:  # standalone `python3 emit.py`: put src/ on the path
+        import pathlib
+        import sys as _sys
+        src = pathlib.Path(__file__).resolve().parents[2] / "src"
+        if src.is_dir() and str(src) not in _sys.path:
+            _sys.path.insert(0, str(src))
+        from revl.host_body import body_lines, check_host_body
+    return body_lines, check_host_body
+
+
 class CeilingUnattributable(EmitError):
     """An emission reaches a budgeted extern through a shape the runtime meter
     cannot attribute exactly (issue #2688).
@@ -5679,7 +5700,10 @@ def _emit_externs(externs: list, crossings: dict | None = None,
                        f"{name!r}, {required!r}, {defaults!r})")
         body = textwrap.dedent(bodies["py"].strip("\n"))
         if body:
-            for line in body.splitlines() or [""]:
+            # #3131: split on newlines only, never on U+0085, U+2028 and the
+            # C0 separators, so a comment stays one comment in the module.
+            body_lines, _check_host_body = _host_body_scanner()
+            for line in body_lines(body):
                 out.add(1, line)
         # an injected secret or config local is a statement in its own right;
         # a body of only comments is not (issue #2284)

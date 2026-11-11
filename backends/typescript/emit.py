@@ -310,6 +310,27 @@ class EmitError(ValueError):
     """The IR document violates the backend contract."""
 
 
+def _host_body_scanner():
+    """The shared host-body scanner (`src/revl/host_body.py`).
+
+    Imported lazily so a standalone `python3 emit.py <ir.json>` keeps working:
+    when the emitter runs through the compiler `revl` is importable, and a bare
+    script run falls back to the source tree beside this file. The scanner is
+    the one place every tier splits an extern body and checks that it cannot
+    leave the function it is spliced into (#3130, #3131, #3162, #3164, #3166).
+    """
+    try:
+        from revl.host_body import body_lines, check_host_body
+    except ModuleNotFoundError:  # standalone `python3 emit.py`: put src/ on the path
+        import pathlib
+        import sys as _sys
+        src = pathlib.Path(__file__).resolve().parents[2] / "src"
+        if src.is_dir() and str(src) not in _sys.path:
+            _sys.path.insert(0, str(src))
+        from revl.host_body import body_lines, check_host_body
+    return body_lines, check_host_body
+
+
 def _finite_float(value):
     """The literal's value, refused when a `Float` is not finite (issue #312).
 
@@ -4610,7 +4631,8 @@ def _ts_extern_needs_int_coercion(ext: dict) -> bool:
     return _ts_v3_type(ext.get("returns")) == "bigint"
 
 
-def _ts_extern_body_lines(body: str, coerce_int: bool, is_async: bool) -> list[str]:
+def _ts_extern_body_lines(body: str, coerce_int: bool, is_async: bool,
+                          where: str = "") -> list[str]:
     """The verbatim `@ts` body, spliced at the extern's own indentation.
 
     `body` is already dedented and its own `return` statements are its own —
@@ -4622,8 +4644,13 @@ def _ts_extern_body_lines(body: str, coerce_int: bool, is_async: bool) -> list[s
     to the extern the author is writing — the wrapper is invisible to it.
     `async` is applied only on the async extern path, where the body may
     `await`; the `await` that follows resolves it before the coercion.
+
+    The shared scanner (#3130) refuses a body JavaScript reads as unbalanced
+    and splits it on newlines only, so a comment cannot leave the function.
     """
-    lines = body.splitlines() or [""]
+    body_lines, check_host_body = _host_body_scanner()
+    check_host_body("ts", body, where=where, error=EmitError)
+    lines = body_lines(body)
     if not coerce_int:
         return ["  " + line for line in lines]
     kw = "async " if is_async else ""
@@ -5777,7 +5804,8 @@ def _emit_ts_externs(externs: list, ui_externs: Optional[set] = None) -> list[st
                 lines.append("  " + config_bind)
             body = textwrap.dedent(bodies["ts"].strip("\n"))
             if body:
-                lines.extend(_ts_extern_body_lines(body, coerce_int, True))
+                lines.extend(_ts_extern_body_lines(
+                    body, coerce_int, True, f"extern `{ext.get('name')}`"))
             else:
                 lines.append("  // (empty @ts body)")
             lines.append("}")
@@ -5795,7 +5823,8 @@ def _emit_ts_externs(externs: list, ui_externs: Optional[set] = None) -> list[st
             lines.append("  " + config_bind)
         body = textwrap.dedent(bodies["ts"].strip("\n"))
         if body:
-            lines.extend(_ts_extern_body_lines(body, coerce_int, False))
+            lines.extend(_ts_extern_body_lines(
+                body, coerce_int, False, f"extern `{ext.get('name')}`"))
         else:
             lines.append("  // (empty @ts body)")
         lines.append("}")
