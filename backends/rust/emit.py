@@ -5045,7 +5045,7 @@ def _rust_render_pure_stmts(steps: list, env: _Env, scope: dict,
                     f"compensate ...` is not lowerable in the Rust backend")
             arg_scope = dict(scope)
             for param in params:
-                arg_scope[param] = f"{param}.clone()"
+                arg_scope[param] = f"{_ident(param, 'parameter')}.clone()"
             parts.append("let _ = %s;" % _journal_service_emit(
                 step.get("expr"), env, _expr(step['expr'], env, arg_scope)))
         elif kind == "break":
@@ -5308,7 +5308,7 @@ def _method_undo_clones(env: _Env, method: dict, out: list[str], indent: int) ->
     for req in env.reqs:
         out.append(f"{pad}let {req}_undo = self.{_req_ident(req, env)}.clone();")
     for param in method.get("params") or []:
-        out.append(f"{pad}let {param}_undo = {param}.clone();")
+        out.append(f"{pad}let {param}_undo = {_ident(param, 'parameter')}.clone();")
 
 
 def _provide_let_type(env: _Env, value: object, ctx: "_V3Ctx") -> str | None:
@@ -5397,7 +5397,7 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             undo_rename = _method_undo_rename(env, method)
             acquire_rename = dict(rename)
             for param in method.get("params") or []:
-                acquire_rename[param] = f"{param}.clone()"
+                acquire_rename[param] = f"{_ident(param, 'parameter')}.clone()"
             label = _string(f"{env.name}.{method.get('name')}.{kind}.{index}")
             undo_node = step.get("undo")
             acquire_node = step.get("acquire") or step.get("expr")
@@ -5434,7 +5434,7 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
         elif kind == "emit":
             acquire_rename = dict(rename)
             for param in method.get("params") or []:
-                acquire_rename[param] = f"{param}.clone()"
+                acquire_rename[param] = f"{_ident(param, 'parameter')}.clone()"
             acquire_node = step.get("expr")
             env.v3_ctx().declared_skip = acquire_node
             acquire = _expr(acquire_node, env, acquire_rename)
@@ -5494,7 +5494,7 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             param = _bare_param(step.get("value"), method)
             if param is not None:
                 value_rename = dict(rename)
-                value_rename[param] = f"{param}.clone()"
+                value_rename[param] = f"{_ident(param, 'parameter')}.clone()"
             value = _expr(step["value"], env, value_rename)
             if kind == "let":
                 out.append(f"{pad}let {'mut ' if step.get('mutable') else ''}"
@@ -5519,7 +5519,7 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             undo_rename = _method_undo_rename(env, method)
             acquire_rename = dict(rename)
             for param in method.get("params") or []:
-                acquire_rename[param] = f"{param}.clone()"
+                acquire_rename[param] = f"{_ident(param, 'parameter')}.clone()"
             label = _string(f"{env.name}.{method.get('name')}.let-effect.{index}")
             undo_node = step.get("undo")
             acquire_node = step.get("acquire")
@@ -5645,7 +5645,7 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
             original_mname = method.get("name")
             mname = _method_ident(original_mname)
             params = ", ".join(
-                f"{p}: {_rust_type(_param_type(env, key, original_mname, p), env.types)}"
+                f"{_ident(p, 'parameter')}: {_rust_type(_param_type(env, key, original_mname, p), env.types)}"
                 for p in method.get("params") or []
             )
             ret = (_rust_type(_method_return(env, key, original_mname), env.types)
@@ -5664,7 +5664,7 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
             # lets every free-form sink scrub it once the body hands it on.
             secret_params = _secret_method_params(
                 env, key, original_mname, method.get("params") or [])
-            mark = "".join(_secret_mark_call(t, p, tail=" ", types=env.types)
+            mark = "".join(_secret_mark_call(t, _ident(p, 'parameter'), tail=" ", types=env.types)
                            for p, t in secret_params)
             if has_effectful:
                 env.v3_ctx().declared_ctx = "self.ctx"
@@ -6035,7 +6035,7 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
             # Rust spelling is for the `fn` alone.
             mname = method.get("name")
             params = ", ".join(
-                f"{p}: {_rust_type(_param_type(env, key, mname, p), env.types)}"
+                f"{_ident(p, 'parameter')}: {_rust_type(_param_type(env, key, mname, p), env.types)}"
                 for p in method.get("params") or []
             )
             ret = (_rust_type(_method_return(env, key, mname), env.types)
@@ -6054,7 +6054,7 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
             # to a free-form sink is scrubbed.
             secret_params = _secret_method_params(
                 env, key, mname, method.get("params") or [])
-            mark = "".join(_secret_mark_call(t, p, tail=" ", types=env.types)
+            mark = "".join(_secret_mark_call(t, _ident(p, 'parameter'), tail=" ", types=env.types)
                            for p, t in secret_params)
             out.append(f"    fn {_method_ident(mname)}(&self, {params}) -> {ret} {{ {mark}{_method_body(env, method)} }}")
         out.append("}")

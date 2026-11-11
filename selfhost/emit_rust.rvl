@@ -5184,7 +5184,7 @@ fn pure_stmts(steps: List[Any], ctx: Ctx, params: List[Str]) -> List[Str] {
 // cloned, so the call does not move a value the rest of the body reads.
 fn params_cloned(rn: Map[Str, Str], params: List[Str]) -> Map[Str, Str] {
   var out = rn
-  for (p of params) { out = out.set(p, `${p}.clone()`) }
+  for (p of params) { out = out.set(p, `${value_ident(p)}.clone()`) }
   return out
 }
 
@@ -5821,7 +5821,7 @@ fn method_undo_clones(comp: Any, method: Any, indent: Int) -> List[Str] {
     let req = key_binding(raw)
     out = out.push(`${pad}let ${req}_undo = self.${mangle(host_key(raw))}.clone();`)
   }
-  for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) out = out.push(`${pad}let ${pn}_undo = ${pn}.clone();`) }
+  for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) out = out.push(`${pad}let ${pn}_undo = ${value_ident(pn)}.clone();`) }
   return out
 }
 // `_bare_param`: the parameter a bare `var`/`name` node names, else ""
@@ -5961,7 +5961,7 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
       if (kind == "effect" || kind == "emit") {
         var undoR = method_undo_rename(comp, method)
         var acqR = scope
-        for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) acqR = acqR.set(pn, `${pn}.clone()`) }
+        for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) acqR = acqR.set(pn, `${value_ident(pn)}.clone()`) }
         if (kind == "emit") {
           // the emission fires, then its `compensate` (item 247, the
           // teardown-contract two-phase abort) is registered on the
@@ -6004,14 +6004,14 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
           if (kind == "let") {
             let cshadow = set_rn(c, c.rn.set(nm, value_ident(nm)))
             var cvalue = cshadow
-            if (param != "") { cvalue = set_rn(cshadow, cshadow.rn.set(param, `${param}.clone()`)) }
+            if (param != "") { cvalue = set_rn(cshadow, cshadow.rn.set(param, `${value_ident(param)}.clone()`)) }
             var mut = ""
             if (value_bool(value_field(step, "mutable"))) { mut = "mut " }
             out = out.push(`${pad}let ${mut}${value_ident(nm)} = ${render_expr(value_field(step, "value"), cvalue)};`)
             c = cshadow
           } else {
             var cvalue = c
-            if (param != "") { cvalue = set_rn(c, c.rn.set(param, `${param}.clone()`)) }
+            if (param != "") { cvalue = set_rn(c, c.rn.set(param, `${value_ident(param)}.clone()`)) }
             out = out.push(`${pad}${value_ident(nm)} = ${render_expr(value_field(step, "value"), cvalue)};`)
           }
           if (inferred != "") { c = set_vt(c, nm, inferred) }
@@ -6078,7 +6078,7 @@ fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: Ty
     for (pn of value_list(value_field(method, "params"))) {
       let pname = value_str(pn)
       let ptype = service_param_type(svc_method, pname)
-      ps = ps.push(`${pname}: ${rust_type_t(ptype, tables.tn)}`)
+      ps = ps.push(`${value_ident(pname)}: ${rust_type_t(ptype, tables.tn)}`)
       vt = vt.set(pname, value_str(ptype))
     }
     var ret = "()"

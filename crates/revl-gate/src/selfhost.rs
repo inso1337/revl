@@ -6909,7 +6909,7 @@ fn pure_stmts(steps: Vec<Value>, ctx_: Ctx__m1, params: Vec<String>) -> Vec<Stri
 fn params_cloned(rn: std::collections::HashMap<String, String>, params: Vec<String>) -> std::collections::HashMap<String, String> {
     let mut out = rn;
     for p in params {
-        out.insert(p.clone(), format!("{}.clone()", p));
+        out.insert(p.clone(), format!("{}.clone()", value_ident(p.clone())));
     }
     return out;
 }
@@ -7604,7 +7604,7 @@ fn method_undo_clones(comp: Value, method: Value, indent: i64) -> Vec<String> {
     }
     for p in value_list(value_field(method.clone(), String::from("params"))) {
         let pn = value_str(p.clone());
-        out.push(format!("{}let {}_undo = {}.clone();", pad, pn, pn));
+        out.push(format!("{}let {}_undo = {}.clone();", pad, pn, value_ident(pn.clone())));
     }
     return out;
 }
@@ -7749,7 +7749,7 @@ fn method_body_lines(comp: Value, method: Value, services: Value, ctx_: Ctx__m1,
                 let mut acqR = scope.clone();
                 for p in value_list(value_field(method.clone(), String::from("params"))) {
                     let pn = value_str(p.clone());
-                    acqR.insert(pn.clone(), format!("{}.clone()", pn));
+                    acqR.insert(pn.clone(), format!("{}.clone()", value_ident(pn.clone())));
                 }
                 if (kind == "emit") {
                     out.push(format!("{}let _ = {};", pad, render_expr(value_field(step.clone(), String::from("expr")), set_rn(c.clone(), acqR.clone()))));
@@ -7789,7 +7789,7 @@ fn method_body_lines(comp: Value, method: Value, services: Value, ctx_: Ctx__m1,
                         let cshadow = set_rn(c.clone(), { let mut c = c.rn.clone(); c.insert(nm.clone(), value_ident(nm.clone())); c });
                         let mut cvalue = cshadow.clone();
                         if (param != "") {
-                            cvalue = set_rn(cshadow.clone(), { let mut c = cshadow.rn.clone(); c.insert(param.clone(), format!("{}.clone()", param)); c });
+                            cvalue = set_rn(cshadow.clone(), { let mut c = cshadow.rn.clone(); c.insert(param.clone(), format!("{}.clone()", value_ident(param.clone()))); c });
                         }
                         let mut mut_ = String::from("");
                         if value_bool(value_field(step.clone(), String::from("mutable"))) {
@@ -7800,7 +7800,7 @@ fn method_body_lines(comp: Value, method: Value, services: Value, ctx_: Ctx__m1,
                     } else {
                         let mut cvalue = c.clone();
                         if (param != "") {
-                            cvalue = set_rn(c.clone(), { let mut c = c.rn.clone(); c.insert(param.clone(), format!("{}.clone()", param)); c });
+                            cvalue = set_rn(c.clone(), { let mut c = c.rn.clone(); c.insert(param.clone(), format!("{}.clone()", value_ident(param.clone()))); c });
                         }
                         out.push(format!("{}{} = {};", pad, value_ident(nm.clone()), render_expr(value_field(step.clone(), String::from("value")), cvalue.clone())));
                     }
@@ -7860,7 +7860,7 @@ fn emit_provide_methods(comp: Value, services: Value, key: &str, srv: String, ta
         for pn in value_list(value_field(method.clone(), String::from("params"))) {
             let pname = value_str(pn.clone());
             let ptype = service_param_type(svc_method.clone(), &pname);
-            ps.push(format!("{}: {}", pname, rust_type_t(ptype.clone(), tables.tn.clone())));
+            ps.push(format!("{}: {}", value_ident(pname.clone()), rust_type_t(ptype.clone(), tables.tn.clone())));
             vt.insert(pname.clone(), value_str(ptype.clone()));
         }
         let mut ret = String::from("()");

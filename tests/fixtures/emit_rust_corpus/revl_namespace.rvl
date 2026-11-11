@@ -11,9 +11,27 @@
 //   - A module `fn Err` emits `fn Err_`, so `Err("denied")` still names the
 //     constructor; `Some_` shifts one rung up the ladder to `Some__`.
 //   - An extern parameter keeps its source name, because the verbatim `@rs`
-//     body spells it; a service parameter takes the rename.
+//     body spells it; a service parameter takes the rename, and so does a
+//     provide-method parameter, in the method head, the undo clones and
+//     the effect arguments, so the head declares what the body reads.
 
-service Meter { fn add(revl_n: Int) -> Int }
+service Meter {
+  fn add(revl_n: Int) -> Int
+  fn keep(revl_k: Str, revl_v: Str) -> Str
+}
+
+component Gauge provides meter: Meter {
+  let store = effect Map.new() undo store.drop()
+
+  provide meter {
+    fn add(revl_n) = revl_n + 1
+    fn keep(revl_k, revl_v) {
+      let revl_key = revl_k
+      effect store.insert(revl_k, revl_v) undo store.remove(revl_k)
+      return revl_v
+    }
+  }
+}
 
 extern pure fn revlHost(revl_n: Int) -> Int = @rs { revl_n + 1 }
 

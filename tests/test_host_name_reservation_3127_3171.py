@@ -132,7 +132,7 @@ def test_3129_python_declarations_do_not_shadow_emitted_builtins():
     assert "return chr(" in emitted        # the to_char helper
     assert "raise IndexError(" in emitted  # the list index guard
     namespace: dict = {}
-    exec(emitted, namespace)  # noqa: S102 — executing the backend's own output
+    exec(emitted, namespace)  # noqa: S102 (executing the backend's own output)
     assert namespace["letter"](65) == "A"
     with pytest.raises(IndexError):
         namespace["at"]([1])
