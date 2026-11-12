@@ -136,6 +136,19 @@ import RevL
 #print axioms RevL.CapCeilings.parameter_widening_refused
 #print axioms RevL.CapCeilings.ceiling_check_not_subsumed
 
+-- Item 260 / issue #2743: the emission cardinality bound. The crossing count
+-- the ceiling and budget theorems do NOT cover is proved over a small
+-- sequence/branch/bounded-loop syntax, and the corpus row (`CARD`) compares
+-- its fold against the number `src/revl/cardinality.py` reports; see
+-- RevL/Theorems/Cardinality.lean.
+#print axioms RevL.Cardinality.runs_le_bound
+#print axioms RevL.Cardinality.cardinality_not_vacuous
+#print axioms RevL.Cardinality.witness_seq_runs
+#print axioms RevL.Cardinality.witness_branch_runs
+#print axioms RevL.Cardinality.witness_loop_runs
+#print axioms RevL.Cardinality.body_bound_bounds_runs
+#print axioms RevL.Cardinality.witness_body_runs
+
 -- Item 294/66/260, STATUS.md TODO 2(a): `held` and `reach` DERIVED from
 -- the statement fragment instead of taken as given -- the capKeys bridge
 -- and the emit-step surface as lemmas, the unnameable receivers named,

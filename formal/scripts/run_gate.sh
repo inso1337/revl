@@ -141,6 +141,13 @@ python3 scripts/axioms_gate.py \
   RevL.CapCeilings.no_star_amplification \
   RevL.CapCeilings.parameter_widening_refused \
   RevL.CapCeilings.ceiling_check_not_subsumed \
+  RevL.Cardinality.runs_le_bound \
+  RevL.Cardinality.cardinality_not_vacuous \
+  RevL.Cardinality.witness_seq_runs \
+  RevL.Cardinality.witness_branch_runs \
+  RevL.Cardinality.witness_loop_runs \
+  RevL.Cardinality.body_bound_bounds_runs \
+  RevL.Cardinality.witness_body_runs \
   RevL.R4.residue_is_exactly_what_remains \
   RevL.R4.abort_leaves_no_residue \
   RevL.R4.residue_complete \
@@ -488,6 +495,7 @@ python3 scripts/axioms_gate.py \
   RevLOracle.councilRowB_iff \
   RevLOracle.g9RowB_iff \
   RevLOracle.gcRowB_iff \
+  RevLOracle.cardRowB_iff \
   RevLOracle.retainRowB_iff RevLOracle.gretainRowB_iff \
   RevLOracle.g4InvRowB_iff RevLOracle.g4invRowB_iff \
   RevLOracle.swRowB_iff RevLOracle.swRowBAll_iff \
