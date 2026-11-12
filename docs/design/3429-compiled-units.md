@@ -82,6 +82,22 @@ Loading executes nothing. No pickle, no `eval`, no import of anything the
 entry names; the decoder constructs a node with `cls.__new__` and fills its
 attributes, and refuses a node that lacks any of its class's fields.
 
+An entry larger than 64 MiB is not read, an entry is opened without
+following a symlink where the platform allows it, and every failure to read,
+parse or decode an entry (including a nesting deep enough to exhaust the
+stack, or memory) is a miss. A failed write removes its temporary file.
+
+## Trust
+
+The cache directory is trusted like the compiler's own files and must be
+private to the user who compiles. Keys are computed from public inputs (the
+text, the path, the compiler's source), so anyone who can write the directory
+can plant an entry that decodes into a parse tree of their choosing, and the
+compiler lowers that tree into code. The decoder only limits what an entry
+can be (parser nodes and plain data); it cannot tell a planted tree from an
+honest one. `compile_files` creates the directory with mode 0o700; it does not
+check the mode of a directory that already exists.
+
 ## Key
 
 The key is everything the parse is a function of, kept wide:
@@ -91,7 +107,10 @@ The key is everything the parse is a function of, kept wide:
 - the absolute path the file is parsed as, and its path relative to the
   working directory (provenance);
 - the compiler: a sha256 over the source of EVERY module of the revl package,
-  the Python version (the lexer reads `unicodedata`), and the entry format.
+  the revl version, the Python version (the lexer reads `unicodedata`), and
+  the entry format. An install without its `.py` sources (bytecode only, or
+  zipped) has no source to digest, so on it the cache reads and writes
+  nothing.
 
 Admission profiles, `replacing`, the running manifest and `operator_sources`
 are not in the key because the parse reads none of them: every step that does
@@ -128,10 +147,10 @@ raises the same refusals as without one.
    every node is written (not only the dataclass fields: the parser sets
    `_paren` on some expression nodes), shared mutable objects stay shared,
    and container types are exact. A program the encoder cannot express raises
-   before anything is written. The only identity-keyed table the parser could
-   leave, `decl_files`, is empty after `Parser.parse` (the encoder refuses to
-   write otherwise) and is filled by the same `record_provenance` that
-   `parse_text` runs.
+   before anything is written. The identity-keyed tables (`decl_files`,
+   `fn_scopes`, `fn_alias_scopes`) are empty after `Parser.parse` (the writer
+   refuses otherwise); `decl_files` is filled by the same `record_provenance`
+   that `parse_text` runs.
 3. A decoded unit is a fresh object graph per compile, so the in-place
    resolution the loader performs next cannot reach an entry or another
    compile.
@@ -144,7 +163,15 @@ raises the same refusals as without one.
 What remains assumed: an iteration over a decoded `set` or `frozenset` visits
 the same elements as the original, possibly in another order. A compile whose
 output depended on that order would already differ between two processes with
-different hash seeds; the corpus check below found no difference.
+different hash seeds; the corpus check below found no difference. Measured,
+the order does differ, at `FnDecl.idents` (a frozenset of identifier
+spellings, issue #1900), whose one consumer, `_lower_fns` in `lower.py`, seeds
+the fresh-name set of `try` desugaring from it and tests membership only. A
+test rebuilds every stored set in reversed order and compares the document.
+
+The identity-keyed tables of `Program` (`decl_files`, `fn_scopes`,
+`fn_alias_scopes`) are empty after `Parser.parse`; a unit where any of them is
+not is never written, and an entry holding one is not decoded.
 
 Checked: the revl-harness composition gives the same document digest with no
 cache, while building the cache and when reading it; every `.rvl` in the revl

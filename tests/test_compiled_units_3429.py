@@ -81,10 +81,20 @@ def _compile(tree: Path, cache: Path):
 def test_cold_equals_cached_on_the_corpus(example, tmp_path, monkeypatch):
     monkeypatch.chdir(ROOT)
     cold = _outcome([str(example)])
-    building = _outcome([str(example)], cache_dir=str(tmp_path / "units"))
-    reading = _outcome([str(example)], cache_dir=str(tmp_path / "units"))
+    built: dict = {}
+    read: dict = {}
+    building = _outcome([str(example)], cache_dir=str(tmp_path / "units"),
+                        report=built)
+    reading = _outcome([str(example)], cache_dir=str(tmp_path / "units"),
+                       report=read)
     assert building == cold
     assert reading == cold
+    if cold[0] == "document":
+        # the second compile read back every unit the first one built
+        assert built["unit_cache"]["built"]
+        assert read["unit_cache"]["built"] == []
+        assert (sorted(read["unit_cache"]["reused"])
+                == sorted(built["unit_cache"]["built"]))
 
 
 REFUSALS = {
@@ -181,9 +191,26 @@ def _damage_dropped_field(entry: Path) -> None:
     entry.write_text(json.dumps(data), encoding="utf-8")
 
 
+def _damage_deep_array(entry: Path) -> None:
+    """Not JSON a writer makes: nested deeper than the stack allows."""
+    entry.write_text("[" * 200000, encoding="utf-8")
+
+
+def _damage_deep_program(entry: Path) -> None:
+    """The right key, then a program that is lists nested 30000 deep."""
+    data = json.loads(entry.read_text(encoding="utf-8"))
+    entry.write_text('{"key":' + json.dumps(data["key"]) + ',"program":'
+                     + "[" * 30000 + "]" * 30000 + "}", encoding="utf-8")
+
+
+def _damage_oversized(entry: Path, cap: int = 1024) -> None:
+    entry.write_bytes(entry.read_bytes() + b" " * cap)
+
+
 @pytest.mark.parametrize("damage", [
     _damage_garbage, _damage_truncated, _damage_wrong_version,
-    _damage_foreign_class, _damage_dropped_field],
+    _damage_foreign_class, _damage_dropped_field, _damage_deep_array,
+    _damage_deep_program],
     ids=lambda f: f.__name__.removeprefix("_damage_"))
 def test_a_damaged_entry_is_rebuilt(damage, tree, tmp_path):
     cache = tmp_path / "units"
@@ -222,3 +249,146 @@ def test_the_compiler_digest_covers_the_whole_package():
     names = {os.path.relpath(p, unit_cache._PACKAGE_DIR) for p in sources}
     assert {"parser.py", "lexer.py", "lower.py", "compiler.py",
             "unit_cache.py"} <= names
+
+
+def test_a_deep_but_well_formed_program_is_a_miss(monkeypatch, tmp_path):
+    """The decoder recurses; a tree deeper than the stack is a miss, not a
+    crash, even when the JSON reader let it through."""
+    deep: list = []
+    for _ in range(100000):
+        deep = [deep]
+    key = unit_cache.unit_key("fn f() -> Int {\n  return 1\n}\n", "/a/f.rvl")
+    entry = tmp_path / "entry.json"
+    entry.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(unit_cache.json, "loads",
+                        lambda _blob: {"key": key, "program": deep})
+    assert unit_cache._read_entry(str(entry), key) is None
+
+
+def test_an_entry_past_the_size_cap_is_rebuilt(tree, tmp_path, monkeypatch):
+    cache = tmp_path / "units"
+    first, _built, _reused = _compile(tree, cache)
+    monkeypatch.setattr(unit_cache, "MAX_ENTRY_BYTES",
+                        max(e.stat().st_size for e in _entries(cache)))
+    for entry in _entries(cache):
+        _damage_oversized(entry)
+    document, built, _reused = _compile(tree, cache)
+    assert built == ["leaf.rvl", "main.rvl", "mid.rvl"]
+    assert document == first
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink") or os.name == "nt",
+                    reason="symlinks")
+def test_an_entry_that_is_a_symlink_is_not_followed(tree, tmp_path):
+    cache = tmp_path / "units"
+    first, _built, _reused = _compile(tree, cache)
+    for entry in _entries(cache):
+        real = entry.with_suffix(".real")
+        entry.rename(real)
+        entry.symlink_to(real)
+    document, built, _reused = _compile(tree, cache)
+    assert built == ["leaf.rvl", "main.rvl", "mid.rvl"]
+    assert document == first
+    # the rewrite replaced each link with a plain file
+    assert not any(e.is_symlink() for e in _entries(cache))
+
+
+def test_a_new_cache_directory_is_private(tree, tmp_path):
+    cache = tmp_path / "units"
+    _compile(tree, cache)
+    if os.name != "nt":
+        assert cache.stat().st_mode & 0o077 == 0
+
+
+@pytest.mark.parametrize("table", ["decl_files", "fn_scopes",
+                                   "fn_alias_scopes"])
+def test_a_unit_with_an_identity_table_is_not_written(table, tree, tmp_path,
+                                                      monkeypatch):
+    real = unit_cache._parser.Parser.parse
+
+    def parse_with_table(self):
+        program = real(self)
+        setattr(program, table, {id(program): {"x"}})
+        return program
+
+    monkeypatch.setattr(unit_cache._parser.Parser, "parse", parse_with_table)
+    cache = tmp_path / "units"
+    unit = unit_cache.UnitCache(str(cache))
+    unit.parse((tree / "leaf.rvl").read_text(encoding="utf-8"),
+               str(tree / "leaf.rvl"))
+    assert _entries(cache) == []
+
+
+def test_a_failed_write_leaves_no_temporary_file(tree, tmp_path, monkeypatch):
+    def refuse(_src, _dst):
+        raise OSError("refused")
+
+    monkeypatch.setattr(unit_cache.os, "replace", refuse)
+    cache = tmp_path / "units"
+    _compile(tree, cache)
+    assert list(cache.iterdir()) == []
+
+
+def test_no_sources_means_no_cache(tree, tmp_path, monkeypatch):
+    """A bytecode-only install has nothing to digest: nothing is read or
+    written, and the compile is the plain one."""
+    monkeypatch.setattr(unit_cache, "has_sources", lambda: False)
+    cache = tmp_path / "units"
+    document, built, reused = _compile(tree, cache)
+    assert (built, reused) == (["leaf.rvl", "main.rvl", "mid.rvl"], [])
+    assert not cache.exists()
+    assert document == compile_files([str(tree / "main.rvl")])
+
+
+def test_the_key_carries_the_revl_version(monkeypatch):
+    unit_cache.compiler_digest.cache_clear()
+    try:
+        base = unit_cache.compiler_digest()
+        monkeypatch.setattr(unit_cache, "_revl_version", lambda: "0.0.0-other")
+        unit_cache.compiler_digest.cache_clear()
+        assert unit_cache.compiler_digest() != base
+    finally:
+        monkeypatch.undo()
+        unit_cache.compiler_digest.cache_clear()
+
+
+def _reverse_scalar_sets(value):
+    """Every stored set or frozenset of plain values, in reversed order. Only
+    scalar members, so the numbering of shared objects is unchanged."""
+    if isinstance(value, list):
+        return [_reverse_scalar_sets(x) for x in value]
+    if isinstance(value, dict):
+        if (len(value) == 1 and next(iter(value)) in ("s", "f")
+                and all(not isinstance(x, (list, dict))
+                        for x in next(iter(value.values())))):
+            tag, members = next(iter(value.items()))
+            return {tag: list(reversed(members))}
+        return {k: _reverse_scalar_sets(v) for k, v in value.items()}
+    return value
+
+
+def test_set_order_does_not_reach_the_document(tmp_path, monkeypatch):
+    """Decoded sets come back in another order (measured at `FnDecl.idents`,
+    read by `_lower_fns` for membership only). Rebuild every stored set in
+    reversed order and the document is still the cold one."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "t.rvl").write_text(
+        "fn risky(n: Int) -> Result[Int, Str] {\n"
+        "  if (n > 0) {\n    return Ok(n)\n  }\n  return Err(\"neg\")\n}\n\n"
+        "fn twice(n: Int) -> Result[Int, Str] {\n"
+        "  let a = try risky(n)\n  let b = try risky(a)\n  return Ok(a + b)\n}\n",
+        encoding="utf-8")
+    cold = _outcome(["t.rvl"])
+    assert cold[0] == "document"
+    cache = tmp_path / "units"
+    _outcome(["t.rvl"], cache_dir=str(cache))
+    reversed_any = False
+    for entry in _entries(cache):
+        data = json.loads(entry.read_text(encoding="utf-8"))
+        flipped = _reverse_scalar_sets(data)
+        reversed_any = reversed_any or flipped != data
+        entry.write_text(json.dumps(flipped), encoding="utf-8")
+    assert reversed_any
+    report: dict = {}
+    assert _outcome(["t.rvl"], cache_dir=str(cache), report=report) == cold
+    assert report["unit_cache"]["built"] == []

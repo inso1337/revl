@@ -21,6 +21,7 @@ another format, another key, an unknown class) is rebuilt from the text.
 """
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import functools
 import hashlib
@@ -31,11 +32,22 @@ import tempfile
 
 from . import parser as _parser
 from ._paths import relpath_or_abs
+from ._version import version as _revl_version
 
 #: Bumped whenever the entry layout below changes.
 FORMAT = 1
 
 _PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+#: The largest entry this compiler reads back; a larger one is a miss.
+MAX_ENTRY_BYTES = 64 * 1024 * 1024
+
+#: Identity-keyed tables of `Program`: `id(...)` names an object of the
+#: process that built it, so a unit carrying any of them is never written.
+_IDENTITY_TABLES = ("decl_files", "fn_scopes", "fn_alias_scopes")
+
+# Opening an entry never follows a symlink where the platform can say so.
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 
 class _Undecodable(Exception):
@@ -59,16 +71,26 @@ _NODE_CLASSES = _node_classes()
 @functools.lru_cache(maxsize=1)
 def compiler_digest() -> str:
     """sha256 over the source of every module in the revl package, plus the
-    Python version and the entry format. Wider than the parser alone on
-    purpose: any change to the compiler's code invalidates every entry."""
+    revl version, the Python version and the entry format. Wider than the
+    parser alone on purpose: any change to the compiler's code invalidates
+    every entry. Only meaningful when `has_sources()`."""
     digest = hashlib.sha256()
-    digest.update(f"format={FORMAT}\0python={sys.version}\0".encode())
+    digest.update(f"format={FORMAT}\0revl={_revl_version()}\0"
+                  f"python={sys.version}\0".encode())
     for path in _package_sources():
         digest.update(os.path.relpath(path, _PACKAGE_DIR).encode() + b"\0")
         with open(path, "rb") as handle:
             digest.update(handle.read())
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+@functools.lru_cache(maxsize=1)
+def has_sources() -> bool:
+    """Whether this install carries its `.py` sources. Without them (a
+    bytecode-only or zipped install) the compiler digest could not tell one
+    compiler from another, so the cache reads and writes nothing."""
+    return bool(_package_sources())
 
 
 def _package_sources() -> list[str]:
@@ -109,6 +131,9 @@ class UnitCache:
         """`parse_text(text, abs_path)`, read back from the directory when an
         entry with this exact key decodes, built and written otherwise. A
         parse that refuses raises as `parse_text` does and writes nothing."""
+        if not has_sources():
+            self.built.append(abs_path)
+            return _parser.parse_text(text, abs_path)
         key = unit_key(text, abs_path)
         entry_path = os.path.join(self.directory, _entry_name(key))
         program = _read_entry(entry_path, key)
@@ -127,39 +152,64 @@ class UnitCache:
 
 
 def _read_entry(entry_path: str, key: dict) -> _parser.Program | None:
+    """The program an entry holds under exactly `key`, or None. EVERY failure
+    to read, parse or decode the entry is a miss (the unit is rebuilt): a
+    damaged entry can be nested deeply enough to exhaust the stack or large
+    enough to exhaust memory, and neither may escape the compile."""
     try:
-        with open(entry_path, encoding="utf-8") as handle:
-            entry = json.load(handle)
-    except (OSError, ValueError):
-        return None
-    try:
+        entry = json.loads(_entry_bytes(entry_path))
         if not isinstance(entry, dict) or entry.get("key") != key:
             return None
         return _decode_program(entry.get("program"), key)
-    except (_Undecodable, RecursionError, TypeError, ValueError,
-            AttributeError, KeyError, IndexError):
+    except (_Undecodable, OSError, RecursionError, MemoryError, TypeError,
+            ValueError, AttributeError, KeyError, IndexError):
         return None
+
+
+def _entry_bytes(entry_path: str) -> bytes:
+    """The entry's bytes, read without following a symlink and refused past
+    `MAX_ENTRY_BYTES`."""
+    fd = os.open(entry_path, os.O_RDONLY | _NOFOLLOW)
+    with os.fdopen(fd, "rb") as handle:
+        if os.fstat(handle.fileno()).st_size > MAX_ENTRY_BYTES:
+            raise _Undecodable("entry too large")
+        blob = handle.read(MAX_ENTRY_BYTES + 1)
+    if len(blob) > MAX_ENTRY_BYTES:
+        raise _Undecodable("entry too large")
+    return blob
+
+
+def _has_identity_tables(program: _parser.Program) -> bool:
+    return any(getattr(program, name) for name in _IDENTITY_TABLES)
 
 
 def _write_entry(entry_path: str, key: dict, program: _parser.Program) -> None:
     """Write atomically (temp file, then rename), so a reader sees a whole
-    entry or none. A failure to write leaves the compile's result unchanged."""
-    if program.decl_files:
-        # identity-keyed, so it cannot be carried to another process; the
-        # parser leaves it empty and `record_provenance` fills it
+    entry or none. The rename replaces a directory entry and never writes
+    through a symlink planted at the entry's name. A failure to write leaves
+    the compile's result unchanged and no temporary file behind."""
+    if _has_identity_tables(program):
+        # the parser leaves these empty; `record_provenance` and the merge in
+        # `compile_files` fill them in the process that uses them
         return
+    tmp = None
     try:
         encoded = _Encoder().value(program)
         blob = json.dumps({"key": key, "program": encoded},
                           separators=(",", ":"))
-        os.makedirs(os.path.dirname(entry_path), exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(entry_path),
-                                   suffix=".tmp")
+        directory = os.path.dirname(entry_path)
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=directory, suffix=".tmp")
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(blob)
         os.replace(tmp, entry_path)
-    except (OSError, RecursionError, TypeError, ValueError):
+        tmp = None
+    except (OSError, RecursionError, MemoryError, TypeError, ValueError):
         return
+    finally:
+        if tmp is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
 
 
 # The encoding. A list is a JSON array; str, int, float, bool and None are
@@ -295,7 +345,7 @@ class _Decoder:
 def _decode_program(data, key: dict) -> _parser.Program:
     with _parser.recursion_headroom():
         program = _Decoder().value(data)
-    if type(program) is not _parser.Program or program.decl_files:
+    if type(program) is not _parser.Program or _has_identity_tables(program):
         raise _Undecodable("not a freshly parsed program")
     _parser.record_provenance(program, key["path"])
     return program

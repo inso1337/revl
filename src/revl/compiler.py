@@ -1388,7 +1388,10 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     under the same key is not parsed again. The document and every refusal are
     the ones a compile without it gives. `None`, the default, reads and writes
     nothing. With a `report`, `report["unit_cache"]` lists the files whose
-    unit this compile rebuilt and reused.
+    unit this compile rebuilt and reused. The directory must be private to
+    the user who compiles: a unit is trusted like the compiler's own files,
+    since anyone who can write the directory can plant a parse tree under a
+    key computed from public source. It is created with mode 0o700.
     """
     rule = _export_rule()
     if rule is not None and rule.applies(profile):
