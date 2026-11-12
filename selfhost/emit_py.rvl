@@ -1132,6 +1132,83 @@ fn annotated_bin(node: Any, lb: Str, rb: Str) -> Str {
   return ""
 }
 
+// A chain of one operator lowers to a LEFT-DEEP tree, and the nested
+// rendering gave every operand one more level of brackets, so ~100 bounded
+// `+` overflowed CPython's parser stack at load (issue #3403). From this many
+// operators on (`_CHAIN_FLAT_MIN`, 16), the reference (`_chain_bin`) writes
+// the spine flat.
+
+// The flat-chain family of a node (`_chain_class`), `""` for none: bounded
+// Int/Int32 `+ - *`, plain `+ -`, plain `*`, `&&`, `||`. A widened node is
+// wrapped in `float(...)`, so it never joins a spine as a left operand. The
+// chain's own head may carry the key: `expr` wraps it and then renders the
+// SAME node, where the reference renders a copy without it, so `head` skips
+// the test.
+fn chain_class(n: Any, head: Bool) -> Str {
+  if (node_kind(n) != "bin" || (!head && value_str(value_field(n, "widen")) == "Float")) { return "" }
+  let op = node_op(n)
+  if (op == "&&" || op == "||") { return op }
+  if (!is_addsubmul(op)) { return "" }
+  let opnd = node_operands(n)
+  if (opnd == "Int" || opnd == "Int32") { return `bounded${opnd}` }
+  if (op == "*") { return "plain*" }
+  return "plain+-"
+}
+
+// The spine nodes of a long chain, bottom up (`_chain_spine`); empty when the
+// node heads fewer than `chain_flat_min()` operators of one family.
+fn chain_spine(n: Any) -> List[Any] {
+  let family = chain_class(n, true)
+  if (family == "") { return [] }
+  var down = [n]
+  var left = value_field(n, "left")
+  while (chain_class(left, false) == family) {
+    down = down.push(left)
+    left = value_field(left, "left")
+  }
+  if (down.length() < 16) { return [] }
+  var up = []
+  var i = down.length() - 1
+  while (i >= 0) {
+    up = up.push(down[i])
+    i -= 1
+  }
+  return up
+}
+
+// The flat text of a chain (`_chain_text`): `&&`/`||` as one python BoolOp,
+// plain `+ -` or `*` left-associated by python itself, bounded Int as a tuple
+// of inline-bounded steps over `_bi`, the previous step's value, whose last
+// element is the answer. Each right operand is bracketed, since another
+// operator now follows it.
+fn chain_text(steps: List[Any], leaf: Str, rights: List[Str]) -> Str {
+  let family = chain_class(steps[0], true)
+  if (family == "&&" || family == "||") {
+    var out = `(${leaf}`
+    let joiner = ` ${py_bin_op(family)} `
+    for (r of rights) { out = `${out}${joiner}(${r})` }
+    return `${out})`
+  }
+  if (family == "boundedInt" || family == "boundedInt32") {
+    var width = "64"
+    if (family == "boundedInt32") { width = "32" }
+    var parts = [bounded(`${leaf} ${node_op(steps[0])} ${rights[0]}`, width)]
+    var i = 1
+    while (i < steps.length()) {
+      parts = parts.push(bounded(`_bi ${node_op(steps[i])} ${rights[i]}`, width))
+      i += 1
+    }
+    return `(${parts.join(", ")})[-1]`
+  }
+  var flat = `(${leaf}`
+  var k = 0
+  while (k < steps.length()) {
+    flat = `${flat} ${node_op(steps[k])} (${rights[k]})`
+    k += 1
+  }
+  return `${flat})`
+}
+
 fn annotated_un(node: Any, ob: Str) -> Str {
   let opnd = node_operands(node)
   if (opnd == "Int") { return `_revl_i64(-${ob})` }
@@ -1150,6 +1227,13 @@ fn render_bin(node: Any) -> Str {
     // evaluates FIRST, so the `then` branch reads a value produced once
     let name = opt_temp(node)
     return `(${name} if (${name} := ${lhs}) is not None else ${rhs})`
+  }
+  let spine = chain_spine(node)
+  if (spine.length() > 0) {
+    let leaf = expr(value_field(spine[0], "left"))
+    var rights = []
+    for (s of spine) { rights = rights.push(expr(value_field(s, "right"))) }
+    return chain_text(spine, leaf, rights)
   }
   let lb = expr(value_field(node, "left"))
   let rb = expr(value_field(node, "right"))
@@ -2584,6 +2668,13 @@ fn cbin(node: Any) -> Str {
     if (is_trivial_node(left)) { return `(${rhs} if ${lhs} is None else ${lhs})` }
     let name = opt_temp(node)
     return `(${name} if (${name} := ${lhs}) is not None else ${rhs})`
+  }
+  let spine = chain_spine(node)
+  if (spine.length() > 0) {
+    let leaf = cexpr(value_field(spine[0], "left"))
+    var rights = []
+    for (s of spine) { rights = rights.push(cexpr(value_field(s, "right"))) }
+    return chain_text(spine, leaf, rights)
   }
   let lb = cexpr(value_field(node, "left"))
   let rb = cexpr(value_field(node, "right"))
