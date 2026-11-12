@@ -798,6 +798,14 @@ jobs:
       # table renders blank and nobody notices.
       - run: python3 tools/conformance.py --check-readme
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+      # Issue #2899: the per-tier support table gained a self-host compile
+      # column whose data is a committed, measured ledger. This gate refuses a
+      # ledger whose self-host, stdlib or tier emitter sources have moved since
+      # the measurement, and a cell that does not emit with no issue or recorded
+      # scope decision behind it. It reads the ledger only, so it needs no
+      # backend toolchain.
+      - run: python3 tools/selfhost_matrix.py --check
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
       - run: python3 tools/selfhost_coverage.py --check
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
       # Issue #301: differential oracles only prove the constructs their corpus

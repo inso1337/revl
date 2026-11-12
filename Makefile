@@ -2,7 +2,7 @@
 # authored: `make matrix` regenerates it, and CI fails if the committed block
 # drifts from a fresh generation (see .github/workflows/ci.yml).
 
-.PHONY: matrix matrix-check matrix-execute docs-gen docs-check demo demo-flagship demo-escape pre-merge pre-merge-affected formal roadmap-check roadmap-issue-state workflow-permissions runtime-seams vision-check
+.PHONY: matrix matrix-check matrix-execute selfhost-tiers-measure selfhost-tiers-check docs-gen docs-check demo demo-flagship demo-escape pre-merge pre-merge-affected formal roadmap-check roadmap-issue-state workflow-permissions runtime-seams vision-check
 
 # roadmap item 327: the required gate before a change reaches main. Mirrors the
 # FAST half of every per-backend CI job locally (emit/golden suites, the
@@ -125,6 +125,17 @@ matrix:
 # The staleness gate CI runs: exit non-zero if the committed block is stale.
 matrix-check:
 	python3 tools/conformance.py --check-readme
+
+# Issue #2899: the per-tier support table's self-host emit column is
+# measured, not authored. The measurement is minutes long, so it is committed
+# as tools/selfhost_compile_matrix.json; --check refuses a ledger whose
+# self-host, stdlib or tier emitter sources have moved, and a non-emitting cell with
+# no issue or recorded scope decision behind it.
+selfhost-tiers-measure:
+	python3 tools/selfhost_matrix.py --measure
+
+selfhost-tiers-check:
+	python3 tools/selfhost_matrix.py --check
 
 # The matrix's third question (issue #244): RUN the cases that have an answer
 # and check every tier computes the same one. `--validate` stops at compile

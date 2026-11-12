@@ -1,0 +1,249 @@
+{
+ "gaps": [
+  {
+   "cell": "checker.rvl::go",
+   "reason": "record literal fields ['name', 'ty'] matches no unique record",
+   "issue": 3144
+  },
+  {
+   "cell": "checker.rvl::java",
+   "reason": "record literal with fields ['name', 'ty'] is ambiguous",
+   "issue": 3144
+  },
+  {
+   "cell": "checker.rvl::wasm",
+   "reason": "the wasm value representation has no Map",
+   "out_of_scope": "#2899 records Map in the value representation as a design question, not a fix"
+  },
+  {
+   "cell": "compile.rvl::go",
+   "reason": "extern `module_path` has no @go body",
+   "issue": 3143
+  },
+  {
+   "cell": "compile.rvl::java",
+   "reason": "extern `module_path` has no @java body",
+   "issue": 3143
+  },
+  {
+   "cell": "compile.rvl::rust",
+   "reason": "extern `module_path` has no @rs body",
+   "issue": 3143
+  },
+  {
+   "cell": "compile.rvl::typescript",
+   "reason": "extern `module_path` has no @ts body",
+   "issue": 3143
+  },
+  {
+   "cell": "compile.rvl::wasm",
+   "reason": "extern `json_parse` has no @wasm body",
+   "issue": 3143
+  },
+  {
+   "cell": "emit_go.rvl::go",
+   "reason": "extern `tab` has no @go body",
+   "issue": 3143
+  },
+  {
+   "cell": "emit_go.rvl::java",
+   "reason": "extern `tab` has no @java body",
+   "issue": 3143
+  },
+  {
+   "cell": "emit_go.rvl::rust",
+   "reason": "extern `tab` has no @rs body",
+   "issue": 3143
+  },
+  {
+   "cell": "emit_go.rvl::typescript",
+   "reason": "extern `tab` has no @ts body",
+   "issue": 3143
+  },
+  {
+   "cell": "emit_go.rvl::wasm",
+   "reason": "the wasm value representation has no Any",
+   "out_of_scope": "#2899 records Any in the value representation as a design question, not a fix"
+  },
+  {
+   "cell": "emit_java.rvl::go",
+   "reason": "extern `json_dumps` has no @go body",
+   "issue": 3143
+  },
+  {
+   "cell": "emit_java.rvl::java",
+   "reason": "extern `json_dumps` has no @java body",
+   "issue": 3143
+  },
+  {
+   "cell": "emit_java.rvl::rust",
+   "reason": "extern `json_dumps` has no @rs body",
+   "issue": 3143
+  },
+  {
+   "cell": "emit_java.rvl::typescript",
+   "reason": "extern `json_dumps` has no @ts body",
+   "issue": 3143
+  },
+  {
+   "cell": "emit_java.rvl::wasm",
+   "reason": "the wasm value representation has no Any",
+   "out_of_scope": "#2899 records Any in the value representation as a design question, not a fix"
+  },
+  {
+   "cell": "emit_py.rvl::go",
+   "reason": "extern `py_repr` has no @go body",
+   "issue": 3143
+  },
+  {
+   "cell": "emit_py.rvl::java",
+   "reason": "extern `py_repr` has no @java body",
+   "issue": 3143
+  },
+  {
+   "cell": "emit_py.rvl::rust",
+   "reason": "extern `py_repr` has no @rs body",
+   "issue": 3143
+  },
+  {
+   "cell": "emit_py.rvl::typescript",
+   "reason": "extern `py_repr` has no @ts body",
+   "issue": 3143
+  },
+  {
+   "cell": "emit_py.rvl::wasm",
+   "reason": "the wasm value representation has no Any",
+   "out_of_scope": "#2899 records Any in the value representation as a design question, not a fix"
+  },
+  {
+   "cell": "emit_rust.rvl::go",
+   "reason": "extern `string_lit` has no @go body",
+   "issue": 3143
+  },
+  {
+   "cell": "emit_rust.rvl::java",
+   "reason": "extern `string_lit` has no @java body",
+   "issue": 3143
+  },
+  {
+   "cell": "emit_rust.rvl::typescript",
+   "reason": "extern `string_lit` has no @ts body",
+   "issue": 3143
+  },
+  {
+   "cell": "emit_rust.rvl::wasm",
+   "reason": "the wasm value representation has no Any",
+   "out_of_scope": "#2899 records Any in the value representation as a design question, not a fix"
+  },
+  {
+   "cell": "emit_ts.rvl::go",
+   "reason": "extern `json_dumps` has no @go body",
+   "issue": 3143
+  },
+  {
+   "cell": "emit_ts.rvl::java",
+   "reason": "extern `json_dumps` has no @java body",
+   "issue": 3143
+  },
+  {
+   "cell": "emit_ts.rvl::rust",
+   "reason": "extern `json_dumps` has no @rs body",
+   "issue": 3143
+  },
+  {
+   "cell": "emit_ts.rvl::typescript",
+   "reason": "extern `json_dumps` has no @ts body",
+   "issue": 3143
+  },
+  {
+   "cell": "emit_ts.rvl::wasm",
+   "reason": "the wasm value representation has no Any",
+   "out_of_scope": "#2899 records Any in the value representation as a design question, not a fix"
+  },
+  {
+   "cell": "emit_wasm.rvl::go",
+   "reason": "extern `num_str` has no @go body",
+   "issue": 3143
+  },
+  {
+   "cell": "emit_wasm.rvl::java",
+   "reason": "extern `num_str` has no @java body",
+   "issue": 3143
+  },
+  {
+   "cell": "emit_wasm.rvl::rust",
+   "reason": "extern `num_str` has no @rs body",
+   "issue": 3143
+  },
+  {
+   "cell": "emit_wasm.rvl::typescript",
+   "reason": "extern `num_str` has no @ts body",
+   "issue": 3143
+  },
+  {
+   "cell": "emit_wasm.rvl::wasm",
+   "reason": "the wasm value representation has no Any",
+   "out_of_scope": "#2899 records Any in the value representation as a design question, not a fix"
+  },
+  {
+   "cell": "lexer.rvl::go",
+   "reason": "unknown builtin method 'is_digit'",
+   "issue": 3144
+  },
+  {
+   "cell": "lexer.rvl::java",
+   "reason": "unknown builtin method 'is_digit'",
+   "issue": 3144
+  },
+  {
+   "cell": "lexer.rvl::wasm",
+   "reason": "an untyped empty list literal needs an expected List type",
+   "issue": 3145
+  },
+  {
+   "cell": "lower.rvl::go",
+   "reason": "extern `sc_sha256` has no @go body",
+   "issue": 3143
+  },
+  {
+   "cell": "lower.rvl::java",
+   "reason": "extern `sc_sha256` has no @java body",
+   "issue": 3143
+  },
+  {
+   "cell": "lower.rvl::typescript",
+   "reason": "extern `sc_sha256` has no @ts body",
+   "issue": 3143
+  },
+  {
+   "cell": "lower.rvl::wasm",
+   "reason": "List indexOf is not lowerable",
+   "issue": 3145
+  },
+  {
+   "cell": "parser.rvl::go",
+   "reason": "record literal fields ['e', 'i'] matches no unique record",
+   "issue": 3144
+  },
+  {
+   "cell": "parser.rvl::java",
+   "reason": "record literal with fields ['i', 'e'] is ambiguous",
+   "issue": 3144
+  },
+  {
+   "cell": "parser.rvl::wasm",
+   "reason": "an untyped empty list literal needs an expected List type",
+   "issue": 3145
+  },
+  {
+   "cell": "types.rvl::java",
+   "reason": "a declared function type needs a nominal Java interface per shape",
+   "out_of_scope": "#2899 records function-typed values on Java as a design question, not a fix (docs/function-types.md)"
+  },
+  {
+   "cell": "types.rvl::wasm",
+   "reason": "relational '>=' is lowerable only for Int and Int32",
+   "issue": 3145
+  }
+ ]
+}

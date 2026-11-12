@@ -1,0 +1,340 @@
+{
+ "schema": 1,
+ "digest": "017dc3a11daf7dd0025a88537cee724131b890a6cb112ee6c3d9cc27f3edd212",
+ "tiers": [
+  "python",
+  "typescript",
+  "rust",
+  "java",
+  "wasm",
+  "go"
+ ],
+ "files": [
+  "checker.rvl",
+  "compile.rvl",
+  "emit_go.rvl",
+  "emit_java.rvl",
+  "emit_py.rvl",
+  "emit_rust.rvl",
+  "emit_ts.rvl",
+  "emit_wasm.rvl",
+  "lexer.rvl",
+  "lower.rvl",
+  "parser.rvl",
+  "types.rvl"
+ ],
+ "cells": {
+  "checker.rvl": {
+   "python": {
+    "kind": "ok",
+    "bytes": 371981
+   },
+   "typescript": {
+    "kind": "ok",
+    "bytes": 267980
+   },
+   "rust": {
+    "kind": "ok",
+    "bytes": 318982
+   },
+   "java": {
+    "kind": "refused",
+    "message": "record literal with fields ['name', 'ty'] is ambiguous between Bind, ParamN, RecField"
+   },
+   "wasm": {
+    "kind": "refused",
+    "message": "compat_tt: parameter tt: type 'Map[Str, TySpec]' is not lowerable \u2014 this tier supports Int/Bool/Str/Bytes/List/record/variant/Opt/Result values"
+   },
+   "go": {
+    "kind": "refused",
+    "message": "cannot infer Go struct type for record literal with fields ['name', 'ty'] \u2014 no unique record has exactly those fields"
+   }
+  },
+  "compile.rvl": {
+   "python": {
+    "kind": "ok",
+    "bytes": 3575561
+   },
+   "typescript": {
+    "kind": "refused",
+    "message": "extern `module_path` has no @ts body \u2014 not portable to this backend (available: py)"
+   },
+   "rust": {
+    "kind": "refused",
+    "message": "extern `module_path` has no @rs body \u2014 not portable to this backend (available: py)"
+   },
+   "java": {
+    "kind": "refused",
+    "message": "extern `module_path` has no @java body \u2014 not portable to this backend (available: py)"
+   },
+   "wasm": {
+    "kind": "refused",
+    "message": "extern `json_parse` has no @wasm body \u2014 not portable to this backend (available: go, py, rs, ts)"
+   },
+   "go": {
+    "kind": "refused",
+    "message": "extern `module_path` has no @go body \u2014 not portable to this backend (available: py)"
+   }
+  },
+  "emit_go.rvl": {
+   "python": {
+    "kind": "ok",
+    "bytes": 306177
+   },
+   "typescript": {
+    "kind": "refused",
+    "message": "extern `tab` has no @ts body \u2014 not portable to this backend (available: py)"
+   },
+   "rust": {
+    "kind": "refused",
+    "message": "extern `tab` has no @rs body \u2014 not portable to this backend (available: py)"
+   },
+   "java": {
+    "kind": "refused",
+    "message": "extern `tab` has no @java body \u2014 not portable to this backend (available: py)"
+   },
+   "wasm": {
+    "kind": "refused",
+    "message": "EmitGo: emitter.render param 'ir': type 'Any' is not lowerable \u2014 this tier supports Int/Bool/Str/Bytes/List/record/variant/Opt/Result values"
+   },
+   "go": {
+    "kind": "refused",
+    "message": "extern `tab` has no @go body \u2014 not portable to this backend (available: py)"
+   }
+  },
+  "emit_java.rvl": {
+   "python": {
+    "kind": "ok",
+    "bytes": 182275
+   },
+   "typescript": {
+    "kind": "refused",
+    "message": "extern `json_dumps` has no @ts body \u2014 not portable to this backend (available: py)"
+   },
+   "rust": {
+    "kind": "refused",
+    "message": "extern `json_dumps` has no @rs body \u2014 not portable to this backend (available: py)"
+   },
+   "java": {
+    "kind": "refused",
+    "message": "extern `json_dumps` has no @java body \u2014 not portable to this backend (available: py)"
+   },
+   "wasm": {
+    "kind": "refused",
+    "message": "EmitJava: emitter.render param 'ir': type 'Any' is not lowerable \u2014 this tier supports Int/Bool/Str/Bytes/List/record/variant/Opt/Result values"
+   },
+   "go": {
+    "kind": "refused",
+    "message": "extern `json_dumps` has no @go body \u2014 not portable to this backend (available: py)"
+   }
+  },
+  "emit_py.rvl": {
+   "python": {
+    "kind": "ok",
+    "bytes": 197513
+   },
+   "typescript": {
+    "kind": "refused",
+    "message": "extern `py_repr` has no @ts body \u2014 not portable to this backend (available: py)"
+   },
+   "rust": {
+    "kind": "refused",
+    "message": "extern `py_repr` has no @rs body \u2014 not portable to this backend (available: py)"
+   },
+   "java": {
+    "kind": "refused",
+    "message": "extern `py_repr` has no @java body \u2014 not portable to this backend (available: py)"
+   },
+   "wasm": {
+    "kind": "refused",
+    "message": "EmitPy: emitter.render param 'ir': type 'Any' is not lowerable \u2014 this tier supports Int/Bool/Str/Bytes/List/record/variant/Opt/Result values"
+   },
+   "go": {
+    "kind": "refused",
+    "message": "extern `py_repr` has no @go body \u2014 not portable to this backend (available: py)"
+   }
+  },
+  "emit_rust.rvl": {
+   "python": {
+    "kind": "ok",
+    "bytes": 321924
+   },
+   "typescript": {
+    "kind": "refused",
+    "message": "extern `string_lit` has no @ts body \u2014 not portable to this backend (available: py, rs)"
+   },
+   "rust": {
+    "kind": "ok",
+    "bytes": 417957
+   },
+   "java": {
+    "kind": "refused",
+    "message": "extern `string_lit` has no @java body \u2014 not portable to this backend (available: py, rs)"
+   },
+   "wasm": {
+    "kind": "refused",
+    "message": "EmitRust: emitter.render param 'ir': type 'Any' is not lowerable \u2014 this tier supports Int/Bool/Str/Bytes/List/record/variant/Opt/Result values"
+   },
+   "go": {
+    "kind": "refused",
+    "message": "extern `string_lit` has no @go body \u2014 not portable to this backend (available: py, rs)"
+   }
+  },
+  "emit_ts.rvl": {
+   "python": {
+    "kind": "ok",
+    "bytes": 196465
+   },
+   "typescript": {
+    "kind": "refused",
+    "message": "extern `json_dumps` has no @ts body \u2014 not portable to this backend (available: py)"
+   },
+   "rust": {
+    "kind": "refused",
+    "message": "extern `json_dumps` has no @rs body \u2014 not portable to this backend (available: py)"
+   },
+   "java": {
+    "kind": "refused",
+    "message": "extern `json_dumps` has no @java body \u2014 not portable to this backend (available: py)"
+   },
+   "wasm": {
+    "kind": "refused",
+    "message": "EmitTs: emitter.render param 'ir': type 'Any' is not lowerable \u2014 this tier supports Int/Bool/Str/Bytes/List/record/variant/Opt/Result values"
+   },
+   "go": {
+    "kind": "refused",
+    "message": "extern `json_dumps` has no @go body \u2014 not portable to this backend (available: py)"
+   }
+  },
+  "emit_wasm.rvl": {
+   "python": {
+    "kind": "ok",
+    "bytes": 133956
+   },
+   "typescript": {
+    "kind": "refused",
+    "message": "extern `num_str` has no @ts body \u2014 not portable to this backend (available: py)"
+   },
+   "rust": {
+    "kind": "refused",
+    "message": "extern `num_str` has no @rs body \u2014 not portable to this backend (available: py)"
+   },
+   "java": {
+    "kind": "refused",
+    "message": "extern `num_str` has no @java body \u2014 not portable to this backend (available: py)"
+   },
+   "wasm": {
+    "kind": "refused",
+    "message": "EmitWasm: emitter.render param 'ir': type 'Any' is not lowerable \u2014 this tier supports Int/Bool/Str/Bytes/List/record/variant/Opt/Result values"
+   },
+   "go": {
+    "kind": "refused",
+    "message": "extern `num_str` has no @go body \u2014 not portable to this backend (available: py)"
+   }
+  },
+  "lexer.rvl": {
+   "python": {
+    "kind": "ok",
+    "bytes": 39651
+   },
+   "typescript": {
+    "kind": "ok",
+    "bytes": 34259
+   },
+   "rust": {
+    "kind": "ok",
+    "bytes": 49002
+   },
+   "java": {
+    "kind": "refused",
+    "message": "unknown builtin method 'is_digit'"
+   },
+   "wasm": {
+    "kind": "refused",
+    "message": "an untyped empty list literal needs an expected List type"
+   },
+   "go": {
+    "kind": "refused",
+    "message": "unknown v3 builtin method 'is_digit'"
+   }
+  },
+  "lower.rvl": {
+   "python": {
+    "kind": "ok",
+    "bytes": 2151517
+   },
+   "typescript": {
+    "kind": "refused",
+    "message": "extern `sc_sha256` has no @ts body \u2014 not portable to this backend (available: py, rs)"
+   },
+   "rust": {
+    "kind": "ok",
+    "bytes": 1764283
+   },
+   "java": {
+    "kind": "refused",
+    "message": "extern `sc_sha256` has no @java body \u2014 not portable to this backend (available: py, rs)"
+   },
+   "wasm": {
+    "kind": "refused",
+    "message": "indexOf is not lowerable on this tier yet for List \u2014 the element comparison has no representation here; use a hosted backend"
+   },
+   "go": {
+    "kind": "refused",
+    "message": "extern `sc_sha256` has no @go body \u2014 not portable to this backend (available: py, rs)"
+   }
+  },
+  "parser.rvl": {
+   "python": {
+    "kind": "ok",
+    "bytes": 124716
+   },
+   "typescript": {
+    "kind": "ok",
+    "bytes": 85746
+   },
+   "rust": {
+    "kind": "ok",
+    "bytes": 105522
+   },
+   "java": {
+    "kind": "refused",
+    "message": "record literal with fields ['i', 'e'] is ambiguous between PR, AtExpr"
+   },
+   "wasm": {
+    "kind": "refused",
+    "message": "an untyped empty list literal needs an expected List type"
+   },
+   "go": {
+    "kind": "refused",
+    "message": "cannot infer Go struct type for record literal with fields ['e', 'i'] \u2014 no unique record has exactly those fields"
+   }
+  },
+  "types.rvl": {
+   "python": {
+    "kind": "ok",
+    "bytes": 43825
+   },
+   "typescript": {
+    "kind": "ok",
+    "bytes": 43360
+   },
+   "rust": {
+    "kind": "ok",
+    "bytes": 54102
+   },
+   "java": {
+    "kind": "refused",
+    "message": "a declared function type ((T) -> U) is not lowerable on the Java tier. A Java lambda needs a *nominal* target type, and the JDK's functional interfaces are neither generic over arity nor usable with primitives without boxing: `(Int) -> Int` is `IntUnaryOperator`, `(Int, Str) -> Bool` has no JDK interface at all, and arity 3+ needs a generated one per shape. Generating those interfaces is a coherent design; guessing one is not. Arrows bound to a local `let` and called in the same body still lower \u2014 they are beta-reduced at the call site (see \"arrows\" below) \u2014 so this refusal is only for a function type *written in a declaration*. See docs/function-types.md."
+   },
+   "wasm": {
+    "kind": "refused",
+    "message": "is_upper1: relational operator '>=' is only lowerable for Int/Int32"
+   },
+   "go": {
+    "kind": "ok",
+    "bytes": 41728
+   }
+  }
+ }
+}
