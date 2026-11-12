@@ -335,6 +335,7 @@ def test_the_re_check_is_revl_checks_own_answer():
     assert applied["check"]["canonicalSource"] == direct["canonicalSource"]
 
 
+@needs_cordis
 def test_applying_while_a_draft_is_held_is_the_draft_held_refusal():
     """Finding 2: a check of a candidate while a draft is held is refused as
     `DRAFT_HELD`, and so is applying a repair, whose re-check is that check."""
