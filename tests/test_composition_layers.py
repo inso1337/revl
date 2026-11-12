@@ -1152,7 +1152,7 @@ def _list_project(tmp_path: Path, origins: str, layer: str | None = None) -> Pat
     doc = _project(tmp_path, *(["tune"] if layer else []),
                    **({"tune": layer} if layer else {}))
     (tmp_path / "socket.rvl").write_text(SOCKET)
-    doc.write_text(doc.read_text().replace(
+    doc.write_text(doc.read_text(encoding="utf-8").replace(
         '  row @cache from "cache.rvl" provides cache\n',
         '  row @cache from "socket.rvl" provides cache\n'
         f'    config {{ origins: {origins} }}\n'
@@ -1185,7 +1185,7 @@ def test_a_list_with_a_mistyped_element_does_not_admit(tmp_path):
 
 def test_a_list_on_a_scalar_field_does_not_admit(tmp_path):
     doc = _project(tmp_path)
-    doc.write_text(doc.read_text().replace('url: "sqlite://local"',
+    doc.write_text(doc.read_text(encoding="utf-8").replace('url: "sqlite://local"',
                                            'url: ["sqlite://local"]'))
     with pytest.raises(RevlError) as caught:
         resolve_file(str(doc), str(tmp_path))
