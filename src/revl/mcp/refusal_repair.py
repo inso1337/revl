@@ -179,13 +179,21 @@ def applied(entry: dict) -> dict:
 
 def _fix_of(record: dict) -> dict | None:
     """The verified `fix_code` a record carries, wherever its class puts it: a
-    plain code has it on the record, and a G4 keeps it on the repair entry it
-    verified (issue #2684)."""
+    plain code (T2, A9, REVL) has it on the record, and a G4 keeps it on the
+    `site-undo` repair entry it verified (issue #2684).
+
+    Only those are applyable. The G1/G2/R2 candidates of issue #2759 carry a
+    `fix_code` on their repair entries too, but they are a ranked list for a
+    caller to choose from, not the one repair the refusal names, so they mint
+    no id. A repair entry marked `widens_authority` is never taken: applying
+    one in a single call would enlarge the declared authority unasked."""
     fix = record.get("fix_code")
     if isinstance(fix, dict) and fix.get("edits"):
         return fix
     for repair in record.get("repairs") or []:
         if not isinstance(repair, dict):
+            continue
+        if repair.get("kind") != "site-undo" or repair.get("widens_authority"):
             continue
         fix = repair.get("fix_code")
         if isinstance(fix, dict) and fix.get("edits"):

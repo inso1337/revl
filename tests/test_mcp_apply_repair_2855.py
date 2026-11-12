@@ -366,3 +366,78 @@ def test_the_stored_candidate_is_the_text_the_check_compiled():
     assert applied["repaired"]["source"] == T2_TERSE.replace(
         "if x > 1 { return null }", "if (x > 1) { return None }")
     assert applied["check"]["ok"] is True
+
+
+#: Issue #2759's G1 and G2 candidates carry a `fix_code` on each repair entry.
+#: They are not in the documented applyable set (T2, A9, G4, REVL), so a
+#: refusal that lists them mints no `repairId`.
+_SERVICES_2759 = ("service Clock { fn now() -> Int }\n"
+                  "service UserSvc { fn go() -> Int }\n")
+G1_WHOLE_STATEMENT = (
+    _SERVICES_2759
+    + "component User provides user: UserSvc {\n"
+    "  provide user {\n"
+    "    fn go() -> Int {\n"
+    "      let t = clock.now()\n"
+    "      return 1\n"
+    "    }\n"
+    "  }\n"
+    "}\n"
+)
+G2_CONFLICT = _SERVICES_2759 + (
+    "service Store { fn get(k: Str) -> Str }\n"
+    "component A provides s: Store {\n"
+    '  provide s { fn get(k) = "a" }\n'
+    "}\n"
+    "component B provides s: Store {\n"
+    '  provide s { fn get(k) = "b" }\n'
+    "}\n"
+)
+
+
+@pytest.mark.parametrize("source,code", [(G1_WHOLE_STATEMENT, "G1"),
+                                         (G2_CONFLICT, "G2")])
+def test_a_generated_capability_repair_mints_no_id(source, code):
+    refused = _call("revl_check", {"source": source})
+    assert refused["ok"] is False
+    record = refused["diagnostics"][0]
+    assert record["code"] == code
+    # the engine did list verified candidates, so the guard is what holds
+    assert any((r.get("fix_code") or {}).get("edits")
+               for r in record.get("repairs") or [])
+    assert "repairId" not in refused
+
+
+def test_a_widening_repair_entry_is_never_taken():
+    from revl.mcp import refusal_repair
+
+    edits = [{"range": {"start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 0}},
+              "newText": "x"}]
+    widening = {"code": "G4", "repairs": [
+        {"kind": "site-undo", "widens_authority": True,
+         "fix_code": {"title": "t", "edits": edits}}]}
+    assert refusal_repair._fix_of(widening) is None
+    narrowing = {"code": "G4", "repairs": [
+        {"kind": "site-undo", "fix_code": {"title": "t", "edits": edits}}]}
+    assert refusal_repair._fix_of(narrowing)["edits"] == edits
+    other_kind = {"code": "G2", "repairs": [
+        {"kind": "rename-key", "widens_authority": False,
+         "fix_code": {"title": "t", "edits": edits}}]}
+    assert refusal_repair._fix_of(other_kind) is None
+
+
+def test_an_applyable_refusal_without_a_line_is_still_reported():
+    """A refusal raised with no line (policy and least-authority build some)
+    must not crash the repair attachment: its range falls back to line 0."""
+    from revl.compiler import compile_source
+    from revl.diagnostics import report
+    from revl.errors import RevlError
+
+    with pytest.raises(RevlError) as raised:
+        compile_source(T2_OPT, "<candidate>.rvl")
+    error = (getattr(raised.value, "errors", None) or [raised.value])[0]
+    error.line = None
+    payload = report(error, sources={"<candidate>.rvl": T2_OPT},
+                     verifier=lambda patched, one: [])
+    assert payload["diagnostics"][0]["code"] == "T2"

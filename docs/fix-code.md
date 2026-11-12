@@ -179,13 +179,16 @@ nothing verified, which is different from a record produced without the text
 
 Each check is a full compile, so one `report` call spends at most
 `diagnostics.REPAIR_COMPILE_BUDGET` (8) verification compiles across all its
-records, the G4 `site-undo` check (one compile per record) included. A record
+records, the single-edit checks included: the G4 `site-undo` check and the
+T2, A9 and REVL `fix_code` check (issue #2855) each spend one compile per
+record. A record
 is checked whole or not at all: its candidates are reserved from the budget
 together, narrowing ones checked first, and a record whose candidates do not
 all fit is not checked. That first record closes the budget, so every later
 record is unchecked too, even a smaller one. An unchecked G1/G2/R2 record keeps
 no list, as if the text were absent; an unchecked G4 record keeps its prose
-repairs with no `fix_code`, as when the verifier cannot check the patch.
+repairs with no `fix_code`, as when the verifier cannot check the patch; and an
+unchecked T2, A9 or REVL record gets no `fix_code`, so no `repairId` either.
 
 The authority rule is the safety half. A candidate that enlarges the reach the
 source *declares* is marked `widens_authority: true`, omitted unless the

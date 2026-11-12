@@ -890,8 +890,12 @@ def _attach_repair_fixes(records: list[dict], errors: list[RevlError],
         if record.get("code") in fixgen.APPLYABLE:
             if not budget.reserve(1):
                 continue                 # unverified, so no edit is offered
+            # a refusal raised with no line (policy, least authority) has no
+            # token to tighten onto: the record's clamped line stands
             ranged = {"code": record["code"], "message": record["message"],
-                      "range": _range_for(text, one)}
+                      "range": (_range_for(text, one)
+                                if isinstance(one.line, int)
+                                else diagnostic["range"])}
             fix = fixgen.fix_code(record, text, one.filename,
                                   diagnostic=ranged, verify=verify)
             if fix.get("ok"):
