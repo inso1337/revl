@@ -9,11 +9,14 @@
 // `bigint`s, and the knocks' `seq` and `line` come back as `bigint`s (the
 // emitted `Raw` record's fields).
 //
-// What it pins (the numbered list of the #3357 proposal, 1, 2, 3, 5 and 7):
+// What it pins (the numbered list of the #3357 proposal, 1 to 5 and 7):
 //   1. Opened, Said, Shut arrive in order on one line, `who` the Origin;
 //   2. an Origin that is not listed, two Origins, or none (unless `bare`) is
 //      answered 403 before the upgrade and makes no knock;
 //   3. a message over `most` shuts the line 1009, none of it delivered;
+//   4. at `held` waiting knocks the provider stops reading and drops nothing,
+//      and an upgrade that arrives then is held unanswered (one that hangs up
+//      while held makes no knock and frees its slot);
 //   5. `say` to a line over `limit` unwritten bytes answers false, and a line
 //      that reads still hears;
 //   7. `shut` (the row's teardown) closes open lines 1001 and frees the port.
@@ -43,7 +46,7 @@ afterEach(() => {
   for (const l of made.splice(0)) shut(l)
 })
 
-async function open(over: Partial<Record<'origins' | 'bare' | 'most' | 'limit' | 'port',
+async function open(over: Partial<Record<'origins' | 'bare' | 'most' | 'held' | 'limit' | 'port',
   unknown>> = {}): Promise<Listener> {
   const l = listen({
     address: '127.0.0.1', port: 0n, origins: [ORIGIN], bare: false,
@@ -161,7 +164,62 @@ describe('the origin rule', () => {
   })
 })
 
+/** A raw upgrade request whose answer is not waited for. */
+function asking(port: number): Promise<net.Socket> {
+  return new Promise((resolve) => {
+    const sock = net.connect(port, '127.0.0.1', () => {
+      sock.write(`GET /wire HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\n`
+        + 'Upgrade: websocket\r\nConnection: Upgrade\r\n'
+        + `Sec-WebSocket-Key: ${crypto.randomBytes(16).toString('base64')}\r\n`
+        + `Sec-WebSocket-Version: 13\r\nOrigin: ${ORIGIN}\r\n\r\n`)
+      resolve(sock)
+    })
+    sock.on('error', () => undefined)
+  })
+}
+
 describe('the limits', () => {
+  it('stops reading at `held` and drops nothing (4)', async () => {
+    const held = 4
+    const l = await open({ held: BigInt(held) })
+    const c = await client(l.port)
+    for (let i = 0; i < held + 5; i++) c.ws.send(`m${i}`)
+    await sleep(500)
+    const first = take(l, 100n)
+    expect(first.length).toBe(held)            // Opened plus held - 1 messages
+    const rest = await until(l, held + 6 - first.length)
+    expect([...first, ...rest].filter((k) => k.kind === 'said').map((k) => k.text))
+      .toEqual(Array.from({ length: held + 5 }, (_, i) => `m${i}`))
+  })
+
+  it('holds an upgrade while the queue is full; one that leaves makes no knock',
+    async () => {
+      const l = await open({ held: 1n })
+      await client(l.port)                     // its Opened fills the queue
+      await sleep(100)
+      const gone = await asking(l.port)        // held, then hangs up
+      const reset = await asking(l.port)       // held, then resets
+      const waiting = await asking(l.port)     // held, and still there
+      let answer = ''
+      waiting.on('data', (d: Buffer) => { answer += d.toString('latin1') })
+      await sleep(200)
+      expect(l.holding).toBe(3)
+      expect(answer).toBe('')                  // no 101 while the queue is full
+      gone.destroy()
+      reset.resetAndDestroy()
+      await sleep(300)
+      expect(l.holding).toBe(1)                // the two that left free their slots
+
+      const knocks = await until(l, 2)         // room: the one still there is answered
+      expect(knocks.map((k) => `${k.line}:${k.kind}`)).toEqual(['1:opened', '2:opened'])
+      expect(answer.startsWith('HTTP/1.1 101 ')).toBe(true)
+      await sleep(200)
+      expect(take(l, 100n)).toEqual([])
+      expect(say(l, 3n, 'nobody')).toBe(false)
+      expect(l.holding).toBe(0)
+      waiting.destroy()
+    })
+
   it('shuts a message over `most` with 1009, none of it delivered (3)', async () => {
     const l = await open({ most: 16n })
     const c = await client(l.port)

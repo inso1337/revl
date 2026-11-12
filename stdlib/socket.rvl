@@ -39,6 +39,12 @@
 //                  `TooLarge` (1009) and none of it is delivered.
 //   held           while `held` knocks wait for `take`, the provider stops
 //                  reading every line (socket backpressure); nothing is dropped.
+//                  A new connection then gets no answer and no knock until
+//                  `take` makes room (py leaves it unaccepted; ts accepts it and
+//                  holds the upgrade unanswered). One that hangs up meanwhile
+//                  makes no knock.
+//   connections    at most 1024 are held at once. On py more wait in the listen
+//                  backlog; on ts node closes them.
 //   limit          `say` to a line with more than `limit` unwritten bytes is
 //                  not queued and answers false; the line stays open. A ping
 //                  over `limit` shuts the line `TooSlow` (1008).

@@ -43,7 +43,9 @@
 //     waiting in the listen backlog.
 //   * while `held` knocks wait, an upgrade is accepted but held unanswered (no
 //     101, no knock) until `take` makes room, as the py engine leaves it
-//     unaccepted; every open line stops being read, as on py.
+//     unaccepted; every open line stops being read, as on py. A held client
+//     that hangs up leaves with no knock; one that sends over `MAX_HEAD` bytes
+//     before its 101 is dropped.
 
 import type { IncomingMessage, Server } from 'node:http'
 import type { Socket } from 'node:net'
@@ -197,6 +199,9 @@ interface Pending {
   req: IncomingMessage
   sock: Socket
   head: Buffer
+  // the listeners that watch it while it is held, removed when it is answered
+  onData: (data: Buffer) => void
+  onGone: () => void
 }
 
 /** A listening socket, its lines and the knocks waiting for `take`. */
@@ -243,8 +248,7 @@ export class Listener {
       if (this.stopping) {
         sock.destroy()
       } else if (this.full()) {
-        sock.pause()
-        this.pending.push({ req, sock, head })
+        this.hold(req, sock, head)
       } else {
         this.upgrade(req, sock, head)
       }
@@ -268,6 +272,11 @@ export class Listener {
     // become an unhandled rejection
     this.ready.catch(() => undefined)
     this.server.listen({ host: address, port, backlog: 128 })
+  }
+
+  /** How many upgrades are held unanswered while the queue is full. */
+  get holding(): number {
+    return this.pending.length
   }
 
   // ---------------------------------------------------------- the program's side
@@ -337,7 +346,10 @@ export class Listener {
   private resume(): void {
     while (this.pending.length > 0 && !this.full()) {
       const p = this.pending.shift() as Pending
-      p.sock.resume()
+      p.sock.removeListener('data', p.onData)
+      p.sock.removeListener('end', p.onGone)
+      p.sock.removeListener('close', p.onGone)
+      if (p.sock.destroyed) continue
       this.upgrade(p.req, p.sock, p.head)
     }
     if (this.full()) return
@@ -348,6 +360,31 @@ export class Listener {
       }
       if (line.phase === 'open' && !this.full()) line.sock.resume()
     }
+  }
+
+  /** Hold an upgrade unanswered until `take` makes room. It is still read, so
+   * that a client that hangs up (or resets) while held is noticed: it leaves the
+   * queue with no knock, as the py engine drops a head-phase connection at EOF.
+   * What it sends while held is kept for its line, up to `MAX_HEAD` bytes; a
+   * client that sends more before its 101 is dropped. */
+  private hold(req: IncomingMessage, sock: Socket, head: Buffer): void {
+    const p: Pending = {
+      req, sock, head,
+      onData: (data: Buffer) => {
+        p.head = p.head.length === 0 ? data : Buffer.concat([p.head, data])
+        if (p.head.length > MAX_HEAD) p.onGone()
+      },
+      onGone: () => {
+        const at = this.pending.indexOf(p)
+        if (at >= 0) this.pending.splice(at, 1)
+        sock.destroy()
+      },
+    }
+    sock.on('error', () => undefined)   // a reset while held is not a fault
+    sock.on('data', p.onData)
+    sock.on('end', p.onGone)
+    sock.on('close', p.onGone)
+    this.pending.push(p)
   }
 
   /** Queue the last bytes of a line and give it `DRAIN_MS` to finish, written
