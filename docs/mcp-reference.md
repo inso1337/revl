@@ -669,9 +669,18 @@ store.
   so the text is not re-sent and the edit is not re-derived.
 - Output: `repaired` (the candidate in the shape it was sent: `source`, or
   `files` with the patched file as a `modules` overlay), `applied` (the code,
-  title, target and verified edits), and `check` (the re-check through the same
-  authoring door the check used): a passing candidate, or the next refusal,
+  title, target and verified edits), and `check`: the answer `revl_check`
+  itself gives the repaired candidate (the same authoring door, the same
+  `canonicalSource` report), so a passing candidate, or the next refusal,
   which mints its own `repairId` when that class is mechanical too.
+- The stored candidate is the text the check compiled, not the text as sent:
+  when `revl_check` completed terse punctuation (`canonicalSource.completed`,
+  for instance the parentheses of an `if`), `repaired` carries that completion
+  as well as the repair, because the verified edits are ranges into the
+  compiled text.
+- While a draft is held, applying is refused as `DRAFT_HELD`, exactly as a
+  `revl_check` of the repaired candidate would be: it is not the composition
+  the loop is filling.
 - Opt-in and read-only: applying installs nothing and writes nothing. The
   repaired candidate enters the composition through `revl_swap`/`revl_load` as
   usual.

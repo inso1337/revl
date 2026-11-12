@@ -4482,12 +4482,21 @@ def _tool_apply_repair(arguments: dict) -> dict:
     Opt-in and read-only. The call names the `repairId` a refusing
     `revl_check` returned; the verified edit that refusal carried (the fixgen
     engine, issue #2684) is applied to the very text the check compiled, and
-    the patched candidate is re-checked through the same authoring door. The
-    answer names what changed and what still fails: the repaired candidate in
-    the shape it was sent, the applied edit, and the new check outcome, whose
-    own refusal carries a `repairId` when that class is mechanical too.
+    the patched candidate is re-checked by `revl_check`'s own handler, so the
+    re-check is that verb's answer to the repaired candidate: the same
+    authoring door, the same `DRAFT_HELD` guard and the same canonical report.
+    The answer names what changed and what still fails: the repaired candidate
+    in the shape it was sent, the applied edit, and the new check outcome,
+    whose own refusal carries a `repairId` when that class is mechanical too.
+    While a draft is held the answer IS the check's `DRAFT_HELD` refusal: the
+    repaired candidate is not the composition the loop is filling.
     Nothing is installed; `revl_swap`/`revl_load` still decide whether the
-    candidate enters the composition."""
+    candidate enters the composition.
+
+    The stored candidate is the text the check COMPILED, so a terse candidate
+    comes back with the punctuation `revl_check` completed (its
+    `canonicalSource.completed`) as well as the repair: the edits are ranges
+    into that text, not into the text as sent."""
     repair_id = arguments.get(_refusal_repair.REPAIR_KEY)
     if repair_id is None:
         return _session_error(
@@ -4505,7 +4514,9 @@ def _tool_apply_repair(arguments: dict) -> dict:
             fix="re-run the check that refused to mint a repair for the "
                 "current unit of work")
     candidate = _refusal_repair.patched_candidate(entry)
-    check, _ir = _check_as_sent(candidate)
+    check = _tool_check(candidate)
+    if check.get("code") == "DRAFT_HELD":
+        return check
     return {"ok": True,
             "applied": _refusal_repair.applied(entry),
             "repaired": candidate,

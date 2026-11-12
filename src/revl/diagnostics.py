@@ -782,14 +782,19 @@ def _attach_repair_fixes(records: list[dict], errors: list[RevlError],
     refusal is dropped, and a record with no generator is listed without an
     edit rather than given one the engine could not verify.
 
-    The ranged diagnostic the G4 generator reads is synthesized from the
-    record; every other code goes through `fix_code`'s own re-computation of
-    the ranged diagnostic, so the engine sees the token the refusal pointed
-    at. `verify` carries the caller's authoring profile and in-memory modules
-    into the patched compile."""
+    The ranged diagnostic every generator reads is built from the refusal the
+    caller's compile raised, never by compiling the text again: the G4 one
+    from the record's line, every other code from the record and the token
+    its message names on that line (the LSP range rule, read from the text,
+    not from a second compile). So the candidate is compiled only through the
+    caller's door, and the diagnostic is the refusal that door reported even
+    when the text `use`s a module that exists only as an overlay. `verify`
+    carries the caller's authoring profile and in-memory modules into the
+    patched compile."""
     if not sources or verifier is None:
         return
     from .lsp import fixgen  # noqa: PLC0415 - analysis imports this module
+    from .lsp.analysis import _range_for  # noqa: PLC0415 - same cycle
 
     for record, one in zip(records, errors):
         text = _compiled_text(one, sources)
@@ -819,7 +824,10 @@ def _attach_repair_fixes(records: list[dict], errors: list[RevlError],
             continue
         if record.get("code") not in fixgen.APPLYABLE:
             continue
-        fix = fixgen.fix_code(record, text, one.filename, verify=verify)
+        diagnostic = {"code": record["code"], "message": record["message"],
+                      "range": _range_for(text, one)}
+        fix = fixgen.fix_code(record, text, one.filename,
+                              diagnostic=diagnostic, verify=verify)
         if fix.get("ok"):
             record["fix_code"] = {"title": fix["title"],
                                   "edits": fix["edits"]}

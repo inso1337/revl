@@ -12,6 +12,7 @@ nothing. A repair id the session never minted is `UNKNOWN_REPAIR`; one minted
 before the unit of work moved is `STALE_REPAIR`.
 """
 
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -21,6 +22,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl.mcp.server import handle  # noqa: E402
+
+needs_cordis = pytest.mark.skipif(
+    importlib.util.find_spec("cordis") is None,
+    reason="a real `revl_load` boots the composition, which needs cordis-py "
+           "(backends/python/.venv)")
+
+#: A composition a real `revl_load` boots, to move the unit of work.
+LOADABLE = "fn ok() -> Int { return 1 }\n"
 
 #: T2, a type error: `null` has no type, and in an optional context the one
 #: mechanical rewrite is `None`. The fixgen engine verifies it.
@@ -183,13 +192,15 @@ def test_an_unknown_repair_id_is_a_named_refusal():
     assert refused["diagnostics"][0]["category"] == "usage"
 
 
-def test_a_stale_repair_id_is_a_named_refusal(_fresh_server_session):
-    session = _fresh_server_session.SESSION
+@needs_cordis
+def test_a_stale_repair_id_is_a_named_refusal():
     refused = _call("revl_check", {"source": T2_OPT})
     repair_id = refused["repairId"]
     # a load, swap, rollback or undo moves the unit of work; the id was minted
-    # in the unit before it, so it no longer names a repair of this one
-    session._generation += 1
+    # in the unit before it, so it no longer names a repair of this one. A
+    # real load, so the test covers the session wiring and not only `resolve`
+    loaded = _call("revl_load", {"source": LOADABLE})
+    assert loaded["ok"] is True, loaded
     stale = _call("revl_apply_repair", {"repairId": repair_id})
     assert stale["ok"] is False
     assert stale["code"] == "STALE_REPAIR"
@@ -208,3 +219,150 @@ def test_applying_installs_nothing_and_the_id_is_reusable():
     # candidate, it does not load or draft one
     state = _call("revl_state", {})
     assert state["loaded"] is False
+
+
+#: A T2 in an inline candidate that `use`s a module present only as an
+#: overlay. A compile without the overlays stops at the `use` line, so the
+#: repair is found only from the refusal the authoring compile raised.
+OVERLAY_MODULE = "pub fn helper(u: Str) -> Int { return 1 }\n"
+T2_USES_OVERLAY = (
+    'use "./t2_overlay_2855.rvl" { helper }\n'
+    "fn first() -> Opt[Int] {\n"
+    "  return null\n"
+    "}\n"
+)
+
+#: The same refusal inside an edited `files` buffer: the disk copy is clean
+#: pre-edit text, the buffer rides as a `modules` overlay over it and itself
+#: `use`s an overlay-only sibling.
+T2_FILES_DISK = "fn first() -> Opt[Int] {\n  return None\n}\n"
+
+
+def test_a_refusing_check_never_compiles_outside_the_authoring_door(
+        monkeypatch):
+    """Review of #3248, finding 1: building the repair must not recompile the
+    candidate through the editor's unprofiled `compile_source`. Every compile
+    a refusing `revl_check` runs goes through the authoring profile."""
+    from revl.lsp import analysis
+    from revl.mcp import server as server_mod
+
+    server_mod.set_authoring_trust(host_code=False)
+    unprofiled = []
+    real = analysis.compile_source
+
+    def spy(*args, **kwargs):
+        unprofiled.append((args[1] if len(args) > 1 else None,
+                           kwargs.get("profile")))
+        return real(*args, **kwargs)
+
+    real_server = server_mod.compile_source
+    profiles = []
+
+    def server_spy(*args, **kwargs):
+        profiles.append(kwargs.get("profile"))
+        return real_server(*args, **kwargs)
+
+    monkeypatch.setattr(analysis, "compile_source", spy)
+    monkeypatch.setattr(server_mod, "compile_source", server_spy)
+    for source in (T2_OPT, A9_SOLE):
+        refused = _call("revl_check", {"source": source})
+        assert refused["ok"] is False
+        assert refused["repairId"]
+    assert unprofiled == []
+    # the check, then the verification of each repair, all profiled
+    assert len(profiles) >= 4
+    assert all(profile is not None for profile in profiles)
+
+
+def test_a_repair_beside_an_overlay_module_is_minted_and_applies():
+    """Finding 1: the ranged diagnostic is the refusal the authoring compile
+    raised, so an overlay-only `use` target does not hide the repair."""
+    modules = {"t2_overlay_2855.rvl": OVERLAY_MODULE}
+    refused = _call("revl_check", {"source": T2_USES_OVERLAY,
+                                   "modules": modules})
+    assert refused["ok"] is False
+    assert refused["diagnostics"][0]["code"] == "T2"
+    assert refused["repairId"]
+    applied = _call("revl_apply_repair", {"repairId": refused["repairId"]})
+    assert applied["ok"] is True
+    assert applied["repaired"]["modules"] == modules
+    assert "null" not in applied["repaired"]["source"]
+    assert applied["check"]["ok"] is True
+
+
+def test_a_repair_in_a_files_overlay_module_applies_to_the_buffer(tmp_path):
+    """Finding 1: the refusal sits in an edited `files` buffer that uses an
+    overlay-only sibling. The repair is spelled from that buffer and the
+    repaired candidate carries the patched buffer as its overlay."""
+    from revl.mcp import server as server_mod
+
+    path = tmp_path / "cand_2855.rvl"
+    path.write_text(T2_FILES_DISK)
+    sibling = str(tmp_path / "t2_overlay_2855.rvl")
+    server_mod.set_authoring_trust(host_code=False, roots=(str(tmp_path),))
+    modules = {str(path): T2_USES_OVERLAY, sibling: OVERLAY_MODULE}
+    refused = _call("revl_check", {"files": [str(path)], "modules": modules})
+    assert refused["ok"] is False
+    assert refused["diagnostics"][0]["code"] == "T2"
+    assert refused["repairId"]
+    applied = _call("revl_apply_repair", {"repairId": refused["repairId"]})
+    assert applied["ok"] is True
+    assert applied["repaired"]["files"] == [str(path)]
+    buffer = applied["repaired"]["modules"][str(path)]
+    assert "null" not in buffer and "return None" in buffer
+    assert applied["repaired"]["modules"][sibling] == OVERLAY_MODULE
+    assert applied["check"]["ok"] is True
+
+
+
+#: A terse candidate: an `if` without parentheses, which `revl_check`
+#: completes before it compiles, and a T2 `null` in an optional context.
+T2_TERSE = (
+    "fn first(x: Int) -> Opt[Int] {\n"
+    "  if x > 1 { return null }\n"
+    "  return Some(x)\n"
+    "}\n"
+)
+
+
+def test_the_re_check_is_revl_checks_own_answer():
+    """Review of #3248, finding 2: the re-check goes through `revl_check`'s
+    handler, so it carries the same canonical report a direct check does."""
+    refused = _call("revl_check", {"source": T2_OPT})
+    applied = _call("revl_apply_repair", {"repairId": refused["repairId"]})
+    direct = _call("revl_check", {"source": applied["repaired"]["source"]})
+    assert applied["check"]["ok"] is True
+    assert applied["check"]["canonicalSource"] == direct["canonicalSource"]
+
+
+def test_applying_while_a_draft_is_held_is_the_draft_held_refusal():
+    """Finding 2: a check of a candidate while a draft is held is refused as
+    `DRAFT_HELD`, and so is applying a repair, whose re-check is that check."""
+    from revl.mcp import server as server_mod
+
+    refused = _call("revl_check", {"source": T2_OPT})
+    scaffold = _call("revl_scaffold", {"service": "Greeter", "effect": False,
+                                       "methods": ["greet() -> Str"]})
+    try:
+        held = _call("revl_load", {"source": scaffold["source"]})
+        assert held["ok"] is True and held["draft"] is True, held
+        applied = _call("revl_apply_repair",
+                        {"repairId": refused["repairId"]})
+        assert applied["ok"] is False
+        assert applied["code"] == "DRAFT_HELD"
+    finally:
+        server_mod.SESSION.pending_draft = None
+        server_mod.SESSION.draft = None
+
+
+def test_the_stored_candidate_is_the_text_the_check_compiled():
+    """Finding 3, documented in docs/mcp-reference.md: the repair's ranges are
+    into the text the check compiled, so a terse candidate comes back with the
+    punctuation the check completed as well as the repair."""
+    refused = _call("revl_check", {"source": T2_TERSE})
+    assert refused["ok"] is False
+    assert refused["diagnostics"][0]["code"] == "T2"
+    applied = _call("revl_apply_repair", {"repairId": refused["repairId"]})
+    assert applied["repaired"]["source"] == T2_TERSE.replace(
+        "if x > 1 { return null }", "if (x > 1) { return None }")
+    assert applied["check"]["ok"] is True

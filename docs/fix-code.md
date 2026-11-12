@@ -192,9 +192,11 @@ same engine, and the refusal also returns `repairId`, a session-scoped name for
 that edit. `revl_apply_repair {"repairId": ...}` applies it to the very text
 the check compiled and returns the repaired candidate with its re-check, so a
 client turn is not spent reconstructing the edit or re-sending the text. It is
-explicit and read-only: the candidate comes back as `repaired`, the re-check as
-`check` (a pass, or the next refusal, which mints its own id when that class is
-mechanical), and nothing is installed. An id the session never minted is
+explicit and read-only: the candidate comes back as `repaired` (the text the
+check compiled, so with any terse punctuation the check completed), the
+re-check as `check` (`revl_check`'s own answer to it: a pass, or the next
+refusal, which mints its own id when that class is mechanical), and nothing is
+installed. An id the session never minted is
 `UNKNOWN_REPAIR`; one minted before a load, swap, rollback or undo moved the
 unit of work is `STALE_REPAIR`. See
 [mcp-reference.md](mcp-reference.md#revl_apply_repair).
