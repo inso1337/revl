@@ -67,6 +67,7 @@ import threading
 import time
 from pathlib import Path
 
+from . import _childproc
 from ._paths import backends_root, stdlib_root, venv_python
 from .activation import local_prereqs
 from .attest import canonical_hash
@@ -170,7 +171,7 @@ def generate_seam_certs(out_dir: Path, identities, hosts=("127.0.0.1", "localhos
     ca_key, ca_crt = out_dir / "seam_ca.key", out_dir / "seam_ca.crt"
 
     def _openssl(args: list[str]) -> None:
-        result = subprocess.run(["openssl", *args], capture_output=True, text=True)
+        result = _childproc.run(["openssl", *args], capture_output=True)
         if result.returncode:
             raise RuntimeError(f"openssl {args[0]} failed:\n{result.stderr.strip()}")
 
@@ -3583,8 +3584,8 @@ def _emit_ts_module(ir: dict, tmp: Path) -> str:
     gen.mkdir(exist_ok=True)
     ir_json = tmp / "ir.json"
     ir_json.write_text(json.dumps(ts_safe_ir(ir)), encoding="utf-8")
-    result = subprocess.run([sys.executable, str(_TS_DIR / "emit.py"), str(ir_json)],
-                            capture_output=True, text=True)
+    result = _childproc.run([sys.executable, str(_TS_DIR / "emit.py"), str(ir_json)],
+                            capture_output=True)
     if result.returncode != 0:
         raise RuntimeError(f"TS emit failed:\n{result.stderr.strip()}")
     module = gen / f"mod_{tmp.name}.ts"
@@ -3617,16 +3618,16 @@ def _build_java(ir: dict, tmp: Path) -> str:
     # accept/dispatch seams and idle watcher consult. Compiled alongside the
     # runner (it is pure JDK, no cordis4j).
     estop = str(_JAVA_DIR / "placement" / "Estop.java")
-    compile_runner = subprocess.run(
+    compile_runner = _childproc.run(
         ["javac", "--release", "17", "-d", str(out), *stubs, estop,
          str(_JAVA_DIR / "placement" / "PlacementRunner.java")],
-        capture_output=True, text=True,
+        capture_output=True,
     )
     if compile_runner.returncode:
         raise RuntimeError(f"javac (runner) failed:\n{compile_runner.stderr.strip()}")
-    compile_components = subprocess.run(
+    compile_components = _childproc.run(
         ["javac", "--release", "17", "-cp", str(out), "-d", str(out), str(gen / "Components.java")],
-        capture_output=True, text=True,
+        capture_output=True,
     )
     if compile_components.returncode:
         raise RuntimeError(f"javac (components) failed:\n{compile_components.stderr.strip()}")
@@ -3745,9 +3746,9 @@ def rust_runner_lock_manifest() -> Path:
 def rust_generate_lockfile(manifest: Path, *, offline: bool) -> "subprocess.CompletedProcess[str]":
     """Run `cargo generate-lockfile` on `manifest`: the resolver only, no build."""
     flags = ["--offline"] if offline else []
-    return subprocess.run(["cargo", "generate-lockfile", *flags,
+    return _childproc.run(["cargo", "generate-lockfile", *flags,
                            "--manifest-path", str(manifest)],
-                          capture_output=True, text=True)
+                          capture_output=True)
 
 
 def _rust_runner_lock() -> bytes:
@@ -3817,15 +3818,15 @@ def _build_rust(ir: dict, tmp: Path) -> str:
     reuse it. `--locked` holds every key to the one resolved Cargo.lock."""
     ir_json = tmp / "rust_ir.json"
     ir_json.write_text(json.dumps(ir), encoding="utf-8")
-    emitted = subprocess.run([sys.executable, str(_BACKENDS_DIR / "rust" / "emit.py"), str(ir_json)],
-                             capture_output=True, text=True)
+    emitted = _childproc.run([sys.executable, str(_BACKENDS_DIR / "rust" / "emit.py"), str(ir_json)],
+                             capture_output=True)
     if emitted.returncode:
         raise RuntimeError(f"rust emit failed:\n{emitted.stderr.strip()}")
     target_dir = _rust_runner_target_dir()
     crate, binary = _stage_rust_runner(emitted.stdout, target_dir)
-    build = subprocess.run(["cargo", "build", "--locked", "--manifest-path", str(crate / "Cargo.toml"),
+    build = _childproc.run(["cargo", "build", "--locked", "--manifest-path", str(crate / "Cargo.toml"),
                             "--target-dir", str(target_dir)],
-                           capture_output=True, text=True)
+                           capture_output=True)
     if build.returncode:
         raise RuntimeError(f"cargo build (rust runner) failed:\n{build.stderr.strip()}")
     _prune_staged(crate.parent, crate.name, _rust_key_artifacts(target_dir))
@@ -3878,7 +3879,7 @@ def _build_go(ir: dict, tmp: Path) -> str:
     module_src, bridge_src = source.split("\f", 1)
     files = _go_runner_sources()
     # the toolchain is a build input too: a go upgrade gets a new key
-    version = subprocess.run(["go", "version"], capture_output=True, text=True)
+    version = _childproc.run(["go", "version"], capture_output=True)
     files["emitted/gen.go"] = module_src.encode("utf-8")
     files["emitted/bridge_gen.go"] = bridge_src.encode("utf-8")
     key = _content_key({**files, "\0go version": version.stdout.encode("utf-8")})
@@ -3890,8 +3891,8 @@ def _build_go(ir: dict, tmp: Path) -> str:
         fd, part = tempfile.mkstemp(dir=stage, prefix=f".{binary.name}.", suffix=".part")
         os.close(fd)
         try:
-            build = subprocess.run(["go", "build", "-o", part, "."],
-                                   cwd=str(stage / "src"), capture_output=True, text=True)
+            build = _childproc.run(["go", "build", "-o", part, "."],
+                                   cwd=str(stage / "src"), capture_output=True)
             if build.returncode:
                 raise RuntimeError(f"go build (go runner) failed:\n{build.stderr.strip()}")
             os.replace(part, binary)
@@ -3911,7 +3912,7 @@ def _find_jdk21() -> str | None:
             return candidate
     java = shutil.which("java")
     if java:
-        version = subprocess.run([java, "-version"], capture_output=True, text=True).stderr
+        version = _childproc.run([java, "-version"], capture_output=True).stderr
         if 'version "21' in version or "version 21" in version:
             return str(Path(java).resolve().parent)
     return None
@@ -3941,11 +3942,11 @@ def _build_java_real(ir: dict, tmp: Path, jdk_bin: str, cordis_classes: str) -> 
     except refusals(emit_module) as refusal:
         raise RuntimeError(f"java emit failed:\n{refusal}") from refusal
     (gen / "Components.java").write_text(components, encoding="utf-8")
-    compile_result = subprocess.run(
+    compile_result = _childproc.run(
         [str(Path(jdk_bin) / "javac"), "--release", "21", "-cp", cordis_classes, "-d", str(out),
          str(_JAVA_DIR / "placement" / "Estop.java"),
          str(_JAVA_DIR / "placement" / "RealPlacementRunner.java"), str(gen / "Components.java")],
-        capture_output=True, text=True,
+        capture_output=True,
     )
     if compile_result.returncode:
         raise RuntimeError(f"javac (real cordis4j) failed:\n{compile_result.stderr.strip()}")
@@ -5544,9 +5545,9 @@ def run_placement(files, placement_path: str, once: bool = False,
             # the boundary the driver established and the canary confirmed above.
             cmd, proc_env = sandbox_drivers[pname].wrap(
                 pname, cmd, proc_env, sandbox_achieved[pname])
-        proc = subprocess.Popen(
+        proc = _childproc.popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            env=proc_env, text=True, errors="replace",
+            env=proc_env,
         )
         children[pname] = (proc, stop_mode)
         thread = threading.Thread(target=pump, args=(pname, proc), daemon=True)

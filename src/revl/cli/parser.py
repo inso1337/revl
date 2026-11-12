@@ -1492,6 +1492,26 @@ def build_parser() -> argparse.ArgumentParser:
                                 "calls that verb")
     _add_mcp_http_arguments(mcp_serve)
     _add_profile_settle_argument(mcp_serve)
+    # issue #2990: the server's own attestation. Opt-in: no key, no record, and
+    # the historical trust-by-address mode is unchanged for a client with no pin.
+    mcp_serve.add_argument("--attestation-key", default=None, metavar="PATH",
+                           help="sign this server's identity and tool manifest "
+                                "with the private key in PATH (a revl peer "
+                                "identity file), so a client that pinned the "
+                                "public half can verify who answered and which "
+                                "tool list it serves")
+    mcp_serve.add_argument("--attestation-server-id",
+                           default="revl-mcp-serve", metavar="ID",
+                           help="the server id the attestation names (default: "
+                                "revl-mcp-serve)")
+    mcp_serve.add_argument("--attestation-ttl", type=float, default=3600.0,
+                           metavar="SECONDS",
+                           help="how long one attestation is valid (default: "
+                                "3600); an expired record is refused")
+    mcp_serve.add_argument("--attestation-pin-out", default=None, metavar="PATH",
+                           help="write the public pin for this server's current "
+                                "tool manifest to PATH, for `revl mcp proxy "
+                                "--attestation-pin`")
     mcp_schema = mcp_sub.add_parser("schema",
                                     help="project provided services to MCP tool definitions")
     mcp_schema.add_argument("files", nargs="+")
@@ -1537,6 +1557,14 @@ def build_parser() -> argparse.ArgumentParser:
                            metavar="SECONDS",
                            help="how long to wait for one upstream answer "
                                 "(default: 120)")
+    mcp_proxy.add_argument("--attestation-pin", default=None, metavar="PATH",
+                           help="pin the upstream's identity and tool manifest "
+                                "to these signed digests (issue #2990): the "
+                                "proxy refuses an upstream whose attestation "
+                                "does not verify under the pinned key, and a "
+                                "tool that changed after the pin, by name. "
+                                "Without a pin the upstream is trusted by "
+                                "address, as before")
     mcp_proxy.add_argument("--wal", default=None, metavar="PATH",
                            help="the session write-ahead log (default: the "
                                 "per-user state directory)")

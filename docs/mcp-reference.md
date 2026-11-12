@@ -356,6 +356,7 @@ answering compiler's identity beside it. Under `revl mcp proxy` the `initialize`
 | `revl_escalate` | no | no | `hash` |
 | `revl_override` | no | yes | `hash`, `reason` |
 | `revl_quorum` | yes | no | `hash` |
+| `revl_approvals` | yes | no | `action` |
 | `revl_distillation_offers` | yes | no | - |
 | `revl_apply_distillation` | no | no | `offerId` |
 | `revl_revoke_distillation` | no | no | `rule` |
@@ -1811,11 +1812,19 @@ gate a swap runs, so a target the current checker rejects is refused
 (`ok:false`, with the diagnostic) and the running composition is untouched. The
 dossier rides along: what unloads, what state drops, and the interim boundary
 crossings that no undo can un-emit ([generation-history.md](generation-history.md)).
-An undo starts the target cold and does not run a `handoff` in reverse, so every
-running component holding live state is listed in `dossier.stateDropped.components`
-with a `note` (issue #2346). A forward `revl_change` with `replace` that re-applies
-the earlier source keeps the state a declared `handoff` (or a template's live
-instances) carries; any other component starts cold either way.
+A provider's live state is carried back across a `handoff` that both the
+generation being left and the one being restored declare on the same key, when
+the restored shape accepts the running state in that direction (issue #3293):
+those components are listed in `dossier.stateDropped.carried`, and the result
+carries the same `handoff` report a forward swap does. Everything else still
+starts cold, and is listed in `dossier.stateDropped.components` with a `note`
+(issue #2346) - a component with no such hand-off, a shape that cannot accept
+the state in the restore direction, or a template's live instance (the undo
+keeps the instance layer at `respawn`). A refused undo reports the plan's
+`components` and `carried` but omits the note, because nothing ran. A
+forward `revl_change` with `replace` that re-applies the earlier source keeps
+the state a declared `handoff` (or a template's live instances) carries; any
+other component starts cold either way.
 The answer carries the `"disk": {"inSync", "stale"}` block (issue #2037): a
 revert of a change that had been exported leaves disk holding the retracted
 change, so `stale` names it and a `note` points at `revl_export`; a revert of a
@@ -2058,6 +2067,50 @@ is refused rather than reported as fact.
 Read-only and ungated: it decides nothing and mints nothing.
 
 - Inputs: `hash` (required); `verify`.
+
+### `revl_approvals`
+
+The approval query surface over the LIVE session (issue #2991): every
+`class-(c)` ticket the session issued, what one of them would let through, and
+how its decisions have gone. Three actions:
+
+- `list`: one row per ticket - its effect, candidate-hash binding, asking round,
+  raisers, state (`pending`, `granted`, `consumed`, `expired`, `revoked`,
+  `refused`, `satisfied`, `denied`, `escalated`, `closed`), the counts by state,
+  and the honest absence of a pending single-party question's age/expiry (the
+  table records the asking round, not a timestamp, and a pending question has no
+  ttl of its own; the policy ttl bounds the approval a yes mints). `pending: true`
+  keeps only the questions still waiting for an answer.
+- `show`: one ticket by `hash` - the full ticket body, the policy rules that
+  answer for it, the binding hashes, the decision graph, the grants minted for
+  it and the durable `approval-consumed`/`approval-emission` provenance once a
+  yes was spent, and the deterministic next actions. `diff: true` adds the blast
+  radius: each crossing with its inverse classification (one-way emission with
+  no checked inverse, compensated emission, deferred, witnessed, or a
+  first-class value widening), the external-effect count, secret flows (taint
+  origins, untrusted arguments, resource scopes, caller-value durability), and
+  the capability widenings.
+- `stats`: folds the session's in-memory decision mirror with the durable
+  approval log - counts by state, the average time from `quorum-open` to its
+  terminal row, the recorded times to decision, and the override, escalation
+  and revocation history.
+
+It reads the session's own fields and writes nothing. It is gated by the
+`approve` operator verb (unlike `revl_quorum`): enumerating the pending
+questions and their blast radius is the same authority as answering them, and a
+`show` hash scopes to its crossing component while `list`/`stats` name no one
+component and need the literal `may approve on *`, whatever other target keys
+the call carries. For `revl_approvals`, a scoped operator's `show` of another
+component's ticket gets the same refusal as an unknown hash, so its refusal
+does not reveal which tickets exist. The other hash-taking approval verbs do not
+give that guarantee yet: `revl_approve`, `revl_escalate`, `revl_override` and
+`revl_revoke` refuse another component's hash by naming that component and an
+unknown hash differently, and `revl_quorum` is not gated. There is no model
+recommendation for approvals anywhere in the tree, so `advice.model` is `null`
+and says so; the actions are the deterministic next steps the facts support.
+
+- Inputs: `action` (required; `list` | `show` | `stats`); `hash`,
+  `pending`, `diff`, `session`.
 
 ### `revl_distillation_offers`
 

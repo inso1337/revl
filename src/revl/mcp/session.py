@@ -40,7 +40,7 @@ from . import operator as _operator
 from . import quorum as _quorum
 from . import identity as _identity
 from .approval import ApprovalRequired
-from .undo_record import undo_cold_start_note
+from .undo_record import undo_cold_start_note, undo_dropped_state_note
 from .approval import UnencodableTicketArgs
 from .approval import _args_digest
 
@@ -770,6 +770,9 @@ class _SwapPlan:
     # the `migrate` label that captured `pre`, named in the migration report so
     # a declared swap does not report itself as generational (issue #2673)
     policy: str = "generational"
+    # issue #3293: under `handoff_back` (an undo) only these captured slots may
+    # cross back; None keeps the forward-swap rule in `_restore_provider_state`
+    handoff_carry: frozenset | None = None
 
 
 def _container_copy(value):
@@ -961,6 +964,97 @@ def _handoff_cold_report(successors: dict, pre: dict) -> dict:
     return report
 
 
+def _settle_undo_carry(dropped: dict, held: list[str], back: dict,
+                       handoff: dict | None, to: int) -> None:
+    """Issue #3293: settle a completed undo's `stateDropped` against what
+    really crossed. The plan lists as `carried` every running component with
+    a compatible hand-off in the restore direction, but the restore can still
+    start a slot cold (the multi-realm rule, or a resource vector that does
+    not match). Each such component moves from `carried` to `components`, and
+    the note is rewritten to name it. `back` is `_handoff_back_pairs` for the
+    undo, `held` the running components that held live state."""
+    cold = {entry.get("component") for entry in (handoff or {}).values()
+            if isinstance(entry, dict) and entry.get("migrated") is False}
+    planned = dropped.get("carried") or []
+    moved = [name for name in planned if back.get(name) in cold]
+    if not moved:
+        return
+    carried = [name for name in planned if name not in moved]
+    dropped["components"] = sorted(set(dropped["components"]) | set(moved))
+    if carried:
+        dropped["carried"] = carried
+    else:
+        dropped.pop("carried", None)
+    lost = [name for name in held if name not in back or name in moved]
+    dropped["note"] = undo_dropped_state_note(lost, to, done=True,
+                                              carried=carried)
+
+
+def _resource_mismatch(key: str, resources: list, captured: list) -> str | None:
+    """Why a captured resource vector cannot be re-seated onto `resources`
+    (a different count, or a resource of a different type at some position),
+    or None when it can. The defence-in-depth half of item 53's check: the
+    declared shapes are already proved compatible."""
+    if len(resources) != len(captured):
+        return (f"provider of {key!r} held {len(captured)} stateful "
+                f"resource(s); the successor acquires {len(resources)}, so "
+                f"state cannot migrate without dropping or inventing one")
+    for pos, (res, (old_type, _snap)) in enumerate(zip(resources, captured)):
+        if type(res) is not old_type:
+            return (f"provider of {key!r}: resource #{pos} was "
+                    f"{old_type.__name__}, the successor acquires "
+                    f"{type(res).__name__}, and retyped state cannot migrate")
+    return None
+
+
+def _handoff_acceptors(ir: dict) -> dict:
+    """`{slot: [component, ...]}` for every non-template component in `ir` that
+    declares a `handoff` (item 53), keyed like `_capture_provider_state`'s
+    slots so old and new providers correlate by what they provide and where."""
+    templates = set((ir.get("manifest") or {}).get("templates") or [])
+    out: dict = {}
+    for comp in ir.get("components") or []:
+        if comp.get("name") in templates:
+            continue
+        handoff = comp.get("handoff")
+        if isinstance(handoff, dict) and handoff.get("key"):
+            out.setdefault(_handoff_slot(comp, handoff["key"]), []).append(comp)
+    return out
+
+
+def _handoff_back_pairs(old_ir: dict, new_ir: dict) -> dict[str, str]:
+    """Issue #3293: the running providers whose live state an undo carries back.
+
+    A forward swap threads a `handoff` from predecessor to successor when the
+    successor's declared shape ACCEPTS the predecessor's (`compatible(accepted,
+    exported)`). An undo runs that exchange in the other direction: the running
+    generation is the one being left, the restored generation is the one
+    accepting its state. So a running component is carried back only when the
+    restored generation declares exactly one `handoff` on the same slot and
+    that accepted shape is compatible with the running provider's exported one
+    in THIS direction. Anything else (no acceptor, an ambiguous one, or a shape
+    that does not accept the running state) stays cold, exactly as before.
+
+    Returns `{running component name: restored component name}`."""
+    acceptors = _handoff_acceptors(new_ir or {})
+    templates = set(((old_ir or {}).get("manifest") or {}).get("templates") or [])
+    out: dict = {}
+    for comp in (old_ir or {}).get("components") or []:
+        if comp.get("name") in templates:
+            continue  # F5: a template's state is the per-instance path
+        handoff = comp.get("handoff")
+        if not isinstance(handoff, dict) or not handoff.get("key"):
+            continue
+        claimants = acceptors.get(_handoff_slot(comp, handoff["key"])) or []
+        if len(claimants) != 1:
+            continue
+        accepted = (claimants[0].get("handoff") or {}).get("type")
+        if not compatible(accepted, handoff.get("type")):
+            continue
+        out[comp["name"]] = claimants[0].get("name")
+    return out
+
+
 class Session:
     """One live composition, driven step by step."""
 
@@ -1002,6 +1096,9 @@ class Session:
         # snapshotted, because there is nothing to replay through the gate.
         self.origin: dict | None = None
         self.previous_origin: dict | None = None  # origin `rollback` restores
+        # issue #3293: the authorship of `previous`, which `rollback` restores
+        # and records with the generation it makes. Unknown reads as agent.
+        self.previous_agent_authored: bool = True
         # the retained generation history (roadmap item 65). `previous` above is
         # the depth-1 slot `rollback` uses and keeps its old semantics; this is
         # the deep version: every admitted change (load, swap, undo) appends a
@@ -1478,20 +1575,26 @@ class Session:
     # -- lifecycle ---------------------------------------------------------
 
     def load(self, ir: dict, config: dict | None = None,
-             record: bool = False, origin: dict | None = None) -> dict:
+             record: bool = False, origin: dict | None = None, *,
+             agent_authored: bool | None = None) -> dict:
         """Boot `ir` as this session's composition, or change nothing.
 
         A load that is refused, raises a ticket, or faults leaves the session
         exactly as it found it, apart from `_SURVIVES_A_FAILED_LOAD` (issue
         #1444). It used to leave the refused composition in place, so every
         later load failed with "a composition is already loaded" while the
-        caller had been told its load failed."""
+        caller had been told its load failed.
+
+        `agent_authored` is the authorship the caller's compile reported (the
+        server passes its compile report's `authored`, as a forward swap
+        does). None records it as unknown, which an undo to this generation
+        reads as agent-authored (issue #3293)."""
         self._refuse_if_halted("load")   # item 443
         if self._driver is not None:
             raise SessionError("a composition is already loaded — swap or unload it")
         checkpoint = _LoadCheckpoint(self)
         try:
-            return self._boot(ir, config, record, origin)
+            state = self._boot(ir, config, record, origin)
         except BaseException as exc:
             checkpoint.restore(self)
             if checkpoint.had_no_loop and self._driver is None:
@@ -1500,6 +1603,10 @@ class Session:
                 self._close_loop()
             _name_the_candidate(exc, ir)
             raise
+        # issue #3293: the generation `_boot` just recorded says who wrote it
+        if agent_authored is not None and self._history:
+            self._history[-1]["agentAuthored"] = bool(agent_authored)
+        return state
 
     def _boot(self, ir: dict, config: dict | None, record: bool,
               origin: dict | None) -> dict:
@@ -2102,6 +2209,13 @@ class Session:
           (F4) NO provider hand-off capture either — a cold start carries nothing
           across, so a rollback through `respawn` cannot launder the generation
           it rolls back FROM into the one it rolls back TO.
+        * ``"handoff_back"``, an undo's policy (issue #3293). The instance
+          layer starts cold as under ``"respawn"``, but a provider's live state
+          crosses BACK across a `handoff` both generations declare on the same
+          key when the restored generation's shape accepts the running state
+          (the restore direction of the same §5 relation). A key either side
+          does not declare, or one whose shapes disagree in that direction,
+          starts cold exactly as before, and the undo dossier says so.
         * ``"declared"`` — the item-334 disclosure policy `Gate.propose` uses for
           an AGENT-authored successor. Operator (gen N) state crosses the trust
           boundary onto the untrusted successor ONLY through a `handoff` declared
@@ -2184,7 +2298,17 @@ class Session:
         # inherit live operator instance state by default. Run the gate for
         # every agent-authored successor; an operator swap (agent_authored
         # False) keeps generational migration.
-        if migrate == "declared" or agent_authored:
+        # Issue #3293: an undo (`handoff_back`) and a rollback (`respawn`)
+        # pass the restored generation's authorship, so the multi-realm rule
+        # in `_restore_provider_state` applies and the history records who
+        # wrote the code, but neither runs this gate. Neither captures
+        # instances; a rollback captures no provider state at all, and an undo
+        # carries a provider only across a hand-off whose restored shape
+        # accepts the running one (`_handoff_back_pairs`). Nothing this gate
+        # refuses can cross, and both stay escape hatches rather than
+        # refusable changes.
+        if migrate == "declared" or (
+                agent_authored and migrate not in ("respawn", "handoff_back")):
             self._enforce_declared_disclosure(old_ir, ir)
         # issue #1446: render the successor while the running generation is still
         # up. The emitter's refusal is raised here, so a document the py tier
@@ -2208,7 +2332,7 @@ class Session:
         # stays cold-start (F4): rollback and undo route through it, and
         # capturing there would launder the rolled-back generation's writes.
         pre = (self._capture_instances(old_ir, ir)
-               if migrate != "respawn" else {})
+               if migrate not in ("respawn", "handoff_back") else {})
         # item 53: capture each stateful *provider's* live state (its
         # effect-created world) before teardown too, so a component that
         # declared a `handoff` starts its successor warm. Admission (or, under
@@ -2222,6 +2346,17 @@ class Session:
         # operator code it rolled back to.
         handoff_pre = (self._capture_provider_state(old_ir)
                        if migrate != "respawn" else {})
+        # issue #3293: an undo (migrate="handoff_back") carries a provider's
+        # state back only across a `handoff` the restored generation declares
+        # on the same slot AND whose shape accepts the running provider's. The
+        # capture stays whole so `_abort_swap` can re-seat every running
+        # provider; this names the slots allowed to cross on success.
+        handoff_carry = None
+        if migrate == "handoff_back":
+            back = _handoff_back_pairs(old_ir, ir)
+            handoff_carry = frozenset(
+                slot for slot, info in handoff_pre.items()
+                if info["component"] in back)
         # item 334 (EDGE 1): the keys gen N ACTUALLY served, captured before
         # teardown while its providers are still live. The health gate below
         # holds the successor to these — see `_assert_successor_activated`.
@@ -2235,7 +2370,8 @@ class Session:
                          pre=pre,
                          handoff_pre=handoff_pre, pre_resolved=pre_resolved,
                          agent_authored=(migrate == "declared" or agent_authored),
-                         pre_pending=pre_pending, policy=migrate)
+                         pre_pending=pre_pending, policy=migrate,
+                         handoff_carry=handoff_carry)
 
     def _cut_over(self, driver, ir: dict, origin: dict | None,
                   plan: "_SwapPlan") -> dict:
@@ -2248,8 +2384,10 @@ class Session:
         # update release (if any) comes back with it
         prior_applied = self.applied_release
         saved_previous, saved_previous_origin = self.previous, self.previous_origin
+        saved_previous_authored = self.previous_agent_authored
         self.previous = self.ir
         self.previous_origin = self.origin
+        self.previous_agent_authored = self._running_agent_authored()
         # item 473: the generation ends HERE — the teardown below is the point of
         # no return, and every earlier exit from `swap` is a refusal that leaves
         # gen N running and so must NOT seal it. Sealed before the dispose so the
@@ -2301,8 +2439,11 @@ class Session:
             # activation failure is an answer; anything else is still re-raised
             # as the fault it is, after the rollback.
             self._abort_swap(old_ir, pre, saved_previous, saved_previous_origin,
-                             handoff_pre)
-            self._record_generation()
+                             handoff_pre,
+                             saved_previous_authored=saved_previous_authored)
+            self._record_generation(agent_authored=(
+                self._history[-1].get("agentAuthored")
+                if self._history else None))
             self._set_last_applied_release(prior_applied)
             if not isinstance(exc, _activation_error()):
                 raise
@@ -2324,7 +2465,8 @@ class Session:
                 # instance state, so a rejected migration leaves nothing changed
                 # and nothing half-migrated.
                 self._abort_swap(old_ir, pre, saved_previous, saved_previous_origin,
-                                 handoff_pre)
+                                 handoff_pre,
+                                 saved_previous_authored=saved_previous_authored)
                 raise SessionError(
                     f"swap rejected: a live instance's state cannot migrate onto "
                     f"the successor — {exc}. The running composition is untouched "
@@ -2335,20 +2477,22 @@ class Session:
         if handoff_pre:
             try:
                 handoff = self._restore_provider_state(
-                    ir, handoff_pre, agent_authored=plan.agent_authored)
+                    ir, handoff_pre, agent_authored=plan.agent_authored,
+                    carry_slots=plan.handoff_carry)
             except driver.runtime.StateIncompatible as exc:
                 # defence in depth: admission gates the *declared* shapes, but a
                 # provider whose resource vector diverges from its declaration
                 # still rolls the whole swap back rather than dropping state.
                 self._abort_swap(old_ir, pre, saved_previous, saved_previous_origin,
-                                 handoff_pre)
+                                 handoff_pre,
+                                 saved_previous_authored=saved_previous_authored)
                 raise SessionError(
                     f"swap rejected: a provider's hand-off state cannot cross onto "
                     f"the successor — {exc}. The running composition is untouched "
                     f"(rolled back to the previous generation, state intact). "
                     f"Dropping it would be residue (docs/state-handoff.md)."
                 ) from None
-        self._record_generation()
+        self._record_generation(agent_authored=plan.agent_authored)
         # item 246: the new generation's class map goes live atomically with the
         # composition, and the outstanding-ticket table is replaced (a ticket
         # issued against the previous generation is gone, not stale — its hash
@@ -2566,7 +2710,8 @@ class Session:
     def _abort_swap(self, old_ir: dict, pre: dict,
                     saved_previous: dict | None,
                     saved_previous_origin: dict | None,
-                    handoff_pre: dict | None = None) -> None:
+                    handoff_pre: dict | None = None, *,
+                    saved_previous_authored: bool = True) -> None:
         """Undo a swap whose migration was rejected: tear down the rejected
         successor, reload the predecessor, and re-seat the captured state —
         both spawned-instance state and provider hand-off state — onto the
@@ -2577,6 +2722,7 @@ class Session:
         driver.ir = self.ir = old_ir
         self.origin = self.previous_origin
         self.previous, self.previous_origin = saved_previous, saved_previous_origin
+        self.previous_agent_authored = saved_previous_authored
         self._generation += 1
         self._slo_begin_generation()
         # item 245: the reloaded predecessor is a fresh generation — install its
@@ -2828,9 +2974,10 @@ class Session:
     def live_state_components(self) -> list[str]:
         """The running components whose live state a cold start would discard
         (issue #2346): a provider whose activation frame holds non-empty state,
-        and a template with a live instance that does. `revl_undo` and
-        `revl_rollback` re-admit through `respawn`, which carries none of it,
-        so these are what such an undo drops. Read-only."""
+        and a template with a live instance that does. `revl_rollback` re-admits
+        through `respawn`, which carries none of it; `revl_undo` now carries a
+        provider's state back across a compatible `handoff` (issue #3293), so
+        only the rest is what such an undo drops. Read-only."""
         driver = self._driver
         if driver is None or self.ir is None:
             return []
@@ -2856,7 +3003,8 @@ class Session:
         return list(frame._resources) if frame is not None else []
 
     def _restore_provider_state(self, new_ir: dict, pre: dict,
-                                agent_authored: bool = False) -> dict:
+                                agent_authored: bool = False,
+                                carry_slots: frozenset | None = None) -> dict:
         """Thread each captured provider state onto the successor that
         re-provides its key (item 53). Two passes — check the whole cohort,
         then apply — so a single incompatible provider rejects with nothing
@@ -2880,17 +3028,16 @@ class Session:
         places every key in one realm: resources are matched by position, so
         an agent could rewire a store of one realm to a key served in another
         behind an identical placement. A frame spanning realms starts cold
-        (`reason: "multi-realm"`) unless the operator wrote the successor."""
+        (`reason: "multi-realm"`) unless the operator wrote the successor.
+
+        Issue #3293: under an undo's `handoff_back` policy the caller passes
+        `carry_slots`, the captures whose restored generation declares a
+        compatible `handoff` in the restore direction (`_handoff_back_pairs`).
+        A capture outside that set starts cold with `reason: "incompatible"`
+        where a restored provider declares the key but its shape does not
+        accept the running state; the undo still restores the code."""
         runtime = self._driver.runtime
-        templates = set((new_ir.get("manifest") or {}).get("templates") or [])
-        successors: dict = {}
-        for comp in new_ir.get("components") or []:
-            if comp.get("name") in templates:
-                continue  # F5: a template is the per-instance path, as in capture
-            handoff = comp.get("handoff")
-            if isinstance(handoff, dict) and handoff.get("key"):
-                key = handoff["key"]
-                successors.setdefault(_handoff_slot(comp, key), []).append(comp)
+        successors = _handoff_acceptors(new_ir)
         plan: list = []
         report: dict = _handoff_cold_report(successors, pre)
         for slot, info in pre.items():
@@ -2899,6 +3046,18 @@ class Session:
             if len(claimants) != 1:
                 continue  # none accepts it (cold), or ambiguous (reported cold)
             comp = claimants[0]
+            if carry_slots is not None and slot not in carry_slots:
+                accepted = (comp.get("handoff") or {}).get("type")
+                exported = info.get("type")
+                report[_handoff_label(slot)] = _handoff_entry(slot, {
+                    "component": comp["name"], "migrated": False,
+                    "reason": "incompatible",
+                    "note": (f"the restored generation accepts `{accepted}` "
+                             f"on `{key}`, but the running provider exports "
+                             f"`{exported}`: the declared hand-off types are "
+                             f"not compatible in the restore direction, so it "
+                             f"starts cold")})
+                continue
             if agent_authored and _frame_spans_realms(slot[1]):
                 report[_handoff_label(slot)] = _handoff_entry(slot, {
                     "component": comp["name"], "migrated": False,
@@ -2927,17 +3086,20 @@ class Session:
             captured = info["captured"]
             fiber = self._driver.fibers.get(comp["name"])
             resources = self._frame_resources(fiber)
-            if len(resources) != len(captured):
-                raise runtime.StateIncompatible(
-                    f"provider of {key!r} held {len(captured)} stateful "
-                    f"resource(s); the successor acquires {len(resources)} — "
-                    f"state cannot migrate without dropping or inventing one")
-            for pos, (res, (old_type, _snap)) in enumerate(zip(resources, captured)):
-                if type(res) is not old_type:
-                    raise runtime.StateIncompatible(
-                        f"provider of {key!r}: resource #{pos} was "
-                        f"{old_type.__name__}, the successor acquires "
-                        f"{type(res).__name__} — retyped state cannot migrate")
+            mismatch = _resource_mismatch(key, resources, captured)
+            if mismatch is not None:
+                if carry_slots is None:
+                    raise runtime.StateIncompatible(mismatch)
+                # issue #3293: an undo is the escape hatch. The declared types
+                # accept the running state, but the runtime resource vector
+                # does not match, so this slot starts cold and the undo still
+                # restores the code; a forward swap refuses it whole (above).
+                report[_handoff_label(slot)] = _handoff_entry(slot, {
+                    "component": comp["name"], "migrated": False,
+                    "reason": "resources",
+                    "note": (f"{mismatch}. An undo does not refuse on this: "
+                             f"the restored provider starts cold")})
+                continue
             plan.append((slot, comp["name"], resources, captured))
         for slot, cname, resources, captured in plan:
             for res, (_old_type, snap) in zip(resources, captured):
@@ -2981,8 +3143,12 @@ class Session:
         # today's teardown semantics for instances (no cross-generation state
         # migration back), so it stays byte-identical to the pre-item-10 path.
         try:
+            # issue #3293: the restored code keeps its own authorship, so the
+            # generation this records says who wrote it, and a later undo to
+            # it applies the same agent-authored hand-off rules.
             result = self.swap(restored, origin=restored_origin,
-                               migrate="respawn", agent_authored=False)
+                               migrate="respawn",
+                               agent_authored=self.previous_agent_authored)
         except Exception as error:  # noqa: BLE001 - re-raised below
             # The generation counter moves at the teardown and nowhere before
             # it, so a failure that left it alone left the running generation
@@ -3407,7 +3573,8 @@ class Session:
 
     # -- generation history and undo (roadmap item 65) ---------------------
 
-    def _record_generation(self, readmittable: bool = True) -> None:
+    def _record_generation(self, readmittable: bool = True, *,
+                           agent_authored: bool | None = None) -> None:
         """Append the now-live generation to the retained history.
 
         The entry is a *re-admittable snapshot* (item 15's persist bundle) plus
@@ -3420,7 +3587,13 @@ class Session:
         `readmittable=False` forces the snapshot to None even when an origin is
         present — the apply path uses it, because a plan-artifact apply leaves
         `origin` reproducing the *pre-apply* sources, which must never stand in
-        as the post-apply generation's re-admission bundle."""
+        as the post-apply generation's re-admission bundle.
+
+        `agent_authored` is the authorship the admitting change ran under
+        (`_SwapPlan.agent_authored`, or the load's compile report); an undo
+        to this generation restores the same code, so it applies the same
+        agent-authored hand-off rules (issue #3293). None leaves it unknown:
+        the entry has no `agentAuthored`, which reads as agent-authored."""
         from .persist import build_snapshot  # noqa: PLC0415 — lazy
 
         # best-effort: a files-based origin materializes by reading the source
@@ -3435,16 +3608,26 @@ class Session:
                                       self.recorder is not None)
             except OSError:
                 snap = None
-        self._history.append({
+        entry = {
             "generation": self._generation,
             "snapshot": snap,
             "ir": self.ir,
             "origin": self.origin,
-        })
+        }
+        if agent_authored is not None:
+            entry["agentAuthored"] = bool(agent_authored)
+        self._history.append(entry)
         # bounded retention: the oldest generations age out. `undo --to` below
         # the floor is refused (see `undo`) instead of reaching for one gone.
         if len(self._history) > HISTORY_LIMIT:
             del self._history[:-HISTORY_LIMIT]
+
+    def _running_agent_authored(self) -> bool:
+        """The running generation's authorship as its history entry records
+        it (issue #3293). Fails closed: an entry without the key, or no
+        history at all, reads as agent-authored."""
+        entry = self._history[-1] if self._history else {}
+        return bool(entry.get("agentAuthored", True))
 
     def _set_last_applied_release(self, release: dict | None) -> None:
         """Stamp (or clear) the update release the newest generation runs.
@@ -3542,7 +3725,8 @@ class Session:
     def _component_names(self, ir: dict | None) -> list[str]:
         return [c.get("name") for c in (ir or {}).get("components") or []]
 
-    def _undo_dossier(self, current: dict, target: dict) -> dict:
+    def _undo_dossier(self, current: dict, target: dict,
+                      live: tuple[list[str], str | None]) -> dict:
         """The undo plan/dossier — computed like any other change (item 65).
 
         An undo is a swap to the target generation's shape, so its delta is
@@ -3597,31 +3781,63 @@ class Session:
             "toGeneration": target["generation"],
             "admissible": p["admissible"],
             "unloads": p["cascade"]["withdrawn"],
-            "stateDropped": self._undo_state_dropped(p, target["generation"]),
+            "stateDropped": self._undo_state_dropped(p, target["generation"],
+                                                     target["ir"], live),
             "cascade": p["cascade"],
             "provisions": p["provisions"],
             "unemittableCrossings": unemittable,
         }
 
-    def _undo_state_dropped(self, p: dict, to: int) -> dict:
-        """The dossier's `stateDropped` (issue #2346). An undo re-admits
-        through `respawn`, a cold start: a `handoff` is not run in reverse, so
-        a rollback never carries the generation it leaves into the one it
-        returns to (the F4 rule in `_plan_swap`). So besides the components
-        the target withdraws, every running component holding live state loses
-        it, and is named here, with a note that says so. A failure to read
-        the live state is said in the note, and never stops the undo."""
+    def undo_carried_components(self, generation: int) -> list[str]:
+        """The running components whose live state an undo to `generation`
+        carries back (issue #3293), for the forward call's `undoNote`. Empty
+        when the live state cannot be read: the advice stays conservative."""
+        entry = next((e for e in self._history
+                      if e["generation"] == generation), None)
+        if entry is None or entry.get("ir") is None:
+            return []
+        back = _handoff_back_pairs(self.ir, entry["ir"])
         try:
-            held, unread = self.live_state_components(), None
-        except Exception as exc:  # noqa: BLE001 - a report, never a fault
-            held, unread = [], f"{type(exc).__name__}: {exc}"
+            held = self.live_state_components()
+        except Exception:  # noqa: BLE001 - the note is advice; nothing carried
+            return []
+        return [name for name in held if name in back]
+
+    def _undo_state_dropped(self, p: dict, to: int, target_ir: dict | None,
+                            live: tuple[list[str], str | None]) -> dict:
+        """The dossier's `stateDropped` (issues #2346 and #3293). An undo
+        carries a provider's live state back across a `handoff` both the
+        running and the restored generation declare on the same slot, when
+        the restored shape accepts the running one in the restore direction
+        (`_handoff_back_pairs`). Every other running component that holds live
+        state still starts cold, as the target's withdrawn components do, and
+        is named here with a note that says so. A failure to read the live
+        state is said in the note, and never stops the undo. `live` is the
+        running components' state as `_live_state_or_reason` read it.
+
+        This is the plan, read before the undo runs. A completed undo settles
+        it against what really crossed (`_settle_undo_carry`)."""
+        back = _handoff_back_pairs(self.ir, target_ir or {})
+        held, unread = live
+        carried = [name for name in held if name in back]
+        dropped = [name for name in held if name not in back]
         out = {
             "provisions": p["provisions"]["withdrawn"],
-            "components": sorted(set(p["components"]["withdrawn"]) | set(held)),
+            # a carried provider may be named differently in the restored
+            # generation (the correlation is the provided key), so the plan can
+            # list the running component as withdrawn even though its state
+            # crosses back. Only a component whose state really crosses is
+            # removed; a stateless one the target withdraws stays named, as
+            # before.
+            "components": sorted((set(p["components"]["withdrawn"])
+                                  | set(dropped)) - set(carried)),
             "teardownOrder": p["teardownOrder"],
         }
-        if held:
-            out["note"] = undo_cold_start_note(held, to, done=True)
+        if carried:
+            out["carried"] = sorted(carried)
+        if dropped:
+            out["note"] = undo_dropped_state_note(dropped, to, done=True,
+                                                  carried=sorted(carried))
         elif unread is not None:
             out["note"] = (
                 f"the running components' live state could not be read "
@@ -3667,7 +3883,9 @@ class Session:
                 f"replay (it is not rehydrated past the gate)")
 
         # the dossier is computed against the *pre-undo* live composition
-        dossier = self._undo_dossier(current, target)
+        live = self._live_state_or_reason()
+        dossier = self._undo_dossier(current, target, live)
+        back = _handoff_back_pairs(self.ir, target["ir"] or {})
 
         # the gate: re-admit the target's sources exactly as a swap would. A
         # rejected recompile is a *result* (the running system is untouched),
@@ -3687,8 +3905,10 @@ class Session:
             check_no_realm_removal(self.ir, target_ir, profile)
         except RevlError as error:
             diag = classify(error)
-            # nothing ran, so no state was dropped: the list stays as the
-            # plan, but the note saying it "is dropped" does not apply
+            # nothing ran, so no state was dropped: the lists (`components`
+            # and `carried`) stay as the plan of what would have dropped and
+            # what would have crossed, but the note saying it "is dropped"
+            # does not apply
             dossier["stateDropped"].pop("note", None)
             return {
                 "undone": False,
@@ -3715,13 +3935,20 @@ class Session:
         if AUTHORED_HOST_BODIES_KEY in target_origin:
             origin[AUTHORED_HOST_BODIES_KEY] = list(
                 target_origin[AUTHORED_HOST_BODIES_KEY] or [])
+        # issue #3293: an undo now carries running state into the restored
+        # code, so the code's authorship decides the agent-authored hand-off
+        # rules (the multi-realm one), exactly as the forward swap to it did.
         try:
             state = self.swap(target_ir, origin=origin,
-                              migrate="respawn", agent_authored=False)
+                              migrate="handoff_back",
+                              agent_authored=bool(
+                                  target.get("agentAuthored", True)))
         except ApprovalRequired as error:
             error.host_bodies = list(
                 origin.get(AUTHORED_HOST_BODIES_KEY) or [])
             raise
+        _settle_undo_carry(dossier["stateDropped"], live[0], back,
+                           state.get("handoff"), target["generation"])
         # undo restores a generation, so it restores that generation's release
         self._set_last_applied_release(target.get("appliedRelease"))
         return {
@@ -4708,11 +4935,33 @@ class Session:
         The session is dead afterwards. `call`, `swap`, `commit`,
         `commit_confirm`, `abort` and `load` refuse; `unload` still works and
         strands rather than unwinds (the process still has to drop its
-        fibers); `estop_report` reads the inventory back."""
+        fibers); `estop_report` reads the inventory back.
+
+        Issue #2991: the halt also closes the approval questions it strands. A
+        pending question outliving the instance it was asked about is not a
+        question anyone can still answer, so every open multi-party quorum is
+        closed `revoked` and every pending single-party ticket is refused, each
+        with a durable row (`quorum-revoked` / `ticket-revoked`) that
+        `revl recover` reports as `revoked`, DISTINCT from `expired`: an expired
+        question ran out of time and can be asked afresh, a revoked one was
+        withdrawn by the operator. An approval that was already CONSUMED is not
+        retroactively affected - it authorized its crossing before the halt, and
+        the halt does not rewrite what already happened.
+
+        The sweep runs AFTER the latch flips, so it can never widen the halt: it
+        only closes what the halt already made unanswerable. Its failures are
+        reported in `revocationErrors` rather than hidden, and never undo the
+        halt. A crash between the latch and the sweep therefore leaves no
+        revoked rows (docs/design/443-estop.md)."""
         driver = self._require()
         halt = driver.runtime.estop(reason, operator=operator or "unknown")
         self._halted = True
-        return {"halted": True, **halt}
+        sweep = self._revoke_pending_approvals(
+            reason, operator or self._operator_token() or "estop")
+        out = {"halted": True, **halt, "revokedApprovals": sweep["revoked"]}
+        if sweep["errors"]:
+            out["revocationErrors"] = sweep["errors"]
+        return out
 
     def estop_report(self) -> dict:
         """The halt inventory, without touching the world (item 443).
@@ -4733,9 +4982,181 @@ class Session:
                 # the same decisions `revl recover` will classify — one ambiguity
                 # vocabulary across the halt report and the forward-recovery scan.
                 "unfinalizedDecisions": self._unfinalized_decisions(),
+                # issue #2991: what the halt revoked. Read back off the durable
+                # rows, so the halt report and `revl recover` name the same
+                # tickets - and a `revoked` question is distinct from an
+                # `expired` one (the reason and the outcome are both recorded).
+                "revokedTickets": self._revoked_ticket_rows(),
                 # an E-Stop is NEVER clean. R4 is a property of the abort path;
                 # the halt violates it by design and says so.
                 "clean": False}
+
+    # -- issue #2991: the halt closes every pending approval question ---------
+
+    def _revoke_pending_approvals(self, reason: str, by: str) -> dict:
+        """Close every approval question the halt strands (issue #2991).
+
+        Opens no new question and widens no authority: it closes the questions
+        the halt already made unanswerable. A multi-party quorum is closed with
+        `quorum-revoked`; a pending single-party asking is refused and writes
+        one `ticket-revoked` row. A grant already CONSUMED is left exactly as it
+        is: it authorized its crossing before the halt, and ownership of what
+        already happened is not the E-Stop's to rewrite.
+
+        Returns ``{"revoked": [...], "errors": [...]}``. One ticket's failure is
+        recorded, not raised: the halt has already happened, and losing its
+        report would be worse than losing one revocation row."""
+        now = self._now_ms()
+        revoked: list = []
+        errors: list = []
+        for ticket_hash, ticket in list(self._tickets.items()):
+            try:
+                rule = self._ticket_approval_shape(ticket)
+            except SessionError as error:  # ambiguous rules: nothing to open
+                errors.append({"hash": ticket_hash,
+                               "error": f"SessionError: {error}"})
+                continue
+            try:
+                # a rule that names ANY approver opens a decision graph
+                # (`_open_quorum` runs for `require 1 of {a,b}` too), so the
+                # split is "does a graph exist", never `is_quorum()`
+                if rule is not None:
+                    entry = self._revoke_open_quorum(ticket, reason, by, now)
+                else:
+                    entry = self._revoke_pending_single(ticket, reason, by, now)
+            except Exception as error:  # noqa: BLE001 - the halt report survives
+                errors.append({"hash": ticket_hash,
+                               "error": f"{type(error).__name__}: {error}"})
+                continue
+            if entry is not None:
+                revoked.append(entry)
+        return {"revoked": revoked, "errors": errors}
+
+    def _revoke_open_quorum(self, ticket: dict, reason: str, by: str,
+                            now: int) -> dict | None:
+        """Close the CURRENT round's decision graph as revoked, if it is still
+        open to votes and not already past its deadline. A lapsed question is
+        left to the expiry vocabulary: writing `revoked` over a timeout would
+        retract the distinction the two outcomes exist to keep. It is closed
+        with the ordinary `quorum-expired` row (`_lapse_quorum`, written once),
+        so the durable log never holds a bare `quorum-open` that `revl recover`
+        could read as neither revoked nor expired."""
+        ticket_hash = ticket["hash"]
+        record = self._quorums.get(self._quorum_request_id(ticket_hash))
+        if record is None or record.get("outcome") is not None \
+                or record.get("expiredAt") is not None:
+            return None
+        if record.get("expiresAt") is not None \
+                and now > int(record["expiresAt"]):
+            self._lapse_quorum(record)
+            return None
+        record["outcome"] = "revoked"
+        record["resolvedAt"] = now
+        self._record_quorum("quorum-revoked", {
+            **self._quorum_binding(record), "by": by,
+            "reason": str(reason or "").strip(),
+            "proposer": record["proposer"],
+            "counted": self._counted(record), "require": record["require"],
+            # the halt withdraws the question, not one actor's votes; the votes
+            # stay recorded and stop counting, exactly as a proposer revoke does
+            "withdrewVotes": [],
+            "estop": True, "at": now})
+        return {"hash": ticket_hash, "component": ticket.get("component"),
+                "candidateHash": ticket.get("candidateHash"),
+                "kind": "quorum", "round": record.get("round"),
+                "state": "revoked", "durableRecord": "quorum-revoked",
+                "requestId": record.get("requestId")}
+
+    def _revoke_pending_single(self, ticket: dict, reason: str, by: str,
+                               now: int) -> dict | None:
+        """Refuse every pending asking of a single-party ticket and write one
+        durable `ticket-revoked` row for it.
+
+        An unspent grant minted for one of the askings is withdrawn too, exactly
+        as an operator's NO withdraws it (`_refuse_single_party_ticket`), so the
+        ledger cannot carry a live yes whose question the halt just refused."""
+        ticket_hash = ticket["hash"]
+        pending = dict(self._ticket_pending_raisers.get(ticket_hash) or {})
+        if not pending:
+            return None
+        withdrawn: list = []
+        wal = self._approval_wal()
+        for proposer in list(pending):
+            entry = self._ledger_entry_for_ticket(ticket_hash, proposer)
+            if entry is None or entry.get("consumed"):
+                continue
+            entry["consumed"] = True
+            entry["revoked"] = True
+            withdrawn.append(entry["requestId"])
+            if wal is not None:
+                wal.record_approval_revoked(entry["requestId"])
+        round_ = self._ticket_rounds.get(ticket_hash, 1)
+        self._ticket_refusals[ticket_hash] = {
+            "by": by, "reason": str(reason or "").strip(), "round": round_,
+            "at": now, "estop": True}
+        self._ticket_pending_raisers.pop(ticket_hash, None)
+        self._show_pending_raisers(ticket_hash)
+        entry = {
+            "hash": ticket_hash,
+            "candidateHash": ticket.get("candidateHash"),
+            "component": ticket.get("component"),
+            "kind": ticket.get("kind"),
+            "round": round_,
+            "proposers": sorted(name for name in pending if name),
+            "capabilities": list(ticket.get("capabilities") or []),
+            "classCCapabilities": list(ticket.get("classCCapabilities") or []),
+            "by": by,
+            "reason": str(reason or "").strip(),
+            "withdrewApprovals": withdrawn,
+            "estop": True,
+            "at": now,
+            "state": "revoked",
+        }
+        if wal is not None:
+            wal.record_ticket_revoked(dict(entry))
+        self._approval_records.append({"record": "ticket-revoked", **entry})
+        return {"hash": ticket_hash, "component": ticket.get("component"),
+                "candidateHash": ticket.get("candidateHash"),
+                "kind": "single", "round": round_,
+                "state": "revoked", "durableRecord": "ticket-revoked",
+                "withdrewApprovals": withdrawn}
+
+    def _revoked_ticket_rows(self) -> list:
+        """The revocation rows this session carries, for the halt report:
+        `ticket-revoked` (single-party) and `quorum-revoked` rows closed by the
+        halt. Reads the durable WAL and folds in the in-memory mirror, so a
+        session with no open log still reports what its sweep revoked. Empty,
+        never an error, when neither is readable."""
+        rows: list = []
+        seen: set = set()
+        for record in list(self._wal_ledger_records()) + list(self._approval_records):
+            kind = record.get("record")
+            if kind in ("ticket-revoked", "quorum-revoked") \
+                    and record.get("estop"):
+                key = (kind, record.get("hash"), record.get("round"))
+                if key in seen:
+                    continue
+                seen.add(key)
+            if kind == "ticket-revoked":
+                rows.append({
+                    "hash": record.get("hash"),
+                    "component": record.get("component"),
+                    "candidateHash": record.get("candidateHash"),
+                    "round": record.get("round"), "kind": "single",
+                    "state": "revoked", "by": record.get("by"),
+                    "reason": record.get("reason"), "at": record.get("at"),
+                    "estop": bool(record.get("estop"))})
+            elif kind == "quorum-revoked" and record.get("estop"):
+                rows.append({
+                    "hash": record.get("hash"),
+                    "component": record.get("component"),
+                    "candidateHash": record.get("candidateHash"),
+                    "round": record.get("round"), "kind": "quorum",
+                    "requestId": record.get("requestId"),
+                    "state": "revoked", "by": record.get("by"),
+                    "reason": record.get("reason"), "at": record.get("at"),
+                    "estop": True})
+        return rows
 
     def _unfinalized_decisions(self) -> list:
         """The `decisionId`s this session's WAL carries an `admit-decided` for with
@@ -5353,6 +5774,7 @@ class Session:
         self.previous = None
         self.origin = None
         self.previous_origin = None
+        self.previous_agent_authored = True
         self.draft = None
         self._generation = 0
         # item 473: a fresh session has measured nothing. The PAUSE is not
@@ -7831,6 +8253,7 @@ class Session:
         Only after all of that does the vote count, and a counted vote either
         closes the decision (minting the approval through the ordinary ledger) or
         leaves the question open with one more name against it."""
+        self._refuse_if_halted("revl_approve")   # issue #2991
         record = self._open_quorum(ticket, rule)
         cast = self._bind_cast(record, "vote", as_token=as_token,
                                as_secret=as_secret, as_proof=as_proof,
@@ -8030,6 +8453,7 @@ class Session:
         authority statement - an operator trusted to cast one of N votes is not
         thereby trusted to stand in for all of them - and it is what a profile
         addresses when it grants or withholds the emergency path."""
+        self._refuse_if_halted("revl_override")   # issue #2991
         ticket = self._tickets.get(ticket_hash)
         if ticket is None:
             raise SessionError(
@@ -8508,6 +8932,7 @@ class Session:
         identity has raised the ticket; when several have, a bare hash is
         refused (`_approved_proposer`) and the others keep their own asking
         pending. A resend naming the same proposer is the idempotent no-op."""
+        self._refuse_if_halted("revl_approve")   # issue #2991
         ticket = self._tickets.get(ticket_hash)
         if ticket is None:
             raise SessionError(

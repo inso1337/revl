@@ -684,7 +684,8 @@ def _default_host_body(tool: dict, role: str) -> str:
 
 def render_imported_source(tools: list[dict], *, service: str = "Imported",
                            key: str = "imported", backend: str = "ts",
-                           host_body=None, signature: str = "typed") -> str:
+                           host_body=None, signature: str = "typed",
+                           origin: str | None = None) -> str:
     """Render classified tools (`classify_imported_tools`) as revl source.
 
     `signature="typed"` maps each tool's input schema to typed parameters (the
@@ -692,10 +693,24 @@ def render_imported_source(tools: list[dict], *, service: str = "Imported",
     `arguments: Str` parameter carrying the JSON arguments object verbatim, so
     a proxy forwards what the client sent without a lossy round trip through
     revl types. `host_body(tool, role)` supplies the text of each host block
-    (`role` is `call`, `undo` or `settled`); the default is a comment stub."""
+    (`role` is `call`, `undo` or `settled`); the default is a comment stub.
+
+    `origin` (issue #2990) declares that every result crosses an external MCP
+    boundary: the extern and the service operation return `Untrusted[...]`, and
+    an emission or witnessed crossing carries `[<origin>]` as its capability
+    scope. The taint machinery then treats an answer as evidence, not authority
+    (G9), and records the origin label on the crossing. `None` keeps the
+    historical surface byte-identical for callers that do not attest an origin.
+    """
     host_body = host_body or _default_host_body
     ops, methods, externs = [], [], []
     settled_rendered = False
+    # The result type of one answer from this server, and the capability scope
+    # its crossing declares. A `pure` tool is still a remote answer: it keeps
+    # `pure` (its authority class) and carries the qualifier alone, because the
+    # parser refuses a capability scope on a pure extern.
+    answer = "Untrusted[Str]" if origin else "Str"
+    caps = f"[{origin}]" if origin else ""
     for tool in tools:
         op = tool["op"]
         effect = tool["effect"]
@@ -726,8 +741,8 @@ def render_imported_source(tools: list[dict], *, service: str = "Imported",
                 f"extern acquire fn undo_{extern_name}(w: Str) -> Unit undo settled_mcp()\n"
                 f"  = @{backend} {{ {host_body(tool, 'undo')} }}")
             externs.append(
-                f"extern witnessed fn {extern_name}({sig}) -> Result[Str, Str] "
-                f"undo undo_{extern_name}(result)\n"
+                f"extern witnessed{caps} fn {extern_name}({sig}) -> "
+                f"Result[{answer}, Str] undo undo_{extern_name}(result)\n"
                 f"  = @{backend} {{ {host_body(tool, 'call')} }}")
             methods.append(f"    fn {op}({call_args}) {{ effect {extern_name}({call_args}) }}")
             continue
@@ -735,9 +750,10 @@ def render_imported_source(tools: list[dict], *, service: str = "Imported",
         plain = effect == EFFECT_PLAIN
         if not plain:
             ops.append("  // imported without a verifiable read-only claim")
-        ops.append(f"  {'' if plain else 'emission '}fn {op}({sig}) -> Str")
+        ops.append(f"  {'' if plain else 'emission '}fn {op}({sig}) -> {answer}")
         externs.append(
-            f"extern {'pure' if plain else 'emission'} fn {extern_name}({sig}) -> Str\n"
+            f"extern {'pure' if plain else 'emission'}{'' if plain else caps} "
+            f"fn {extern_name}({sig}) -> {answer}\n"
             f"  = @{backend} {{ {host_body(tool, 'call')} }}"
         )
         # an emission crossing carries its `emit` marker at the call site
@@ -765,7 +781,8 @@ def render_imported_source(tools: list[dict], *, service: str = "Imported",
 
 def import_tools(manifest: dict, *, service: str = "Imported",
                  key: str = "imported", backend: str = "ts",
-                 undo: dict | None = None) -> str:
+                 undo: dict | None = None,
+                 origin: str | None = None) -> str:
     """Turn an MCP server's `tools/list` result into revl source: a service
     declaration plus an extern-backed provider skeleton.
 
@@ -778,7 +795,7 @@ def import_tools(manifest: dict, *, service: str = "Imported",
     """
     return render_imported_source(
         classify_imported_tools(manifest, undo=undo),
-        service=service, key=key, backend=backend)
+        service=service, key=key, backend=backend, origin=origin)
 
 
 def _params_from_schema(schema: dict) -> list[tuple[str, str]]:
