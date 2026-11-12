@@ -59,6 +59,60 @@ from .parser import Program
 # even though the author is untrusted. The `no_declassify` door is the sole
 # `blocked` case: this profile has no author-side declassify path at all.
 
+
+#: Issue #3432: the sentence each refusal below gives the person who WROTE the
+#: source, beside the message, hint and code kept for whoever wants them. A
+#: product that shows a refusal to its own user (a player who sent a rule, say)
+#: shows this one. Keyed by the refusal's code, then by which of that code's
+#: refusals it is; `{name}` is the author's own spelling of what was refused.
+#: Written for a reader who has never seen this module: no code name, no item
+#: number, none of the profile's own vocabulary
+#: (`tests/test_untrusted_refusal_plain_3432.py` holds both halves, and fails
+#: when a refusal here is added without a sentence).
+PLAIN: dict[str, dict[str, str]] = {
+    "G8": {
+        "declare": "This change may not carry its own code for the machine it "
+                   "runs on: remove `{name}` and use what you have been given.",
+        "asset": "This change may not read files from the machine it is built "
+                 "on: remove `{name}` and use what you have been given.",
+        "reach": "This change may not use code written for the machine it runs "
+                 "on, even through a file it imports: stop using `{name}` and "
+                 "use what you have been given.",
+    },
+    "G-RETAIN": {
+        "retention": "This change may not decide how long its own data is "
+                     "kept: remove `{name}` and use a rule for keeping data "
+                     "that already exists.",
+    },
+    "G9": {
+        "place": "This change may not choose where `{name}` runs: remove that "
+                 "choice and it runs where everything else runs.",
+        "unplace": "This change may not take `{name}` out of a place it "
+                   "already runs in: keep it there, or remove `{name}` "
+                   "altogether.",
+        "trust_fn": "This change may not decide by itself that input is safe: "
+                    "remove `{name}` and use a check you have been given, or "
+                    "ask a person to approve it.",
+        "endorse": "This change may not mark input as safe by itself: remove "
+                   "the `{name}` call and use a check you have been given, or "
+                   "ask a person to approve it.",
+    },
+    "R2": {
+        "ungranted": "This change may only use what it has been given, and "
+                     "`{name}` is not among it: remove that use, or ask for "
+                     "`{name}` to be given.",
+        "ungranted_key": "`{name}` was given to another part of this change, "
+                         "not this one: ask for it to be given here too, or "
+                         "provide it inside the change.",
+    },
+}
+
+
+def _plain(code: str, kind: str, name: str) -> str:
+    """The author-facing sentence for one refusal (issue #3432)."""
+    return PLAIN[code][kind].format(name=name)
+
+
 def _granted_navigate(granted, *, reached: str | None = None) -> dict:
     """Enumerate the granted service set as author-enactable alternatives: reach a
     granted service, or provide it internally. `candidate` (whether a granted
@@ -274,6 +328,7 @@ def check_no_extern(root_programs: list[Program], profile: AdmissionProfile) -> 
                      "its own host code — remove the extern and reach a granted "
                      "service instead",
                 code="G8", category="admission",
+                plain=_plain("G8", "declare", decl.name),
                 navigate=_granted_navigate(profile.granted),
             )
 
@@ -308,6 +363,7 @@ def check_no_asset(root_programs: list[Program], profile: AdmissionProfile) -> N
                      "pre-granted services — a frontend asset is contributed by "
                      "the trusted composition that owns the tree (item 459)",
                 code="G8", category="admission",
+                plain=_plain("G8", "asset", f'asset "{node.written}"'),
                 navigate=_granted_navigate(profile.granted),
             )
 
@@ -421,6 +477,7 @@ def check_no_retention_policy(root_programs: list[Program],
                      f"operator add it (item 520/544, "
                      f"docs/design/545-kernel-boundary-capability.md)",
                 code="G-RETAIN", category="admission",
+                plain=_plain("G-RETAIN", "retention", f"retention {decl.name}"),
                 navigate=_granted_navigate(profile.granted),
             )
 
@@ -497,6 +554,7 @@ def check_no_realm_placement(root_programs: list[Program],
             # authority ADDRESS, which is the same rule one layer out — the realm
             # decides which standing approvals cover the crossing.
             code="G9", category="admission",
+            plain=_plain("G9", "place", stmt.key),
             navigate=_realm_navigate(
                 [r for s in found
                  for r in (list(s.realms) if isinstance(s, RouteStmt)
@@ -696,6 +754,7 @@ def _refuse_realm_set_shrink(admitted: dict, candidate: dict,
              "placement, withdraw the component, or have an operator move it "
              "through the gated swap (issue #2586)",
         code="G9", category="admission",
+        plain=_plain("G9", "unplace", name),
         navigate=_realm_removal_navigate([r for _n, rs in shrunk for r in rs]),
     )
 
@@ -801,6 +860,7 @@ def check_no_realm_removal(admitted: dict | None, candidate: dict,
              "instead, or have an operator move it through the gated swap "
              "(issues #2487, #2523, #2585, #3121)",
         code="G9", category="admission",
+        plain=_plain("G9", "unplace", name),
         navigate=_realm_removal_navigate(lost),
     )
 
@@ -939,6 +999,7 @@ def check_no_host_extern_reach(root_programs: list[Program],
                  "granted services, never reach a host extern; drop the import "
                  "and reach a granted service instead (items 330, 329/transitive)",
             code="G8", category="admission",
+            plain=_plain("G8", "reach", name),
             navigate=_granted_navigate(profile.granted, reached=name),
         )
 
@@ -989,6 +1050,7 @@ def check_no_declassify(root_programs: list[Program],
                          "Reach a granted checked parser, or gate the downgrade on "
                          "a human approval (item 249, Slice C)",
                     code="G9", category="admission",
+                    plain=_plain("G9", "trust_fn", f"verified fn {fn.name}"),
                     navigate=_no_declassify_navigate())
         # door 2: an `endorse` anywhere in the admitted source.
         endorses: list = []
@@ -1006,6 +1068,7 @@ def check_no_declassify(root_programs: list[Program],
                      "approval, never from the turn's own `endorse` (item 249, "
                      "Slice C)",
                 code="G9", category="admission",
+                plain=_plain("G9", "endorse", f"endorse[{first.origin}]"),
                 navigate=_no_declassify_navigate())
 
 
@@ -1192,6 +1255,7 @@ def check_allowlist(document: dict, profile: AdmissionProfile) -> None:
                      f"service or one its OWN components provide under the very "
                      f"key it requires (item 329 allowlist).{extra}",
                 code="R2", category="admission",
+                plain=_plain("R2", "ungranted", service),
                 navigate=_granted_navigate(granted, reached=service),
             )
 
@@ -1214,6 +1278,7 @@ def _refuse_ungranted_key(document: dict, comp: dict, key: str, service: str,
               f"compiled from the same source. Grant this component's row, or "
               f"provide `{key}` inside the turn."),
         code="R2", category="admission",
+        plain=_plain("R2", "ungranted_key", service),
     )
 
 

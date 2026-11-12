@@ -106,7 +106,7 @@ issue #2858 answer in one envelope, additive to every key they returned before:
 | `ok` | did the call answer at all (this one is on every verb) |
 | `verdict` | `passed`, `failed` or `refused` |
 | `payloadKey` | the key in the same answer that carries the verb's substance: `selfCheck` for `revl_check`, `tests` for `revl_test_run` |
-| `refusal` | present when `verdict` is `refused`: `code`, `category`, `message`, `location`, `repair` |
+| `refusal` | present when `verdict` is `refused`: `code`, `category`, `message`, `location`, `repair`, and `plain` when the refusing diagnostic has one |
 
 `failed` is a verdict about what was checked: the call ran, and the composition
 did not compile (so `diagnostics` and `selfCheck` explain it) or the suite had a
@@ -117,6 +117,16 @@ refusal's `code` and `category` come from one registry,
 `revl.answer.REFUSALS`, and a converted handler can emit no code the registry
 does not hold: an unregistered code raises when the refusal is built, rather
 than reaching an answer.
+
+**The author's sentence (`plain`).** A refusal of the untrusted-author profile
+(new host code, a file read, a self-chosen realm, a self-minted declassifier,
+an ungranted service) carries `plain` on its diagnostic and on the answer's
+`refusal`: one sentence for the person who wrote the source, naming their own
+identifier and no code, item number or profile term, for example "This change
+may not carry its own code for the machine it runs on: remove `peek` and use
+what you have been given." A product shows that sentence to its user and keeps
+`code`, `message` and `hint` for whoever wants them. The sentences live in
+`revl.admit_profile.PLAIN`, one per refusal (issue #3432).
 
 **Refusal codes.** The stable contract across the converted verbs. Message text
 stays free to improve; a script or an agent branches on the code and its

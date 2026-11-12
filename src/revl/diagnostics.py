@@ -639,6 +639,9 @@ def classify(error: RevlError) -> dict:
     }
     if error.hint:
         record["hint"] = error.hint
+    if getattr(error, "plain", None):
+        # issue #3432: the sentence a product shows the author
+        record["plain"] = error.plain
     expected = getattr(error, "expected", None)
     actual = getattr(error, "actual", None)
     if expected is not None or actual is not None:
