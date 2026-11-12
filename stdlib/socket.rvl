@@ -1,0 +1,135 @@
+// The revl stdlib SOCKET module: the accepted-socket provider of `Wire`
+// (`stdlib/wire.rvl`, issue #3357). py tier.
+//
+// A program that serves live clients writes `requires wire: Wire` and a row
+//
+//     row @wire from "stdlib/socket.rvl" provides wire
+//       config { address: "127.0.0.1", port: 8765, origins: [...] }
+//
+// picks this provider. Everything that is the socket's own (the address, the
+// port, the origin rule and the limits) is this component's config, never the
+// program's argument, so `Wire` stays the same for a page-to-page provider.
+//
+// ------------------------------------------------------------- the crossing
+// The listener is `acquire`: it is a handle to release, and the row's teardown
+// releases it (`socket_shut`), so an unload frees the port. The three verbs are
+// `emission` (a message leaves for a machine this program does not own, the
+// `stdlib/net.rvl` rule) and declare the contract's tokens, `wire.take`,
+// `wire.say`, `wire.close`: one fixed token per verb, the `stdlib/server.rvl`
+// rule. `revl audit` prints `socket_take [wire.take]` and so on, so a reader
+// sees which provider crosses while a grant names the contract's verb.
+// `acquire` takes no capability scope, so the bind address is not an audit
+// token; it is the row's config, which `revl composition` prints.
+//
+// ----------------------------------------------------------------- the host
+// The socket I/O is `backends/python/revl_socket.py`: standard library only
+// (`socket`, `selectors`, `threading`, `hashlib`, `base64`), the RFC 6455
+// upgrade handshake and text framing written there, no extensions and no
+// subprotocols. Each extern body is one line into it.
+//
+// ------------------------------------------------------------------- limits
+//   origins, bare  an upgrade whose `Origin` is not listed, or that carries two,
+//                  is answered 403 before the upgrade and makes no knock; no
+//                  `Origin` is admitted only when `bare`.
+//   most           a text message over `most` bytes shuts the line
+//                  `TooLarge` (1009) and none of it is delivered.
+//   held           while `held` knocks wait for `take`, the provider stops
+//                  reading every line (socket backpressure); nothing is dropped.
+//   limit          `say` to a line with more than `limit` unwritten bytes is
+//                  not queued and answers false; the line stays open.
+//   a binary frame shuts the line `Refused` (1003). A request that is not an
+//                  upgrade is answered 404: serving files is beside this binding.
+//   a bind failure raises inside the acquire, so the row's activation fails
+//                  by name.
+
+use "stdlib/wire.rvl" { Knock, Kind, Why, Wire, why_str }
+
+// Everything that is the socket's own, built from the provider's config.
+pub type Door = { address: Str, port: Int, origins: List[Str], bare: Bool,
+                  most: Int, held: Int, limit: Int }
+
+// One knock as the host hands it over: `kind` is "opened", "said" or "shut",
+// `why` is `why_str` of the reason on "shut" and "" otherwise.
+type Raw = { seq: Int, kind: Str, why: Str, line: Int, who: Str, text: Str }
+
+// The close code a socket sends for each reason (RFC 6455 section 7.4.1), when
+// the program shuts a line. The host shuts a line `Refused` on its own with a
+// more exact code: 1003 for a binary frame, 1002 for a protocol violation and
+// 1007 for text that is not UTF-8.
+pub fn close_code(why: Why) -> Int {
+  return match why {
+    Closed => 1000,
+    TooLarge => 1009,
+    TooFast => 1008,
+    TooSlow => 1008,
+    Refused => 1008,
+    Silent => 1001,
+    Expired => 1001,
+    HostGone => 1001,
+  }
+}
+
+// The inverse of `why_str`, for the host's spelling. An unknown spelling is the
+// host's defect, read as `Refused` rather than a fault inside `take`.
+fn why_of(s: Str) -> Why {
+  if (s == "closed") { return Closed }
+  if (s == "silent") { return Silent }
+  if (s == "too_large") { return TooLarge }
+  if (s == "too_slow") { return TooSlow }
+  if (s == "too_fast") { return TooFast }
+  if (s == "expired") { return Expired }
+  if (s == "host_gone") { return HostGone }
+  return Refused
+}
+
+fn kind_of(r: Raw) -> Kind {
+  if (r.kind == "opened") { return Opened }
+  if (r.kind == "said") { return Said }
+  return Shut(why_of(r.why))
+}
+
+fn knocks_of(raws: List[Raw]) -> List[Knock] {
+  var out = []
+  for (r of raws) {
+    out = out.push({ seq: r.seq, kind: kind_of(r), line: r.line, who: r.who,
+                     text: r.text })
+  }
+  return out
+}
+
+// `Listener` is an opaque handle: the host's listening socket and its lines.
+pub type Listener = Opaque
+
+extern acquire fn socket_listen(door: Door) -> Listener undo socket_shut(result)
+  = @py { from revl_socket import listen; return listen(door) }
+extern acquire fn socket_shut(l: Listener) -> Unit undo settled()
+  = @py { from revl_socket import shut; return shut(l) }
+extern pure fn settled() -> Unit
+  = @py { return None }
+
+extern emission[wire.take] fn socket_take(l: Listener, most: Int) -> List[Raw]
+  = @py { from revl_socket import take; return take(l, most) }
+extern emission[wire.say] fn socket_say(l: Listener, line: Int, text: Str) -> Bool
+  = @py { from revl_socket import say; return say(l, line, text) }
+extern emission[wire.close] fn socket_close(l: Listener, line: Int, code: Int,
+                                            why: Str, text: Str) -> Bool
+  = @py { from revl_socket import close; return close(l, line, code, why, text) }
+
+component SocketWire provides wire: Wire {
+  config { address: Str = "127.0.0.1", port: Int = 0, origins: List[Str],
+           bare: Bool = false, most: Int = 65536, held: Int = 1024,
+           limit: Int = 1048576 }
+  let door = effect socket_listen({ address: config.address, port: config.port,
+                                    origins: config.origins, bare: config.bare,
+                                    most: config.most, held: config.held,
+                                    limit: config.limit }) undo socket_shut(door)
+  provide wire {
+    fn take(most) {
+      let raws = emit socket_take(door, most)
+      return knocks_of(raws)
+    }
+    fn say(line, text) = emit socket_say(door, line, text)
+    fn close(line, why, text) =
+      emit socket_close(door, line, close_code(why), why_str(why), text)
+  }
+}
