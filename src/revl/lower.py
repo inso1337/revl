@@ -63,6 +63,8 @@ from .typecheck import (
     bind_local as _bind_typed_local,
     check_ir,
     infer_ast,
+    infer_memo,
+    infer_memo_active,
     infer_ir,
     mismatch,
     pin_hole,
@@ -7669,6 +7671,26 @@ def _refuse_foreign_increment(expr, filename: str, type_env: dict | None,
 
 def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filename: str,
                      type_env: dict | None = None, types: dict | None = None) -> dict:
+    """Lower one pure-stratum expression.
+
+    Issue #3400: the operator arms below ask `infer_ast` for the type of each
+    operand after lowering it, and each answer walks the operand's subtree, so
+    the outermost call opens an `infer_memo()` and every node of the
+    expression is inferred once. Sound here because every statement scope this
+    lowering opens inside an expression works on a copy (`dict(type_env)`), so
+    no environment an operand was inferred under changes meanwhile.
+    """
+    if infer_memo_active():
+        return _lower_pure_expr_node(expr, scope, callables, alias_fns, filename,
+                                     type_env, types)
+    with infer_memo():
+        return _lower_pure_expr_node(expr, scope, callables, alias_fns, filename,
+                                     type_env, types)
+
+
+def _lower_pure_expr_node(expr, scope: dict, callables: set, alias_fns: dict,
+                          filename: str, type_env: dict | None = None,
+                          types: dict | None = None) -> dict:
     type_env = type_env if type_env is not None else {}
     types = types if types is not None else {}
     if isinstance(expr, ExprHole):
