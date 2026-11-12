@@ -172,7 +172,7 @@ def _driver_paths():
 def test_no_driver_carries_a_machine_path():
     for path in _driver_paths():
         text = path.read_text(encoding="utf-8")
-        for needle in ("/Users/", "/tmp/b", "/private/tmp"):
+        for needle in ("/Users/", "/tmp/", "/private/tmp"):
             assert needle not in text, (path.name, needle)
 
 

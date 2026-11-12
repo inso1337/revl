@@ -45,12 +45,12 @@ calls; the default `REVL_REPO` is now derived from the driver's own location
 instead of a machine path (and gen3's `--arm-src` is required instead of
 defaulting to a `/tmp` path); and a long dash in a comment was replaced with
 plain punctuation. None of these changes what a driver sends to a model. On
-macOS and Linux the platform default encoding was already UTF-8, and on
-Windows it now matches. The
-repository's encoding guards (issues #2639 and #2648) reject the platform
-default anywhere in the tree. Nothing else was rewritten; the source files are
-untracked and not in this repository, so a reader can check the tracked hash
-here, and the source hash only against a copy of the original.
+macOS and Linux the platform default encoding was already UTF-8, and on Windows
+it now matches. The repository's encoding guards (issues #2639 and #2648)
+reject the platform default anywhere in the tree. Nothing else was rewritten;
+the source files are untracked and not in this repository, so a reader can
+check the tracked hash here, and the source hash only against a copy of the
+original.
 
 Two long dashes per driver (none in gen1) were left on purpose, because
 changing them is not a punctuation fix: one sits inside the `TASK_AUTHOR`
@@ -92,10 +92,10 @@ it existed cannot be bound to a hash, only to a driver name: nobody can
 establish that a scratch file was unchanged between a published run and the
 copy, so `source_sha256` records the copy and does not vouch for the run.
 
-The scratch copies were left where they were
-found; they are untracked and not part of this repository, so the manifest's
-`source_sha256` is the record of them, not a path a reader can fetch. They can
-be dropped once the spec records the tracked revision.
+The scratch copies were left where they were found; they are untracked and not
+part of this repository, so the manifest's `source_sha256` is the record of
+them, not a path a reader can fetch. They can be dropped once the spec records
+the tracked revision.
 
 ## Running
 
@@ -115,13 +115,13 @@ the separate interpreter that serves the MCP server (`cordis-py`), and
     BENCH_BASE_URL=<url> BENCH_API_KEY=<key> BENCH_MODEL=<model> \
     python3 bench/agentic/gen3/bench_agentic3.py --exp both --reps 1
 
-They were moved as they were found, apart from the docstring identity and
-encoding edits above: they write workdirs and result rows beside themselves,
-and they assume the fixtures and trees the spec names. `REVL_REPO` defaults to the repository these files sit in; gen3's
-`--arm-src FILE` (the file holding the arm system prompt) must be given with
-`--workdir`. The scrub lists name environment
-variables, including `KIRA_API_KEY`, and carry no value. A run drives a real
-model, so check the endpoint and budget first; nothing here is run by CI.
+They were moved as they were found, apart from the edits above: they write
+workdirs and result rows beside themselves, and they assume the fixtures and
+trees the spec names. `REVL_REPO` defaults to the repository these files sit
+in; gen3's `--arm-src FILE` (the file holding the arm system prompt) must be
+given with `--workdir`. The scrub lists name environment variables, including
+`KIRA_API_KEY`, and carry no value. A run drives a real model, so check the
+endpoint and budget first; nothing here is run by CI.
 
 ## Edits to a published driver
 
