@@ -8,15 +8,23 @@ the properties that make them traceable, not to the numbers they produce:
   * every driver under `bench/agentic/` is named in the manifest, and every
     manifest entry is a driver in that tree;
   * each tracked file still hashes to its recorded `tracked_sha256`;
-  * the source with the module docstring token removed still hashes to its
-    recorded body sha, and the tracked copy to its own; the recorded edits are
-    the docstring identity lines and explicit UTF-8 encodings, which do not
-    change benchmark behaviour;
+  * the tracked copy, with its module docstring token removed, hashes to its
+    recorded `tracked_body_sha256`; `source_body_sha256` is a recorded value
+    that no test recomputes, because the sources are not in the repository
+    (the only check on it is that an `edit: none` entry records it equal to the
+    tracked body sha); the recorded edits are the docstring identity lines,
+    explicit UTF-8 encodings and the machine-path removals, which do not change
+    what a driver sends to a model;
   * the tracked body hashes are pinned here, outside the manifest, so a body
     edit fails even if the manifest is refreshed with it;
   * each driver's docstring opens with its own filename, the identity a copied
     variant used to lose;
-  * an `edit: none` entry records the tracked hash as equal to the source hash.
+  * an `edit: none` entry records the tracked hash as equal to the source hash;
+  * no driver carries a machine path as a default: the repository root is
+    derived from the driver's own location and `--arm-src` is required;
+  * no driver carries a long dash in a comment or docstring;
+  * the manifest says, per driver, whether its source could be re-read, and
+    records the size and modification time only for a source that was.
 """
 
 from __future__ import annotations
@@ -25,7 +33,10 @@ import ast
 import hashlib
 import io
 import json
+import os
 import re
+import subprocess
+import sys
 import tokenize
 from pathlib import Path
 
@@ -46,12 +57,12 @@ EXPECTED = {
 # manifest.json so that refreshing the manifest is not enough to change one:
 # a body edit fails here until the test itself is edited and reviewed.
 FROZEN_BODY_SHA256 = {
-    "bench_agentic.py": "2727550b325d467809d4c98f7aab03f3eb18f8c278fd9dd1a3ec05bc4d54b46b",
-    "bench_agentic2.py": "7c35b98908461875d8b0191f16c058f874aa05dd525b31580feb66e7954fd0bf",
-    "bench_agentic2_cap.py": "4931cfa414f625beee870e07a3812dd0e16ba53109599641c94b4a18f9de87e4",
-    "bench_agentic2_cap6.py": "0d9146dfcb59015ae5df8c3653ce7005c8eab09d41122f4523363e3df1617168",
-    "bench_agentic2_cap2.py": "1da9a92567e12ff5f7cf588bdb2e765613bf8de4043ded6c73fad921350428ab",
-    "bench_agentic3.py": "9fe01ceb9603855ac87412c32a108bad99662e03e9d00bcf57c95d69fd85b1f2",
+    "bench_agentic.py": "b92418c364fd363f81ce21c2f2dd5e28f7517747274dc83f3329e1df6d15937c",
+    "bench_agentic2.py": "cb80dbf16d0d86376c259e2bc5ed293010f61d751779ca2cf2962059274e88e1",
+    "bench_agentic2_cap.py": "c0e987ec4d9c721e4283dd4ac224ceeb7b01aa90a99f76f8120aea4f8417d034",
+    "bench_agentic2_cap6.py": "f92d3ddc2b42b4b5980d649c063d1feb38a2c8d5c0a189468a39cbf0c9ec1d5a",
+    "bench_agentic2_cap2.py": "66ba30240f0738926ffc7eb72e660598300a548d29bf92976ce25e3a9ad37cc0",
+    "bench_agentic3.py": "1fd459ae5bd894dbee0ebcb7abe7fa9ab9753b2e903ce57e8cfd357be18b0f3d",
 }
 
 
@@ -152,3 +163,74 @@ def test_manifest_hashes_are_lowercase_hex():
             "tracked_body_sha256",
         ):
             assert re.fullmatch(r"[0-9a-f]{64}", variant[key]), (variant["name"], key)
+
+
+def _driver_paths():
+    return sorted(AGENTIC.rglob("*.py"))
+
+
+def test_no_driver_carries_a_machine_path():
+    for path in _driver_paths():
+        text = path.read_text(encoding="utf-8")
+        for needle in ("/Users/", "/tmp/b", "/private/tmp"):
+            assert needle not in text, (path.name, needle)
+
+
+def test_repo_root_default_is_derived_from_the_driver_location():
+    saved = os.environ.pop("REVL_REPO", None)
+    try:
+        for path in _driver_paths():
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            node = next(
+                n for n in tree.body
+                if isinstance(n, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "REVL_REPO" for t in n.targets)
+            )
+            ns = {
+                "os": os,
+                "Path": Path,
+                "__file__": str(path),
+                "HERE": path.resolve().parent,
+            }
+            value = eval(compile(ast.Expression(node.value), str(path), "eval"), ns)
+            assert Path(value).resolve() == ROOT, (path.name, value)
+    finally:
+        if saved is not None:
+            os.environ["REVL_REPO"] = saved
+
+
+def test_gen3_requires_arm_src_with_a_clear_error(tmp_path):
+    driver = AGENTIC / "gen3" / "bench_agentic3.py"
+    run = subprocess.run(
+        [sys.executable, str(driver), "--workdir", str(tmp_path / "wd")],
+        capture_output=True, text=True, cwd=tmp_path, timeout=60,
+    )
+    assert run.returncode == 2, (run.returncode, run.stderr[-400:])
+    assert "--arm-src" in run.stderr and "Traceback" not in run.stderr, run.stderr[-400:]
+
+
+def test_no_long_dash_in_comments_or_docstrings():
+    dash = "\u2014"
+    for path in _driver_paths():
+        text = path.read_text(encoding="utf-8")
+        for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+            if tok.type == tokenize.COMMENT:
+                assert dash not in tok.string, (path.name, tok.start)
+        for node in ast.walk(ast.parse(text)):
+            if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                doc = ast.get_docstring(node, clean=False) or ""
+                assert dash not in doc, (path.name, getattr(node, "name", "module"))
+
+
+def test_source_provenance_is_checkable_or_marked_unverified():
+    readme = (AGENTIC / "README.md").read_text(encoding="utf-8")
+    for variant in _variants():
+        name = variant["name"]
+        assert isinstance(variant["source_reread"], bool), name
+        record = variant.get("source_record")
+        if variant["source_reread"]:
+            assert isinstance(record["size_bytes"], int) and record["size_bytes"] > 0, name
+            assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d", record["mtime"]), name
+        else:
+            assert record is None, name
+            assert f"`{name}`" in readme.split("could not be re-read", 1)[1], name

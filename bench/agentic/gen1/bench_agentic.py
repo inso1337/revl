@@ -58,7 +58,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 OMLX = os.environ.get("OMLX_URL", "http://127.0.0.1:8010/v1/chat/completions")
 MODEL = os.environ.get("OMLX_MODEL", "Ornith-1.5-35B-A3B-MLX-4bit")
-REVL_REPO = Path(os.environ.get("REVL_REPO", "/Users/inso/Projects/revl"))
+REVL_REPO = Path(os.environ.get("REVL_REPO", str(HERE.parents[2])))
 
 # `revl mcp serve` must run under the interpreter that has cordis-py
 # (src/revl/mcp/session.py::_backend names it). Override with REVL_MCP_PYTHON.

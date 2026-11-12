@@ -1,5 +1,5 @@
 {
-  "_comment": "Provenance for the six bench_agentic drivers. Each entry records the file as it was found before it was tracked (source), the sha256 of that file, and the sha256 of the tracked copy. Cite the name and sha256 beside any number published from a driver. body_sha256 is the sha256 of the source with the module docstring token removed (tokenizer based, so it does not change with the interpreter version). Every tracked body carries two mechanical edits over its source: the docstring identity for three capped variants, and explicit UTF-8 encodings on text-mode IO for all six, required by the repository's encoding guards; the benchmark behaviour is unchanged.",
+  "_comment": "Provenance for the six bench_agentic drivers. Each entry records the file as it was found before it was tracked (source), the sha256 of that file, and the sha256 of the tracked copy. Cite the name and sha256 beside any number published from a driver. body_sha256 is the sha256 of the source with the module docstring token removed (tokenizer based, so it does not change with the interpreter version). Every tracked body carries mechanical edits over its source, listed per entry in edit: the docstring identity for three capped variants, explicit UTF-8 encodings on text-mode IO (required by the repository's encoding guards), the default repository root derived from the driver's own location, the gen3 --arm-src made required, and a long dash replaced in a comment; what a driver sends to a model is unchanged. source_reread says whether the source file could be read again when this record was reviewed (2026-11-12): when true, source_record gives its size in bytes and modification time as read then and source_sha256 was recomputed from it; when false, source_sha256 is a value recorded at copying time and was not verified, and source_record is null.",
   "family": "bench_agentic",
   "variants": [
     {
@@ -9,11 +9,13 @@
       "source": "bench10_out scratch directory (untracked)",
       "predecessor": null,
       "tool_result_cap": 6000,
-      "edit": "explicit UTF-8 encodings on text-mode reads, writes and open calls",
+      "edit": "explicit UTF-8 encodings on text-mode reads, writes and open calls; the default repository root derived from the driver's own location instead of a machine path",
       "source_sha256": "7c99e7cdbcf8f4cd4f5dc16bc21df80f1d2d102cfeeef6973554c0a645f464a6",
-      "tracked_sha256": "579149a6592c7e631bbdff70e04404d2268fbc9d694926845c2322580a3fd1f0",
+      "tracked_sha256": "be9174b6b30b6d7678b342b923cdbcc25279ba3194cf395f8bc91caeca65679c",
       "source_body_sha256": "2445c792946987975d136a0f4a6f0611c8f74dd57b522f49c6a5bf390304ce3c",
-      "tracked_body_sha256": "2727550b325d467809d4c98f7aab03f3eb18f8c278fd9dd1a3ec05bc4d54b46b"
+      "tracked_body_sha256": "b92418c364fd363f81ce21c2f2dd5e28f7517747274dc83f3329e1df6d15937c",
+      "source_reread": false,
+      "source_record": null
     },
     {
       "name": "bench_agentic2.py",
@@ -22,11 +24,13 @@
       "source": "bench10_out scratch directory (untracked)",
       "predecessor": "bench_agentic.py",
       "tool_result_cap": 6000,
-      "edit": "explicit UTF-8 encodings on text-mode reads, writes and open calls",
+      "edit": "explicit UTF-8 encodings on text-mode reads, writes and open calls; the default repository root derived from the driver's own location instead of a machine path; long dash in a comment replaced",
       "source_sha256": "1e33d68308d2192f0705b86335098d92e493270ba3e7e2ea134dd60c48ebf6e1",
-      "tracked_sha256": "340bd8145a2f6c6226df04bbc87722551a07941cd0eaa02b04806eea48df2b2e",
+      "tracked_sha256": "42398afa165c9412c8b02bbfd41dcdd2c6bff46f50c9ab7e60895167e2b9bf04",
       "source_body_sha256": "d7b0caf6afcb23fcff97cbdad2c8fb39ccc95fb8fc601cad6d76d28d3c4900a1",
-      "tracked_body_sha256": "7c35b98908461875d8b0191f16c058f874aa05dd525b31580feb66e7954fd0bf"
+      "tracked_body_sha256": "cb80dbf16d0d86376c259e2bc5ed293010f61d751779ca2cf2962059274e88e1",
+      "source_reread": false,
+      "source_record": null
     },
     {
       "name": "bench_agentic2_cap.py",
@@ -35,11 +39,13 @@
       "source": "bench10_out scratch directory (untracked)",
       "predecessor": "bench_agentic2.py",
       "tool_result_cap": 24000,
-      "edit": "module docstring identity and usage lines, plus explicit UTF-8 encodings",
+      "edit": "module docstring identity and usage lines, plus explicit UTF-8 encodings; the default repository root derived from the driver's own location instead of a machine path; long dash in a comment replaced",
       "source_sha256": "bb6625413f20c6e03d9b6cdab254552219880d5a39a054164d64c06cc54f580d",
-      "tracked_sha256": "0322e2e331509e265293133901299be10bec356844b9a260608d5a13a0e7bc25",
+      "tracked_sha256": "23bfed4ce47fbe8c78a93ce720a55dd0c3bb006e1348a1ed345e565e79eeae32",
       "source_body_sha256": "1e26a17f4ec99fd4ec3b5698a341f3b73c7547f1a71826edc01ea3a348442728",
-      "tracked_body_sha256": "4931cfa414f625beee870e07a3812dd0e16ba53109599641c94b4a18f9de87e4"
+      "tracked_body_sha256": "c0e987ec4d9c721e4283dd4ac224ceeb7b01aa90a99f76f8120aea4f8417d034",
+      "source_reread": false,
+      "source_record": null
     },
     {
       "name": "bench_agentic2_cap6.py",
@@ -48,11 +54,13 @@
       "source": "bench10_out scratch directory (untracked)",
       "predecessor": "bench_agentic2.py",
       "tool_result_cap": 6000,
-      "edit": "module docstring identity and usage lines, plus explicit UTF-8 encodings",
+      "edit": "module docstring identity and usage lines, plus explicit UTF-8 encodings; the default repository root derived from the driver's own location instead of a machine path; long dash in a comment replaced",
       "source_sha256": "14b6b5b08ebaaabb82e3c2a417635995cdfedd31a73706f4038803464fee3770",
-      "tracked_sha256": "e62f1f57700d51ef449e416bf0a2efc4739c7ce3ea47942b7c23f723ba1f8e84",
+      "tracked_sha256": "7e09a77758b9d2f12a6a495e30d3624526b4fa12e3e14da3034c3617c3ba982c",
       "source_body_sha256": "4b8141f5c2cd41d33ef2e1ee25f7bf52e7c75c7a20f1b89c73336a7ce749857d",
-      "tracked_body_sha256": "0d9146dfcb59015ae5df8c3653ce7005c8eab09d41122f4523363e3df1617168"
+      "tracked_body_sha256": "f92d3ddc2b42b4b5980d649c063d1feb38a2c8d5c0a189468a39cbf0c9ec1d5a",
+      "source_reread": false,
+      "source_record": null
     },
     {
       "name": "bench_agentic2_cap2.py",
@@ -61,11 +69,16 @@
       "source": "revl-lanes/bench-agentic/daily (untracked)",
       "predecessor": "bench_agentic2_cap.py",
       "tool_result_cap": "BENCH_CAP (default 24000)",
-      "edit": "module docstring identity and usage lines, plus explicit UTF-8 encodings",
+      "edit": "module docstring identity and usage lines, plus explicit UTF-8 encodings; the default repository root derived from the driver's own location instead of a machine path; long dash in a comment replaced",
       "source_sha256": "fc76a9aa96f3c70168140f39ceb5e2c8a83c69fa825601a87a6aa932911150c9",
-      "tracked_sha256": "f1862f34ee7b1dd5456130897d5c2c406ee7b622c4c422daf2908a25219eb07d",
+      "tracked_sha256": "ef350bd0802a6003261b2a01fbd741a384de2e18eeacbc38f91b4d444b5bb760",
       "source_body_sha256": "1d36024c6108478afda3f7e994b40458d1cba0553b51de7274d994ee8ce02f12",
-      "tracked_body_sha256": "1da9a92567e12ff5f7cf588bdb2e765613bf8de4043ded6c73fad921350428ab"
+      "tracked_body_sha256": "66ba30240f0738926ffc7eb72e660598300a548d29bf92976ce25e3a9ad37cc0",
+      "source_reread": true,
+      "source_record": {
+        "size_bytes": 40834,
+        "mtime": "2026-10-12T02:59:51+01:00"
+      }
     },
     {
       "name": "bench_agentic3.py",
@@ -74,11 +87,16 @@
       "source": "revl-lanes/bench-agentic (untracked)",
       "predecessor": "bench_agentic2_cap2.py",
       "tool_result_cap": "BENCH_CAP (default 24000)",
-      "edit": "explicit UTF-8 encodings on text-mode reads, writes and open calls",
+      "edit": "explicit UTF-8 encodings on text-mode reads, writes and open calls; the default repository root derived from the driver's own location instead of a machine path; --arm-src required with --workdir instead of a /tmp default; long dash in a comment replaced",
       "source_sha256": "a1e71a435599ff2aa430b633af7ad59f84dff13682c1a3864d7e3bfcd5d80dd1",
-      "tracked_sha256": "129d9b0e5741119fe9e9bfc991848f8a6fc31d1aa1dea6bbfa5720d68c37d80e",
+      "tracked_sha256": "33c30c1b7f5b0deca8d7289d9ece56f3742c332f56847ce3056d7d0b0ee63c9a",
       "source_body_sha256": "e89733cd6122c009eb32ad0b3c2d0b645845237aae5ed887f7a671fae24ba846",
-      "tracked_body_sha256": "9fe01ceb9603855ac87412c32a108bad99662e03e9d00bcf57c95d69fd85b1f2"
+      "tracked_body_sha256": "1fd459ae5bd894dbee0ebcb7abe7fa9ab9753b2e903ce57e8cfd357be18b0f3d",
+      "source_reread": true,
+      "source_record": {
+        "size_bytes": 53191,
+        "mtime": "2026-10-10T18:19:48+01:00"
+      }
     }
   ]
 }

@@ -11,7 +11,7 @@ Changes against bench_agentic2_cap2.py (everything else is unchanged):
     are separate; export_calls counts revl_export direct or through the hatch;
   * every row records model, base-URL host, workdir, sha256 of the exact system
     prompt, tool cap, per-call out_len/cut, provider usage and per-turn latency.
-Single-run mode: --workdir DIR --out FILE [--arm-src FILE --arm-var NAME].
+Single-run mode: --workdir DIR --out FILE --arm-src FILE [--arm-var NAME].
 
 Original docstring follows.
 
@@ -145,7 +145,7 @@ class ModelCallError(RuntimeError):
         super().__init__(msg)
         self.status = status
         self.kind = kind  # "timeout" | "http" | "rate_limit" | "error"
-REVL_REPO = Path(os.environ.get("REVL_REPO", "/Users/inso/Projects/revl")).resolve()
+REVL_REPO = Path(os.environ.get("REVL_REPO", str(HERE.parents[2]))).resolve()
 # Absolute on purpose: _compile runs `sys.executable -m revl` with cwd=REVL_REPO
 # and PYTHONPATH=MCP_PATH; a relative REVL_REPO silently breaks module
 # resolution and zeroes every compiles/done metric (see SPEC §16.13).
@@ -906,7 +906,7 @@ async def run_arm(exp, arm, workdir, max_turns, verbose, sys_template_override=N
                     args = {}
                 # The #2073 hatch: a listed verb standing in for an unlisted one.
                 # Counting it separately is the measurement of whether the fix is
-                # actually *used* — the tiered surface hides revl_export, so the
+                # actually *used*: the tiered surface hides revl_export, so the
                 # artifact can only reach disk through here (or write_file).
                 # The schema key is `names` (an array); SYS_AUTHOR advertises a
                 # singular `name` the server ignores. Count either form, so a
@@ -1023,9 +1023,6 @@ def _agg(rs, key):
     return f"{m:.0f} ({min(vals):.0f}-{max(vals):.0f})"
 
 
-ARM_SRC_DEFAULT = "/tmp/b2653257/run_main2/withdraw_warm_cap3.py"
-
-
 def load_arm_prompt(path, var):
     """Read a module-level string assignment from a driver file WITHOUT importing
     it (those files run asyncio.run(main()) at import). The prompt is evaluated
@@ -1087,14 +1084,16 @@ def main():
     ap.add_argument("--out", default=str(HERE / "results_agentic2.jsonl"))
     ap.add_argument("--workdir", default=None,
                     help="single-run mode: one withdraw run in this workdir, row appended to --out")
-    ap.add_argument("--arm-src", default=ARM_SRC_DEFAULT,
-                    help="file holding the arm system prompt (read with ast, never imported)")
+    ap.add_argument("--arm-src", default=None,
+                    help="file holding the arm system prompt (read with ast, never imported); required with --workdir")
     ap.add_argument("--arm-var", default="SYS_WARM")
     ap.add_argument("--rep", type=int, default=0)
     ap.add_argument("--label", default="")
     args = ap.parse_args()
 
     if args.workdir:
+        if not args.arm_src:
+            ap.error("--arm-src is required with --workdir (the file holding the arm system prompt)")
         _single(args)
         return
 

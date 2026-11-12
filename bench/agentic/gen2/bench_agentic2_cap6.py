@@ -83,7 +83,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 OMLX = os.environ.get("OMLX_URL", "http://127.0.0.1:8010/v1/chat/completions")
 MODEL = os.environ.get("OMLX_MODEL", "Ornith-1.5-35B-A3B-MLX-4bit")
-REVL_REPO = Path(os.environ.get("REVL_REPO", "/Users/inso/Projects/revl")).resolve()
+REVL_REPO = Path(os.environ.get("REVL_REPO", str(HERE.parents[2]))).resolve()
 # Absolute on purpose: _compile runs `sys.executable -m revl` with cwd=REVL_REPO
 # and PYTHONPATH=MCP_PATH; a relative REVL_REPO silently breaks module
 # resolution and zeroes every compiles/done metric (see SPEC §16.13).
@@ -746,7 +746,7 @@ async def run_arm(exp, arm, workdir, max_turns, verbose):
                     args = {}
                 # The #2073 hatch: a listed verb standing in for an unlisted one.
                 # Counting it separately is the measurement of whether the fix is
-                # actually *used* — the tiered surface hides revl_export, so the
+                # actually *used*: the tiered surface hides revl_export, so the
                 # artifact can only reach disk through here (or write_file).
                 if name == "revl_verbs" and ("name" in args or "names" in args):
                     usage["hatch_calls"] = usage.get("hatch_calls", 0) + 1
