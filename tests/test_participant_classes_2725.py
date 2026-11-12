@@ -411,3 +411,55 @@ def test_a_redeploy_killed_before_it_commits_keeps_the_earlier_run(tmp_path):
     assert settled["federationDecision"] == "none"
     assert settled["committedEffects"] == 2, settled
     assert settled["worldCalls"] == 0, settled   # no inverse was run
+
+
+def _reused_wal(tmp_path, plan):
+    """One WAL file reused by several openings (issue #3147). ``plan`` is a
+    list of ``(file, completed)``: each opening writes one reversible effect
+    and, when completed, commits its activation and run."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]
+                           / "backends" / "python"))
+    import replay
+
+    path = str(tmp_path / "reused.wal")
+    for generation, (name, completed) in enumerate(plan, 1):
+        wal = replay.WriteAheadLog(path, ir={"composition": "p"},
+                                   generation=generation).open()
+        wal.record_boundary("Store", f"write {name}", resource=f"file:{name}",
+                            inverse_op={"receiver": "fs", "method": "unlink",
+                                        "args": [name]})
+        if completed:
+            wal.commit_activation(["Store"])
+            wal.commit_run()
+        wal.close()
+    return path
+
+
+def test_committed_false_on_two_crashed_openings_inverts_as_much_as_none(
+        tmp_path):
+    """A stronger "did not commit" answer must not roll back LESS. With two
+    openings that both crashed, `committed=None` inverts both (the trailing
+    uncommitted openings); `committed=False` inverts the same effects."""
+    from revl.recovery import DictWorld, recover
+
+    path = _reused_wal(tmp_path, [("a", False), ("b", False)])
+    plain = recover(path, world=DictWorld())
+    answered = recover(path, world=DictWorld(), committed=False)
+    assert plain["verdict"] == answered["verdict"] == "rolled-back"
+    assert plain["worldCalls"] == 2, plain
+    assert answered["worldCalls"] == plain["worldCalls"], answered
+
+
+def test_committed_false_on_two_completed_openings_keeps_the_first(tmp_path):
+    """Both openings completed, and the caller says the step did not commit:
+    only the latest opening is inverted; the earlier opening's committed write
+    is kept."""
+    from revl.recovery import DictWorld, recover
+
+    path = _reused_wal(tmp_path, [("a", True), ("b", True)])
+    answered = recover(path, world=DictWorld(), committed=False)
+    assert answered["verdict"] == "rolled-back", answered
+    assert answered["worldCalls"] == 1, answered
+    assert [e["label"] for e in answered["ran"]] == ["write b"], answered

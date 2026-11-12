@@ -425,9 +425,11 @@ def recover(wal_path: str, *, world: Optional[World] = None,
 
     ``committed=False`` (issue #2725) is a caller holding a durable answer that
     the multi-participant step this WAL belongs to did NOT commit (an abort or
-    pending federation decision, or none at all): the WAL is rolled back LIFO
-    even when it carries ``activation-complete``, because that marker settles
-    this participant's own activation, not the step. ``None``, the default,
+    pending federation decision, or none at all): the latest opening of the
+    WAL (and the uncommitted openings just before it, as a plain recover would
+    walk them; an earlier committed opening is kept) is rolled back LIFO even
+    when it carries ``activation-complete``, because that marker settles this
+    participant's own activation, not the step. ``None``, the default,
     leaves the WAL's own markers to decide, so a plain recover is unchanged.
 
     ``callers`` (issue #1889) is placement recover's map of every OTHER process
@@ -487,8 +489,11 @@ def recover(wal_path: str, *, world: Optional[World] = None,
         # commit, so the latest opening is rolled back even when it carries
         # `activation-complete` (that marker settles this participant's own
         # activation, not the step).
-        report = _roll_back(_scoped_wal(wal, latest),
-                            world=bound(), wal_path=wal_path)
+        # A stronger answer never rolls back less than `None`: the trailing
+        # uncommitted openings before the latest are inverted too.
+        report = _roll_back(
+            _scoped_wal(wal, _trailing_open(intervals[:-1]) + latest),
+            world=bound(), wal_path=wal_path)
     elif any(r.get("record") == "activation-complete" for r in latest):
         report = _roll_forward(_scoped_wal(wal, latest),
                                session=session, snapshot=snapshot)
