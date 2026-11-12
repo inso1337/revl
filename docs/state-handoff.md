@@ -62,6 +62,9 @@ refused at its own line, as any other method whose body disagrees with its
 declared result. Without this, the wrong value was stored, carried across the
 swap, and failed at run time in a later expression.
 
+The result of `m.remove(k)` is not typed in this slice: it stays opaque, as
+before.
+
 A Map with no `handoff` declaration, and a component that acquires more than
 one Map (the declaration does not say which one it names), are not typed: their
 values stay on the host frontier, as before.
