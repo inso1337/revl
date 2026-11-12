@@ -3213,6 +3213,8 @@ transport, [mcp-http-transport.md](mcp-http-transport.md)):
 
 1. `revl_plan` with `{"source": "<the new app.rvl>"}` (or `files`/`modules`):
    the delta against the running composition, nothing applied. Needs no grant.
+   A successor the face cannot serve (below) is `"admissible": false` with
+   the swap's code, so the plan answers what the swap will.
 2. `revl_swap` with the same arguments (grant `swap`): the candidate is admitted
    against the running composition, then cut over. The face answers the next
    app request from the new generation. A candidate admission refuses is an
@@ -3224,11 +3226,23 @@ What a swap can change: operation bodies, components, wiring, anything the
 served surface does not show. What it cannot: the face's routes and public
 surface are bound at boot, so a successor that adds, drops or moves a route, or
 changes a served operation's parameters, return, route bindings or a type they
-name, is refused with `"code": "SERVED_SURFACE_CHANGED"`, naming each operation,
-and the running composition is untouched. Restart `revl serve` to serve a new
-surface, as `revl run --watch` asks for a change its boot-bound hosts cannot
-serve (issue #1569). An undo or rollback to a generation with another surface is
-refused the same way.
+name, is refused with `"code": "SERVED_SURFACE_CHANGED"` (also the code of its
+diagnostic, and `"swapped": false`), naming each operation, and the running
+composition is untouched. Restart `revl serve` to serve a new surface, as
+`revl run --watch` asks for a change its boot-bound hosts cannot serve (issue
+#1569). An undo or rollback to a generation with another surface is refused the
+same way, and so is a `revl_load` or `revl_restore` after a `revl_unload`: the
+face keeps the surface it bound at boot, so a cold load of the same surface is
+served and one with another is refused, with nothing loaded. A route that binds
+a typed `Request` is rebuilt through the module of the generation that runs, so
+it answers after a swap, an undo or a reload as before it.
+
+A served type is one an operation's parameters, return or route bindings name,
+read off the type positions: a type that only shares its name with a path
+segment or a parameter is not part of the surface. The check errs toward
+refusing. A type named like a field or a case of a served type, or like any
+other identifier in a served operation's entry, counts as served, so a change
+to it is refused although the face could serve it.
 
 ---
 

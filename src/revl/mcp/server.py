@@ -1271,6 +1271,21 @@ def _refusal_code(error: BaseException) -> dict:
     return {"code": code} if code else {}
 
 
+#: issue #3430: the served-surface refusal names itself on its diagnostic too,
+#: as an admission refusal's diagnostic carries the checker's code. Other
+#: carried codes keep the `REVL` diagnostic they have always had.
+_SURFACE_CODE = "SERVED_SURFACE_CHANGED"
+
+
+def _coded_refusal(error: BaseException, **extra) -> dict:
+    """`_session_error` for a refusal that carries its code (`_refusal_code`),
+    with the served-surface refusal's code on its diagnostic as well."""
+    payload = _session_error(error, **_refusal_code(error), **extra)
+    if payload.get("code") == _SURFACE_CODE:
+        payload["diagnostics"][0]["code"] = _SURFACE_CODE
+    return payload
+
+
 def _repair_field(repair: dict | None) -> dict:
     """The refusal's structured repair (issue #2845), or nothing at all.
 
@@ -1779,7 +1794,7 @@ def _boot(ir: dict, source, modules, config, record: bool, origin: dict,
         state = SESSION.load(ir, config, record=record, origin=origin,
                              agent_authored=bool(compile_report.get("authored")))
     except SessionError as error:
-        return _session_error(error)
+        return _coded_refusal(error)
     except ApprovalRequired as exc:
         return _approval_required(exc, host_bodies=authored)
     global _AUTHORED_HOST_BODIES
@@ -2020,7 +2035,7 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
         state = SESSION.swap(full, origin=origin,
                              agent_authored=agent_authored)
     except SessionError as error:
-        return _session_error(error, **_refusal_code(error))
+        return _coded_refusal(error, swapped=False)
     except ApprovalRequired as exc:
         # the candidate's own host bodies: a yes admits the candidate, so its
         # ticket names the candidate's host code, never the running one's
@@ -2298,7 +2313,7 @@ def _swap_server_side(replacing: tuple) -> dict:
     except ApprovalRequired as exc:
         return _approval_required(exc, host_bodies=authored)
     except SessionError as error:
-        return _session_error(error, **_refusal_code(error))
+        return _coded_refusal(error, swapped=False)
     return {"ok": True, "admitted": True, "swapped": True,
             "fromServerSide": True, "blastRadius": radius, **_summary(full), **state,
             **_effect_classes.report(full, running, against=True)}
@@ -3280,7 +3295,7 @@ def _tool_undo(arguments: dict) -> dict:
         return _approval_required(
             error, host_bodies=getattr(error, "host_bodies", []))
     except SessionError as error:
-        return _session_error(error)
+        return _coded_refusal(error)
     # a gate refusal is a result, not an error: surface it as ok:False with the
     # diagnostic, matching how revl_restore reports a rejected re-admission.
     if result.get("refused"):
@@ -4254,7 +4269,7 @@ def _tool_restore(arguments: dict) -> dict:
                 "message": str(error)}]
         return payload
     except SessionError as error:
-        return _session_error(error)
+        return _coded_refusal(error)
     from .persist import admitted_name  # noqa: PLC0415
 
     authored = _authored_host_bodies(
@@ -4973,7 +4988,34 @@ def _tool_plan(arguments: dict) -> dict:
     warnings = _leases.advise_plan(SESSION, arguments)
     if warnings:
         payload["leaseWarnings"] = warnings
+    if against == "session" and payload.get("admissible"):
+        _plan_served_surface(payload, arguments)
     return payload
+
+
+def _plan_served_surface(payload: dict, arguments: dict) -> None:
+    """Issue #3430: a plan against a session a face serves answers what the
+    swap with the same arguments will, so a successor the face cannot serve is
+    not admissible. Checked on the whole composition the swap would install,
+    compiled as `_swap_inline` compiles it; a candidate that does not compile
+    on its own is left to the plan's own answer (the swap refuses it too)."""
+    check = getattr(SESSION, "served_surface_check", None)
+    source, files, modules = _candidate_of(arguments)
+    if check is None or (source is None and not files and not modules):
+        return
+    try:
+        full = compile_under_authoring(source, files, modules=modules)
+    except RevlError:
+        return
+    problem = check(full)
+    if problem is None:
+        return
+    payload["admissible"] = False
+    payload["code"] = _SURFACE_CODE
+    payload["diagnostics"] = [*payload.get("diagnostics", []), {
+        "severity": "error", "code": _SURFACE_CODE,
+        "category": "session",
+        "message": problem, "from": "session"}]
 
 
 def _tool_ship(arguments: dict) -> dict:
