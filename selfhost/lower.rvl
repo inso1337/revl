@@ -3806,7 +3806,10 @@ fn p_route_stmt(ts: List[Token], i: Int, end: Int, provh: List[Bind],
                        setup, iso, rts, icept, hoff, action)
   }
   if (rc.strat != "" && !contains(known_strategies(), rc.strat)) {
-    return mk_refuse(provs, setup, iso, rts,
+    // issue #3360: the route is kept, as lower.py's header stub keeps it, so
+    // the refused router is still a router and draws no G3 self-cycle
+    return mk_refuse(provs, setup, iso,
+      rts.push({ key: key, rlms: rc.rlms, strat: "" }),
       tagged("ROUTE", route_strategy_msg(rc.strat, key, cname)), ts, i)
   }
   return p_comp_body(ts, rc.i, end, provh, reqh, cname, provs, setup, iso,

@@ -11885,7 +11885,7 @@ fn p_route_stmt(ts: Vec<Token>, i: i64, end: i64, provh: &[Bind], reqh: &[Bind],
         return p_comp_body(ts.clone(), skip_line(&ts, i), end, provh, reqh, cname, provs, setup, iso, rts, icept, hoff, action);
     }
     if ((rc.strat != "") && (!contains__m2(&known_strategies(), &rc.strat))) {
-        return mk_refuse(provs, setup, iso, rts, tagged("ROUTE", &route_strategy_msg(&rc.strat, &key, cname)), &ts, i);
+        return mk_refuse(provs, setup, iso, rts.revl_push(Route { key: key.clone(), rlms: rc.rlms.clone(), strat: String::from("") }), tagged("ROUTE", &route_strategy_msg(&rc.strat, &key, cname)), &ts, i);
     }
     return p_comp_body(ts, rc.i, end, provh, reqh, cname, provs, setup, iso, rts.revl_push(Route { key: key, rlms: rc.rlms.clone(), strat: rc.strat.clone() }), icept, hoff, action);
 }

@@ -8341,17 +8341,33 @@ def _component_header_stub(comp: ComponentDecl, filename: str) -> dict:
     topology complete from the parts available BEFORE body lowering — the
     `requires`/`provides` clauses on the `component` declaration — and mark it
     `poisoned` so the body-walking post-passes (taint, spawn bounds/attenuation,
-    holes) skip it. `isolate`/`routes` are body statements, so a stub carries
-    none: its provisions sit in the shared realm, which is exactly enough to
-    stop the route-check fabrication and keep G2/G3 sound over its keys."""
-    return {
+    holes) skip it. `isolate` is a body statement, so a stub carries none: its
+    provisions sit in the shared realm, which is exactly enough to stop the
+    route-check fabrication and keep G2/G3 sound over its keys.
+
+    A multi-realm route over a REQUIRED key is carried (issue #3360): it is
+    what makes a component that requires and provides one key a router rather
+    than a self-cycle, so a stub without it fabricated a G3 refusal next to the
+    real one (an unknown strategy, say). Only the realm set travels; a route
+    over a key the header does not require is the body's own refusal."""
+    from .parser import RouteStmt
+    requires = {local for local, _svc, _line in comp.requires}
+    stub = {
         "name": comp.name,
         "source": comp.source or filename,
-        "requires": {local for local, _svc, _line in comp.requires},
+        "requires": requires,
         "provides": {key for key, _svc, _line in comp.provides},
         "body": [],
         "poisoned": True,
     }
+    routes: dict = {}
+    for stmt in comp.body or ():
+        if isinstance(stmt, RouteStmt) and stmt.key in requires \
+                and stmt.key not in routes:
+            routes[stmt.key] = {"realms": list(stmt.realms), "strategy": None}
+    if routes:
+        stub["routes"] = routes
+    return stub
 
 
 def _raise_collected(errors: list[RevlError], program: Program) -> None:

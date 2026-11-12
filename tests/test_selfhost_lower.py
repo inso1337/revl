@@ -4505,6 +4505,24 @@ def test_issue_3354_a_read_of_the_extern_is_still_refused(admit, body):
     _agree(admit, src)
 
 
+def test_issue_3360_an_unknown_strategy_on_a_router_is_not_a_cycle(admit):
+    src = """service Layer { fn told(what: Str) -> Str }
+component Flat provides layer: Layer {
+  isolate layer in realm("flat")
+  provide layer { fn told(what) = "flat:" + what }
+}
+component Deep provides layer: Layer {
+  isolate layer in realm("deep")
+  provide layer { fn told(what) = "deep:" + what }
+}
+component Layers requires layer: Layer provides layer: Layer {
+  isolate layer in realms("flat", "deep") strategy(all)
+}
+"""
+    assert _ref_all(src) == [(11, "ROUTE")]
+    _agree(admit, src)
+
+
 # Parse refusals the gate spells in the reference's words. They cannot be
 # `REJECTED_PROGRAMS` rows: `_classify` files a parse error as "OUT:<message>"
 # and the gate tags it BAD, so only the message is compared here.

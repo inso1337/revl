@@ -194,6 +194,35 @@ def test_unknown_strategy_is_refused():
     assert "unknown routing strategy `round_robbin`" in str(ei.value)
 
 
+def test_an_unknown_strategy_on_a_router_is_its_only_refusal():
+    """Issue #3360: a component that requires and provides one key and routes
+    it across realms is a router. With a misspelt strategy its body is refused,
+    and the refusal stands alone: the route still makes it a router, so no G3
+    self-cycle is reported beside it."""
+    src = """service Layer {
+  fn told(what: Str) -> Str
+}
+component Flat provides layer: Layer {
+  isolate layer in realm("flat")
+  provide layer { fn told(what) = "flat:" + what }
+}
+component Deep provides layer: Layer {
+  isolate layer in realm("deep")
+  provide layer { fn told(what) = "deep:" + what }
+}
+component Layers requires layer: Layer provides layer: Layer {
+  isolate layer in realms("flat", "deep") strategy(all)
+}
+"""
+    with pytest.raises(RevlError) as ei:
+        compile_source(src, "layers.rvl")
+    errs = getattr(ei.value, "errors", None) or [ei.value]
+    assert [(e.line, e.message) for e in errs] == [
+        (13, "unknown routing strategy `all` for `layer` in Layers")]
+    compile_source(src.replace("strategy(all)", "strategy(round_robin)"),
+                   "layers.rvl")
+
+
 def test_routing_a_provision_is_refused():
     """Routing distributes a *consumer's* dependency; a provision has one
     installed instance in one realm (G2), so routing it is meaningless."""
