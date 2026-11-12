@@ -44,7 +44,7 @@ version behaves identically.
 from __future__ import annotations
 
 from .admission import (_caps_widen, _handoff_compatible, _service_compatible,
-                        _service_equal, _service_from_ir)
+                        _service_equal, _service_from_ir, _service_type_drift)
 from .adapt import bridge_plan
 from .audit_diff import (audit_report, diff_backends, diff_capability_scopes,
                          diff_cardinality, diff_crossings, diff_inverses,
@@ -152,13 +152,17 @@ def provided_surface(ir: dict, label: str = "a composition") -> dict:
     return out
 
 
-def _changed_surface(old: dict, new: dict) -> dict:
+def _changed_surface(old: dict, new: dict, old_types: dict | None = None,
+                     new_types: dict | None = None) -> dict:
     """The provisions whose shape or presence changed between OLD and NEW.
 
     Only keys the old version provided are considered: a key the new version
     adds has no consumer in the running composition, so it is not a migration
     of anyone. A key the new version withdraws, or whose service shape moved,
-    is exactly what the real consumers are pinned to.
+    is exactly what the real consumers are pinned to. The shape includes the
+    declared types the service's signatures reach: the same spelling over a
+    record that gained a field is a reshaped provision, as the admission gate
+    reads it (`admission._service_type_drift`).
     """
     changed: dict[tuple[str, str], dict] = {}
     for key, before in old.items():
@@ -167,7 +171,9 @@ def _changed_surface(old: dict, new: dict) -> dict:
             changed[key] = {"kind": "withdrawn", "before": before, "after": None}
             continue
         if before["decl"] is not None and after["decl"] is not None:
-            if _service_equal(after["decl"], before["decl"]):
+            if _service_equal(after["decl"], before["decl"]) and \
+                    _service_type_drift(before["decl"], new_types,
+                                        old_types) is None:
                 continue
             changed[key] = {"kind": "reshaped", "before": before,
                             "after": after}
@@ -245,6 +251,11 @@ def _consumer_plan(against: dict, new_ir: dict, new_surface: dict,
         return entry
 
     drift = _service_compatible(after["decl"], need, providers_retained=False)
+    if drift is None:
+        # the spellings hold; the declarations behind the names the consumer
+        # pinned may not (the admission gate's reading of the same pair)
+        drift = _service_type_drift(need, new_ir.get("types"),
+                                    against.get("types"))
     if drift is None:
         entry.update({"verdict": MOVABLE, "difference": None, "adapter": None})
         return entry
@@ -439,7 +450,8 @@ def handoffs(old_ir: dict, new_ir: dict) -> list[dict]:
                 f"the new version declares no hand-off on `{key}`: the "
                 f"successor starts cold and the predecessor's state is "
                 f"dropped")
-        elif _handoff_compatible(accepted.get("type"), exported.get("type")):
+        elif _handoff_compatible(accepted.get("type"), exported.get("type"),
+                                 new_ir.get("types"), old_ir.get("types")):
             entry["verdict"] = "compatible"
             entry["reason"] = (
                 f"`{accepted.get('type')}` accepts the state `"
@@ -545,7 +557,8 @@ def plan(old_ir: dict, new_ir: dict, against_ir: dict, *,
     _require_consumers(against_ir)
     old_surface = provided_surface(old_ir, "the OLD version")
     new_surface = provided_surface(new_ir, "the NEW version")
-    changed = _changed_surface(old_surface, new_surface)
+    changed = _changed_surface(old_surface, new_surface, old_ir.get("types"),
+                               new_ir.get("types"))
     _pin_against(against_ir, old_surface, changed)
     bump = derive_version(old_ir, new_ir)
     delta = composition_diff(old_ir, new_ir)

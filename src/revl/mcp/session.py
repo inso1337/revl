@@ -30,12 +30,12 @@ from fnmatch import fnmatchcase
 from .. import cap_order
 from .. import intent as _intent
 from .._paths import backends_root, python_backend_emitter, venv_python
+from ..admission import _handoff_compatible, _handoff_detail
 from ..gate import _ir_referenced_names
 from ..holes import collect as collect_holes
 from ..holes import summarize as summarize_holes
 from ..refusal import refusals
 from ..taint import REDACTED_SECRET
-from ..typecheck import compatible
 from . import operator as _operator
 from . import quorum as _quorum
 from . import identity as _identity
@@ -775,6 +775,14 @@ class _SwapPlan:
     handoff_carry: frozenset | None = None
 
 
+def _own_declarations(turn_doc: dict, running_ir: dict | None) -> dict:
+    """The declarations `turn_doc` does not share with the table it was
+    compiled against: the names the turn adds or redeclares differently."""
+    running = (running_ir or {}).get("types") or {}
+    return {name: spec for name, spec in (turn_doc.get("types") or {}).items()
+            if running.get(name) != spec}
+
+
 def _container_copy(value):
     if isinstance(value, dict):
         return dict(value)
@@ -1426,7 +1434,7 @@ class Session:
         # that call returns (a turn is never wired mid-call, exactly as the
         # self-evolution loop never swaps synchronously). Empty in every session
         # that does not admit, so nothing changes for one that does not.
-        self._pending_admits: list[dict] = []
+        self._pending_admits: list[tuple[dict, dict, dict]] = []
         # design 460 §4 (two-phase admission, Slice 2 — same-process half): the
         # applied set keyed by a turn's CONTENT decision key, so re-wiring the
         # identical turn plugs once and returns the recorded keys. This closes the
@@ -2614,11 +2622,14 @@ class Session:
             accepted = accepts.get(key)
             if accepted is None:
                 continue  # the successor opts out of this key — starts cold
-            if not compatible(accepted, exported):
+            if not _handoff_compatible(accepted, exported, new_ir.get("types"),
+                                       old_ir.get("types")):
+                at, ex = _handoff_detail(accepted, exported, new_ir.get("types"),
+                                         old_ir.get("types"))
                 raise SessionError(
                     f"the successor's `handoff` on {key!r} accepts "
-                    f"`{accepted}`, but the running provider exports "
-                    f"`{exported}` — the declared hand-off types are not §5-"
+                    f"`{accepted}`{at}, but the running provider exports "
+                    f"`{exported}`{ex} — the declared hand-off types are not §5-"
                     f"compatible, so operator state cannot cross onto the "
                     f"agent-authored successor (the item-53 accept-vs-export "
                     f"gate never ran on the standalone decision compile). "
@@ -2944,6 +2955,9 @@ class Session:
             pre[_handoff_slot(comp, key)] = {
                 "component": comp["name"],
                 "type": handoff.get("type"),
+                # the declarations that spelling is written against, so the
+                # restore step compares shapes and not just names
+                "types": (old_ir or {}).get("types") or {},
                 "captured": captured,
             }
         return pre
@@ -3077,11 +3091,14 @@ class Session:
             # check below passes it through.
             accepted = (comp.get("handoff") or {}).get("type")
             exported = info.get("type")
-            if not compatible(accepted, exported):
+            if not _handoff_compatible(accepted, exported, new_ir.get("types"),
+                                       info.get("types")):
+                at, ex = _handoff_detail(accepted, exported, new_ir.get("types"),
+                                         info.get("types"))
                 raise runtime.StateIncompatible(
                     f"provider of {key!r}: the successor accepts state "
-                    f"`{accepted}`, but the running provider exported "
-                    f"`{exported}` — the declared hand-off types are not §5-"
+                    f"`{accepted}`{at}, but the running provider exported "
+                    f"`{exported}`{ex} — the declared hand-off types are not §5-"
                     f"compatible, so the state cannot migrate")
             captured = info["captured"]
             fiber = self._driver.fibers.get(comp["name"])
@@ -5940,14 +5957,18 @@ class Session:
         turn_bundle = {"sources": {filename: source},
                        "granted": sorted(granted or ()),
                        "modules": dict(modules or {})}
+        # what the turn itself declares, taken against the table it was just
+        # compiled over: a queued turn is wired later, when that table may have
+        # moved (`_types_with_turn`).
+        declared = _own_declarations(turn_doc, self.ir)
         if self._loop is not None and self._loop.is_running():
-            self._pending_admits.append((turn_doc, turn_bundle))
+            self._pending_admits.append((turn_doc, turn_bundle, declared))
         else:
-            self._wire_turn(turn_doc, bundle=turn_bundle)
+            self._wire_turn(turn_doc, bundle=turn_bundle, declared=declared)
         return AdmitVerdict(True, handle=AdmitHandle(self, keys), keys=keys)
 
-    def _wire_turn(self, turn_doc: dict, *,
-                   bundle: dict | None = None) -> tuple[str, ...]:
+    def _wire_turn(self, turn_doc: dict, *, bundle: dict | None = None,
+                   declared: dict | None = None) -> tuple[str, ...]:
         """Plug an admitted turn's components into the LIVE driver with the
         session owner active — so every frame the turn builds joins the same
         live-frame registry the enclosing session's commit/abort iterate — then
@@ -6009,7 +6030,7 @@ class Session:
 
         # the post-admission composition, built BEFORE anything is plugged so the
         # pre-boot gates decide against the surface the turn actually creates.
-        merged = self._merged_turn_ir(turn_doc)
+        merged = self._merged_turn_ir(turn_doc, declared)
         turn_names = {c["name"] for c in turn_components}
         new_map = self._build_class_map(merged)
         # item 294: an admitted turn may not self-mint a lease either. Scoped to
@@ -6145,6 +6166,12 @@ class Session:
         self.ir["components"].extend(turn_components)
         for name, spec in turn_doc["services"].items():
             self.ir["services"].setdefault(name, spec)
+        # the declarations travel with the services spelled over them, so the
+        # next admission reads every adopted signature against the record it
+        # was checked as
+        types = self._types_with_turn(turn_doc, declared)
+        if types:
+            self.ir["types"] = types
         self.ir["manifest"] = turn_doc["manifest"]
         driver.ir = self.ir
 
@@ -6285,7 +6312,23 @@ class Session:
             sort_keys=True, separators=(",", ":"))
         return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-    def _merged_turn_ir(self, turn_doc: dict) -> dict:
+    def _types_with_turn(self, turn_doc: dict,
+                         declared: dict | None = None) -> dict:
+        """The declarations once `turn_doc` is wired: the live table with the
+        turn's own laid over it. `declared` is what the turn itself declares
+        (`_own_declarations`, taken when it was compiled). A turn queued behind
+        another was compiled before that one was wired, so its document's whole
+        table would drop the earlier turn's declarations and put back the
+        running one for any name the earlier turn redeclared. Without
+        `declared` the document was compiled against the live table and its
+        table is laid over whole."""
+        table = dict((self.ir or {}).get("types") or {})
+        table.update((turn_doc.get("types") or {}) if declared is None
+                     else declared)
+        return table
+
+    def _merged_turn_ir(self, turn_doc: dict,
+                        declared: dict | None = None) -> dict:
         """The composition that WILL be live once `turn_doc` is wired: the running
         ir widened by the turn's components, services and externs, over the turn's
         manifest (which already describes base + turn). A fresh dict over fresh
@@ -6307,6 +6350,9 @@ class Session:
         externs += [e for e in (turn_doc.get("externs") or [])
                     if e.get("name") not in known]
         merged["externs"] = externs
+        types = self._types_with_turn(turn_doc, declared)
+        if types:
+            merged["types"] = types
         merged["manifest"] = turn_doc["manifest"]
         return merged
 
@@ -6733,8 +6779,8 @@ class Session:
         if not self._pending_admits:
             return
         pending, self._pending_admits = self._pending_admits, []
-        for turn_doc, bundle in pending:
-            self._wire_turn(turn_doc, bundle=bundle)
+        for turn_doc, bundle, declared in pending:
+            self._wire_turn(turn_doc, bundle=bundle, declared=declared)
 
     # -- the auto-approve policy (roadmap item 246) ------------------------
 

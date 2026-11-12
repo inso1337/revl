@@ -76,8 +76,68 @@ state hand-off on `cache` differs from the running manifest: `CacheV2` accepts
 the predecessor's state, and dropping it on the swap would be residue
 ```
 
+A shape spelled with a declared record or variant name means what **its own
+version** declares. The running version's declarations come from the running
+manifest's `types`, the candidate's from its own text, and a name both shapes
+mention whose declaration (or any declaration it reaches) differs between the
+two is a different shape even though the spelling is the same: `St` going from
+`{ a: Int }` to `{ a: Int, b: Int }`, a field changing type, `Secret[Str]`
+becoming `Str`, or a variant gaining a case is refused, and the refusal prints
+both declarations. This is deliberately strict: it compares declarations for
+identity, so a harmless widening of a record is refused too and has to be
+migrated explicitly. Type parameters are compared by position, so renaming `T`
+to `U` is no change; variant cases are compared in order, because the WIT export
+numbers them by position, so a reorder is refused. The agent-authored swap path
+(`revl_propose`/`revl_swap`) and `revl migrate` apply the same check.
+
+A running manifest may record no declaration for a name the hand-off reaches.
+Either the running sources never declared it (a name used as a type without a
+declaration is accepted, and a program that declares no record or variant has
+no `types` at all), or they did and the manifest was written without it: by
+hand, or by a `revl apply` from before it carried the declarations along. An
+apply onto such a composition records the candidate's declarations and none of
+those already running, so the table can also be there and lack the name. The
+gate cannot tell the two histories apart, so a candidate that declares the
+name is refused, and the hint gives both ways through in place of the usual
+advice. Where the running sources declare the name, compiling them again gives
+a manifest that records it, and admitting against that one is decided on the
+declarations as usual. Where they do not, declaring it is the change: leave it
+undeclared, or give the new type another name and keep the hand-off spelled as
+it runs (respelled with the new name it is another type, refused on its own).
+
+All of that is advice about a declaration, and it is given only where the two
+hand-off types agree as spelled. Where they do not (the running version
+exports `Map[Str, St]` and the candidate accepts `St`), no declaration makes
+them agree. The hint is then the usual one, to widen the accepted type or
+migrate, and it adds that the declarations shown differ as well.
+
 Refusing is the sound move: silently dropping the predecessor's state on a swap
 would be **residue**, which G7/the erase-report forbid.
+
+### A hand-off the admission keeps
+
+The same rule covers a running component the admission does **not** replace.
+Its state stays where it is, built against the running declarations, and a
+composition has one declaration per name. So a candidate that redeclares
+differently a name a kept component's exported shape reaches is refused, even
+when the candidate has nothing to do with that component:
+
+```
+state hand-off on `db` differs from the running manifest: `Store` is kept and
+exports `St` (`St = {a: Int}`), but the candidate redeclares a type that
+spelling names (`St = {a: Int, b: Int}`); `Store` holds state built against the
+running declaration, and a composition has one declaration per name
+```
+
+Redeclaring the name identically is admitted, and so is a candidate that does
+not declare it. A type the language provides, such as `Answer[T]`, is never a
+redeclaration: no program can declare one, so a candidate that starts naming it
+changes nothing, and only the declared names under it are compared (`Answer[St]`
+is held to `St`). The ways through are the hint's: leave the declaration alone,
+give the new type another name, or replace the component in the same
+admission, where the replacement check above decides what happens to its state.
+A component the admission withdraws is not held to this rule for that reason.
+With several kept components the refusal names the first by component name.
 
 ### What is *not* a conflict
 
@@ -179,6 +239,9 @@ runs the reverse hand-off.
   `_admit_handoff_replacement`, `_handoff_error`), wired in
   `src/revl/lower.py::check_and_lower`; the running provider's exported shape is
   threaded into the ambient by `src/revl/compiler.py::_running_handoffs`;
+* the kept half: `src/revl/admission.py` (`_admit_retained_handoffs`), fed by
+  `src/revl/compiler.py::_retained_handoffs`, and `retained_handoff_refusals`
+  in `selfhost/lower.rvl`, which prints the same refusal byte for byte;
 * the warm-start threading — `src/revl/mcp/session.py` (`_capture_provider_state`,
   `_restore_provider_state`, and the extended `_abort_swap`), and the undo's
   restore-direction filter (`_handoff_back_pairs`, the `handoff_back` policy);

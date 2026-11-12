@@ -81,6 +81,59 @@ running component can break, and the change is admitted **however it drifts**.
 This is the honest strengthening the manifest makes possible: a change that
 breaks the interface is refused only when there is actually something to break.
 
+### The declared types behind a signature
+
+A signature spells a record or variant by name, and `compatible` takes one name
+on both sides to be one type. The running manifest fixes what each name meant
+when its consumers and providers were checked, so the gate also resolves every
+name a **running** service's signature reaches (parameters and returns, through
+`Map`, `List`, `Opt` and other records) against the running manifest's `types`
+and against the candidate's. A name whose declaration, or anything it reaches,
+differs between the two is a `signature` drift: `Rec` gaining, losing or
+retyping a field, a `Secret[Str]` field becoming `Str`, a variant changing a
+case. This runs for every service a running component provides or consumes,
+**whether or not the candidate redeclares it**, so a type-only edit is checked
+too. A service nothing running touches, and a type no touched service reaches,
+are not checked. A field reorder is not a change (fields compare as a set). A
+type the language provides, such as `Answer[T]`, is the same on both sides; the
+declared names under it are still compared.
+
+It is deliberately strict, as the state hand-off check is (it shares the
+declaration comparison): declarations are compared for identity, so a harmless
+widening of a record is refused and has to be migrated explicitly. A name the
+candidate does not declare keeps the running meaning. A running manifest that
+records no declaration for a name cannot say what it meant, so a candidate
+that declares it is refused, and the hint then gives the two ways through:
+compile the running sources again where they declare the name, leave it
+undeclared or give the new type another name where they do not (see
+docs/state-handoff.md). Under another name the signature keeps its running
+spelling: respelled with the new name it is another type, and that is refused
+as any narrowing is. `revl migrate` applies the same comparison per
+consumer (a changed record reads as a reshaped provision and the consumer is
+not `movable`).
+
+A document compiled against a manifest, and the composition `revl apply`
+installs, carry the running declarations next to the candidate's own (the
+candidate's wins on a shared name), so either can stand as the next running
+manifest and a later swap that changes nothing is admitted. A live session
+adopts the declarations of each admitted turn the same way, so a later turn
+that redeclares an unchanged record is admitted and one that changes a record a
+running turn's service uses is refused. A turn admitted while a call is running
+is wired when the call returns and adds the declarations it wrote itself, so it
+neither drops nor puts back what a turn wired before it declared.
+
+The candidate's declaration winning on a shared name is safe only because a
+changed one is refused wherever something running still depends on the old
+meaning: here for a service signature, and in `docs/state-handoff.md` for the
+state of a component the admission keeps.
+
+The self-host gate (`selfhost/lower.rvl`, `crates/revl-gate`) does not make
+this comparison yet. It does not run the compatibility relation on a
+redeclared service at all, so on that path a changed declaration behind a
+running signature is admitted where the reference refuses
+(`tests/test_selfhost_lower.py`,
+`test_service_declared_type_changed_is_refused_by_the_gate`).
+
 ## Consumer/provider identification, and the conservative fallback
 
 The composition manifest is `cordisc`-shaped: each component entry carries
@@ -129,6 +182,9 @@ would silently cross the boundary (G4/G8)
   genuine identity elsewhere (`plan`, capability round-trip tests). Two
   declarations of one service in a single compilation remain a **duplicate**,
   never a compatible swap.
+* `admission._admit_service_types` / `admission._service_type_drift`: the
+  declared-types check above, called from `check_and_lower` right after the
+  candidate's types are lowered; `migrate` reuses `_service_type_drift`.
 * `compiler._provision_services` / the `provision_services` ambient field —
   the key → service map the touchers read.
 
