@@ -66,6 +66,12 @@
 
 ["function", "inline-template-rejects-guarded-return-with-missing-expressi", "inline_template", 1, 1]
 
+["reason", "issue-3407-direct-read-guards-on-input-the-frontend-refuses", "issue #3407: defensive guards in the direct-read analysis whose input the frontend refuses. The duplicate-fn guard (`duplicate function `move``) and the callee-or-let-named-like-a-parameter check (`f` is already declared in this function; `move` is bound here and called in this body, and a module function of that name is in scope): no compiled document reaches them."]
+
+["function", "issue-3407-direct-read-guards-on-input-the-frontend-refuses", "dict_receivers", 1, 1]
+
+["function", "issue-3407-direct-read-guards-on-input-the-frontend-refuses", "dr_is_param", 1, 1]
+
 ["reason", "issue-721-method-block-renders-pass-for-an", "issue #721: `method_block` renders `pass` for an EMPTY provide-method control-flow arm. services_control_flow.rvl reaches every other statement, and no corpus document holds an empty arm. The reference renders the same `pass` through `_Lines.close_block` (issue #2284), which every other block shares, so it has no uncovered twin; tests/test_selfhost_emit_py.py `test_comment_only_blocks_agree` holds the two to the same bytes on empty arms."]
 
 ["function", "issue-721-method-block-renders-pass-for-an", "method_block", 1, 1]
