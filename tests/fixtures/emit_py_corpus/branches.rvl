@@ -18,6 +18,9 @@ fn optional_field(p: Opt[Point]) -> Opt[Int] { return p?.x }
 fn optional_parse(s: Opt[Str]) -> Opt[Opt[Int]] { return s?.to_int() }
 fn empty_map() -> Map[Str, Int] { return Map.empty() }
 fn removed(m: Map[Str, Int], k: Str) -> Map[Str, Int] { return m.remove(k) }
+fn removed_kk(m: Map[Str, Int], kk: Str) -> Map[Str, Int] { return m.remove(kk) }
+fn removed_vv(m: Map[Str, Int], vv: Str) -> Map[Str, Int] { return m.remove(vv) }
+fn removed_call(m: Map[Str, Int], x: Int) -> Map[Str, Int] { return m.remove(`k${x}`) }
 fn assertions(x: Int) {
   assert x >= 0
   assert x != 2

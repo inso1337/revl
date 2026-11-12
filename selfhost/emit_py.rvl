@@ -1645,9 +1645,11 @@ fn dr_calls(node: Any, fns: Map[Str, Any], ctx: Int) -> List[DrCall] {
 }
 
 // A rendered key that is a bare name or a number: re-evaluating it per
-// comprehension entry costs nothing and has no effect (issue #3344).
+// comprehension entry costs nothing and has no effect (issue #3344). The
+// comprehension's own loop variables `kk` and `vv` are not plain: a user name
+// spelled that way would be captured by them.
 fn py_plain_key(key: Str) -> Bool {
-  if (key.length() == 0) { return false }
+  if (key.length() == 0 || key == "kk" || key == "vv") { return false }
   var i = 0
   while (i < key.length()) {
     if (!dr_word_char(key.slice(i, i + 1))) { return false }

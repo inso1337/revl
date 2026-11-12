@@ -29,6 +29,8 @@ fn key(x: Int) -> Str {
 }
 fn viaCall(b: Box, x: Int) -> Map[Str, Int] { return b.m.remove(key(x)) }
 fn viaBare(b: Box, k: Str) -> Map[Str, Int] { return b.m.remove(k) }
+fn viaKk(m: Map[Str, Int], kk: Str) -> Map[Str, Int] { return m.remove(kk) }
+fn viaVv(m: Map[Str, Int], vv: Str) -> Map[Str, Int] { return m.remove(vv) }
 fn viaLocal(m: Map[Str, Int], x: Int) -> Map[Str, Int] { return m.remove(key(x)) }
 """
 
@@ -90,3 +92,9 @@ def test_a_bare_key_keeps_the_one_frame_comprehension():
     assert ns["viaBare"]({"m": {"a": 1, "b": 2}}, "a") == {"b": 2}
     body = src[src.index("def viaBare("):].split("\ndef ")[0]
     assert "kk != k}" in body
+
+
+def test_a_key_named_like_the_comprehension_variable_is_not_captured():
+    _, ns, _ = _counting()
+    assert ns["viaKk"]({"a": 1, "b": 2}, "a") == {"b": 2}
+    assert ns["viaVv"]({"a": 1, "b": 2}, "a") == {"b": 2}

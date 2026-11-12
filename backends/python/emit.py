@@ -5489,16 +5489,18 @@ def _py_inplace_write(node: dict) -> dict | None:
     return value if value.get("method") in _PY_INPLACE_METHODS else None
 
 
-# The persistent methods with an in-place equivalent, and their arity, kept
-# here because `_py_inplace_stmts` renders one statement per method.
 def _py_plain_key(key: str) -> bool:
     """A rendered key that is a bare name or a number: re-evaluating it per
-    comprehension entry costs nothing and has no effect (issue #3344)."""
-    return key != "" and all(
+    comprehension entry costs nothing and has no effect (issue #3344). The
+    comprehension's own loop variables `kk` and `vv` are not plain: a user name
+    spelled that way would be captured by them."""
+    return key not in ("", "kk", "vv") and all(
         c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
         for c in key)
 
 
+# The persistent methods with an in-place equivalent, and their arity, kept
+# here because `_py_inplace_stmts` renders one statement per method.
 _PY_INPLACE_METHODS = {"push": 1, "set": 2, "remove": 1}
 
 
