@@ -40,6 +40,7 @@ import subprocess
 import sys
 import threading
 
+from .. import _childproc
 from ..compiler import compile_source
 from ..errors import RevlError
 from . import attestation as _attestation
@@ -154,9 +155,9 @@ class Upstream:
 
     def start(self) -> None:
         try:
-            self._process = subprocess.Popen(
+            self._process = _childproc.popen(
                 self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=None, text=True, encoding="utf-8", bufsize=1)
+                stderr=None, bufsize=1)
         except OSError as error:
             raise UpstreamError(f"cannot start the upstream server "
                                 f"{self.command!r}: {error}") from error

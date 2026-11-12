@@ -75,6 +75,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+from .. import _childproc
 from ..admit_profile import AdmissionProfile
 from ..compiler import compile_files, compile_source, escaping_use_path
 from ..diagnostics import FIXES, GUARANTEES, classify, explain, report
@@ -5476,10 +5477,10 @@ def _run_affected_tests_selector(script: Path, root: Path, base: str,
         "PYTHONNOUSERSITE": "1",
     }
     try:
-        completed = subprocess.run(
+        completed = _childproc.run(
             [sys.executable, "-c", _AFFECTED_TESTS_SELECTOR_PROGRAM,
              str(script), str(root), base],
-            cwd=root, input=json.dumps(paths), capture_output=True, text=True,
+            cwd=root, input=json.dumps(paths), capture_output=True,
             check=False, timeout=_AFFECTED_TESTS_SELECTOR_TIMEOUT, env=environment)
     except subprocess.TimeoutExpired:
         return None, (f"affected-test selector timed out after "
@@ -5528,9 +5529,9 @@ def _tool_affected_tests(arguments: dict) -> dict:
     top = None
     for allowed_root in roots:
         try:
-            candidate = subprocess.run(
+            candidate = _childproc.run(
                 ["git", "rev-parse", "--show-toplevel"],
-                cwd=allowed_root, capture_output=True, text=True, check=False,
+                cwd=allowed_root, capture_output=True, check=False,
                 timeout=2)
         except (OSError, subprocess.TimeoutExpired):
             continue
@@ -5566,9 +5567,9 @@ def _tool_affected_tests(arguments: dict) -> dict:
     base = None
     for ref in ("origin/main", "main"):
         try:
-            merged = subprocess.run(
+            merged = _childproc.run(
                 ["git", "merge-base", ref, "HEAD"], cwd=root,
-                capture_output=True, text=True, check=False, timeout=2)
+                capture_output=True, check=False, timeout=2)
         except (OSError, subprocess.TimeoutExpired):
             continue
         if merged.returncode == 0 and merged.stdout.strip():

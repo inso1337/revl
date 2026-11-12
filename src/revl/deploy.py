@@ -120,7 +120,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
-from . import attest
+from . import _childproc, attest
 from .errors import RevlError
 
 # ---------------------------------------------------------------------------
@@ -1831,10 +1831,9 @@ class ProcessRunnerTransport:
 
     def _ensure(self) -> subprocess.Popen:
         if self._proc is None or self._proc.poll() is not None:
-            self._proc = subprocess.Popen(  # noqa: S603 — argv is caller-built
+            self._proc = _childproc.popen(  # noqa: S603 — argv is caller-built
                 self._argv, cwd=self._cwd, env=self._env,
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                text=True, encoding="utf-8")
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         return self._proc
 
     def send(self, request_wire: Mapping, *, now=None) -> dict:
@@ -2424,9 +2423,9 @@ class StdioRunnerTransport:
 
     def _exchange(self, payload: str) -> dict:
         try:
-            completed = subprocess.run(
+            completed = _childproc.run(
                 self._argv, input=payload + "\n", capture_output=True,
-                text=True, timeout=self._timeout)
+                timeout=self._timeout)
         except FileNotFoundError as error:
             raise SshRunnerRefused(
                 f"the runner command {self._argv[0]!r} could not be launched: "
@@ -2593,8 +2592,8 @@ def stage_bundle_over_ssh(local_bundle: Path | str, *, host: str,
     argv = [scp_exe, *opts, *[str(a) for a in extra_args], "-r",
             str(src), f"{host}:{remote_bundle}"]
     try:
-        completed = subprocess.run(  # noqa: S603 — argv built above, no shell
-            argv, capture_output=True, text=True, timeout=timeout)
+        completed = _childproc.run(  # noqa: S603 — argv built above, no shell
+            argv, capture_output=True, timeout=timeout)
     except FileNotFoundError as error:
         raise BundleStageRefused(
             f"the stage command {scp_exe!r} could not be launched: "
@@ -5057,8 +5056,8 @@ def launch_container_participant(
     if subprocess.run([exe, "image", "inspect", target.image],
                       capture_output=True, timeout=timeout,
                       check=False).returncode != 0:
-        pull = subprocess.run([exe, "pull", target.image], capture_output=True,
-                              text=True, timeout=max(timeout, 300), check=False)
+        pull = _childproc.run([exe, "pull", target.image], capture_output=True,
+                              timeout=max(timeout, 300), check=False)
         if pull.returncode != 0:
             return None, (
                 f"target {target.process!r}: image {target.image!r} is neither "
@@ -5096,9 +5095,9 @@ def launch_container_participant(
                                               interactive=True)
             + [target.image, "python3", str(module), str(spec_path)])
     try:
-        process = subprocess.Popen(  # noqa: S603 — argv built above, no shell
+        process = _childproc.popen(  # noqa: S603 — argv built above, no shell
             argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True)
+            stderr=subprocess.PIPE)
     except OSError as error:
         return None, (f"target {target.process!r}: could not start the "
                       f"container ({error})")
@@ -5196,9 +5195,9 @@ def launch_local_participant(
     exe = python or sys.executable
     argv = [exe, "-u", str(module), str(spec_path)]
     try:
-        process = subprocess.Popen(  # noqa: S603 — argv built above, no shell
+        process = _childproc.popen(  # noqa: S603 — argv built above, no shell
             argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True)
+            stderr=subprocess.PIPE)
     except OSError as error:
         return None, (f"target {target.process!r}: could not start the local "
                       f"participant ({error})")
