@@ -2859,9 +2859,11 @@ jobs:
           tests/test_run_go.py
           tests/test_run_ts_stdlib_fs_root.py
           tests/test_stdlib_version.py
+          tests/test_str_trim.py
           tests/test_total_field_surface.py
           tests/test_ts_block_arm_record_capture_2297.py
           tests/test_ts_seam_int_1566.py
+          tests/test_value_float.py
           tests/test_value_stdlib.py
           tests/test_verdict_test_count_2286.py
           -q
