@@ -35,6 +35,11 @@ def _run_explain(args) -> int:
         print(f"  {record['meaning']}")
     if record.get("fix"):
         print(f"  fix: {record['fix']}")
+    if record.get("repairs"):
+        # issue #2759: the mechanical ways out the fixgen engine can verify,
+        # listed by kind so an author knows what `repairs` will carry on a
+        # refusal of this code.
+        print(f"  repairs: {', '.join(record['repairs'])}")
     return 0
 
 

@@ -94,6 +94,7 @@ PLAN: dict[str, tuple[dict, dict | None]] = {
     "revl_escalate": ({"hash": "x"}, None),
     "revl_override": ({"hash": "x", "reason": "r"}, None),
     "revl_quorum": ({"hash": "x"}, None),
+    "revl_approvals": ({"action": "list"}, None),
     "revl_distillation_offers": ({}, None),
     "revl_apply_distillation": ({"offerId": "x"}, None),
     "revl_revoke_distillation": ({"rule": "x"}, None),

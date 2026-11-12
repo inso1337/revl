@@ -891,16 +891,29 @@ def _run_replay(args) -> int:
     each crossing's capability token and is itself admitted under the policy; it
     is compiled statically, so no live effect fires.
 
+    `--probe` with `--under` prints the probe report instead (item 2806, Slice
+    1): one row per `--candidate` composition, with the candidate hash, the
+    number of recorded crossings regraded, the newly refused and newly allowed
+    counts, the first dangerous crossing and the bounds. It is ORDERING
+    evidence only and grants nothing, so a clean row is not an admission and a
+    refusal does not fail this command.
+
     Exit status without `--under`: 0 when at least one mode is plannable from
     the record (the WAL carries model decisions), 1 when none is (no model
     decision recorded, so the WAL cannot inform any LLM-aware replay mode), which
     doubles as an honest gate on "is this WAL model-aware". With `--under`: 0
     when the question is answerable, no recorded crossing is refused and the
     candidate is admitted; 1 when a recording cannot answer it, when a recorded
-    crossing is refused, or when the candidate is refused.
+    crossing is refused, or when the candidate is refused. With `--probe`: 0
+    when the report is produced, 2 on an unreadable or malformed input, because
+    the probe does not decide anything to exit on.
     """
     if getattr(args, "under", None):
         return _run_counterfactual(args)
+    if getattr(args, "probe", False):
+        print("error: --probe is the summary of the --under counterfactual; "
+              "pass --under POLICY and --candidate FILE", file=sys.stderr)
+        return 2
 
     from ..errors import RevlError  # noqa: PLC0415
     from ..model_evidence import resolve_key  # noqa: PLC0415
@@ -928,12 +941,37 @@ def _run_replay(args) -> int:
 def _run_counterfactual(args) -> int:
     """The `--under POLICY` half of `revl replay`: counterfactual incident
     replay over the WAL (roadmap item 467). Reads the record and compiles the
-    candidate; fires no effect."""
-    from ..counterfactual import (CounterfactualError, replay_under,  # noqa: PLC0415
-                                  render)
+    candidate; fires no effect.
 
+    With `--probe` it builds the probe report over every `--candidate`
+    composition (item 2806, Slice 1). `--candidate` is collected as a list of
+    compositions so a probe can compare competing edits; the counterfactual
+    itself still takes exactly one composition."""
+    from ..counterfactual import (CounterfactualError, probe,  # noqa: PLC0415
+                                  render_probe, replay_under, render)
+
+    compositions = args.candidate or []
+    if getattr(args, "probe", False):
+        if not compositions:
+            print("error: a probe needs at least one --candidate composition",
+                  file=sys.stderr)
+            return 2
+        try:
+            doc = probe(args.wal, args.under, compositions)
+        except CounterfactualError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(doc, indent=2) if args.json else render_probe(doc))
+        return 0
+
+    if len(compositions) > 1:
+        print("error: one --candidate composition is required; repeat "
+              "--candidate with --probe to compare candidates",
+              file=sys.stderr)
+        return 2
+    files = compositions[0] if compositions else None
     try:
-        doc = replay_under(args.wal, args.under, candidate=args.candidate)
+        doc = replay_under(args.wal, args.under, candidate=files)
     except CounterfactualError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2

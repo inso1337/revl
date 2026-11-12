@@ -166,6 +166,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional, Union
 
+from . import _childproc
 from . import (peer_identity, peer_pool, pool_bundle, pool_health,
                pool_receipt, pool_state)
 from .lawful_retry import EffectClass
@@ -1008,8 +1009,8 @@ def execute(runner: str, source: Artifact, workspace: Path,
         # No stdin: the runner reads nothing from the peer process, so a
         # runner that would prompt gets end-of-file instead of waiting on
         # whatever `pool serve` was started with.
-        done = subprocess.run(argv, cwd=str(workspace), capture_output=True,
-                              stdin=subprocess.DEVNULL, text=True,
+        done = _childproc.run(argv, cwd=str(workspace), capture_output=True,
+                              stdin=subprocess.DEVNULL,
                               timeout=timeout, check=False)
         code, out, err = done.returncode, done.stdout, done.stderr
     except subprocess.TimeoutExpired:
