@@ -135,6 +135,7 @@ CORPUS = [
     "str_borrows.rvl",  # fixpoint signatures, owned boundaries, &str call sites
     "borrow_boundaries.rvl",  # callbacks, escaping captures, nested-list needles
     "borrow_shadowing.rvl",  # later/sibling bindings cannot hide function values
+    "str_trim.rvl",  # Str.trim over the is_space set (issue #3361)
     "lengths.rvl",  # property length and scalar to_str, not just method length;
                     #   read-only List param borrow (`&[T]`) + call-site threading
                     #   (owned `&xs` and already-borrowed pass-through)

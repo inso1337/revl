@@ -1708,6 +1708,12 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
     # would wrongly match the empty string, which is a substring of every str).
     if method == "is_space":
         return f'({target} in (" ", "\\t", "\\n", "\\r"))'
+    # trim (issue #3361): both ends, over exactly the is_space set above. An
+    # explicit argument to `strip`, never the bare call: python's default set
+    # also takes VT/FF/FS-US/NEL and the Unicode spaces, which no other tier
+    # agrees on (#3265).
+    if method == "trim":
+        return f'({target}).strip(" \\t\\n\\r")'
     # The Map value type (docs/stdlib-2.0.md §Map): a python dict, copied
     # on write — `{**m, k: v}` IS the persistent set.
     if method == "set":

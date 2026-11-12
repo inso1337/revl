@@ -995,7 +995,7 @@ fn builtin_return_type(node: Any, ctx: Ctx) -> Str {
       || m == "div_trunc" || m == "div_floor" || m == "div_euclid" || m == "mod"
       || m == "size") { return "Int" }
   if (m == "charAt" || m == "join" || m == "repeat" || m == "str" || m == "to_str"
-      || m == "to_char") { return "Str" }
+      || m == "to_char" || m == "trim") { return "Str" }
   if (m == "startsWith" || m == "endsWith" || m == "has" || m == "is_alnum"
       || m == "is_digit" || m == "is_alpha" || m == "is_space") { return "Bool" }
   if (m == "split" || m == "keys") { return "List[Str]" }
@@ -2188,6 +2188,11 @@ fn render_builtin(node: Any, ctx: Ctx) -> Str {
     return `{ let _cp: i64 = ${target}; if _cp < 0 || _cp > 0x10FFFF { String::new() } else { char::from_u32(_cp as u32).map(|c| c.to_string()).unwrap_or_default() } }`
   }
   if (method == "length") { return `${target}.revl_length()` }
+  // trim (issue #3361): both ends, over exactly the is_space set; not
+  // `str::trim`, whose set is the Unicode White_Space class.
+  if (method == "trim") {
+    return `{ let _rc: &str = &${target}; _rc.trim_matches(&[' ', '\t', '\n', '\r'][..]).to_string() }`
+  }
   return `<<UNSUPPORTED-BUILTIN:${method}>>`
 }
 

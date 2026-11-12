@@ -1720,6 +1720,11 @@ _BUILTIN_SIG = {
     "is_digit": ("Str", [], "Bool"),
     "is_alpha": ("Str", [], "Bool"),
     "is_space": ("Str", [], "Bool"),
+    # Strip whitespace from both ends (issue #3361, docs/stdlib-2.0.md
+    # §Str.trim). The set is exactly `is_space`'s (space, tab, LF, CR), so a
+    # trimmed text is the same on every tier rather than each host's own
+    # notion of whitespace (JS `trim()` and python `strip()` disagree, #3265).
+    "trim": ("Str", [], "Str"),
     # Integer division and modulo, named rather than defaulted (§0 keeps `/`
     # and `%` meaning what TypeScript means by them; these say what they do).
     # docs/arithmetic.md gives the definitions and the divergence they close.

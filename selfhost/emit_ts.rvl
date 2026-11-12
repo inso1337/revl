@@ -715,6 +715,11 @@ fn render_builtin(method: Str, target: Str, args: List[Str], arg_nodes: List[Any
   if (method == "is_space") {
     return { text: `((_rc: string) => _rc === " " || _rc === "\t" || _rc === "\n" || _rc === "\r")(${target})`, counter: counter }
   }
+  // trim (issue #3361): both ends, over exactly the is_space set; not the host
+  // `trim()`, whose whitespace set differs from every other tier's.
+  if (method == "trim") {
+    return { text: `(${target}).replace(/^[ \t\n\r]+|[ \t\n\r]+$/g, "")`, counter: counter }
+  }
   if (method == "set") {
     return { text: `(<K, V>(_m: Map<K, V>, _k: K, _v: V) => { const _c = new Map(_m); _c.set(_k, _v); return _c })(${target}, ${args[0]}, ${args[1]})`, counter: counter }
   }

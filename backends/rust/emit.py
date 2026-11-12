@@ -7104,7 +7104,7 @@ _BUILTIN_RESULT = {
     "to_str": "Str", "to_char": "Str",
     "startsWith": "Bool", "endsWith": "Bool", "has": "Bool",
     "is_alnum": "Bool", "is_digit": "Bool", "is_alpha": "Bool",
-    "is_space": "Bool",
+    "is_space": "Bool", "trim": "Str",
     "split": "List[Str]", "keys": "List[Str]",
     "to_int32": "Int32",
     "field": "Any", "list": "List[Any]",
@@ -8560,6 +8560,11 @@ def _v3_builtin(method: str, target: str, args: list[str],
     if method == "is_space":
         return (f'{{ let _rc: &str = &{target}; '
                 f'_rc == " " || _rc == "\\t" || _rc == "\\n" || _rc == "\\r" }}')
+    # trim (issue #3361): both ends, over exactly the is_space set above. Not
+    # `str::trim`, whose set is the Unicode White_Space class (#3265).
+    if method == "trim":
+        return (f"{{ let _rc: &str = &{target}; "
+                f"_rc.trim_matches(&[' ', '\\t', '\\n', '\\r'][..]).to_string() }}")
     raise EmitError(f"unknown builtin method {method!r}")
 
 

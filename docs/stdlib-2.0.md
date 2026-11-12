@@ -28,6 +28,7 @@ revl refuses.)
 | `is_alpha()` | 0 | Str | single-char ASCII letter `a`-`z`/`A`-`Z` (NOT `_`) | chained range compare | chained range compare |
 | `is_alnum()` | 0 | Str | single-char ASCII letter or digit | chained range compare | chained range compare |
 | `is_space()` | 0 | Str | single-char ASCII blank: space, tab, LF, CR | `x in (" ", "\t", "\n", "\r")` | equality set |
+| `trim()` | 0 | Str | drop the `is_space` set (space, tab, LF, CR) from both ends (issue #3361) | `x.strip(" \t\n\r")` | anchored regex replace |
 | `div_trunc(b)` | 1 | Int | integer division rounding toward zero | built | `Math.trunc(a / b)` |
 | `div_floor(b)` | 1 | Int | integer division rounding toward −∞ | `a // b` | `Math.floor(a / b)` |
 | `div_euclid(b)` | 1 | Int | division whose remainder is ≥ 0 | built | built |
@@ -425,6 +426,32 @@ still refuse them, each with its own message (`unknown v3 builtin method
 'is_digit'` on go, `unknown builtin method 'is_digit'` on java, `unsupported
 builtin method 'is_digit'` on wasm). A tier that later adopts them lowers to its
 own ASCII test.
+
+### `Str.trim()`: strip both ends over the `is_space` set (issue #3361)
+
+`s.trim()` returns `s` without the characters at either end that `is_space`
+accepts: space, tab, LF and CR. Nothing else is stripped: VT, FF, NBSP and the
+other Unicode spaces stay, on every tier. An all-space text and the empty text
+both trim to `""`. It is Str-only, takes no argument and returns `Str`.
+
+```revl
+fn reason(line: Str) -> Str {
+  return line.slice(7, line.length()).trim()   // "CANNOT:   x  " -> "x"
+}
+```
+
+The set is spelled out per tier rather than left to the host, because the
+hosts disagree: JS `trim()` strips U+FEFF and the Unicode spaces, python
+`strip()` also strips U+001C to U+001F, and rust `str::trim` follows Unicode
+`White_Space` (#3265). `trimStart` / `trimEnd` are not part of the surface;
+`stdlib/str.rvl` keeps its own `trim`/`lstrip`/`rstrip` free functions, whose
+set is wider (it adds VT and FF, matching python's ASCII `strip()`).
+
+**Tier status.** **py** (`x.strip(" \t\n\r")`), **typescript** (an anchored
+`replace` over `[ \t\n\r]`) and **rust** (`trim_matches` over the four chars):
+the tiers that lower `is_space`. Executed on all three by
+`tests/test_str_trim.py`. **go, java and wasm** refuse it with their unknown
+builtin message, as they refuse `is_space`.
 
 ### `Str.codepoint_at(i)`: codepoint-at-index scan (item 276)
 

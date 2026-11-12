@@ -289,6 +289,9 @@ _BUILTIN_METHODS = {
     # §Str.is_alnum): Str-only, no argument. Cuts the self-host lexer's
     # per-byte revl-fn-call + code-point-range tax to a native inline test.
     "is_alnum": 0, "is_digit": 0, "is_alpha": 0, "is_space": 0,
+    # Both-ends whitespace strip over exactly the `is_space` set (issue #3361,
+    # docs/stdlib-2.0.md §Str.trim): Str-only, no argument, Str result.
+    "trim": 0,
     # Integer division and modulo. `/` and `%` keep the meaning TypeScript
     # gives them (§0); these name what they do, so no tier has to guess and
     # none can quietly pick its host's convention (docs/arithmetic.md).

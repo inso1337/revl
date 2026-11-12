@@ -962,7 +962,7 @@ _DETERMINISTIC_BUILTIN_ALLOWLIST = frozenset({
     "indexOf", "split", "join", "repeat", "startsWith", "endsWith", "is_alnum",
     "is_digit", "is_alpha", "is_space", "has", "keys", "list", "lookup",
     "remove", "set", "size", "field", "str", "to_int", "to_int32", "to_str",
-    "to_char",
+    "to_char", "trim",
     "div_trunc", "div_floor", "div_euclid", "mod", "checked_div_trunc",
     "checked_div_floor", "checked_div_euclid", "checked_mod",
 })
