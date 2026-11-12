@@ -1120,6 +1120,18 @@ def _bound_only(profile: AdmissionProfile | None) -> AdmissionProfile | None:
     return replace(profile, realm_bindings=AUTHORING.realm_bindings)
 
 
+def _restore_gate_profile() -> AdmissionProfile | None:
+    """The profile the operator gate's `restore` target derivation compiles
+    under (issue #3197): the realm bindings the boot compile
+    (`AUTHORING.profile()`) carries, and nothing else, so a `realm(?NAME)`
+    binds the same way in the gate and in the boot. None when the boot binds
+    nothing."""
+    boot = AUTHORING.profile()
+    if boot is None or not boot.realm_bindings:
+        return None
+    return _bound_only(None)
+
+
 def _candidate_of(arguments: dict) -> tuple:
     """The candidate a tool call carries, as the `(source, files, modules)`
     triple `_compile` takes positionally. Read here ONCE, so a verb cannot
@@ -4196,6 +4208,11 @@ def _restore_authoring_refusal(error: RevlError, snap: dict | None = None) -> di
     return payload
 
 
+#: issue #3197: the operator gate's restore disk reads for the call in flight
+#: (path -> sha256), set by `handle` around the handler; None outside one.
+_RESTORE_GATE_READS: dict | None = None
+
+
 def _tool_restore(arguments: dict) -> dict:
     """Re-admit a snapshot into an empty session by replaying admission.
 
@@ -4227,7 +4244,14 @@ def _tool_restore(arguments: dict) -> dict:
     sources = sources or {}
     compile_report: dict = {"authored": True}
     try:
-        result = SESSION.restore(snap, profile=profile, report=compile_report)
+        # issue #3197: with an operator bound, the boot compile reads from
+        # disk exactly what the gate's compile read (none when no gate ran
+        # for this call). Ungated, the call is unchanged.
+        gated = ({"gate_reads": _RESTORE_GATE_READS or {}}
+                 if getattr(SESSION, "operator", None) is not None else {})
+        result = SESSION.restore(snap, profile=profile,
+                                 report=compile_report, agent_supplied=True,
+                                 **gated)
     except ApprovalRequired as error:
         from .persist import admitted_name  # noqa: PLC0415
 
@@ -8253,7 +8277,11 @@ def _call_tool_in_scope(name: str, arguments: dict, record: bool) -> dict:
     # profile bound -> ungated, today's behaviour unchanged. Skipped when the
     # call is already refused, so a refused path is never even resolved
     # against an operator's grants.
-    decision = _operator.decide(SESSION, name, arguments)
+    # issue #3197: a restore's target derivation binds realm placeholders
+    # the way its boot compile will; every other verb's call is unchanged
+    gate_kwargs = ({"restore_profile": _restore_gate_profile()}
+                   if name == "revl_restore" else {})
+    decision = _operator.decide(SESSION, name, arguments, **gate_kwargs)
     if decision.gated and not decision.allowed:
         return _canonicalised(_refused_by_operator(decision),
                               canonicalised)
@@ -8266,7 +8294,14 @@ def _call_tool_in_scope(name: str, arguments: dict, record: bool) -> dict:
         return _canonicalised(_runtime_gate.refusal(name), canonicalised)
     pre = _capture_undo_state(name, arguments)
     ir_before = getattr(SESSION, "ir", None)
-    payload = _run_handler(name, arguments)
+    global _RESTORE_GATE_READS
+    # issue #3197: what the operator gate's restore compile read from disk,
+    # for `_tool_restore` to hold the boot compile to
+    _RESTORE_GATE_READS = decision.disk_reads
+    try:
+        payload = _run_handler(name, arguments)
+    finally:
+        _RESTORE_GATE_READS = None
     if decision.gated and decision.allowed:
         _stamp_authority(payload, decision)
     if payload.get("ok"):
