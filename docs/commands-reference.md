@@ -154,7 +154,10 @@ Parse, check, link, and lower `FILES` to a backend IR document.
   provenance and origins are recorded against (default: the working
   directory). Ignored for module arguments.
 - `--json-diagnostics` - on rejection, print a structured diagnostic (code,
-  guarantee, expected/actual, `fix` hint) instead of the human rendering.
+  guarantee, expected/actual, `fix` hint) instead of the human rendering. A
+  refusal of the untrusted-author profile also carries `plain`: one sentence
+  for the person who wrote the source, naming their own identifier and no
+  internal term, for a product to show in place of the message (issue #3432).
 - `--taint-strict` - derive taint sinks and sources with no annotation (item
   249, slice D): a shell/exec/terminal-scoped crossing refuses untrusted
   input, and a web/net/fs/model/input emission mints its origin. Additive: a

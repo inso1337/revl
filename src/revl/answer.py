@@ -178,12 +178,18 @@ def define(code: str) -> Entry:
 
 
 def refusal(code: str, message: str, location: str | None = None,
-            repair: str | None = None) -> dict:
+            repair: str | None = None, plain: str | None = None) -> dict:
     """One structured refusal: the stable code and category from the registry,
-    the free-to-change `message`, and where and how to repair the call."""
+    the free-to-change `message`, and where and how to repair the call.
+
+    `plain` (issue #3432) is the sentence for the person who wrote the source,
+    carried from the diagnostic that refused; omitted when it has none."""
     entry = define(code)
-    return {"code": code, "category": entry.category, "message": str(message),
-            "location": location, "repair": repair}
+    answer = {"code": code, "category": entry.category, "message": str(message),
+              "location": location, "repair": repair}
+    if plain:
+        answer["plain"] = str(plain)
+    return answer
 
 
 def attach_refusal(payload: dict, code: str, message: str,
@@ -193,8 +199,10 @@ def attach_refusal(payload: dict, code: str, message: str,
 
     Called where a handler refuses, so the shared error envelope does not have
     to spell these fields itself and stay one vocabulary across transports."""
+    detail = (payload.get("diagnostics") or [{}])[0]
     payload["refusal"] = refusal(code, message, payload.get("location"),
-                                 payload.get("repair") or fix)
+                                 payload.get("repair") or fix,
+                                 detail.get("plain"))
     return payload
 
 
@@ -247,7 +255,8 @@ def _refusal_of(payload: dict) -> dict:
     return refusal(code,
                    detail.get("message") or payload.get("note") or "",
                    payload.get("location") or _location(detail),
-                   payload.get("repair") or detail.get("fix"))
+                   payload.get("repair") or detail.get("fix"),
+                   detail.get("plain"))
 
 
 def _derived_code(payload: dict) -> str:
@@ -274,4 +283,5 @@ def _location(detail: dict) -> str | None:
 
 def _normalised(value: dict) -> dict:
     return refusal(value.get("code"), value.get("message") or "",
-                   value.get("location"), value.get("repair"))
+                   value.get("location"), value.get("repair"),
+                   value.get("plain"))
