@@ -977,6 +977,48 @@ def drift(ir: dict, service: str, gains=(), losses=()) -> dict:
     )
 
 
+def authority(ir: dict, capability: str, previous: dict = None) -> dict:
+    """which model roles can reach a capability? — the authority graph, built
+    by joining the audit's boundary surface with the declared model routes and
+    secret bindings. `previous` is a previously emitted `authority` result;
+    with it the answer also reports the edges a pending update added."""
+    from . import authority as authority_graph  # noqa: PLC0415
+
+    graph = authority_graph.build_graph(ir)
+    known = authority_graph.capabilities(graph)
+    if capability not in known:
+        return _unknown("authority", "capability", capability, known)
+
+    result = _result(
+        "authority",
+        f"which model roles can reach `{capability}`?",
+        APPROX if any(edge["precision"] == APPROX
+                      for edge in graph["edges"]) else EXACT,
+        "the graph joins the audit's boundary surface with the declared model "
+        "routes and secret bindings. Route, declaration and binding edges are "
+        "read off the admitted IR; a component -> service edge is the audit's "
+        "may-analysis, so a reachable capability is one some admitted path "
+        "can carry, not one every activation does. A model role that declares "
+        "no `reaches [...]` is recorded as opaque, never assumed to reach "
+        "nothing.",
+        [_ASSUMPTION_MAY, _ASSUMPTION_EXTERN, _ASSUMPTION_SWAP,
+         _ASSUMPTION_SCOPE],
+        target=capability,
+        graph=graph,
+        roles=authority_graph.roles_reaching(graph, capability),
+        secrets=authority_graph.secrets_of(graph, capability),
+    )
+    if previous is not None:
+        if (not isinstance(previous, dict)
+                or not isinstance(previous.get("graph"), dict)):
+            return {"ok": False, "query": "authority",
+                    "error": "not an authority graph document: expected the "
+                             "`--json` result of `revl query authority`, "
+                             "whose `graph` object this diff reads"}
+        result["diff"] = authority_graph.diff(previous["graph"], graph)
+    return result
+
+
 # ---------------------------------------------------------------- live mode
 #
 # The same verbs, answered against the live session's real loaded state instead
@@ -1445,19 +1487,20 @@ QUERIES = {
     "depends-on": dependents,
     "reaches": reach,
     "drift": drift,
+    "authority": authority,
 }
+
+# the verbs the live query surface exposes, named once so the MCP verb enum
+# and this dispatch table cannot drift. `authority` is static-only: it answers
+# over the declared routes and secret bindings, and the live tool's argument
+# shape (one target or component) has no capability slot.
+LIVE_VERBS = ("emits-to", "withdraw", "depends-on", "reaches", "drift")
 
 # the same verbs, addressed by the result `query` name — what `live_query`
 # dispatches on. Live mode runs these against the session's post-swap IR;
 # historical mode adds its own verbs (`emitted-between`, `lifetime`) that only
 # a recorded run can answer.
-_VERB_FN = {
-    "emits-to": emitters,
-    "withdraw": withdrawal,
-    "depends-on": dependents,
-    "reaches": reach,
-    "drift": drift,
-}
+_VERB_FN = {name: QUERIES[name] for name in LIVE_VERBS}
 
 
 # ---------------------------------------------------------------- rendering
@@ -1608,6 +1651,26 @@ def render(result: dict) -> str:
                 out.append(f"    breaks call site {site['label']} "
                            f"({site['key']}.{site['method']})")
             out.append(f"    {loss['note']}")
+    elif query == "authority":
+        roles = result.get("roles") or []
+        if not roles:
+            out.append("\nno model role reaches it through an admitted path.")
+        for role in roles:
+            where = f" ({role['residence']})" if role.get("residence") else ""
+            out.append(f"\n  {role['role']}{where}  [{role['precision']}]")
+            out.append("    " + " -> ".join(role["path"]))
+        if result.get("secrets"):
+            out.append("\n  secrets bound to this capability: "
+                       + ", ".join(result["secrets"]))
+        if result.get("diff"):
+            delta = result["diff"]
+            out.append("\n  added edges: "
+                       + (", ".join(delta["added"]) or "none"))
+            out.append("  removed edges: "
+                       + (", ".join(delta["removed"]) or "none"))
+            out.append("  the update widens authority."
+                       if delta["widened"] else
+                       "  the update adds no authority edge.")
 
     if result.get("assumptions"):
         out.append("\n  this answer assumes:")

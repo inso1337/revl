@@ -625,21 +625,6 @@
     },
     {
       "sites": [
-        "src/revl/mcp/query_tools.py::_VERBS",
-        "src/revl/query.py::QUERIES",
-        "src/revl/query.py::_VERB_FN"
-      ],
-      "tokens": [
-        "depends-on",
-        "drift",
-        "emits-to",
-        "reaches",
-        "withdraw"
-      ],
-      "note": "The five query verbs, declared by the MCP tool surface and twice by the query engine. A verb added to the engine and not to the tool surface is unreachable over MCP, and the reverse dispatches to nothing."
-    },
-    {
-      "sites": [
         "src/revl/policy.py::TAINT_FOLD_ORIGINS",
         "src/revl/taint.py::_SOURCE_CLASS_SCOPES"
       ],

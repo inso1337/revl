@@ -120,6 +120,8 @@ PLAN: dict[str, tuple[dict, dict | None]] = {
     "revl_query_dependents": ({"target": "S", "source": SOURCE}, None),
     "revl_query_reach": ({"component": "C", "source": SOURCE}, None),
     "revl_query_drift": ({"service": "S", "source": SOURCE}, None),
+    "revl_query_authority": ({"target": "model.complete", "source": SOURCE},
+                             None),
     "revl_live_query": ({"verb": "depends-on", "target": "S"}, None),
     "revl_history_emitted_between": ({"from": 0, "to": 1},
                                      {"from": 0, "to": 1, "timeline": TIMELINE}),

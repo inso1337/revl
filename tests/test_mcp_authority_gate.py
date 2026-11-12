@@ -459,6 +459,7 @@ UNGATED = {
     "revl_query_dependents": "static query",
     "revl_query_emitters": "static query",
     "revl_query_drift": "static query",
+    "revl_query_authority": "static query",
     "revl_query_withdraw": "static query",
     "revl_live_query": "reads the live composition",
     "revl_update_check": "reads the release feed and compares identities; "

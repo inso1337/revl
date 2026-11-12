@@ -356,7 +356,7 @@ outputs are in [mcp-reference.md](mcp-reference.md).
 | `revl_distillation_offers` · `revl_apply_distillation` · `revl_revoke_distillation` | fold repeated yeses into a proposed auto-approve rule, install it, retire it | [mcp-reference.md](mcp-reference.md#revl_distillation_offers) |
 | `revl_estop` · `revl_estop_report` | the operator's emergency halt (a latch flip, not an unwind), and reading back what it stranded | [mcp-reference.md](mcp-reference.md#revl_estop) |
 | `revl_fork` · `revl_fork_confirm` | enumerate what forking the session at step k would rewind and what it cannot, then perform it and mint the branch | [mcp-reference.md](mcp-reference.md#revl_fork) |
-| `revl_query_{emitters,withdraw,dependents,reach,drift}` · `revl_live_query` | who emits to X? what breaks if I withdraw C? over source, or against the live session | [queries.md](queries.md) |
+| `revl_query_{emitters,withdraw,dependents,reach,drift,authority}` · `revl_live_query` | who emits to X? what breaks if I withdraw C? which model role can reach a capability? over source, or against the live session | [queries.md](queries.md) |
 | `revl_history_emitted_between` · `revl_history_lifetime` | the same query envelope over a recorded run | [queries.md](queries.md) |
 
 Two properties worth relying on: a **rejected candidate cannot deploy** (the

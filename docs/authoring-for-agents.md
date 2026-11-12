@@ -12,7 +12,7 @@ the authoring side. This does.
 If you only read one other doc, read [guide-ai-agents.md](guide-ai-agents.md):
 it is the full workflow guide, including the MCP verb table and the
 `revl_check` -> `revl_edit` -> `revl_resolve` -> `revl_admit` loop for a
-**running** composition. This page is narrower, naming the five verbs an
+**running** composition. This page is narrower, naming the six verbs an
 authoring agent reaches for before anything is live, each with both its CLI
 form and its MCP form. Every step of the loop is reachable either way, so an
 MCP-native agent never has to shell out.

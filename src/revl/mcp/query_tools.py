@@ -34,7 +34,7 @@ _SOURCE_INPUT = {
 
 _PRECISION_NOTE = (
     "Every result carries `precision` (\"exact\" or \"over-approximation\"), "
-    "`precisionNote` and `assumptions`. Read them before acting: two of these "
+    "`precisionNote` and `assumptions`. Read them before acting: three of these "
     "queries are proofs over the linked graph and three are may-analyses."
 )
 
@@ -102,6 +102,14 @@ def _tool_drift(arguments: dict) -> dict:
     return _run(arguments, Q.drift, service,
                 gains=list(arguments.get("gains") or []),
                 losses=list(arguments.get("loses") or arguments.get("losses") or []))
+
+
+def _tool_authority(arguments: dict) -> dict:
+    target, err = _require(arguments, "target")
+    if err:
+        return err
+    return _run(arguments, Q.authority, target,
+                previous=arguments.get("previous"))
 
 
 _METHOD_LIST = {"type": "array", "items": {"type": "string"}}
@@ -213,6 +221,38 @@ QUERY_TOOLS = [
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_drift,
     },
+    {
+        "name": "revl_query_authority",
+        "description":
+            "WHICH MODEL ROLE CAN REACH A CAPABILITY? Builds the authority "
+            "graph over one composition: model roles, components, services, "
+            "capabilities and secrets, joined from the audit's boundary "
+            "surface, the declared `route model` edges and the secret "
+            "bindings. Returns every role with an admitted path to the target "
+            "capability, one witness path each, plus the graph itself. With "
+            "`previous` (a previous result of this tool) it also reports the "
+            "edges a pending update adds, which is the widening direction an "
+            "operator reviews. Over-approximate on the crossing edges: it "
+            "reports what the checker proves, never a predicted behaviour.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_SOURCE_INPUT,
+                "target": {"type": "string",
+                           "description": "a capability token: a service "
+                                          "method's `emission[<capability>]`, "
+                                          "a secret's capability, or a model "
+                                          "role's `reaches` element"},
+                "previous": {"type": "object",
+                             "description": "a previous revl_query_authority "
+                                            "result to diff against; its `graph` "
+                                            "is the before side"},
+            },
+            "required": ["target"],
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_authority,
+    },
 ]
 
 
@@ -225,7 +265,7 @@ QUERY_TOOLS = [
 # envelope is the same one the static tools use; `mode` says which world.
 # --------------------------------------------------------------------------
 
-_VERBS = ["emits-to", "withdraw", "depends-on", "reaches", "drift"]
+_VERBS = list(Q.LIVE_VERBS)
 
 LIVE_QUERY_TOOLS = [
     {

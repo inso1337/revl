@@ -1,0 +1,26 @@
+// Authority graph fixture (issue #2702). Two model roles, each steering one
+// component. `analyst` reaches `payments.charge` through service `Payments`;
+// `reader` steers `Browser`, which only crosses `catalog.read`, so `reader`
+// must not be reported for `payments.charge`.
+
+model role analyst on_device reaches [payments.charge]
+model role reader on_device reaches [catalog.read]
+
+service Payments { emission[payments.charge] fn charge(amount: Int) -> Str }
+service Catalog { emission[catalog.read] fn read(id: Str) -> Str }
+service Answer { emission fn classify(text: Str) -> Str }
+
+// A host body and the secret bound to the same capability, so the graph
+// carries a secret node and its binding edge too.
+extern emission[payments.charge] fn charge_host(amount: Int) -> Str = @py { return str(amount) }
+secret api_key for payments.charge
+
+component Checkout requires pay: Payments provides checkout: Answer {
+  route model on classify { * -> analyst }
+  provide checkout { fn classify(text: Str) = emit pay.charge(1) }
+}
+
+component Browser requires cat: Catalog provides browse: Answer {
+  route model on classify { * -> reader }
+  provide browse { fn classify(text: Str) = emit cat.read(text) }
+}

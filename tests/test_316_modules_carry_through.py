@@ -308,6 +308,13 @@ MODULES_VERBS = {
     "revl_query_dependents": (lambda ir: {"target": "tool"}, _ok),
     "revl_query_reach": (lambda ir: {"component": "T"}, _ok),
     "revl_query_drift": (lambda ir: {"service": "Tool"}, _ok),
+    # the candidate declares no capability, so a carried module earns the
+    # authority verb's own unknown-capability miss; a dropped module fails the
+    # compile (caught by the DROP_SIGNS assertion) before the verb is reached
+    "revl_query_authority": (
+        lambda ir: {"target": "lib.module"},
+        lambda p: p.get("query") == "authority" and p.get("ok") is False
+                  and "unknown capability" in str(p.get("error") or "")),
     # issue #2532: `revl_source` declares the `modules` it always read for an
     # inline `source`; a symbol the module declares proves they are read
     "revl_source": (lambda ir: {"symbol": "helper"},

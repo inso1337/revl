@@ -98,10 +98,11 @@ TOPICS: dict[str, tuple[str, tuple[str, ...]]] = {
         "revl_timeline", "revl_inspect_step", "revl_step_back",
         "revl_replay_bisect", "revl_replay_forward")),
     "query": ("ask the composition: emitters, withdraw, dependents, reach, "
-              "drift; live and historical queries", (
+              "drift, authority; live and historical queries", (
         "revl_query_emitters", "revl_query_withdraw", "revl_query_dependents",
-        "revl_query_reach", "revl_query_drift", "revl_live_query",
-        "revl_history_emitted_between", "revl_history_lifetime")),
+        "revl_query_reach", "revl_query_drift", "revl_query_authority",
+        "revl_live_query", "revl_history_emitted_between",
+        "revl_history_lifetime")),
 }
 
 _ALL_TOOLS = os.environ.get("REVL_MCP_ALL_TOOLS", "") not in ("", "0")

@@ -286,7 +286,7 @@ below; the exhaustive per-command flag reference is
 | `revl plan FILES` | dry run for admission (`--manifest RUNNING.json`, `--replacing`); `-o change.plan` serializes an executable plan | [plan.md](plan.md) |
 | `revl apply change.plan` | execute a plan: drift-refuse, verify each step, roll back on failure (`--against RUNNING.json`) | [apply.md](apply.md) |
 | `revl undo --history H` | operator undo: replay a generation history and return to an earlier generation through the gate | [generation-history.md](generation-history.md) |
-| `revl query emits-to\|withdraw\|depends-on\|reaches\|drift TARGET FILES` | ask the composition a static question (`drift` takes `--gains`/`--loses`) | [queries.md](queries.md) |
+| `revl query emits-to\|withdraw\|depends-on\|reaches\|drift\|authority TARGET FILES` | ask the composition a static question (`drift` takes `--gains`/`--loses`; `authority` takes `--diff PREV.json`) | [queries.md](queries.md) |
 | `revl query emitted-between --timeline F --from X --to Y` | which emissions crossed between two steps of a recorded run | [queries.md](queries.md) |
 | `revl query touched COMPONENT` | everything a component touched (`--trace` lifecycle JSONL, `--timeline` replay recording) | [queries.md](queries.md) |
 | `revl fmt FILES` | canonical formatting (IR-equivalence gated); `--migrate` rewrites 1.x `$`, `--check` for CI | [fmt.md](fmt.md) |

@@ -382,6 +382,7 @@ answering compiler's identity beside it. Under `revl mcp proxy` the `initialize`
 | `revl_query_dependents` | yes | no | `target` (source) |
 | `revl_query_reach` | yes | no | `component` (source) |
 | `revl_query_drift` | yes | no | `service` (source) |
+| `revl_query_authority` | yes | no | `target` (source) |
 | `revl_live_query` | yes | no | `verb` |
 | `revl_history_emitted_between` | yes | no | `from`, `to` |
 | `revl_history_lifetime` | yes | no | `component` |
@@ -2444,7 +2445,7 @@ replayable rather than faked.
 
 ## Query the composition
 
-The five static query verbs answer over source; two of them are proofs over the
+The six static query verbs answer over source; three of them are proofs over the
 linked graph and three are may-analyses, and each result says which via
 `precision`, `precisionNote`, and `assumptions` ([queries.md](queries.md)).
 `source` / `files` are optional when the session holds a composition: with
@@ -2501,6 +2502,19 @@ EXACT for the compiled composition.
 
 - Inputs: `source` / `files` / `modules`; `service` (required); `gains`
   (methods added), `loses` (methods removed).
+
+### `revl_query_authority`
+
+WHICH MODEL ROLE CAN REACH A CAPABILITY? Builds the authority graph over one
+composition: model roles, components, services, capabilities and secrets,
+joined from the audit's boundary surface, the declared `route model` edges and
+the secret bindings. Returns every role with an admitted path to the target
+capability, one witness path each, plus the graph itself. With `previous` (a
+previous result) it also reports the edges a pending update adds, the widening
+direction an operator reviews. Over-approximate on the crossing edges.
+
+- Inputs: `source` / `files` / `modules`; `target` (required); `previous`
+  (a previous `revl_query_authority` result to diff against).
 
 ### `revl_live_query`
 
