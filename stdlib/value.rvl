@@ -460,8 +460,9 @@ pub extern pure fn value_int(v: Value) -> Int =
 // A Float out of a number (issue #3343). A float reads back as itself and an
 // integer as the Float of the same value, rounded to the nearest Float the way
 // every host converts (an integer past 2**53 may round; one past the Float
-// range is the signed infinity, on py exactly as on ts, where `Number` of a
-// `bigint` gives it); anything else, a bool included, is `0.0`.
+// range is the signed infinity on py and ts, where `Number` of a `bigint`
+// gives it, while rust refuses the document); anything else, a bool
+// included, is `0.0`.
 //
 // NaN and infinity in a parsed `Value`: `json_parse` refuses the `NaN` and
 // `Infinity` tokens on every tier (RFC 8259 section 6), so no NaN comes out of

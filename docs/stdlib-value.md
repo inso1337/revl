@@ -64,7 +64,7 @@ untrusted or partially-shaped document cannot fault.
 | `value_len(v)` | `Value -> Int` | length of list/record/str; a str counts CODE POINTS, never UTF-16 units (docs/strings.md); scalar/null → `0` |
 | `value_str(v)` | `Value -> Str` | as string; non-str → `""` |
 | `value_int(v)` | `Value -> Int` | as int (bool excluded); non-int → `0` |
-| `value_float(v)` | `Value -> Float` | a float as itself, an int as the Float of the same value (so `json_parse("3")` and `json_parse("3.0")` read back equal; an int past the Float range is the signed infinity); anything else, bool included → `0.0` (issue #3343) |
+| `value_float(v)` | `Value -> Float` | a float as itself, an int as the Float of the same value (so `json_parse("3")` and `json_parse("3.0")` read back equal; an int past the Float range is the signed infinity on py and ts; rust refuses the document); anything else, bool included → `0.0` (issue #3343) |
 | `value_bool(v)` | `Value -> Bool` | as bool; non-bool → `false` |
 
 ```revl
