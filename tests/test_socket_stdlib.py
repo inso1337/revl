@@ -500,7 +500,8 @@ def _listener(wire: Wire):
     import gc
     engine = _engine()
     (found,) = [o for o in gc.get_objects()
-                if isinstance(o, engine.Listener) and o.port == wire.port]
+                if isinstance(o, engine.Listener)
+             and getattr(o, "port", None) == wire.port]  # a failed bind has none
     return found
 
 
