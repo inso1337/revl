@@ -402,10 +402,11 @@ candidate's compile for a `load`, the snapshot's `sources` for a `restore`.
 * **restore**: every component the snapshot's `sources` compile to, the
   composition that actually boots. The document's `manifest` and
   `meta.components` are caller-written claims and scope nothing. A module
-  the document leaves out of its in-memory sources is read from disk once,
-  by the gate, and pinned into the snapshot the handler boots; with an
-  operator bound, a boot compile that would still read a module from disk is
-  refused, so a file changed between the decision and the boot cannot load.
+  the document leaves out of its in-memory sources is read from disk by the
+  gate's compile and again by the boot's; with an operator bound, a boot
+  compile whose disk reads differ from the gate's (another path, or a changed
+  text) is refused, so a file changed between the decision and the boot
+  cannot load.
 * **unload / edit / snapshot / undo / rollback** — the whole running
   composition (each operates on all of it).
 * **estop** (item 443) — the whole running composition too, and deliberately:

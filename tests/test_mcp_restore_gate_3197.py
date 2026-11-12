@@ -296,12 +296,17 @@ def _loaded_names(loaded: list) -> list[str]:
                   for entry in (ir.get("manifest") or {}).get("components") or [])
 
 
+def _messages(payload: dict) -> str:
+    return " ".join(d.get("message", "")
+                    for d in payload.get("diagnostics") or [])
+
+
 @pytest.mark.parametrize("claimed", [["Store"], ["TenantACache"]])
 def test_a_file_changed_after_the_gate_does_not_boot(
         server_with_a_recorder, tmp_path, monkeypatch, claimed):
     """The gate decides on `TenantACache`; the file then holds `Store`. The
-    boot must load the text the gate decided on, so whatever loads equals
-    `authority.subjects`, whichever set the document claims."""
+    boot compile reads a text the gate never read, so the restore is refused
+    and nothing loads, whichever set the document claims."""
     session, loaded = server_with_a_recorder
     session.operator = parse_profile(NAME_PROFILE).get("alice")
     path = tmp_path / "app.rvl"
@@ -309,12 +314,146 @@ def test_a_file_changed_after_the_gate_does_not_boot(
     _write_between_gate_and_boot(monkeypatch, path, STORE)
     payload = _call("revl_restore",
                     {"snapshot": _files_snapshot(path, claimed)})
-    assert "Store" not in _loaded_names(loaded), payload
-    if payload.get("ok"):
-        assert _loaded_names(loaded) == payload["authority"]["subjects"]
-    if claimed == ["TenantACache"]:
-        assert payload["ok"] is True, payload
-        assert _loaded_names(loaded) == ["TenantACache"]
+    assert payload["ok"] is False, payload
+    assert loaded == [], payload
+    assert "operator gate" in _messages(payload), payload
+
+
+DEP = 'pub fn word() -> Str { return "ok" }\n'
+USES_DEP = """use "./dep.rvl" { word }
+service S { fn q() -> Str }
+component Store provides s: S { provide s { fn q() = word() } }
+"""
+
+
+def test_a_use_changed_after_the_gate_does_not_boot(
+        server_with_a_recorder, tmp_path, monkeypatch):
+    """The root text is in the snapshot but the `use`-reached module is not in
+    `dependencies`, so both compiles read it from disk. A change to it between
+    the gate and the boot refuses the restore."""
+    session, loaded = server_with_a_recorder
+    session.operator = parse_profile(
+        "operator alice may restore on Store").get("alice")
+    path = tmp_path / "app.rvl"
+    path.write_text(USES_DEP)
+    dep = tmp_path / "dep.rvl"
+    dep.write_text(DEP)
+    _write_between_gate_and_boot(monkeypatch, dep, DEP.replace('"ok"', '"no"'))
+    snap = _files_snapshot(path, ["Store"])
+    snap["sources"]["files_content"] = {str(path): USES_DEP}
+    payload = _call("revl_restore", {"snapshot": snap})
+    assert payload["ok"] is False, payload
+    assert loaded == [], payload
+    assert "dep.rvl" in _messages(payload), payload
+
+
+def test_a_source_mode_module_changed_after_the_gate_does_not_boot(
+        server_with_a_recorder, tmp_path, monkeypatch):
+    """The same for a single-`source` snapshot whose `modules` leave the
+    `use`-reached module out: it is read from disk beside the admitted name."""
+    session, loaded = server_with_a_recorder
+    session.operator = parse_profile(
+        "operator alice may restore on Store").get("alice")
+    dep = tmp_path / "dep.rvl"
+    dep.write_text(DEP)
+    _write_between_gate_and_boot(monkeypatch, dep, DEP.replace('"ok"', '"no"'))
+    snap = {"sources": {"source": USES_DEP,
+                        "modules": {str(tmp_path / "other.rvl"):
+                                    'pub fn other() -> Str { return "x" }\n'}},
+            "manifest": {"components": [{"name": "Store",
+                                         "file": str(tmp_path / "app.rvl")}]},
+            "meta": {"components": ["Store"]}}
+    payload = _call("revl_restore", {"snapshot": snap})
+    assert payload["ok"] is False, payload
+    assert loaded == [], payload
+    assert "dep.rvl" in _messages(payload), payload
+
+
+def test_an_unchanged_disk_dependency_restores_with_its_asset(
+        server_with_a_recorder, tmp_path):
+    """A module read from disk keeps its disk semantics under an operator: an
+    `asset` beside a `use`-reached module still resolves, and the restore
+    loads. Copying the module text into the snapshot would have turned it
+    into an in-memory module whose asset no longer resolves."""
+    session, loaded = server_with_a_recorder
+    session.operator = parse_profile(
+        "operator root may restore on *").get("root")
+    (tmp_path / "dep.rvl").write_text(
+        'pub fn tpl_path() -> Str { let a = asset "./page.tpl"\n'
+        '  return a.path }\n')
+    (tmp_path / "page.tpl").write_text("hi")
+    root = ('use "./dep.rvl" { tpl_path }\n'
+            'service S { fn q() -> Str }\n'
+            'component Store provides s: S { provide s { fn q() = tpl_path() } }\n')
+    path = tmp_path / "app.rvl"
+    path.write_text(root)
+    snap = _files_snapshot(path, ["Store"])
+    snap["sources"]["files_content"] = {str(path): root}
+    payload = _call("revl_restore", {"snapshot": snap})
+    assert payload["ok"] is True, payload
+    assert _loaded_names(loaded) == ["Store"]
+
+
+def test_a_gated_restore_records_no_stdlib_text_as_a_dependency(
+        server_with_a_recorder, tmp_path, monkeypatch):
+    """The restored session's origin holds the snapshot's own sources: a
+    stdlib module the compile reached is not carried into later snapshots as
+    a `dependencies` entry."""
+    session, _loaded = server_with_a_recorder
+    session.operator = parse_profile(
+        "operator root may restore on *").get("root")
+    origins: list = []
+
+    def record_origin(ir, config=None, **kwargs):
+        origins.append(kwargs.get("origin") or {})
+        return {"loaded": True}
+
+    monkeypatch.setattr(session, "load", record_origin)
+    text = ('use "stdlib/str.rvl" { trim }\n'
+            'service S { fn q() -> Str }\n'
+            'component Store provides s: S { provide s { fn q() = trim(" ok ") } }\n')
+    path = tmp_path / "app.rvl"
+    path.write_text(text)
+    snap = _files_snapshot(path, ["Store"])
+    snap["sources"]["files_content"] = {str(path): text}
+    payload = _call("revl_restore", {"snapshot": snap})
+    assert payload["ok"] is True, payload
+    assert len(origins) == 1
+    dependencies = origins[0].get("dependencies") or {}
+    assert not any("stdlib" in path for path in dependencies), dependencies
+
+
+@pytest.mark.parametrize("entry", ["restore", "resume"])
+def test_the_operators_own_restore_accepts_no_meta_components(entry):
+    """`revl mcp serve --restore` and crash recovery (`persist.resume`) are
+    the operator's own snapshot, compiled with no authoring profile: a
+    snapshot that names no components restores as on main. The unconditional
+    check is for an agent-supplied document only."""
+    from revl.mcp import persist
+    from revl.mcp.session import Session
+
+    session = Session()
+    session.load = lambda ir, config=None, **_kwargs: {"loaded": True}
+    snap = {"sources": {"source": PURE},
+            "manifest": {"components": [{"name": "Store",
+                                         "file": "<snapshot>.rvl"}]},
+            "meta": {}}
+    result = getattr(persist, entry)(session, snap)
+    assert result["restored"] is True
+
+
+def test_the_operators_own_restore_still_refuses_a_wrong_claim():
+    """The control: the operator path keeps main's check when the snapshot
+    does name components."""
+    from revl.mcp import persist
+    from revl.mcp.session import Session
+
+    session = Session()
+    session.load = lambda ir, config=None, **_kwargs: {"loaded": True}
+    snap = {"sources": {"source": PURE}, "manifest": {"components": []},
+            "meta": {"components": ["Migrator"]}}
+    with pytest.raises(persist.RestoreError, match="no longer reproduce"):
+        persist.restore(session, snap)
 
 
 def test_an_undecided_restore_reads_nothing_from_disk(
@@ -333,8 +472,7 @@ def test_an_undecided_restore_reads_nothing_from_disk(
                     {"snapshot": _files_snapshot(path, ["Store"])})
     assert payload["ok"] is False, payload
     assert loaded == [], payload
-    message = " ".join(d.get("message", "")
-                       for d in payload.get("diagnostics") or [])
+    message = _messages(payload)
     assert "from disk" in message and "operator gate" in message, payload
 
 

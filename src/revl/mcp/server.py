@@ -4154,6 +4154,11 @@ def _restore_authoring_refusal(error: RevlError, snap: dict | None = None) -> di
     return payload
 
 
+#: issue #3197: the operator gate's restore disk reads for the call in flight
+#: (path -> sha256), set by `handle` around the handler; None outside one.
+_RESTORE_GATE_READS: dict | None = None
+
+
 def _tool_restore(arguments: dict) -> dict:
     """Re-admit a snapshot into an empty session by replaying admission.
 
@@ -4185,10 +4190,10 @@ def _tool_restore(arguments: dict) -> dict:
     sources = sources or {}
     compile_report: dict = {"authored": True}
     try:
-        # issue #3197: with an operator bound the gate decided on the texts
-        # it read and pinned them into `snap`, so the boot reads no disk.
-        # Ungated, the call is unchanged.
-        gated = ({"read_disk": False}
+        # issue #3197: with an operator bound, the boot compile reads from
+        # disk exactly what the gate's compile read (none when no gate ran
+        # for this call). Ungated, the call is unchanged.
+        gated = ({"gate_reads": _RESTORE_GATE_READS or {}}
                  if getattr(SESSION, "operator", None) is not None else {})
         result = SESSION.restore(snap, profile=profile,
                                  report=compile_report, **gated)
@@ -8086,10 +8091,6 @@ def _call_tool_in_scope(name: str, arguments: dict, record: bool) -> dict:
     if decision.gated and not decision.allowed:
         return _canonicalised(_refused_by_operator(decision),
                               canonicalised)
-    if decision.arguments is not None:
-        # issue #3197: the call as the gate decided it (a restore pinned to
-        # the texts the gate compiled), for the handler and the recorders
-        arguments = decision.arguments
     if not runtime_available() and _runtime_gate.is_refused(name, arguments):
         # issue #1692: a verb that needs a live composition, on an
         # interpreter that cannot boot one, refuses by name with the fix in
@@ -8099,7 +8100,14 @@ def _call_tool_in_scope(name: str, arguments: dict, record: bool) -> dict:
         return _canonicalised(_runtime_gate.refusal(name), canonicalised)
     pre = _capture_undo_state(name, arguments)
     ir_before = getattr(SESSION, "ir", None)
-    payload = _run_handler(name, arguments)
+    global _RESTORE_GATE_READS
+    # issue #3197: what the operator gate's restore compile read from disk,
+    # for `_tool_restore` to hold the boot compile to
+    _RESTORE_GATE_READS = decision.disk_reads
+    try:
+        payload = _run_handler(name, arguments)
+    finally:
+        _RESTORE_GATE_READS = None
     if decision.gated and decision.allowed:
         _stamp_authority(payload, decision)
     if payload.get("ok"):

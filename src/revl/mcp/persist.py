@@ -31,6 +31,7 @@ never the stored manifest.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from datetime import datetime, timezone
 
@@ -251,35 +252,11 @@ def recompile_snapshot(snap: dict | None, profile=None,
                       report=report)
 
 
-def pin_snapshot(snap: dict, disk_reads: dict[str, str] | None) -> dict:
-    """`snap` with every module text a compile of it read from disk folded
-    into its in-memory sources, so a later compile of the result reads the
-    same texts and nothing from disk.
-
-    The operator gate compiles a snapshot to derive its targets, and the
-    handler compiles it again to boot it (issue #3197). Without the pin, a
-    files-mode snapshot missing a `files_content` entry, or a `use` missing
-    from `dependencies`, is read from disk twice, and a write between the two
-    reads boots a composition the gate never decided on. A new document is
-    returned; the caller's is not mutated."""
-    if not disk_reads:
-        return snap
-    sources = dict(snap.get("sources") or {})
-    if sources.get(ORIGIN_SOURCE) is not None:
-        modules = dict(sources.get(ORIGIN_MODULES) or {})
-        modules.update(disk_reads)
-        sources[ORIGIN_MODULES] = modules
-    else:
-        roots = {os.path.abspath(path)
-                 for path in sources.get(ORIGIN_FILES) or []}
-        content = dict(sources.get(ORIGIN_FILES_CONTENT) or {})
-        dependencies = dict(sources.get(ORIGIN_DEPENDENCIES) or {})
-        for path, text in disk_reads.items():
-            (content if path in roots else dependencies)[path] = text
-        sources[ORIGIN_FILES_CONTENT] = content
-        if dependencies:
-            sources[ORIGIN_DEPENDENCIES] = dependencies
-    return {**snap, "sources": sources}
+def read_digests(disk_reads: dict[str, str] | None) -> dict[str, str]:
+    """The module texts a compile read from disk, as path -> sha256 of the
+    text: what the operator gate decided on (issue #3197)."""
+    return {path: hashlib.sha256(text.encode("utf-8")).hexdigest()
+            for path, text in (disk_reads or {}).items()}
 
 
 def _recompile(sources: dict, name: str = "<snapshot>.rvl",
@@ -415,7 +392,8 @@ def _refuse_policy_downgrade(session, meta: dict) -> None:
 
 
 def restore(session, snap: dict, profile=None,
-            report: dict | None = None, *, read_disk: bool = True) -> dict:
+            report: dict | None = None, *,
+            gate_reads: dict[str, str] | None = None) -> dict:
     """Re-admit a snapshot into `session`, replaying admission.
 
     Refuses if a composition is already loaded. Refuses a snapshot taken under an
@@ -430,10 +408,19 @@ def restore(session, snap: dict, profile=None,
     `_recompile`); an agent-supplied snapshot passes the session's, and that
     single compile is both the admission decision and the IR that is loaded.
 
-    `read_disk=False` (issue #3197) is a restore an operator gate decided on:
-    the gate pinned every text it read into `snap` (:func:`pin_snapshot`), so
-    a boot compile that still reads a module from disk would boot text the
-    gate never saw, and is refused before anything loads.
+    `gate_reads` (issue #3197) is set for a restore an operator gate decided
+    on: the modules the gate's own compile read from disk, as
+    :func:`read_digests`. The gate and this boot compile separately, so a
+    boot compile whose disk reads differ (another path, or a changed text)
+    would boot a composition the gate never saw, and is refused before
+    anything loads. The disk semantics are kept: a module still resolves its
+    `asset`, `ref` and body files beside it.
+
+    The `meta.components` cross-check is unconditional for an agent-supplied
+    snapshot (`profile` set): a caller-written document that leaves the
+    field out claims nothing, and an absent claim is not a match. The
+    operator's own paths (`revl mcp serve --restore`, crash recovery) keep
+    the older rule and skip the check when the snapshot names no components.
     """
     from .session import SessionError  # noqa: PLC0415
 
@@ -460,22 +447,28 @@ def restore(session, snap: dict, profile=None,
         # the load-bearing failure: a snapshot whose component the current
         # checker refuses does not load — it fails here, with the diagnostic
         raise RestoreError.from_revl(error) from None
-    read = sorted(report.get("disk_reads") or {})
-    if not read_disk and read:
-        raise RestoreError(
-            f"restore refused: the boot compile read {read} from disk, but "
-            "the operator gate decided on the texts it read itself. Put the "
-            "text in the snapshot (`files_content`, `dependencies`) and retry")
+    if gate_reads is not None:
+        booted = read_digests(report.get("disk_reads"))
+        drift = sorted(path for path in set(booted) | set(gate_reads)
+                       if booted.get(path) != gate_reads.get(path))
+        if drift:
+            raise RestoreError(
+                f"restore refused: the boot compile read {drift} from disk "
+                "differently from the compile the operator gate decided on "
+                "(a file changed or appeared in between). Put the text in the "
+                "snapshot (`files_content`, `dependencies`) and retry")
 
     # defence in depth: the runtime IR is the freshly compiled one, never the
     # stored manifest. Verify re-admission produced the composition the
     # snapshot described, so a silent drift is a loud refusal, not a smuggle.
-    # Unconditional (issue #3197): a caller-supplied document that leaves
-    # `meta.components` out claims nothing, and an absent claim is not a match.
+    # Issue #3197: unconditional for an agent-supplied snapshot (`profile`
+    # set), whose document is caller-written: leaving `meta.components` out
+    # claims nothing, and an absent claim is not a match. The operator's own
+    # snapshot keeps the older rule.
     claimed = set(meta.get("components") or [])
     got = {entry.get("name")
            for entry in (ir.get("manifest") or {}).get("components") or []}
-    if claimed != got:
+    if (claimed or profile is not None) and claimed != got:
         raise RestoreError(
             f"restore refused: re-admission produced components {sorted(got)}, "
             f"but the snapshot claimed {sorted(claimed)} — the sources no "
