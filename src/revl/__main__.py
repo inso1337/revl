@@ -1626,6 +1626,9 @@ def _dispatch(args) -> int:
     if args.command == "deploy-admit":
         from .deploy import deploy_admit_command  # noqa: PLC0415 — lazy
         return deploy_admit_command(args)
+    if args.command == "federation-apply":
+        from .federation_apply import federation_apply_command  # noqa: PLC0415 (lazy)
+        return federation_apply_command(args)
     if args.command == "composition":
         return _run_composition(args)
     if args.command == "analyze":

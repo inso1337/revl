@@ -396,7 +396,8 @@ def recover(wal_path: str, *, world: Optional[World] = None,
             session=None, snapshot: Optional[dict] = None,
             reissue: Optional[str] = None,
             forward_admissions: bool = False,
-            callers: Optional[dict] = None) -> dict:
+            callers: Optional[dict] = None,
+            committed: Optional[bool] = None) -> dict:
     """Read the WAL at ``wal_path`` and prove a way back.
 
     Returns a stated verdict (``rolled-forward`` or ``rolled-back``) with a
@@ -421,6 +422,15 @@ def recover(wal_path: str, *, world: Optional[World] = None,
     ``backends/python/replay.py`` so recover reads a WAL produced by any tier's
     runtime — the py in-process driver or a non-py (go/rust/java/wasm)
     subprocess — with no backend on the path.
+
+    ``committed=False`` (issue #2725) is a caller holding a durable answer that
+    the multi-participant step this WAL belongs to did NOT commit (an abort or
+    pending federation decision, or none at all): the latest opening of the
+    WAL (and the uncommitted openings just before it, as a plain recover would
+    walk them; an earlier committed opening is kept) is rolled back LIFO even
+    when it carries ``activation-complete``, because that marker settles this
+    participant's own activation, not the step. ``None``, the default,
+    leaves the WAL's own markers to decide, so a plain recover is unchanged.
 
     ``callers`` (issue #1889) is placement recover's map of every OTHER process
     of the run to the effect seqs its WAL holds, ``{process: {seq, ...}}``. A
@@ -474,7 +484,17 @@ def recover(wal_path: str, *, world: Optional[World] = None,
     intervals = opening_intervals(records)
     latest = intervals[-1]
     approved = _approval(latest)
-    if any(r.get("record") == "activation-complete" for r in latest):
+    if committed is False:
+        # issue #2725: the caller holds a durable answer that the step did NOT
+        # commit, so the latest opening is rolled back even when it carries
+        # `activation-complete` (that marker settles this participant's own
+        # activation, not the step).
+        # A stronger answer never rolls back less than `None`: the trailing
+        # uncommitted openings before the latest are inverted too.
+        report = _roll_back(
+            _scoped_wal(wal, _trailing_open(intervals[:-1]) + latest),
+            world=bound(), wal_path=wal_path)
+    elif any(r.get("record") == "activation-complete" for r in latest):
         report = _roll_forward(_scoped_wal(wal, latest),
                                session=session, snapshot=snapshot)
     elif approved is not None:
