@@ -742,3 +742,152 @@ def test_a_plain_out_of_unit_return_is_not_minted_confidential():
            + "service Vault { emission[vault.mint] fn get() -> Str }\n"
            + _secret_caller())
     compile_source(src, "out_of_unit_plain_secret.rvl")  # must not raise
+
+
+# ===========================================================================
+# 8. A verified-fn parser declassifier does NOT launder `confidential` (#3113).
+# ===========================================================================
+#
+# `verified fn wash(x) -> Trusted[Str]` declassifies an `Untrusted` parser input
+# for the G9 authority rule. It is NOT a downgrade for the `confidential`
+# origin: the declassifier branch used to check only `_carries_secret`, so a
+# `Secret[Str]` payment token handed to `wash` came back CLEAN and reached a log
+# or an LLM prompt with no `endorse[confidential]`. A `confidential` value
+# downgrades ONLY at the declared, audited slot (§7c), so the crossing is
+# refused at the declassifier - the same unconditional refusal a bound `secret`
+# already gets there (4a.3).
+
+# The program from the issue report, verbatim.
+_VERIFIED_FN_WASH = (
+    "extern emission[payment.charge] fn charge(a: Str) -> Secret[Str] "
+    "= @py { return a }\n"
+    "extern emission[log] fn logit(m: Str) -> Int = @py { return 0 }\n"
+    "verified fn wash(x: Str) -> Trusted[Str] { return x }\n"
+    "service Ops { emission fn go(u: Str) -> Int }\n"
+    "component Agent provides ops: Ops {\n  provide ops {\n"
+    "    fn go(u: Str) {\n      let t = emit charge(u)\n      let c = wash(t)\n"
+    "      let x = emit logit(c)\n      return 0\n    }\n  }\n}\n"
+)
+
+_WASH = "verified fn wash(x: Str) -> Trusted[Str] { return x }\n"
+
+
+def test_a_verified_fn_declassifier_does_not_launder_a_secret_return():
+    """#3113, the reported program: washing the token before logging it must be
+    refused, at the declassifier, with G-SECRET-FLOW."""
+    err = _refuses(_VERIFIED_FN_WASH)
+    assert "verified-fn declassifier" in err.message
+    assert "argument 1 of `wash`" in err.message
+
+
+def test_a_verified_fn_declassifier_does_not_launder_a_secret_into_a_prompt():
+    """The same escape with the log replaced by an LLM prompt: a washed token
+    must not reach the model context either."""
+    _refuses(_agent(
+        "      let t = emit charge(u)\n      let c = wash(t)\n"
+        "      let r = emit prompt(c)", extra=_WASH))
+
+
+def test_the_verified_fn_still_clears_the_other_origins():
+    """The fix does not disable the parser declassifier: a value with no
+    `confidential` origin still washes clean and reaches the log."""
+    compile_source(_agent(
+        "      let c = wash(u)\n      let x = emit logit(c)", extra=_WASH),
+        "verified_fn_clean.rvl")  # must not raise
+
+
+def test_a_declared_endorse_confidential_before_the_verified_fn_is_admitted():
+    """The one legal downgrade still works through the same shape: endorse the
+    token at a declared slot, then wash the now-clean value."""
+    src = (
+        "extern emission[payment.charge] fn charge(a: Str) -> Secret[Str] "
+        "= @py { return a }\n"
+        "extern emission[log] fn logit(m: Str) -> Int = @py { return 0 }\n"
+        + _WASH
+        + "service Ops { emission endorse[confidential] fn go(u: Str) -> Int }\n"
+        + "component Agent provides ops: Ops {\n  provide ops {\n"
+        + "    fn go(u: Str) {\n      let t = emit charge(u)\n"
+        + "      let d = endorse[confidential](t, reason = \"charge settled\")\n"
+        + "      let c = wash(d)\n      let x = emit logit(c)\n"
+        + "      return 0\n    }\n  }\n}\n")
+    compile_source(src, "verified_fn_endorse.rvl")  # must not raise
+
+
+# ===========================================================================
+# 9. A wrapper of the verified-fn declassifier does not launder either (#3113).
+# ===========================================================================
+#
+# The declassifier returns CLEAN, so a plain fn that wraps it used to get a
+# signature in which its parameter goes nowhere: the caller's `confidential` (or
+# bound `secret`) value came back clean and reached a log. The wrapper's
+# signature now records that the parameter reaches a declassifier
+# (`_Signature.declassifies_at`, the sibling of `persists_at`), transitively,
+# and the caller that hands it a `secret` or `confidential` value is refused.
+
+_LAUNDER = _WASH + "fn launder(p: Str) -> Str { return wash(p) }\n"
+
+
+def test_a_wrapper_of_the_declassifier_does_not_launder_a_secret_return():
+    err = _refuses(_agent(
+        "      let t = emit charge(u)\n      let c = launder(t)\n"
+        "      let x = emit logit(c)", extra=_LAUNDER))
+    assert "verified-fn declassifier (`wash`" in err.message
+    assert "argument 1 of `launder`" in err.message
+
+
+def test_a_trusted_returning_wrapper_does_not_launder_a_secret_return():
+    """The same wrapper declaring `-> Trusted[Str]`: a plain (non-verified) fn is
+    not a declassifier, so the qualifier on its return changes nothing."""
+    _refuses(_agent(
+        "      let t = emit charge(u)\n      let c = launder(t)\n"
+        "      let x = emit logit(c)",
+        extra=_WASH + "fn launder(p: Str) -> Trusted[Str] { return wash(p) }\n"))
+
+
+def test_a_wrapper_of_a_wrapper_does_not_launder_a_secret_return():
+    err = _refuses(_agent(
+        "      let t = emit charge(u)\n      let c = outer(t)\n"
+        "      let x = emit logit(c)",
+        extra=_LAUNDER + "fn outer(q: Str) -> Str { return launder(q) }\n"))
+    assert "outer -> launder -> wash" in err.message
+
+
+def test_a_wrapper_of_the_declassifier_does_not_launder_a_bound_key():
+    """The bound-key twin: `launder(emit complete(u))` into a host sink. The
+    direct call of the declassifier was already refused (4a.3); through a
+    wrapper it is now refused the same way, with G-SECRET."""
+    src = (
+        _BOUND_PRELUDE
+        + "extern emission[log] fn logit(m: Str) -> Int = @py { return 0 }\n"
+        + _LAUNDER
+        + "service Ops { emission fn go(u: Str) -> Int }\n"
+        + "component Agent provides ops: Ops {\n  provide ops {\n"
+        + "    fn go(u) {\n      let c = launder(emit complete(u))\n"
+        + "      let x = emit logit(c)\n      return 0\n    }\n  }\n}\n")
+    assert _code_of(src) == "G-SECRET"
+
+
+def test_a_service_method_wrapping_the_declassifier_does_not_launder():
+    """The method-call shape: a required-service operation whose in-unit
+    provider body washes its parameter. The provide method's signature carries
+    the same record, so `emit l.launder(t)` is refused at the caller."""
+    src = (
+        _PRELUDE + _WASH
+        + "service Laund { emission fn launder(x: Str) -> Str }\n"
+        + "component Washer provides l: Laund {\n  provide l {\n"
+        + "    fn launder(x) {\n      return wash(x)\n    }\n  }\n}\n"
+        + "service Ops { emission fn go(u: Str) -> Int }\n"
+        + "component Agent requires l: Laund provides ops: Ops {\n"
+        + "  provide ops {\n    fn go(u: Str) {\n"
+        + "      let t = emit charge(u)\n      let c = emit l.launder(t)\n"
+        + "      let x = emit logit(c)\n      return 0\n    }\n  }\n}\n")
+    err = _refuses(src)
+    assert "Washer.launder -> wash" in err.message
+
+
+def test_a_clean_value_through_the_wrapper_still_compiles():
+    """The record refuses only a `secret` or `confidential` argument: a plain
+    value with neither origin still passes through the wrapper to the log."""
+    compile_source(_agent(
+        "      let c = launder(u)\n      let x = emit logit(c)", extra=_LAUNDER),
+        "wrapper_clean.rvl")  # must not raise

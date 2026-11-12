@@ -21,6 +21,7 @@ saga on a real dev server); Slice 1 goldens the generated code SHAPE.
 """
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -245,6 +246,539 @@ def test_residue_sink_present():
     assert "ApplicationFailure.create(" in got and "details: [report]" in got
     assert "defineQuery<Residue[]>" in got and "setHandler(" in got
     assert "worldRemaining" in got and "proof: 'revl-saga-abort'" in got
+
+
+# ------------------------------------------- reserved scaffolding names (#3187)
+
+def _extern_crossing_src(name: str) -> str:
+    return (
+        f'extern emission fn {name}(card: Str) -> Str = @ts {{ return "ok" }}\n'
+        f'component Pay {{ emit {name}("visa") }}\n'
+    )
+
+
+@pytest.mark.parametrize("name", [
+    "recordResidue",       # the abort sink's own activity name
+    "proxyActivities",     # SDK import; destructuring it is a TDZ error
+    "ApplicationFailure",  # SDK import; `throw ApplicationFailure.create`
+    "setHandler",          # SDK import
+    "defineQuery",         # SDK import
+    "redactResidueError",  # emitted module-level helper
+    "argNeedles",          # emitted module-level helper
+    "AT_MOST_ONCE",        # emitted retry policy
+    # the activation body's own bindings shadow the destructured activity at
+    # its call site even though the destructuring itself is legal
+    "saga", "residue", "input", "step",
+])
+def test_extern_named_temporal_scaffolding_refused(name):
+    """An extern name becomes a module-scope activity binding AND is called
+    inside the workflow function, so it may not land on a name the workflow
+    module or its activation body already binds (issue #3187)."""
+    ir = compile_source(_extern_crossing_src(name), f"{name}.rvl")
+    with pytest.raises(EMIT.EmitError, match="reserves"):
+        EMIT.emit(ir, target="temporal")
+
+
+def test_activity_named_input_refused_in_a_component_with_config():
+    """A configured component does not change the rule: `input` is refused for
+    the extern before rendering, so the generated `input: PayInput` parameter
+    cannot shadow an activity of that name. The body-name check in `register`
+    is defensive: a service-derived activity name always carries the uppercase
+    key/method join, and every extern is already refused here."""
+    src = (
+        'extern emission fn input(card: Str) -> Str = @ts { return "ok" }\n'
+        "component Pay {\n"
+        '  config { level: Str = "x" }\n'
+        '  emit input("visa")\n'
+        "}\n"
+    )
+    ir = compile_source(src, "input_activity.rvl")
+    with pytest.raises(EMIT.EmitError, match="reserves"):
+        EMIT.emit(ir, target="temporal")
+
+
+@pytest.mark.parametrize("name", [
+    "recordResidue", "proxyActivities", "setHandler", "COMPENSATION_BUDGET_MS",
+])
+def test_component_named_temporal_scaffolding_refused(name):
+    ir = compile_source(f"component {name} {{ }}\n", f"{name}.rvl")
+    with pytest.raises(EMIT.EmitError, match="reserves"):
+        EMIT.emit(ir, target="temporal")
+
+
+def test_component_whose_residue_query_hits_the_sink_refused():
+    """`{component}Residue` is the component's `defineQuery` const, so a
+    component named `record` would emit a second `recordResidue` beside the
+    abort sink."""
+    ir = compile_source("component record { }\n", "record.rvl")
+    with pytest.raises(EMIT.EmitError, match="residue query"):
+        EMIT.emit(ir, target="temporal")
+
+
+def test_component_colliding_with_another_components_residue_query_refused():
+    ir = compile_source("component Trip { }\ncomponent TripResidue { }\n",
+                        "trip_residue.rvl")
+    with pytest.raises(EMIT.EmitError, match="reserves"):
+        EMIT.emit(ir, target="temporal")
+
+
+def test_service_method_activity_name_colliding_with_sink_refused():
+    """The activity name is DERIVED from a service-method crossing
+    (`record` + `residue` -> `recordResidue`), so the extern-only check is not
+    enough: the derived name is refused when the crossing registers."""
+    src = (
+        "service Ledger { emission fn residue(card: Str) -> Str }\n"
+        "component Pay requires record: Ledger {\n"
+        '  emit record.residue("visa")\n'
+        "}\n"
+    )
+    ir = compile_source(src, "ledger.rvl")
+    with pytest.raises(EMIT.EmitError, match="reserves"):
+        EMIT.emit(ir, target="temporal")
+
+
+@pytest.mark.parametrize("name", ["saga", "residue", "input", "step"])
+def test_binding_named_activation_scaffolding_refused(name):
+    """The activation body binds `saga` (the compensation stack), `input` (the
+    config object) and the drain's `residue`/`step` itself. `saga`/`input`
+    shadow a value the body reads today; the whole set is reserved so a
+    template change cannot turn a silent shadow back on."""
+    src = (
+        "extern pure fn r_close(h: RHandle) = @ts { return }\n"
+        "extern acquire fn r_open(n: Int) -> RHandle undo r_close(result)"
+        ' = @ts { return "h" }\n'
+        "component Pay {\n"
+        f"  let {name} = effect r_open(0) undo r_close({name})\n"
+        "}\n"
+    )
+    ir = compile_source(src, f"{name}_binding.rvl")
+    with pytest.raises(EMIT.EmitError, match="reserves"):
+        EMIT.emit(ir, target="temporal")
+
+
+def test_near_miss_extern_name_is_emitted_distinct_from_the_sink():
+    """Refusal is exact, not a prefix rule: `recordResidue_` is a different
+    activity and must keep working beside the `recordResidue` sink."""
+    ir = compile_source(_extern_crossing_src("recordResidue_"),
+                        "near_miss.rvl")
+    got = EMIT.emit(ir, target="temporal")
+    assert 'await recordResidue_("visa")' in got
+    assert "await recordResidue(report)" in got
+    assert "const { recordResidue, recordResidue_ } = proxyActivities" in got
+    assert "recordResidue_(card: string): Promise<string>" in got
+    assert "recordResidue(report: SagaReport): Promise<void>" in got
+
+
+def test_near_miss_binding_does_not_shadow_the_saga_stack():
+    src = (
+        "extern pure fn r_close(h: RHandle) = @ts { return }\n"
+        "extern acquire fn r_open(n: Int) -> RHandle undo r_close(result)"
+        ' = @ts { return "h" }\n'
+        "component Pay {\n"
+        "  let saga_ = effect r_open(0) undo r_close(saga_)\n"
+        "}\n"
+    )
+    got = _emit_temporal_module().emit_temporal(
+        compile_source(src, "near_miss_binding.rvl"))
+    assert "const saga: SagaStep[] = []" in got
+    assert "let saga_: unknown = undefined" in got
+    assert "saga_ = await r_open(0n)" in got
+    assert 'saga.push({ name: "saga_.undo"' in got
+
+
+# The host globals the emitted workflow module itself reads: `Date.now()` in
+# the abort path, `String`/`Set`/`Array`/`Object` in the redaction helpers,
+# and `Promise`, which the async functions read as a value once compiled
+# below ES2017 (`__awaiter`). No `@ts` body is emitted into this module, so a
+# global it does not read is not shadowed by anything.
+_JS_GLOBALS_AT_MODULE_SCOPE = [
+    "Date", "String", "Set", "Promise", "Object", "Array",
+]
+
+# Host globals the emitted workflow module never reads: an activity or a
+# component may take these spellings on this target, as on the main TS target.
+_JS_GLOBALS_THE_MODULE_NEVER_READS = ["fetch", "console", "setTimeout", "Map"]
+
+
+@pytest.mark.parametrize("name", _JS_GLOBALS_AT_MODULE_SCOPE)
+def test_extern_named_a_js_global_refused(name):
+    """An extern destructured as `Date` out of `proxyActivities` replaces the
+    global for the whole module: the abort path's `Date.now()` then calls the
+    activity proxy and throws before the drain loop, so no compensation runs
+    and `recordResidue` is never reached."""
+    ir = compile_source(_extern_crossing_src(name), f"{name}.rvl")
+    with pytest.raises(EMIT.EmitError, match="reserves"):
+        EMIT.emit(ir, target="temporal")
+
+
+@pytest.mark.parametrize("name", _JS_GLOBALS_AT_MODULE_SCOPE)
+def test_component_named_a_js_global_refused(name):
+    """A component is declared `export async function <name>()` at module
+    scope, so a component named `String` or `Set` shadows the global the
+    redaction helper calls the first time a compensation fails."""
+    ir = compile_source(f"component {name} {{ }}\n", f"{name}.rvl")
+    with pytest.raises(EMIT.EmitError, match="reserves"):
+        EMIT.emit(ir, target="temporal")
+
+
+@pytest.mark.parametrize("name", _JS_GLOBALS_THE_MODULE_NEVER_READS)
+def test_extern_named_an_unread_js_global_emits(name):
+    """Only the globals the module reads are reserved: an activity named
+    `fetch` is destructured and called like any other, since nothing in the
+    workflow module reads the host's `fetch`."""
+    got = EMIT.emit(compile_source(_extern_crossing_src(name), f"{name}.rvl"),
+                    target="temporal")
+    assert f'await {name}("visa")' in got
+    assert f"  {name}(card: string): Promise<string>" in got
+
+
+def test_component_named_an_unread_js_global_emits():
+    got = EMIT.emit(compile_source("component fetch { }\n", "fetch.rvl"),
+                    target="temporal")
+    assert "export async function fetch(): Promise<void>" in got
+
+
+def _bracket_src(undo: str, acquire: str = "r_open") -> str:
+    return (
+        f"extern pure fn {undo}(h: RHandle) = @ts {{ return }}\n"
+        f"extern acquire fn {acquire}(n: Int) -> RHandle undo {undo}(result)"
+        ' = @ts { return "h" }\n'
+        "component Pay {\n"
+        f"  let h = effect {acquire}(0) undo {undo}(h)\n"
+        "}\n"
+    )
+
+
+@pytest.mark.parametrize("name", ["fetch", "console", "process"])
+def test_pure_extern_named_a_host_global_refused(name):
+    """A pure extern is never declared in the workflow module: `undo fetch(h)`
+    renders as a bare `fetch(h)`, which would call the host's `fetch` instead
+    of the extern. So a name the module reads free avoids the globals listed
+    in `JS_GLOBAL_RESERVED`, not only the ones the scaffolding reads."""
+    ir = compile_source(_bracket_src(name), f"{name}_pure.rvl")
+    with pytest.raises(EMIT.EmitError, match="reserves"):
+        EMIT.emit(ir, target="temporal")
+
+
+@pytest.mark.parametrize("name", ["setTimeout", "fetch"])
+def test_acquire_extern_named_a_host_global_refused(name):
+    ir = compile_source(_bracket_src("r_close", acquire=name),
+                        f"{name}_acquire.rvl")
+    with pytest.raises(EMIT.EmitError, match="reserves"):
+        EMIT.emit(ir, target="temporal")
+
+
+def test_witnessed_extern_named_a_host_global_refused():
+    """A witnessed extern is not an activity either: `effect fetch("a")`
+    renders as a bare `fetch("a")` the module never declares."""
+    src = (
+        "type WT = { id: Str }\n"
+        "extern pure fn zqChk(w: WT) -> Int = @ts { return 1 }\n"
+        "extern witnessed fn fetch(x: Str) -> Result[WT, Str] undo pure"
+        " zqChk(result) = @ts { return x }\n"
+        "component Res {\n"
+        '  effect fetch("a")\n'
+        "}\n"
+    )
+    ir = compile_source(src, "fetch_witnessed.rvl")
+    with pytest.raises(EMIT.EmitError, match="reserves the name 'fetch' for a witnessed extern"):
+        EMIT.emit(ir, target="temporal")
+
+
+def test_unused_local_extern_named_a_host_global_refused():
+    """The check covers every extern in the program, reached by a component
+    or not, so an unused `local` extern named `fetch` is refused too (it fails
+    safe)."""
+    src = (
+        "extern local fn fetch(n: Int) -> Unit = @ts { return }\n"
+        "component Res { }\n"
+    )
+    ir = compile_source(src, "fetch_local.rvl")
+    with pytest.raises(EMIT.EmitError, match="reserves the name 'fetch' for a local extern"):
+        EMIT.emit(ir, target="temporal")
+
+
+def test_free_read_refusal_names_the_host_call_not_scaffolding():
+    """`fetch` is not scaffolding: the refusal says the bare call would reach
+    the host's own function, with the article the class takes."""
+    ir = compile_source(_bracket_src("r_close", acquire="fetch"),
+                        "fetch_acquire_msg.rvl")
+    with pytest.raises(EMIT.EmitError) as info:
+        EMIT.emit(ir, target="temporal")
+    text = str(info.value)
+    assert "for an acquire extern" in text
+    assert "would reach the host's own 'fetch'" in text
+    assert "scaffolding" not in text
+
+
+# Names the emitted module uses ONLY as types: the TS lib `Record` and the
+# module's own `SagaStep`/`Residue`/`SagaReport` aliases and `RevlActivities`
+# interface. A value binding lives in another namespace, so an activity or a
+# component may take these spellings.
+_TYPE_ONLY_NAMES = ["Record", "SagaStep", "Residue", "SagaReport",
+                    "RevlActivities"]
+
+
+@pytest.mark.parametrize("name", _TYPE_ONLY_NAMES)
+def test_emission_extern_named_a_type_only_name_emits(name):
+    got = EMIT.emit(compile_source(_extern_crossing_src(name), f"{name}.rvl"),
+                    target="temporal")
+    assert f'await {name}("visa")' in got
+    assert f"  {name}(card: string): Promise<string>" in got
+
+
+@pytest.mark.parametrize("name", _TYPE_ONLY_NAMES)
+def test_component_named_a_type_only_name_emits(name):
+    got = EMIT.emit(compile_source(f"component {name} {{ }}\n", f"{name}.rvl"),
+                    target="temporal")
+    assert f"export async function {name}(): Promise<void>" in got
+
+
+def test_free_read_global_gets_the_free_read_reason():
+    """`Date` is also in the module scope, but a pure extern named `Date` is
+    never bound, so the refusal gives the free-read reason, not the shadow
+    one."""
+    ir = compile_source(_bracket_src("Date"), "Date_pure.rvl")
+    with pytest.raises(EMIT.EmitError) as info:
+        EMIT.emit(ir, target="temporal")
+    text = str(info.value)
+    assert "reserves the name 'Date' for a pure extern" in text
+    assert "would reach the host's own 'Date'" in text
+    assert "scaffolding" not in text
+
+
+# ------------------------------- reserved names derived from the emitted module
+
+# Every author-chosen name in this workflow starts with `zq`, so whatever else
+# the emitted module names is the target's own scaffolding. Its two components
+# render every step branch a source program can reach on this target: a
+# service crossing with a compensation, a keyed extern (the second retry
+# group), an acquire bracket bound to a name, an acquire whose site undo names
+# no binding, config reads, and a unary operand. The renderer's other branches
+# are not reachable from source: a component `if` guard may only hold `fail`,
+# which the step allowlist refuses, and an `acquire` needs a site `undo`, so an
+# effect without one never compiles. A template change in one of those
+# branches is not seen here.
+_SCAFFOLDING_PROBE = (
+    "service ZqLedger { emission fn zqCharge(zqCard: Str) -> Str\n"
+    "                   emission fn zqRefund(zqCard: Str) -> Str }\n"
+    "extern emission idempotent(key: zqCard) fn zqSettle(zqCard: Str) -> Str\n"
+    "  = @ts { return zqCard }\n"
+    "extern pure fn zqClose(zqH: RHandle) = @ts { return }\n"
+    "extern pure fn zqDrop(zqN: Int) = @ts { return }\n"
+    "extern acquire fn zqOpen(zqN: Int) -> RHandle undo zqClose(result)"
+    ' = @ts { return "h" }\n'
+    "extern acquire fn zqLease(zqN: Int) -> RHandle undo zqDrop(0)"
+    ' = @ts { return "h" }\n'
+    "component ZqPay requires zqLedger: ZqLedger {\n"
+    '  config { zqLevel: Str = "x" }\n'
+    "  let zqH = effect zqOpen(0) undo zqClose(zqH)\n"
+    '  emit zqLedger.zqCharge("visa") compensate zqLedger.zqRefund("visa")\n'
+    "  emit zqSettle(config.zqLevel)\n"
+    "}\n"
+    "component ZqDrain {\n"
+    "  config { zqCount: Int = 2 }\n"
+    "  effect zqLease(-1) undo zqDrop(config.zqCount)\n"
+    "}\n"
+)
+
+_TS_IDENT = r"[A-Za-z_$][\w$]*"
+
+# Syntax, not bindings: JS keywords plus the TS/contextual words the template
+# writes. Nothing an author can name shadows one of these.
+_TS_SYNTAX = frozenset(EMIT.JS_RESERVED) | {
+    "as", "async", "from", "of", "type", "interface", "string", "number",
+    "boolean", "bigint", "unknown", "any", "never",
+}
+
+
+def _strip_ts_comments_and_strings(code: str) -> str:
+    return re.sub(
+        r"//[^\n]*|'(?:\\.|[^'\\\n])*'|\"(?:\\.|[^\"\\\n])*\"|`(?:\\.|[^`\\])*`",
+        lambda m: " " * len(m.group(0)), code)
+
+
+_TS_TYPE = r"[A-Za-z_$][\w$.]*(?:\[\])*"
+
+
+def _blank_type_positions(code: str) -> str:
+    """`code` with every TYPE position blanked (same length, so offsets keep):
+    generic arguments, `type` aliases, `interface` blocks, annotations on a
+    `const`/`let`, on a function parameter or on a return, and `as` casts. A
+    name the module reads only there is not a value read, and a value binding
+    with that spelling shadows nothing."""
+    def blank(m):
+        return " " * len(m.group(0))
+    code = re.sub(r"(?m)^(?:export\s+)?type\s[^\n]*", blank, code)
+    for m in list(re.finditer(r"(?m)^(?:export\s+)?interface\s", code))[::-1]:
+        a, b = _brace_span(code, m.start())
+        code = code[:a] + " " * (b - a) + code[b:]
+    while True:  # innermost generic arguments first, so nesting unwinds
+        new = re.sub(r"(?<=[\w$])<[^<>()=]*>", blank, code)
+        if new == code:
+            break
+        code = new
+    code = re.sub(rf"(?<=\))\s*:\s*{_TS_TYPE}", blank, code)
+    code = re.sub(rf"(\b(?:const|let)\s+{_TS_IDENT})(\s*:\s*{_TS_TYPE})",
+                  lambda m: m.group(1) + " " * len(m.group(2)), code)
+    code = re.sub(rf"(?<![*\s])\s+as\s+{_TS_TYPE}", blank, code)
+
+    def params(m):
+        inner = re.sub(rf"(:\s*{_TS_TYPE})", blank, m.group(2))
+        return m.group(1) + inner + ")"
+    return re.sub(rf"(\bfunction\s+{_TS_IDENT}\s*\()([^()]*)\)", params, code)
+
+
+def _brace_span(code: str, start: int) -> tuple[int, int]:
+    """[start, end) from `start` through the brace that closes the first `{`
+    after it."""
+    depth = 0
+    for j in range(code.index("{", start), len(code)):
+        depth += {"{": 1, "}": -1}.get(code[j], 0)
+        if depth == 0:
+            return start, j + 1
+    raise AssertionError("unbalanced braces in the emitted module")
+
+
+def _declared_in(text: str) -> set:
+    names = set(re.findall(rf"\b(?:const|let|var)\s+({_TS_IDENT})", text))
+    names |= set(re.findall(rf"\bcatch\s*\(\s*({_TS_IDENT})", text))
+    params = (re.findall(rf"\bfunction\s+{_TS_IDENT}\s*\(([^()]*)\)", text)
+              + re.findall(r"\(([^()]*)\)\s*=>", text))
+    for group in params:
+        for param in group.split(","):
+            names |= set(re.findall(rf"^\s*({_TS_IDENT})", param))
+    return names
+
+
+def _scaffolding_identifiers():
+    """(names an extern must not take, names a component must not take),
+    read off the emitted module rather than a hand list.
+
+    Collected: every bare identifier in code (not a comment or string, not a
+    `.property`, not an object key or annotated name), minus syntax and the
+    probe's own `zq` names. Left out: names DECLARED in a sealed scope (the
+    redaction helpers and each workflow's catch block) and used nowhere else;
+    no author code is emitted there, so an author name cannot meet them. A
+    component also may take a name the workflow function binds for itself
+    (`saga`, `input`, ...): its function is never called from its own body."""
+    code = _blank_type_positions(_strip_ts_comments_and_strings(EMIT.emit(
+        compile_source(_SCAFFOLDING_PROBE, "zq_probe.rvl"), target="temporal")))
+    seen: dict = {}
+    for m in re.finditer(rf"(?<![\w$])({_TS_IDENT})", code):
+        before = code[:m.start()]
+        if before.endswith(".") and not before.endswith("..."):
+            continue  # a property access, not a binding
+        if re.match(r"\s*\??:", code[m.end():]):
+            continue  # an object/type key or an annotated name
+        seen.setdefault(m.group(1), []).append(m.start())
+    sealed = [_brace_span(code, m.start())
+              for m in re.finditer(r"(?m)^function\s", code)]
+    sealed += [_brace_span(code, m.start())
+               for m in re.finditer(r"\bcatch\s*\(err\)", code)]
+    workflows = [_brace_span(code, m.start())
+                 for m in re.finditer(r"(?m)^export async function\s", code)]
+
+    def only_in(spans, positions):
+        return all(any(a <= pos < b for a, b in spans) for pos in positions)
+
+    sealed_local = set().union(*(_declared_in(code[a:b]) for a, b in sealed))
+    workflow_local = set().union(*(_declared_in(code[a:b]) for a, b in workflows))
+    externs = {
+        name for name, positions in seen.items()
+        if name not in _TS_SYNTAX and not name.lower().startswith("zq")
+        and not (name in sealed_local and only_in(sealed, positions))
+    }
+    return frozenset(externs), frozenset(externs - workflow_local)
+
+
+def _free_author_names() -> frozenset:
+    """The probe's own `zq` names the emitted module reads but never binds:
+    no destructuring, declaration, parameter or function names them, so each
+    one resolves to whatever the host has under that spelling."""
+    code = _strip_ts_comments_and_strings(EMIT.emit(
+        compile_source(_SCAFFOLDING_PROBE, "zq_probe.rvl"), target="temporal"))
+    bound = _declared_in(code)
+    bound |= set(re.findall(
+        rf"\b(?:function|interface|type)\s+({_TS_IDENT})", code))
+    for group in re.findall(r"const\s*\{([^}]*)\}\s*=\s*proxyActivities", code):
+        bound |= {name.strip() for name in group.split(",")}
+    read = set()
+    for m in re.finditer(r"(?<![\w$.])[zZ]q[\w$]*", code):
+        if not re.match(r"\s*\??:", code[m.end():]):
+            read.add(m.group(0))
+    return frozenset(read - bound)
+
+
+def test_every_author_name_read_free_is_refused_as_a_host_global():
+    """The derived tests above skip the probe's own names, so they cannot see
+    an author name the module reads free. This one finds those names in the
+    emitted module (externs rendered as a bare call and never declared) and
+    respells each as the host global `fetch`, which the scaffolding never
+    reads: each respelling must be refused, since the bare call would reach
+    the host's `fetch`."""
+    free = _free_author_names()
+    assert {"zqClose", "zqOpen", "zqDrop", "zqLease"} <= free  # positive control
+    emitted = []
+    for name in sorted(free):
+        src = re.sub(rf"\b{name}\b", "fetch", _SCAFFOLDING_PROBE)
+        try:
+            EMIT.emit(compile_source(src, f"{name}_as_fetch.rvl"), target="temporal")
+        except EMIT.EmitError as exc:
+            if "reserves" not in str(exc):
+                emitted.append(f"{name}: {exc}")
+        else:
+            emitted.append(name)
+    assert not emitted, f"free author names that may take a host global: {emitted}"
+
+
+def test_scaffolding_identifier_collector_sees_every_kind_of_name():
+    """Positive control for the derived tests below: the collector finds an
+    SDK import, a module helper, a host global read only in the abort path, a
+    workflow-body binding, and it leaves out the catch-local `deadline`."""
+    externs, components = _scaffolding_identifiers()
+    assert {"proxyActivities", "redactResidueError", "Date", "String", "Set",
+            "recordResidue", "saga", "input"} <= externs
+    assert "deadline" not in externs and "zqSettle" not in externs
+    # names read only in a type position are skipped (`Record<...>`, `SagaStep[]`)
+    assert not {"Record", "SagaStep", "Residue", "SagaReport", "RevlActivities",
+                "Promise"} & externs
+    assert "activities" in externs  # a type-only import, but TS2440 binds it
+    assert "Date" in components and "saga" not in components
+
+
+def test_every_scaffolding_identifier_is_refused_as_an_extern_name():
+    """An identifier the emitted module reads or binds where an extern's
+    activity is destructured (module scope) or called (the workflow body) is
+    refused as an extern name. Derived from the emitted module, so a name the
+    template starts using later fails here until it is reserved."""
+    externs, _ = _scaffolding_identifiers()
+    emitted = []
+    for name in sorted(externs):
+        ir = compile_source(_extern_crossing_src(name), f"{name}.rvl")
+        try:
+            EMIT.emit(ir, target="temporal")
+        except EMIT.EmitError as exc:
+            if "reserves" not in str(exc):
+                emitted.append(f"{name}: {exc}")
+        else:
+            emitted.append(name)
+    assert not emitted, f"scaffolding names an extern can still take: {emitted}"
+
+
+def test_every_module_scope_scaffolding_identifier_is_refused_as_a_component():
+    _, components = _scaffolding_identifiers()
+    emitted = []
+    for name in sorted(components):
+        ir = compile_source(f"component {name} {{ }}\n", f"{name}.rvl")
+        try:
+            EMIT.emit(ir, target="temporal")
+        except EMIT.EmitError as exc:
+            if "reserves" not in str(exc):
+                emitted.append(f"{name}: {exc}")
+        else:
+            emitted.append(name)
+    assert not emitted, f"scaffolding names a component can still take: {emitted}"
 
 
 # --------------------------------------------------------------- residue-error redaction (item 421 F7)

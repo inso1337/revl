@@ -1141,7 +1141,8 @@ decl        := ['pub'] (typedecl | fndecl | service | extern)
              | ['lifecycle'] test                              (§7.1)
              | composition                                     (§4c)
 typedecl    := 'type' IDENT generics? '=' (record | variant ('|' variant)*)
-fndecl      := ['verified'] 'fn' IDENT '(' tparams? ')' ['->' type] block
+fndecl      := ['verified'] 'fn' IDENT '(' tparams? ')' ['->' type]
+               ['ensures' expr] block             -- run as a prop test (function-specs.md)
 methoddecl  := ['route' METHOD STRING] modifier* 'fn' IDENT '(' tparams? ')' ['->' type]
 METHOD      := 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head'   -- item 457
 component   := (unchanged from 1.x) + blockeffect + fail

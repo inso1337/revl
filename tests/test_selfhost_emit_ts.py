@@ -122,6 +122,7 @@ CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_ts_corpus"
 # other fixture — no `xfail` remains.
 CORPUS = [
     "arith.rvl",       # bounded int/int32, division/modulo, comparisons, unary
+    "int_inline_2904.rvl",  # inline Int bound test in fn/test bodies, call in arrows and arms (issue #2904)
     "bitwise.rvl",  # Int32 bitwise & | ^ << >> and unary ~ (item 366, item 391 self-host port)
     "strings.rvl",     # the stdlib string builtins and `${…}` interpolation
     "control.rvl",     # while/for/if, match (Some/None/wildcard), sync arrow

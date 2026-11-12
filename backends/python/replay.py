@@ -2989,6 +2989,24 @@ class WriteAheadLog:
         self._write(record)
         return record
 
+    def record_ticket_revoked(self, entry: dict) -> dict:
+        """Append the ``ticket-revoked`` record when the operator E-Stop revokes
+        a PENDING single-party question (issue #2991).
+
+        One row per ticket, written before the session is dead, so a post-mortem
+        reader (`revl recover`, `revl.wal.revoked_tickets`) can say a question
+        was revoked by the halt rather than merely never answered. It is
+        deliberately a different record from ``quorum-revoked`` (which closes a
+        MULTI-party question) and from ``approval-revoked`` (which withdraws a
+        MINTED grant): the three name three different things, and folding them
+        would lose which one happened. Consumes no seq: like ``approval-granted``
+        it names a consent fact, not an effect. The entry carries the ticket's
+        binding (``hash``, ``candidateHash``, ``component``, ``kind``, ``round``),
+        who halted it, why, and the proposers whose asking it refused."""
+        record = {"record": "ticket-revoked", **entry}
+        self._write(record)
+        return record
+
     def record_approval_emission(self, request_id: str, capability: str,
                                  component: str, *,
                                  use: int | None = None) -> dict:
@@ -3261,10 +3279,12 @@ class WriteAheadLog:
     def read(path: str) -> dict:
         """Load a WAL from disk into ``{header, records, complete, torn}``.
 
-        ``complete`` is whether the terminal ``activation-complete`` marker is
-        present.  A trailing half-written line (a genuine ``kill -9`` can leave
-        one) is tolerated and reported as ``torn`` rather than crashing the
-        recovery that exists to handle exactly that.
+        ``complete`` is whether the LATEST opening's ``activation-complete``
+        marker is present: a later run reusing the file writes a ``generation``
+        record and owns its own marker, so a prior opening's marker must not read
+        as this one's (issue #3147).  A trailing half-written line (a genuine
+        ``kill -9`` can leave one) is tolerated and reported as ``torn`` rather
+        than crashing the recovery that exists to handle exactly that.
 
         Two integrity gates run first (item 413), fail-closed via
         :class:`WALIntegrityError`: a header ``walVersion`` outside
@@ -3302,6 +3322,12 @@ class WriteAheadLog:
                 ) from None
             kind = entry.get("record")
             if kind == "header":
+                if header:
+                    # issue #3147: a REPEATED header is a later opening's
+                    # boundary (a compiled tier appending to REVL_WAL); kept
+                    # in the record list, in step with revl.wal.read_wal.
+                    complete = False
+                    records.append(entry)
                 header = entry
                 version = header.get("walVersion")
                 if version not in SUPPORTED_WAL_VERSIONS:
@@ -3312,6 +3338,14 @@ class WriteAheadLog:
                     )
             elif kind == "activation-complete":
                 complete = True
+                records.append(entry)
+            elif kind == "generation":
+                # issue #3147: a later opening writes this record and then owns
+                # its own terminal marker. Reset, so a reused file's
+                # `activation-complete` (an EARLIER opening's) is not read as the
+                # latest opening's; a crash mid-activation must not borrow the
+                # prior run's completion.
+                complete = False
                 records.append(entry)
             else:
                 records.append(entry)
