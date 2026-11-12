@@ -356,6 +356,7 @@ answering compiler's identity beside it. Under `revl mcp proxy` the `initialize`
 | `revl_escalate` | no | no | `hash` |
 | `revl_override` | no | yes | `hash`, `reason` |
 | `revl_quorum` | yes | no | `hash` |
+| `revl_approvals` | yes | no | `action` |
 | `revl_distillation_offers` | yes | no | - |
 | `revl_apply_distillation` | no | no | `offerId` |
 | `revl_revoke_distillation` | no | no | `rule` |
@@ -2066,6 +2067,50 @@ is refused rather than reported as fact.
 Read-only and ungated: it decides nothing and mints nothing.
 
 - Inputs: `hash` (required); `verify`.
+
+### `revl_approvals`
+
+The approval query surface over the LIVE session (issue #2991): every
+`class-(c)` ticket the session issued, what one of them would let through, and
+how its decisions have gone. Three actions:
+
+- `list`: one row per ticket - its effect, candidate-hash binding, asking round,
+  raisers, state (`pending`, `granted`, `consumed`, `expired`, `revoked`,
+  `refused`, `satisfied`, `denied`, `escalated`, `closed`), the counts by state,
+  and the honest absence of a pending single-party question's age/expiry (the
+  table records the asking round, not a timestamp, and a pending question has no
+  ttl of its own; the policy ttl bounds the approval a yes mints). `pending: true`
+  keeps only the questions still waiting for an answer.
+- `show`: one ticket by `hash` - the full ticket body, the policy rules that
+  answer for it, the binding hashes, the decision graph, the grants minted for
+  it and the durable `approval-consumed`/`approval-emission` provenance once a
+  yes was spent, and the deterministic next actions. `diff: true` adds the blast
+  radius: each crossing with its inverse classification (one-way emission with
+  no checked inverse, compensated emission, deferred, witnessed, or a
+  first-class value widening), the external-effect count, secret flows (taint
+  origins, untrusted arguments, resource scopes, caller-value durability), and
+  the capability widenings.
+- `stats`: folds the session's in-memory decision mirror with the durable
+  approval log - counts by state, the average time from `quorum-open` to its
+  terminal row, the recorded times to decision, and the override, escalation
+  and revocation history.
+
+It reads the session's own fields and writes nothing. It is gated by the
+`approve` operator verb (unlike `revl_quorum`): enumerating the pending
+questions and their blast radius is the same authority as answering them, and a
+`show` hash scopes to its crossing component while `list`/`stats` name no one
+component and need the literal `may approve on *`, whatever other target keys
+the call carries. For `revl_approvals`, a scoped operator's `show` of another
+component's ticket gets the same refusal as an unknown hash, so its refusal
+does not reveal which tickets exist. The other hash-taking approval verbs do not
+give that guarantee yet: `revl_approve`, `revl_escalate`, `revl_override` and
+`revl_revoke` refuse another component's hash by naming that component and an
+unknown hash differently, and `revl_quorum` is not gated. There is no model
+recommendation for approvals anywhere in the tree, so `advice.model` is `null`
+and says so; the actions are the deterministic next steps the facts support.
+
+- Inputs: `action` (required; `list` | `show` | `stats`); `hash`,
+  `pending`, `diff`, `session`.
 
 ### `revl_distillation_offers`
 

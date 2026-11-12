@@ -4935,11 +4935,33 @@ class Session:
         The session is dead afterwards. `call`, `swap`, `commit`,
         `commit_confirm`, `abort` and `load` refuse; `unload` still works and
         strands rather than unwinds (the process still has to drop its
-        fibers); `estop_report` reads the inventory back."""
+        fibers); `estop_report` reads the inventory back.
+
+        Issue #2991: the halt also closes the approval questions it strands. A
+        pending question outliving the instance it was asked about is not a
+        question anyone can still answer, so every open multi-party quorum is
+        closed `revoked` and every pending single-party ticket is refused, each
+        with a durable row (`quorum-revoked` / `ticket-revoked`) that
+        `revl recover` reports as `revoked`, DISTINCT from `expired`: an expired
+        question ran out of time and can be asked afresh, a revoked one was
+        withdrawn by the operator. An approval that was already CONSUMED is not
+        retroactively affected - it authorized its crossing before the halt, and
+        the halt does not rewrite what already happened.
+
+        The sweep runs AFTER the latch flips, so it can never widen the halt: it
+        only closes what the halt already made unanswerable. Its failures are
+        reported in `revocationErrors` rather than hidden, and never undo the
+        halt. A crash between the latch and the sweep therefore leaves no
+        revoked rows (docs/design/443-estop.md)."""
         driver = self._require()
         halt = driver.runtime.estop(reason, operator=operator or "unknown")
         self._halted = True
-        return {"halted": True, **halt}
+        sweep = self._revoke_pending_approvals(
+            reason, operator or self._operator_token() or "estop")
+        out = {"halted": True, **halt, "revokedApprovals": sweep["revoked"]}
+        if sweep["errors"]:
+            out["revocationErrors"] = sweep["errors"]
+        return out
 
     def estop_report(self) -> dict:
         """The halt inventory, without touching the world (item 443).
@@ -4960,9 +4982,181 @@ class Session:
                 # the same decisions `revl recover` will classify — one ambiguity
                 # vocabulary across the halt report and the forward-recovery scan.
                 "unfinalizedDecisions": self._unfinalized_decisions(),
+                # issue #2991: what the halt revoked. Read back off the durable
+                # rows, so the halt report and `revl recover` name the same
+                # tickets - and a `revoked` question is distinct from an
+                # `expired` one (the reason and the outcome are both recorded).
+                "revokedTickets": self._revoked_ticket_rows(),
                 # an E-Stop is NEVER clean. R4 is a property of the abort path;
                 # the halt violates it by design and says so.
                 "clean": False}
+
+    # -- issue #2991: the halt closes every pending approval question ---------
+
+    def _revoke_pending_approvals(self, reason: str, by: str) -> dict:
+        """Close every approval question the halt strands (issue #2991).
+
+        Opens no new question and widens no authority: it closes the questions
+        the halt already made unanswerable. A multi-party quorum is closed with
+        `quorum-revoked`; a pending single-party asking is refused and writes
+        one `ticket-revoked` row. A grant already CONSUMED is left exactly as it
+        is: it authorized its crossing before the halt, and ownership of what
+        already happened is not the E-Stop's to rewrite.
+
+        Returns ``{"revoked": [...], "errors": [...]}``. One ticket's failure is
+        recorded, not raised: the halt has already happened, and losing its
+        report would be worse than losing one revocation row."""
+        now = self._now_ms()
+        revoked: list = []
+        errors: list = []
+        for ticket_hash, ticket in list(self._tickets.items()):
+            try:
+                rule = self._ticket_approval_shape(ticket)
+            except SessionError as error:  # ambiguous rules: nothing to open
+                errors.append({"hash": ticket_hash,
+                               "error": f"SessionError: {error}"})
+                continue
+            try:
+                # a rule that names ANY approver opens a decision graph
+                # (`_open_quorum` runs for `require 1 of {a,b}` too), so the
+                # split is "does a graph exist", never `is_quorum()`
+                if rule is not None:
+                    entry = self._revoke_open_quorum(ticket, reason, by, now)
+                else:
+                    entry = self._revoke_pending_single(ticket, reason, by, now)
+            except Exception as error:  # noqa: BLE001 - the halt report survives
+                errors.append({"hash": ticket_hash,
+                               "error": f"{type(error).__name__}: {error}"})
+                continue
+            if entry is not None:
+                revoked.append(entry)
+        return {"revoked": revoked, "errors": errors}
+
+    def _revoke_open_quorum(self, ticket: dict, reason: str, by: str,
+                            now: int) -> dict | None:
+        """Close the CURRENT round's decision graph as revoked, if it is still
+        open to votes and not already past its deadline. A lapsed question is
+        left to the expiry vocabulary: writing `revoked` over a timeout would
+        retract the distinction the two outcomes exist to keep. It is closed
+        with the ordinary `quorum-expired` row (`_lapse_quorum`, written once),
+        so the durable log never holds a bare `quorum-open` that `revl recover`
+        could read as neither revoked nor expired."""
+        ticket_hash = ticket["hash"]
+        record = self._quorums.get(self._quorum_request_id(ticket_hash))
+        if record is None or record.get("outcome") is not None \
+                or record.get("expiredAt") is not None:
+            return None
+        if record.get("expiresAt") is not None \
+                and now > int(record["expiresAt"]):
+            self._lapse_quorum(record)
+            return None
+        record["outcome"] = "revoked"
+        record["resolvedAt"] = now
+        self._record_quorum("quorum-revoked", {
+            **self._quorum_binding(record), "by": by,
+            "reason": str(reason or "").strip(),
+            "proposer": record["proposer"],
+            "counted": self._counted(record), "require": record["require"],
+            # the halt withdraws the question, not one actor's votes; the votes
+            # stay recorded and stop counting, exactly as a proposer revoke does
+            "withdrewVotes": [],
+            "estop": True, "at": now})
+        return {"hash": ticket_hash, "component": ticket.get("component"),
+                "candidateHash": ticket.get("candidateHash"),
+                "kind": "quorum", "round": record.get("round"),
+                "state": "revoked", "durableRecord": "quorum-revoked",
+                "requestId": record.get("requestId")}
+
+    def _revoke_pending_single(self, ticket: dict, reason: str, by: str,
+                               now: int) -> dict | None:
+        """Refuse every pending asking of a single-party ticket and write one
+        durable `ticket-revoked` row for it.
+
+        An unspent grant minted for one of the askings is withdrawn too, exactly
+        as an operator's NO withdraws it (`_refuse_single_party_ticket`), so the
+        ledger cannot carry a live yes whose question the halt just refused."""
+        ticket_hash = ticket["hash"]
+        pending = dict(self._ticket_pending_raisers.get(ticket_hash) or {})
+        if not pending:
+            return None
+        withdrawn: list = []
+        wal = self._approval_wal()
+        for proposer in list(pending):
+            entry = self._ledger_entry_for_ticket(ticket_hash, proposer)
+            if entry is None or entry.get("consumed"):
+                continue
+            entry["consumed"] = True
+            entry["revoked"] = True
+            withdrawn.append(entry["requestId"])
+            if wal is not None:
+                wal.record_approval_revoked(entry["requestId"])
+        round_ = self._ticket_rounds.get(ticket_hash, 1)
+        self._ticket_refusals[ticket_hash] = {
+            "by": by, "reason": str(reason or "").strip(), "round": round_,
+            "at": now, "estop": True}
+        self._ticket_pending_raisers.pop(ticket_hash, None)
+        self._show_pending_raisers(ticket_hash)
+        entry = {
+            "hash": ticket_hash,
+            "candidateHash": ticket.get("candidateHash"),
+            "component": ticket.get("component"),
+            "kind": ticket.get("kind"),
+            "round": round_,
+            "proposers": sorted(name for name in pending if name),
+            "capabilities": list(ticket.get("capabilities") or []),
+            "classCCapabilities": list(ticket.get("classCCapabilities") or []),
+            "by": by,
+            "reason": str(reason or "").strip(),
+            "withdrewApprovals": withdrawn,
+            "estop": True,
+            "at": now,
+            "state": "revoked",
+        }
+        if wal is not None:
+            wal.record_ticket_revoked(dict(entry))
+        self._approval_records.append({"record": "ticket-revoked", **entry})
+        return {"hash": ticket_hash, "component": ticket.get("component"),
+                "candidateHash": ticket.get("candidateHash"),
+                "kind": "single", "round": round_,
+                "state": "revoked", "durableRecord": "ticket-revoked",
+                "withdrewApprovals": withdrawn}
+
+    def _revoked_ticket_rows(self) -> list:
+        """The revocation rows this session carries, for the halt report:
+        `ticket-revoked` (single-party) and `quorum-revoked` rows closed by the
+        halt. Reads the durable WAL and folds in the in-memory mirror, so a
+        session with no open log still reports what its sweep revoked. Empty,
+        never an error, when neither is readable."""
+        rows: list = []
+        seen: set = set()
+        for record in list(self._wal_ledger_records()) + list(self._approval_records):
+            kind = record.get("record")
+            if kind in ("ticket-revoked", "quorum-revoked") \
+                    and record.get("estop"):
+                key = (kind, record.get("hash"), record.get("round"))
+                if key in seen:
+                    continue
+                seen.add(key)
+            if kind == "ticket-revoked":
+                rows.append({
+                    "hash": record.get("hash"),
+                    "component": record.get("component"),
+                    "candidateHash": record.get("candidateHash"),
+                    "round": record.get("round"), "kind": "single",
+                    "state": "revoked", "by": record.get("by"),
+                    "reason": record.get("reason"), "at": record.get("at"),
+                    "estop": bool(record.get("estop"))})
+            elif kind == "quorum-revoked" and record.get("estop"):
+                rows.append({
+                    "hash": record.get("hash"),
+                    "component": record.get("component"),
+                    "candidateHash": record.get("candidateHash"),
+                    "round": record.get("round"), "kind": "quorum",
+                    "requestId": record.get("requestId"),
+                    "state": "revoked", "by": record.get("by"),
+                    "reason": record.get("reason"), "at": record.get("at"),
+                    "estop": True})
+        return rows
 
     def _unfinalized_decisions(self) -> list:
         """The `decisionId`s this session's WAL carries an `admit-decided` for with
@@ -8059,6 +8253,7 @@ class Session:
         Only after all of that does the vote count, and a counted vote either
         closes the decision (minting the approval through the ordinary ledger) or
         leaves the question open with one more name against it."""
+        self._refuse_if_halted("revl_approve")   # issue #2991
         record = self._open_quorum(ticket, rule)
         cast = self._bind_cast(record, "vote", as_token=as_token,
                                as_secret=as_secret, as_proof=as_proof,
@@ -8258,6 +8453,7 @@ class Session:
         authority statement - an operator trusted to cast one of N votes is not
         thereby trusted to stand in for all of them - and it is what a profile
         addresses when it grants or withholds the emergency path."""
+        self._refuse_if_halted("revl_override")   # issue #2991
         ticket = self._tickets.get(ticket_hash)
         if ticket is None:
             raise SessionError(
@@ -8736,6 +8932,7 @@ class Session:
         identity has raised the ticket; when several have, a bare hash is
         refused (`_approved_proposer`) and the others keep their own asking
         pending. A resend naming the same proposer is the idempotent no-op."""
+        self._refuse_if_halted("revl_approve")   # issue #2991
         ticket = self._tickets.get(ticket_hash)
         if ticket is None:
             raise SessionError(
