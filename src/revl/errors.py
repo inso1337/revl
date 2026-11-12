@@ -52,6 +52,7 @@ class RevlError(Exception):
         acquire = _source_spelling_deep(acquire)
         declared_class = _source_spelling_deep(declared_class)
         repairs = _source_spelling_deep(repairs)
+                 repairs: list[dict] | None = None, plain: str | None = None):
         self.filename = filename
         self.line = line
         self.message = message
@@ -84,6 +85,10 @@ class RevlError(Exception):
         self.acquire = acquire
         self.declared_class = declared_class
         self.repairs = repairs
+        # issue #3432: one sentence for the person who wrote the source, with
+        # no internal terms, beside the message, hint and code kept for whoever
+        # wants them. A structured field only, so the rendered text is unchanged.
+        self.plain = plain
         # the derivation behind the verdict, where the check ran a search
         # (G4's fixed point, G3's cycle, G2's provider table) — see why.py.
         # It is appended *after* the message and hint so the first line of
@@ -128,7 +133,7 @@ class RevlErrors(RevlError):
                          expected=first.expected, actual=first.actual, why=first.why,
                          navigate=first.navigate, repair=repair,
                          acquire=first.acquire, declared_class=first.declared_class,
-                         repairs=first.repairs)
+                         repairs=first.repairs, plain=first.plain)
 
     def __str__(self) -> str:
         # A single refusal renders exactly as a plain `RevlError` would: no
