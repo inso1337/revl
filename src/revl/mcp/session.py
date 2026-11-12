@@ -1184,6 +1184,13 @@ class Session:
         # call via the ticket two-step. Set at serve time
         # (`revl mcp serve --approval-policy auto`).
         self.approval_policy = None
+        # issue #3430: set by a face that serves this session (`revl serve
+        # --http`). `served_surface_check(ir)` says why the face, whose routes
+        # and public surface are bound at boot, cannot serve a successor, or
+        # None. A swap (and so an undo or rollback) it refuses leaves the
+        # running generation untouched, as `run --watch` refuses an edit its
+        # boot-bound hosts cannot serve (issue #1569).
+        self.served_surface_check = None
         # issue #2690: the operator-configured attempt budget for the
         # check/admit loop (`revl mcp serve --attempt-limit N`). None = no
         # limit, so refusals carry no `attemptsRemaining` at all. Advisory:
@@ -2261,12 +2268,20 @@ class Session:
             _name_the_candidate(exc, ir)
             raise
 
+    def _enforce_served_surface(self, ir: dict) -> None:
+        """Issue #3430: refuse a successor the serving face cannot follow."""
+        check = self.served_surface_check
+        problem = check(ir) if check is not None else None
+        if problem is not None:
+            raise SessionError(problem, code="SERVED_SURFACE_CHANGED")
+
     def _plan_swap(self, driver, ir: dict, migrate: str,
                    agent_authored: bool) -> "_SwapPlan":
         """Everything `swap` does before the teardown: every gate, rendering
         the successor, and capturing the state that crosses. The running
         generation is still live and serving throughout, and nothing here may
         change it, so a raise from here leaves it exactly as it was."""
+        self._enforce_served_surface(ir)
         self._enforce_sandbox(ir)
         self._enforce_evidence(ir)
         # item 246: classify the candidate and gate its activation reach BEFORE
@@ -5552,6 +5567,8 @@ class Session:
         # 6. mint the branch identity over the (now rewound) shared workspace.
         branch = Session()
         branch.approval_policy = self.approval_policy
+        # issue #3430: the face follows the branch, so its surface check does
+        branch.served_surface_check = self.served_surface_check
         branch.approval_separation = self.approval_separation
         # the durability posture rides with the policy: a fork must not become a
         # session where an approved caller value is recorded that the parent's

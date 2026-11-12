@@ -3194,6 +3194,42 @@ An operator credential sent to the face is only an app request: the face has no
 bound, untouched, only into a routed `Bearer` parameter for the application's
 own validation (item 457).
 
+**Updating a served composition without a restart (issue #3430).** The
+operator listener serves the compiler server's swap verbs on the face's
+session, so a new version is admitted and cut over while the face keeps its
+port and its process:
+
+```sh
+revl serve --http app.rvl --operator-listen 127.0.0.1:8471 \
+    --operator-profile ops.profile
+# ops.profile grants the operator that updates it:
+#   operator deploy key sha256:<sha256 of the bearer secret>
+#   operator deploy may swap, undo on *
+```
+
+Each step is one MCP `tools/call` to `http://127.0.0.1:8471/mcp` with
+`Authorization: Bearer <secret>` (any MCP client over the Streamable HTTP
+transport, [mcp-http-transport.md](mcp-http-transport.md)):
+
+1. `revl_plan` with `{"source": "<the new app.rvl>"}` (or `files`/`modules`):
+   the delta against the running composition, nothing applied. Needs no grant.
+2. `revl_swap` with the same arguments (grant `swap`): the candidate is admitted
+   against the running composition, then cut over. The face answers the next
+   app request from the new generation. A candidate admission refuses is an
+   `"ok": false` answer and the face keeps answering from the running one.
+3. `revl_undo` (grant `undo`) returns to the previous generation (`to` names an
+   older retained one), through the same admission.
+
+What a swap can change: operation bodies, components, wiring, anything the
+served surface does not show. What it cannot: the face's routes and public
+surface are bound at boot, so a successor that adds, drops or moves a route, or
+changes a served operation's parameters, return, route bindings or a type they
+name, is refused with `"code": "SERVED_SURFACE_CHANGED"`, naming each operation,
+and the running composition is untouched. Restart `revl serve` to serve a new
+surface, as `revl run --watch` asks for a change its boot-bound hosts cannot
+serve (issue #1569). An undo or rollback to a generation with another surface is
+refused the same way.
+
 ---
 
 ## The component manager

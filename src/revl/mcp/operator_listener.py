@@ -16,7 +16,10 @@ matching a `key sha256:` line of the live profile, or a client certificate under
 mutual TLS, with the settle window and the deny-all placeholder between
 requests), and the verbs an operator has are the ones that transport serves,
 gated by the same profile: `revl_estop` and `revl_estop_report`, `revl_approve`
-and `revl_revoke` for the tickets the face hands out, `revl_state`.
+and `revl_revoke` for the tickets the face hands out, `revl_state`, and
+`revl_plan`, `revl_swap` and `revl_undo` to take a new version without a
+restart (issue #3430; a successor that changes what the face serves is
+refused, see `HttpComposedServer.surface_change`).
 
 What it adds to that transport is only the wiring:
 
