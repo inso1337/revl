@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 
 from .._run_backends import KNOWN_BACKENDS, RUNNABLE_BACKENDS
+from .._update_consents import UPDATE_OPERATOR_CONSENTS
 from ..tiers import tier_metavar, tier_type
 
 # The backends `revl bundle` can emit (the emitter package names under
@@ -136,6 +137,10 @@ def _add_update_feed_arguments(sub) -> None:
                      help="read the release manifest from this file or URL "
                           "instead of resolving the feed; the same validation "
                           "runs")
+    sub.add_argument("--trust-unsigned", action="store_true",
+                     help="accept a manifest fetched over the network that "
+                          "carries no signature at all; a manifest that does "
+                          "carry one is still verified")
     sub.add_argument("--home", default=None, metavar="DIR",
                      help="update home (default $REVL_UPDATE_HOME or "
                           "~/.revl/updates)")
@@ -469,6 +474,10 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--json-diagnostics", action="store_true",
                        help="on rejection, print a structured diagnostic (code, guarantee, "
                             "expected/actual, hint) instead of the human rendering")
+    audit.add_argument(
+        "--spec-results", metavar="FILE", default=None,
+        help="list each function's `ensures` spec with its last recorded "
+             "result, read from a `revl test --report json` file")
     # item 439: a COMPOSITION document argument is resolved rather than
     # compiled as a module, so its rows — and the providers a `remote` row
     # synthesizes — are on the surface. Row provenance is recorded against the
@@ -1485,6 +1494,21 @@ def build_parser() -> argparse.ArgumentParser:
                                 "fallback) as applicable; such a release has no "
                                 "declared sha256 and is never applied "
                                 "automatically")
+    mcp_serve.add_argument("--update-trust-unsigned", action="store_true",
+                           help="accept a networked release manifest that "
+                                "carries no signature at all (UPDATE_UNSIGNED "
+                                "otherwise); a manifest that does carry a "
+                                "signature is still verified, and the accepted "
+                                "manifest is as authentic as the channel that "
+                                "served it")
+    mcp_serve.add_argument("--update-allow-consent", action="append", default=[],
+                           choices=UPDATE_OPERATOR_CONSENTS, metavar="NAME",
+                           help="honour this consent flag from "
+                                "revl_update_apply, repeated for each: "
+                                + ", ".join(UPDATE_OPERATOR_CONSENTS) +
+                                ". Without a grant the caller passing the flag "
+                                "is refused (UPDATE_CONSENT_NOT_GRANTED); "
+                                "force needs none")
     mcp_serve.add_argument("--update-replacing", action="append", default=[],
                            metavar="COMPONENT",
                            help="a provider the release takes over, repeated "
@@ -1499,6 +1523,26 @@ def build_parser() -> argparse.ArgumentParser:
                                 "calls that verb")
     _add_mcp_http_arguments(mcp_serve)
     _add_profile_settle_argument(mcp_serve)
+    # issue #2990: the server's own attestation. Opt-in: no key, no record, and
+    # the historical trust-by-address mode is unchanged for a client with no pin.
+    mcp_serve.add_argument("--attestation-key", default=None, metavar="PATH",
+                           help="sign this server's identity and tool manifest "
+                                "with the private key in PATH (a revl peer "
+                                "identity file), so a client that pinned the "
+                                "public half can verify who answered and which "
+                                "tool list it serves")
+    mcp_serve.add_argument("--attestation-server-id",
+                           default="revl-mcp-serve", metavar="ID",
+                           help="the server id the attestation names (default: "
+                                "revl-mcp-serve)")
+    mcp_serve.add_argument("--attestation-ttl", type=float, default=3600.0,
+                           metavar="SECONDS",
+                           help="how long one attestation is valid (default: "
+                                "3600); an expired record is refused")
+    mcp_serve.add_argument("--attestation-pin-out", default=None, metavar="PATH",
+                           help="write the public pin for this server's current "
+                                "tool manifest to PATH, for `revl mcp proxy "
+                                "--attestation-pin`")
     mcp_schema = mcp_sub.add_parser("schema",
                                     help="project provided services to MCP tool definitions")
     mcp_schema.add_argument("files", nargs="+")
@@ -1544,6 +1588,14 @@ def build_parser() -> argparse.ArgumentParser:
                            metavar="SECONDS",
                            help="how long to wait for one upstream answer "
                                 "(default: 120)")
+    mcp_proxy.add_argument("--attestation-pin", default=None, metavar="PATH",
+                           help="pin the upstream's identity and tool manifest "
+                                "to these signed digests (issue #2990): the "
+                                "proxy refuses an upstream whose attestation "
+                                "does not verify under the pinned key, and a "
+                                "tool that changed after the pin, by name. "
+                                "Without a pin the upstream is trusted by "
+                                "address, as before")
     mcp_proxy.add_argument("--wal", default=None, metavar="PATH",
                            help="the session write-ahead log (default: the "
                                 "per-user state directory)")
@@ -2308,10 +2360,19 @@ def build_parser() -> argparse.ArgumentParser:
              "reports that the question is not answerable from the record, "
              "because a crossing's capability token is not on the WAL")
     replay_cmd.add_argument(
-        "--candidate", nargs="+", default=None, metavar="FILE",
+        "--candidate", action="append", nargs="+", default=None, metavar="FILE",
         help="the candidate composition to resolve each recorded crossing's "
-             "capability token from, and to admit under --under. Compiled "
-             "statically: no live effect fires")
+             "capability token from, and to admit under --under. Repeat it to "
+             "compare competing compositions with --probe. Compiled statically: "
+             "no live effect fires")
+    replay_cmd.add_argument(
+        "--probe", action="store_true",
+        help="with --under, print the probe report instead of the "
+             "counterfactual: one row per --candidate composition with its "
+             "content hash, the recorded crossings regraded, the newly refused "
+             "and newly allowed counts, the first dangerous crossing and the "
+             "bounds. Ordering evidence only; a clean row admits nothing and a "
+             "refusal does not fail the command")
     replay_cmd.add_argument("--json", action="store_true",
                             help="machine-readable output")
 
@@ -3121,6 +3182,46 @@ def build_parser() -> argparse.ArgumentParser:
         help="a runtime this host reports on its verdicts (e.g. python=3.14); "
              "repeatable. These are the versions bound into the load-time "
              "measurement a later audit correlates against")
+
+    # `revl federation-apply PLAN [--dry-run]`: an all-or-nothing update of
+    # several co-located compositions, written as a plan file (issue #2718).
+    # The admission half compiles each composition's new source, runs the
+    # consumer contracts and the irreversible-crossing rule through
+    # `deploy.federation_admission`, and reports any capability the new
+    # generation reaches and the one it replaces does not. Without --dry-run it
+    # also drives the coordinated PREPARE/COMMIT protocol, runs the plan's
+    # health probes after the commit, and unwinds the update when a probe
+    # fails, times out or is interrupted.
+    fed_cmd = sub.add_parser(
+        "federation-apply",
+        help="admit a federation plan (new sources, consumer contracts, health "
+             "probes) and, without --dry-run, apply it as one co-located "
+             "all-or-nothing update (item 2718)")
+    fed_cmd.add_argument("plan", metavar="PLAN",
+                         help="the federation plan (TOML or JSON): "
+                              "[compositions.<id>] tables with each "
+                              "composition's `source`, optional `prior` "
+                              "generation, `health_probe` and "
+                              "`allow_capabilities`, plus [[contracts]] "
+                              "consumer surfaces")
+    fed_cmd.add_argument(
+        "--dry-run", action="store_true",
+        help="run only the effect-free admission half and print the verdict; "
+             "opens no boundary and moves no composition off its prior "
+             "generation")
+    fed_cmd.add_argument("--json", action="store_true",
+                         help="machine-readable verdict (admission, widened "
+                              "capabilities, participant outcomes, probes)")
+    fed_cmd.add_argument(
+        "--state-dir", metavar="DIR",
+        help="the participant state directory for THIS generation (default: "
+             "<wal-dir>/federation/<federation>/<generation>). It is locked "
+             "for the whole apply and used once: a directory that already "
+             "holds a decision record is refused before anything is written")
+    fed_cmd.add_argument(
+        "--probe-timeout", type=float, default=30.0, metavar="SECONDS",
+        help="how long one declared health probe may run before it counts as "
+             "failed and its process group is killed (default: 30)")
 
     # `revl truc <verb> ...` — a namespaced door onto the standalone `truc`
     # binary (roadmap item 136, slice S2). This is a pure passthrough: the tail

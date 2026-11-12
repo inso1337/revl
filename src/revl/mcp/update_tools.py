@@ -25,14 +25,18 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 
 from .._paths import relpath_or_abs
+from .._update_consents import UPDATE_OPERATOR_CONSENTS
 from ..update.errors import UpdateError
 from ..update.feed import resolve_release
-from ..update.fetch import (find_staged, stage_release, staged_intact,
+from ..update.fetch import (find_staged, stage_release,
+                            staged_artifact_intact, staged_intact,
                             update_home)
 from ..update.identity import compare_release, current_identity
 from ..update.journal import Journal
@@ -40,6 +44,13 @@ from ..update.journal import Journal
 #: How many plans one server keeps. A plan is small; the bound is there so a
 #: long-lived session cannot grow it without limit.
 PLAN_LIMIT = 8
+
+#: The consents a caller may not grant itself. Each unlocks a departure from a
+#: plain upgrade, so it is honoured only when the operator started the server
+#: with ``--update-allow-consent NAME``; the caller's own flag then records
+#: that it made the departure knowingly. ``force`` is not here: it only
+#: re-plans the release the composition already runs and opts into nothing.
+OPERATOR_CONSENTS = UPDATE_OPERATOR_CONSENTS
 
 _CONFIG: dict = {
     "enabled": False,
@@ -50,7 +61,9 @@ _CONFIG: dict = {
     "home": None,
     "api_base": None,
     "trust_tags": False,
+    "trust_unsigned": False,
     "replacing": (),
+    "consents": (),
 }
 _PLANS: dict[str, dict] = {}
 _LOCK = threading.RLock()
@@ -65,10 +78,17 @@ def configure(**values: object) -> None:
     unknown = set(values) - set(_CONFIG)
     if unknown:
         raise ValueError(f"unknown update option(s): {', '.join(sorted(unknown))}")
+    consents = tuple(values.get("consents", _CONFIG["consents"]) or ())
+    bad = set(consents) - set(OPERATOR_CONSENTS)
+    if bad:
+        raise ValueError(
+            f"unknown update consent(s): {', '.join(sorted(bad))}; the names "
+            "are " + ", ".join(OPERATOR_CONSENTS))
     with _LOCK:
         _CONFIG.update(values)
         _CONFIG["enabled"] = bool(_CONFIG["enabled"])
         _CONFIG["replacing"] = tuple(_CONFIG["replacing"] or ())
+        _CONFIG["consents"] = consents
         if not _CONFIG["enabled"]:
             _PLANS.clear()
 
@@ -85,7 +105,7 @@ def reset() -> None:
             "enabled": False, "repo": "inso1337/revl", "project": None,
             "channel": "stable", "token_env": "REVL_UPDATE_TOKEN",
             "home": None, "api_base": None, "trust_tags": False,
-            "replacing": ()})
+            "trust_unsigned": False, "replacing": (), "consents": ()})
         _PLANS.clear()
 
 
@@ -125,7 +145,8 @@ def _resolve(cfg: dict):
     return resolve_release(
         cfg["repo"], channel=cfg["channel"], project=cfg["project"],
         token=_token(cfg), token_env=cfg["token_env"],
-        api_base_override=cfg["api_base"])
+        api_base_override=cfg["api_base"],
+        trust_unsigned=bool(cfg["trust_unsigned"]))
 
 
 def _generation() -> int | None:
@@ -154,50 +175,42 @@ def _provided_keys() -> list[str]:
     return list(server.SESSION.state(drain=False).get("providedKeys") or [])
 
 
-def _applied_releases(journal: Journal) -> list[dict]:
-    """Every apply in the update journal no rollback consumed, oldest first.
-
-    The journal, not server memory, is the record: it survives a restart,
-    and it is read for every server session sharing the update home, because
-    the composition a release was applied to outlives the session that
-    applied it.
-    """
-    entries = journal.read()
-    consumed = {entry.get("consumes") for entry in entries
-                if entry.get("event") == "rollback"}
-    project = _CONFIG["project"]
-    return [entry for entry in entries
-            if entry.get("event") == "apply"
-            and entry.get("planHash") not in consumed
-            and (project is None or entry.get("project") == project)]
-
-
 def _release_state() -> dict:
-    """What the journal says about the running composition's release.
+    """What the generation history says about the running composition's release.
 
-    ``running`` is the applied release whose composition digest is the one
-    running now. ``lastApplied`` is the newest applied release either way: a
-    composition swapped or reloaded by hand since runs a release of unknown
-    version, but it is unknown SINCE that release, not unknown from nothing.
+    The applied release is recorded on the generation that runs, and in its
+    snapshot meta beside `approval`. The update journal is a log, never the
+    version gate: a writer who can append to it must not be able to move which
+    release the host believes it runs.
+
+    ``running`` is the release the current generation was updated to.
+    ``lastApplied`` is the newest release any retained generation was updated
+    to: a composition swapped or reloaded by hand since runs a release of
+    unknown version, but it is unknown SINCE that release, not from nothing.
     The comparison is with the composition, never with the toolchain's own
     version: an application feed versions the application.
     """
     server = _server()
-    applied = _applied_releases(_journal(_CONFIG))
-    last = _release_summary(applied[-1]) if applied else None
     if not server.SESSION.loaded:
-        return {"running": None, "lastApplied": last}
-    digest = _ir_digest(server.SESSION.ir)
-    for entry in reversed(applied):
-        if entry.get("irDigest") == digest:
-            return {"running": _release_summary(entry), "lastApplied": last}
-    return {"running": None, "lastApplied": last}
+        return {"running": None, "lastApplied": None}
+    return {"running": server.SESSION.applied_release,
+            "lastApplied": server.SESSION.last_applied_release}
 
 
-def _release_summary(entry: dict) -> dict:
-    return {key: entry.get(key) for key in
-            ("planHash", "project", "version", "tag", "commit", "irDigest",
-             "sessionId", "generationAfter")}
+def _applied_release(plan: dict, before_generation: int | None,
+                     after_generation: int | None) -> dict:
+    """The generation-history record of one applied release."""
+    return {
+        "planHash": plan["planHash"],
+        "project": plan["release"]["project"],
+        "version": plan["release"]["version"],
+        "tag": plan["release"]["tag"],
+        "commit": plan["release"]["commit"],
+        "manifestDigest": plan["release"].get("manifestDigest"),
+        "generationBefore": before_generation,
+        "generationAfter": after_generation,
+        "sessionId": _SESSION_ID,
+    }
 
 
 def _compare(resolved, identity: dict, cfg: dict, state: dict) -> dict:
@@ -252,35 +265,150 @@ def _files_digest(paths: list[str]) -> tuple[str, list[dict], dict]:
     return digest.hexdigest(), entries, bodies
 
 
-def _materialise(plan: dict, bodies: dict[str, bytes]) -> list[str]:
-    """Write the hashed bytes into a fresh private directory, return its files.
+def _materialise(plan: dict, bodies: dict[str, bytes]) -> tuple[list[str], str]:
+    """Write the hashed bytes into a fresh private directory.
 
-    The swap compiles from these paths, so a write to the staging directory
-    after the digest check cannot reach the swap. The directory is kept: it
-    is the on-disk source of the generation the swap starts.
+    Returns the files and the directory that holds them. The swap compiles
+    from these paths, so a write to the staging directory after the digest
+    check cannot reach the swap. The directory is kept: it is the on-disk
+    source of the generation the swap starts, and the apply record names it so
+    a later prune can tell the directories a rollback still needs from the
+    rest.
     """
     root = update_home(_CONFIG["home"]) / "applied"
     root.mkdir(parents=True, exist_ok=True)
     target = tempfile.mkdtemp(prefix=f"{plan['planHash'][:16]}-", dir=root)
     source_root = plan["sourceRoot"]
     paths: list[str] = []
-    for path in plan["files"]:
-        # the absolute fallback (another drive on Windows) is outside the
-        # staging root, so it is refused with a climbing path
-        relative = relpath_or_abs(path, source_root)
-        if relative.startswith(os.pardir) or os.path.isabs(relative):
-            raise UpdateError(
-                "UPDATE_FILES",
-                f"the planned source {path} is outside its staging root",
-                fix="stage the release again, then plan it again")
-        destination = os.path.join(target, relative)
-        os.makedirs(os.path.dirname(destination), mode=0o700, exist_ok=True)
-        descriptor = os.open(destination,
-                             os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(bodies[path])
-        paths.append(destination)
-    return paths
+    try:
+        for path in plan["files"]:
+            # the absolute fallback (another drive on Windows) is outside the
+            # staging root, so it is refused with a climbing path
+            relative = relpath_or_abs(path, source_root)
+            if relative.startswith(os.pardir) or os.path.isabs(relative):
+                raise UpdateError(
+                    "UPDATE_FILES",
+                    f"the planned source {path} is outside its staging root",
+                    fix="stage the release again, then plan it again")
+            destination = os.path.join(target, relative)
+            os.makedirs(os.path.dirname(destination), mode=0o700, exist_ok=True)
+            descriptor = os.open(destination,
+                                 os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(bodies[path])
+            paths.append(destination)
+    except BaseException:
+        # a half-written directory is never the source of anything
+        shutil.rmtree(target, ignore_errors=True)
+        raise
+    return paths, target
+
+
+def _retained_applied_directories(journal: Journal) -> tuple[set[str], set[str]]:
+    """The applied directories this session can still roll back to.
+
+    The same entries ``_pending_apply`` walks: an apply this server session
+    made that no rollback consumed. An entry records its directory outright;
+    an entry written before it did is matched by the plan hash prefix
+    ``_materialise`` names the directory with. Another session's apply is not
+    this session's rollback target, and the directory is not read after the
+    swap, so its directory is pruned.
+    """
+    entries = journal.read()
+    consumed = {entry.get("consumes") for entry in entries
+                if entry.get("event") == "rollback"}
+    applies = [entry for entry in entries
+               if entry.get("event") == "apply"
+               and entry.get("sessionId") == _SESSION_ID
+               and entry.get("planHash") not in consumed]
+    # Every apply advances the generation by at least one, so an apply older
+    # than the undo history cannot be rolled back to. Keeping the newest
+    # HISTORY_LIMIT of them bounds the directories one session retains.
+    names, prefixes = set(), set()
+    for entry in applies[-_undo_history():]:
+        directory = entry.get("appliedDirectory")
+        if isinstance(directory, str) and directory:
+            names.add(os.path.basename(directory.rstrip("/\\")))
+        plan_hash = entry.get("planHash")
+        if isinstance(plan_hash, str) and len(plan_hash) >= 16:
+            prefixes.add(plan_hash[:16])
+    return names, prefixes
+
+
+def _undo_history() -> int:
+    """How many generations the session's undo history retains."""
+    from .session import HISTORY_LIMIT  # noqa: PLC0415 - avoids a circular import
+
+    return HISTORY_LIMIT
+
+
+def _prune_applied(journal: Journal) -> list[str]:
+    """Remove applied directories this session can no longer roll back to.
+
+    Each apply writes the bytes it swaps into a fresh directory under the
+    update home. Only this server session can roll its own applies back, and
+    the directory is not read after the swap, so every other directory there
+    is dead weight. A directory found behind a symlink is left alone: the
+    update home may be shared, and the prune never follows a link out of it.
+    """
+    root = update_home(_CONFIG["home"]) / "applied"
+    if root.is_symlink() or not root.is_dir():
+        return []
+    try:
+        names, prefixes = _retained_applied_directories(journal)
+        directories = list(root.iterdir())
+    except OSError:
+        # pruning is housekeeping: it never turns a completed apply into an
+        # error
+        return []
+    removed: list[str] = []
+    for directory in directories:
+        if directory.is_symlink() or not directory.is_dir():
+            continue
+        if (directory.name in names
+                or any(directory.name.startswith(prefix + "-")
+                       for prefix in prefixes)):
+            continue
+        try:
+            shutil.rmtree(directory)
+        except OSError:
+            continue
+        removed.append(directory.name)
+    return removed
+
+
+def _discard_applied(directory: str | None) -> None:
+    """Remove an applied directory whose swap did not become the running one."""
+    if directory:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+@contextmanager
+def _applied_lock():
+    """Serialize materialise, swap, apply record and prune across servers.
+
+    A second server sharing the update home must not prune a directory this
+    one is still swapping from. The lock is an advisory POSIX file lock; a
+    host without ``fcntl`` falls back to no lock, the same isolation the
+    mechanism had before the prune existed.
+    """
+    home = update_home(_CONFIG["home"])
+    home.mkdir(parents=True, exist_ok=True)
+    try:
+        import fcntl  # noqa: PLC0415 - POSIX only
+    except ImportError:  # pragma: no cover - exercised by a Windows host
+        yield
+        return
+    descriptor = os.open(os.path.join(home, ".applied.lock"),
+                         os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 
 
 def _plan_hash(binding: dict) -> str:
@@ -435,10 +563,20 @@ def _stage_for_apply(resolved, cfg: dict, journal: Journal):
                 if staged.tag_fallback or staged.digest != artifact.sha256:
                     continue
             # the extracted files are what compiles, so they are checked
-            # against the digests recorded when the verified archive was
-            # extracted; a staging edited since is fetched again, not used
+            # against the kept archive, extracted again once its bytes hash
+            # to the digest the signed manifest declares (checked above);
+            # never against provenance.json, which a writer who edits the
+            # tree can edit too. A staging that differs is fetched again.
             if not staged_intact(staged):
                 journal.append("refusal", stage="reuse",
+                               project=staged.project, version=staged.version,
+                               directory=str(staged.directory))
+                continue
+            if (resolved.manifest is not None
+                    and not staged_artifact_intact(staged)):
+                # the kept archive no longer hashes to the sha256 the signed
+                # manifest declares, so the staging is fetched again
+                journal.append("refusal", stage="reuse-archive",
                                project=staged.project, version=staged.version,
                                directory=str(staged.directory))
                 continue
@@ -483,8 +621,10 @@ def _tool_update_status(arguments: dict) -> dict:
     return {
         "ok": True,
         "enabled": cfg["enabled"],
-        "config": {key: cfg[key] for key in
-                   ("repo", "project", "channel", "home", "trust_tags")},
+        "config": {**{key: cfg[key] for key in
+                      ("repo", "project", "channel", "home", "trust_tags",
+                       "trust_unsigned")},
+                   "operatorConsents": sorted(cfg["consents"])},
         "identity": current_identity(),
         "loaded": loaded,
         "generation": _generation(),
@@ -496,13 +636,31 @@ def _tool_update_status(arguments: dict) -> dict:
 
 
 #: The caller's explicit consents, each to one thing. `force` only re-plans the
-#: release that is already running; it opts into nothing else.
+#: release that is already running; it opts into nothing else. The rest are in
+#: OPERATOR_CONSENTS and are honoured only under an operator grant.
 _CONSENTS = ("force", "allowDowngrade", "acceptNotLive", "acceptIncompatible",
              "acceptUnknownVersion")
 
 
 def _consents(arguments: dict) -> dict:
     return {name: arguments.get(name) is True for name in _CONSENTS}
+
+
+def _granted(name: str) -> bool:
+    """Whether the operator granted consent ``name`` at serve time."""
+    return name in _CONFIG["consents"]
+
+
+def _consent_not_granted(name: str, **extra) -> dict:
+    """The named refusal for a consent flag the operator did not grant."""
+    payload = _refusal(UpdateError(
+        "UPDATE_CONSENT_NOT_GRANTED",
+        f"the caller passed {name} true, but the operator did not grant that "
+        "consent when starting this server; a caller cannot grant itself a "
+        "departure from a plain upgrade",
+        fix=f"restart `revl mcp serve` with --update-allow-consent {name}"))
+    payload.update(extra)
+    return payload
 
 
 def _nothing_to_plan(comparison: dict, note: str) -> dict:
@@ -530,6 +688,8 @@ def _ordering_gate(resolved, comparison: dict, consents: dict) -> dict | None:
             comparison, f"the running composition is on release {running}, "
                         f"newer than the channel's {resolved.version}; nothing "
                         "was staged or planned (allowDowngrade plans it)")
+    if relation == "older" and not _granted("allowDowngrade"):
+        return _consent_not_granted("allowDowngrade", comparison=comparison)
     if relation == "unknown":
         return _unknown_gate(resolved, comparison, consents)
     if relation == "same" and not consents["force"]:
@@ -556,6 +716,9 @@ def _unknown_gate(resolved, comparison: dict, consents: dict) -> dict | None:
                 fix="pass acceptUnknownVersion true to plan the release "
                     "anyway"),
             comparison=comparison)
+    if not _granted("acceptUnknownVersion"):
+        return _consent_not_granted("acceptUnknownVersion",
+                                    comparison=comparison)
     if (comparison.get("sinceRelation") == "older"
             and not consents["allowDowngrade"]):
         return _refusal(
@@ -568,6 +731,9 @@ def _unknown_gate(resolved, comparison: dict, consents: dict) -> dict | None:
                 fix="pass allowDowngrade true as well to plan the older "
                     "release"),
             comparison=comparison)
+    if (comparison.get("sinceRelation") == "older"
+            and not _granted("allowDowngrade")):
+        return _consent_not_granted("allowDowngrade", comparison=comparison)
     return None
 
 
@@ -587,6 +753,10 @@ def _plan_gate(resolved, comparison: dict, consents: dict) -> dict | None:
                 fix="update the toolchain or the host first, or pass "
                     "acceptIncompatible true to let the running gate decide"),
             comparison=comparison)
+    if (comparison.get("compatible") is False
+            and not _granted("acceptIncompatible")):
+        return _consent_not_granted("acceptIncompatible",
+                                    comparison=comparison)
     if (resolved.manifest is not None and not resolved.manifest.live
             and not consents["acceptNotLive"]):
         return _refusal(
@@ -599,6 +769,9 @@ def _plan_gate(resolved, comparison: dict, consents: dict) -> dict | None:
                     "acceptNotLive true to apply a release the feed has not "
                     "certified live"),
             comparison=comparison)
+    if (resolved.manifest is not None and not resolved.manifest.live
+            and not _granted("acceptNotLive")):
+        return _consent_not_granted("acceptNotLive", comparison=comparison)
     return None
 
 
@@ -713,6 +886,7 @@ def _plan_apply(arguments: dict) -> dict:
         "staged": staged.as_report(),
         "comparison": comparison,
         "consents": consents,
+        "operatorConsents": sorted(_CONFIG["consents"]),
         "generation": generation,
         "live": plan["live"],
         "restartRequired": plan["restartRequired"],
@@ -759,6 +933,13 @@ def _apply_plan(arguments: dict) -> dict:
             "what would be applied is no longer what was planned",
             fix="call revl_update_apply with no planHash to plan against the "
                 "running generation"), stalePlan=plan_hash)
+    if (plan["widening"]["widened"]
+            and arguments.get("acknowledgeWidening")
+            and not _granted("acknowledgeWidening")):
+        return _consent_not_granted(
+            "acknowledgeWidening", planned=True, applied=False,
+            approvalRequired=True, planHash=plan_hash,
+            widening=plan["widening"])
     if plan["widening"]["widened"] and not arguments.get("acknowledgeWidening"):
         return {"ok": False, "planned": True, "applied": False,
                 "approvalRequired": True, "planHash": plan_hash,
@@ -784,65 +965,94 @@ def _apply_plan(arguments: dict) -> dict:
             stalePlan=plan_hash)
     before_generation = generation
     before_keys = _provided_keys()
-    try:
-        swap_files = _materialise(plan, bodies)
-    except (OSError, UpdateError) as error:
-        return _refusal(error if isinstance(error, UpdateError) else
-                        UpdateError("UPDATE_FILES",
-                                    f"the verified sources could not be "
-                                    f"written for the swap: {error}"))
-    swap = server._tool_swap({"files": swap_files,
-                              "replacing": plan["replacing"]})
-    if not swap.get("ok"):
-        journal.append("refusal", stage="swap", planHash=plan_hash,
-                       sessionId=_SESSION_ID)
-        return {"ok": False, "applied": False, "stoppedAt": "swap",
-                "swap": swap,
-                "note": "the swap was refused; the running composition is "
-                        "untouched"}
-    after_generation = _generation()
-    after_keys = _provided_keys()
-    healthy = (server.SESSION.loaded
-               and _keys_served(before_keys, after_keys))
-    if not healthy:
-        reverted = False
+    # The materialise, swap, apply record and prune run under the applied
+    # directory lock, so a second server sharing the update home cannot prune
+    # a directory this one is still swapping from.
+    with _applied_lock():
+        applied_directory = None
+        kept = False
         try:
-            server.SESSION.rollback()
-            reverted = True
-        except Exception:  # noqa: BLE001 - report the uncertain outcome
-            reverted = False
-        journal.append("auto-revert", planHash=plan_hash,
-                       release=plan["release"], reverted=reverted,
-                       sessionId=_SESSION_ID,
-                       before=before_generation, after=after_generation)
-        return {"ok": False, "applied": False, "autoReverted": reverted,
-                "stoppedAt": "health",
-                "health": {"before": before_keys, "after": after_keys},
-                "note": ("the successor did not serve the running keys; "
-                         + ("the previous generation was restored" if reverted
-                            else "the automatic restore FAILED and the "
-                                 "session is in the updated generation"))}
-    with _LOCK:
-        _PLANS.pop(plan_hash, None)
-    journal.append("apply", planHash=plan_hash, **plan["release"],
-                   irDigest=_ir_digest(server.SESSION.ir),
-                   sessionId=_SESSION_ID,
-                   generationBefore=before_generation,
-                   generationAfter=after_generation)
-    return {
-        "ok": True,
-        "applied": True,
-        "planHash": plan_hash,
-        "release": plan["release"],
-        "generationBefore": before_generation,
-        "generation": after_generation,
-        "widening": plan["widening"],
-        "live": plan.get("live"),
-        "restartRequired": plan.get("restartRequired"),
-        "providedKeys": after_keys,
-        "note": "the release is the running generation; the previous "
-                "generation is retained, so revl_update_rollback can restore it",
-    }
+            try:
+                swap_files, applied_directory = _materialise(plan, bodies)
+            except (OSError, UpdateError) as error:
+                return _refusal(error if isinstance(error, UpdateError) else
+                                UpdateError("UPDATE_FILES",
+                                            f"the verified sources could not be "
+                                            f"written for the swap: {error}"))
+            swap = server._tool_swap({"files": swap_files,
+                                      "replacing": plan["replacing"]})
+            if not swap.get("ok"):
+                journal.append("refusal", stage="swap", planHash=plan_hash,
+                               sessionId=_SESSION_ID)
+                return {"ok": False, "applied": False, "stoppedAt": "swap",
+                        "swap": swap,
+                        "note": "the swap was refused; the running composition "
+                                "is untouched"}
+            after_generation = _generation()
+            after_keys = _provided_keys()
+            healthy = (server.SESSION.loaded
+                       and _keys_served(before_keys, after_keys))
+            if not healthy:
+                reverted = False
+                try:
+                    server.SESSION.rollback()
+                    reverted = True
+                except Exception:  # noqa: BLE001 - report the uncertain outcome
+                    reverted = False
+                if not reverted:
+                    # the session runs the updated generation, so its on-disk
+                    # source is kept and the version gate records the release
+                    kept = True
+                    server.SESSION.record_applied_release(
+                        _applied_release(plan, before_generation,
+                                         after_generation))
+                journal.append("auto-revert", planHash=plan_hash,
+                               release=plan["release"], reverted=reverted,
+                               sessionId=_SESSION_ID,
+                               before=before_generation, after=after_generation)
+                return {"ok": False, "applied": False, "autoReverted": reverted,
+                        "stoppedAt": "health",
+                        "health": {"before": before_keys, "after": after_keys},
+                        "note": ("the successor did not serve the running keys; "
+                                 + ("the previous generation was restored"
+                                    if reverted else
+                                    "the automatic restore FAILED and the "
+                                    "session is in the updated generation"))}
+            with _LOCK:
+                _PLANS.pop(plan_hash, None)
+            # The release lives on the generation that runs, in its history
+            # entry and snapshot meta; the journal entry below is a log.
+            server.SESSION.record_applied_release(
+                _applied_release(plan, before_generation, after_generation))
+            journal.append("apply", planHash=plan_hash, **plan["release"],
+                           irDigest=_ir_digest(server.SESSION.ir),
+                           sessionId=_SESSION_ID,
+                           appliedDirectory=applied_directory,
+                           generationBefore=before_generation,
+                           generationAfter=after_generation)
+            kept = True
+            # The apply record is written first, so the directory just created
+            # is in the retained set: the prune removes what this apply made
+            # dead, never its own sources.
+            _prune_applied(journal)
+            return {
+                "ok": True,
+                "applied": True,
+                "planHash": plan_hash,
+                "release": plan["release"],
+                "generationBefore": before_generation,
+                "generation": after_generation,
+                "widening": plan["widening"],
+                "live": plan.get("live"),
+                "restartRequired": plan.get("restartRequired"),
+                "providedKeys": after_keys,
+                "note": "the release is the running generation; the previous "
+                        "generation is retained, so revl_update_rollback can "
+                        "restore it",
+            }
+        finally:
+            if applied_directory is not None and not kept:
+                _discard_applied(applied_directory)
 
 
 def _tool_update_apply(arguments: dict) -> dict:
@@ -856,20 +1066,6 @@ def _tool_update_apply(arguments: dict) -> dict:
         return _plan_apply(arguments)
     except UpdateError as error:
         return _refusal(error)
-
-
-def _pending_apply(journal: Journal) -> dict | None:
-    """This session's newest applied release that no rollback consumed."""
-    entries = journal.read()
-    consumed = {entry.get("consumes") for entry in entries
-                if entry.get("event") == "rollback"
-                and entry.get("sessionId") == _SESSION_ID}
-    for entry in reversed(entries):
-        if (entry.get("event") == "apply"
-                and entry.get("sessionId") == _SESSION_ID
-                and entry.get("planHash") not in consumed):
-            return entry
-    return None
 
 
 def _rollback_refused(answer: dict, record: dict) -> dict:
@@ -895,49 +1091,69 @@ def _tool_update_rollback(arguments: dict) -> dict:
     server = _server()
     cfg = _CONFIG
     journal = _journal(cfg)
-    record = _pending_apply(journal)
-    if record is None:
-        return _refusal(UpdateError(
-            "UPDATE_NOTHING_APPLIED",
-            "this server session has no applied release left to roll back in "
-            "this update home (none was applied, or its rollback already ran)",
-            fix="apply a release first, or use revl_undo for a hand-made "
-                "generation. A plan or apply recorded by another server "
-                "session is not this session's to undo"))
-    target = record.get("generationBefore")
     if not server.SESSION.loaded:
         return _refusal(UpdateError(
-            "UPDATE_NOTHING_LOADED",
-            "nothing is running now; the generation to roll back to is not "
-            "live", fix="load the composition first"))
-    generation = _generation()
-    if generation != record.get("generationAfter"):
+            "UPDATE_NOTHING_APPLIED",
+            "nothing is running now, so there is no applied release to roll "
+            "back; a session's generation history starts empty",
+            fix="apply a release first, or load the composition and use "
+                "revl_undo for a hand-made generation"))
+    # The version gate is the generation history, never the journal. `current`
+    # is the release the running generation was updated to; `last` is the
+    # newest release any retained generation carries.
+    current = server.SESSION.applied_release
+    last = server.SESSION.last_applied_release
+    if current is None:
+        if last is not None:
+            return _refusal(UpdateError(
+                "UPDATE_ROLLBACK_STALE",
+                f"release {last.get('version')} was applied to an earlier "
+                "generation, but a later generation is running; rolling back "
+                "to the generation before the release would also discard every "
+                "change made since",
+                fix="use revl_undo to choose the generation to return to"),
+                planHash=last.get("planHash"))
+        return _refusal(UpdateError(
+            "UPDATE_NOTHING_APPLIED",
+            "this server session has no applied release left to roll back: "
+            "none was applied, or its rollback already ran",
+            fix="apply a release first, or use revl_undo for a hand-made "
+                "generation. An apply recorded by another server session is "
+                "not this session's to undo"))
+    target = current.get("generationBefore")
+    if not isinstance(target, int):
         return _refusal(UpdateError(
             "UPDATE_ROLLBACK_STALE",
-            f"release {record.get('version')} started generation "
-            f"{record.get('generationAfter')}, but generation {generation} is "
-            "running; rolling back to the generation before the release would "
-            "also discard every change made since",
+            "the applied release did not record the generation it replaced, "
+            "so there is no generation to roll back to",
             fix="use revl_undo to choose the generation to return to"),
-            planHash=record.get("planHash"))
+            planHash=current.get("planHash"))
     # revl_undo's own path: the authoring profile, and an approval ticket
     # answered as the two-step it is
     answer = server._tool_undo({"to": target})
     if not answer.get("ok"):
         journal.append("refusal", stage="rollback",
-                       planHash=record.get("planHash"), sessionId=_SESSION_ID)
-        return _rollback_refused(answer, record)
-    journal.append("rollback", consumes=record.get("planHash"), release={
-        key: record.get(key) for key in
+                       planHash=current.get("planHash"), sessionId=_SESSION_ID)
+        return _rollback_refused(answer, current)
+    # A rollback consumes its apply, so the release stops counting as the last
+    # one applied even though its generation stays in the history.
+    server.SESSION.forget_applied_release(current.get("planHash"))
+    journal.append("rollback", consumes=current.get("planHash"), release={
+        key: current.get(key) for key in
         ("project", "version", "tag", "commit", "manifestDigest")},
         sessionId=_SESSION_ID,
-        generationBefore=record.get("generationAfter"),
+        generationBefore=current.get("generationAfter"),
         generationTo=target)
+    # The consumed apply is no longer a rollback target, so its applied
+    # directory is now dead weight and the prune can drop it. The lock keeps
+    # a concurrent apply's in-flight directory out of the scan.
+    with _applied_lock():
+        _prune_applied(journal)
     return {
         "ok": True,
         "rolledBack": True,
         "generation": _generation(),
-        "release": {key: record.get(key) for key in
+        "release": {key: current.get(key) for key in
                     ("project", "version", "tag", "commit")},
         "undo": answer,
         "note": "the generation before the applied release is running again; "
@@ -953,7 +1169,11 @@ TOOLS = [
                        "version, semver bump, whether the release declares "
                        "itself live-safe, and whether this host satisfies its "
                        "declared gate, language and Python requirements. Reads "
-                       "the feed only; fetches and compiles nothing. The feed "
+                       "the feed only; fetches and compiles nothing. A "
+                       "networked manifest is checked against the pinned "
+                       "release keys (UPDATE_UNSIGNED otherwise; the operator "
+                       "escape is --update-trust-unsigned) and the answer's "
+                       "release reports its signature. The feed "
                        "is the server's configuration (`--update`, "
                        "`--update-repo`, `--update-channel`), never a caller "
                        "argument. A server started without --update refuses by "
@@ -969,13 +1189,23 @@ TOOLS = [
                        "Called with no planHash it stages the newest release, "
                        "compiles and admits it against the running manifest, "
                        "plans the swap and returns a server-side planHash; "
-                       "nothing is mutated. Called with planHash it refuses a "
+                       "nothing is mutated. A networked manifest that carries "
+                       "no signature is refused unless the operator started "
+                       "the server with --update-trust-unsigned; a manifest "
+                       "that carries one is verified either way. Called "
+                       "with planHash it refuses a "
                        "stale plan, requires acknowledgeWidening when the "
                        "release adds or widens irreversible reach, swaps the "
                        "release in and verifies the successor serves the "
                        "running keys, reverting automatically when it does "
-                       "not. The feed is the server's configuration; a caller "
-                       "cannot name another repository or token.",
+                       "not. The applied release is recorded on the generation "
+                       "history entry and in its snapshot meta. The feed is "
+                       "the server's configuration; a caller "
+                       "cannot name another repository or token. Every consent "
+                       "flag except force is honoured only when the operator "
+                       "started the server with --update-allow-consent NAME: a "
+                       "caller cannot grant itself a departure from a plain "
+                       "upgrade (UPDATE_CONSENT_NOT_GRANTED otherwise).",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -991,7 +1221,10 @@ TOOLS = [
                 "allowDowngrade": {"type": "boolean",
                                    "description": "plan a release older than "
                                                   "the one the running "
-                                                  "composition was updated to"},
+                                                  "composition was updated to "
+                                                  "(needs the operator's "
+                                                  "--update-allow-consent "
+                                                  "allowDowngrade)"},
                 "acceptUnknownVersion": {"type": "boolean",
                                          "description": "plan a release that "
                                                         "cannot be ordered "
@@ -1000,17 +1233,26 @@ TOOLS = [
                                                         "release version is "
                                                         "unknown (never "
                                                         "updated, or swapped "
-                                                        "by hand since)"},
+                                                        "by hand since); needs "
+                                                        "the operator's "
+                                                        "--update-allow-consent "
+                                                        "acceptUnknownVersion"},
                 "acceptNotLive": {"type": "boolean",
                                   "description": "plan a release whose "
-                                                 "manifest says live false"},
+                                                 "manifest says live false "
+                                                 "(needs the operator's "
+                                                 "--update-allow-consent "
+                                                 "acceptNotLive)"},
                 "acceptIncompatible": {"type": "boolean",
                                        "description": "plan a release whose "
                                                       "declared gate, language "
                                                       "or Python requirements "
                                                       "this host does not meet; "
                                                       "the running gate still "
-                                                      "admits or refuses it"},
+                                                      "admits or refuses it "
+                                                      "(needs the operator's "
+                                                      "--update-allow-consent "
+                                                      "acceptIncompatible)"},
                 "acknowledgeWidening": {"type": "boolean",
                                         "description": "true: apply a release "
                                                        "whose irreversible "
@@ -1018,7 +1260,10 @@ TOOLS = [
                                                        "the running "
                                                        "composition's; the "
                                                        "widening is reported in "
-                                                       "the plan answer"},
+                                                       "the plan answer (needs "
+                                                       "the operator's "
+                                                       "--update-allow-consent "
+                                                       "acknowledgeWidening)"},
             },
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": True},
@@ -1030,7 +1275,9 @@ TOOLS = [
                        "its feed configuration, the running identity and "
                        "generation, the staged releases under the update home, "
                        "the plans held server side, and the tail of the update "
-                       "journal. Read-only, and answers even when updates are "
+                       "journal (a log; the applied release lives on the "
+                       "generation history). Read-only, and answers even when "
+                       "updates are "
                        "disabled so an operator can see why.",
         "inputSchema": {"type": "object", "properties": {}},
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
@@ -1040,9 +1287,9 @@ TOOLS = [
         "name": "revl_update_rollback",
         "description": "Roll the running composition back to the generation "
                        "that ran before the last applied release, through the "
-                       "same admitted undo revl_undo runs. Reads the update "
-                       "journal for the target generation, consumes the apply "
-                       "it rolls back, and refuses by name when no release is "
+                       "same admitted undo revl_undo runs. Reads the release "
+                       "from the generation history, consumes the apply it "
+                       "rolls back, and refuses by name when no release is "
                        "left to roll back, when a later generation is running, "
                        "or when the target has aged out of the bounded "
                        "history.",

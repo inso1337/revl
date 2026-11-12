@@ -492,17 +492,80 @@ verdict = deploy.federation_admission(
 
 ### Settling a stranded participant
 
-`settle_stranded(wal_path, decision_path)` applies `recovery.py`'s rule
-verbatim; it decides nothing on its own.
+`settle_stranded(wal_path, decision_path)` lets the durable decision choose
+the direction and has `recovery.recover` perform it. The verdict is computed
+against a model world unless a composition binds the real one
+(`revl recover --composition`), so a `rolled-back` verdict does not rewrite
+the participant's own boundary state.
 
 * durable `federation-commit-approved` present: the federation committed. The
   participant's WAL is given the `commit-approved` marker recovery already keys
   roll-forward off, and `recovery.recover` rolls it forward.
-* absent, or an explicit abort decision: `recovery.recover` reads the WAL
-  unchanged and rolls back LIFO, reporting residue exactly as today.
+* absent, pending, or an explicit abort decision: `recovery.recover` reads the
+  WAL unchanged and applies its own rule, rolling back LIFO and reporting
+  residue exactly as today, or rolling forward a WAL that reached
+  `activation-complete`.
+* a `revl federation-apply` decision (its records carry
+  `"writer": "federation-apply"`) that is pending or an abort rolls back even a
+  WAL that reached `activation-complete`: the marker says the participant
+  finished its own slice, not that the federation committed, and an apply uses
+  its generation directory once, so the marker cannot be an earlier run's. This
+  rule applies to `federation-apply` only. `revl deploy` reuses one WAL across
+  runs, where the marker may be an earlier approved run's, so its
+  completed-participant case keeps recovery's rule and is tracked in issue
+  #3147.
 * unreadable: **fails closed** with `unresolved` and settles nothing. Guessing
   between roll-forward and roll-back is precisely the split-brain the durable
   record exists to prevent.
+* the decision file's directory holds a `lock` that another process holds (a
+  `revl federation-apply` still running): `unresolved`, nothing settled.
+
+### The written plan, the command and the prior-generation restore
+
+Issue #2718. The admission rule and the coordinated protocol above were
+reachable only from Python. `revl federation-apply PLAN` and
+`src/revl/federation_apply.py` add the written form without adding a protocol:
+
+```toml
+federation = "shop"
+generation = 2
+
+[compositions.app]
+source = "app.revl"
+prior = "app-v1.revl"
+health_probe = ["python3", "probe_app.py"]
+allow_capabilities = ["net"]
+
+[[contracts]]
+surface = "app.surface.json"
+provider = "billing"
+```
+
+Admission compiles each new source, checks every contract with
+`federation.check`, runs the irreversible-crossing rule, and compares each
+composition's derived capability surface with the one it names in `prior`. The
+comparison is the receiver ceiling's own surface (`deploy.capability_surface`),
+so the plan check and the trust-store ceiling cannot disagree. A capability the
+new generation reaches and the old one does not is reported in the verdict and
+refused unless that composition's `allow_capabilities` names it.
+
+A refusal happens before any participant is spawned, so the whole update stays
+on its prior generation. The apply then locks its generation's state directory
+and refuses one that already holds a decision record, writes the
+`federation-decision-pending` record before the first launch (issue #2725's
+rule), and writes `federation-commit-approved` only after every participant
+committed and every declared health probe passed. A probe that fails, times
+out or raises writes the durable abort decision first and then asks every
+committed participant to run its own local LIFO unwind, the same roll-back a
+stranded participant gets from `revl recover --decision`. Each generation has its own state directory (the
+command's default is `<wal-dir>/federation/<federation>/<generation>`), so
+restoring the prior generation is observable: the failed generation's
+directory unwinds to empty while the previous generation's directory is
+byte-identical.
+
+This is still the co-located case only. Two-phase commit across hosts, with
+partial failure and coordinator crash, remains undefined, and every participant
+here is the conductor's own child on one kernel.
 
 ## 5. The deploy map, and the boundary a deploy may cross
 

@@ -59,6 +59,7 @@ from revl.tee_attestation import (  # noqa: E402
     ResultReceipt,
     TeeError,
     TeeRequirement,
+    TdxPolicy,
     open_attested_run,
     receipt_admits,
     receipt_key_binding,
@@ -617,7 +618,11 @@ def tdx_proof(**overrides) -> dict:
 
 
 def hardware_requirement(**overrides) -> TeeRequirement:
-    return requirement(measurements=frozenset({MRTD}), **overrides)
+    """The result-delivery path is not the runtime-register policy's test: the
+    proof is admitted with the explicit MRTD-only choice and the policy has its
+    own file."""
+    return requirement(measurements=frozenset({MRTD}),
+                       tdx=TdxPolicy(accept_mrtd_only=True), **overrides)
 
 
 def test_a_hardware_rooted_run_delivers_and_is_not_labelled_development():

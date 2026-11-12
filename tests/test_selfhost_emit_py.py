@@ -123,6 +123,7 @@ CORPUS = [
     "strings.rvl",     # the stdlib string builtins and `${…}` interpolation
     "control.rvl",     # while/for/if, match (Some/None/wildcard), sync arrow
     "records.rvl",     # record literal, functional record update, list literal
+    "direct_reads.rvl",  # issue #3407: direct reads of records built here, dispatch kept elsewhere
     "optionals.rvl",   # optional-call chaining (opt receiver)
     "mixed.rvl",       # a cross-section of the above in three functions
     "user_names_like_temps.rvl",  # user locals spelled like emitter temporaries (issue #2913)

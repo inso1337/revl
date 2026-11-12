@@ -86,8 +86,9 @@ TOPICS: dict[str, tuple[str, tuple[str, ...]]] = {
         "revl_knowledge")),
     "approve": ("approval tickets, revocation, escalation and quorum; "
                 "distillation offers; the E-Stop; forking a session", (
-        "revl_approve", "revl_revoke", "revl_escalate", "revl_override",
-        "revl_quorum", "revl_distillation_offers", "revl_apply_distillation",
+        "revl_approve", "revl_approvals", "revl_revoke", "revl_escalate",
+        "revl_override", "revl_quorum", "revl_distillation_offers",
+        "revl_apply_distillation",
         "revl_revoke_distillation", "revl_estop", "revl_estop_report",
         "revl_fork", "revl_fork_confirm")),
     "grade": ("grade and prove a candidate: gauntlet, quarantine, repair, "

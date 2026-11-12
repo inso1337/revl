@@ -563,10 +563,11 @@ class TdxQuote:
 
     Only the members a placement decision reads are surfaced. ``mrtd`` is the
     TD's initial measurement and the one this module reports as THE measurement;
-    the four ``rtmrs`` are the runtime-extended registers, carried so a policy
-    that needs them has them (a permitted-set that is re-attested as it moves is
-    roadmap item 469, not this one). ``report_data`` is the 64 bytes the workload
-    chose, and the only place a challenge can be bound."""
+    the four ``rtmrs`` are the runtime-extended registers, compared against the
+    requirement's permitted runtime measurements by
+    :func:`~revl.tee_attestation.tee_admits` (a permitted set that is re-attested
+    as it moves is roadmap item 469, not this one). ``report_data`` is the 64
+    bytes the workload chose, and the only place a challenge can be bound."""
 
     version: int
     att_key_type: int
@@ -1378,7 +1379,13 @@ class QuoteVerdict:
     launch measurement for a SEV-SNP guest), in hex, and it is empty on a
     refusal: a caller that compares it against a permitted set therefore cannot
     accidentally compare a refused quote's measurement and find it acceptable.
-    ``report_data`` is the 64 bytes the workload bound into the quote."""
+    ``report_data`` is the 64 bytes the workload bound into the quote.
+
+    The other hardware facts a requirement can compare are on the same terms:
+    ``runtime_measurements`` (TDX RTMR0..3), ``tee_tcb_svn``/``qe_svn``/``pce_svn``
+    and the quoting enclave's ``qe_mr_signer``/``qe_mr_enclave`` (TDX), and
+    ``sev_current_tcb``/``sev_reported_tcb`` (SEV-SNP) are empty or -1 on a
+    refusal, so no policy can be satisfied by a quote the root refused."""
 
     ok: bool
     reason: str
@@ -1388,6 +1395,13 @@ class QuoteVerdict:
     platform_key_id: str = ""
     runtime_measurements: tuple[str, ...] = ()
     debug_enabled: bool = False
+    tee_tcb_svn: str = ""
+    qe_svn: int = -1
+    pce_svn: int = -1
+    qe_mr_signer: str = ""
+    qe_mr_enclave: str = ""
+    sev_current_tcb: int = -1
+    sev_reported_tcb: int = -1
 
 
 def _refused(reason: str, fmt: str = "") -> QuoteVerdict:
@@ -1494,6 +1508,11 @@ def _verify_tdx(blob: Any, root: HardwareRoot, platform_key: bytes,
         platform_key_id=fingerprint,
         runtime_measurements=tuple(r.hex() for r in quote.rtmrs),
         debug_enabled=debug,
+        tee_tcb_svn=quote.tee_tcb_svn.hex(),
+        qe_svn=quote.qe_svn,
+        pce_svn=quote.pce_svn,
+        qe_mr_signer=quote.qe_mr_signer.hex(),
+        qe_mr_enclave=quote.qe_mr_enclave.hex(),
     )
 
 
@@ -1532,4 +1551,6 @@ def _verify_sev_snp(blob: Any, root: HardwareRoot, platform_key: bytes,
         report_data=report.report_data,
         platform_key_id=fingerprint,
         debug_enabled=report.debug_enabled,
+        sev_current_tcb=report.current_tcb,
+        sev_reported_tcb=report.reported_tcb,
     )
