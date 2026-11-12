@@ -959,6 +959,9 @@ class Decision:
       into the causal trace on an authorized management action.
     * ``why`` — the policy-style refusal trace, when refused.
     * ``message`` — the human refusal line.
+    * ``arguments``: when set, the call as the gate decided it: the handler
+      must run on these instead of the caller's (issue #3197, a `restore`
+      whose snapshot the gate pinned to the texts it compiled).
     """
 
     gated: bool
@@ -968,6 +971,7 @@ class Decision:
     subjects: tuple[str, ...] = ()
     why: WhyTrace | None = None
     message: str | None = None
+    arguments: dict | None = None
 
 
 def _labels_for(ir: dict, name: str, realms) -> frozenset[str]:
@@ -1057,8 +1061,15 @@ def _changed_targets(old_ir: dict, new_ir: dict) \
 
 def _snapshot_targets(snap: dict | None) \
         -> list[tuple[str, frozenset[str]]] | None:
+    """A restore's targets (see :func:`_restore_targets`)."""
+    return _restore_targets(snap)[0]
+
+
+def _restore_targets(snap: dict | None) \
+        -> tuple[list[tuple[str, frozenset[str]]] | None, dict | None]:
     """A restore's targets, derived from the composition its `sources` compile
-    to — never from the `manifest` the caller writes.
+    to, never from the `manifest` the caller writes; and the snapshot pinned
+    to the texts that compile read.
 
     A snapshot document is caller-supplied JSON, so its `manifest` and `meta`
     are claims, not evidence. Reading them scoped the gate to a composition the
@@ -1067,24 +1078,37 @@ def _snapshot_targets(snap: dict | None) \
     compiled and loaded anything (issue #3197). This compiles the same sources
     the handler re-admits, as `_targets` does for a `load` candidate.
 
-    Unprofiled by the same rule as :func:`_compile_candidate`: it derives names
-    and realms, lowers no host body and boots nothing, and the handler's own
-    compile under the authoring profile still runs. That profile may only
-    REFUSE a compile, never reshape the composition a successful one produces,
-    so it cannot change the target set here; the unprofiled derivation accepts
-    everything the profiled one does. ``None`` when the document names no
-    sources or does not compile — an *undecidable* target set, which
-    :func:`decide` fails closed on. An empty composition compiles to no targets
-    and is scoped to the whole composition too (:func:`_live_targets`)."""
-    if not isinstance(snap, dict):
-        return [("*", frozenset({WHOLE}))]
-    from .persist import recompile_snapshot  # noqa: PLC0415 — lazy, no cycle
+    The pin: a snapshot may leave a module out of its in-memory sources, and
+    the compile then reads it from disk. The handler compiles again to boot,
+    so a write between the two reads would boot a composition the gate never
+    decided on. Every text this compile read from disk is folded into the
+    returned snapshot (:func:`persist.pin_snapshot`), which the handler runs
+    on, and the handler refuses a boot compile that still reads the disk.
 
+    Two compiles stay (this one unprofiled, the handler's under the authoring
+    profile) and they cannot disagree on the component set: they compile the
+    same texts, and the profile may only REFUSE a compile, never reshape the
+    composition a successful one produces. Unprofiled by the same rule as
+    :func:`_compile_candidate`: it derives names and realms, lowers no host
+    body and boots nothing, and accepts everything the profiled one does.
+
+    The targets are ``None`` when the document names no sources or does not
+    compile: an *undecidable* target set, which :func:`decide` fails closed
+    on. An empty composition compiles to no targets and is scoped to the whole
+    composition too (:func:`_live_targets`). The pinned snapshot is ``None``
+    when there is nothing to pin."""
+    if not isinstance(snap, dict):
+        return [("*", frozenset({WHOLE}))], None
+    from .persist import pin_snapshot, recompile_snapshot  # noqa: PLC0415 - lazy, no cycle
+
+    report: dict = {}
     try:
-        ir = recompile_snapshot(snap)
+        ir = recompile_snapshot(snap, report=report)
     except Exception:  # noqa: BLE001 - a failed derivation must not widen
-        return None
-    return _live_targets(ir)
+        return None, None
+    disk_reads = report.get("disk_reads")
+    pinned = pin_snapshot(snap, disk_reads) if disk_reads else None
+    return _live_targets(ir), pinned
 
 
 def _compile_candidate(arguments: dict, manifest: dict | None = None,
@@ -1524,7 +1548,15 @@ def decide(session, tool_name: str, arguments: dict) -> Decision:
             and not _cold_load_activation_emits(arguments):
         return Decision(gated=False)  # cold load: not yet a privileged mutation
 
-    targets = _targets(verb, session, arguments)
+    pinned = None
+    if verb == "restore":
+        # issue #3197: derive and pin in ONE compile, so the handler boots
+        # the texts this decision was made on
+        targets, snapshot = _restore_targets(arguments.get("snapshot"))
+        if snapshot is not None:
+            pinned = {**arguments, "snapshot": snapshot}
+    else:
+        targets = _targets(verb, session, arguments)
     if targets is None:
         # UNDECIDABLE — fail closed. The gate cannot work out which components
         # this action touches, so it scopes the action to the unnameable whole
@@ -1546,4 +1578,4 @@ def decide(session, tool_name: str, arguments: dict) -> Decision:
 
     subjects = tuple(sorted(name for name, _ in targets))
     return Decision(gated=True, allowed=True, operator=operator.token,
-                    verb=verb, subjects=subjects)
+                    verb=verb, subjects=subjects, arguments=pinned)

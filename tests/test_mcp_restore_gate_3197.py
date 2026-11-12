@@ -253,3 +253,99 @@ def test_a_snapshot_without_meta_components_is_refused(server_with_a_recorder):
                        for d in payload.get("diagnostics") or [])
     assert "no longer reproduce the snapshotted composition" in message, payload
     assert loaded == []
+
+
+# ------------------------------------- the gate and the boot read one text
+
+
+STORE = """
+service S { fn q() -> Str }
+component Store provides s: S { provide s { fn q() = "ok" } }
+"""
+
+# realm-free, so the session's authoring profile admits it at the boot; the
+# grant scopes by component name instead
+TENANT_A_PLAIN = STORE.replace("Store", "TenantACache")
+NAME_PROFILE = "operator alice may restore on TenantA*"
+
+
+def _files_snapshot(path: Path, meta_components: list[str]) -> dict:
+    """A files-mode snapshot that carries `files` but no `files_content`, so
+    a compile of it reads the file from disk."""
+    return {"sources": {"files": [str(path)]},
+            "manifest": {"components": []},
+            "meta": {"components": meta_components}}
+
+
+def _write_between_gate_and_boot(monkeypatch, path: Path, text: str) -> None:
+    """Rewrite `path` right after the operator gate decides, so the handler
+    runs on a disk that differs from the one the gate read."""
+    real_decide = server._operator.decide
+
+    def decide_then_write(session, name, arguments):
+        decision = real_decide(session, name, arguments)
+        path.write_text(text)
+        return decision
+
+    monkeypatch.setattr(server._operator, "decide", decide_then_write)
+
+
+def _loaded_names(loaded: list) -> list[str]:
+    return sorted(entry.get("name")
+                  for ir in loaded
+                  for entry in (ir.get("manifest") or {}).get("components") or [])
+
+
+@pytest.mark.parametrize("claimed", [["Store"], ["TenantACache"]])
+def test_a_file_changed_after_the_gate_does_not_boot(
+        server_with_a_recorder, tmp_path, monkeypatch, claimed):
+    """The gate decides on `TenantACache`; the file then holds `Store`. The
+    boot must load the text the gate decided on, so whatever loads equals
+    `authority.subjects`, whichever set the document claims."""
+    session, loaded = server_with_a_recorder
+    session.operator = parse_profile(NAME_PROFILE).get("alice")
+    path = tmp_path / "app.rvl"
+    path.write_text(TENANT_A_PLAIN)
+    _write_between_gate_and_boot(monkeypatch, path, STORE)
+    payload = _call("revl_restore",
+                    {"snapshot": _files_snapshot(path, claimed)})
+    assert "Store" not in _loaded_names(loaded), payload
+    if payload.get("ok"):
+        assert _loaded_names(loaded) == payload["authority"]["subjects"]
+    if claimed == ["TenantACache"]:
+        assert payload["ok"] is True, payload
+        assert _loaded_names(loaded) == ["TenantACache"]
+
+
+def test_an_undecided_restore_reads_nothing_from_disk(
+        server_with_a_recorder, tmp_path, monkeypatch):
+    """The gate cannot compile the file, so it decides on the whole
+    composition and a `*` operator proceeds. A file made valid before the boot
+    must not load: with an operator bound the boot compile reads only text
+    the gate read."""
+    session, loaded = server_with_a_recorder
+    session.operator = parse_profile(
+        "operator root may restore on *").get("root")
+    path = tmp_path / "app.rvl"
+    path.write_text("service Broken {")
+    _write_between_gate_and_boot(monkeypatch, path, STORE)
+    payload = _call("revl_restore",
+                    {"snapshot": _files_snapshot(path, ["Store"])})
+    assert payload["ok"] is False, payload
+    assert loaded == [], payload
+    message = " ".join(d.get("message", "")
+                       for d in payload.get("diagnostics") or [])
+    assert "from disk" in message and "operator gate" in message, payload
+
+
+def test_a_restore_with_no_operator_still_reads_the_disk(
+        server_with_a_recorder, tmp_path):
+    """The control: with no operator bound nothing is gated, and a files-mode
+    snapshot without `files_content` restores from the disk as before."""
+    _session, loaded = server_with_a_recorder
+    path = tmp_path / "app.rvl"
+    path.write_text(STORE)
+    payload = _call("revl_restore",
+                    {"snapshot": _files_snapshot(path, ["Store"])})
+    assert payload["ok"] is True, payload
+    assert _loaded_names(loaded) == ["Store"]

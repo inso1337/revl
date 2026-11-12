@@ -4185,7 +4185,13 @@ def _tool_restore(arguments: dict) -> dict:
     sources = sources or {}
     compile_report: dict = {"authored": True}
     try:
-        result = SESSION.restore(snap, profile=profile, report=compile_report)
+        # issue #3197: with an operator bound the gate decided on the texts
+        # it read and pinned them into `snap`, so the boot reads no disk.
+        # Ungated, the call is unchanged.
+        gated = ({"read_disk": False}
+                 if getattr(SESSION, "operator", None) is not None else {})
+        result = SESSION.restore(snap, profile=profile,
+                                 report=compile_report, **gated)
     except ApprovalRequired as error:
         from .persist import admitted_name  # noqa: PLC0415
 
@@ -8080,6 +8086,10 @@ def _call_tool_in_scope(name: str, arguments: dict, record: bool) -> dict:
     if decision.gated and not decision.allowed:
         return _canonicalised(_refused_by_operator(decision),
                               canonicalised)
+    if decision.arguments is not None:
+        # issue #3197: the call as the gate decided it (a restore pinned to
+        # the texts the gate compiled), for the handler and the recorders
+        arguments = decision.arguments
     if not runtime_available() and _runtime_gate.is_refused(name, arguments):
         # issue #1692: a verb that needs a live composition, on an
         # interpreter that cannot boot one, refuses by name with the fix in

@@ -251,6 +251,37 @@ def recompile_snapshot(snap: dict | None, profile=None,
                       report=report)
 
 
+def pin_snapshot(snap: dict, disk_reads: dict[str, str] | None) -> dict:
+    """`snap` with every module text a compile of it read from disk folded
+    into its in-memory sources, so a later compile of the result reads the
+    same texts and nothing from disk.
+
+    The operator gate compiles a snapshot to derive its targets, and the
+    handler compiles it again to boot it (issue #3197). Without the pin, a
+    files-mode snapshot missing a `files_content` entry, or a `use` missing
+    from `dependencies`, is read from disk twice, and a write between the two
+    reads boots a composition the gate never decided on. A new document is
+    returned; the caller's is not mutated."""
+    if not disk_reads:
+        return snap
+    sources = dict(snap.get("sources") or {})
+    if sources.get(ORIGIN_SOURCE) is not None:
+        modules = dict(sources.get(ORIGIN_MODULES) or {})
+        modules.update(disk_reads)
+        sources[ORIGIN_MODULES] = modules
+    else:
+        roots = {os.path.abspath(path)
+                 for path in sources.get(ORIGIN_FILES) or []}
+        content = dict(sources.get(ORIGIN_FILES_CONTENT) or {})
+        dependencies = dict(sources.get(ORIGIN_DEPENDENCIES) or {})
+        for path, text in disk_reads.items():
+            (content if path in roots else dependencies)[path] = text
+        sources[ORIGIN_FILES_CONTENT] = content
+        if dependencies:
+            sources[ORIGIN_DEPENDENCIES] = dependencies
+    return {**snap, "sources": sources}
+
+
 def _recompile(sources: dict, name: str = "<snapshot>.rvl",
                profile=None, report: dict | None = None) -> dict:
     """Compile the snapshotted sources through the very entry points a live
@@ -384,7 +415,7 @@ def _refuse_policy_downgrade(session, meta: dict) -> None:
 
 
 def restore(session, snap: dict, profile=None,
-            report: dict | None = None) -> dict:
+            report: dict | None = None, *, read_disk: bool = True) -> dict:
     """Re-admit a snapshot into `session`, replaying admission.
 
     Refuses if a composition is already loaded. Refuses a snapshot taken under an
@@ -398,6 +429,11 @@ def restore(session, snap: dict, profile=None,
     `profile` is the authoring trust the snapshot's text compiles under (see
     `_recompile`); an agent-supplied snapshot passes the session's, and that
     single compile is both the admission decision and the IR that is loaded.
+
+    `read_disk=False` (issue #3197) is a restore an operator gate decided on:
+    the gate pinned every text it read into `snap` (:func:`pin_snapshot`), so
+    a boot compile that still reads a module from disk would boot text the
+    gate never saw, and is refused before anything loads.
     """
     from .session import SessionError  # noqa: PLC0415
 
@@ -416,12 +452,20 @@ def restore(session, snap: dict, profile=None,
     # any recompile or runtime touch, so the refusal is loud and side-effect-free.
     _refuse_policy_downgrade(session, meta)
 
+    if report is None:
+        report = {}
     try:
         ir = recompile_snapshot(snap, profile=profile, report=report)
     except RevlError as error:
         # the load-bearing failure: a snapshot whose component the current
         # checker refuses does not load — it fails here, with the diagnostic
         raise RestoreError.from_revl(error) from None
+    read = sorted(report.get("disk_reads") or {})
+    if not read_disk and read:
+        raise RestoreError(
+            f"restore refused: the boot compile read {read} from disk, but "
+            "the operator gate decided on the texts it read itself. Put the "
+            "text in the snapshot (`files_content`, `dependencies`) and retry")
 
     # defence in depth: the runtime IR is the freshly compiled one, never the
     # stored manifest. Verify re-admission produced the composition the

@@ -399,9 +399,13 @@ candidate's compile for a `load`, the snapshot's `sources` for a `restore`.
   realm it leaves never counts toward an allow. A no-op or server-side
   re-admit targets the whole composition.
 * **load** — every component in the candidate (a cold boot instantiates all).
-* **restore** — every component the snapshot's `sources` compile to, the
+* **restore**: every component the snapshot's `sources` compile to, the
   composition that actually boots. The document's `manifest` and
-  `meta.components` are caller-written claims and scope nothing.
+  `meta.components` are caller-written claims and scope nothing. A module
+  the document leaves out of its in-memory sources is read from disk once,
+  by the gate, and pinned into the snapshot the handler boots; with an
+  operator bound, a boot compile that would still read a module from disk is
+  refused, so a file changed between the decision and the boot cannot load.
 * **unload / edit / snapshot / undo / rollback** — the whole running
   composition (each operates on all of it).
 * **estop** (item 443) — the whole running composition too, and deliberately:
