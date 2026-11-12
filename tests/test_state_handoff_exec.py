@@ -102,7 +102,7 @@ def test_incompatible_handoff_is_refused_at_admission_state_intact():
 
         # admission refuses the incompatible successor — the swap never runs
         with pytest.raises(RevlError, match="state hand-off on `cache` differs"):
-            compile_source(_cache("Map[Str, Int]", version=2), "cache.rvl",
+            compile_source(_cache("List[Str]", version=2), "cache.rvl",
                            manifest=session.ir, replacing=("Cache",))
 
         # still the old provider, entries intact — nothing dropped

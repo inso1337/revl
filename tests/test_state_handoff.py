@@ -106,21 +106,25 @@ def test_narrowed_acceptor_is_refused():
         compile_source(_cache("Str"), "c.rvl", manifest=old, replacing=("Cache",))
 
 
+# The incompatible successor below declares `List[Str]`. It used to declare
+# `Map[Str, Int]` over the Str-valued `Store`, a body that contradicts its own
+# declaration: since issue #3342 that successor is refused by its own checker
+# (its `get` returns `Opt[Int]`), before admission is reached.
 def test_incompatible_successor_is_refused_at_admission():
     old = compile_source(_cache("Map[Str, Str]"), "c.rvl")
     with pytest.raises(RevlError, match="state hand-off on `cache` differs"):
-        compile_source(_cache("Map[Str, Int]"), "c.rvl",
+        compile_source(_cache("List[Str]"), "c.rvl",
                        manifest=old, replacing=("Cache",))
 
 
 def test_refusal_names_both_shapes_and_carries_a_why_trace():
     old = compile_source(_cache("Map[Str, Str]"), "c.rvl")
     try:
-        compile_source(_cache("Map[Str, Int]"), "c.rvl",
+        compile_source(_cache("List[Str]"), "c.rvl",
                        manifest=old, replacing=("Cache",))
         assert False, "expected refusal"
     except RevlError as exc:
-        assert "Map[Str, Int]" in str(exc) and "Map[Str, Str]" in str(exc)
+        assert "List[Str]" in str(exc) and "Map[Str, Str]" in str(exc)
         assert exc.why is not None and exc.why.kind == "state-handoff-drift"
         roles = {step.kind for step in exc.why.steps}
         assert {"accept", "export"} <= roles
@@ -131,7 +135,7 @@ def test_renamed_successor_correlates_by_provided_key():
     # the gate correlates by the *key*, not the component name
     old = compile_source(_cache("Map[Str, Str]", name="Cache"), "c.rvl")
     with pytest.raises(RevlError, match="state hand-off on `cache` differs"):
-        compile_source(_cache("Map[Str, Int]", name="CacheV2"), "c.rvl",
+        compile_source(_cache("List[Str]", name="CacheV2"), "c.rvl",
                        manifest=old, replacing=("Cache",))
 
 
