@@ -120,6 +120,10 @@ BENCH_DEPENDENT_TESTS = (
     # Issue #1702: checks the blast-radius task set, its expected states, its
     # TypeScript renderings and its scorer, all under bench/blast_radius/.
     "tests/test_blast_radius_bench.py",
+    # Issue #2736: loads `bench/saga_defects/run.py` by path, checks the
+    # corpus data and the refusal codes, and (in the slow lane) re-measures
+    # every row against the committed table.
+    "tests/test_saga_defect_corpus_2736.py",
     # Issues #2195 / #2197: loads `bench/admission_latency.py` by path and runs
     # its scenario against the compile hot path.
     "tests/test_compile_hot_path_2195_2197.py",

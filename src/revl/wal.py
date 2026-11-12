@@ -60,7 +60,9 @@ The record schema a durable WAL speaks (all a tier must emit to be recoverable):
   captured instead of assuming one. Consumes no seq: it names a fact, not an
   effect. :func:`determinism` reads it for `revl simulate swap`.
 * ``activation-complete`` — the terminal marker. Its PRESENCE is roll-forward,
-  its ABSENCE (the crash) is roll-back. The whole decision.
+  its ABSENCE (the crash) is roll-back. The whole decision, scoped to the
+  OPENING it belongs to: a ``generation`` record starts a later opening, whose
+  crash must not borrow an earlier opening's marker (issue #3147).
 """
 
 from __future__ import annotations
@@ -123,6 +125,25 @@ WAL_GUARANTEE = (
     "process) and closure-only boundary inverses are reported as residue, "
     "never silently claimed to have run."
 )
+
+
+def header_record(generation: int = 1) -> dict:
+    """The WAL's first line, in the ONE schema every tier's writer emits.
+
+    A writer that assembled this mapping itself would be a second copy of a
+    closed vocabulary (``record``/``walVersion``/``generation``/``guarantee``)
+    with nothing comparing the two copies; deriving both sides from here keeps
+    the header byte-identical across the py, wasm and drift writers as the
+    schema moves. `generation` starts at 1 and only moves on a generation swap,
+    so a fresh WAL never claims generation 0.
+    """
+    if not isinstance(generation, int) or isinstance(generation, bool) \
+            or generation < 1:
+        raise ValueError(
+            f"a WAL header generation is a positive integer, got {generation!r}"
+        )
+    return {"record": "header", "walVersion": WAL_VERSION,
+            "generation": generation, "guarantee": WAL_GUARANTEE}
 
 
 # ---------------------------------------------------------------------------
@@ -372,13 +393,62 @@ def resolve_crossing(path: str, seq: int) -> None:
         os.fsync(handle.fileno())
 
 
+#: The records that commit ONE opening of a WAL: its activation finished
+#: (``activation-complete``), or its activation gate approved the commit
+#: (``commit-approved``, the approved-to-discharged window). Either one makes
+#: that opening's effects committed work recovery must NOT invert.
+COMMITTING_RECORDS = ("activation-complete", "commit-approved")
+
+
+#: The records that START a later opening of a reused WAL: the py writer's
+#: ``generation`` record, and a repeated ``header`` from a compiled tier (the
+#: first header is never in the record list, see :func:`read_wal`).
+OPENING_BOUNDARIES = ("generation", "header")
+
+
+def opening_intervals(records: list) -> list:
+    """The records each OPENING of a WAL file owns, in order (issue #3147).
+
+    A WAL opened more than once -- a later run appending to the same ``--wal``
+    path, or a ``--watch`` reload -- starts a later opening with a
+    ``generation`` record when that opening carries an IR (#641/#642). A
+    compiled tier (go, java, rust) that appends to an existing ``REVL_WAL``
+    stamps a second ``header`` instead, which :func:`read_wal` keeps in the
+    record list for exactly this split. Everything from either boundary until
+    the next one belongs to that opening; the records before the first belong
+    to the first opening, whose generation the header carried. A
+    single-opening WAL yields one interval, so every single-run caller reads
+    exactly as before.
+    """
+    intervals: list = [[]]
+    for record in records:
+        if record.get("record") in OPENING_BOUNDARIES:
+            intervals.append([])
+        intervals[-1].append(record)
+    return intervals
+
+
+def interval_committed(interval: list) -> bool:
+    """Whether ONE opening's interval holds its own commit proof.
+
+    ``activation-complete`` means that opening's activation finished;
+    ``commit-approved`` means its activation gate approved the commit (item 245
+    Decision 3's window). A LATER opening's interval is separate state, so its
+    crash can no longer borrow this proof (issue #3147).
+    """
+    return any(r.get("record") in COMMITTING_RECORDS for r in interval)
+
+
 def read_wal(path: str) -> dict:
     """Load a WAL from disk into ``{header, records, complete, torn}``.
 
     Tier-agnostic: it parses JSON Lines and classifies by the ``record`` field,
     so it reads a WAL written by the py in-process driver or by a non-py tier's
-    subprocess identically. ``complete`` is whether the terminal
-    ``activation-complete`` marker is present. A trailing half-written line (a
+    subprocess identically. ``complete`` is whether the LATEST opening's
+    ``activation-complete`` marker is present: a file appended to by a later run
+    (``--wal PATH`` reuses it, #641/#642) still carries the PRIOR opening's
+    marker, and that marker proves only that the prior opening finished, never
+    the opening that crashed (issue #3147). A trailing half-written line (a
     genuine ``kill -9`` can leave one) is tolerated and reported as ``torn``
     rather than crashing the recovery that exists to handle exactly that.
 
@@ -452,10 +522,27 @@ def read_wal(path: str) -> dict:
                     f"{path}` recovers all of them; read one process's WAL by "
                     f"its own path.")
             if kind == "header":
+                if header:
+                    # issue #3147: the go, java and rust sinks append to an
+                    # existing REVL_WAL and stamp a fresh `header` (seq from 0)
+                    # instead of a `generation` record. A REPEATED header is
+                    # therefore a later opening's boundary: keep it in the
+                    # record list for `opening_intervals` and reset `complete`
+                    # exactly as a `generation` record does.
+                    complete = False
+                    records.append(entry)
                 header = entry
                 _check_version(header, path)
             elif kind == "activation-complete":
                 complete = True
+                records.append(entry)
+            elif kind == "generation":
+                # issue #3147: a later opening writes this record and then owns
+                # its own terminal marker. Reset, so a reused file's
+                # `activation-complete` (which belongs to an EARLIER opening) is
+                # not read as the latest opening's; a crash mid-activation must
+                # not borrow the prior run's completion.
+                complete = False
                 records.append(entry)
             else:
                 records.append(entry)

@@ -44,6 +44,27 @@ class EmitError(ValueError):
     pass
 
 
+def _host_body_scanner():
+    """The shared host-body scanner (`src/revl/host_body.py`).
+
+    Imported lazily so a standalone `python3 emit.py <ir.json>` keeps working:
+    when the emitter runs through the compiler `revl` is importable, and a bare
+    script run falls back to the source tree beside this file. The scanner is
+    the one place every tier splits an extern body and checks that it cannot
+    leave the function it is spliced into (#3130, #3131, #3162, #3164, #3166).
+    """
+    try:
+        from revl.host_body import body_lines, check_host_body
+    except ModuleNotFoundError:  # standalone `python3 emit.py`: put src/ on the path
+        import pathlib
+        import sys as _sys
+        src = pathlib.Path(__file__).resolve().parents[2] / "src"
+        if src.is_dir() and str(src) not in _sys.path:
+            _sys.path.insert(0, str(src))
+        from revl.host_body import body_lines, check_host_body
+    return body_lines, check_host_body
+
+
 def _finite_float(value):
     """The literal's value, refused when a `Float` is not finite (issue #312).
 
@@ -9527,6 +9548,12 @@ def _emit_v3_go_externs(externs: list, ctx: _V3GoCtx,
                 f"(available: {', '.join(sorted(bodies)) or 'none'})"
             )
         body = bodies["go"].strip()
+        # #3162/#3166: refuse a body Go reads as unbalanced, and split on
+        # newlines only so a comment cannot become a statement. Before the
+        # journalled/secret wrappers so the body is checked once.
+        _body_lines, check_host_body = _host_body_scanner()
+        check_host_body("go", body,
+                        where=f"extern `{ext.get('name')}`", error=EmitError)
         # item 421 F6: an extern whose DECLARED return was `Secret[T]` is the
         # ORIGIN — where the value enters the value world, the case a
         # receiver-end marking misses (`let t = emit mint(); effect
@@ -9597,8 +9624,9 @@ _GO_LANGUAGE_KEYWORDS = frozenset({
 def _hoist_go_imports(body: str, ctx: "_V3GoCtx", extern: str) -> list[str]:
     """Split a @go extern body into emittable lines, pulling any
     `//revl:import [alias] <path>` directive out to the module import set (ctx)."""
+    body_lines, _check_host_body = _host_body_scanner()
     kept: list[str] = []
-    for line in body.splitlines():
+    for line in body_lines(body):
         if _GO_IMPORT_DIRECTIVE_WORD.match(line.strip()):
             spec = _go_import_spec(line.strip(), extern)
             ctx.extern_imports.add(spec)

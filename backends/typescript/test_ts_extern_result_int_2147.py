@@ -109,10 +109,10 @@ def test_the_coercion_runs_on_the_result_of_the_body_not_instead_of_it():
     """The uses the issue names: `+`, `div_trunc` and `iso_date` all receive a
     `bigint`, because the value that crossed is one."""
     out = _load_ts_emit().emit(_ir())
-    assert "return revlI64(day_number_now() + 1n)" in out
+    assert "return (BigInt.asIntN(64, $revl_i64 = day_number_now() + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))" in out  # inline bound, issue #2904
     assert "return revlDivTrunc(day_number_now(), 2n)" in out
     assert "return iso_date(day_number_now())" in out
-    assert "return revlI64(big_day_number() + 1n)" in out
+    assert "return (BigInt.asIntN(64, $revl_i64 = big_day_number() + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))" in out  # inline bound, issue #2904
 
 
 def test_the_helper_is_emitted_only_where_it_is_used():

@@ -75,6 +75,12 @@ The experiment prescribed by [docs/syntax-2.0.md §10](../docs/syntax-2.0.md):
   Tasks over 20+-component compositions with compiler-checked ground truth,
   TypeScript renderings, and a scorer. No model runs. See
   [its section](#the-blast-radius-benchmark-issue-1702).
+- `saga_defects/`: the seeded-defect saga corpus (issue #2736). One small
+  saga per known saga defect, with the expected catch point
+  written as data, and a runner that scores each row as refused at compile
+  time, caught only by the fault sweep, or missed. The measured table is
+  `results/saga-defect-corpus.md`; no model runs. See
+  [its README](saga_defects/README.md).
 - `decode_grammar_probe.py` — item 513's measurement: does a real provider
   honour the decoding grammar revl states
   (`docs/design/542-grammar-constrained-decoding.md`, §11)? Runs one prompt set

@@ -47,8 +47,9 @@ see "Obtaining the runtime without the clone" below:
 This clones [cordis-py](https://github.com/inso1337/cordis-py) at branch
 `harden-fiber-lifecycle` (the lifecycle-reentrancy-hardened fork the
 semantics depend on; upstream PR geohotstan/cordis-py#1) into `.cordis-py/`,
-**pinned to the tested commit `1c5e6f17`** (the dict-plugin Config fix on top
-of the `1316174` A8 async-body fix, docs/contract-errata.md A8) —
+**pinned to the tested commit `70a8ce71`** (the lazy outer-stack capture,
+#3390, on top of `1c5e6f17`, the dict-plugin Config fix on top of the
+`1316174` A8 async-body fix, docs/contract-errata.md A8):
 never the branch's moving HEAD, which made vintage-pinned tests fail on fresh
 worktrees through no fault of the change under test (findings-faultres).
 Update the pin in `setup.sh` deliberately when the runtime moves, and record

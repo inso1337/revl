@@ -1302,6 +1302,8 @@
    "tests/fixtures/verified_method_effect/t1_plain_site_undo.rvl"
   ],
   "1": [
+   "admission:near_miss_dunder_implemented_method",
+   "admission:near_miss_dunder_service_method",
    "examples/app/private_notes.rvl",
    "examples/rejections/a5_compensatable_without_compensate.rvl",
    "examples/rejections/a5_no_inverse_declares_compensate.rvl",
@@ -1428,6 +1430,7 @@
    "tests/fixtures/emit_rust_refusals/untyped_empty_list.rvl",
    "tests/fixtures/emit_ts_corpus/block_arm_records.rvl",
    "tests/fixtures/emit_ts_corpus/host_map_journal.rvl",
+   "tests/fixtures/emit_ts_corpus/int_inline_2904.rvl",
    "tests/fixtures/emit_ts_corpus/module_keyword_names.rvl",
    "tests/fixtures/emit_ts_corpus/module_name_family.rvl",
    "tests/fixtures/emit_ts_corpus/to_char.rvl",

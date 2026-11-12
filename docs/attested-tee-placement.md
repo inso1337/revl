@@ -34,12 +34,43 @@ region = "eu-west"                 # the permitted region; `regions` for several
 outbound_network = "forbidden"     # the only posture this item defines
 max_age_s = 120                    # optional; the proof's freshness window
 nonce = "…"                        # optional; the challenge the proof must answer
+
+# TDX: what the quote must prove beyond MRTD. A TDX quote is refused without
+# this policy, so a table that may be answered by TDX evidence must state one.
+runtime_measurements = [["<rtmr0>", "<rtmr1>", "<rtmr2>", "<rtmr3>"]]
+                                   # one quadruple per permitted boot chain
+min_tee_tcb_svn = "<32 hex>"       # optional TCB floor
+min_qe_svn = 3                     # optional quoting-enclave SVN floor
+min_pce_svn = 3                    # optional PCE SVN floor
+qe_mr_signers = ["<64 hex>"]       # optional permitted QE signers
+qe_mr_enclaves = ["<64 hex>"]      # optional permitted QE images
+# accept_mrtd_only = true          # the explicit narrower choice, instead of
+                                   # runtime_measurements
+
+# SEV-SNP: optional TCB floor (microcode 0x73, SNP 0x16, TEE 0x01,
+# bootloader 0x04)
+sev_min_tcb = 0x7316000000000104
 ```
 
 `bundle` is a 64-hex SHA-256, `measurements` is a non-empty list of hex digests,
 and `outbound_network` accepts exactly one value, `forbidden`. `region` and
 `regions` are the singular and plural of one fact: a table carrying both is
 refused rather than resolved by a tie-break rule.
+
+`runtime_measurements` is the TDX runtime-register policy of
+`docs/tee-attestation-root.md`: each entry is the four RTMR values a TD's kernel,
+root file system and application extend, and the quote's registers must equal one
+of them. A table that states any TDX key (`min_qe_svn` included) must name the
+permitted registers or say `accept_mrtd_only = true`: a TDX quote whose runtime
+registers are not compared is admitted only by that explicit acknowledgement, not
+by an omitted key. `sev_min_tcb` is the SEV-SNP TCB floor, compared on the report's
+SVN components, each on its own: the TCB version is read little-endian, so byte 0
+is the least significant, and on Milan and Genoa the bootloader SVN is byte 0, TEE
+byte 1, SNP byte 6 and microcode byte 7, with bytes 2 to 5 reserved. A report below
+the floor in any one component is refused, whatever the others carry, and a floor
+that sets a reserved byte is refused when the table is read. Turin lays the TCB
+version out differently, and the report's processor family is not read, so a
+Turin-layout report is not covered by this floor.
 
 `nonce` is the challenge the attestation must answer. A placement may pin it; a
 caller may supply one instead; failing both, the surface mints a fresh one. An
@@ -67,12 +98,13 @@ for a root: a root is operator configuration, it is what makes the demand mean
 anything, and a file a composition author edits is the wrong place to name it.
 
 So a peer is admitted only on a proof that is authentic, about the approved
-bundle, inside a permitted measurement and region, confined to a forbidden
-outbound network, fresh, unanswered before, and vouched for by a key the peer
-does not hold. An offer's asserted `trust = "attested"` facet is decoration: the
-signature proves the peer wrote the word, not that it is so. The permitted
-region is checked against the **attestation**, never copied into the slot's
-asserted `regions`.
+bundle, inside a permitted measurement and region, with the runtime registers,
+TCB and quoting enclave the table names when it states a TDX or SEV-SNP policy,
+confined to a forbidden outbound network, fresh, unanswered before, and vouched
+for by a key the peer does not hold. An offer's asserted `trust = "attested"`
+facet is decoration: the signature proves the peer wrote the word, not that it is
+so. The permitted region is checked against the **attestation**, never copied
+into the slot's asserted `regions`.
 
 `admit_peer_for_process` never raises; it returns `(False, reason)` and the
 reason is the verifier's own, so the placement spelling cannot refuse an offer

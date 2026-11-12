@@ -1077,6 +1077,37 @@ fn async_arrow(shape: Str, lam: Str) -> Str {
   return lam
 }
 
+// The reference's `_inline_div` (issue #3408): `a / b` with the nonzero divisor
+// inline and `_revl_div` kept as the tail for a zero one. Each operand runs
+// exactly once, the dividend before the divisor. A name or literal is read
+// again for free, anything else is bound by a walrus; see the reference for the
+// five shapes and why a dividend over 120 characters is bound, not repeated.
+fn is_div_trivial(n: Any) -> Bool {
+  let k = node_kind(n)
+  return k == "var" || k == "name" || k == "lit"
+}
+
+fn inline_div(node: Any, lb: Str, rb: Str) -> Str {
+  let left = value_field(node, "left")
+  let right = value_field(node, "right")
+  let left_trivial = is_div_trivial(left)
+  if (node_kind(right) == "lit") {
+    if (rb == "0" || rb == "0.0" || rb == "-0.0") { return `_revl_div(${lb}, ${rb})` }
+    return `(${lb} / ${rb})`
+  }
+  if (is_div_trivial(right)) {
+    if (left_trivial || (lb.length() <= 120 && lb.indexOf("_revl_dn") < 0 && lb.indexOf("_revl_div") < 0)) {
+      return `(${lb} / ${rb} if ${rb} else _revl_div(${lb}, ${rb}))`
+    }
+    return `(_revl_dn / ${rb} if (_revl_dn := ${lb}) is _revl_dn and ${rb} else _revl_div(_revl_dn, ${rb}))`
+  }
+  if (left_trivial) {
+    return `(${lb} / _revl_dd if (_revl_dd := ${rb}) else _revl_div(${lb}, _revl_dd))`
+  }
+  if (rb.indexOf("_revl_dn") >= 0) { return `_revl_div(${lb}, ${rb})` }
+  return `(_revl_dn / _revl_dd if (_revl_dn := ${lb}) is _revl_dn and (_revl_dd := ${rb}) else _revl_div(_revl_dn, _revl_dd))`
+}
+
 // THE one place the `operands` annotation becomes python (issue #2198). Two
 // renderers reach it: `render_bin`/`render_un` are the module-fn spine and
 // `cbin`/`cun` the component path. The component pair used to spell every
@@ -1092,7 +1123,7 @@ fn annotated_bin(node: Any, lb: Str, rb: Str) -> Str {
   let opnd = node_operands(node)
   if (is_addsubmul(op) && opnd == "Int") { return bounded(`${lb} ${op} ${rb}`, "64") }
   if (is_addsubmul(op) && opnd == "Int32") { return bounded(`${lb} ${op} ${rb}`, "32") }
-  if (op == "/") { return `_revl_div(${lb}, ${rb})` }
+  if (op == "/") { return inline_div(node, lb, rb) }
   if (op == "%" && opnd == "Float") {
     // The Float remainder is IEEE `fmod`, which has a VALUE at a zero
     // divisor (NaN) where the Int one faults (issue #721).

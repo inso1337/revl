@@ -258,10 +258,10 @@ type StmtOut = { lines: List[Str], counter: Int }
 // `empty_lists` (issue #273) is the body-local `[]`-binding annotation table
 // `empty_list_types` computes; it rides on ACx because a `let` can sit at any
 // depth of the statement tree `v3_stmt` walks.
-type ACx = { in_async: Bool, in_arrow: Bool, ops: List[Str], async_names: List[Str], async_locals: List[Str], empty_lists: Map[Str, Str], routes: List[Str], req_keys: Map[Str, Str], test_mode: Bool, comps: List[Any], module: Map[Str, Str] }
+type ACx = { in_async: Bool, in_arrow: Bool, ops: List[Str], async_names: List[Str], async_locals: List[Str], empty_lists: Map[Str, Str], routes: List[Str], req_keys: Map[Str, Str], test_mode: Bool, comps: List[Any], i64_tmp: Bool, module: Map[Str, Str] }
 
 // The sync, non-component context: the pure fn/test pass and every sync body.
-fn sync_acx(module: Map[Str, Str]) -> ACx { return { in_async: false, in_arrow: false, ops: [], async_names: [], async_locals: [], empty_lists: Map.empty(), routes: [], req_keys: Map.empty(), test_mode: false, comps: [], module: module } }
+fn sync_acx(module: Map[Str, Str]) -> ACx { return { in_async: false, in_arrow: false, ops: [], async_names: [], async_locals: [], empty_lists: Map.empty(), routes: [], req_keys: Map.empty(), test_mode: false, comps: [], i64_tmp: false, module: module } }
 
 // The `"<reqKey>#<method>"` await-seed key.
 fn async_op_key(req_key: Str, method: Str) -> Str {
@@ -908,10 +908,13 @@ fn emission_call_node(node: Any, acx: ACx) -> Bool {
 // !in_arrow` in `render_call`), so an arm body can be an un-awaited Promise
 // with no `await` in its text and the arm arrow's own `async`/`await` pair is
 // what resolves it. Mirrors the reference exactly.
-fn match_expr(node: Any, counter: Int, acx: ACx) -> Rendered {
+fn match_expr(node: Any, counter: Int, outer: ACx) -> Rendered {
   let c0 = counter + 1
   let tmp = `$revl_match_${c0}`
-  let sr = expr(value_field(node, "scrutinee"), c0, acx)
+  let sr = expr(value_field(node, "scrutinee"), c0, outer)
+  // issue #2904: the arms render inside the IIFE's own function, which does
+  // not declare the Int temp, so an arm keeps the `revlI64` call.
+  let acx = { outer | i64_tmp = false }
   var c = sr.counter
   let arms = value_list(value_field(node, "arms"))
   var is_opt = false
@@ -1124,12 +1127,36 @@ fn render_bin(node: Any, counter: Int, acx: ACx) -> Rendered {
   let l = expr(value_field(node, "left"), counter, acx)
   let r = expr(value_field(node, "right"), l.counter, acx)
   if (is_addsubmul(op) && opnd == "Int") {
-    return { text: `revlI64(${l.text} ${jop} ${r.text})`, counter: r.counter }
+    return { text: bounded_i64(`${l.text} ${jop} ${r.text}`, acx), counter: r.counter }
   }
   if (is_addsubmul(op) && opnd == "Int32") {
     return { text: `revlI32(${l.text} ${jop} ${r.text})`, counter: r.counter }
   }
   return { text: `(${l.text} ${jop} ${r.text})`, counter: r.counter }
+}
+
+// issue #2904, `_bounded_i64`: impose the Int bound on a bigint `+ - *` or
+// unary `-`. In a body that declares the `$revl_i64` temp (`acx.i64_tmp`, a
+// module fn or test body) the test is inline: the operation is assigned once
+// and compared with its `BigInt.asIntN(64, ...)` image, equal exactly in the
+// i64 range, so an in-range result costs no helper call and an out-of-range
+// one still raises through `revlI64`. An arrow body or a match arm keeps the
+// call. A nested site finishes its own assignment before the enclosing one
+// assigns, so the one temp serves every depth.
+fn bounded_i64(operation: Str, acx: ACx) -> Str {
+  if (!acx.i64_tmp) { return `revlI64(${operation})` }
+  return `(BigInt.asIntN(64, $revl_i64 = ${operation}) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))`
+}
+
+// `_declare_i64_tmp`: a function's statement lines with the inline-bound temp
+// declared first when any line assigns it (issue #2904).
+fn declare_i64_tmp(body: List[Str]) -> List[Str] {
+  for (line of body) {
+    if (line.indexOf("BigInt.asIntN(64, $revl_i64 = ") >= 0) {
+      return ["    let $revl_i64 = 0n"].concat(body)
+    }
+  }
+  return body
 }
 
 fn render_un(node: Any, counter: Int, acx: ACx) -> Rendered {
@@ -1143,7 +1170,7 @@ fn render_un(node: Any, counter: Int, acx: ACx) -> Rendered {
   }
   if (op == "-") {
     let opnd = node_operands(node)
-    if (opnd == "Int") { return { text: `revlI64(-${r.text})`, counter: r.counter } }
+    if (opnd == "Int") { return { text: bounded_i64(`-${r.text}`, acx), counter: r.counter } }
     if (opnd == "Int32") { return { text: `revlI32(-${r.text})`, counter: r.counter } }
     return { text: `(-${r.text})`, counter: r.counter }
   }
@@ -1207,7 +1234,7 @@ fn render_arrow(node: Any, counter: Int, acx: ACx) -> Rendered {
   // stays out of the arrow (its Promise flattens). `async_names`/`async_locals`
   // are inherited (the reference's `with_scope` leaves them untouched), so an
   // async callable invoked inside an async arrow is still awaited.
-  let body_acx = { in_async: is_async, in_arrow: true, ops: acx.ops, async_names: acx.async_names, async_locals: acx.async_locals, empty_lists: acx.empty_lists, routes: acx.routes, req_keys: acx.req_keys, test_mode: acx.test_mode, comps: acx.comps, module: acx.module }
+  let body_acx = { in_async: is_async, in_arrow: true, ops: acx.ops, async_names: acx.async_names, async_locals: acx.async_locals, empty_lists: acx.empty_lists, routes: acx.routes, req_keys: acx.req_keys, test_mode: acx.test_mode, comps: acx.comps, i64_tmp: false, module: acx.module }
   let br = expr(value_field(node, "body"), counter, body_acx)
   // Item 435(b): the `async` followed the DECLARED type, so `(msgs) =>
   // model.complete(msgs)` rendered `async (msgs: any) =>
@@ -2152,9 +2179,9 @@ fn emit_functions(functions: List[Any], async_names: List[Str], module: Map[Str,
                                value_list(value_field(fnode, "params")),
                                value_str(value_field(fnode, "returns")))
     let sync_base = sync_acx(module)
-    var body_acx = { sync_base | empty_lists = elt }
+    var body_acx = { sync_base | empty_lists = elt, i64_tmp = true }
     if (value_bool(value_field(fnode, "async"))) {
-      body_acx = { in_async: true, in_arrow: false, ops: [], async_names: async_names, async_locals: locals, empty_lists: elt, routes: [], req_keys: Map.empty(), test_mode: false, comps: [], module: module }
+      body_acx = { in_async: true, in_arrow: false, ops: [], async_names: async_names, async_locals: locals, empty_lists: elt, routes: [], req_keys: Map.empty(), test_mode: false, comps: [], i64_tmp: true, module: module }
       out = out.push(`export async function ${name}(${params}): Promise<${returns}> {`)
     } else {
       out = out.push(`export function ${name}(${params}): ${returns} {`)
@@ -2163,11 +2190,13 @@ fn emit_functions(functions: List[Any], async_names: List[Str], module: Map[Str,
     if (body.length() == 0) {
       out = out.push("  // (empty body)")
     } else {
+      var lines = []
       for (s of body) {
         let r = v3_stmt(s, 2, c, body_acx)
-        out = out.concat(r.lines)
+        lines = lines.concat(r.lines)
         c = r.counter
       }
+      out = out.concat(declare_i64_tmp(lines))
     }
     out = out.push("}")
     out = out.push("")
@@ -3067,7 +3096,7 @@ fn provide_impl(step: Any, services: Any, ops: List[Str], routes: List[Str], req
     var body_acx = { sync_base | routes = routes, req_keys = req_keys, comps = comps }
     if (is_async) {
       prefix = "async "
-      body_acx = { in_async: true, in_arrow: false, ops: ops, async_names: async_names, async_locals: [], empty_lists: Map.empty(), routes: routes, req_keys: req_keys, test_mode: false, comps: comps, module: module }
+      body_acx = { in_async: true, in_arrow: false, ops: ops, async_names: async_names, async_locals: [], empty_lists: Map.empty(), routes: routes, req_keys: req_keys, test_mode: false, comps: comps, i64_tmp: false, module: module }
     }
     out = out.push(`${pad}${prefix}${name}(${sig_parts.join(", ")}) {`)
     // A param the service declared `Secret[T]` is a declared DISCLOSURE
@@ -3135,7 +3164,7 @@ fn component_step(step: Any, services: Any, ops: List[Str], routes: List[Str], r
     let awaited = value_bool(value_field(step, "async"))
     var acquire_acx = a
     if (awaited && kind == "let-effect") {
-      acquire_acx = { in_async: true, in_arrow: false, ops: ops, async_names: async_names, async_locals: [], empty_lists: Map.empty(), routes: routes, req_keys: req_keys, test_mode: false, comps: comps, module: module }
+      acquire_acx = { in_async: true, in_arrow: false, ops: ops, async_names: async_names, async_locals: [], empty_lists: Map.empty(), routes: routes, req_keys: req_keys, test_mode: false, comps: comps, i64_tmp: false, module: module }
     }
     let ar = expr(value_field(step, "acquire"), counter, acquire_acx)
     var out = []
@@ -3816,7 +3845,7 @@ fn revl_i64_helper() -> Str {
   o = o.push("const REVL_I64_MIN = -(2n ** 63n)")
   o = o.push("const REVL_I64_MAX = 2n ** 63n - 1n")
   o = o.push("function revlI64(v: bigint): bigint {")
-  o = o.push("  if (v < REVL_I64_MIN || v > REVL_I64_MAX) throw new RangeError('revl: Int overflow')")
+  o = o.push("  if (BigInt.asIntN(64, v) !== v) throw new RangeError('revl: Int overflow')")
   o = o.push("  return v")
   o = o.push("}")
   return o.join(newline())
@@ -4618,12 +4647,14 @@ fn pure_test_lines(tests: List[Any], module: Map[Str, Str]) -> List[Str] {
       } else {
         // issue #273: a `test` body binds locals too.
         let base = sync_acx(module)
-        let acx = { base | empty_lists = empty_list_types(body, [], ""), test_mode = true }
+        let acx = { base | empty_lists = empty_list_types(body, [], ""), test_mode = true, i64_tmp = true }
+        var lines = []
         for (st of body) {
           let r = v3_stmt(st, 2, c, acx)
-          out = out.concat(r.lines)
+          lines = lines.concat(r.lines)
           c = r.counter
         }
+        out = out.concat(declare_i64_tmp(lines))
       }
       out = out.push("})")
       out = out.push("")
@@ -5074,12 +5105,12 @@ test "the await-seed awaits a req-keyed async op only in an async, non-arrow bod
   let call = { kind: "call", target: { kind: "req", name: "store" }, method: "get",
                args: [{ kind: "name", id: "k" }] }
   let ops = [async_op_key("store", "get")]
-  assert expr(call, 0, { in_async: true, in_arrow: false, ops: ops, async_names: [], async_locals: [], empty_lists: Map.empty(), routes: [], req_keys: Map.empty(), test_mode: false, comps: [], module: Map.empty() }).text
+  assert expr(call, 0, { in_async: true, in_arrow: false, ops: ops, async_names: [], async_locals: [], empty_lists: Map.empty(), routes: [], req_keys: Map.empty(), test_mode: false, comps: [], i64_tmp: false, module: Map.empty() }).text
     == "(await ctx.store.get(k))"
   assert expr(call, 0, sync_acx(Map.empty())).text == "ctx.store.get(k)"
-  assert expr(call, 0, { in_async: true, in_arrow: true, ops: ops, async_names: [], async_locals: [], empty_lists: Map.empty(), routes: [], req_keys: Map.empty(), test_mode: false, comps: [], module: Map.empty() }).text
+  assert expr(call, 0, { in_async: true, in_arrow: true, ops: ops, async_names: [], async_locals: [], empty_lists: Map.empty(), routes: [], req_keys: Map.empty(), test_mode: false, comps: [], i64_tmp: false, module: Map.empty() }).text
     == "ctx.store.get(k)"
-  assert expr(call, 0, { in_async: true, in_arrow: false, ops: [], async_names: [], async_locals: [], empty_lists: Map.empty(), routes: [], req_keys: Map.empty(), test_mode: false, comps: [], module: Map.empty() }).text
+  assert expr(call, 0, { in_async: true, in_arrow: false, ops: [], async_names: [], async_locals: [], empty_lists: Map.empty(), routes: [], req_keys: Map.empty(), test_mode: false, comps: [], i64_tmp: false, module: Map.empty() }).text
     == "ctx.store.get(k)"
 }
 

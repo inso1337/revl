@@ -22,6 +22,7 @@ document say two things about one row.
 
 from __future__ import annotations
 
+import copy
 import json
 import sys
 from datetime import datetime, timedelta, timezone
@@ -354,6 +355,298 @@ def test_a_declared_legal_hold_overrides_the_deadline_across_the_seam():
 
 def test_a_seam_policy_whose_deadline_has_not_passed_compiles():
     compile_source(FUTURE + SEAM_PERSISTS, "retain.rvl")
+
+
+# ===========================================================================
+# 1c. The derivative relation: DECLARED in source, then checked.
+# ===========================================================================
+
+# The item's prerequisite 4, the half issue #2695 asks for: a way to say, in
+# source, that a value is a derivative of a retained value, so the qualifier
+# follows it and the persistence check and the receipt both apply to it. The
+# relation is DECLARED, never inferred through an opaque host body.
+
+# a policy that covers the class the derivation below declares
+DERIVE_PAST = PAST.replace("derivatives: summary, index",
+                           "derivatives: embedding")
+DERIVE_FUTURE = DERIVE_PAST.replace("2020-01-01", "2099-01-01")
+
+DERIVE_SOURCES = '''extern pure fn load(k: Str) -> Retained[Str, customer_pii] = @py { return k }
+extern emission[db.insert] fn db_put(row: Str) -> Int = @py { return 0 }
+'''
+
+DERIVE_FN = '''fn embed(x: Retained[Str, customer_pii]) -> Str derives embedding of x { return x }
+
+service Ops { emission fn go(k: Str) -> Int }
+
+component Store provides ops: Ops {
+  provide ops {
+    fn go(k) {
+      let row = load(k)
+      let v = embed(row)
+      let n = emit db_put(v)
+      return n
+    }
+  }
+}
+'''
+
+
+def test_a_declared_derivative_written_past_the_deadline_is_refused_by_name():
+    """The exit criterion: the value written is a DECLARED embedding of a
+    retained record, so the refusal names the sink AND the derivation, not only
+    the policy."""
+    err = _refuses(DERIVE_PAST + DERIVE_SOURCES + DERIVE_FN)
+    assert err.code == "G-RETAIN"
+    assert "`db_put`" in err.message, err.message
+    assert "`db` crossing" in err.message, err.message
+    assert "declared `embedding` derivative of `x`, made by `embed`" \
+        in err.message, err.message
+    assert "`derives embedding of x`" in err.message, err.message
+
+
+def test_a_declared_derivative_on_an_extern_carries_the_policy_too():
+    """A crossing (an extern) may declare the relation as well: the host body is
+    opaque, so the declaration is the only place the fact can be written."""
+    extern_fn = DERIVE_FN.replace(
+        "fn embed(x: Retained[Str, customer_pii]) -> Str derives embedding of x "
+        "{ return x }",
+        "extern pure fn embed(x: Retained[Str, customer_pii]) -> Str "
+        "derives embedding of x = @py { return x }")
+    err = _refuses(DERIVE_PAST + DERIVE_SOURCES + extern_fn)
+    assert err.code == "G-RETAIN"
+    assert "`db_put`" in err.message, err.message
+    assert "declared `embedding` derivative of `x`, made by `embed`" \
+        in err.message, err.message
+
+
+def test_a_derivative_class_the_policy_does_not_cover_is_refused_at_the_declaration():
+    """The second acceptance criterion: the SAME program under a policy that
+    covers only summaries is refused at the derivation, not reported later as
+    `not-covered` at erasure time."""
+    src = DERIVE_PAST.replace("derivatives: embedding",
+                              "derivatives: summary") + DERIVE_SOURCES + DERIVE_FN
+    err = _refuses(src)
+    assert err.code == "G-RETAIN"
+    assert "`embed` declares `derives embedding of x`" in err.message, err.message
+    assert "does not cover `embedding` derivatives" in err.message, err.message
+    assert "it covers `summary`" in err.message, err.message
+    # AT THE DECLARATION: the flow refusal (which this same program would also
+    # meet at the sink) must not be the one that fires.
+    assert "flows into the persistence sink" not in err.message, err.message
+    expected_line = src.splitlines().index(
+        "fn embed(x: Retained[Str, customer_pii]) -> Str "
+        "derives embedding of x { return x }") + 1
+    assert err.line == expected_line, (err.line, expected_line)
+
+
+def test_a_covered_derivative_class_is_admitted():
+    """The control: the same source with the class the policy covers, and a
+    deadline that has not passed, compiles."""
+    compile_source(DERIVE_FUTURE + DERIVE_SOURCES + DERIVE_FN, "retain.rvl")
+
+
+def test_a_derivation_of_an_unknown_class_is_refused_by_name():
+    src = DERIVE_PAST + DERIVE_FN.replace("derives embedding of x",
+                                          "derives telepathy of x")
+    err = _refuses(src)
+    assert err.code == "G-RETAIN"
+    assert "`telepathy` is not a derivative class" in err.message, err.message
+    assert "`embedding`" in err.hint, err.hint
+
+
+def test_a_derivation_naming_a_parameter_the_callable_does_not_have():
+    src = DERIVE_PAST + DERIVE_FN.replace("derives embedding of x",
+                                          "derives embedding of row")
+    err = _refuses(src)
+    assert err.code == "G-RETAIN"
+    assert "has no parameter `row`" in err.message, err.message
+
+
+def test_a_derivation_source_must_be_a_retained_parameter():
+    """A derivation names the RETAINED value it is made from: that is where the
+    policy, the deadline and the covered classes come from. A plain `Str`
+    parameter has no policy, so the declaration is refused rather than read as
+    an annotation nothing enforces."""
+    src = DERIVE_PAST + DERIVE_FN.replace(
+        "x: Retained[Str, customer_pii]) -> Str derives embedding of x",
+        "x: Str) -> Str derives embedding of x")
+    err = _refuses(src)
+    assert err.code == "G-RETAIN"
+    assert "parameter `x` is not `Retained[T, <policy>]`" in err.message, \
+        err.message
+
+
+def test_a_retained_return_and_a_derivation_are_refused_as_two_claims():
+    src = DERIVE_PAST + DERIVE_FN.replace(
+        "-> Str derives embedding of x",
+        "-> Retained[Str, customer_pii] derives embedding of x")
+    err = _refuses(src)
+    assert err.code == "G-RETAIN"
+    assert "both a `Retained` return and `derives embedding of x`" \
+        in err.message, err.message
+
+
+DERIVE_STATEMENT_EMIT = ('      let n = emit db_put(v)\n      return n\n',
+                         '      emit db_put(v)\n      return 0\n')
+
+
+def _reach_and_rest(src: str):
+    ir = copy.deepcopy(compile_source(src, "retain.rvl"))
+    reach = ir["components"][0]["taint"].pop("reaches")
+    return reach, ir
+
+
+@pytest.mark.parametrize("form", ["value", "statement"])
+def test_the_derivation_declaration_adds_one_origin_to_the_reach_list(form):
+    """The clause changes no emitted code: with and without it the IR is equal
+    everywhere except the component's reach list, which gains exactly the one
+    derivation origin. Pinned for a value-form and a statement-form emission."""
+    with_clause = DERIVE_FUTURE + DERIVE_SOURCES + DERIVE_FN
+    if form == "statement":
+        with_clause = with_clause.replace(*DERIVE_STATEMENT_EMIT)
+        assert DERIVE_STATEMENT_EMIT[1] in with_clause
+    without = with_clause.replace(" derives embedding of x", "")
+    assert without != with_clause
+    reach_with, rest_with = _reach_and_rest(with_clause)
+    reach_without, rest_without = _reach_and_rest(without)
+    assert reach_without == ["retained:customer_pii"]
+    assert reach_with == ["retained:customer_pii",
+                          "retained:customer_pii!embedding@embed.x"]
+    assert rest_with == rest_without
+
+
+# The clause ADDS a retention origin; it must never REPLACE the provenance a
+# return qualifier, a body flow or a declassifier already put on the result.
+# An implementation that REPLACES the result's origin set admits the first
+# three programs below, which is the laundering defect these pin; the fourth
+# pins that a declassifier's clean result also carries the added origin.
+
+def _derive_body(calls: str) -> str:
+    return ('service Ops { emission fn go(k: Str) -> Int }\n'
+            'component C provides ops: Ops {\n'
+            '  provide ops {\n'
+            '    fn go(k) {\n'
+            '      let row = load(k)\n' + calls +
+            '    }\n'
+            '  }\n'
+            '}\n')
+
+
+AUTHORITY_SINK = ('extern emission[shell] fn run(cmd: Trusted[Str]) -> Int '
+                  '= @py { return 0 }\n')
+
+
+def test_a_derivation_never_replaces_an_untrusted_return():
+    """`-> Untrusted[Str] derives embedding of x` still yields the untrusted
+    origin, so the authority sink refuses (G9). A replacing origin would admit
+    it, which is the hole this pins."""
+    src = DERIVE_FUTURE + DERIVE_SOURCES + AUTHORITY_SINK + (
+        'extern pure fn embed(x: Retained[Str, customer_pii]) -> Untrusted[Str] '
+        'derives embedding of x = @py { return x }\n') + _derive_body(
+        '      let v = embed(row)\n'
+        '      let n = emit run(v)\n'
+        '      return n\n')
+    err = _refuses(src)
+    assert err.code == "G9", err.message
+
+
+def test_a_derivation_never_replaces_a_secret_return():
+    """`-> Secret[Str] derives ...` still yields `confidential`, so handing the
+    result to an ordinary extern is refused as a disclosure (G-SECRET-FLOW)."""
+    src = DERIVE_FUTURE + DERIVE_SOURCES + (
+        'extern pure fn embed(x: Retained[Str, customer_pii]) -> Secret[Str] '
+        'derives embedding of x = @py { return x }\n'
+        'extern pure fn logit(s: Str) -> Str = @py { return s }\n') + _derive_body(
+        '      let s = embed(row)\n'
+        '      let x = logit(s)\n'
+        '      return 0\n')
+    err = _refuses(src)
+    assert err.code == "G-SECRET-FLOW", err.message
+
+
+def test_a_derivation_never_launders_an_untrusted_body_flow():
+    """The untrusted origin can enter through a SECOND parameter, so validation
+    of the return type alone cannot save the rule: the derivation origin has to
+    JOIN the signature propagation, not stand in for it."""
+    src = DERIVE_FUTURE + DERIVE_SOURCES + AUTHORITY_SINK + (
+        'extern emission[web.fetch] fn fetch(u: Str) -> Untrusted[Str] '
+        '= @py { return u }\n'
+        'fn embed(x: Retained[Str, customer_pii], u: Untrusted[Str]) -> Str '
+        'derives embedding of x { return u }\n') + _derive_body(
+        '      let u = emit fetch(k)\n'
+        '      let v = embed(row, u)\n'
+        '      let n = emit run(v)\n'
+        '      return n\n')
+    err = _refuses(src)
+    assert err.code == "G9", err.message
+
+
+def test_a_derived_result_survives_a_declassifier_as_a_retained_value():
+    """A `verified fn` returning `Trusted[Str]` still declassifies its argument
+    (the authority sink admits it), and the derivation origin is ADDED to the
+    clean result rather than turning the fn into a retention source that would
+    pre-empt the declassifier. The retained result is refused at the
+    persistence sink, naming the derivation."""
+    src = DERIVE_PAST + DERIVE_SOURCES + AUTHORITY_SINK + (
+        'extern emission[web.fetch] fn fetch(u: Str) -> Untrusted[Str] '
+        '= @py { return u }\n'
+        'verified fn clean(x: Retained[Str, customer_pii], u: Untrusted[Str]) '
+        '-> Trusted[Str] derives embedding of x { return u }\n') + _derive_body(
+        '      let u = emit fetch(k)\n'
+        '      let t = clean(row, u)\n'
+        '      let n = emit run(t)\n'
+        '      let m = emit db_put(t)\n'
+        '      return n\n')
+    err = _refuses(src)
+    assert err.code == "G-RETAIN", err.message
+    assert "declared `embedding` derivative of `x`, made by `clean`" \
+        in err.message, err.message
+
+
+def test_the_receipt_lists_a_declared_derivative_as_a_row():
+    """The third acceptance criterion: the receipt a fixture's declaration
+    enumerates names the derivative, covered by the policy that reaches it."""
+    program = Parser(DERIVE_PAST + DERIVE_SOURCES + DERIVE_FN, "f.rvl").parse()
+    rows = R.declared_derivatives(program)
+    assert [(r.name, r.kind) for r in rows] == [("embed(x)", "embedding")]
+    policy = R.policies(program, "f.rvl")["customer_pii"]
+    receipt = R.make_receipt(policy, "dpo", REPLICAS, rows, KEY, now=NOW)
+    assert receipt["derivatives"][0]["derivativeKind"] == "embedding"
+    assert receipt["derivatives"][0]["covered"] is True
+    assert receipt["derivatives"][0]["disposition"] == "covered"
+    assert receipt["derivatives"][0]["token"] == "derive:embed:x"
+    assert receipt["summary"]["coveredDerivatives"] == 1
+    ok, reason = R.verify_receipt(receipt, KEY)
+    assert ok, reason
+
+
+def test_the_declaration_refusal_of_a_persisting_derivation_names_it():
+    """When the crossing that DECLARES the relation is itself the persistence
+    sink, the existing declaration-level `G-RETAIN` says which derivative it
+    writes rather than leaving the reader with only a policy name."""
+    src = PAST + '''extern emission[index.add] fn index_add(x: Retained[Str, customer_pii]) -> Int derives index of x = @py { return 0 }
+service Ops { emission fn go(k: Str) -> Int }
+component C provides ops: Ops {
+  provide ops {
+    fn go(k) { return 0 }
+  }
+}
+'''
+    err = _refuses(src)
+    assert err.code == "G-RETAIN"
+    assert "declared as the source of the `index` derivative" in err.message, \
+        err.message
+    assert "`derives index of x`" in err.message, err.message
+
+
+def test_a_derivation_origin_reads_as_its_policy_and_names_its_declaration():
+    origin = R.derivation_origin("customer_pii", "embedding", "embed", "x")
+    assert R.policy_of_origin(origin) == "customer_pii"
+    assert R.derivation_of_origin(origin) == ("embedding", "embed", "x")
+    # a plain retained origin carries no derivation, and still reads its policy
+    assert R.policy_of_origin(R.origin_for("customer_pii")) == "customer_pii"
+    assert R.derivation_of_origin(R.origin_for("customer_pii")) is None
 
 
 # ===========================================================================

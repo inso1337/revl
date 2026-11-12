@@ -4,7 +4,7 @@ title: "Testing Recovery Claims: Exhaustive Fault Sweeps and Inverse Round-Trips
 theme: effects-replay
 kind: empirical
 maturity: partial
-status: "Fault sweep, cross-tier sweep and round-trip tests are shipped with tests; no corpus-wide results, mutation analysis or baseline comparison yet."
+status: "Fault sweep, cross-tier sweep and round-trip tests are shipped with tests. A seeded-defect saga corpus (bench/saga_defects, issue #2736) reports the sweep's corpus-wide result: 4 of 16 seeded rows are caught only by the sweep, 4 are missed, and 8 are refused at compile (7 by a checker rule, 1 by a parse error; two rows are one defect kind at two call sites); no mutation analysis or baseline comparison yet."
 fused_with: P17
 ---
 
@@ -70,7 +70,7 @@ Tree: revl main at commit 45bec431f.
 - Example sweep output: "swept 5 step(s) across 2 component(s): 5 passed, 0 failed, 0 unreachable" is a documentation illustration (`docs/fault-tests.md:346-365`), not a measurement.
 - Cross-tier tests assert 4 fault points agreeing on py and go (`tests/test_fault_sweep_cross_tier.py:441-456`).
 - Test function counts (not re-run): fault_tests 58, cross-tier 31, verified_effect 23, idempotent_309 25.
-- No measured bug-detection rate, no mutation score, no runtime cost, no corpus-wide sweep results.
+- No measured bug-detection rate, no mutation score, no runtime cost. The seeded-defect saga corpus (`bench/saga_defects`, issue #2736) reports the sweep's corpus-wide result: 16 rows (`missing-undo-hold` and `missing-undo-auth` are one defect kind at two call sites), 8 refused at compile (7 by a checker rule, 1 by a parse error), 4 caught only by the sweep, 4 missed by both; the rows are the authors' own and the Temporal comparison is not run.
 
 ## Paper outline
 1. Introduction: from "an inverse exists" to "the inverse works".
@@ -80,7 +80,7 @@ Tree: revl main at commit 45bec431f.
 5. The cross-tier sweep: authenticated proof, compensations owed versus ran, agreement, loud skips.
 6. The round trip: fingerprint from the trace ledger, rounds, blind spots; value-aware double-undo.
 7. Findings: the async fiber state defect, the false green in the first injection placement, the no-op inverse moved to compile time.
-8. Evaluation: corpus results, mutation analysis, baseline (not yet run).
+8. Evaluation: a seeded-defect saga corpus with a measured catch point per row (revl half only, `bench/saga_defects`); mutation analysis, baseline and the Temporal comparison are not run.
 9. Limits and related work.
 
 ## Threats to validity and limits
@@ -92,6 +92,7 @@ Tree: revl main at commit 45bec431f.
 - The Cordis finding is a single instance, and the upstream fix is cited by the doc, not verified here. The doc says the reproducer had "no revl code in the loop", but it is a hand-built IR emitted and plugged directly (`docs/fault-tests.md:297-322`).
 - The sweep uses one failure model; success on it does not extend to crashes (see P15) or to concurrent schedules. Its own blind spots, per `docs/fault-tests.md:449-460`: on the in-process py tier a body that calls `os._exit(0)` still ends the checker with status 0, and host code that reads the runner's memory is not covered.
 - That a shape-proven idempotent tier cannot be derived soundly is a limitation, not a result: declarations stay fail-closed with a tripwire test.
+- The corpus-wide sweep result depends on provider state being observable. A wrong inverse is caught when the provider is a revl `Map` (`wrong-release-sku`) and missed behind an opaque host body (`wrong-refund-order`), so the caught count is optimistic for an external service.
 
 ## Fact-check
 Claims in this draft were checked against revl main at commit 45bec431f: 40 checked, 9 corrected.

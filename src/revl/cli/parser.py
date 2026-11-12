@@ -443,6 +443,10 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--json-diagnostics", action="store_true",
                        help="on rejection, print a structured diagnostic (code, guarantee, "
                             "expected/actual, hint) instead of the human rendering")
+    audit.add_argument(
+        "--spec-results", metavar="FILE", default=None,
+        help="list each function's `ensures` spec with its last recorded "
+             "result, read from a `revl test --report json` file")
     # item 439: a COMPOSITION document argument is resolved rather than
     # compiled as a module, so its rows — and the providers a `remote` row
     # synthesizes — are on the surface. Row provenance is recorded against the

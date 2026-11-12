@@ -166,10 +166,11 @@ def test_locals_beside_module_names_ending_in_underscore(tmp_path):
 def test_an_escaped_local_never_spells_a_module_name():
     out = _emit(MODULE_TRAILING_SOURCE)
     assert "const zzz_ = a" in out
-    assert "return revlI64(zzz_ + 1n)" in out
+    assert "return (BigInt.asIntN(64, $revl_i64 = zzz_ + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))" in out
     assert "const foo_ = a" in out
-    assert re.search(r"const revlFoo_+ = a\n\s+return revlI64\(foo_\(a\) \+ revlFoo_{2,}\)",
-                     out) is not None
+    # issue #2904: a fn body tests the Int bound inline through `$revl_i64`
+    assert re.search(r"const revlFoo_+ = a\n\s+return \(BigInt\.asIntN\(64, \$revl_i64 = "
+                     r"foo_\(a\) \+ revlFoo_{2,}\)", out) is not None
 
 
 def test_locals_are_renamed_and_ordinary_names_are_not():
@@ -179,12 +180,13 @@ def test_locals_are_renamed_and_ordinary_names_are_not():
     assert "export function pick(undefined_: bigint" in out
     assert "export function apply(revlI64_: " in out
     assert "for (const revlI64_ of xs)" in out
-    # the checked calls still name the helpers and the global
-    assert "return revlI64(a + b)" in out
+    # the checked calls still name the helpers and the global (a fn body
+    # tests the Int bound inline, its trapping tail calls `revlI64`, #2904)
+    assert "return (BigInt.asIntN(64, $revl_i64 = a + b) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))" in out
     assert "!== undefined)" in out
     # ordinary names and a local named like a module fn keep their spelling
     assert "export function plain(total: bigint, count: bigint): bigint {" in out
-    assert "const sum = revlI64(total + count)" in out
+    assert "const sum = (BigInt.asIntN(64, $revl_i64 = total + count) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))" in out
     assert "const slip = 5n" in out
 
 
