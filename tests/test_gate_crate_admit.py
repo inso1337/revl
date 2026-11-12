@@ -488,6 +488,14 @@ OUTSIDE_THE_ADMISSION_SURFACE = (
      "service A {\n  fn f(x: Int) -> Int\n}\nservice A {\n  fn g(x: Int) -> Int\n}\n"),
     ("duplicate_method",
      "service A {\n  fn f(x: Int) -> Int\n  fn f(y: Int) -> Int\n}\n"),
+    # issue #3155: the reference refuses a dunder service-method name (issue
+    # #319) and the native gate raises no objection, so the certifier has to
+    # withhold it. Both shapes from the issue: the bare declaration, and the
+    # same method implemented by a component.
+    ("dunder_service_method", "service S {\n  fn __init__()\n}\n"),
+    ("dunder_implemented_method",
+     "service S {\n  fn __proto__(x: Int) -> Int\n}\n"
+     "component C provides s: S {\n  provide s {\n    fn __proto__(x) = x\n  }\n}\n"),
     # issue #2224: the reference refuses two component names that differ only
     # in letter case or underscores, which `has_duplicate` alone would admit
     ("folded_component_names", _two_components("KVStore", "Kvstore")),
@@ -537,6 +545,22 @@ def test_the_admission_arm_is_exercised_and_agrees_with_the_reference(consumer):
             f"{name} is admitted by the crate; the reference must admit it too")
     for name, wire in zip(names[len(inside):], wires[len(inside):]):
         assert wire["admitted"] is False, f"{name} must be withheld: {wire}"
+
+
+def test_a_dunder_service_method_is_withheld(consumer):
+    """Issue #3155: the reference refuses a dunder service-method name (issue
+    #319) and the native gate raises no objection, so the certifier has to
+    withhold the admission. Both shapes from the issue text: the bare
+    declaration, and the same method implemented by a component."""
+    programs = (
+        "service S {\n  fn __init__()\n}\n",
+        "service S {\n  fn __proto__(x: Int) -> Int\n}\n"
+        "component C provides s: S {\n  provide s {\n    fn __proto__(x) = x\n  }\n}\n",
+    )
+    wires = _crate_verdicts(consumer, list(programs), "--admission")
+    for source, wire in zip(programs, wires):
+        assert _reference(source)[0] != "", source
+        assert wire["admitted"] is False, wire
 
 
 def test_a_withheld_admission_is_the_verdict_wire_verbatim(consumer):

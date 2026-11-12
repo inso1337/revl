@@ -1,0 +1,49 @@
+// wrong_refund_order - the inverse refunds a different order
+//
+// Seeded defect: the charge for `order-1` is undone by a refund for
+// `order-2`. The inverse is present and well-shaped. The payment store is an
+// opaque host boundary here (the extern body is not a revl Map), so the fault
+// sweep cannot see which order was refunded: this is the external-service
+// case, and it is missed.
+// Expected catch: missed
+// Corpus index: bench/saga_defects/defects.json (issue #2736)
+
+extern pure fn record_charge(order: Str, cents: Int) -> Str = @py { return order }
+extern pure fn record_refund(order: Str, cents: Int) -> Int = @py { return 0 }
+extern pure fn record_settle(order: Str, cents: Int) -> Int = @py { return 0 }
+extern pure fn record_reverse(order: Str, cents: Int) -> Int = @py { return 0 }
+
+service Inventory {
+  fn reserve(sku: Str, qty: Int) -> Int
+  fn release(sku: Str, qty: Int) -> Int
+}
+
+service Payments {
+  fn charge(order: Str, cents: Int) -> Str
+  fn refund(order: Str, cents: Int) -> Int
+  emission fn settle(order: Str, cents: Int) -> Int
+  fn reverse(order: Str, cents: Int) -> Int
+}
+
+component Warehouse provides inventory: Inventory {
+  let rows = effect Map.new() undo rows.drop()
+  provide inventory {
+    fn reserve(sku, qty) = rows.insert(sku, qty)
+    fn release(sku, qty) = rows.remove(sku)
+  }
+}
+
+component Ledger provides payments: Payments {
+  provide payments {
+    fn charge(order, cents) = record_charge(order, cents)
+    fn refund(order, cents) = record_refund(order, cents)
+    fn settle(order, cents) = record_settle(order, cents)
+    fn reverse(order, cents) = record_reverse(order, cents)
+  }
+}
+
+component Checkout requires inventory: Inventory, payments: Payments {
+  let hold = effect inventory.reserve("sku-1", 1) undo inventory.release("sku-1", 1)
+  let auth = effect payments.charge("order-1", 4200) undo payments.refund("order-2", 4200)
+  emit payments.settle("order-1", 4200) compensate payments.reverse("order-1", 4200)
+}

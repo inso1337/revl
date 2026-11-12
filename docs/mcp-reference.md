@@ -2501,7 +2501,13 @@ running toolchain. Reports the release, the semver bump, whether the release
 declares itself live-safe (`live`), whether it changes host bytes
 (`hostChanges`), and whether this host satisfies the declared gate, language
 and Python requirements. Reads only: fetches no artifact and compiles
-nothing. `applyAvailable` says whether a live apply is possible right now
+nothing. A networked manifest that carries a signature is verified against a
+key pinned in `src/revl/update/release_keys.py` and valid at the check instant;
+an invalid or expired signature is `UPDATE_UNSIGNED`. A manifest that carries
+no signature at all is also `UPDATE_UNSIGNED` unless the operator started the
+server with `--update-trust-unsigned`. The release report carries `signed` and
+the `signature` (`status`, `keyId`, `notAfter`). `applyAvailable` says whether a
+live apply is possible right now
 (a composition is loaded and the release carries a `source` artifact).
 
 - Inputs: none. The feed is the server's configuration.
@@ -2513,22 +2519,32 @@ With no `planHash` it stages the newest release, compiles and admits it
 against the running manifest, plans the swap and returns a server-side
 `planHash`; nothing is mutated. With `planHash` it refuses a stale plan
 (another generation or composition is running, or the staged bytes changed
-after admission), requires `acknowledgeWidening` when the release widens any
-authority axis, swaps the release in, and verifies the successor serves the
-running keys. A successor that does not is reverted automatically and the
+after admission), requires both the operator's
+`--update-allow-consent acknowledgeWidening` grant and the caller's
+`acknowledgeWidening` when the release widens any authority axis, swaps the
+release in, and verifies the successor serves the
+running keys. The applied release is recorded on the generation history entry
+and in its snapshot meta beside `approval`; the update journal is a log. A
+successor that does not is reverted automatically and the
 answer says so. A release declaring `live: false` is refused for a running
-composition unless `force` is passed; the plan answer reports `live` and
-`restartRequired`.
+composition unless `acceptNotLive` is passed; the plan answer reports `live`
+and `restartRequired`.
 
 - Inputs: `planHash` (the plan to apply), `force` (plan even when already up
-  to date), `acknowledgeWidening` (accept the reported widening).
+  to date), `allowDowngrade`, `acceptUnknownVersion`, `acceptIncompatible`,
+  `acceptNotLive` (consent to each departure from a plain upgrade) and
+  `acknowledgeWidening` (accept the reported widening). Every consent except
+  `force` is honoured only when the server was started with
+  `--update-allow-consent NAME` for it; a caller that passes an ungranted
+  consent is refused with `UPDATE_CONSENT_NOT_GRANTED`.
 
 ### `revl_update_status`
 
 What the update surface knows: whether it is enabled, the feed
-configuration, the running identity and generation, the staged releases under
-the update home, the plans held server side, and the tail of the journal.
-Answers even when updates are disabled, so an operator can see why a verb
+configuration (including `--update-trust-unsigned`), the running identity and
+generation, the staged releases under
+the update home, the plans held server side, and the tail of the journal (a
+log). Answers even when updates are disabled, so an operator can see why a verb
 refuses.
 
 - Inputs: none.
@@ -2537,7 +2553,7 @@ refuses.
 
 Roll the running composition back to the generation that ran before the last
 applied release, through the same admitted undo a hand-made generation uses.
-Reads the journal for the target generation and refuses by name when no
+Reads the release from the generation history and refuses by name when no
 release was applied or the target has aged out of the bounded history.
 
 - Inputs: none.
@@ -2546,7 +2562,8 @@ The feed token (a private repository's bearer token) is sent only to the feed
 host and GitHub's release hosts, and only over https or loopback http; a
 cross-host redirect drops it. A release with no manifest (tag fallback) is
 never applied unless the operator explicitly enabled `--update-trust-tags`.
-A stage is reused only when its digest is the manifest's sha256.
+A stage is reused only when its extracted files, its kept artifact archive and
+its provenance all still match the signed manifest.
 
 ## See also
 

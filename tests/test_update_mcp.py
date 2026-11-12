@@ -7,7 +7,9 @@ the widening gate, the tag fallback refusal) still run everywhere.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -16,7 +18,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from _update_feed_fixture import serve_feed, tar_gz  # noqa: E402
+from _update_feed_fixture import pin_test_key, serve_feed, tar_gz  # noqa: E402
 from revl.mcp import server as server_mod  # noqa: E402
 from revl.mcp import update_tools  # noqa: E402
 from revl.mcp.server import handle  # noqa: E402
@@ -65,9 +67,18 @@ def _isolated():
     update_tools.reset()
 
 
-def _configure(feed, tmp_path: Path) -> None:
+@pytest.fixture(autouse=True)
+def _pin_fixture_release_key(monkeypatch):
+    pin_test_key(monkeypatch)
+
+
+def _configure(feed, tmp_path: Path, *,
+               consents: tuple[str, ...] | None = None) -> None:
+    if consents is None:
+        consents = update_tools.OPERATOR_CONSENTS
     update_tools.configure(enabled=True, repo="owner/app", project="app",
-                           api_base=feed.base_url, home=str(tmp_path))
+                           api_base=feed.base_url, home=str(tmp_path),
+                           consents=consents)
 
 
 # ------------------------------------------------------------ runtime free
@@ -178,6 +189,8 @@ def test_plan_apply_and_rollback_through_the_gate(tmp_path):
         assert rolled["ok"] is True and rolled["rolledBack"] is True
         assert _call("revl_call", {"key": "cache",
                                    "method": "size"})["result"] == 0
+        # the applied sources went with the rollback that consumed the apply
+        assert list((tmp_path / "applied").iterdir()) == []
     finally:
         feed.close()
 
@@ -583,6 +596,34 @@ def test_a_reused_staging_is_checked_file_by_file(tmp_path):
         encoding="utf-8") == CACHE_V2
 
 
+def test_a_reused_staging_is_checked_against_its_archive_not_provenance(
+        tmp_path):
+    feed = _release_feed()
+    try:
+        release = resolve_release("owner/app", api_base_override=feed.base_url)
+        cfg = {"home": str(tmp_path), "trust_tags": False,
+               "api_base": feed.base_url, "token_env": None}
+        first, refusal = update_tools._stage_for_apply(
+            release, cfg, Journal(str(tmp_path)))
+        assert refusal is None
+        # a local writer edits a source and its digest in provenance.json and
+        # leaves the kept archive, which still matches the signed sha256
+        edited = CACHE_V2.replace("43", "99")
+        (first.source_root / "cache.rvl").write_text(edited, encoding="utf-8")
+        record = first.directory / "provenance.json"
+        provenance = json.loads(record.read_text(encoding="utf-8"))
+        provenance["sources"]["files"]["cache.rvl"] = hashlib.sha256(
+            edited.encode("utf-8")).hexdigest()
+        record.write_text(json.dumps(provenance), encoding="utf-8")
+        second, refusal = update_tools._stage_for_apply(
+            release, cfg, Journal(str(tmp_path)))
+    finally:
+        feed.close()
+    assert refusal is None
+    assert (second.source_root / "cache.rvl").read_text(
+        encoding="utf-8") == CACHE_V2
+
+
 @needs_runtime
 def test_the_swap_compiles_the_bytes_that_were_hashed(monkeypatch, tmp_path):
     feed = _release_feed()
@@ -657,27 +698,232 @@ def test_a_hand_swap_after_an_apply_leaves_the_version_unknown_since_it(
 
 
 @needs_runtime
-def test_the_applied_release_survives_a_server_restart(monkeypatch, tmp_path):
+def test_a_journal_log_does_not_move_the_version_gate(tmp_path):
     feed = _release_feed()
     try:
         _configure(feed, tmp_path)
         _call("revl_load", {"source": CACHE})
         _apply()
-    finally:
-        feed.close()
-    # a restarted server: a new session id, no in-memory state, the same
-    # update home and running composition
-    monkeypatch.setattr(update_tools, "_SESSION_ID", "restarted:1")
-    update_tools.reset()
-    older = _release_feed(version="1.0.0", source=CACHE)
-    try:
-        _configure(older, tmp_path)
+        # The journal is a log. A local writer can append an apply record whose
+        # irDigest matches the running composition and whose version is lower;
+        # the version gate must not read it.
+        journal = Journal(str(tmp_path))
+        journal.append("apply", planHash="f" * 64, sessionId="forged:1",
+                       project="app", version="0.0.1",
+                       irDigest=update_tools._ir_digest(server_mod.SESSION.ir),
+                       generationBefore=0, generationAfter=1)
         check = _call("revl_update_check", {})
         assert check["runningRelease"]["version"] == "9.9.9"
-        assert check["comparison"]["relation"] == "older"
-        assert _call("revl_update_apply", {})["planned"] is False
-        forced = _call("revl_update_apply", {"force": True})
-        assert forced["refusal"]["code"] == "UPDATE_DOWNGRADE"
-        assert _call("revl_update_apply", FIRST)["planned"] is False
+        assert check["comparison"]["relation"] == "same"
+        assert check["comparison"]["updateAvailable"] is False
+        # A real restart unloads the session, and its generation history with
+        # it: the log names no release, so the version is unknown.
+        _call("revl_unload", {})
+        update_tools.reset()
+        _configure(feed, tmp_path)
+        _call("revl_load", {"source": CACHE_V2})
+        after = _call("revl_update_check", {})
+        assert after["runningRelease"] is None
+        assert after["lastApplied"] is None
+        assert after["comparison"]["relation"] == "unknown"
     finally:
-        older.close()
+        feed.close()
+
+
+@needs_runtime
+def test_an_operator_restore_carries_the_applied_release(tmp_path):
+    feed = _release_feed()
+    try:
+        _configure(feed, tmp_path)
+        _call("revl_load", {"source": CACHE})
+        _apply()
+        snap = _call("revl_snapshot", {})["snapshot"]
+        assert snap["meta"]["appliedRelease"]["version"] == "9.9.9"
+        assert server_mod.SESSION._history[-1]["appliedRelease"]["version"] == \
+            "9.9.9"
+        _call("revl_unload", {})
+        update_tools.reset()
+        # the operator restore path (no agent profile), like --restore
+        restored = server_mod.SESSION.restore(snap)
+    finally:
+        feed.close()
+    assert restored["restored"] is True
+    assert restored["appliedRelease"]["version"] == "9.9.9"
+    check_feed = _release_feed()
+    try:
+        _configure(check_feed, tmp_path)
+        check = _call("revl_update_check", {})
+    finally:
+        check_feed.close()
+    assert check["runningRelease"]["version"] == "9.9.9"
+    assert check["comparison"]["relation"] == "same"
+
+
+# ------------------------------------------- issue #3021: follow-ups
+
+@needs_runtime
+def test_a_consent_flag_the_operator_did_not_grant_is_refused(tmp_path):
+    feed = _release_feed()
+    try:
+        _configure(feed, tmp_path, consents=())
+        _call("revl_load", {"source": CACHE})
+        payload = _call("revl_update_apply", {"acceptUnknownVersion": True})
+    finally:
+        feed.close()
+    assert payload["ok"] is False
+    assert payload["refusal"]["code"] == "UPDATE_CONSENT_NOT_GRANTED"
+    assert "acceptUnknownVersion" in payload["refusal"]["message"]
+    assert "--update-allow-consent acceptUnknownVersion" in \
+        payload["refusal"]["fix"]
+    # refused before staging: the ungranted consent unlocks nothing
+    assert not (tmp_path / "staged").exists()
+
+
+@needs_runtime
+def test_acknowledging_a_widening_needs_the_operator_grant(monkeypatch,
+                                                           tmp_path):
+    feed = _release_feed()
+    try:
+        _configure(feed, tmp_path, consents=("acceptUnknownVersion",))
+        _call("revl_load", {"source": CACHE})
+        monkeypatch.setattr(
+            update_tools, "_widening",
+            lambda _ir, _files: {"widened": True,
+                                 "added": ["emit:MemCache:send"]})
+        planned = _call("revl_update_apply", FIRST)
+        plan_hash = planned["planHash"]
+        ungranted = _call("revl_update_apply",
+                          {"planHash": plan_hash,
+                           "acknowledgeWidening": True})
+        assert ungranted["ok"] is False
+        assert ungranted["refusal"]["code"] == "UPDATE_CONSENT_NOT_GRANTED"
+        assert ungranted["approvalRequired"] is True
+        assert _call("revl_state", {})["generation"] == 1
+        # the operator can still grant it for the same plan and session
+        _configure(feed, tmp_path,
+                   consents=("acceptUnknownVersion", "acknowledgeWidening"))
+        accepted = _call("revl_update_apply",
+                         {"planHash": plan_hash,
+                          "acknowledgeWidening": True})
+        assert accepted["ok"] is True and accepted["applied"] is True
+    finally:
+        feed.close()
+
+
+def test_applied_directories_are_pruned_to_the_rollback_set(tmp_path):
+    journal = Journal(str(tmp_path))
+    applied = tmp_path / "applied"
+    applied.mkdir()
+    update_tools.configure(enabled=True, home=str(tmp_path))
+    rollback_target = applied / ("a" * 16 + "-rollback-target")
+    consumed = applied / ("b" * 16 + "-consumed")
+    legacy = applied / ("c" * 16 + "-legacy")
+    orphan = applied / ("d" * 16 + "-orphan")
+    foreign = applied / ("f" * 16 + "-other-session")
+    for directory in (rollback_target, consumed, legacy, orphan, foreign):
+        directory.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked = applied / ("e" * 16 + "-linked")
+    linked.symlink_to(outside, target_is_directory=True)
+    journal.append("apply", planHash="a" * 64,
+                   sessionId=update_tools._SESSION_ID,
+                   appliedDirectory=str(rollback_target))
+    journal.append("apply", planHash="b" * 64,
+                   sessionId=update_tools._SESSION_ID,
+                   appliedDirectory=str(consumed))
+    # an apply recorded before the directory was named: matched by plan prefix
+    journal.append("apply", planHash="c" * 64,
+                   sessionId=update_tools._SESSION_ID)
+    # another server session's apply is not this session's rollback target
+    journal.append("apply", planHash="f" * 64,
+                   sessionId="another-session:1",
+                   appliedDirectory=str(foreign))
+    journal.append("rollback", consumes="b" * 64)
+    removed = update_tools._prune_applied(journal)
+    assert sorted(removed) == sorted(
+        [consumed.name, orphan.name, foreign.name])
+    assert rollback_target.is_dir() and legacy.is_dir()
+    assert not consumed.exists() and not orphan.exists()
+    assert not foreign.exists()
+    # a link in the update home is never followed, and nothing behind it goes
+    assert linked.is_symlink() and outside.is_dir()
+
+
+def test_an_unknown_consent_name_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="unknown update consent"):
+        update_tools.configure(enabled=True, home=str(tmp_path),
+                               consents=("acceptEverything",))
+
+
+def test_every_plan_consent_needs_both_the_grant_and_the_flag(tmp_path):
+    from types import SimpleNamespace
+
+    resolved = SimpleNamespace(version="9.9.9",
+                               manifest=SimpleNamespace(live=False))
+    comparison = {"running": "9.9.9", "requirements": [], "since": None,
+                  "sinceRelation": None}
+    cases = {
+        "allowDowngrade": ({**comparison, "relation": "older",
+                            "compatible": True}, {"force": True}),
+        "acceptUnknownVersion": ({**comparison, "relation": "unknown",
+                                  "compatible": True}, {}),
+        "acceptIncompatible": ({**comparison, "relation": "same",
+                                "compatible": False,
+                                "requirements": ["gateApi: x"]},
+                               {"force": True}),
+        "acceptNotLive": ({**comparison, "relation": "same",
+                           "compatible": True}, {"force": True}),
+    }
+    # without the operator's grant, the caller's flag unlocks nothing
+    update_tools.configure(enabled=True, home=str(tmp_path), consents=())
+    base = {name: False for name in update_tools._CONSENTS}
+    for name, (case, extra) in cases.items():
+        payload = update_tools._plan_gate(
+            resolved, case, {**base, name: True, **extra})
+        assert payload["refusal"]["code"] == "UPDATE_CONSENT_NOT_GRANTED", name
+        assert name in payload["refusal"]["message"]
+    # with the grant, the caller still has to pass its own flag
+    update_tools.configure(enabled=True, home=str(tmp_path),
+                           consents=update_tools.OPERATOR_CONSENTS)
+    expected = {"allowDowngrade": "UPDATE_DOWNGRADE",
+                "acceptUnknownVersion": "UPDATE_VERSION_UNKNOWN",
+                "acceptIncompatible": "UPDATE_INCOMPATIBLE",
+                "acceptNotLive": "UPDATE_NOT_LIVE"}
+    for name, (case, extra) in cases.items():
+        payload = update_tools._plan_gate(resolved, case, {**base, **extra})
+        assert payload["refusal"]["code"] == expected[name], name
+
+
+def test_the_retained_applied_set_is_bounded_by_the_undo_history(tmp_path):
+    journal = Journal(str(tmp_path))
+    update_tools.configure(enabled=True, home=str(tmp_path))
+    limit = update_tools._undo_history()
+    total = limit + 6
+    for index in range(total):
+        journal.append("apply", planHash=f"{index:064x}",
+                       sessionId=update_tools._SESSION_ID,
+                       appliedDirectory=str(tmp_path / "applied"
+                                            / f"{index:016x}-dir"))
+    names, _prefixes = update_tools._retained_applied_directories(journal)
+    assert len(names) == limit
+    # the newest applies are the ones a rollback can still reach
+    assert f"{total - 1:016x}-dir" in names
+    assert "0000000000000000-dir" not in names
+
+
+@needs_runtime
+def test_a_refused_swap_leaves_no_applied_directory(monkeypatch, tmp_path):
+    feed = _release_feed()
+    try:
+        _configure(feed, tmp_path)
+        _call("revl_load", {"source": CACHE})
+        planned = _call("revl_update_apply", FIRST)
+        monkeypatch.setattr(server_mod, "_tool_swap",
+                            lambda arguments: {"ok": False, "refusal": {}})
+        refused = _call("revl_update_apply", {"planHash": planned["planHash"]})
+        assert refused["stoppedAt"] == "swap"
+        assert _call("revl_state", {})["generation"] == 1
+        assert list((tmp_path / "applied").iterdir()) == []
+    finally:
+        feed.close()
