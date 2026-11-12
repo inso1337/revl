@@ -63,11 +63,16 @@ instrument failure rather than as a checker regression.
   is therefore outside this row (the G9 row has the same granularity); what
   the row catches is a skipped scope or a skipped top-level statement, which
   is the class of bug the activation-skip failure belonged to.
-* The walk's scopes are compared **in the order the checker opened them**, not
-  reordered into `Body.scopes` order. That is a real conjunct and not
-  decoration: on an admitted body the two orders coincide by construction
-  because the checker refuses an `effect`/`let-effect`/`timer` after a
-  `provide` block, so any other order is a walk the model refuses.
+* The walk's scopes are compared in `Body.scopes` order: the activation
+  scope first when the walk visited an activation statement, then the
+  provide scopes **in the order the checker opened them**. The checker's own
+  opening order differs from that on some admitted bodies: it refuses an
+  `effect`/`let-effect`/`timer` after a `provide` block but accepts an `emit`
+  or an `if` there, and the lowering loop then opens the provide scope before
+  it visits that activation statement. The harness therefore moves the
+  activation scope to the front, the one reordering it applies, and the
+  provide scopes keep the walk's order, so the label conjunct still reads
+  them as walked.
 
 ## The three conjuncts, and why each one is here
 

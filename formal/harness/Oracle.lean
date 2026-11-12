@@ -350,6 +350,10 @@ Verdict rows out:
                                                    `RevL.G1Coverage.coversAccessBodyB`
                                                    over the `G1B`/`G1P` body
                                                    and the `G1W` walk
+  G1CM <kind> <file> <comp> <covers=ok|fail>       the same coverage over a
+                                                   whole `G1M` walk:
+                                                   `accessCoverageRowB`,
+                                                   for the harness ratchet
   A1 <file> <comp> <ord> <async=ok|fail>           A1 async colour over one
                                                    site: `RevL.A1Async.siteB`
   A1S <file> <comp> <key.method> <sig=ok|fail>     A1, a provide method's
@@ -3144,6 +3148,55 @@ def g1covVerdicts (p : String) (rs : G1CoverageRows) : String := Id.run do
       out := out ++ s!"G1C\t{p}\t{b.comp}\t{label}\tcoverage={v}\n"
   return out
 
+/-- One `G1M` row: a component's recorded walk, as recorded (`as-walked`) or
+under one of the harness ratchet's shortenings (`drop`, `bump`, `strip`,
+`extra`), the whole walk in one `label|count|params;...` column so an empty
+walk is still a row. -/
+structure G1MRow where
+  kind : String
+  path : String
+  comp : String
+  walk : List G1WRow
+
+/-- One `label|count|params` scope of a `G1M` walk column (a label may be
+namespaced, `acme::greeter.hello`, so `:` is not the separator), as the
+`G1WRow` it stands for. -/
+def parseWalkScope (path comp : String) (s : String) : Option G1WRow :=
+  match s.splitOn "|" with
+  | [label, n, ps] =>
+      n.toNat?.bind fun k => (parseNames ps).map fun names =>
+        ⟨path, comp, label, k, names⟩
+  | _ => none
+
+def parseG1M (f : List String) : Option G1MRow :=
+  match f with
+  | ["G1M", kind, path, comp, walk] =>
+      let ws := if walk == "" then some []
+        else (walk.splitOn ";").mapM (parseWalkScope path comp)
+      ws.map fun w => ⟨kind, path, comp, w⟩
+  | _ => none
+
+/-- One `G1CM <kind> <file> <comp> covers=ok|fail` row per `G1M` row: the
+whole-walk `accessCoverageRowB`, the Bool `accessCoverageRowB_iff` is about,
+over the body the `G1B`/`G1P` rows describe and the walk the `G1M` row
+carries. The per-scope `G1C` rows never print this Bool; these rows are what
+lets the harness ratchet require the LEAN verdict to flip under each
+shortening, so an oracle that printed a constant fails the gate. A row whose
+component has no `G1B` row prints `fail`. -/
+def g1covMutantVerdicts (rs : G1CoverageRows) (ms : List G1MRow) :
+    String := Id.run do
+  let mut out := ""
+  for m in ms do
+    let v := match rs.g1b.find?
+        (fun (r : G1BRow) => r.path == m.path && r.comp == m.comp) with
+      | some b =>
+          let ps := rs.g1p.filter
+            (fun (r : G1PRow) => r.path == m.path && r.comp == m.comp)
+          if accessCoverageRowB b ps m.walk then "ok" else "fail"
+      | none => "fail"
+    out := out ++ s!"G1CM\t{m.kind}\t{m.path}\t{m.comp}\tcovers={v}\n"
+  return out
+
 end G1Coverage
 
 def main (args : List String) : IO UInt32 := do
@@ -3191,6 +3244,7 @@ def main (args : List String) : IO UInt32 := do
     let g9rows := parseG9Rows fields
     let gcrow := parseG9CoverageRows fields
     let g1covrows := parseG1CoverageRows fields
+    let g1mrows := fields.filterMap parseG1M
     let retainrows := parseGRetainRows fields
     let invrows := parseG4InvRows fields
     let swrows := parseSWRows fields
@@ -3286,6 +3340,9 @@ def main (args : List String) : IO UInt32 := do
     if !unknownEVR.isEmpty then
       IO.eprintln s!"oracle: EVR rows of unknown scope or position: {unknownEVR}"
       return 1
+    -- G1CM verdicts (the G1 coverage ratchet's walks, issue #2744): the
+    -- whole-walk `accessCoverageRowB` over each `G1M` row
+    out := out ++ g1covMutantVerdicts g1covrows g1mrows
     for p in paths do
       let fm := mrows.filter (fun r => r.path == p)
       let ub := brows.filter (fun r => r.path == p)

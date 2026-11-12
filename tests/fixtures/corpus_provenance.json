@@ -1430,6 +1430,7 @@
    "tests/fixtures/emit_wasm_refusals/true_division.rvl",
    "tests/fixtures/emit_wasm_refusals/ui_transaction_unit.rvl",
    "tests/fixtures/emit_wasm_refusals/untyped_empty_list.rvl",
+   "tests/fixtures/g1_coverage/provide_then_emit.rvl",
    "tests/fixtures/g4_method_append_inverse.rvl",
    "tests/fixtures/model_reach_spawn/model_child_role_reach.rvl",
    "tests/fixtures/model_reach_spawn/model_grandchild_role_reach.rvl",

@@ -3587,14 +3587,17 @@ def access_rows(rel: str, comp, roots: set[str], resolved: set[str],
 #
 #   G1W <file> <comp> <scope> <stmts> <params>
 #       One scope the shipped checker's lowering ACTUALLY visited, recorded
-#       while `compile_files` ran, in the order the walk opened it: the
-#       scope's label (`activation` or `<provide key>.<method>`), how many of
-#       the scope's TOP-LEVEL statements the walk dispatched, and the
-#       parameter names it seeded into the scope's own environment when it
-#       opened it. The order is compared as recorded, not normalised: an
-#       admitted body's activation statements precede every `provide` block
-#       (the checker refuses an effect after a provide), so a different order
-#       is a failure rather than something to sort away.
+#       while `compile_files` ran: the scope's label (`activation` or
+#       `<provide key>.<method>`), how many of the scope's TOP-LEVEL
+#       statements the lowering loop REACHED (recorded at the loop head,
+#       before dispatch, so a dispatch that skips a reached statement is not
+#       seen), and the parameter names it seeded into the scope's own
+#       environment when it opened it. The rows are in `Body.scopes` order:
+#       the activation scope first when it was visited, then the provide
+#       scopes in the order the walk opened them. The checker accepts an
+#       `emit` or an `if` after a `provide` block and then opens the provide
+#       scope first, so the activation scope is moved to the front; nothing
+#       else is reordered.
 #
 #       Statements inside an `if`/`while`/`for` body are lowered by the
 #       scope's own recursion and are NOT counted a second time: the count is
@@ -3603,11 +3606,20 @@ def access_rows(rel: str, comp, roots: set[str], resolved: set[str],
 #       limitation is stated in `RevL.G1Coverage`'s docstring.
 #
 #   G1C <file> <comp> <scope> coverage=ok|fail
-#       The oracle's OUTPUT, not an export row: `RevLOracle.accessCoverageRowB`
-#       decides `RevL.G1Coverage.coversAccessBodyB` over `G1B`/`G1P`/`G1W`
-#       and projects it one row per scope, out to the longer of the two lists,
-#       so a walk that opened FEWER scopes than the body still produces a
-#       NAMED `fail` for the missing one.
+#       The oracle's OUTPUT, not an export row: `RevLOracle.g1covVerdicts`
+#       prints `Walked.matches` per scope over `G1B`/`G1P`/`G1W`, out to the
+#       longer of the two lists, so a walk that opened FEWER scopes than the
+#       body still produces a NAMED `fail` for the missing one. That is the
+#       per-scope projection of `coversAccessBodyB`, not the whole-walk Bool.
+#
+#   G1M <kind> <file> <comp> <walk>
+#       The recorded walk (`as-walked`) and its four shortenings (`drop`,
+#       `bump`, `strip`, `extra`, `_g1_shortenings`), one row each, the walk
+#       as `label|count|params` joined by `;`. The oracle answers each with
+#       `G1CM <kind> <file> <comp> covers=ok|fail`, the whole-walk
+#       `RevLOracle.accessCoverageRowB` the bridge theorem is about, and the
+#       ratchet requires `ok` on a recorded walk and `fail` under each
+#       shortening from the LEAN side, not only from the Python one.
 #
 # THE PRIVATE SEAM THIS PINS. The checker has no separate access-walk function
 # to wrap the way the G9 row wraps `taint._walk_component_methods`: the walk
@@ -3699,19 +3711,25 @@ def _access_observation():
 
 
 def _access_walk_scopes(observed: dict) -> list:
-    """The walk's scopes for one component, in the ORDER the checker opened
-    them, as `(label, statement count, parameter names)` triples.
+    """The walk's scopes for one component as `(label, statement count,
+    parameter names)` triples, in the order `Body.scopes` defines: the
+    activation scope first when the walk visited an activation statement,
+    then the provide scopes in the order the checker opened them.
 
-    The order is part of the comparison and is not normalised: a walk that
-    opened the provide scopes before the activation scope is a walk the model
-    refuses (its label list differs), and reordering it here would make the
-    printed `ok` something other than `coversAccessB` on the walk the checker
-    performed. On an admitted body the two orders coincide by construction:
-    the checker refuses an `effect`/`let-effect`/`timer` after a `provide`
-    block, so the activation statements come first, and `Body.scopes` puts the
-    activation first exactly when it has a statement."""
-    return [(label, v["stmts"], list(v["params"]))
-            for label, v in observed.items()]
+    The checker's own opening order is NOT the model's order on every
+    admitted body. It refuses an `effect`, a `let`-effect or a `timer` after a
+    `provide` block, but it accepts an `emit` or an `if` there, and the
+    lowering loop then opens the provide scope before it visits that
+    activation statement. Comparing that raw order would print `fail` on both
+    scopes of a correct walk. Moving the activation scope to the front is the
+    one reordering applied: it is the order the model defines, and the
+    provide scopes keep the order the checker opened them in, so the label
+    conjunct still reads them as walked."""
+    act = [("activation", v["stmts"], list(v["params"]))
+           for label, v in observed.items() if label == "activation"]
+    rest = [(label, v["stmts"], list(v["params"]))
+            for label, v in observed.items() if label != "activation"]
+    return act + rest
 
 
 def g1coverage_rows(rel: str, prog) -> list[str]:
@@ -3792,6 +3810,13 @@ def g1coverage_rows(rel: str, prog) -> list[str]:
         for label, n, params in ordered:
             rows.append("\t".join(["G1W", rel, comp, label, str(n),
                                    ",".join(params)]))
+        if ordered:
+            # the same walk, as recorded and under each shortening, for the
+            # Lean oracle to decide with `accessCoverageRowB` (the ratchet
+            # requires the Lean verdict to flip, not only the Python one)
+            for kind, mutated in _g1_shortenings(ordered):
+                rows.append("\t".join(["G1M", kind, rel, comp,
+                                       _g1_walk_field(mutated)]))
         per_file.append((comp, scopes, ordered))
     _G1_COVERAGE_ROWS[rel] = per_file
     _G1_COVERAGE_CENSUS["components"] = (
@@ -3817,6 +3842,106 @@ def _g1_covers(body: list, walk: list) -> list[tuple[str, str]]:
     return out
 
 
+#: The kinds of `G1M` row, in export order: the walk as recorded (the
+#: positive control, the Lean oracle must print `ok` on it) and its four
+#: shortenings (each must make the Lean oracle print `fail` somewhere).
+G1_SHORTENINGS = ("as-walked", "drop", "bump", "strip", "extra")
+
+
+def _g1_shortenings(walk: list) -> list[tuple[str, list]]:
+    """The recorded walk and its four shortenings, `(kind, walk)` in
+    `G1_SHORTENINGS` order: drop the first scope, bump every visited count,
+    strip every scope's last parameter, add a scope the body does not have.
+    ONE definition, so the Python ratchet and the `G1M` rows the Lean oracle
+    decides mutate the same walk the same way."""
+    return [
+        ("as-walked", list(walk)),
+        ("drop", walk[1:]),
+        ("bump", [(lb, n + 1, p) for lb, n, p in walk]),
+        ("strip", [(lb, n, p[:-1]) for lb, n, p in walk]),
+        ("extra", walk + [("activation", 1, [])]),
+    ]
+
+
+def _g1_walk_field(walk: list) -> str:
+    """One walk as a single `G1M` column: `label|count|params` per scope,
+    `;`-joined, parameters `,`-joined, the empty walk the empty column. A
+    label is `key.method` and a key may be namespaced (`acme::greeter`), so
+    `:` is NOT a safe separator; `|` and `;` are checked rather than assumed
+    absent, and a label or parameter carrying one stops the run."""
+    for lb, _n, ps in walk:
+        for part in (lb, *ps):
+            if "|" in part or ";" in part or (part != lb and "," in part):
+                raise SystemExit(
+                    f"differential oracle: G1 walk label or parameter {part!r} "
+                    "carries a G1M separator")
+    return ";".join(f"{lb}|{n}|{','.join(p)}" for lb, n, p in walk)
+
+
+def _g1_lean_mutant_verdicts(formal_text: str) -> dict:
+    """The Lean oracle's `G1CM <kind> <file> <comp> covers=ok|fail` rows:
+    `RevLOracle.accessCoverageRowB`, the whole-walk Bool the bridge theorem
+    is about, over each `G1M` row."""
+    out: dict = {}
+    for line in formal_text.splitlines():
+        parts = line.split("\t")
+        if parts[0] == "G1CM" and len(parts) == 5:
+            out[(parts[1], parts[2], parts[3])] = parts[4].split("=", 1)[1]
+    return out
+
+
+def _g1_lean_findings(formal_text: str) -> list[str]:
+    """The Lean half of the ratchet: every `G1M` row the export carried got
+    a `G1CM` verdict, that verdict is the Python whole-walk verdict, the
+    as-recorded walk prints `ok` somewhere and each shortening prints `fail`
+    somewhere. An oracle that printed a constant fails here."""
+    got = _g1_lean_mutant_verdicts(formal_text)
+    findings: list[str] = []
+    missing: list = []
+    differ: list = []
+    oks = {k: 0 for k in G1_SHORTENINGS}
+    fails = {k: 0 for k in G1_SHORTENINGS}
+    for rel, per_file in sorted(_G1_COVERAGE_ROWS.items()):
+        for comp, body, walk in per_file:
+            if not walk:
+                continue
+            for kind, mutated in _g1_shortenings(walk):
+                want = ("ok" if all(v == "ok" for _lb, v
+                                    in _g1_covers(body, mutated)) else "fail")
+                lean = got.get((kind, rel, comp))
+                if lean is None:
+                    missing.append((kind, rel, comp))
+                    continue
+                if lean != want:
+                    differ.append((kind, rel, comp, want, lean))
+                (oks if lean == "ok" else fails)[kind] += 1
+    if missing:
+        findings.append(
+            f"g1 coverage (Lean): {len(missing)} G1M row(s) got no G1CM "
+            f"verdict from the oracle, e.g. {missing[:3]}")
+    if differ:
+        findings.append(
+            f"g1 coverage (Lean): {len(differ)} G1CM verdict(s) differ from "
+            f"the Python whole-walk verdict (kind, file, comp, python, lean), "
+            f"e.g. {differ[:3]}")
+    if not oks["as-walked"]:
+        findings.append(
+            "g1 coverage (Lean): the oracle printed `ok` on no recorded walk, "
+            "so its `fail` under the shortenings proves nothing")
+    for kind in G1_SHORTENINGS[1:]:
+        if not fails[kind]:
+            findings.append(
+                f"g1 coverage (Lean): the {kind!r} shortening makes the Lean "
+                f"oracle print `fail` on no walk, so the printed verdict does "
+                f"not read what that shortening changes")
+    if not findings:
+        print(f"g1 coverage (Lean): {sum(oks.values()) + sum(fails.values())} "
+              f"G1M walks decided by `accessCoverageRowB`, "
+              f"{oks['as-walked']} recorded walks ok, fail under "
+              + ", ".join(f"{k} {fails[k]}" for k in G1_SHORTENINGS[1:]))
+    return findings
+
+
 def _g1_params(field: str) -> list[str]:
     """One carried comma-joined parameter-NUMBER column as a list. The empty
     string is the empty list; an empty member stops the run rather than being
@@ -3833,7 +3958,7 @@ def _g1_params(field: str) -> list[str]:
     return out
 
 
-def g1coverage_coverage() -> list[str]:
+def g1coverage_coverage(formal_text: str | None = None) -> list[str]:
     """The non-vacuity ratchet for the `G1B`/`G1P`/`G1W`/`G1C` rows
     (issue #2744).
 
@@ -3852,7 +3977,11 @@ def g1coverage_coverage() -> list[str]:
         walk, drop a scope, bump a count, strip a parameter, and add a scope
         the body does not have. `RevL.G1Coverage` proves each shortening is a
         distinct way to fail; this is the corpus half, and a row that
-        returned a constant fails all four.
+        returned a constant fails all four. Given the oracle's output
+        (`formal_text`), the same four shortenings, exported as `G1M` rows,
+        must also make the LEAN oracle's `accessCoverageRowB` print `fail`,
+        and the walk as recorded must make it print `ok`, so an oracle that
+        printed a constant fails too (`_g1_lean_findings`).
 
     A verdict that comes out `fail` on the corpus, the walk genuinely having
     skipped a scope, is NOT reported here: it is `checker_alignment`'s
@@ -3911,16 +4040,14 @@ def g1coverage_coverage() -> list[str]:
                 params += 1
             if not walk:
                 continue
-            if _g1_covers(body, walk[1:]) != _g1_covers(body, walk):
+            short = dict(_g1_shortenings(walk))
+            if _g1_covers(body, short["drop"]) != _g1_covers(body, walk):
                 drop_scope += 1
-            bumped = [(lb, n + 1, p) for lb, n, p in walk]
-            if _g1_covers(body, bumped) != _g1_covers(body, walk):
+            if _g1_covers(body, short["bump"]) != _g1_covers(body, walk):
                 bump += 1
-            stripped = [(lb, n, p[:-1]) for lb, n, p in walk]
-            if _g1_covers(body, stripped) != _g1_covers(body, walk):
+            if _g1_covers(body, short["strip"]) != _g1_covers(body, walk):
                 strip += 1
-            more = walk + [("activation", 1, [])]
-            if _g1_covers(body, more) != _g1_covers(body, walk):
+            if _g1_covers(body, short["extra"]) != _g1_covers(body, walk):
                 extra += 1
     if not acts:
         findings.append(
@@ -3951,6 +4078,8 @@ def g1coverage_coverage() -> list[str]:
         findings.append(
             "g1 coverage: adding a scope the body does not have changes no "
             "verdict, the row does not read the label list")
+    if formal_text is not None:
+        findings.extend(_g1_lean_findings(formal_text))
     if not findings:
         print(f"g1 coverage: {len(_G1_COVERAGE_ROWS)} files over "
               f"{_G1_COVERAGE_CENSUS['components']} components "
@@ -6884,6 +7013,11 @@ def parse_verdicts(text: str) -> Verdicts:
             # as many statements as a scope the body declares, or seeded a
             # different parameter set than that scope declares.
             g1cov[(parts[1], parts[2], parts[3])] = parts[4].split("=", 1)[1]
+        elif parts[0] == "G1CM" and len(parts) == 5:
+            # G1 coverage under a shortening (issue #2744): not a corpus
+            # verdict, the Lean half of `g1coverage_coverage`'s ratchet, which
+            # reads these rows from the oracle's output itself.
+            continue
         else:
             raise SystemExit(f"differential oracle: malformed verdict row {line!r}")
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
@@ -9142,7 +9276,7 @@ def main() -> int:
     mismatches.extend(council_coverage())
     mismatches.extend(g9_coverage())
     mismatches.extend(g9coverage_coverage())
-    mismatches.extend(g1coverage_coverage())
+    mismatches.extend(g1coverage_coverage(formal_text))
     mismatches.extend(retain_coverage())
     mismatches.extend(g4inverse_coverage())
     mismatches.extend(sw_coverage())

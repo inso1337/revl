@@ -14442,8 +14442,11 @@ def _poison_failed_binding(stmt, env: "Env") -> None:
 # separate walk function to wrap the way the G9 row wraps
 # `taint._walk_component_methods`. The obligation the coverage theorem states
 # is about the walk that lowering IS: every scope a component body induces is
-# opened and each of its top-level statements is lowered, and therefore has
-# its names resolved. `formal/harness/diff_corpus.py` observes exactly that by
+# opened and each of its top-level statements is REACHED BY THE LOWERING LOOP.
+# A visit is recorded at the loop head, before the statement is dispatched, so
+# the log observes that the loop reached the statement, not that name
+# resolution then ran on it: a dispatch that skipped a reached statement would
+# still log a full walk. `formal/harness/diff_corpus.py` observes that by
 # installing a log here for the duration of ONE `compile_files` call.
 #
 # None in production: every call site is one branch and a module-global
@@ -14451,7 +14454,7 @@ def _poison_failed_binding(stmt, env: "Env") -> None:
 # behaviour depends on the log. The
 # entries are `("scope", component, label, (param, ...))` when a provide
 # method's scope opens (its declared parameters are seeded there) and
-# `("visit", component, label, ())` once per statement the walk dispatched.
+# `("visit", component, label, ())` once per statement the loop reached.
 # The harness is the only reader; a renamed or moved call site leaves the log
 # short, which the coverage row reports as its own blind spot rather than as
 # the checker having skipped a statement.
@@ -14467,7 +14470,8 @@ def _note_access_scope(component: str, scope: str,
 
 
 def _note_access_visit(component: str, scope: str) -> None:
-    """Record that the walk dispatched one statement of one scope."""
+    """Record that the lowering loop reached one statement of one scope,
+    before it is dispatched."""
     log = _ACCESS_WALK
     if log is not None:
         log.append(("visit", component, scope, ()))
@@ -14888,9 +14892,9 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
     # this pass has to bound (item 485)
     check_list_index_bounds(comp.body, filename)
     for stmt in comp.body:
-        # the G1 coverage observation (issue #2744): the walk VISITS this
+        # the G1 coverage observation (issue #2744): the loop REACHES this
         # activation statement here, before any branch decides what it lowers
-        # to. A provide block is its own scope and is recorded by
+        # to, so the log records the reach and not the resolution. A provide block is its own scope and is recorded by
         # `_lower_provide`, not as an activation statement.
         if not isinstance(stmt, ProvideStmt):
             _note_access_visit(comp.name, "activation")
@@ -15731,7 +15735,8 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
 
         # the G1 coverage observation (issue #2744): the walk opens this
         # provide method's scope with exactly the parameters it seeds into the
-        # method's environment, then visits each of its statements.
+        # method's environment, then records each statement the loop reaches,
+        # before it is dispatched.
         _note_access_scope(comp.name, f"{stmt.key}.{method.name}",
                            list(env.params))
         for mstmt in method.body:

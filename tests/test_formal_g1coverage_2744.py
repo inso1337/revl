@@ -342,12 +342,13 @@ def _notes():
     return "examples/app/notes.rvl"
 
 
-def test_a_walk_that_skips_the_activation_scope_is_refused_by_the_row(harness):
-    """The mutation witness the issue asks for: make the observed walk drop a
-    scope, re-export one file, and the reference's own `G1C` verdict refuses
-    the file. The mutation is applied to the recorder (the row's observation),
-    which is what the row's verdict is a function of; the seam itself is pinned
-    by `test_the_pinned_seams_are_where_the_row_says`."""
+def test_a_log_missing_the_activation_visits_is_refused_by_the_row(harness):
+    """The row reads the recorder's log: silence the activation visits in the
+    LOG, re-export one file, and the reference's own `G1C` verdict refuses
+    the file. This patches the recorder, not the walk, so it pins how the row
+    reads the log format; it does not drive a checker that really skips a
+    scope (the checker still lowers every statement here). Where the seam
+    sits is pinned by `test_the_pinned_seams_are_where_the_row_says`."""
     rel = _notes()
     p = harness.REPO / rel
     with pytest.MonkeyPatch.context() as mp:
@@ -371,10 +372,12 @@ def test_a_walk_that_skips_the_activation_scope_is_refused_by_the_row(harness):
         "the activation skip was filed as an observation failure instead"
 
 
-def test_a_walk_that_skips_a_provide_scope_is_refused_by_the_row(harness):
-    """The other scope kind: drop every visit of one provide method and the
-    reference refuses that method's scope (the file still records the other
-    scopes, so it is a coverage disagreement, never the observation bucket)."""
+def test_a_log_missing_a_provide_scope_is_refused_by_the_row(harness):
+    """The other scope kind: drop one provide method's scope open and visits
+    from the recorder's LOG and the reference refuses that method's scope (the
+    file still records the other scopes, so it is a coverage disagreement,
+    never the observation bucket). Like the test above, this patches the
+    recorder, not the walk: it pins the row's reading of the log format."""
     rel = _notes()
     p = harness.REPO / rel
     with pytest.MonkeyPatch.context() as mp:
@@ -408,7 +411,152 @@ def test_the_lean_oracle_agrees_on_every_coverage_scope(
     root = tmp_path_factory.mktemp("g1coverage_oracle")
     tsv = root / "corpus.tsv"
     tsv.write_text("\n".join(rows) + "\n", encoding="utf-8")
-    formal = harness.parse_verdicts(
-        harness.run_oracle(tsv, root / "formal_verdicts.tsv"))
+    text = harness.run_oracle(tsv, root / "formal_verdicts.tsv")
+    formal = harness.parse_verdicts(text)
     assert formal.g1cov == verdicts.g1cov
     assert formal.g1cov, "the oracle decided no coverage scope at all"
+    # the Lean half of the ratchet: `accessCoverageRowB` prints `ok` on the
+    # recorded walks and `fail` under each shortening, on the real oracle
+    assert "\nG1CM\t" in "\n" + text
+    assert harness.g1coverage_coverage(text) == []
+
+
+# ------------------------------- review follow-up: order, Lean half, limits
+
+#: An accepted body whose activation `emit` comes AFTER its `provide` block:
+#: the lowering loop opens the provide scope first.
+PROVIDE_THEN_EMIT = "tests/fixtures/g1_coverage/provide_then_emit.rvl"
+
+
+def _export_one(harness, rel):
+    p = harness.REPO / rel
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(harness, "_G1_COVERAGE_ROWS", {})
+        mp.setattr(harness, "_G1_COVERAGE_CENSUS", {})
+        mp.setattr(harness, "_G1_UNOBSERVED", {})
+        prog = harness.Parser(p.read_text(encoding="utf-8"), str(p)).parse()
+        rows = harness.g1coverage_rows(rel, prog)
+        per_file = dict(harness._G1_COVERAGE_ROWS)
+    return rows, per_file
+
+
+def test_the_walk_is_compared_activation_first(harness):
+    """The checker's opening order is not the model's: the activation scope
+    is moved to the front and the provide scopes keep the walk's order."""
+    observed = {"b.m": {"stmts": 1, "params": ["y"]},
+                "activation": {"stmts": 2, "params": []},
+                "a.n": {"stmts": 1, "params": []}}
+    assert harness._access_walk_scopes(observed) == [
+        ("activation", 2, []), ("b.m", 1, ["y"]), ("a.n", 1, [])]
+
+
+def test_an_activation_emit_after_a_provide_block_is_covered(harness):
+    """The accepted shape the review reproduced: before the fix the walk
+    opened `ops.run` before `activation` and BOTH scopes printed `fail`."""
+    rows, _ = _export_one(harness, PROVIDE_THEN_EMIT)
+    walk = [f[3] for f in (r.split("\t") for r in rows) if f[0] == "G1W"]
+    assert walk == ["activation", "ops.run"], rows
+    verdicts = harness.reference_from_tsv(rows)
+    assert verdicts.g1cov == {
+        (PROVIDE_THEN_EMIT, "Mgr", "activation"): "ok",
+        (PROVIDE_THEN_EMIT, "Mgr", "ops.run"): "ok"}
+
+
+def test_the_export_carries_each_shortening_for_the_lean_oracle(harness):
+    """One `G1M` row per kind for every recorded walk, the walk in one
+    column, so the Lean oracle decides the same shortenings Python does."""
+    rows, per_file = _export_one(harness, PROVIDE_THEN_EMIT)
+    g1m = [r.split("\t") for r in rows if r.startswith("G1M\t")]
+    assert [f[1] for f in g1m] == list(harness.G1_SHORTENINGS)
+    by_kind = {f[1]: f[4] for f in g1m}
+    assert by_kind["as-walked"] == "activation|1|;ops.run|1|x"
+    assert by_kind["drop"] == "ops.run|1|x"
+    assert by_kind["strip"] == "activation|1|;ops.run|1|"
+    (_comp, _body, walk), = per_file[PROVIDE_THEN_EMIT]
+    assert dict(harness._g1_shortenings(walk))["bump"] == [
+        ("activation", 2, []), ("ops.run", 2, ["x"])]
+
+
+def _lean_text(harness, verdict_of):
+    """A stand-in for the oracle's `G1CM` output over the module's rows,
+    every verdict chosen by `verdict_of(kind, body, walk)`."""
+    lines = []
+    for rel, per_file in harness._G1_COVERAGE_ROWS.items():
+        for comp, body, walk in per_file:
+            if not walk:
+                continue
+            for kind, mutated in harness._g1_shortenings(walk):
+                lines.append("\t".join(["G1CM", kind, rel, comp,
+                                        "covers=" + verdict_of(kind, body,
+                                                               mutated)]))
+    return "\n".join(lines) + "\n"
+
+
+def test_the_ratchet_reads_the_lean_verdicts(harness, rows):
+    """An oracle printing the right whole-walk verdict satisfies the Lean
+    half; one printing a constant does not."""
+    harness.reference_from_tsv(rows)
+    right = _lean_text(harness, lambda _k, body, w: "ok" if all(
+        v == "ok" for _lb, v in harness._g1_covers(body, w)) else "fail")
+    assert harness.g1coverage_coverage(right) == []
+
+
+def test_the_ratchet_bites_when_the_lean_oracle_prints_ok(harness, rows):
+    harness.reference_from_tsv(rows)
+    findings = harness.g1coverage_coverage(
+        _lean_text(harness, lambda *_a: "ok"))
+    for kind in ("drop", "bump", "strip", "extra"):
+        assert any(f"{kind!r} shortening" in f for f in findings), findings
+
+
+def test_the_ratchet_bites_when_the_lean_oracle_prints_fail(harness, rows):
+    harness.reference_from_tsv(rows)
+    findings = harness.g1coverage_coverage(
+        _lean_text(harness, lambda *_a: "fail"))
+    assert any("printed `ok` on no recorded walk" in f for f in findings), \
+        findings
+
+
+def test_the_ratchet_bites_when_the_lean_oracle_prints_nothing(harness, rows):
+    harness.reference_from_tsv(rows)
+    findings = harness.g1coverage_coverage("")
+    assert any("got no G1CM verdict" in f for f in findings), findings
+
+
+def test_the_stated_remainder_names_the_observation_limits():
+    """What the row does NOT observe is stated where a reader looks: the
+    visit is recorded where the loop reaches a statement, before dispatch;
+    the printed per-scope line is not the whole-walk Bool; and no theorem
+    links typing to coverage."""
+    status = (ROOT / "formal" / "STATUS.md").read_text(encoding="utf-8")
+    g1 = next(line for line in status.splitlines()
+              if line.startswith("| **G1** declared access"))
+    assert "before it is dispatched" in g1
+    assert "`G1CM`" in g1 and "`Walked.matches`" in g1
+    assert "no theorem links `Body.TypedIn` or `AccessOK` to coverage" in g1
+    source = (ROOT / "src" / "revl" / "lower.py").read_text(encoding="utf-8")
+    assert "REACHED BY THE LOWERING LOOP" in source
+
+
+def test_the_status_axioms_column_matches_print_axioms():
+    """The G1 coverage rows' axioms column is what `#print axioms` gives."""
+    if shutil.which("lake") is None:
+        pytest.skip("lake is not on PATH; the formal gate runs this half")
+    import re
+    import subprocess
+    out = subprocess.run(["lake", "env", "lean", "CheckAxioms.lean"],
+                         cwd=ROOT / "formal", capture_output=True, text=True,
+                         check=True).stdout
+    real = {}
+    for m in re.finditer(r"'(RevL\.G1Coverage\.[^']+)' (depends on axioms: "
+                         r"\[(.*)\]|does not depend on any axioms)", out):
+        real[m.group(1)] = (m.group(3) or "").replace(" ", "")
+    assert real, "CheckAxioms.lean printed no G1Coverage theorem"
+    status = (ROOT / "formal" / "STATUS.md").read_text(encoding="utf-8")
+    for name, axioms in real.items():
+        row = next(line for line in status.splitlines()
+                   if line.startswith(f"| `{name}` |"))
+        column = row.split(" | ")[3].strip()
+        want = ",".join(f"`{a}`" for a in axioms.split(",")) if axioms \
+            else "none"
+        assert column.replace(", ", ",") == want, (name, column, axioms)
