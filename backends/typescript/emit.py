@@ -519,12 +519,16 @@ def _mangle(name: str, extra: frozenset = frozenset()) -> str:
 #                        a JS keyword (`static`) is already broken on ts for
 #                        exactly that reason; a scaffolding-named case would join
 #                        it. Fixing the construction site is a separate change.
-#   "type name", "service", "component", "extern name", "secret name",
+#   "type name", "service", "component", "secret name",
 #   "ref symbol"      -> a type/binding the emitter DERIVES from the name, or a
 #                        name it also emits as a string; a rename needs a
 #                        derivation-aware reservation (the still-open xfail in
 #                        tests/test_cluster_c_emitter_hijack_553.py), not this
 #                        ladder
+#
+# "extern name" left this list with issue #3127: an extern is bound inside the
+# emitted module and nothing on the host resolves it by name, so `_ident`
+# renames it through the module family (`_mangle_module`) instead.
 #
 # The injected type names (`RevlSecretShape`, `RevlResult`, `RevlActivation`,
 # `RevlFrame`, `RevlSpawnHandle`, java's `Pool`/`Map`) are NOT in
@@ -591,9 +595,10 @@ def _module_scope(module: frozenset, cases: frozenset = frozenset()) -> tuple:
     with, so an escaped local never lands on a module binding the same
     function may read. `rung` is 1 unless a module name ends in `_`, so a
     document whose module names do not is unaffected."""
-    # every spelling a module name can be emitted under: a read, and an ADT
-    # case's declaration (which also escapes `JS_GLOBAL_RESERVED`)
-    spelled = set(module) | {_mangle(n, EMITTER_RESERVED) for n in module} | {
+    # every spelling a module name can be emitted under: the module family's
+    # read/declaration spelling (issue #3127), and an ADT case's declaration
+    # (which also escapes `JS_GLOBAL_RESERVED`)
+    spelled = set(module) | {_mangle_module(n) for n in module} | {
         _mangle(n, EMITTER_RESERVED | JS_GLOBAL_RESERVED) for n in cases}
     tail = max((len(n) - len(n.rstrip("_")) for n in spelled), default=0)
     return (module, tail + 1)
@@ -607,6 +612,65 @@ def _reserved_for_locals(root: str) -> bool:
             or _TS_HELPER_PREFIX_RE.match(root) is not None)
 
 
+# Issue #3127: the same family, at MODULE scope. A top-level `fn`/extern/
+# component binds a module-scope name, so a user `fn undefined` or
+# `fn BigInt` replaced the JS global every other function in the emitted
+# module reads bare: a `match` on an `Opt` compared against the user fn
+# (`$revl_match_1 !== undefined` always true, so a `None` arm never fired),
+# and the `length()` helper's `BigInt` returned the user fn's value. The
+# module-scope names a user binding may take without changing host-visible
+# behaviour are renamed (a fn or an extern); a `pub fn` and a `component` are
+# resolved by the host under their source spelling (the placement spec names
+# the component), so a collision there is REFUSED instead (see
+# `_refuse_module_collision`).
+_MODULE_NAME_ROLES = frozenset({"function", "function name", "module name", "name"})
+
+
+def _module_reserved(root: str) -> bool:
+    """Whether a module-scope binding spelled *root* would shadow a JS global,
+    an emitted helper or a runtime import the emitted module reads bare
+    (issue #3127)."""
+    return (root in JS_GLOBAL_RESERVED or root in _TS_IMPORTED_NAMES
+            or root in TS_HELPER_NAMES
+            or _TS_HELPER_PREFIX_RE.match(root) is not None)
+
+
+def _mangle_module(name: str) -> str:
+    """`_mangle`'s injective ladder over the module family: JS keywords,
+    `EMITTER_RESERVED` and `_module_reserved`. Declaration and every read go
+    through here, so the two agree; a name outside the family is unchanged."""
+    root = name
+    while root:
+        if (root in JS_RESERVED or root in EMITTER_RESERVED
+                or _module_reserved(root)):
+            return name + "_"
+        if not root.endswith("_"):
+            break
+        root = root[:-1]
+    return name
+
+
+def _collides_with_module_name(name: str) -> bool:
+    """Whether *name* (or a trailing-underscore root of it) is in the module
+    family. A host-visible name that collides is refused, not renamed."""
+    root = name
+    while root:
+        if _module_reserved(root):
+            return True
+        if not root.endswith("_"):
+            break
+        root = root[:-1]
+    return False
+
+
+def _refuse_module_collision(name: object, role: str, why: str) -> None:
+    if isinstance(name, str) and _collides_with_module_name(name):
+        raise EmitError(
+            f"{role} {name!r} is spelled like {why}, which the emitted ts "
+            f"module reads bare at module scope, and a {role} is resolved by "
+            f"its source name: rename it (issue #3127)")
+
+
 def _mangle_local(name: str, extra: frozenset) -> str:
     """`_mangle`'s injective ladder over the local family: JS keywords,
     `extra`, `EMITTER_RESERVED` and `_reserved_for_locals`. A name that IS one
@@ -618,7 +682,7 @@ def _mangle_local(name: str, extra: frozenset) -> str:
     because both go through here."""
     module, rung = _MODULE_NAMES.get()
     if name in module:
-        return _mangle(name, extra | EMITTER_RESERVED)
+        return _mangle_module(name)
     root = name
     while root:
         if (root in JS_RESERVED or root in extra or root in EMITTER_RESERVED
@@ -633,8 +697,19 @@ def _mangle_local(name: str, extra: frozenset) -> str:
 def _ident(name: object, role: str, extra: frozenset = frozenset()) -> str:
     if not isinstance(name, str) or not IDENT_RE.match(name):
         raise EmitError(f"invalid {role} identifier: {name!r}")
+    if role in _MODULE_NAME_ROLES:
+        # A module-level fn/call read takes the module family (issue #3127).
+        # A `pub fn`'s host-visible spelling is refused separately, in
+        # `_emit_ts_functions`; every other module fn is internal and moves one
+        # rung clear of the global/helper it would shadow.
+        return _mangle_module(name)
     if role in _LOCAL_ROLES:
         return _mangle_local(name, extra)
+    if role == "extern name":
+        # An extern is bound inside this module (its config/secret/ref
+        # machinery keys on the declaration, not on the emitted spelling), so
+        # it takes the module family like a fn (issue #3127).
+        return _mangle_module(name)
     if role in _SCAFFOLDING_RENAMABLE_ROLES:
         # `EMITTER_RESERVED` joins the ladder as a position-INDEPENDENT family:
         # it is passed at the declaration AND at every use, so the two agree by
@@ -967,12 +1042,13 @@ def _fn_call(node: dict, ctx: "_Ctx") -> str:
     renderer now covers both dialects, so the kind is enough here; the args
     render through the same `_expr`.
     """
-    name = _ident(node.get("name"), "function")
-    if name not in ctx.function_names and name not in ctx.extern_names:
+    raw_name = node.get("name")
+    if raw_name not in ctx.function_names and raw_name not in ctx.extern_names:
         raise EmitError(
-            f"call to unknown function {name!r} — no `fn` or `extern` of "
+            f"call to unknown function {raw_name!r} — no `fn` or `extern` of "
             f"that name is declared in this document"
         )
+    name = _ident(raw_name, "function")
     args = ", ".join(_expr(arg, ctx) for arg in node.get("args") or [])
     call = f"{name}({args})"
     if node.get("name") in ctx.compensated:
@@ -2996,6 +3072,13 @@ def _refuse_required_stream(component: dict, tier: str) -> None:
 
 def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
     name = _ident(component.get("name"), "component")
+    # The placement spec names the component to the runner, so its spelling is
+    # host-visible and cannot be renamed (issue #3127). This is the cordis
+    # module's own family; the temporal target reserves the names its workflow
+    # module reads in `emit_temporal.py` (#3375), so the check lives here and
+    # not in the `_ident` both targets share.
+    _refuse_module_collision(component.get("name"), "component",
+                             "a JS global or emitted helper")
     _refuse_required_stream(component, "cordis-ts")
     requires = component.get("requires") or {}
     provides = component.get("provides") or {}
@@ -5263,7 +5346,15 @@ def _emit_ts_functions(functions: list, types: dict, externs: list) -> list[str]
     ctx = _Ctx(types, functions, externs)
     lines: list[str] = []
     for fn in functions:
-        name = _ident(fn.get("name"), "function name")
+        raw_name = fn.get("name")
+        if (fn.get("public") and isinstance(raw_name, str)
+                and _collides_with_module_name(raw_name)):
+            raise EmitError(
+                f"pub fn {raw_name!r} is spelled like a JS global or an emitted "
+                f"ts helper, which the module reads bare; a host calls a pub fn "
+                f"by its source name, so the emitter cannot rename it: give it "
+                f"another name (issue #3127)")
+        name = _ident(raw_name, "function name")
         params = ", ".join(
             f"{_ident(p.get('name'), 'parameter name')}: {_ts_v3_type(p.get('type'))}"
             for p in fn.get("params") or []

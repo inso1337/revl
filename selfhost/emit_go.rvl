@@ -194,7 +194,7 @@ fn node_step(n: Any) -> Str { return value_str(value_field(n, "step")) }
 fn v3_ident(name: Str) -> Str {
   var root = name
   while (root.length() > 0) {
-    if (is_go_reserved(root)) { return name.concat("_") }
+    if (is_go_reserved(root) || has_revl_prefix(root)) { return name.concat("_") }
     if (root.charAt(root.length() - 1) != "_") { return name }
     root = root.slice(0, root.length() - 1)
   }
@@ -215,13 +215,35 @@ fn is_go_reserved(name: Str) -> Bool {
   if (name == "RevlFrame" || name == "RevlTimer" || name == "RevlTeardownRecord") { return true }
   if (name == "Stream" || name == "Subscription" || name == "EventContract") { return true }
   if (name == "RevlSpawnHandle") { return true }
-  // The predeclared identifiers the emitted code spells by bare name, which a
-  // user binding of the same name would shadow.
+  // The WHOLE predeclared set (issue #3161), the same set
+  // `backends/go/emit.py::_GO_RESERVED` carries: the emitted code spells
+  // `recover`, `close`, `cap`, `clear` and `uint64` in places, and a later
+  // helper can spell any other universe-block name. Reserving the set once is
+  // what keeps the two implementations byte-identical.
   if (name == "any" || name == "append" || name == "bool" || name == "byte") { return true }
-  if (name == "comparable" || name == "copy" || name == "delete" || name == "error") { return true }
-  if (name == "float64" || name == "int" || name == "int32" || name == "int64") { return true }
-  if (name == "len" || name == "make" || name == "panic" || name == "rune") { return true }
-  return name == "string" || name == "uint32"
+  if (name == "cap" || name == "clear" || name == "close" || name == "comparable") { return true }
+  if (name == "complex" || name == "complex64" || name == "complex128") { return true }
+  if (name == "copy" || name == "delete" || name == "error") { return true }
+  if (name == "float32" || name == "float64" || name == "imag") { return true }
+  if (name == "int" || name == "int8" || name == "int16" || name == "int32" || name == "int64") { return true }
+  if (name == "len" || name == "make" || name == "max" || name == "min" || name == "new") { return true }
+  if (name == "panic" || name == "print" || name == "println" || name == "real" || name == "recover") { return true }
+  if (name == "rune" || name == "string") { return true }
+  if (name == "uint" || name == "uint8" || name == "uint16" || name == "uint32" || name == "uint64") { return true }
+  return name == "uintptr"
+}
+
+// The reference's `_REVL_HELPER_PREFIX_RE` (issue #3168): the go emitter's own
+// helpers are spelled `revl<Upper>`, `REVL_`, `_revl` or `_REVL`, and a user
+// binding of that shape would shadow a bare helper call inside its function.
+// Escaped by the same one-rung ladder as a reserved word.
+fn has_revl_prefix(name: Str) -> Bool {
+  if (name.startsWith("REVL_") || name.startsWith("_REVL")) { return true }
+  if (name.startsWith("_revl")) { return true }
+  if (name.length() < 5) { return false }
+  if (!name.startsWith("revl")) { return false }
+  let c = name.charCodeAt(4)
+  return c >= 65 && c <= 90
 }
 
 // `_camel` verbatim (item 390): snake_or_lower / `-` -> UpperCamel, keeping the

@@ -189,11 +189,12 @@ extern pure fn mangle_with(name: Str, builtins: Bool, types: Bool, temps: Bool) 
     extra = set()
     if builtins:
         extra |= {
-            "AttributeError", "Exception", "OverflowError", "RuntimeError", "TypeError",
-            "abs", "bool", "bytes", "callable", "dict", "float", "getattr", "globals",
-            "hasattr", "hash", "int", "isinstance", "len", "list", "max", "min",
-            "object", "ord", "range", "repr", "reversed", "set", "sorted", "str",
-            "tuple", "type",
+            "AssertionError", "AttributeError", "Exception", "IndexError", "KeyError",
+            "OverflowError", "RuntimeError", "TypeError",
+            "abs", "bool", "bytes", "callable", "chr", "dict", "float", "getattr",
+            "globals", "hasattr", "hash", "int", "isinstance", "len", "list", "max",
+            "min", "next", "object", "ord", "range", "realm_label", "repr", "reversed",
+            "set", "setattr", "sorted", "str", "tuple", "type",
         }
     if types:
         extra |= {"Ok", "Err", "_RevlNoLiveWorker", "_RevlRouter"}
