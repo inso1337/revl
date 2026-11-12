@@ -46,7 +46,7 @@ no oracle row is checked against the *paper*, not against `src/revl`.
 | Code | Formal status | Theorems | Oracle | The gap, and what kind of gap it is |
 |---|---|---|---|---|
 | **G1** declared access | partial | 2 + 6 | **yes** (one G1 row per component; 21 agree-G1) | `declared_only_access` is real and witnessed, but its content is the shape of `Typed`/`ReachIn`: it says an undeclared access cannot be *written*, not that the checker *visits* every statement of a real component body. **Modelling limit** — L0 grew component bodies in issue #2108, so the shape is expressible at last, but this theorem still does not prove the visiting half: what does is `RevL.G9Coverage.coversBodyB`, stated over a body's own scopes and decided on the corpus by the `GC` row, and that is G9's row rather than this one. Since issue #1807 the `G1` row decides `RevL.G1Access.AccessOK` over each component's ACCESS roots (`GA`): every call head's root and every name read in value position, at every nesting depth (after and inside `if`/`else`/`while`/`for`/guard blocks, in conditions), less the roots the checker resolves without a requirement, plus `intercept` targets. So the visiting half is measured against the checker on the corpus, through the exporter's walk, while the classification of a root as local, callable, import, host family or constructor is the exporter's and component-wide, not per scope |
-| **G2** provision disjointness | full | 4 | **yes** (V rows, 2 agree-G2) | stated over `(key, realm)` slots from the incremental `LinkOK`, and the oracle bites: change `Manifest.needs` to ignore the realm and four corpus files mismatch |
+| **G2** provision disjointness | full | 9 | **yes** (V rows, 2 agree-G2) | stated over `(key, realm)` slots from the incremental `LinkOK`, and the oracle bites: change `Manifest.needs` to ignore the realm and four corpus files mismatch. Since issue #2739 the same invariant is stated over the IR IMAGE as well (`linkOK_ir_disjoint`, over the IR document's `provides` and sparse `isolate` fields, the ones the backends read) and decided on the lowered documents by the `IRD`/`IRS` rows, with `isolate_entry_is_load_bearing` as the mutation witness |
 | **G3** acyclic dependencies | full | 9 | **yes** (V rows, 1 agree-G3) | the layering certificate is *derived* from `LinkOK`, so nothing is assumed. No known gap |
 | **G4** inverse-or-emit | full over the lattice; the shape-level statement is weak and marked | 2 + 7 + 10 | **yes** (182 G rows, 25 P rows, 6 agree-G4; one AP row per marked crossing for the approval floor, whose 36 refusals file under agree-G4) | `G4.inverse_or_emit` is shape-level and superseded. For the lattice form: the reach fold's **fuel bound** is real and named (`fold_must_run_to_stability`), `FnDecl.calls` stands in for `_calls_in` (an empirical obligation on the lowering), first-class dispatch is `*`, and `inverseOK` reads `undo` only where the reference walks `compensate` too. **Unbuilt work**, not modelling limits. The approval floor (item 246, issue #1455) is `RevL.G4Approval.CrossingOK` over three exported facts: the approval-required capability TOKENS (`AR`, keyed by token as `lower._approval_index` keys them), the tokens one marked crossing reaches (`AX`, as `lower._approval_crossed_caps` resolves them, a `compensate` slot's crossings included) and its `with` edge (`AE`, none for the value form); `crossingB_iff` bridges the printed verdict, and `approval_coverage` fails the gate unless the corpus carries a covered crossing, one refused under another edge, one refused with no edge and an unrequired one admitted. Not modelled there: a `[...]` class in a glob scope, an edge the exporter cannot name (read as none, fail-closed), and a required token declared in a `use`d module |
 | **G5** teardown registers nothing | full over the lattice; the shape-level statement is **contentless** and registered as a finding | 2 + 15 | **yes** (one U5 row per effect statement; the gate prints the count) | `G5.teardown_registers_nothing` is true by definition (`registrations` is constant zero) and says so in the registry. `G5Classified` carries the real count, including two operational runs. The oracle now reconstructs the file's `RevL.Lemmas.Prog` from the `EX`/`FN`/`PG` rows and decides `registrations` over each effect's inverse body (`Oracle.registrationsB`, `registrationsB_iff`); the reference recomputes the same reach fold independently from the TSV, and the two agree on every one of them. `prog_coverage` fails the gate unless the corpus carries a clean teardown (count 0) AND a caught crossing (`examples/rejections/g5_undo_fn_emission.rvl`, an `undo` reaching an emission through a `fn`), and `g5_row_not_vacuous` proves the count flips to 0 when the wrapping fn stops calling the emission. An inverse's indirections are resolved by the exporter as the checker resolves them (issue #1792): a dispatched `let`-bound arrow, an emitting fn passed as a value, and a service operation read off a spawn handle (declared in the `Prog` as an `emission` boundary `<Service>.<op>`) count as heads, so all twelve G5 fixtures are `agree-G5`. First-class dispatch (`star`) is `n/a` on both sides, outside the model as in G4 |
@@ -72,19 +72,15 @@ no oracle row is checked against the *paper*, not against `src/revl`.
 
 Three summary readings of that map:
 
-- **The oracle reaches G2, G3, G4, G7, A2, A8, R4, A9 and the capability order.**
-  G5, G6, G8 and G9 are still proved against the design documents and the
-  reference source read by hand. That remains the largest gap in the
-  layer, and it is a gap in *coverage of the gate*, not in the proofs. The
-  four that are left are left for a reason and the reason is the same one:
-  each is indexed by `RevL.Syntax.Stmt` (or, for G9, by a `Flow` over a
-  path), and the export carries FACTS — call sites, capabilities,
-  manifests — not statement terms, so there is no shape for a corpus row
-  to take. Closing them is an export change, not an oracle change.
-  Two rows now *execute* rather than read, because their subject is a run
-  and not a text: G7 drives `backends/python/runtime.py` over an
-  enumerated teardown corpus, and A8/R4 drive `src/revl/recovery.py` over
-  an enumerated WAL corpus.
+<!-- BEGIN GENERATED oracle-summary: regenerate with `python3 formal/scripts/oracle_summary.py --write` -->
+**The oracle reaches 20 of the 24 rows in the table above: G1, G2, G3, G4, G5, G6, G7, G8, G9, G-MODEL-PLACE, G-COUNCIL-SPLIT, G-RETAIN, A1, A2, A5, A6, A8, A9, R4 and items 66/294/260 capability ceilings.**
+
+G-SECRET / G-SECRET-FLOW carries a **partial** oracle row: the cell in the table says which half is decided on the corpus and which half is not.
+
+The 3 rows with no oracle row are A3, T1/T2/T3 and item 133 cross-tier agreement; each Oracle cell says what that row is checked against instead.
+
+An oracle row means the row's verdict is compared against the shipped checker over the corpus by `harness/diff_corpus.py`; it relates the model to the checker on the corpus and says nothing about lowering. A row without one is checked against the design documents and the reference source read by hand, which is weaker, and says so in its cell rather than leaving a reader to infer it.
+<!-- END GENERATED oracle-summary -->
 - **Two guarantee codes have no theorem at all** (A3, T1-T3).
   A5 left this list in issue #2114. It was the one worth naming twice:
   G7 proves how a `compensation` entry is disposed without anything
@@ -190,6 +186,11 @@ Two caveats, so the table is not read wider than it is:
 | `RevL.G2.linkOK_requires_closed` | G2/G1 — requirement closure | **proved** | `propext` | every consumed slot provided in-composition |
 | `RevL.G2.realm_separation_admitted` | G2 — non-vacuity | **proved** | `propext, Quot.sound` | `examples/tenants.rvl`: one key, two realms, links |
 | `RevL.G2.same_realm_conflict_refused` | G2 — non-vacuity | **proved** | `propext, Quot.sound` | drop the realms and the same pair cannot link |
+| `RevL.G2.linkOK_ir_disjoint` | G2 over the IR image (issue #2739) | **proved** | `propext, Quot.sound` | `LinkOK` from the model yields provision disjointness of the lowered IR document's own `provides` and sparse `isolate` fields, not just of the linker shape |
+| `RevL.G2.slots_ofIR` | G2 over the IR image: the bridge | **proved** | none | `rfl`: the model the IR denotes carries exactly the IR slots |
+| `RevL.G2.tenants_link_ir` | G2 over the IR image: non-vacuity | **proved** | `propext, Quot.sound` | the tenants composition in IR form satisfies the theorem's `LinkOK` hypothesis |
+| `RevL.G2.tenants_ir_disjoint` | G2 over the IR image: non-vacuity | **proved** | `propext, Quot.sound` | the theorem's conclusion on the same admitted document |
+| `RevL.G2.isolate_entry_is_load_bearing` | G2 over the IR image: mutation witness | **proved** | `propext, Quot.sound` | dropping both `isolate` entries makes the same document collide, so the oracle's `IRD`/`IRS` rows are mutation-sensitive |
 | `RevL.G3.depPath_rank_lt` | G3 — cycles rejected (§6.5) | **proved** | none | ranks strictly decrease along dep paths |
 | `RevL.G3.no_dependency_cycles` | G3 | **proved** | none | a layering certificate excludes cycles |
 | `RevL.G3.linkOK_layeredBy_rankOf` | G3 — the layering construction | **proved** | `propext, Quot.sound` | the admission order is a layering: `rankOf` |

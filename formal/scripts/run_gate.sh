@@ -3,14 +3,16 @@
 #
 # 1. the L0/L1/L2 import layering (formal/scripts/layering_gate.py);
 # 2. the non-vacuity registry (formal/scripts/nonvacuity_gate.py);
-# 3. lake build over the Lean package;
-# 4. CheckAxioms.lean's `#print axioms` output through the axioms gate
+# 3. the oracle summary against the table it restates
+#    (formal/scripts/oracle_summary.py, issue #2739);
+# 4. lake build over the Lean package;
+# 5. CheckAxioms.lean's `#print axioms` output through the axioms gate
 #    (no sorryAx, no project-defined axioms, no missing theorem);
-# 5. the same axioms gate over harness/Oracle.lean's own `#print axioms`
+# 6. the same axioms gate over harness/Oracle.lean's own `#print axioms`
 #    block — that file is outside the RevL library root, so it is outside
 #    CheckAxioms.lean and outside the layering gate, and its bridge
 #    theorems are what make the differential oracle bite;
-# 6. the harness census (formal/harness/diff_corpus.py), which also fails a
+# 7. the harness census (formal/harness/diff_corpus.py), which also fails a
 #    row kind whose corpus has no accepted or no refused document.
 #
 # When $GITHUB_STEP_SUMMARY is set, a proof-status table (theorems per
@@ -47,6 +49,7 @@ trap summarize EXIT
 # machine without lake still gets the layering and non-vacuity verdicts.
 python3 scripts/layering_gate.py
 python3 scripts/nonvacuity_gate.py
+python3 scripts/oracle_summary.py --check
 
 # elan installs lake in ~/.elan/bin and adds that to PATH only from a shell
 # profile, so a shell that never sourced it has elan installed and no lake on
@@ -73,6 +76,11 @@ python3 scripts/axioms_gate.py \
   RevL.G2.linkOK_requires_closed \
   RevL.G2.realm_separation_admitted \
   RevL.G2.same_realm_conflict_refused \
+  RevL.G2.slots_ofIR \
+  RevL.G2.linkOK_ir_disjoint \
+  RevL.G2.tenants_link_ir \
+  RevL.G2.tenants_ir_disjoint \
+  RevL.G2.isolate_entry_is_load_bearing \
   RevL.G3.depPath_rank_lt \
   RevL.G3.no_dependency_cycles \
   RevL.G3.linkOK_layeredBy_rankOf \
@@ -447,6 +455,7 @@ python3 scripts/axioms_gate.py \
   RevLOracle.stmtSurfaceB_iff \
   RevLOracle.registrationsB_iff \
   RevLOracle.linkOKB_iff \
+  RevLOracle.irdisjointB_iff \
   RevLOracle.pathPrefixB_iff \
   RevLOracle.pleqB_iff \
   RevLOracle.mem_keys_of_lookupV \
