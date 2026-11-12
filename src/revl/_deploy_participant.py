@@ -38,6 +38,7 @@ Commands (one JSON object per line, one reply per command):
 Spec (argv[1], a JSON file):
 
     {"identity": "db", "world": "<path>", "wal": "<path>",
+     "generation": 2,           # optional: the federation generation (default 0)
      "effects": [{"name": "row", "reversible": true}, ...],
      "failAt": 1,               # optional: fail the commit at this index
      "refusePrepare": "why",    # optional: refuse in PREPARE instead
@@ -49,6 +50,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import sys
 import tempfile
 from pathlib import Path
@@ -146,6 +148,7 @@ class _Participant:
 
     def __init__(self, spec: dict) -> None:
         self.identity = spec.get("identity") or "?"
+        self.generation = int(spec.get("generation", 0))
         self.world_path = spec["world"]
         self.wal_path = spec["wal"]
         self.effects = list(spec.get("effects") or [])
@@ -231,7 +234,8 @@ class _Participant:
     def _append(self, record: dict) -> None:
         if not self._wal_open:
             self._raw({"record": "header", "walVersion": WAL_VERSION,
-                       "generation": 0, "participant": self.identity})
+                       "generation": self.generation,
+                       "participant": self.identity})
             self._wal_open = True
         self._raw(record)
 
@@ -335,6 +339,7 @@ class _Participant:
             self._apply_one(effect)
         self._append({"record": "activation-complete",
                       "participant": self.identity,
+                      "generation": self.generation,
                       "components": [e["name"] for e in self.effects]})
         return {"ok": True, "identity": self.identity, "pid": os.getpid(),
                 "applied": [self._referent(e) for e in self.effects]}
@@ -355,6 +360,13 @@ class _Participant:
 
 
 def main() -> None:
+    # A terminal's Ctrl-C goes to the whole foreground process group, and this
+    # process is the conductor's child in that group. Dying from it would
+    # strand a committed slice exactly when the conductor, which handles the
+    # same SIGINT, is about to ask for its unwind. The conductor decides what
+    # an interrupt means; this process ends when its control channel closes.
+    if hasattr(signal, "SIGINT"):
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
     spec = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
     participant = _Participant(spec)
     ops = {"prepare": participant.prepare, "commit": participant.commit,
