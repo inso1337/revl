@@ -37,9 +37,11 @@ SERVICE = (
 
 
 def _book(version: int, handoff: str | None = "Map[Str, Str]", *,
-          name: str = "MeterBook") -> str:
+          name: str = "MeterBook", read: str = "store.get(label)") -> str:
     """The `MeterBook` component alone, the text a `replace` takes. `handoff`
-    is the whole declared state shape, or None for no hand-off."""
+    is the whole declared state shape, or None for no hand-off. `read` is the
+    body of `get`: a store whose values are `Opt[Str]` reads `Opt[Opt[Str]]`
+    off its handoff-typed Map (issue #3342), so it flattens with `?? None`."""
     line = f"  handoff meter: {handoff}\n" if handoff else ""
     return (
         f"component {name} provides meter: Meter {{\n"
@@ -48,7 +50,7 @@ def _book(version: int, handoff: str | None = "Map[Str, Str]", *,
         "  provide meter {\n"
         "    fn log(label) { effect store.insert(label, label) "
         "undo store.remove(label) }\n"
-        "    fn get(label) = store.get(label)\n"
+        f"    fn get(label) = {read}\n"
         f"    fn version() = {version}\n"
         "  }\n"
         "}\n")
@@ -152,7 +154,8 @@ def test_undo_stays_cold_when_the_restored_shape_cannot_accept_in_reverse():
     changed = _call("revl_change", {
         "commit": True,
         "replace": {"component": "MeterBook",
-                    "source": _book(2, "Map[Str, Opt[Str]]")}})
+                    "source": _book(2, "Map[Str, Opt[Str]]",
+                                      read="store.get(label) ?? None")}})
     assert changed["ok"] is True and changed.get("committed") is True, changed
     assert changed["handoff"]["meter"]["migrated"] is True
     assert _meter_call("get", "l1")["result"] == "l1"

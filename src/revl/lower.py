@@ -993,6 +993,14 @@ class Env:
         # a pass-through that only fails at the host runtime (item 401, the
         # item-84 crash shape).
         self.host_locals: dict[str, str] = {}
+        # issue #3342: the host Map a `handoff <key>: Map[K, V]` declaration
+        # types. `handoff_map_bind` is the SOURCE name of the component's one
+        # `Map.new()` acquisition (set before the body is lowered, see
+        # `_handoff_map_binding`); `handoff_maps` maps that acquisition's safe
+        # IR name to `(K, V, "<the declaration>")` once it is bound, so its
+        # verbs are held to K and V (`_check_handoff_map_verb`).
+        self.handoff_map_bind: tuple[str, str, str, str] | None = None
+        self.handoff_maps: dict[str, tuple[str, str, str]] = {}
         # HOST HANDLES (issue #1968). An activation `let <x> = effect <acq>
         # undo <...>` whose acquisition yields a HOST family value binds a
         # handle, not a stdlib value. `host_locals` above carries the family
@@ -1251,6 +1259,77 @@ def _check_host_verb(family: str, verb: str, arg_types: list,
             f"{'' if arity == 1 else 's'}, got {len(arg_types)}",
             hint=f"the signature is `.{verb}()`",
             code="HOST-ARITY", category="host-boundary")
+
+
+def _is_map_new(expr) -> bool:
+    """True for the surface `Map.new()` (the host Map acquisition)."""
+    return (isinstance(expr, ExprCall) and isinstance(expr.callee, ExprField)
+            and isinstance(expr.callee.target, ExprVar)
+            and expr.callee.target.name == "Map" and expr.callee.name == "new")
+
+
+def _handoff_map_binding(body: list) -> tuple[str, str, str, str] | None:
+    """The host Map a component's `handoff` declaration types (issue #3342).
+
+    `handoff <key>: Map[K, V]` states what the provider's live state is, and a
+    component holds one resource vector. When that vector has exactly ONE host
+    Map (`let m = effect Map.new() undo ...` at the top of the body), the
+    declaration names it: the result is `(bind, K, V, declaration)`. With no
+    Map acquisition, several, or a handoff type that is not a `Map[K, V]`,
+    nothing is typed and the Map stays on the audit surface, as before."""
+    decl = next((s for s in body if isinstance(s, HandoffStmt)), None)
+    if decl is None:
+        return None
+    head, targs = parse_type(decl.state_type)
+    if head != "Map" or len(targs) != 2:
+        return None
+    maps = [s.bind for s in body
+            if isinstance(s, LetEffect) and s.bind and _is_map_new(s.acquire)]
+    if len(maps) != 1:
+        return None
+    return (maps[0], targs[0], targs[1],
+            f"handoff {decl.key}: {render_type(decl.state_type)}")
+
+
+def _bind_handoff_map(env: "Env", bind: str, safe: str, acquire: dict) -> None:
+    """Record the handoff-typed Map once its acquisition is bound (#3342).
+
+    The value type also goes in the type env under `handoff_map.<safe>`, so
+    `infer_ir` types a `get` off it as `Opt[V]`."""
+    hm = getattr(env, "handoff_map_bind", None)
+    if hm is None or hm[0] != bind or acquire.get("fn") != "Map.new":
+        return
+    env.handoff_maps[safe] = (hm[1], hm[2], hm[3])
+    env.type_env[f"handoff_map.{safe}"] = hm[2]
+
+
+#: issue #3342: which argument of a host Map verb is a key and which a value.
+_HANDOFF_MAP_ARG_ROLES: dict[str, tuple[str, ...]] = {
+    "insert": ("key", "value"),
+    "insert_if_absent": ("key", "value"),
+    "get": ("key",),
+    "remove": ("key",),
+}
+
+
+def _check_handoff_map_verb(env: "Env", safe: str, verb: str, args: list,
+                            filename: str | None, line: int) -> None:
+    """Hold a verb on the handoff-typed Map to the declared K and V (#3342).
+
+    A store of the wrong type into `Map[Str, Int]` is the T1 mismatch the
+    checker gives any other declared boundary, naming the declaration. An
+    argument whose type the checker cannot infer is not judged."""
+    typed = getattr(env, "handoff_maps", {}).get(safe)
+    roles = _HANDOFF_MAP_ARG_ROLES.get(verb)
+    if typed is None or roles is None or not filename:
+        return
+    key_t, val_t, decl = typed
+    for role, actual in zip(roles, _compared_arg_types(args, env, filename, line)):
+        expected = key_t if role == "key" else val_t
+        if actual and not compatible(expected, actual, env.types):
+            raise mismatch(filename, line,
+                           f"`{verb}` {role} of the Map typed by `{decl}`",
+                           expected, actual)
 
 
 # item 395 / Stage 5 gate of docs/design/378-sync-extern-service-reach.md: the
@@ -10652,6 +10731,8 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                     family, method,
                     _host_arg_types(family, args, env, filename, line),
                     filename, line)
+                _check_handoff_map_verb(env, scope[root], method, args,
+                                        filename, line)
                 return {"kind": "call",
                         "target": {"kind": "name", "id": scope[root]},
                         "method": method, "args": args}
@@ -14680,6 +14761,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             # verb surface (item 401).
             if acquire.get("kind") == "host":
                 env.host_locals[safe] = str(acquire["fn"]).partition(".")[0]
+                _bind_handoff_map(env, stmt.bind, safe, acquire)
             acquired_type = infer_ir(acquire, env.type_env, env.types, env.services)
             # item 397: a result-declared host verb (a Bool CAS like
             # `insert_if_absent`) types its bind from the frontier's result
@@ -14909,6 +14991,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
     # legal, so it is the one place the `setup` statements can carry an index
     # this pass has to bound (item 485)
     check_list_index_bounds(comp.body, filename)
+    env.handoff_map_bind = _handoff_map_binding(comp.body)
     for stmt in comp.body:
         if isinstance(stmt, HandoffStmt):
             # `handoff <key>: <Type>` (roadmap item 53): the verified state
@@ -18114,6 +18197,8 @@ def _lower_postfix(expr: Postfix, env: Env, mode: str):
                 family, op.name,
                 _host_arg_types(family, host_args, env, env.filename, op.line),
                 env.filename, op.line)
+            _check_handoff_map_verb(env, node["id"], op.name, host_args,
+                                    env.filename, op.line)
         node = {
             "kind": "call",
             "target": node,

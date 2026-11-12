@@ -327,7 +327,7 @@ def test_dedicated_state_handoff_is_needs_handoff():
 
 
 def test_incompatible_state_handoff_is_refused():
-    new = _handoff("Map[Str, Int]")
+    new = _handoff("List[Str]")
     result = _plan(HANDOFF_OLD, new, HANDOFF_AGAINST)
     assert result["handoff"][0]["verdict"] == "incompatible"
     assert result["classification"] == REFUSED
