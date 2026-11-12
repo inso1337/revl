@@ -113,6 +113,14 @@
 //        as item 104: a vendored copy under the old stamp has no id-token
 //        verifier, so its author is hand-rolling one, and the hand-rolled
 //        verifier is where `alg` confusion and non-canonical base64url live.
+//  14 -> adds `stdlib/wire.rvl` and `stdlib/socket.rvl` (issue #3357): the
+//        contract a program serving live clients is written against -- `Why`,
+//        `Kind`, `Knock`, the service `Wire` (`take`, `say`, `close`, tokens
+//        `wire.take`, `wire.say`, `wire.close`) and `why_str` -- and its py-tier
+//        accepted-socket provider, `SocketWire`, with `Door`, `Listener` and
+//        `close_code`. Same reason as item 104: a vendored copy under the old
+//        stamp has no socket binding, so its author is still writing the
+//        socket as host code whose crossing `revl audit` cannot name.
 pub fn stdlib_version() -> Str {
-  return "13"
+  return "14"
 }
