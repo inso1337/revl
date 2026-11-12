@@ -619,8 +619,11 @@ class Proxy:
                 if refusal is not None:
                     raise SessionError(refusal.message)
                 # the proxy renders this source itself (see `_compile`)
-                self.session.swap(ir, origin={"source": source},
-                                  agent_authored=False)
+                # the proxy returns no swap answer: its residue stays held
+                # for the session's next report (issue #3381)
+                self.session.rehold_compensation_residue(
+                    self.session.swap(ir, origin={"source": source},
+                                      agent_authored=False))
         except (RevlError, SessionError, ApprovalRequired) as error:
             reason = (f"the proxy could not put its reclassified surface live "
                       f"({type(error).__name__}: {error}), so this tool is refused "

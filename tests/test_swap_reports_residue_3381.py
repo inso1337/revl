@@ -171,3 +171,94 @@ def test_control_revl_run_still_prints_the_inverse_residue_key(tmp_path):
     text = out.stdout + out.stderr
     assert "inverse residue" in text
     assert "1 inverse failure(s) recorded" in text
+
+
+# -- callers that swap on the session's behalf (review of #3381) ------------
+
+REMOVE_V2 = REMOVE.replace("m.get(k) ?? 0", "m.get(k) ?? 1")
+
+
+@needs_cordis
+def test_update_apply_reports_the_residue_its_swap_drained(tmp_path,
+                                                           monkeypatch):
+    """`revl_update_apply` swaps through `_tool_swap`; its own answer carries
+    the records that swap drained, so none is lost to the verb's fresh dict."""
+    from _update_feed_fixture import pin_test_key, serve_feed, tar_gz
+    from revl.mcp import server as server_mod
+    from revl.mcp import update_tools
+    from revl.mcp.server import handle
+
+    def call(tool, arguments):
+        response = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                           "params": {"name": tool, "arguments": arguments}})
+        return response["result"]["structuredContent"]
+
+    pin_test_key(monkeypatch)
+    update_tools.reset()
+    feed = serve_feed(version="9.9.9", artifact_bytes=tar_gz(
+        {"memory.rvl": REMOVE_V2.encode()}, top="app-9.9.9"))
+    try:
+        update_tools.configure(enabled=True, repo="owner/app", project="app",
+                               api_base=feed.base_url, home=str(tmp_path),
+                               consents=update_tools.OPERATOR_CONSENTS)
+        assert call("revl_load", {"source": REMOVE})["ok"] is True
+        for k in range(5):
+            call("revl_call", {"key": "mind", "method": "set", "args": [k, k]})
+        swapped = call("revl_swap", {"source": REMOVE})
+        assert _not_reversed(swapped["compensationResidue"]) == []
+        # the handoff carried the keys over: these writes' undo does not reverse
+        for k in range(5):
+            call("revl_call", {"key": "mind", "method": "set",
+                               "args": [k, k + 1]})
+        planned = call("revl_update_apply", {"acceptUnknownVersion": True})
+        applied = call("revl_update_apply", {"planHash": planned["planHash"]})
+        assert applied["ok"] is True and applied["applied"] is True
+        assert len(_not_reversed(applied["compensationResidue"])) == 5
+        report = server_mod.SESSION.unload()
+        assert report["noResidue"] is True
+    finally:
+        feed.close()
+        if server_mod.SESSION.loaded:
+            server_mod.SESSION.unload()
+        update_tools.reset()
+
+
+LEAKY = """
+component Leaky {
+  let m = effect Map.new() undo m.drop()
+  effect m.remove(1) undo m.insert(1, 5)
+}
+"""
+
+
+@needs_cordis
+def test_cli_undo_replay_keeps_the_residue_for_its_unload(tmp_path,
+                                                           monkeypatch):
+    """`revl undo history.json` replays the history with swaps whose answers
+    it never prints; their records are held for the unload that ends it.
+    Every disposal of `Leaky` leaves one record: two replay swaps, the undo's
+    swap and the unload's own teardown."""
+    import json
+    from revl.__main__ import main
+    from revl.mcp.session import Session
+
+    s, ir = _session(LEAKY)
+    for _ in range(2):
+        s.swap(ir, origin={"source": LEAKY}, agent_authored=False)
+    path = tmp_path / "history.json"
+    path.write_text(json.dumps(s.history_document()))
+    s.unload()
+
+    seen = []
+    original = Session.unload
+
+    def spy(self):
+        report = original(self)
+        seen.append(report)
+        return report
+
+    monkeypatch.setattr(Session, "unload", spy)
+    assert main(["undo", str(path), "--to", "1"]) == 0
+    assert len(seen) == 1
+    assert seen[0]["noResidue"] is False
+    assert len(_not_reversed(seen[0]["compensationResidue"])) == 4

@@ -4238,6 +4238,19 @@ class Session:
 
         return _restore(self, snap, profile=profile, report=report)
 
+    def rehold_compensation_residue(self, *answers) -> None:
+        """Put back the `compensationResidue` of answers a caller does not
+        return to its client (issue #3381). A swap or rollback answer drains
+        the driver's records into itself; a caller that discards that answer
+        hands its records back here, so the next answer or the boundary report
+        names them and none is lost."""
+        held = getattr(self._driver, "_compensation_residue", None)
+        if held is None:
+            return
+        for answer in answers:
+            if isinstance(answer, dict):
+                held.extend(answer.get("compensationResidue") or ())
+
     def unload(self) -> dict:
         """Tear down and report the residue checks — R4 from inside the
         protocol, so an agent can prove its component leaves nothing.
