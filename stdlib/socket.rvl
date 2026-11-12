@@ -1,5 +1,5 @@
 // The revl stdlib SOCKET module: the accepted-socket provider of `Wire`
-// (`stdlib/wire.rvl`, issue #3357). py tier.
+// (`stdlib/wire.rvl`, issue #3357). py and ts tiers.
 //
 // A program that serves live clients writes `requires wire: Wire` and a row
 //
@@ -22,10 +22,14 @@
 // token; it is the row's config, which `revl composition` prints.
 //
 // ----------------------------------------------------------------- the host
-// The socket I/O is `backends/python/revl_socket.py`: standard library only
-// (`socket`, `selectors`, `threading`, `hashlib`, `base64`), the RFC 6455
+// The socket I/O is `backends/python/revl_socket.py` on py: standard library
+// only (`socket`, `selectors`, `threading`, `hashlib`, `base64`), the RFC 6455
 // upgrade handshake and text framing written there, no extensions and no
-// subprotocols. Each extern body is one line into it.
+// subprotocols. Each extern body is one line into it. On ts it is
+// `backends/typescript/revl_socket_ts.ts`, one `@ts ref` per extern (the
+// `stdlib/fs.rvl` door), over `node:http` and `node:crypto` with the same
+// knocks, codes and limits. On ts the bind completes after the acquire
+// returns, so a bind failure is thrown by the next `take`, naming the address.
 //
 // ------------------------------------------------------------------- limits
 //   origins, bare  an upgrade whose `Origin` is not listed, or that carries two,
@@ -35,6 +39,14 @@
 //                  `TooLarge` (1009) and none of it is delivered.
 //   held           while `held` knocks wait for `take`, the provider stops
 //                  reading every line (socket backpressure); nothing is dropped.
+//                  A new connection then gets no answer and no knock until
+//                  `take` makes room (py leaves it unaccepted; ts accepts it and
+//                  holds the upgrade unanswered). One that hangs up meanwhile
+//                  makes no knock. On ts a held client that sends over 16384
+//                  bytes before its 101 is dropped with no knock (py leaves
+//                  them in the kernel buffer and reads them after the accept).
+//   connections    at most 1024 are held at once. On py more wait in the listen
+//                  backlog; on ts node closes them.
 //   limit          `say` to a line with more than `limit` unwritten bytes is
 //                  not queued and answers false; the line stays open. A ping
 //                  over `limit` shuts the line `TooSlow` (1008).
@@ -43,7 +55,7 @@
 //   a binary frame shuts the line `Refused` (1003). A request that is not an
 //                  upgrade is answered 404: serving files is beside this binding.
 //   a bind failure raises inside the acquire, so the row's activation fails
-//                  by name.
+//                  by name (py; on ts the next `take` throws it).
 
 use "stdlib/wire.rvl" { Knock, Kind, Why, Wire, why_str }
 
@@ -105,18 +117,24 @@ pub type Listener = Opaque
 
 extern acquire fn socket_listen(door: Door) -> Listener undo socket_shut(result)
   = @py { from revl_socket import listen; return listen(door) }
+  = @ts ref listen from "../backends/typescript/revl_socket_ts.ts"
 extern acquire fn socket_shut(l: Listener) -> Unit undo settled()
   = @py { from revl_socket import shut; return shut(l) }
+  = @ts ref shut from "../backends/typescript/revl_socket_ts.ts"
 extern pure fn settled() -> Unit
   = @py { return None }
+  = @ts ref settled from "../backends/typescript/revl_socket_ts.ts"
 
 extern emission[wire.take] fn socket_take(l: Listener, most: Int) -> List[Raw]
   = @py { from revl_socket import take; return take(l, most) }
+  = @ts ref take from "../backends/typescript/revl_socket_ts.ts"
 extern emission[wire.say] fn socket_say(l: Listener, line: Int, text: Str) -> Bool
   = @py { from revl_socket import say; return say(l, line, text) }
+  = @ts ref say from "../backends/typescript/revl_socket_ts.ts"
 extern emission[wire.close] fn socket_close(l: Listener, line: Int, code: Int,
                                             why: Str, text: Str) -> Bool
   = @py { from revl_socket import close; return close(l, line, code, why, text) }
+  = @ts ref close from "../backends/typescript/revl_socket_ts.ts"
 
 component SocketWire provides wire: Wire {
   config { address: Str = "127.0.0.1", port: Int = 0, origins: List[Str],
