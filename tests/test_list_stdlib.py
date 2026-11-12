@@ -18,7 +18,8 @@ Checked here:
   * the module file is the documented surface;
   * the py tier EXECUTES a pure-revl program using ONLY the kit;
   * `list_sort` == `sorted()` byte-for-byte (fixed cases + fuzz);
-  * `list_contains` present/absent/empty; `list_dedup` order + edges.
+  * `list_contains` present/absent/empty; `list_dedup` order + edges;
+  * `list_reverse` (generic) edges, double reverse, fuzz vs `reversed()`.
 """
 
 import importlib.util
@@ -40,7 +41,7 @@ STDLIB = ROOT / "stdlib" / "list.rvl"
 #: emitters reach for — `x in set` (list_contains) and `sorted(set)`
 #: (list_sort(list_dedup(...))) — in PURE revl, using ONLY the kit.
 CONSUMER = """\
-use "stdlib/list.rvl" { str_lt, list_contains, list_sort, list_dedup, list_reverse }
+use "stdlib/list.rvl" { str_lt, list_contains, list_sort, list_dedup }
 
 // membership — the `str_in` replacement
 fn has(xs: List[Str], x: Str) -> Bool { return list_contains(xs, x) }
@@ -52,11 +53,6 @@ fn sorted_set(xs: List[Str]) -> List[Str] { return list_sort(list_dedup(xs)) }
 fn sort_join(xs: List[Str]) -> Str { return list_sort(xs).join("|") }
 fn dedup_join(xs: List[Str]) -> Str { return list_dedup(xs).join("|") }
 fn sorted_set_join(xs: List[Str]) -> Str { return sorted_set(xs).join("|") }
-
-fn rev_join(xs: List[Str]) -> Str { return list_reverse(xs).join("|") }
-fn rev_len(xs: List[Str]) -> Int { return list_reverse(xs).length() }
-fn rev_twice_join(xs: List[Str]) -> Str { return list_reverse(list_reverse(xs)).join("|") }
-fn rev_ints(xs: List[Int]) -> List[Int] { return list_reverse(xs) }
 
 // the codepoint comparator, exposed for a direct pin
 fn lt(a: Str, b: Str) -> Bool { return str_lt(a, b) }
@@ -81,7 +77,7 @@ def consumer_ir(tmp_path_factory):
 
 def test_module_imports_and_functions_reach_the_ir(consumer_ir):
     names = {f["name"] for f in consumer_ir["functions"]}
-    assert {"str_lt", "list_contains", "list_sort", "list_dedup", "list_reverse"} <= names
+    assert {"str_lt", "list_contains", "list_sort", "list_dedup"} <= names
     # PURE revl: no @py externs are introduced by the kit
     assert consumer_ir.get("externs", []) == []
 
@@ -91,7 +87,6 @@ def test_module_file_is_the_documented_surface():
     assert "pub fn list_contains(xs: List[Str], x: Str) -> Bool" in text
     assert "pub fn list_sort(xs: List[Str]) -> List[Str]" in text
     assert "pub fn list_dedup(xs: List[Str]) -> List[Str]" in text
-    assert "pub fn list_reverse[T](xs: List[T]) -> List[T]" in text
     assert "pub fn str_lt(a: Str, b: Str) -> Bool" in text
 
 
@@ -212,36 +207,72 @@ def test_sorted_set_is_sorted_unique(ns):
     assert ns["sorted_set_join"](xs) == "|".join(sorted(set(xs)))
 
 
-# ---- list_reverse: edges, double reverse, fuzz vs reversed() ----------------
+# ---- list_reverse: its own consumer, so the older cases above stay independent
 
-def test_reverse_empty(ns):
-    assert ns["rev_len"]([]) == 0
-    assert ns["rev_join"]([]) == ""
+REVERSE_CONSUMER = """\
+use "stdlib/list.rvl" { list_reverse }
 
-
-def test_reverse_single(ns):
-    assert ns["rev_join"](["x"]) == "x"
-
-
-def test_reverse_abc(ns):
-    assert ns["rev_join"](["a", "b", "c"]) == "c|b|a"
+fn rev_join(xs: List[Str]) -> Str { return list_reverse(xs).join("|") }
+fn rev_len(xs: List[Str]) -> Int { return list_reverse(xs).length() }
+fn rev_twice_join(xs: List[Str]) -> Str { return list_reverse(list_reverse(xs)).join("|") }
+fn rev_ints(xs: List[Int]) -> List[Int] { return list_reverse(xs) }
+"""
 
 
-def test_reverse_is_generic_over_element_type(ns):
-    assert list(ns["rev_ints"]([1, 2, 3])) == [3, 2, 1]
+@pytest.fixture(scope="module")
+def reverse_ir(tmp_path_factory):
+    d = tmp_path_factory.mktemp("list_reverse_consumer")
+    (d / "stdlib").mkdir()
+    (d / "stdlib" / "list.rvl").write_text(STDLIB.read_text(encoding="utf-8"),
+                                           encoding="utf-8")
+    main = d / "main.rvl"
+    main.write_text(REVERSE_CONSUMER, encoding="utf-8")
+    return compile_files([str(main)])
 
 
-def test_reverse_does_not_mutate_input(ns):
+@pytest.fixture(scope="module")
+def rns(reverse_ir):
+    return _exec_python(reverse_ir)
+
+
+def test_reverse_reaches_the_ir_pure(reverse_ir):
+    assert "list_reverse" in {f["name"] for f in reverse_ir["functions"]}
+    assert reverse_ir.get("externs", []) == []
+
+
+def test_reverse_surface_is_generic_in_the_module_file():
+    text = STDLIB.read_text(encoding="utf-8")
+    assert "pub fn list_reverse[T](xs: List[T]) -> List[T]" in text
+
+
+def test_reverse_empty(rns):
+    assert rns["rev_len"]([]) == 0
+    assert rns["rev_join"]([]) == ""
+
+
+def test_reverse_single(rns):
+    assert rns["rev_join"](["x"]) == "x"
+
+
+def test_reverse_abc(rns):
+    assert rns["rev_join"](["a", "b", "c"]) == "c|b|a"
+
+
+def test_reverse_is_generic_over_element_type(rns):
+    assert list(rns["rev_ints"]([1, 2, 3])) == [3, 2, 1]
+
+
+def test_reverse_does_not_mutate_input(rns):
     xs = ["a", "b", "c"]
-    ns["rev_join"](xs)
+    rns["rev_join"](xs)
     assert xs == ["a", "b", "c"]
 
 
-def test_reverse_fuzz_matches_reversed_and_twice_is_identity(ns):
+def test_reverse_fuzz_matches_reversed_and_twice_is_identity(rns):
     alphabet = ["a", "A", "b", "z", "1", "_", "", "aa", "Ab"]
     rnd = random.Random(3463)
     for _ in range(2000):
         xs = [rnd.choice(alphabet) for _ in range(rnd.randint(0, 9))]
-        assert ns["rev_join"](xs) == "|".join(reversed(xs)), xs
-        assert ns["rev_len"](xs) == len(xs), xs
-        assert ns["rev_twice_join"](xs) == "|".join(xs), xs
+        assert rns["rev_join"](xs) == "|".join(reversed(xs)), xs
+        assert rns["rev_len"](xs) == len(xs), xs
+        assert rns["rev_twice_join"](xs) == "|".join(xs), xs

@@ -134,6 +134,9 @@ reason about. Generalising `contains`/`dedup` to `[T]` is a clean future
 extension; a generic `sort` would need an ordered-type bound the language does
 not yet express.
 
+The one exception is `list_reverse[T]`: it needs neither ordering nor `==`, so it
+is generic over the element type.
+
 **A `Set[T]` type is explicitly out of scope.** A set is a language feature — a
 type with its own literal, membership operator, and checker support — not a
 stdlib module. This module delivers exactly the list operations that cover the
