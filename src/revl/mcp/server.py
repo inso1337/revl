@@ -1773,7 +1773,10 @@ def _boot(ir: dict, source, modules, config, record: bool, origin: dict,
         include_trusted_files=True)
     _with_authored_host_bodies(origin, authored)
     try:
-        state = SESSION.load(ir, config, record=record, origin=origin)
+        # issue #3293: the generation records who wrote it, as a forward swap
+        # does, so an undo back to it applies the agent-authored rules
+        state = SESSION.load(ir, config, record=record, origin=origin,
+                             agent_authored=bool(compile_report.get("authored")))
     except SessionError as error:
         return _session_error(error)
     except ApprovalRequired as exc:
@@ -6542,7 +6545,14 @@ TOOLS = [
                        "undo never bypasses the gate. The dossier rides along: what "
                        "unloads, what state drops (item 53's honesty in reverse), and "
                        "the interim boundary crossings that no undo can un-emit "
-                       "(compensation is not inversion — paper §6.1). A revert of "
+                       "(compensation is not inversion — paper §6.1). A provider's "
+                       "live state is carried back across a `handoff` both "
+                       "generations declare on the same key when the restored shape "
+                       "accepts the running one in that direction (issue #3293): "
+                       "`stateDropped.carried` names it, and the result carries the "
+                       "same `handoff` report a forward swap does. A component with "
+                       "no such hand-off starts cold and is named in "
+                       "`stateDropped.components` with a note. A revert of "
                        "an exported change leaves disk holding the retracted text: "
                        "the answer carries a `disk` block (issue #2037) naming the "
                        "stale path and pointing at `revl_export`. "

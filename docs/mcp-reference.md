@@ -1811,11 +1811,19 @@ gate a swap runs, so a target the current checker rejects is refused
 (`ok:false`, with the diagnostic) and the running composition is untouched. The
 dossier rides along: what unloads, what state drops, and the interim boundary
 crossings that no undo can un-emit ([generation-history.md](generation-history.md)).
-An undo starts the target cold and does not run a `handoff` in reverse, so every
-running component holding live state is listed in `dossier.stateDropped.components`
-with a `note` (issue #2346). A forward `revl_change` with `replace` that re-applies
-the earlier source keeps the state a declared `handoff` (or a template's live
-instances) carries; any other component starts cold either way.
+A provider's live state is carried back across a `handoff` that both the
+generation being left and the one being restored declare on the same key, when
+the restored shape accepts the running state in that direction (issue #3293):
+those components are listed in `dossier.stateDropped.carried`, and the result
+carries the same `handoff` report a forward swap does. Everything else still
+starts cold, and is listed in `dossier.stateDropped.components` with a `note`
+(issue #2346) - a component with no such hand-off, a shape that cannot accept
+the state in the restore direction, or a template's live instance (the undo
+keeps the instance layer at `respawn`). A refused undo reports the plan's
+`components` and `carried` but omits the note, because nothing ran. A
+forward `revl_change` with `replace` that re-applies the earlier source keeps
+the state a declared `handoff` (or a template's live instances) carries; any
+other component starts cold either way.
 The answer carries the `"disk": {"inSync", "stale"}` block (issue #2037): a
 revert of a change that had been exported leaves disk holding the retracted
 change, so `stale` names it and a `note` points at `revl_export`; a revert of a
