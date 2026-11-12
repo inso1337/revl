@@ -1401,6 +1401,7 @@
    "tests/fixtures/emit_py_activation_fail.rvl",
    "tests/fixtures/emit_py_corpus/direct_reads.rvl",
    "tests/fixtures/emit_py_corpus/list_index_guard.rvl",
+   "tests/fixtures/emit_py_corpus/method_effect_coalesce.rvl",
    "tests/fixtures/emit_py_corpus/to_char.rvl",
    "tests/fixtures/emit_py_corpus/ui_transaction_unit.rvl",
    "tests/fixtures/emit_py_corpus/user_names_like_temps.rvl",
