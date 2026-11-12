@@ -546,6 +546,23 @@ _EMITTER_RESERVED = {
     "RevlFrame", "RevlSpawnHandle",
 }
 
+# Issue #3160 / #3171: the `Components` class declares its own helpers as
+# private static methods (`revlEq`, `revlConcat`, `revlHash`, `revlLength`,
+# `revlMarkSecret`, `revlSecretResult`, ...), and it emits every top-level user
+# `fn` and extern as a `public static` method of the SAME class under the source
+# name. java resolves an unqualified call among all overloads and picks the most
+# specific, so a user `revlEq(String, String)` beats the helper's
+# `revlEq(Object, Object)` for every Str `==`/`!=` in the module, and a user
+# `revlMarkSecret(String)` beats the varargs secret registration. The whole
+# helper namespace is therefore unspellable from a user name at every position
+# whose spelling is internal (a binding, a top-level fn/extern): names whose
+# root starts `revl` followed by an upper-case letter are escaped by one rung of
+# the same injective ladder. A `record field` / `config field` is a member or
+# wire name and keeps its spelling. This mirrors the ts tier's
+# `_TS_HELPER_PREFIX_RE` (issue #3179) and go's `_REVL_HELPER_PREFIX_RE`
+# (issue #3168).
+_REVL_NAMESPACE_RE = re.compile(r"^(?:revl[A-Z]|REVL_|_revl|_REVL)")
+
 # Host-runtime classes the emitter injects *and* names as bare tokens at host
 # call sites (`Map.new(..)`, `Pool.open(..)`, `Job.run(..)`), so they cannot go
 # into `_EMITTER_RESERVED`: refusing them would make a program that uses the
@@ -806,7 +823,8 @@ def _split_generic(inner: str) -> list[str]:
     return parts
 
 
-def _mangle(name: str, extra: "frozenset[str]" = frozenset()) -> str:
+def _mangle(name: str, extra: "frozenset[str]" = frozenset(), *,
+            helper_namespace: bool = False) -> str:
     """Rename a syntactically-valid identifier that collides with a *Java*
     reserved word (`class`, `new`, `int`, `default`, …) so a valid revl
     identifier that happens to be a Java keyword emits and RUNS instead of
@@ -852,10 +870,19 @@ def _mangle(name: str, extra: "frozenset[str]" = frozenset()) -> str:
     same injective ladder: a type name passes `_JAVA_TYPE_RESERVED` so the
     host-runtime `Map`/`Pool`/`Job` classes cannot be shadowed by a user type of
     the same simple name (`Map` -> `Map_`, `Map_` -> `Map__` stay distinct),
-    while every other position passes the empty set and is unchanged."""
+    while every other position passes the empty set and is unchanged.
+
+    `helper_namespace=True` adds the `revl*` helper namespace (issue #3160): the
+    `Components` class also declares `revlEq`, `revlConcat`, `revlMarkSecret`
+    and the rest, and java overload resolution prefers a user `revlEq(String,
+    String)` over the helper's `revlEq(Object, Object)`. It is opt-in so a
+    `record field` / `config field` (a member or wire name) keeps its spelling;
+    the binding and top-level-callable positions pass it."""
     root = name
     while root:
-        if root in _JAVA_RESERVED or root in extra:
+        if (root in _JAVA_RESERVED or root in extra
+                or (helper_namespace
+                    and _REVL_NAMESPACE_RE.match(root) is not None)):
             return name + "_"
         if not root.endswith("_"):
             break
@@ -977,7 +1004,7 @@ def _ident(name: object, role: str) -> str:
         raise EmitError(f"invalid {role} identifier: {name!r}")
     extra = _JAVA_TYPE_RESERVED if role == "type name" else frozenset()
     if role in _JAVA_SCAFFOLDING_RENAMABLE_ROLES:
-        return _mangle(name, extra | _EMITTER_RESERVED)
+        return _mangle(name, extra | _EMITTER_RESERVED, helper_namespace=True)
     if role in ("record field", "field"):
         # A record COMPONENT is a member name, not a module-scope binding, so
         # it is a different namespace from the `ctx`/`root`/`frame` tokens the
@@ -1044,7 +1071,8 @@ def _fn_name(name: object) -> str:
         raise EmitError(f"invalid function identifier: {name!r}")
     root = name
     while root:
-        if root in _JAVA_RESERVED or root in _EMITTER_RESERVED:
+        if (root in _JAVA_RESERVED or root in _EMITTER_RESERVED
+                or _REVL_NAMESPACE_RE.match(root) is not None):
             return name + "_"
         if not root.endswith("_"):
             break
