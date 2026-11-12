@@ -88,6 +88,16 @@ TOOL_VERB = {
     # scoped `may approve on payments` grant is usable while other components are
     # live.
     "revl_approve": "approve",
+    # issue #2991: the approval query surface is READ-ONLY, but reading the
+    # questions, their blast radius and their history is the same authority as
+    # answering them - a bystander who could enumerate what an irreversible
+    # crossing would reach and who is being asked is inside the approval
+    # boundary. So it gates under `approve`, never ungated like `revl_quorum`
+    # (which reads one hash the caller already holds). `_approvals_targets`
+    # resolves a `show` hash to its crossing component; `list`/`stats` name no
+    # one component, so they scope to the whole composition and need the
+    # literal `may approve on *`, whatever target keys the arguments add.
+    "revl_approvals": "approve",
     # item 379: revoking a standing grant early is the mirror of granting it —
     # withdrawing consent is the SAME authority as saying yes, so `revl_revoke`
     # gates under the same `approve` verb. Its `_approve_targets` branch resolves
@@ -1342,6 +1352,51 @@ def _distillation_targets(session, arguments: dict) \
     return out
 
 
+def _approvals_targets(session, arguments: dict) \
+        -> list[tuple[str, frozenset[str]]] | None:
+    """A `revl_approvals` call's target (issue #2991), resolved from the ACTION.
+
+    `show` reads one ticket, so a hash the outstanding-ticket table holds scopes
+    to that ticket's crossing component, exactly as `revl_approve` does. `list`
+    and `stats` read every component's tickets, so they scope to the whole
+    composition (None, which `decide` fails closed to `*`) whatever other keys
+    the arguments carry: `_approve_targets` would read `hash`, `requestId`,
+    `capability`, `offerId` or `rule` and scope a whole-table read to one
+    component. An unknown hash is undecidable too, so a scoped operator gets
+    the same refusal for it as for another component's ticket."""
+    if arguments.get("action") != "show":
+        return None
+    ticket_hash = arguments.get("hash")
+    tickets = getattr(session, "_tickets", None) or {}
+    if not isinstance(ticket_hash, str) or ticket_hash not in tickets:
+        return None
+    return _approve_targets(session, {"hash": ticket_hash})
+
+
+def _approvals_refusal(operator: Operator, verb: str, arguments: dict,
+                       ) -> tuple[WhyTrace, str]:
+    """The ONE refusal a `revl_approvals` call gets (issue #2991). It names the
+    action and never the resolved component or whether a `may not` matched, so
+    a refused `show` cannot tell a scoped operator whether a hash names a
+    ticket, or whose ticket it is."""
+    action = arguments.get("action")
+    action = action if action in {"list", "show", "stats"} else "query"
+    need = ("a grant over the ticket's crossing component" if action == "show"
+            else "`may approve on *`")
+    message = (f"operator `{operator.token}` may not read approvals with "
+               f"`{action}`: it needs `{verb}` authority, {need} (operator "
+               f"capabilities, item 55; issue #2991)")
+    why = WhyTrace(
+        kind="operator-authority", subject=operator.token, shape=CHAIN,
+        steps=[
+            TraceStep(operator.token, "operator", None, None,
+                      f"attempts `{verb}`"),
+            TraceStep("the approval query", "component", None, None,
+                      f"target of `{verb}`", ("*",)),
+        ])
+    return why, message
+
+
 def _refusal(operator: Operator, verb: str,
              offender: tuple[str, frozenset[str]], grant: Grant | None,
              ) -> tuple[WhyTrace, str]:
@@ -1545,7 +1600,9 @@ def decide(session, tool_name: str, arguments: dict) -> Decision:
             and not _cold_load_activation_emits(arguments):
         return Decision(gated=False)  # cold load: not yet a privileged mutation
 
-    targets = _targets(verb, session, arguments)
+    approvals = tool_name == "revl_approvals"
+    targets = (_approvals_targets(session, arguments) if approvals
+               else _targets(verb, session, arguments))
     if targets is None:
         # UNDECIDABLE — fail closed. The gate cannot work out which components
         # this action touches, so it scopes the action to the unnameable whole
@@ -1562,7 +1619,9 @@ def decide(session, tool_name: str, arguments: dict) -> Decision:
         allowed, grant = operator.allows(verb, labels, deny_labels_of(labels),
                                          was_labels_of(labels))
         if not allowed:
-            why, message = _refusal(operator, verb, offender, grant)
+            why, message = (_approvals_refusal(operator, verb, arguments)
+                            if approvals
+                            else _refusal(operator, verb, offender, grant))
             return Decision(gated=True, allowed=False, operator=operator.token,
                             verb=verb, why=why, message=message)
 

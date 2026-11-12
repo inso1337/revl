@@ -802,15 +802,21 @@ participant is settled against it, not against a guess:
 revl recover --wal <participant>.wal --decision decision.jsonl
 ```
 
-The record is read by `deploy.settle_stranded`, which applies `recovery.py`'s
-existing rule:
+The record is read by `deploy.settle_stranded`: the record chooses the
+direction and `recovery.recover` performs it. The verdict is computed against a
+model world unless `--composition` binds the real one:
 
 - `federation-commit-approved` (present): the step committed. The participant's
   WAL is given the `commit-approved` marker recovery already keys roll-forward
   off, so it rolls forward and replays no inverse.
 - `federation-abort-decided`, `federation-decision-pending` (written when a
   newer run started and has not decided), or no file at all: the step did not
-  commit for this run. The WAL is recovered unchanged and rolls back LIFO.
+  commit for this run. The WAL is recovered unchanged under recovery's own
+  rule: it rolls back LIFO, or rolls forward when it reached
+  `activation-complete`. Under a `revl federation-apply` decision (records
+  carrying `"writer": "federation-apply"`) it rolls back even then, since that
+  apply uses its generation directory once; `revl deploy`'s reused WAL keeps
+  recovery's rule (issue #3147).
 - an unreadable record: fails closed as `unresolved` and settles nothing.
   Guessing between forward and back is the split-brain the record exists to
   prevent.
@@ -857,3 +863,16 @@ Two WALs read differently once a session has been forked.
 - It works from the durable log alone. Recovery never re-enters the dead runtime,
   which is the point: the process is gone, and the WAL was written so that its
   absence would not matter.
+
+
+## Approval questions a halt revoked (issue #2991)
+
+The operator E-Stop closes every approval question it strands and writes one
+durable row per question: `ticket-revoked` for a pending single-party asking and
+`quorum-revoked` for an open multi-party one. `revl recover` reports these under
+`revokedTickets`, kept apart from `expiredTickets` (which it builds from
+`quorum-expired`): an expired question ran out of time and may be asked afresh,
+a revoked one was withdrawn. Neither is residue - both are decisions about a
+question, not effects - so they do not move the residue proof or the exit
+status. A WAL with neither record renders byte-identically to before this
+report existed.
