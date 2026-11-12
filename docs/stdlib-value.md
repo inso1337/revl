@@ -64,6 +64,7 @@ untrusted or partially-shaped document cannot fault.
 | `value_len(v)` | `Value -> Int` | length of list/record/str; a str counts CODE POINTS, never UTF-16 units (docs/strings.md); scalar/null → `0` |
 | `value_str(v)` | `Value -> Str` | as string; non-str → `""` |
 | `value_int(v)` | `Value -> Int` | as int (bool excluded); non-int → `0` |
+| `value_float(v)` | `Value -> Float` | a float as itself, an int as the Float of the same value (so `json_parse("3")` and `json_parse("3.0")` read back equal; an int past the Float range is the signed infinity); anything else, bool included → `0.0` (issue #3343) |
 | `value_bool(v)` | `Value -> Bool` | as bool; non-bool → `false` |
 
 ```revl
@@ -182,6 +183,16 @@ What it does **not** replace, correctly: `py_repr` (host `repr()` of a literal),
 would move behind their own stdlib surfaces — a `repr`/format module — not this
 one.) `selfhost/*` is owned by item 171 and was not edited here; the mapping
 above is the specification for that rewrite.
+
+### NaN and infinity from a parsed `Value` (`value_float`)
+
+`json_parse` refuses the `NaN`, `Infinity` and `-Infinity` tokens on every
+tier (RFC 8259 section 6), so no NaN comes out of a parsed document. An
+out-of-range number literal such as `1e400` is different: py `json.loads` and
+the ts parser read it as an infinity, while rust's `serde_json` refuses the
+document. So on py and ts an infinity can come out of a parsed `Value`, and
+`value_float` returns it unchanged. A `Value` built in revl from a NaN or
+infinite Float reads back as that Float.
 
 ## Tier status
 
