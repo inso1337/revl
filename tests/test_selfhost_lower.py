@@ -4472,6 +4472,39 @@ component C provides ops: Ops {
     _agree(admit, pure)
 
 
+_EXT_3354 = "extern emission fn now() -> Int = @py {\n  return 1\n}\n"
+
+
+@pytest.mark.parametrize("body", [
+    "fn later(now: Int) -> Int { return now + 1 }\n",
+    "fn later(n: Int) -> Int {\n  let now = n + 1\n  return now\n}\n",
+    "fn later(ns: List[Int]) -> Int {\n  var s = 0\n"
+    "  for (now of ns) { s = s + now }\n  return s\n}\n",
+    "fn later(o: Opt[Int]) -> Int {\n"
+    "  return match o { Some(now) => now, None => 0, }\n}\n",
+    "fn later() -> Int {\n  let g = (now: Int) => now + 1\n  return g(1)\n}\n",
+    "fn later(o: Opt[Int]) -> Int {\n  return match o {\n    Some(now) => {\n"
+    "      let y = now + 1\n      y\n    },\n    None => 0,\n  }\n}\n",
+], ids=["parameter", "let", "for", "match-binding", "lambda-parameter",
+        "block-arm-binding"])
+def test_issue_3354_a_local_shadows_an_emission_extern(admit, body):
+    src = _EXT_3354 + body
+    assert _ref(src) == ("", "")
+    _agree(admit, src)
+
+
+@pytest.mark.parametrize("body", [
+    "fn later() -> Int {\n  let f = now\n  return 1\n}\n",
+    "fn later(b: Bool) -> Int {\n  if (b) {\n    let now = 1\n  }\n"
+    "  let f = now\n  return 1\n}\n",
+    "fn later() -> Int {\n  let f = now\n  let now = 2\n  return now\n}\n",
+], ids=["real-read", "closed-block", "let-after-use"])
+def test_issue_3354_a_read_of_the_extern_is_still_refused(admit, body):
+    src = _EXT_3354 + body
+    assert _ref(src)[0] == "G4"
+    _agree(admit, src)
+
+
 # Parse refusals the gate spells in the reference's words. They cannot be
 # `REJECTED_PROGRAMS` rows: `_classify` files a parse error as "OUT:<message>"
 # and the gate tags it BAD, so only the message is compared here.
