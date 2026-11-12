@@ -77,7 +77,7 @@ provide   := 'provide' IDENT '{' ('fn' IDENT '(' IDENT* ')' ('=' expr | block))*
 composition := 'composition' IDENT '{' (use | row | remote | place | grant | stack | site)* '}'  -- contextual kw
 row       := 'row' '@' IDENT 'from' STRING 'provides' ('nothing' | IDENT (',' IDENT)*)
              ['component' IDENT]            -- disambiguator; provenance, not identity
-             ['config' '{' (IDENT ':' literal)* '}']  -- checked against the header
+             ['config' '{' (IDENT ':' (literal|'['literal*']'))* '}'] -- checked against the header
              ['granted' '{' IDENT (',' IDENT)* '}']   -- reach allowlist, empty default
 place     := 'place' address 'on' 'process' STRING ['backend' IDENT]   -- which process runs the row
 grant     := 'grant' address 'with' '{' IDENT (',' IDENT)* '}'          -- the `requires` keys a row may reach

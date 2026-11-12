@@ -6038,7 +6038,7 @@ class Parser:
                                       f"(layer `{layer}`)")
             seen.add(field_name)
             self.expect(":")
-            out.append((field_name, self.literal(), fline))
+            out.append((field_name, self.row_config_value(), fline))
             if self.at(","):
                 self.next()
         self.expect("}")
@@ -6413,7 +6413,7 @@ class Parser:
                 raise self.err(fline, f"duplicate config field `{field_name}` on row `@{label}`")
             seen.add(field_name)
             self.expect(":")
-            out.append((field_name, self.literal(), fline))
+            out.append((field_name, self.row_config_value(), fline))
             if self.at(","):
                 self.next()
         self.expect("}")
@@ -6515,6 +6515,23 @@ class Parser:
                      "never boot — list the values the host may inject (item 350)",
             )
         return {"kind": "in", "values": values}
+
+    def row_config_value(self):
+        """A row config value: a literal, or `[literal, ...]` (issue #3357).
+
+        Lists of scalar literals only, no nesting and no expressions; the list
+        is checked element-wise against the field's declared `List[T]` at
+        resolution (`composition._row_value_type`)."""
+        if not self.at("["):
+            return self.literal()
+        self.next()
+        values = []
+        while not self.at("]"):
+            values.append(self.literal())
+            if self.at(","):
+                self.next()
+        self.expect("]")
+        return values
 
     def literal(self):
         tok = self.peek()
