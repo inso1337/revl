@@ -36,7 +36,10 @@
 //   held           while `held` knocks wait for `take`, the provider stops
 //                  reading every line (socket backpressure); nothing is dropped.
 //   limit          `say` to a line with more than `limit` unwritten bytes is
-//                  not queued and answers false; the line stays open.
+//                  not queued and answers false; the line stays open. A ping
+//                  over `limit` shuts the line `TooSlow` (1008).
+//   a line that ends without a close frame (EOF, reset, failed write) shuts
+//                  `HostGone`.
 //   a binary frame shuts the line `Refused` (1003). A request that is not an
 //                  upgrade is answered 404: serving files is beside this binding.
 //   a bind failure raises inside the acquire, so the row's activation fails

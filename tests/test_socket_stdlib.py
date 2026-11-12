@@ -483,3 +483,199 @@ def test_close_code_table_matches_the_engine():
     assert table["Closed"] == revl_socket.CODE_CLOSED
     assert table["TooLarge"] == revl_socket.CODE_TOO_LARGE
     assert table["HostGone"] == revl_socket.CODE_GONE
+
+
+# ---------------------------------------------------------------------------
+# the engine's own bounds (review of the first slice)
+# ---------------------------------------------------------------------------
+
+def _engine():
+    sys.path.insert(0, str(ROOT / "backends" / "python"))
+    import revl_socket
+    return revl_socket
+
+
+def _listener(wire: Wire):
+    """The live engine object behind `wire`, found by its port."""
+    import gc
+    engine = _engine()
+    (found,) = [o for o in gc.get_objects()
+                if isinstance(o, engine.Listener) and o.port == wire.port]
+    return found
+
+
+def _raw(port: int, payload: bytes, timeout: float = 5.0) -> socket.socket:
+    sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+    sock.sendall(payload)
+    return sock
+
+
+def _upgrade(extra: str = "", version: str = "13",
+             key: str | None = None) -> bytes:
+    key = key if key is not None else base64.b64encode(os.urandom(16)).decode()
+    return (f"GET /wire HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n"
+            f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\n"
+            f"Sec-WebSocket-Version: {version}\r\nOrigin: {ORIGIN}\r\n"
+            f"{extra}\r\n").encode("ascii")
+
+
+@needs_cordis
+def test_partial_frame_then_eof_shuts_host_gone(wire_factory):
+    wire = wire_factory()
+    client = Client(wire.port)
+    client.sock.sendall(b"\x81\x85\x00")   # a text frame header, cut short
+    client.shut()
+    assert [k[1] for k in wire.until(2)] == ["Opened", "Shut(HostGone)"]
+
+
+@needs_cordis
+def test_ping_flood_from_a_reader_that_never_reads_shuts_too_slow(wire_factory):
+    wire = wire_factory(limit=1024)
+    client = Client(wire.port)
+    ping = bytes([0x89, 0x80 | 125]) + b"\x00" * 4 + b"p" * 125
+    try:
+        client.sock.sendall(ping * 40000)
+    except OSError:
+        pass                            # the server shut the line mid-flood
+    knocks = wire.until(2, seconds=10)
+    assert [k[1] for k in knocks] == ["Opened", "Shut(TooSlow)"]
+
+
+@needs_cordis
+def test_write_failure_on_an_open_line_shuts_host_gone(wire_factory):
+    wire = wire_factory(held=1)         # Opened fills the queue: reading stops
+    client = Client(wire.port)
+    time.sleep(0.2)
+    client.sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                           struct.pack("ii", 1, 0))
+    client.shut()                       # a reset, not a close
+    time.sleep(0.2)
+    line = 1
+    answers = []
+    for _ in range(20):
+        answers.append(wire.call("say", line, "x" * 1000))
+        if not answers[-1]:
+            break
+        time.sleep(0.05)
+    assert answers[-1] is False
+    assert [k[1] for k in wire.until(2)] == ["Opened", "Shut(HostGone)"]
+
+
+@needs_cordis
+def test_a_shutting_line_whose_client_never_reads_is_dropped(wire_factory, monkeypatch):
+    monkeypatch.setattr(_engine(), "_DRAIN_S", 0.3)
+    wire = wire_factory(limit=1 << 30)
+    client = Client(wire.port)
+    (opened,) = wire.until(1)
+    for _ in range(80):
+        wire.call("say", opened[2], "z" * 65536)
+    assert wire.call("close", opened[2], wire.why("Refused"), "bye") is True
+    time.sleep(1.5)
+    assert _listener(wire)._conns == {}
+    client.shut()
+
+
+@needs_cordis
+def test_a_silent_request_head_is_dropped(wire_factory, monkeypatch):
+    monkeypatch.setattr(_engine(), "_HEAD_S", 0.3)
+    wire = wire_factory()
+    sock = _raw(wire.port, b"GET / HT", timeout=3)
+    assert sock.recv(10) == b""         # closed by the server, not timed out
+    sock.close()
+
+
+@needs_cordis
+def test_lines_over_the_cap_wait_to_be_accepted(wire_factory, monkeypatch):
+    monkeypatch.setattr(_engine(), "_MAX_LINES", 2)
+    wire = wire_factory()
+    first, second = Client(wire.port), Client(wire.port)
+    third = _raw(wire.port, _upgrade(), timeout=0.5)
+    with pytest.raises(socket.timeout):
+        third.recv(100)
+    first.bye()
+    first.close_frame()
+    first.shut()
+    third.settimeout(5)
+    assert _read_head(third)[0] == "HTTP/1.1 101 Switching Protocols"
+    third.close()
+    second.shut()
+
+
+@needs_cordis
+def test_message_length_alone_over_most_closes_1009(wire_factory):
+    wire = wire_factory(most=16)
+    client = Client(wire.port)
+    client.sock.sendall(bytes([0x81, 0x80 | 127]) + struct.pack(">Q", 1 << 40))
+    assert client.close_frame()[0] == 1009
+    assert [k[1] for k in wire.until(2)] == ["Opened", "Shut(TooLarge)"]
+
+
+@needs_cordis
+def test_unmasked_frame_closes_1002(wire_factory):
+    wire = wire_factory()
+    client = Client(wire.port)
+    client.sock.sendall(b"\x81\x02hi")
+    assert client.close_frame()[0] == 1002
+    assert [k[1] for k in wire.until(2)] == ["Opened", "Shut(Refused)"]
+
+
+@needs_cordis
+def test_text_that_is_not_utf8_closes_1007(wire_factory):
+    wire = wire_factory()
+    client = Client(wire.port)
+    client.send(b"\xff\xfe")
+    assert client.close_frame()[0] == 1007
+    assert [k[1] for k in wire.until(2)] == ["Opened", "Shut(Refused)"]
+
+
+@needs_cordis
+def test_fragments_arrive_as_one_message(wire_factory):
+    wire = wire_factory()
+    client = Client(wire.port)
+
+    def frame(b0: int, data: bytes) -> bytes:
+        return bytes([b0, 0x80 | len(data)]) + b"\x00" * 4 + data
+
+    client.sock.sendall(frame(0x01, b"hel") + frame(0x89, b"p") + frame(0x80, b"lo"))
+    assert client.recv() == (0xA, b"p")   # a ping between fragments is answered
+    knocks = wire.until(2)
+    assert [(k[1], k[4]) for k in knocks] == [("Opened", ""), ("Said", "hello")]
+
+
+@needs_cordis
+def test_ping_is_answered_with_its_payload(wire_factory):
+    wire = wire_factory()
+    client = Client(wire.port)
+    client.send(b"beat", opcode=0x9)
+    assert client.recv() == (0xA, b"beat")
+
+
+@needs_cordis
+@pytest.mark.parametrize(("payload", "status"), [
+    (b"GET / HTTP/1.1\r\n" + b"X-Pad: " + b"a" * 20000, "431"),
+    (None, "426"),
+    ("bad-key", "400"),
+])
+def test_malformed_upgrades_are_refused(wire_factory, payload, status):
+    wire = wire_factory()
+    if payload is None:
+        payload = _upgrade(version="8")
+    elif payload == "bad-key":
+        payload = _upgrade(key="short")
+    sock = _raw(wire.port, payload)
+    assert _read_head(sock)[0].startswith(f"HTTP/1.1 {status} ")
+    sock.close()
+    time.sleep(0.1)
+    assert wire.take() == []
+
+
+@needs_cordis
+@pytest.mark.parametrize("payload", [b"\x03", struct.pack(">H", 1005),
+                                     struct.pack(">H", 1000) + b"\xff"])
+def test_a_malformed_peer_close_is_refused_1002(wire_factory, payload):
+    wire = wire_factory()
+    client = Client(wire.port)
+    client.send(payload, opcode=0x8)
+    code = 1007 if payload.endswith(b"\xff") else 1002
+    assert client.close_frame()[0] == code
+    assert [k[1] for k in wire.until(2)] == ["Opened", "Shut(Refused)"]

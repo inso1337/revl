@@ -20,9 +20,18 @@ What the program sees is a list of plain dicts, one per knock, that
 Close codes this module sends on its own: 1009 for a message over `most`, 1003
 for a binary frame, 1002 for a protocol violation (an unmasked client frame, a
 reserved bit or opcode, a bad fragment or control frame) and 1007 for a text
-message that is not UTF-8. Each of those shuts the line `Refused`, apart from
-1009, which is `TooLarge`. A close the program asks for carries the code
+message or close reason that is not UTF-8. Each of those shuts the line
+`Refused`, apart from 1009, which is `TooLarge`. A peer that pings while more
+than `limit` bytes wait for it is shut `TooSlow` (1008): `limit` bounds the
+control replies as well as `say`. A close the program asks for carries the code
 `stdlib/socket.rvl`'s `close_code` chose.
+
+Bounds of the engine itself: a request head must arrive within `_HEAD_S`, a
+shutting line is dropped `_DRAIN_S` after it starts shutting whether or not
+its peer reads, at most `_MAX_LINES` connections are held (more wait in the
+listen backlog), and a failed `accept` (out of descriptors) pauses accepting
+for `_ACCEPT_PAUSE_S`. A line that ends without a close frame, by EOF, by a
+reset or by a failed write, knocks `Shut(HostGone)`.
 """
 
 from __future__ import annotations
@@ -38,7 +47,10 @@ import time
 
 _GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 _MAX_HEAD = 16384          # bytes of request head before it is refused 431
-_DRAIN_S = 2.0             # how long a shut line is read (and discarded) for
+_DRAIN_S = 2.0             # how long a shutting line may take to finish
+_HEAD_S = 10.0             # how long a connection may take to send its head
+_MAX_LINES = 1024          # connections held at once; more wait in the backlog
+_ACCEPT_PAUSE_S = 0.5      # accept pauses this long after it fails (EMFILE)
 _TICK_S = 0.25             # selector timeout, for drain deadlines and shut
 
 CODE_CLOSED = 1000
@@ -47,6 +59,11 @@ CODE_PROTOCOL = 1002
 CODE_BINARY = 1003
 CODE_NOT_UTF8 = 1007
 CODE_TOO_LARGE = 1009
+CODE_TOO_SLOW = 1008
+
+# close codes a peer may send (RFC 6455 section 7.4): 1004-1006 and 1015 are
+# never on the wire, 1012-2999 are unassigned or reserved
+_PEER_CODES = frozenset({1000, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011})
 
 
 def _http(status: str, extra: str = "") -> bytes:
@@ -85,7 +102,7 @@ class _Line:
     """One accepted connection, from its request head to its shut."""
 
     __slots__ = ("sock", "num", "phase", "inbuf", "out", "frag", "frag_op",
-                 "eof", "flush_then_shut", "drain_until")
+                 "eof", "flush_then_shut", "wr_shut", "deadline", "paused")
 
     def __init__(self, sock: socket.socket):
         self.sock = sock
@@ -97,7 +114,11 @@ class _Line:
         self.frag_op = 0         # 0: no fragmented message in progress
         self.eof = False
         self.flush_then_shut = False
-        self.drain_until = 0.0   # set once the last byte is written
+        self.wr_shut = False     # our side of the TCP stream is shut
+        # the head must arrive by this time; cleared at the upgrade, set again
+        # when the line starts shutting
+        self.deadline = time.monotonic() + _HEAD_S
+        self.paused = False      # frame parsing stopped on a full queue
 
 
 class Listener:
@@ -132,6 +153,7 @@ class Listener:
         self._sel = selectors.DefaultSelector()
         self._sel.register(self._wake_r, selectors.EVENT_READ, None)
         self._accepting = False
+        self._accept_after = 0.0
         self._thread = threading.Thread(target=self._run, daemon=True,
                                         name=f"revl-socket-{self.port}")
         self._thread.start()
@@ -186,20 +208,23 @@ class Listener:
     def _full(self) -> bool:
         return len(self._knocks) >= self.held
 
-    def _shut(self, conn: _Line, why: str, code: int, text: str) -> None:
-        """End an open line from this side: close frame, then a `Shut` knock."""
-        conn.out += _frame(0x8, _close_payload(code, text))
+    def _shutting(self, conn: _Line, last: bytes) -> None:
+        """Queue the last bytes of a line and give it `_DRAIN_S` to finish,
+        written or not."""
+        conn.out += last
         conn.phase = "shutting"
         conn.flush_then_shut = True
+        conn.deadline = time.monotonic() + _DRAIN_S
         conn.inbuf.clear()
+
+    def _shut(self, conn: _Line, why: str, code: int, text: str) -> None:
+        """End an open line from this side: close frame, then a `Shut` knock."""
+        self._shutting(conn, _frame(0x8, _close_payload(code, text)))
         self._lines.pop(conn.num, None)
         self._knock("shut", why, conn, "", text)
 
     def _refuse(self, conn: _Line, status: str, extra: str = "") -> None:
-        conn.out += _http(status, extra)
-        conn.phase = "shutting"
-        conn.flush_then_shut = True
-        conn.inbuf.clear()
+        self._shutting(conn, _http(status, extra))
 
     # --------------------------------------------------------- the thread's side
 
@@ -222,7 +247,8 @@ class Listener:
 
     def _interest(self) -> None:
         paused = self._full()
-        want_accept = not paused
+        want_accept = (not paused and len(self._conns) < _MAX_LINES
+                       and time.monotonic() >= self._accept_after)
         if want_accept != self._accepting:
             if want_accept:
                 self._sel.register(self._server, selectors.EVENT_READ, "accept")
@@ -269,12 +295,15 @@ class Listener:
             self._read(conn)
 
     def _accept(self) -> None:
-        while True:
+        while len(self._conns) < _MAX_LINES:
             try:
                 sock, _addr = self._server.accept()
             except (BlockingIOError, InterruptedError):
                 return
             except OSError:
+                # out of descriptors (EMFILE) or the like: the listener stays
+                # readable, so stop accepting for a while instead of spinning
+                self._accept_after = time.monotonic() + _ACCEPT_PAUSE_S
                 return
             sock.setblocking(False)
             self._conns[sock] = _Line(sock)
@@ -288,12 +317,12 @@ class Listener:
             self._drop(conn)
             return
         del conn.out[:sent]
-        if not conn.out and conn.flush_then_shut and not conn.drain_until:
+        if not conn.out and conn.flush_then_shut and not conn.wr_shut:
             try:
                 conn.sock.shutdown(socket.SHUT_WR)
             except OSError:
                 pass
-            conn.drain_until = time.monotonic() + _DRAIN_S
+            conn.wr_shut = True
 
     def _read(self, conn: _Line) -> None:
         try:
@@ -314,17 +343,25 @@ class Listener:
 
     def _resume(self) -> None:
         """Parse what a pause left buffered, once `take` made room."""
+        if self._full():
+            return
         for conn in list(self._conns.values()):
-            if conn.phase == "open" and (conn.inbuf or conn.eof) and not self._full():
+            if conn.phase == "open" and conn.paused:
+                conn.paused = False
                 self._parse(conn)
 
     def _expire(self) -> None:
         now = time.monotonic()
         for conn in list(self._conns.values()):
-            if conn.drain_until and now >= conn.drain_until:
+            if conn.deadline and now >= conn.deadline:
                 self._drop(conn)
 
     def _drop(self, conn: _Line) -> None:
+        """Close a connection. An open line that ends here (the peer went
+        away, or a write to it failed) knocks `Shut(HostGone)`."""
+        if conn.phase == "open":
+            self._lines.pop(conn.num, None)
+            self._knock("shut", "host_gone", conn, "", "")
         self._conns.pop(conn.sock, None)
         try:
             self._sel.unregister(conn.sock)
@@ -344,6 +381,7 @@ class Listener:
                                    + _frame(0x8, _close_payload(CODE_GONE, "")))
                 except OSError:
                     pass
+                conn.phase = "gone"     # nobody takes a knock after the unload
             self._drop(conn)
         self._lines.clear()
         for sock in (self._server, self._wake_r, self._wake_w):
@@ -360,10 +398,9 @@ class Listener:
             self._head(conn)
         if conn.phase == "open":
             self._frames(conn)
-        if conn.phase == "open" and conn.eof and not conn.inbuf:
-            # the peer went away without a close frame
-            self._lines.pop(conn.num, None)
-            self._knock("shut", "host_gone", conn, "", "")
+        if conn.phase == "open" and conn.eof and not conn.paused:
+            # the peer went away without a close frame; whatever is left in
+            # `inbuf` is a frame it never finished
             self._drop(conn)
         elif conn.phase == "head" and conn.eof:
             self._drop(conn)
@@ -420,6 +457,7 @@ class Listener:
         self._next += 1
         conn.num = self._next
         conn.phase = "open"
+        conn.deadline = 0.0
         self._lines[conn.num] = conn
         self._knock("opened", "", conn, origins[0] if origins else "", "")
 
@@ -427,7 +465,10 @@ class Listener:
 
     def _frames(self, conn: _Line) -> None:
         buf = conn.inbuf
-        while conn.phase == "open" and not self._full() and len(buf) >= 2:
+        while conn.phase == "open" and len(buf) >= 2:
+            if self._full():
+                conn.paused = True
+                return
             b0, b1 = buf[0], buf[1]
             fin, rsv, op = b0 & 0x80, b0 & 0x70, b0 & 0x0F
             n, off = b1 & 0x7F, 2
@@ -463,6 +504,12 @@ class Listener:
             if op == 0x8:
                 self._peer_close(conn, payload)
             elif op == 0x9:
+                if len(conn.out) > self.limit:
+                    # a peer that pings and never reads the pongs: `limit`
+                    # bounds what waits for it, control replies included
+                    self._shut(conn, "too_slow", CODE_TOO_SLOW,
+                               f"over {self.limit} unwritten bytes")
+                    return
                 conn.out += _frame(0xA, payload)
             elif op == 0xA:
                 pass
@@ -484,12 +531,19 @@ class Listener:
         self._knock("said", "", conn, "", text)
 
     def _peer_close(self, conn: _Line, payload: bytes) -> None:
-        code = struct.unpack(">H", payload[:2])[0] if len(payload) >= 2 else CODE_CLOSED
-        reason = payload[2:].decode("utf-8", "replace")
-        conn.out += _frame(0x8, payload[:2])
-        conn.phase = "shutting"
-        conn.flush_then_shut = True
-        conn.inbuf.clear()
+        if not payload:
+            code, reason = CODE_CLOSED, ""
+        else:
+            code = struct.unpack(">H", payload[:2])[0] if len(payload) >= 2 else 0
+            if code not in _PEER_CODES and not 3000 <= code <= 4999:
+                self._shut(conn, "refused", CODE_PROTOCOL, "bad close frame")
+                return
+            try:
+                reason = payload[2:].decode("utf-8")
+            except UnicodeDecodeError:
+                self._shut(conn, "refused", CODE_NOT_UTF8, "close reason is not UTF-8")
+                return
+        self._shutting(conn, _frame(0x8, payload[:2]))
         self._lines.pop(conn.num, None)
         self._knock("shut", "host_gone" if code == CODE_GONE else "closed",
                     conn, "", reason)
