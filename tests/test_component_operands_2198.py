@@ -221,8 +221,11 @@ def test_py_provide_method_calls_the_shared_arithmetic_helpers():
     code = emit.emit(compile_source(PROVIDE_SOURCE, "t.rvl"))
     assert ("return _revl_rem(_revl_config['a'], _revl_config['b'])"
             in code)
-    assert ("return _revl_div(_revl_config['a'], _revl_config['b'])"
-            in code)
+    # the shared Float `/`: the nonzero divisor inline, `_revl_div` the tail
+    # for a zero one (issue #3408), where it was the bare call
+    assert ("return (_revl_dn / _revl_dd if (_revl_dn := _revl_config['a']) "
+            "is _revl_dn and (_revl_dd := _revl_config['b']) "
+            "else _revl_div(_revl_dn, _revl_dd))" in code)
 
 
 # -- (c) an activation `effect` argument no longer takes the host operator ---
@@ -237,7 +240,9 @@ def test_py_effect_argument_plus_goes_through_the_annotated_path():
     assert "_revl_config['a'] + _revl_config['b']" in code
     assert "_revl_i64" in code
     assert "open_slot(_revl_rem(_revl_config['a'], _revl_config['b']))" in code
-    assert "open_ratio(_revl_div(_revl_config['a'], _revl_config['b']))" in code
+    assert ("open_ratio((_revl_dn / _revl_dd if (_revl_dn := _revl_config['a']) "
+            "is _revl_dn and (_revl_dd := _revl_config['b']) "
+            "else _revl_div(_revl_dn, _revl_dd)))" in code)
 
 
 # -- (d) the self-hosted producer types every component bind the same way ----

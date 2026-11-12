@@ -123,6 +123,27 @@ class EmitError(ValueError):
     """The IR document cannot be lowered by this backend."""
 
 
+def _host_body_scanner():
+    """The shared host-body scanner (`src/revl/host_body.py`).
+
+    Imported lazily so a standalone `python3 emit.py <ir.json>` keeps working:
+    when the emitter runs through the compiler `revl` is importable, and a bare
+    script run falls back to the source tree beside this file. The scanner is
+    the one place every tier splits an extern body and checks that it cannot
+    leave the function it is spliced into (#3130, #3131, #3162, #3164, #3166).
+    """
+    try:
+        from revl.host_body import body_lines, check_host_body
+    except ModuleNotFoundError:  # standalone `python3 emit.py`: put src/ on the path
+        import pathlib
+        import sys as _sys
+        src = pathlib.Path(__file__).resolve().parents[2] / "src"
+        if src.is_dir() and str(src) not in _sys.path:
+            _sys.path.insert(0, str(src))
+        from revl.host_body import body_lines, check_host_body
+    return body_lines, check_host_body
+
+
 class CeilingUnattributable(EmitError):
     """An emission reaches a budgeted extern through a shape the runtime meter
     cannot attribute exactly (issue #2688).
@@ -222,6 +243,7 @@ _PY_ASYNC_SVC_OPS: set = set()      # {(service_name, method_name)} async operat
 _PY_AWAIT_LOCALS: set = set()       # async-typed parameter names of the body being rendered
 _PY_IN_ASYNC: bool = False          # is the body being rendered an `async def`
 _PY_IN_ARROW: bool = False          # is the body being rendered inside an arrow (item 141/264)
+_PY_DICT_LOCALS: frozenset = frozenset()  # names a field read reads directly (issue #3407)
 _PY_USES_AS_ASYNC: bool = False     # did any body need the `_revl_as_async` wrapper
 # The document's user variant case names (#552 B5). `None`/`Some` are the Opt
 # built-ins the emitter renders as host None / identity, but a user variant may
@@ -1211,6 +1233,69 @@ def _bounded(operation: str, width: int) -> str:
             f"<= _REVL_I{width}_MAX else _revl_i{width}({tmp}))")
 
 
+# The true-division temps (issue #3408). Both sit in the `_revl*` namespace the
+# emitter already reserves (`_EMITTER_TEMP_RE`), so a user name cannot reach them.
+_DIV_NUM_TMP = "_revl_dn"
+_DIV_DEN_TMP = "_revl_dd"
+_DIV_ZERO_TEXT = frozenset({"0", "0.0", "-0.0"})
+# Kinds a division may read twice for free: a local and a literal.
+_DIV_TRIVIAL = frozenset({"var", "name", "lit"})
+# A dividend this short is written into both branches rather than bound.
+_DIV_DUP_MAX = 120
+
+
+def _inline_div(node: dict, render) -> str:
+    """Render `a / b` with the nonzero divisor INLINE (issue #3408).
+
+    `_revl_div(a, b)` entered a python frame for every division, and a divisor
+    is nonzero in every answer but the rare one. The call stays as the tail for
+    a zero divisor, so the IEEE value written once in `_revl_div` is still the
+    only place that builds it, and a nonzero divisor gives the same `a / b`
+    the helper's first line returned.
+
+    Each operand is evaluated exactly once, the dividend before the divisor, as
+    the call did. A name or a literal is read again for free; anything else is
+    bound by a walrus. The condition runs first, so:
+
+      * a nonzero literal divisor: `(a / 2.0)`, no test at all (a zero literal
+        keeps the call);
+      * a name divisor and a short dividend: `(A / d if d else _revl_div(A, d))`,
+        where the dividend is a sub-expression of the one branch taken, so it
+        runs once and after nothing it could be ordered against. A long one
+        (a division chained on a division would double the text per level) is
+        bound first: `(n / d if (n := A) is n and d else _revl_div(n, d))`;
+      * any other divisor with a name or literal dividend (nothing to evaluate,
+        so reading it after the divisor is unobservable):
+        `(a / dd if (dd := B) else _revl_div(a, dd))`;
+      * any other divisor with an evaluated dividend: both are bound in order,
+        `(dn / dd if (dn := A) is dn and (dd := B) else _revl_div(dn, dd))`.
+        The temps are single names, so a divisor that itself binds `dn` (a
+        nested division) would rebind it before it is read; that one keeps the
+        call. `is` on the value just bound is always true; it is there so the
+        walrus is a condition operand without building a tuple.
+    """
+    left, right = node["left"], node["right"]
+    ra, rb = render(left), render(right)
+    left_trivial = left.get("kind") in _DIV_TRIVIAL
+    dn, dd = _DIV_NUM_TMP, _DIV_DEN_TMP
+    if right.get("kind") == "lit":
+        if rb in _DIV_ZERO_TEXT:
+            return f"_revl_div({ra}, {rb})"
+        return f"({ra} / {rb})"
+    if right.get("kind") in _DIV_TRIVIAL:
+        if left_trivial or (len(ra) <= _DIV_DUP_MAX and dn not in ra
+                            and "_revl_div" not in ra):
+            return f"({ra} / {rb} if {rb} else _revl_div({ra}, {rb}))"
+        return (f"({dn} / {rb} if ({dn} := {ra}) is {dn} and {rb} "
+                f"else _revl_div({dn}, {rb}))")
+    if left_trivial:
+        return f"({ra} / {dd} if ({dd} := {rb}) else _revl_div({ra}, {dd}))"
+    if dn in rb:
+        return f"_revl_div({ra}, {rb})"
+    return (f"({dn} / {dd} if ({dn} := {ra}) is {dn} and ({dd} := {rb}) "
+            f"else _revl_div({dn}, {dd}))")
+
+
 def _annotated_bin(node: dict, render) -> str | None:
     """Render an arithmetic `bin` node from its `operands` annotation, or
     `None` when the annotation asks for nothing special.
@@ -1245,7 +1330,7 @@ def _annotated_bin(node: dict, render) -> str | None:
     if op == "/":
         # true division, IEEE at zero (docs/arithmetic.md), regardless of the
         # operand type, since `Int / Int` is Float.
-        return f"_revl_div({render(node['left'])}, {render(node['right'])})"
+        return _inline_div(node, render)
     if op == "%" and operands == "Float":
         # The Float remainder is IEEE `fmod`, and IEEE gives it a VALUE at a
         # zero divisor: `x % 0.0` is NaN, not a fault. python's own `%` raises
@@ -1323,6 +1408,231 @@ def _field_read(target: str, name: str, opt: bool = False,
                 f"else getattr({tmp}, {name!r}, None))")
     return (f"({tmp}[{name!r}] if isinstance({got}, dict) "
             f"else getattr({tmp}, {name!r}))")
+
+
+# Issue #3407: the receivers a field read may read DIRECTLY, without the
+# `isinstance` dispatch above. The dispatch exists for a value that is not the
+# dict a record literal builds: an ADT payload object, or a host object handed
+# in under a record type (an extern's return, a host calling a `pub fn`, a
+# component's state or a service argument). A name qualifies only when every
+# value it can hold was built by a record literal in this document, which is a
+# closed-world fact over the IR:
+#
+# - a `let` bound to a dict-building expression, every later assignment of
+#   it (a `var`) assigning one too;
+# - a record-typed parameter of a fn that is not `pub` (a `pub fn` is the
+#   exported surface a host calls, docs/syntax-2.0.md), whose every reference
+#   in the document, counting every identifier-like word of every string (an
+#   extern's `@py` body is one), is a direct call from a fn or `test` body
+#   passing a dict-building argument there. A fn with no call site gets
+#   nothing: only a host could be calling it (the `prop test` wrapper is one).
+#
+# A dict-building expression is a record literal or update, a qualifying name, or a call
+# to a fn (not async, not `cache pure`) whose every `return` is one. Both facts
+# are a greatest fixpoint: a recursive cycle keeps them only when every entry
+# into it supplies a built record. A name also qualifies only when the body
+# spells it nowhere but as a read (a `var` node), so an arrow parameter, a match
+# bind or a capture of the same spelling disqualifies it rather than being
+# resolved here. Anything this does not recognise keeps the dispatch.
+#
+# Host text that reaches a module-private fn other than by its spelled name (a
+# computed `globals()` key, `sys._getframe`, `getattr(sys.modules[...], ...)`)
+# is outside the closed world, as it is already outside the typed boundary; a
+# record-typed value handed across the typed boundary (an extern's return, a
+# `pub fn` call, a service argument, a component's state, a container element)
+# keeps the dispatch.
+def _dict_read_spellings(node: Any, bad: set, lets: dict) -> None:
+    """One pass over a body: `bad` collects every name spelled somewhere other
+    than as a read (a `var` node's name) or a `field` node's label; `lets`
+    collects, per name, the `let` and plain `assign` steps that bind it."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            bad.add(k)
+            if isinstance(v, str):
+                if k == "name" and node.get("kind") in ("var", "field"):
+                    continue
+                if k == "name" and node.get("step") in ("let", "assign") \
+                        and "value" in node and "op" not in node:
+                    lets.setdefault(v, []).append(node)
+                    continue
+                bad.add(v)
+            else:
+                _dict_read_spellings(v, bad, lets)
+    elif isinstance(node, list):
+        for v in node:
+            if isinstance(v, str):
+                bad.add(v)
+            else:
+                _dict_read_spellings(v, bad, lets)
+
+
+def _dict_read_walk(node: Any, visit) -> None:
+    if isinstance(node, dict):
+        visit(node)
+        for v in node.values():
+            _dict_read_walk(v, visit)
+    elif isinstance(node, list):
+        for v in node:
+            _dict_read_walk(v, visit)
+
+
+# a word of a string: a maximal run of ASCII identifier characters
+_DICT_READ_WORD = re.compile(r"[A-Za-z0-9_]+")
+
+
+def _dict_read_tally(text: str, counts: dict, delta: int) -> None:
+    for word in _DICT_READ_WORD.findall(text):
+        counts[word] = counts.get(word, 0) + delta
+
+
+def _dict_read_strings(node: Any, counts: dict) -> None:
+    """Count every word of every string (value or key) in the document. A
+    string is counted by its words, not as a whole, because some strings are
+    host text emitted verbatim into the module (an extern's `@py` body, inline
+    or spliced from a file), and a call made by name there is a reference the
+    IR does not otherwise show. Any other string that happens to contain the
+    name (a string literal, a test title) only costs the fast path."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            _dict_read_tally(k, counts, 1)
+            _dict_read_strings(v, counts)
+    elif isinstance(node, list):
+        for v in node:
+            _dict_read_strings(v, counts)
+    elif isinstance(node, str):
+        _dict_read_tally(node, counts, 1)
+
+
+def _dict_receivers(ir: dict) -> dict:
+    """`{fn name: frozenset(local names)}`: the names a field read in that fn's
+    body may read directly (issue #3407; the rules are above)."""
+    types = ir.get("types") or {}
+    functions = [f for f in ir.get("functions") or []
+                 if isinstance(f, dict) and isinstance(f.get("name"), str)]
+    by_name = {f["name"]: f for f in functions}
+    if len(by_name) != len(functions):
+        return {}
+    # contexts: (key, params, body). A test body has no parameters.
+    contexts = [(("fn", f["name"]), f.get("params") or [], f.get("body") or [])
+                for f in functions]
+    for i, t in enumerate(ir.get("tests") or []):
+        if isinstance(t, dict):
+            contexts.append((("test", i), [], t.get("body") or []))
+    counts: dict = {}
+    _dict_read_strings(ir, counts)
+    for t in ir.get("tests") or []:
+        # a test's title is a label, never a reference (`test "move" {..}`)
+        if isinstance(t, dict) and isinstance(t.get("name"), str):
+            _dict_read_tally(t["name"], counts, -1)
+    calls: dict = {name: [] for name in by_name}
+    for key, _params, body in contexts:
+        def visit(node, key=key):
+            callee = node.get("callee")
+            if node.get("kind") == "call" and isinstance(callee, dict) \
+                    and callee.get("kind") == "var" and len(callee) == 2 \
+                    and callee.get("name") in calls:
+                calls[callee["name"]].append((key, node.get("args")))
+        _dict_read_walk(body, visit)
+    returns: dict = {}
+    for f in functions:
+        found = []
+        _dict_read_walk(f.get("body") or [], lambda n, found=found:
+                        found.append(n) if n.get("step") == "return" else None)
+        returns[f["name"]] = found
+    # a reference that is not a recognised call site (a value use, a word of
+    # any string, an extern's `@py` body calling it by name) opens the world
+    # for that fn
+    closed = {name for name in by_name
+              if calls[name] and counts.get(name, 0) == 1 + len(calls[name])}
+    params_ok = set()
+    for f in functions:
+        if f.get("public") or f["name"] not in closed:
+            continue
+        for i, p in enumerate(f.get("params") or []):
+            spec = types.get(p.get("type")) if isinstance(p.get("type"), str) else None
+            if isinstance(spec, dict) and spec.get("kind") == "record":
+                params_ok.add((f["name"], i))
+    returns_ok = {f["name"] for f in functions
+                  if not f.get("async") and not _is_cache_pure(f)
+                  and returns[f["name"]]}
+    params_of = {key: params for key, params, _body in contexts}
+    spellings: dict = {}
+    for key, _params, body in contexts:
+        bad: set = set()
+        lets: dict = {}
+        _dict_read_spellings(body, bad, lets)
+        spellings[key] = (bad, lets)
+
+    def spelled_as_reads(key, name):
+        """Is `name` spelled in that body only as reads, and by which binders?"""
+        bad, lets = spellings[key]
+        return name not in bad, lets.get(name, [])
+
+    def builds(node, key, local):
+        if not isinstance(node, dict):
+            return False
+        kind = node.get("kind")
+        if kind in ("record", "record_update"):
+            # both render a dict display (`{..}`, `{**base, ..}`)
+            return True
+        if kind == "var":
+            return node.get("name") in local
+        if kind == "call":
+            callee = node.get("callee")
+            if not (isinstance(callee, dict) and callee.get("kind") == "var"
+                    and len(callee) == 2 and callee.get("name") in returns_ok):
+                return False
+            name = callee["name"]
+            if any(p.get("name") == name for p in params_of[key]):
+                return False
+            ok, lets = spelled_as_reads(key, name)
+            return ok and not lets
+        return False
+
+    # a name bound by exactly one `let` (and any plain assignments), spelled
+    # nowhere else but as reads, and no parameter: its binding values
+    candidates_of: dict = {}
+    for key, params, _body in contexts:
+        bad, lets = spellings[key]
+        candidates_of[key] = {
+            name: [b["value"] for b in binders] for name, binders in lets.items()
+            if name not in bad and sum(b.get("step") == "let" for b in binders) == 1
+            and all(p.get("name") != name for p in params)}
+
+    def locals_of(key):
+        local = set()
+        if key[0] == "fn":
+            for i, p in enumerate(params_of[key]):
+                if (key[1], i) in params_ok and spelled_as_reads(key, p["name"]) == (True, []):
+                    local.add(p["name"])
+        candidates = candidates_of[key]
+        # greatest fixpoint again: `f = move(f, ..)` in a loop keeps `f` only
+        # if its first binding and every assignment build a record
+        local |= set(candidates)
+        changed = True
+        while changed:
+            changed = False
+            for name, values in candidates.items():
+                if name in local and not all(builds(v, key, local) for v in values):
+                    local.discard(name)
+                    changed = True
+        return frozenset(local)
+
+    while True:
+        local = {key: locals_of(key) for key, _p, _b in contexts}
+        kept_params = {(fn, i) for fn, i in params_ok
+                       if all(isinstance(args, list)
+                              and len(args) == len(by_name[fn].get("params") or [])
+                              and builds(args[i], key, local[key])
+                              for key, args in calls[fn])}
+        kept_returns = {fn for fn in returns_ok
+                        if all(builds(r.get("expr"), ("fn", fn), local[("fn", fn)])
+                               for r in returns[fn])}
+        if kept_params == params_ok and kept_returns == returns_ok:
+            break
+        params_ok, returns_ok = kept_params, kept_returns
+    return {key[1]: names for key, names in local.items()
+            if key[0] == "fn" and names}
 
 
 def _render_builtin(method, target: str, args: list, recv: str | None = None) -> str:
@@ -4948,6 +5258,13 @@ def _expr(node: dict) -> str:
         # `_fv :=` temp (item 436 F4: drop the measured `inline field _fv :=`).
         tgt = node["target"]
         atom = isinstance(tgt, dict) and tgt.get("kind") == "var"
+        if atom and tgt.get("name") in _PY_DICT_LOCALS:
+            # issue #3407: the receiver is a record this document built, so
+            # it is a dict and the shape dispatch has nothing to dispatch on.
+            got = _expr(tgt)
+            if node.get("opt"):
+                return f"{got}.get({node['name']!r})"
+            return f"{got}[{node['name']!r}]"
         return _field_read(_expr(tgt), node["name"],
                            opt=bool(node.get("opt")), rereadable=atom)
     if kind == "index":
@@ -5324,8 +5641,9 @@ def _emit_memo_wrapper(name: str, params: list, is_async: bool) -> "_Lines":
     return out
 
 
-def _emit_functions(functions: list, function_ceilings: dict | None = None) -> "_Lines":
-    global _PY_IN_ASYNC, _PY_AWAIT_LOCALS, _PY_IN_ARROW
+def _emit_functions(functions: list, function_ceilings: dict | None = None,
+                    dict_locals: dict | None = None) -> "_Lines":
+    global _PY_IN_ASYNC, _PY_AWAIT_LOCALS, _PY_IN_ARROW, _PY_DICT_LOCALS
     out = _Lines()
     # issue #2688: the runtime backstop tag. A local function that reaches a
     # budgeted extern carries the declaration it inherits, so a crossing that
@@ -5352,6 +5670,7 @@ def _emit_functions(functions: list, function_ceilings: dict | None = None) -> "
             _PY_IN_ARROW = False
             _PY_AWAIT_LOCALS = {p["name"] for p in fn["params"]
                                 if _is_async_fn_type(p.get("type"))}
+            _PY_DICT_LOCALS = (dict_locals or {}).get(fn.get("name"), frozenset())
             # item 310: a `cache pure` fn renders its real body under a private name
             # and gains a memo wrapper under the public one (below), so every caller
             # — including a first-class value reference — goes through the table.
@@ -5371,6 +5690,7 @@ def _emit_functions(functions: list, function_ceilings: dict | None = None) -> "
         _PY_IN_ASYNC = False
         _PY_IN_ARROW = False
         _PY_AWAIT_LOCALS = set()
+        _PY_DICT_LOCALS = frozenset()
     return out
 
 
@@ -5616,7 +5936,10 @@ def _emit_externs(externs: list, crossings: dict | None = None,
                        f"{name!r}, {required!r}, {defaults!r})")
         body = textwrap.dedent(bodies["py"].strip("\n"))
         if body:
-            for line in body.splitlines() or [""]:
+            # #3131: split on newlines only, never on U+0085, U+2028 and the
+            # C0 separators, so a comment stays one comment in the module.
+            body_lines, _check_host_body = _host_body_scanner()
+            for line in body_lines(body):
                 out.add(1, line)
         # an injected secret or config local is a statement in its own right;
         # a body of only comments is not (issue #2284)
@@ -7271,7 +7594,8 @@ def emit(ir: dict) -> str:
             out.add(0)
         out.extend(_emit_types(types))
     if functions:
-        out.extend(_emit_functions(functions, function_ceilings))
+        out.extend(_emit_functions(functions, function_ceilings,
+                                   _dict_receivers(ir)))
     if externs:
         out.extend(_emit_externs(externs, crossings, gated=bool(components)))
     if tests:

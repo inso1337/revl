@@ -213,6 +213,18 @@ OFFLINE_NOTE = (
     "enough to inform the mode at all."
 )
 
+#: The per-entry replay status (issue #2808, Slice 2). Stated beside the
+#: decisions so the two verdicts are not read as one:
+REASONING_NOTE = (
+    "`fromRecord` says the recorded ANSWER can be served without calling the "
+    "model, which only a retained completion makes true. `rederivable` says "
+    "the answer can be reproduced from the prompt. A `hidden` or `summary` "
+    "reasoning span makes `rederivable` false, because part of the decision "
+    "was not on the record; it does not make `fromRecord` false, because a "
+    "retained answer is still there to serve. A pre-3.0 record is not claimed "
+    "rederivable: it does not say whether an opaque span existed."
+)
+
 
 def _load(path: str) -> dict:
     try:
@@ -310,6 +322,16 @@ def _reading(record: dict, key) -> dict:
     A genuine, genuinely-signed record lifted onto another crossing is refused
     there; keeping the WAL's key here is what lets a reader see WHERE it was
     found while the refusal says what it named.
+
+    Per-entry replay status (issue #2808, Slice 2) rides beside the reading:
+
+    * ``fromRecord``: the recorded ANSWER can be served without calling the
+      model. True only when a verified record retained its completion text.
+    * ``rederivable``: the answer can be reproduced from the prompt. A
+      ``hidden`` or ``summary`` reasoning span makes it false, with the reason
+      named, because part of the decision was not visible. A pre-3.0 record is
+      also not claimed rederivable: it does not say whether an opaque span
+      existed, and silence is not evidence that it did not.
     """
     crossing = [record.get("component"), record.get("stepIndex")]
     refused = record.get(WAL_REFUSAL_MEMBER)
@@ -323,20 +345,60 @@ def _reading(record: dict, key) -> dict:
         "reason": "",
         "decision": None,
         "reproducible": None,
+        "reasoningVisibility": None,
+        "reasoningTokens": None,
+        "opaqueReasoning": False,
+        "fromRecord": False,
+        "rederivable": False,
+        "rederivableReason": "",
     }
     if evidence is None:
         entry["reason"] = (
             "this crossing carries no `%s` member: the run did not seal it, or "
             "it predates item 517 Slice 2. Both read the same way here"
             % WAL_EVIDENCE_MEMBER)
+        entry["rederivableReason"] = entry["reason"]
         return entry
     if key is None:
         entry["reason"] = ("a seal is present and no key was supplied, so it "
                            "was not checked and nothing is read out of it")
+        entry["rederivableReason"] = entry["reason"]
         return entry
     reading = reconstruct(evidence, key, at=tuple(crossing))
     reading["crossing"] = crossing
     entry.update(reading)
+    if not entry["verified"]:
+        entry["rederivableReason"] = entry["reason"]
+        return entry
+    decision = entry["decision"]
+    reasoning = decision.get("reasoning")
+    reasoning = reasoning if isinstance(reasoning, dict) else None
+    visibility = reasoning.get("visibility") if reasoning else None
+    tokens = reasoning.get("tokens") if reasoning else None
+    tokens = tokens if isinstance(tokens, dict) else {}
+    entry["reasoningVisibility"] = visibility
+    entry["reasoningTokens"] = tokens.get("value")
+    entry["opaqueReasoning"] = visibility in ("hidden", "summary")
+    entry["fromRecord"] = bool(decision.get("retainedCompletion"))
+    if entry["opaqueReasoning"]:
+        entry["rederivableReason"] = (
+            f"the host returned a {visibility} reasoning span; the answer "
+            "cannot be reproduced from the prompt because that span is not "
+            "on the record")
+        return entry
+    if visibility is None:
+        entry["rederivableReason"] = (
+            "the record predates envelope 3.0, so whether the host returned "
+            "an opaque reasoning span is unknown; it is not claimed "
+            "rederivable")
+        return entry
+    reproducible = entry.get("reproducible") or {}
+    if not reproducible.get("ok"):
+        entry["rederivableReason"] = (
+            "the record cannot be re-run from what it carries: missing "
+            + ", ".join(reproducible.get("missing") or []))
+        return entry
+    entry["rederivable"] = True
     return entry
 
 
@@ -398,6 +460,7 @@ def plan(path: str, mode: Optional[str] = None,
 
     modes = MODES if mode is None else (mode,)
     plans = [_mode_plan(m, present) for m in modes]
+    opaque = [entry for entry in readings if entry.get("opaqueReasoning")]
 
     return {
         "kind": "revl.replay-plan",
@@ -408,11 +471,16 @@ def plan(path: str, mode: Optional[str] = None,
         "decisions": readings,
         "modes": plans,
         "present": present,
+        "opaqueSpans": {
+            "count": len(opaque),
+            "crossings": [entry.get("crossing") for entry in opaque],
+        },
         "requirements": {req: REQUIREMENTS[req]
                          for m in modes for req in _mode_requires(m)},
         "offlineNote": OFFLINE_NOTE,
         "pre3aNote": PRE_3A_NOTE,
         "decisionNote": DECISION_NOTE,
+        "reasoningNote": REASONING_NOTE,
     }
 
 
@@ -453,6 +521,26 @@ def render(doc: dict) -> str:
             lines.append(f"          asked   : {d['sampling']}")
             lines.append(f"          rule    : policy "
                          f"{d['policyDigest'][:16]}, key {d['keyId']}")
+            reasoning = d.get("reasoning")
+            if isinstance(reasoning, dict):
+                count = (reasoning.get("tokens") or {}).get("value")
+                digest_value = reasoning.get("digest")
+                lines.append(
+                    f"          reasoning: {reasoning.get('visibility')}, "
+                    f"{count if count is not None else 'unreported'} "
+                    f"host-reported token(s), "
+                    + (f"digest {digest_value[:16]}" if digest_value
+                       else "no digest"))
+            else:
+                lines.append("          reasoning: not recorded (pre-3.0 "
+                             "envelope)")
+            status = (f"          replay  : from record "
+                      f"{'yes' if entry.get('fromRecord') else 'no'}, "
+                      f"rederivable "
+                      f"{'yes' if entry.get('rederivable') else 'no'}")
+            if entry.get("rederivableReason"):
+                status += f" ({entry['rederivableReason']})"
+            lines.append(status)
             if not repro.get("ok", True):
                 lines.append("          re-runnable: no, missing "
                              + ", ".join(repro.get("missing") or []))
@@ -465,6 +553,18 @@ def render(doc: dict) -> str:
                          + entry.get("reason", ""))
         else:
             lines.append(head + "no evidence on the record")
+    verified = [entry for entry in doc.get("decisions") or []
+                if entry.get("verified")]
+    opaque = doc.get("opaqueSpans") or {}
+    count = opaque.get("count", 0)
+    if count:
+        listed = ", ".join(f"{crossing[0]}#{crossing[1]}"
+                           for crossing in opaque.get("crossings") or [])
+        lines.append(f"  opaque reasoning spans: {count} of {len(verified)} "
+                     f"verified decision(s): {listed}")
+    else:
+        lines.append(f"  opaque reasoning spans: none in {len(verified)} "
+                     "verified decision(s)")
     lines.append("")
     for mode in doc["modes"]:
         mark = "plannable" if mode["plannable"] else "not plannable"
@@ -478,11 +578,13 @@ def render(doc: dict) -> str:
     lines += ["", "  " + doc["offlineNote"], "  " + doc["pre3aNote"]]
     if doc.get("decisionNote"):
         lines.append("  " + doc["decisionNote"])
+    if doc.get("reasoningNote"):
+        lines.append("  " + doc["reasoningNote"])
     return "\n".join(lines)
 
 
 __all__ = [
     "MODES", "MODE_RECORD_REQUIRES", "MODE_EXECUTOR_REQUIRES", "MODE_INTENT",
-    "REQUIREMENTS", "RECORD_MODEL_DECISION", "DECISION_NOTE", "ReplayPlanError",
-    "plan", "render",
+    "REQUIREMENTS", "RECORD_MODEL_DECISION", "DECISION_NOTE", "REASONING_NOTE",
+    "ReplayPlanError", "plan", "render",
 ]

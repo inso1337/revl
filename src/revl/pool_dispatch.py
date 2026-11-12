@@ -166,6 +166,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional, Union
 
+from . import _childproc
 from . import (peer_identity, peer_pool, pool_bundle, pool_health,
                pool_receipt, pool_state)
 from .lawful_retry import EffectClass
@@ -1008,8 +1009,8 @@ def execute(runner: str, source: Artifact, workspace: Path,
         # No stdin: the runner reads nothing from the peer process, so a
         # runner that would prompt gets end-of-file instead of waiting on
         # whatever `pool serve` was started with.
-        done = subprocess.run(argv, cwd=str(workspace), capture_output=True,
-                              stdin=subprocess.DEVNULL, text=True,
+        done = _childproc.run(argv, cwd=str(workspace), capture_output=True,
+                              stdin=subprocess.DEVNULL,
                               timeout=timeout, check=False)
         code, out, err = done.returncode, done.stdout, done.stderr
     except subprocess.TimeoutExpired:
@@ -1531,6 +1532,7 @@ def verify_delivery(answer: Mapping[str, Any], *, charter_record: Mapping[str, A
                         f"the receipt was refused on {check.link}: "
                         f"{check.reason}",
                         task_id=check.task_id, receipt_link=check.link,
+                        attestation_verdict=attestation.get("verdict", ""),
                         check=check.as_dict())
     return {"ok": True, "task_id": check.task_id,
             "receipt_digest": check.digest,
@@ -1656,7 +1658,8 @@ def _settle(*, pool_dir, peer_id: str, task_id: str,
         charter_record, roster = peer_pool.load_pool(pool_dir)
         directory = peer_pool.load_directory(pool_dir)
         ledger = load_ledger(pool_dir)
-        outcome = _record_answer(ledger, charter_record=charter_record,
+        outcome = _record_answer(ledger, roster=roster,
+                                 charter_record=charter_record,
                                  directory=directory, peer_id=peer_id,
                                  task_id=task_id, member=member,
                                  answer=answer,
@@ -1669,13 +1672,81 @@ def _settle(*, pool_dir, peer_id: str, task_id: str,
     return outcome
 
 
-def _record_answer(ledger: "DeliveryLedger", *, charter_record, directory,
+def _violation_for_receipt_refusal(receipt_link: str,
+                                   attestation_verdict: str) -> str:
+    """The violation kind a refused receipt names, or "" when it names none.
+
+    Only refusal links that are a member breaking its terms map to a kind,
+    rather than a malformed record handed in by somebody else. Offer drift and
+    unanswered probes are observed outside a delivery and get their records
+    from their own detection sites.
+
+    Of the two delivery events mapped here, only ``receipt-artifact-mismatch``
+    has a detection site today. ``attestation-rejected`` has none yet:
+    :func:`verify_delivery` makes the attestation itself with
+    ``pool_receipt.attest_receipt`` and its default verdict ``admitted``, so
+    the verdict that reaches this mapping is always ``admitted`` and the
+    second branch cannot fire from a settlement. The detection site would be
+    that ``attest_receipt`` call in :func:`verify_delivery`, once the operator's
+    attesting step can decide a verdict other than ``admitted`` and passes it
+    as ``verdict=``. The branch is kept so that event maps to the closed list
+    the moment it exists."""
+    if receipt_link == pool_receipt.LINK_RECEIPT_ARTIFACT:
+        return peer_pool.VIOLATION_RECEIPT_ARTIFACT
+    if (receipt_link == pool_receipt.LINK_ATTESTATION_AUTHORITY
+            and attestation_verdict
+            and attestation_verdict != pool_receipt.ADMITTED):
+        return peer_pool.VIOLATION_ATTESTATION_REJECTED
+    return ""
+
+
+def _record_refusal_violation(roster: peer_pool.Roster, peer_id: str,
+                              verdict: Mapping[str, Any], *,
+                              receipt: Any, member: peer_pool.Membership,
+                              task: Optional[Mapping[str, Any]]) -> None:
+    """Record one violation for a refused answer, in the roster's ledger.
+
+    RECORD ONLY: the member row is not touched and nothing here can move a tier
+    or a grant. A peer that is no longer a member by the time the answer
+    settles is not recorded against, because a violation is a record about a
+    member and the ledger already holds the refused delivery.
+
+    Nor is a receipt that is not this membership's answer to this task: one
+    issued before the membership began, or one whose ``task_digest`` is not the
+    task being settled. ``check_receipt`` runs the artifact check before those
+    two, so such a receipt (a replay from another pool directory with the same
+    pool id, say) is refused on ``receipt-artifact``; it stays refused as
+    before, and nothing is written against the member, because what it shows
+    is what the key signed elsewhere, not what this member did here."""
+    kind = _violation_for_receipt_refusal(
+        str(verdict.get("receipt_link", "")),
+        str(verdict.get("attestation_verdict", "")))
+    if not kind or peer_id not in roster.members:
+        return
+    if not pool_receipt.answers_membership_task(
+            receipt if isinstance(receipt, Mapping) else {},
+            admitted_at=member.admitted_at, task=task):
+        return
+    peer_pool.record_violation(
+        roster, peer_id, kind, detail=str(verdict.get("reason", "")),
+        link=str(verdict.get("receipt_link", "")))
+
+
+def _record_answer(ledger: "DeliveryLedger", *, roster: peer_pool.Roster,
+                   charter_record, directory,
                    peer_id: str, task_id: str, member: peer_pool.Membership,
                    answer: Mapping[str, Any],
                    attesting_identity: peer_identity.PeerIdentity,
                    network_exposed: bool = False,
                    task: Optional[Mapping[str, Any]] = None) -> dict:
-    """Decide what the answer means and write it into ``ledger``."""
+    """Decide what the answer means and write it into ``ledger``.
+
+    A refused receipt that names one of the closed violation kinds is also
+    recorded against the member in the ROSTER (issue #2722): the refusal was
+    already refused and is already in the delivery ledger, and this is the
+    member-level record an operator reads in `pool status`. It changes no
+    authority; the entry stays a record until a charter policy says otherwise.
+    """
     if not answer.get("ok"):
         link = str(answer.get("link", LINK_RECEIPT_REFUSED))
         if link != LINK_PEER_UNREACHABLE:
@@ -1690,6 +1761,9 @@ def _record_answer(ledger: "DeliveryLedger", *, charter_record, directory,
                               attesting_identity=attesting_identity,
                               network_exposed=network_exposed, task=task)
     if not verdict.get("ok"):
+        _record_refusal_violation(roster, peer_id, verdict,
+                                  receipt=answer.get("receipt"),
+                                  member=member, task=task)
         ledger.refuse(task_id=task_id, link=str(verdict.get("link", "")),
                       reason=str(verdict.get("reason", "")))
         return dict(verdict, task_id=task_id)

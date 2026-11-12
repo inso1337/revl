@@ -1,0 +1,39 @@
+// emission_with_undo - an emission is given an inverse instead of a compensation
+//
+// Seeded defect: the settlement is irreversible by declaration, but the call site tries `emit ... undo`; revl has no inverse slot on an emission, only `compensate`.
+// Expected catch: compile (parse refusal; the parser reports G6)
+// Corpus index: bench/saga_defects/defects.json (issue #2736)
+
+service Inventory {
+  fn reserve(sku: Str, qty: Int) -> Int
+  fn release(sku: Str, qty: Int) -> Int
+}
+
+service Payments {
+  fn charge(order: Str, cents: Int) -> Str
+  fn refund(order: Str, cents: Int) -> Int
+  emission fn settle(order: Str, cents: Int) -> Int
+  fn reverse(order: Str, cents: Int) -> Int
+}
+
+component Warehouse provides inventory: Inventory {
+  let rows = effect Map.new() undo rows.drop()
+  provide inventory {
+    fn reserve(sku, qty) = rows.insert(sku, qty)
+    fn release(sku, qty) = rows.remove(sku)
+  }
+}
+
+component Ledger provides payments: Payments {
+  let rows = effect Map.new() undo rows.drop()
+  provide payments {
+    fn charge(order, cents) = rows.insert(order, cents)
+    fn refund(order, cents) = rows.remove(order)
+    fn settle(order, cents) = rows.insert(order, cents)
+    fn reverse(order, cents) = rows.remove(order)
+  }
+}
+
+component Checkout requires inventory: Inventory, payments: Payments {
+  emit payments.settle("order-1", 4200) undo payments.reverse("order-1", 4200)
+}

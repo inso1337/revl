@@ -1962,7 +1962,12 @@ def test_bounded_tiers_emit_checked_int_negation():
     tier's checked mechanism, never the host's wrapping unary minus."""
     assert "revlSub(0, " in _emit("go", NEG_INT_MIN)
     assert "revlNeg(" in _emit("java", NEG_INT_MIN)
-    assert "revlI64(-" in _emit("typescript", NEG_INT_MIN)
+    # issue #2904: in a fn body ts tests the bound inline and traps through
+    # `revlI64`; the execution half is test_negation_of_int_min_traps.
+    ts = _emit("typescript", NEG_INT_MIN)
+    assert ("(BigInt.asIntN(64, $revl_i64 = -x) === $revl_i64"
+            " ? $revl_i64 : revlI64($revl_i64))") in ts
+    assert "if (BigInt.asIntN(64, v) !== v) throw new RangeError('revl: Int overflow')" in ts
 
 
 # -------------------------------------------------- Int.MIN / -1 overflows too

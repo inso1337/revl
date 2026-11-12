@@ -116,6 +116,66 @@ trust = deploy.TrustStore(keys={key_id: verify_key}, backend="python",
                           require_gauntlet=True, require_conformance=True)
 ```
 
+### Setting the receiver's rules on the far host
+
+`TrustStore` is the receiver's, so the far host sets these rules on its OWN
+command line, never in a request (design S2.4). `revl deploy-admit` accepts one
+flag per rule, and all of them are opt-in:
+
+| flag | `TrustStore` field | refuses |
+| --- | --- | --- |
+| `--max-age SECONDS` | `evidence_ttl_seconds` | `evidence-stale` when the signed timestamp is more than SECONDS old |
+| `--not-before INSTANT` | `not_before` | `evidence-stale` when the attestation predates INSTANT (a unix timestamp or an ISO-8601 instant), typically the last deploy this host accepted |
+| `--capability-ceiling NAME` | `capability_ceiling` | `capability-ceiling` when the staged composition reaches a capability outside the repeated names |
+| `--revoked-key KEY_ID` | `revoked` | `signer-untrusted` when the signer's key is listed; repeatable, so one signer is revoked while the other key files stay in force |
+| `--recheck-source` | `recheck_source` | `source-or-ir-hash` unless the host's own frontend admits the staged source and reproduces the staged IR |
+
+A runner that names none of them keeps Slice 1's behaviour: the rules default
+to off, and an unconfigured host still admits what a trusted key signed.
+
+Two checks run when the runner starts. `--max-age` and `--not-before` each take
+one value, so giving either one twice is refused with a message naming the flag
+(a repeat would otherwise let the later value quietly replace the earlier one).
+`--revoked-key` refuses an empty id and an id that matches no key loaded with
+`--key`, so a typo cannot leave the signer trusted without a signal.
+
+Behind `via = ssh`, the same flags arrive through the deploy map's `extra_args`
+(the allowlist there is exactly the runner's own flags):
+
+```toml
+[processes.worker.deploy]
+via             = "ssh"
+host            = "deploy@edge"
+known_hosts     = "/etc/revl/known_hosts"
+host_key        = "/etc/revl/edge-receipt.key"
+remote_bundle   = "/srv/revl/app.revlbundle"
+extra_args      = ["--key", "/etc/revl/deploy/trust.key",
+                   "--max-age", "604800",
+                   "--not-before", "2026-01-01T00:00:00+00:00"]
+```
+
+That map is the conductor's file. A conductor the host does not control can
+leave these flags out, and the far runner then starts with none of the rules
+set. A host that needs its rules to hold whatever the conductor sends pins them
+itself: an sshd forced command (`command=` on the conductor's key in
+`authorized_keys`, or `ForceCommand`) or a host-side wrapper script that runs
+`revl deploy-admit` with the flags already on its command line. A rule the
+wrapper does not carry stays off.
+
+A wrapper must not forward the conductor's arguments to `revl deploy-admit`.
+Most of the runner's flags can be repeated or replaced, so forwarded arguments
+can widen a `--capability-ceiling`, add a trusted `--key` or replace
+`--host-key`. If a wrapper has to forward any, it filters them down to the
+switches that only tighten the rules: `--require-gauntlet`,
+`--require-conformance` and `--recheck-source`. The startup refusal of a
+repeated `--max-age` or `--not-before` covers those two flags only; it is not a
+guard for the others.
+
+The local `revl deploy --bundle` check (`admit_bundle_chain`) is the conductor
+verifying a bundle on its own disk; it takes the keys, the backend and the two
+`--require-*` floors, and none of the receiver-side rules above. Those belong to
+the host that will run the bytes, which is the `revl deploy-admit` runner.
+
 ### The ceiling is measured off the IR, not off `policy.json`
 
 `policy.json` is a **projection**: `build_bundle` derives it from the IR with

@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import lifecycle
+from . import _childproc, lifecycle
 from .compiler import compile_files
 from .errors import RevlError
 from .holes import refuse_admission
@@ -289,10 +289,9 @@ def _start_vite(frontend: Path, host: str, port: int) -> subprocess.Popen[str]:
     # other process while the composition is served somewhere else.  With it,
     # Vite exits instead of moving and the boot check below reports the port
     # failure on the URL `revl dev` was asked to serve.
-    return subprocess.Popen(
+    return _childproc.popen(
         [npm, "run", "dev", "--", "--host", host, "--port", str(port), "--strictPort"],
         cwd=frontend,
-        text=True,
     )
 
 

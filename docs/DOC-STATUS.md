@@ -79,7 +79,7 @@ regenerated rather than edited.
 | composition-rows.md | needs-work | 24 |  |
 | conformance.md | needs-work | 0 |  |
 | contract-errata.md | needs-work | 56 | yes |
-| crash-recovery.md | needs-work | 52 |  |
+| crash-recovery.md | needs-work | 51 |  |
 | dash.md | current | 9 |  |
 | delivery-semantics.md | needs-work | 0 |  |
 | deploy.md | needs-work | 12 |  |
@@ -97,6 +97,7 @@ regenerated rather than edited.
 | fix-code.md | needs-work | 10 |  |
 | fmt.md | needs-work | 12 |  |
 | frontend-assets.md | needs-work | 13 |  |
+| function-specs.md | needs-work | 0 |  |
 | function-types.md | needs-work | 31 |  |
 | gate-as-a-service.md | needs-work | 21 | yes |
 | gate-dependency-contract.md | stale-fixed | 0 |  |
