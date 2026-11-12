@@ -3194,6 +3194,56 @@ An operator credential sent to the face is only an app request: the face has no
 bound, untouched, only into a routed `Bearer` parameter for the application's
 own validation (item 457).
 
+**Updating a served composition without a restart (issue #3430).** The
+operator listener serves the compiler server's swap verbs on the face's
+session, so a new version is admitted and cut over while the face keeps its
+port and its process:
+
+```sh
+revl serve --http app.rvl --operator-listen 127.0.0.1:8471 \
+    --operator-profile ops.profile
+# ops.profile grants the operator that updates it:
+#   operator deploy key sha256:<sha256 of the bearer secret>
+#   operator deploy may swap, undo on *
+```
+
+Each step is one MCP `tools/call` to `http://127.0.0.1:8471/mcp` with
+`Authorization: Bearer <secret>` (any MCP client over the Streamable HTTP
+transport, [mcp-http-transport.md](mcp-http-transport.md)):
+
+1. `revl_plan` with `{"source": "<the new app.rvl>"}` (or `files`/`modules`):
+   the delta against the running composition, nothing applied. Needs no grant.
+   A successor the face cannot serve (below) is `"admissible": false` with
+   the swap's code, so the plan answers what the swap will.
+2. `revl_swap` with the same arguments (grant `swap`): the candidate is admitted
+   against the running composition, then cut over. The face answers the next
+   app request from the new generation. A candidate admission refuses is an
+   `"ok": false` answer and the face keeps answering from the running one.
+3. `revl_undo` (grant `undo`) returns to the previous generation (`to` names an
+   older retained one), through the same admission.
+
+What a swap can change: operation bodies, components, wiring, anything the
+served surface does not show. What it cannot: the face's routes and public
+surface are bound at boot, so a successor that adds, drops or moves a route, or
+changes a served operation's parameters, return, route bindings or a type they
+name, is refused with `"code": "SERVED_SURFACE_CHANGED"` (also the code of its
+diagnostic, and `"swapped": false`), naming each operation, and the running
+composition is untouched. Restart `revl serve` to serve a new surface, as
+`revl run --watch` asks for a change its boot-bound hosts cannot serve (issue
+#1569). An undo or rollback to a generation with another surface is refused the
+same way, and so is a `revl_load` or `revl_restore` after a `revl_unload`: the
+face keeps the surface it bound at boot, so a cold load of the same surface is
+served and one with another is refused, with nothing loaded. A route that binds
+a typed `Request` is rebuilt through the module of the generation that runs, so
+it answers after a swap, an undo or a reload as before it.
+
+A served type is one an operation's parameters, return or route bindings name,
+read off the type positions: a type that only shares its name with a path
+segment or a parameter is not part of the surface. The check errs toward
+refusing. A type named like a field or a case of a served type, or like any
+other identifier in a served operation's entry, counts as served, so a change
+to it is refused although the face could serve it.
+
 ---
 
 ## The component manager

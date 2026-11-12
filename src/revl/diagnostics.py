@@ -344,6 +344,19 @@ OTHER_CODES = {
                "the recorded change) or the candidate reaches further than it "
                "should",
     },
+    "SERVED_SURFACE_CHANGED": {
+        "category": "session",
+        "guarantee": "a served composition is swapped only into a successor "
+                     "its face can serve",
+        "meaning": "the successor adds, drops or moves a route of `revl serve "
+                   "--http`, or changes a served operation's signature or a "
+                   "type it names; the face binds them at boot, so the swap "
+                   "was refused and the running generation is untouched "
+                   "(issue #3430)",
+        "fix": "swap a successor that keeps the served surface (operation "
+               "bodies may change), or restart `revl serve` to serve the new "
+               "surface",
+    },
     # ---- the HTTP face's routed error bodies
     "method": {
         "category": "http",

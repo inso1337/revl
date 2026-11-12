@@ -412,8 +412,15 @@ class HttpComposedServer:
         # `serve_http` wires the live module's decoder for the escape hatch.
         self._decode = decode or (lambda v: v)
         # issue #1553: rebuilds `decode` for a session this face starts to
-        # follow (`_follow`), whose live module is not the one `decode` read
+        # follow (`_follow`), whose live module is not the one `decode` read.
+        # Issue #3430: and for each generation the session moves to (a swap,
+        # an undo, a rollback, an aborted swap's reload, a load after an
+        # unload), each of which runs a module of its own. `_decoded_for` is
+        # the (session, module) `decode` was built for. The module, not the
+        # generation number: a load after an unload starts again at 1.
         self._decoder_for = decoder_for
+        self._decoded_for = ((session, getattr(session, "_module", None))
+                             if decode is not None else (None, None))
         # 569 section 6 (issue #1553): refuse a class-(c) crossing an app request
         # reaches when no approval policy could hold it. Classified against the
         # live composition, rebuilt when its IR changes (a swap, a fork).
@@ -424,6 +431,7 @@ class HttpComposedServer:
         # for the manifest so the fourth quadrant's compiler-derived
         # readOnly/emission classification rides this transport too.
         public = set(public)
+        self._public = frozenset(public)
         self._by_path: dict[str, tuple[str, str, list[str]]] = {}
         self._hints: dict[str, dict] = {}
         for tool in self._composed._advertised:
@@ -441,6 +449,12 @@ class HttpComposedServer:
         # item 457: the declared HTTP routes, resolved from the IR `route` entry.
         self._routes_457: list[_Route] = self._build_routes(session.ir or {})
         self.frontier = gate_version().get("frontier", "")
+        # issue #3430: the routes, the public surface and the declared types are
+        # bound here, at boot, and a body-only swap keeps them. A successor that
+        # would change what this face serves is refused by the session, before
+        # the running generation is touched.
+        self._surface = served_surface(session.ir or {}, self._public)
+        self._guard(session)
 
     # -- the operator listener (issue #1553) -------------------------------
     def attach_operator(self, binding, *, caller, halted, before=None) -> None:
@@ -484,13 +498,42 @@ class HttpComposedServer:
             self._follow(session)
             yield
 
+    def _guard(self, session) -> None:
+        if session is not None and hasattr(session, "served_surface_check"):
+            session.served_surface_check = self.surface_change
+
+    def surface_change(self, ir: dict) -> str | None:
+        """Why this face cannot serve `ir`, or None when it can: a successor
+        that adds, drops or moves a route, changes a served operation's
+        parameters, return or route bindings, or a type they name (issue
+        #3430). Operation bodies are free to change."""
+        changed = _surface_diff(self._surface, served_surface(ir, self._public))
+        if not changed:
+            return None
+        return ("the successor changes what `revl serve --http` serves ("
+                + ", ".join(changed) + "): the face's routes and public surface "
+                "are bound at boot, so the running composition is untouched; "
+                "restart `revl serve` to serve the new surface (issue #3430)")
+
     def _follow(self, session) -> None:
-        if session is None or session is self.session:
+        if session is not None and session is not self.session:
+            self.session = session
+            self._guard(session)
+            self._composed.session = session
+        self._refresh_decoder()
+
+    def _refresh_decoder(self) -> None:
+        """Rebuild `decode` when the session it was built for, or the module
+        that session runs, is no longer the one serving (issue #3430): a typed
+        `Request` is rebuilt through the module that runs now, whose `Method`
+        and `Body` cases the handler matches on."""
+        if self._decoder_for is None:
             return
-        self.session = session
-        self._composed.session = session
-        if self._decoder_for is not None:
-            self._decode = self._decoder_for(session) or (lambda v: v)
+        live = (self.session, getattr(self.session, "_module", None))
+        if live[0] is self._decoded_for[0] and live[1] is self._decoded_for[1]:
+            return
+        self._decode = self._decoder_for(self.session) or (lambda v: v)
+        self._decoded_for = live
 
     def halted(self) -> bool:
         """Whether an operator halted this face (E-Stop): the session says so,
@@ -799,6 +842,7 @@ class HttpComposedServer:
         """Construct the typed `Request` escape-hatch value (a record dict). The
         `method`/`body` variants are rebuilt through the live module's decoder so
         a handler that `match`es on `req.method` sees native cases."""
+        self._refresh_decoder()
         verb = route.method.capitalize()
         raw_body = body.decode("utf-8", "replace") if body else ""
         body_val = ({"$kind": "Text", "$value": raw_body} if raw_body
@@ -1363,6 +1407,68 @@ def build_http_server(server: HttpComposedServer, host: str, port: int, *,
     return Listener(exposure, _make_handler(server, exposure))
 
 
+def served_surface(ir: dict, public=frozenset()) -> dict:
+    """What a face serves from `ir`, keyed by `key.op`: each routed or public
+    operation's signature (its service method entry, route included) and the
+    definitions of the types it names, transitively. Operation bodies live in
+    the components and are not part of it (issue #3430)."""
+    services = ir.get("services") or {}
+    types = ir.get("types") or {}
+    surface = {}
+    for component in ir.get("components") or []:
+        for key, service_name in (component.get("provides") or {}).items():
+            methods = (services.get(service_name) or {}).get("methods") or {}
+            for op_name, op in methods.items():
+                if not op.get("route") and (key, op_name) not in public:
+                    continue
+                surface[f"{key}.{op_name}"] = json.dumps(
+                    {"op": op, "types": _named_types(_typed_part(op), types)},
+                    sort_keys=True, default=str)
+    return surface
+
+
+def _typed_part(op: dict) -> dict:
+    """`op` less the names in it that never name a type: the route's path and
+    each parameter's name (on the parameter, and as a key of the route's
+    bindings). Without them a type that happens to share a path segment's or a
+    parameter's name (`type Echo` beside `route get "/Echo"`) is not read as
+    one the operation names. Every other string is still scanned, so a type
+    position is never dropped; the surface itself compares the whole `op`."""
+    part = dict(op)
+    part["params"] = [{k: v for k, v in param.items() if k != "name"}
+                      if isinstance(param, dict) else param
+                      for param in op.get("params") or []]
+    route = op.get("route")
+    if isinstance(route, dict):
+        route = {k: v for k, v in route.items() if k != "path"}
+        if isinstance(route.get("bind"), dict):
+            route["bind"] = [route["bind"][k] for k in sorted(route["bind"])]
+        part["route"] = route
+    return part
+
+
+def _named_types(value, types: dict) -> dict:
+    """The definitions in `types` that `value` names, closed over theirs."""
+    found: dict = {}
+    pending = [json.dumps(value, sort_keys=True, default=str)]
+    while pending:
+        text = pending.pop()
+        for name in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", text):
+            if name in types and name not in found:
+                found[name] = types[name]
+                pending.append(json.dumps(types[name], sort_keys=True,
+                                          default=str))
+    return found
+
+
+def _surface_diff(before: dict, after: dict) -> list[str]:
+    added = sorted(set(after) - set(before))
+    dropped = sorted(set(before) - set(after))
+    changed = sorted(k for k in set(before) & set(after) if before[k] != after[k])
+    return ([f"adds `{k}`" for k in added] + [f"drops `{k}`" for k in dropped]
+            + [f"changes `{k}`" for k in changed])
+
+
 def _served_ops(face: "HttpComposedServer") -> set:
     """Every `(key, op)` the face serves: its public canonical operations and
     its routed ones, less the withheld."""
@@ -1433,6 +1539,18 @@ def dev_stub_bind_refusal(host: str, environ=None) -> str | None:
             f"REVL_AUTH_ISSUER, REVL_AUTH_AUDIENCE)")
 
 
+def build_face(session, **options) -> "HttpComposedServer":
+    """The face `serve_http` serves `session` through, `options` being
+    `HttpComposedServer`'s keywords.
+
+    Item 457: it is wired with the live module's decoder, so a routed handler
+    binding a typed `Request` (whose `method`/`body` are variants) sees native
+    case instances, and with `_live_decoder` to rebuild that decoder for each
+    generation the session moves to (issue #3430)."""
+    return HttpComposedServer(session, decode=_live_decoder(session),
+                              decoder_for=_live_decoder, **options)
+
+
 def serve_http(ir: dict, config: dict | None = None, *,
                composition: str = "revl", host: str = "127.0.0.1",
                port: int = 8080, exposure: Exposure | None = None,
@@ -1485,12 +1603,8 @@ def serve_http(ir: dict, config: dict | None = None, *,
     # an approval policy needs its spend durable (item 246, Decision 2)
     session.load(ir, config or {}, record=approval_policy is not None,
                  origin=origin)
-    # item 457: wire the live module's decoder so a routed handler binding a typed
-    # `Request` (whose `method`/`body` are variants) sees native case instances.
-    decode = _live_decoder(session)
-    face = HttpComposedServer(session, composition=composition, decode=decode,
-                              declared=declared, decoder_for=_live_decoder,
-                              refuse_ungated_emissions=refuse_ungated_emissions)
+    face = build_face(session, composition=composition, declared=declared,
+                      refuse_ungated_emissions=refuse_ungated_emissions)
     httpd = build_http_server(face, host, port, exposure=exposure)
     if listener is not None:
         listener.face = face

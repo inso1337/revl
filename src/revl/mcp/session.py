@@ -1184,6 +1184,13 @@ class Session:
         # call via the ticket two-step. Set at serve time
         # (`revl mcp serve --approval-policy auto`).
         self.approval_policy = None
+        # issue #3430: set by a face that serves this session (`revl serve
+        # --http`). `served_surface_check(ir)` says why the face, whose routes
+        # and public surface are bound at boot, cannot serve a successor, or
+        # None. A swap (and so an undo or rollback) it refuses leaves the
+        # running generation untouched, as `run --watch` refuses an edit its
+        # boot-bound hosts cannot serve (issue #1569).
+        self.served_surface_check = None
         # issue #2690: the operator-configured attempt budget for the
         # check/admit loop (`revl mcp serve --attempt-limit N`). None = no
         # limit, so refusals carry no `attemptsRemaining` at all. Advisory:
@@ -1592,6 +1599,11 @@ class Session:
         self._refuse_if_halted("load")   # item 443
         if self._driver is not None:
             raise SessionError("a composition is already loaded — swap or unload it")
+        # issue #3430: a face that serves this session keeps the surface it
+        # bound at boot across an unload, so a cold load (and a restore, which
+        # loads through here) answers to it as a swap does. The boot load runs
+        # before any face is built, so it has no check to meet.
+        self._enforce_served_surface(ir)
         checkpoint = _LoadCheckpoint(self)
         try:
             state = self._boot(ir, config, record, origin)
@@ -2261,12 +2273,20 @@ class Session:
             _name_the_candidate(exc, ir)
             raise
 
+    def _enforce_served_surface(self, ir: dict) -> None:
+        """Issue #3430: refuse a successor the serving face cannot follow."""
+        check = self.served_surface_check
+        problem = check(ir) if check is not None else None
+        if problem is not None:
+            raise SessionError(problem, code="SERVED_SURFACE_CHANGED")
+
     def _plan_swap(self, driver, ir: dict, migrate: str,
                    agent_authored: bool) -> "_SwapPlan":
         """Everything `swap` does before the teardown: every gate, rendering
         the successor, and capturing the state that crosses. The running
         generation is still live and serving throughout, and nothing here may
         change it, so a raise from here leaves it exactly as it was."""
+        self._enforce_served_surface(ir)
         self._enforce_sandbox(ir)
         self._enforce_evidence(ir)
         # item 246: classify the candidate and gate its activation reach BEFORE
@@ -2415,7 +2435,11 @@ class Session:
         # aborted (it was made permanent — the swap-owner-scoping data-loss bug).
         self._install_session_owner(ir)
         try:
-            self._run(driver._load(ir, self._prepare_module(ir, plan.rendered)))
+            module = self._prepare_module(ir, plan.rendered)
+            # item 457: the successor's module is the one a typed `Request`
+            # must be rebuilt through, as `_boot` keeps it (issue #3430)
+            self._module = module
+            self._run(driver._load(ir, module))
             # item 334 (EDGE 1): the POST-ACTIVATION HEALTH GATE. `driver._load`
             # returns WITHOUT raising for the two most likely candidate faults —
             # item 372 makes a mid-body FAILED activation "honest and observable"
@@ -2732,8 +2756,11 @@ class Session:
         self._install_session_owner(old_ir)
         try:
             rendered = self._render_cached(driver, old_ir)
-            self._run(driver._load(old_ir,
-                                   self._prepare_module(old_ir, rendered)))
+            module = self._prepare_module(old_ir, rendered)
+            # the reloaded predecessor's module, not the refused successor's
+            # (item 457, issue #3430)
+            self._module = module
+            self._run(driver._load(old_ir, module))
         finally:
             driver.runtime.clear_session_owner()
         for name, info in pre.items():
@@ -5552,6 +5579,8 @@ class Session:
         # 6. mint the branch identity over the (now rewound) shared workspace.
         branch = Session()
         branch.approval_policy = self.approval_policy
+        # issue #3430: the face follows the branch, so its surface check does
+        branch.served_surface_check = self.served_surface_check
         branch.approval_separation = self.approval_separation
         # the durability posture rides with the policy: a fork must not become a
         # session where an approved caller value is recorded that the parent's
