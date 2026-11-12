@@ -8,10 +8,16 @@ import threading
 
 import pytest
 
-from _update_feed_fixture import COMMIT, manifest_for, serve_feed
+from _update_feed_fixture import (COMMIT, TEST_RELEASE_KEY, manifest_for,
+                                  pin_test_key, serve_feed)
 from revl.update import feed as feed_module
 from revl.update.errors import UpdateError
 from revl.update.feed import resolve_manifest_source, resolve_release
+
+
+@pytest.fixture(autouse=True)
+def _pin_fixture_release_key(monkeypatch):
+    pin_test_key(monkeypatch)
 
 
 def test_a_manifest_release_resolves_with_its_fields():
@@ -200,3 +206,50 @@ def test_a_fetched_manifest_may_not_name_a_local_artifact(tmp_path):
     path = tmp_path / "release.json"
     path.write_text(json.dumps(document), encoding="utf-8")
     assert resolve_manifest_source(str(path), project="app").manifest
+
+
+def test_a_networked_manifest_without_a_signature_is_refused():
+    feed = serve_feed(version="1.2.0", signed=False)
+    try:
+        with pytest.raises(UpdateError) as raised:
+            resolve_release("owner/app", api_base_override=feed.base_url)
+    finally:
+        feed.close()
+    assert raised.value.code == "UPDATE_UNSIGNED"
+    assert "not signed" in raised.value.message
+
+
+def test_trust_unsigned_accepts_a_networked_manifest_without_a_signature():
+    feed = serve_feed(version="1.2.0", signed=False)
+    try:
+        release = resolve_release("owner/app", api_base_override=feed.base_url,
+                                  trust_unsigned=True)
+    finally:
+        feed.close()
+    assert release.unsigned_accepted is True
+    assert release.signature == {"status": "trusted-unsigned"}
+    assert release.as_report()["unsignedAccepted"] is True
+
+
+def test_a_signed_manifest_reports_the_pinned_key():
+    feed = serve_feed(version="1.2.0")
+    try:
+        release = resolve_release("owner/app", api_base_override=feed.base_url)
+    finally:
+        feed.close()
+    assert release.signature["status"] == "valid"
+    assert release.signature["keyId"] == TEST_RELEASE_KEY["keyId"]
+    assert release.as_report()["signed"] is True
+
+
+def test_trust_unsigned_does_not_accept_a_broken_signature():
+    # the escape accepts a manifest with no signature at all; one that carries
+    # a signature is verified either way, so a broken value is still refused
+    feed = serve_feed(version="1.2.0", signature_tampered=True)
+    try:
+        with pytest.raises(UpdateError) as raised:
+            resolve_release("owner/app", api_base_override=feed.base_url,
+                            trust_unsigned=True)
+    finally:
+        feed.close()
+    assert raised.value.code == "UPDATE_UNSIGNED"

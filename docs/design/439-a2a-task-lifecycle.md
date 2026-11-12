@@ -1,6 +1,6 @@
 # 439: the A2A Task lifecycle binding, and the first slice
 
-**Roadmap:** item 439 · **Issue:** #118 · **Reasoning of record for the landed slices:** docs/design/439-a2a-transport-binding.md (the importer, `through a2a` / `through a2a_rest`, terminal-only `message/send`, `FilePart`, `Untrusted[T]` tainting) · **Status:** DECISION, 2026-09-08 (decision 3's G8 and trust rows revised 2026-09-13, slice B1; the four ops bound over HTTP+JSON/REST 2026-09-14; the reply's shape gates and the T2 / durable-task-id re-verification 2026-09-14)
+**Roadmap:** item 439 · **Issue:** #118 · **Reasoning of record for the landed slices:** docs/design/439-a2a-transport-binding.md (the importer, `through a2a` / `through a2a_rest`, terminal-only `message/send`, `FilePart`, `Untrusted[T]` tainting) · **Status:** DECISION, 2026-09-08 (decision 3's G8 and trust rows revised 2026-09-13, slice B1; the four ops bound over HTTP+JSON/REST 2026-09-14; the reply's shape gates and the T2 / durable-task-id re-verification 2026-09-14; the T3 dependency re-verified 2026-11-07)
 
 ## What this note decides
 
@@ -212,9 +212,12 @@ client call, and revl now has the right primitive for it: an endpoint (docs/
 design/457-endpoint-one-definition.md). A `route post "/a2a/notify/{task}"`
 operation with a `Bearer` parameter carrying the push token, validated
 explicitly by the handler against the token the start call configured, feeds
-the same `TaskEvent` shape into the consumer. Deferred behind 457 S1. Polling
-stays the canonical feed; push is an optimisation that must not change what the
-consumer sees.
+the same `TaskEvent` shape into the consumer. 457 S1, the routed-endpoint
+surface, landed on 2026-09-08 (`427d366d2`); what remains is the receiver
+itself (`src/revl` has no notify route, and `src/revl/import_a2a.py` records
+webhooks as NOT projected) and the way a pushed
+event reaches the waiting operation. Polling stays the canonical feed; push is
+an optimisation that must not change what the consumer sees.
 
 ## Decision 6: an E-Stop leaves the remote task running, and says so
 
@@ -268,7 +271,7 @@ are still working somewhere else.
 | **T0** | `TransportFault` to withdrawal in the activation runtime | py | none | a fake peer that stops answering withdraws the synthesized provider; the consumer deactivates reactively with a no-residue proof; under `on_failure(result)` the same fault is the `Err` and the provider stays wired |
 | **T1** | `stdlib/a2a.rvl`; the four-op projection on both entry points; `compensate` emitted for `_start`; `Faulted` synthesised on deadline; `Untrusted` on every return | py | T0 | against the fake A2A server used by `tests/test_439_a2a_transport.py`: `_start` returns a `TaskRef`; `_poll` walks `Working` to `Done`; a peer that answers `input-required` yields the event and `_reply` advances it; an owner abort issues exactly one `tasks/cancel` and records it; a peer that stops answering yields `Faulted` and withdraws; a `Done` payload reaching a shell sink is refused without `endorse` |
 | **T2** | the stream form over the same crossings; SSE listener where the card claims streaming | py | 130's stream-valued service operation; T1 | `every ev in sub` sees the same event sequence T1's poll saw; unload closes the listener before the start's compensation runs (LIFO); a silently dead peer resolves the parked `next` as `Faulted` (130 exit tests 4 and 5 against a remote) |
-| **T3** | push notifications as a routed endpoint | py, then ts | 457 S1; T1 | a pushed event and a polled event produce byte-identical `TaskEvent`s; a push without the configured token is `401` and feeds nothing |
+| **T3** | push notifications as a routed endpoint | py, then ts | 457 S1 (landed); T1 | a pushed event and a polled event produce byte-identical `TaskEvent`s; a push without the configured token is `401` and feeds nothing |
 
 T0 and T1 are the first implementable slice for #118. They close the
 load-bearing question with a surface that exists on today's language, keep

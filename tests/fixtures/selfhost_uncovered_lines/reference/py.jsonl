@@ -134,6 +134,10 @@
 
 ["function", "function-type-parser-malformed-spelling-returns-split-fn", "_split_fn_type", 2, 2]
 
+["reason", "host-body-scanner-standalone-bootstrap", "`_host_body_scanner` is the lazy import of the shared `revl.host_body` scanner added for the host-body containment fixes (#3130, #3131, #3162, #3164, #3166). Its `except ModuleNotFoundError` arm runs only when `emit.py` is executed as a script with `revl` not importable, an invocation mode that no corpus document and no refusal document reaches. It is the same class recorded for the `_refuse_deferred_emissions` and `_refuse_validated_emissions` bootstrap above. On the tiers whose corpus carries a host-bodied extern the import and the return are reached and only that arm stays unrun; the java and wasm corpora carry no host-bodied extern, so the whole helper stays unrun there."]
+
+["function", "host-body-scanner-standalone-bootstrap", "_host_body_scanner", 7, 7]
+
 ["reason", "identifier-rejection-in-ident-unusable-python-identifiers-an", "Identifier rejection in _ident: unusable Python identifiers and emitter-reserved scaffolding collisions are negative IR checks. Frontend rejects these source binders; legal Python keywords are mangled and covered by reserved.rvl."]
 
 ["function", "identifier-rejection-in-ident-unusable-python-identifiers-an", "_ident", 2, 2]
@@ -151,6 +155,12 @@
 ["function", "issue-1474-a-provided-method-named-after-a", "_method_access", 1, 1]
 
 ["function", "issue-1474-a-provided-method-named-after-a", "_method_def_name", 2, 2]
+
+["reason", "issue-3407-direct-read-guards-on-input-the-frontend-refuses", "issue #3407: defensive guards in the direct-read analysis whose input the frontend refuses. The duplicate-fn guard (`duplicate function `move``) and the callee-or-let-named-like-a-parameter check (`f` is already declared in this function; `move` is bound here and called in this body, and a module function of that name is in scope): no compiled document reaches them."]
+
+["function", "issue-3407-direct-read-guards-on-input-the-frontend-refuses", "_dict_receivers", 1, 1]
+
+["function", "issue-3407-direct-read-guards-on-input-the-frontend-refuses", "_dict_receivers.builds", 1, 1]
 
 ["reason", "item-130-4-5-replay-rendering-backends-python", "Item 130 §4.5 replay rendering: backends/python/emit.py::_replay_kwarg renders the `replay=` keyword for a provider declaration or a consumer request. selfhost/emit_py.rvl ports the component `host` call but refuses a replay-declaring `Stream.source()` by name, and no corpus document can declare replay yet: the self-host gate refuses the `replay(…)` clause with G1, a false reject the gate/reference census reports for any census-directory document. The reference half is pinned by tests/test_stream_reactive.py, the port's refusal by tests/test_selfhost_emit_py.py::test_a_declared_stream_replay_is_named_not_dropped, and the runtime half by backends/python/tests/test_stream_runtime.py."]
 
@@ -246,7 +256,7 @@
 
 ["function", "the-named-call-an-inverse-or-a-compensation-writes-into-its", "_inert", 2, 2]
 
-["function", "the-named-call-an-inverse-or-a-compensation-writes-into-its", "_named_call_kwarg", 3, 3]
+["function", "the-named-call-an-inverse-or-a-compensation-writes-into-its", "named_call_target", 2, 2]
 
 ["reason", "unknown-generic-annotation-fallback-py-type-erases-arguments", "Unknown generic annotation fallback: _py_type erases arguments of non-List/Map/Opt/Result generic names to Any. Both sources retain this compatibility path; frontend-supported builtins/function types and nominal annotations are exercised by types/branches, rather than inventing an undeclared generic type."]
 

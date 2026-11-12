@@ -31,6 +31,7 @@ never the stored manifest.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from datetime import datetime, timezone
 
@@ -123,7 +124,8 @@ def _read_text(path: str) -> str:
 
 def build_snapshot(ir: dict | None, origin: dict | None,
                    config: dict | None, record: bool = False,
-                   approval: dict | None = None) -> dict | None:
+                   approval: dict | None = None,
+                   applied_release: dict | None = None) -> dict | None:
     """`{sources, manifest, meta}` from *explicit* admission inputs, not a live
     session — the shared core of :func:`snapshot` and of the generation-history
     entries (roadmap item 65, docs/generation-history.md).
@@ -139,6 +141,11 @@ def build_snapshot(ir: dict | None, origin: dict | None,
     than boot the recovered generation ungated (see :func:`restore`). A composition
     admitted with no operator-flag posture stamps nothing, so the meta stays
     byte-identical off-policy.
+
+    `applied_release` is the update release the generation runs, stamped into
+    meta beside `approval` so a restored generation keeps the version gate the
+    journal is no longer trusted to hold. A generation admitted without an
+    update stamps nothing, so its meta stays byte-identical.
     """
     if not origin:
         return None
@@ -155,6 +162,8 @@ def build_snapshot(ir: dict | None, origin: dict | None,
     }
     if approval:
         meta["approval"] = dict(approval)
+    if applied_release:
+        meta["appliedRelease"] = dict(applied_release)
     return {
         "sources": _materialize(origin),
         "manifest": manifest,
@@ -206,7 +215,9 @@ def snapshot(session) -> dict:
 
     snap = build_snapshot(session.ir, session.origin, session.config,
                           session.recorder is not None,
-                          approval=_approval_posture(session))
+                          approval=_approval_posture(session),
+                          applied_release=getattr(session,
+                                                  "applied_release", None))
     # component leases (item 61): reflect the active workspace claims into the
     # persisted meta, so a snapshot records who was iterating on what. Leases
     # are wall-clock TTL claims, so only the still-live ones are carried and
@@ -234,6 +245,28 @@ def admitted_name(snap: dict | None) -> str:
         if isinstance(name, str) and name:
             return name
     return "<snapshot>.rvl"
+
+
+def recompile_snapshot(snap: dict | None, profile=None,
+                       report: dict | None = None) -> dict:
+    """The IR `restore` re-admits from `snap`: its `sources` compiled through
+    the entry points a live `revl_load` uses.
+
+    One spelling for the handler and for the operator gate's target derivation
+    (issue #3197). The gate used to read its targets from the document's
+    `manifest`, which the caller writes, so a snapshot could claim one
+    component and boot another. Deriving from this compile scopes the gate to
+    the composition that runs, not to the document's description of it."""
+    sources = (snap or {}).get("sources") or {}
+    return _recompile(sources, admitted_name(snap), profile=profile,
+                      report=report)
+
+
+def read_digests(disk_reads: dict[str, str] | None) -> dict[str, str]:
+    """The module texts a compile read from disk, as path -> sha256 of the
+    text: what the operator gate decided on (issue #3197)."""
+    return {path: hashlib.sha256(text.encode("utf-8")).hexdigest()
+            for path, text in (disk_reads or {}).items()}
 
 
 def _recompile(sources: dict, name: str = "<snapshot>.rvl",
@@ -369,7 +402,9 @@ def _refuse_policy_downgrade(session, meta: dict) -> None:
 
 
 def restore(session, snap: dict, profile=None,
-            report: dict | None = None) -> dict:
+            report: dict | None = None, *,
+            gate_reads: dict[str, str] | None = None,
+            agent_supplied: bool = False) -> dict:
     """Re-admit a snapshot into `session`, replaying admission.
 
     Refuses if a composition is already loaded. Refuses a snapshot taken under an
@@ -383,6 +418,21 @@ def restore(session, snap: dict, profile=None,
     `profile` is the authoring trust the snapshot's text compiles under (see
     `_recompile`); an agent-supplied snapshot passes the session's, and that
     single compile is both the admission decision and the IR that is loaded.
+
+    `gate_reads` (issue #3197) is set for a restore an operator gate decided
+    on: the modules the gate's own compile read from disk, as
+    :func:`read_digests`. The gate and this boot compile separately, so a
+    boot compile whose disk reads differ (another path, or a changed text)
+    would boot a composition the gate never saw, and is refused before
+    anything loads. The disk semantics are kept: a module still resolves its
+    `asset`, `ref` and body files beside it.
+
+    The `meta.components` cross-check is unconditional for an agent-supplied
+    snapshot (`agent_supplied=True`, which `revl_restore` passes whatever the
+    authoring trust): a caller-written document that leaves the field out
+    claims nothing, and an absent claim is not a match. The operator's own
+    paths (`revl mcp serve --restore`, crash recovery) pass nothing and keep
+    the older rule, skipping the check when the snapshot names no components.
     """
     from .session import SessionError  # noqa: PLC0415
 
@@ -401,27 +451,50 @@ def restore(session, snap: dict, profile=None,
     # any recompile or runtime touch, so the refusal is loud and side-effect-free.
     _refuse_policy_downgrade(session, meta)
 
+    if report is None:
+        report = {}
     try:
-        ir = _recompile(sources, admitted_name(snap), profile=profile,
-                        report=report)
+        ir = recompile_snapshot(snap, profile=profile, report=report)
     except RevlError as error:
         # the load-bearing failure: a snapshot whose component the current
         # checker refuses does not load — it fails here, with the diagnostic
         raise RestoreError.from_revl(error) from None
+    if gate_reads is not None:
+        booted = read_digests(report.get("disk_reads"))
+        drift = sorted(path for path in set(booted) | set(gate_reads)
+                       if booted.get(path) != gate_reads.get(path))
+        if drift:
+            raise RestoreError(
+                f"restore refused: the boot compile read {drift} from disk "
+                "differently from the compile the operator gate decided on "
+                "(a file changed or appeared in between). Put the text in the "
+                "snapshot (`files_content`, `dependencies`) and retry")
 
     # defence in depth: the runtime IR is the freshly compiled one, never the
     # stored manifest. Verify re-admission produced the composition the
     # snapshot described, so a silent drift is a loud refusal, not a smuggle.
+    # Issue #3197: unconditional for an agent-supplied snapshot, whose
+    # document is caller-written: leaving `meta.components` out claims
+    # nothing, and an absent claim is not a match. Keyed on the caller, not
+    # on `profile`, which is None under trusted authoring too. The
+    # operator's own snapshot keeps the older rule.
     claimed = set(meta.get("components") or [])
     got = {entry.get("name")
            for entry in (ir.get("manifest") or {}).get("components") or []}
-    if claimed and claimed != got:
+    if (claimed or agent_supplied) and claimed != got:
         raise RestoreError(
             f"restore refused: re-admission produced components {sorted(got)}, "
             f"but the snapshot claimed {sorted(claimed)} — the sources no "
             f"longer reproduce the snapshotted composition")
 
     state = session.load(ir, config, record=record, origin=_origin_from(sources))
+    # the version gate travels with the generation: an operator restore of a
+    # snapshot that names an applied release puts that release back on the
+    # restored generation. An agent-supplied snapshot does not get to name it.
+    applied = meta.get("appliedRelease")
+    if (profile is None and isinstance(applied, dict)
+            and isinstance(applied.get("version"), str)):
+        session.record_applied_release(applied)
     # rehydrate still-live component leases (item 61) onto the fresh book; ones
     # whose wall-clock TTL has elapsed since the snapshot are silently dropped.
     _restore_leases(session, meta.get("leases") or [])
@@ -431,6 +504,8 @@ def restore(session, snap: dict, profile=None,
         "loadOrder": (ir.get("manifest") or {}).get("loadOrder") or [],
         "reAdmitted": True,
         **state,
+        **({"appliedRelease": dict(applied)}
+           if profile is None and isinstance(applied, dict) else {}),
     }
 
 

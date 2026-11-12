@@ -8,6 +8,11 @@ name: publish
 #
 # The publish is gated on the full CI suite (the same one that gates main),
 # re-run on the tagged commit: a version on PyPI is a claim that suite passed.
+#
+# The upload is then gated again on the tag being a FINAL release. A pre-release
+# tag such as `v2.0.0rc1` runs the tagged commit's CI, but it never reaches
+# PyPI: an index entry cannot be deleted, and a pre-release version is not the
+# release the project means to serve.
 on:
   push:
     tags:
@@ -24,12 +29,18 @@ jobs:
 
   # Sanity gate: the tag must match the version in pyproject.toml. A tag of
   # v2.0.1 publishing a wheel that says 2.0.0 (or vice versa) is a footgun; fail
-  # loudly before building rather than shipping a mislabeled release.
+  # loudly before building rather than shipping a mislabeled release. The same
+  # step classifies the version so the publish job below can refuse a
+  # pre-release.
   check-version:
     runs-on: ubuntu-latest
+    outputs:
+      # `stable` or `prerelease`, from tools/release_channel.py.
+      channel: ${{ steps.version.outputs.channel }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
       - name: Tag matches pyproject version
+        id: version
         run: |
           tag="${GITHUB_REF_NAME#v}"
           proj=$(python3 - <<'PY'
@@ -46,10 +57,17 @@ jobs:
           if [ "$tag" != "$proj" ]; then
             echo "::error::tag v$tag does not match pyproject version $proj"; exit 1
           fi
+          channel=$(python3 tools/release_channel.py "$proj")
+          echo "channel=$channel"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
 
   publish:
     needs: [ci, check-version]
     runs-on: ubuntu-latest
+    # Fail closed: only a version `check-version` classified `stable` uploads.
+    # The comparison is explicit, so an empty or unrecognized output skips this
+    # job instead of publishing something nobody classified.
+    if: ${{ needs.check-version.outputs.channel == 'stable' }}
     # A dedicated environment lets the maintainer add manual-approval and
     # branch/tag protection rules around every release from the repo settings.
     environment:
@@ -122,6 +140,13 @@ jobs:
   github-release:
     needs: [ci, check-version]
     runs-on: ubuntu-latest
+    # The release signing key lives in the protected environment the PyPI
+    # publish already uses, so a release asset and the distribution it
+    # describes are gated by the same approval. A job without the secret fails
+    # at the signing step below instead of publishing an unsigned manifest.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/revl/
     permissions:
       contents: write
     steps:
@@ -137,6 +162,48 @@ jobs:
         run: python3 tools/release_manifest.py --out release.json dist/*
       - name: Validate the manifest the updater will read
         run: python3 tools/release_manifest.py --validate release.json
+      # The updater refuses a networked manifest without a signature from a
+      # pinned release key (UPDATE_UNSIGNED). The private half is the
+      # REVL_RELEASE_SIGNING_KEY secret in the protected `pypi` environment; a
+      # release job with no secret fails here rather than publishing an
+      # unsigned release that no host can verify.
+      - name: Sign the release manifest
+        env:
+          REVL_RELEASE_SIGNING_KEY: ${{ secrets.REVL_RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${REVL_RELEASE_SIGNING_KEY:-}" ]; then
+            echo "::error::REVL_RELEASE_SIGNING_KEY is not set in the protected environment; refusing to publish an unsigned release"
+            exit 1
+          fi
+          key_file="$(mktemp)"
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s' "$REVL_RELEASE_SIGNING_KEY" > "$key_file"
+          chmod 600 "$key_file"
+          python3 tools/release_signing.py sign release.json --key-file "$key_file"
+      - name: Validate the signed manifest
+        run: python3 tools/release_manifest.py --validate release.json
+      # `--validate` only parses the document; it ignores the signature members.
+      # Verify the signed file against the keys this tree pins, so a wrong
+      # identity, domain or an unpinned/expired key stops the release here
+      # instead of publishing a manifest every updater must refuse.
+      - name: Verify the signature against the pinned release keys
+        run: |
+          python3 - <<'PY'
+          import json
+          import sys
+
+          sys.path.insert(0, "src")
+          from revl.update import signing
+
+          with open("release.json", encoding="utf-8") as handle:
+              document = json.load(handle)
+          ok, reason = signing.verify_manifest(document)
+          if not ok:
+              print(f"::error::release.json does not verify against RELEASE_KEYS: {reason}")
+              raise SystemExit(1)
+          print(reason)
+          PY
       - name: Publish the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

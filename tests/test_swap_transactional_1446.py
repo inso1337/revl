@@ -24,6 +24,7 @@ import pytest
 
 import revl.mcp.server as server
 from revl.mcp import admit_bridge, reflect_bridge
+from revl.mcp.session import host_body_entry
 
 pytestmark = pytest.mark.skipif(
     importlib.util.find_spec("cordis") is None,
@@ -299,7 +300,13 @@ def test_a_ticket_a_swap_raised_stays_answerable(tmp_path):
     asked = _call("revl_swap", {"source": candidate})
     assert asked.get("approvalRequired") is True, asked
     ticket = asked["ticket"]
-    assert ticket["unreviewedHostCode"] == [
+    from revl.compiler import compile_source
+    announce = next(extern for extern in
+                    compile_source(candidate, "ticket-1446.rvl")["externs"]
+                    if extern["name"] == "announce")
+    assert ticket["unreviewedHostCode"] == [host_body_entry(announce)]
+    assert [{key: value for key, value in entry.items() if key != "digests"}
+            for entry in ticket["unreviewedHostCode"]] == [
         {"extern": "announce", "classification": "emission", "backends": ["py"]}]
     assert _next()["result"] == 7
     assert server._AUTHORED_HOST_BODIES == before["_AUTHORED_HOST_BODIES"]
@@ -359,8 +366,15 @@ _ANNOUNCE = (
 _BOOT_EMIT = 'emit announce("s", "boot")\n  provide counter {'
 
 
-def _entry(name: str, classification: str) -> dict:
-    return {"extern": name, "classification": classification, "backends": ["py"]}
+def _entry(name: str, classification: str, body: str | None = None) -> dict:
+    """The disclosure record `name` produces from the body these tests use."""
+    bodies = {"announce": "\n    return\n",
+              "alpha": "\n    return x\n",
+              "beta": "\n    return x\n"}
+    return host_body_entry({
+        "name": name, "class": classification,
+        "bodies": {"py": bodies[name] if body is None else body},
+    })
 
 
 def _running_host_code() -> None:
@@ -423,7 +437,8 @@ def test_new_host_code_is_what_the_running_composition_does_not_run_already():
 
     ticket = _call("revl_swap", {"source": changed})["ticket"]
     assert ticket["newHostCode"] == [
-        _entry("alpha", "pure"), _entry("announce", "emission")]
+        _entry("alpha", "pure", "\n    return x + x\n"),
+        _entry("announce", "emission")]
 
 
 def test_an_edit_ticket_names_the_edited_host_code():

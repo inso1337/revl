@@ -1,0 +1,31 @@
+// issue #3304: which provide-method brackets `Frame.adopt_bracket` may
+// coalesce. The #1980 restore and a `remove` on a named key are absolute table
+// inverses; a computed key is evaluated again by the undo, so it is adopted
+// plainly.
+service Kv {
+  fn put(k: Str, v: Str) -> Str
+  fn tag(k: Str, v: Str) -> Str
+  fn set(k: Str, v: Str) -> Str
+}
+
+component Cache provides kv: Kv {
+  let store = effect Map.new() undo store.drop()
+  provide kv {
+    fn put(k, v) {
+      let was = store.get(k)
+      effect store.insert(k, v)
+      undo match was { Some(p) => store.insert(k, p), None => store.remove(k) }
+      return v
+    }
+    fn tag(k, v) {
+      effect store.insert(k.concat("!"), v)
+      undo store.remove(k.concat("!"))
+      return v
+    }
+    fn set(k, v) {
+      effect store.insert(k, v)
+      undo store.remove(k)
+      return v
+    }
+  }
+}

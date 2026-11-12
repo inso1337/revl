@@ -287,7 +287,7 @@ component Cfg provides cfg: Config {
 FIVE_TIERS = ["python", "typescript", "go", "java", "rust"]
 IN_MEMORY = [
     ("grader", GRADER, ALL_TIERS),
-    ("stats", STATS, FIVE_TIERS),        # wasm: no Float value
+    ("stats", STATS, ALL_TIERS),         # wasm Float landed (#3295)
     ("csv", CSV, ALL_TIERS),             # wasm method-body `for` landed (item 458)
     ("lexer", LEXER, ALL_TIERS),    # go carries it since issue #1321
     ("money", MONEY, ALL_TIERS),    # go carries it since issue #1321
@@ -358,7 +358,6 @@ def test_normalizer_emits_on_all_tiers(tmp_path):
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.parametrize("name,source,reason", [
-    ("stats", STATS, "type 'Float' is not lowerable"),
     ("config", CONFIG, "scalar values have no methods"),
 ])
 def test_wasm_remainder_is_a_clear_refusal(name, source, reason):
@@ -366,6 +365,17 @@ def test_wasm_remainder_is_a_clear_refusal(name, source, reason):
     with pytest.raises(Exception) as excinfo:
         backend_emitter("wasm").emit(ir)
     assert reason in str(excinfo.value)
+
+
+def test_wasm_stats_component_now_lowers_float_arithmetic():
+    """Float is a native f64 value since issue #3295, so the floating-point
+    statistics component lowers: its list elements are Float slots and its
+    arithmetic is f64, ending in `.to_str()` (the same canonical renderer)."""
+    ir = compile_source(STATS)
+    wat = _emitted_text("wasm", ir)
+    assert "(f64.add)" in wat and "(f64.mul)" in wat and "(f64.div)" in wat, wat
+    assert "f64.reinterpret_i64" in wat, wat
+    assert "(call $f64_to_str" in wat, wat
 
 
 @pytest.mark.parametrize("name,source,component,helper", [

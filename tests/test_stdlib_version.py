@@ -57,7 +57,10 @@ def test_stamp_is_the_expected_bumped_counter():
     # The stamp is a monotonic counter bumped once per public stdlib change
     # (add/remove/signature). Pinning the literal here makes every future bump
     # DELIBERATE: a public addition that forgets to bump reds this test instead
-    # of shipping a stale stamp. It is "13" as of `stdlib/jose.rvl` (local
+    # of shipping a stale stamp. It is "15" as of `stdlib/socket.rvl`'s ts
+    # tier (issue #3357: `SocketWire` runs on ts too); "14" was `stdlib/wire.rvl`
+    # and `stdlib/socket.rvl` (issue #3357: `Why`, `Kind`, `Knock`, `Wire`,
+    # `why_str`, `Door`, `Listener`, `close_code`); "13" was `stdlib/jose.rvl` (local
     # JWT/JWKS verification: `JoseError`, `JwsHeader`, `Claims`, `VerifyOptions`,
     # `Jwk`, `Verified`, `parse_jwks`, `header_of`, `claims_of`, `check_claims`,
     # `select_key`, `verify`); "12" was `stdlib/net.rvl` (the py-tier outbound
@@ -74,8 +77,8 @@ def test_stamp_is_the_expected_bumped_counter():
     # that landed without a bump (fs.rvl is_dir/lexists/resolve_within,
     # shell.rvl plan_op_name). Raise it here in lock-step with the next public
     # change.
-    assert EXPECTED_STDLIB_VERSION == "13"
-    assert read_stamp(STDLIB) == "13"
+    assert EXPECTED_STDLIB_VERSION == "15"
+    assert read_stamp(STDLIB) == "15"
 
 
 def test_repo_stamp_matches_expected():

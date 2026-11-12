@@ -3,7 +3,11 @@
 **Status:** implemented: `revl update check|fetch|status` on the CLI, and
 `revl_update_check`, `revl_update_apply`, `revl_update_status` and
 `revl_update_rollback` on `revl mcp serve` when the operator starts it with
-`--update`.
+`--update`. A networked release manifest must carry a valid signature from a
+pinned release key; a manifest with no signature at all is refused unless the
+operator passes the `--update-trust-unsigned` escape. The applied release lives
+on the generation history and in snapshot meta, and the update journal is a
+log.
 
 Revl systems already know how to replace a running component: the admission
 gate, the swap, the generation history and the undo are the machinery a
@@ -52,11 +56,21 @@ Rules the parser enforces, each with its own refusal code:
 | `compat` | `language` is required semver; `gateApi`, `irVersion`, `minPython`, `frontier` are optional host facts |
 | `live` | true only when the release was tested as a live update over the previous release |
 | `hostChanges` | true when the release also changes host Python, compiler or venv bytes |
+| signature | a manifest fetched over the network must carry `sign_alg`, `key_id`, `public_key` and `signature` from a key pinned in `src/revl/update/release_keys.py` and valid at the check instant; `UPDATE_UNSIGNED` otherwise. A manifest with no signature at all is the only one `--trust-unsigned` accepts; a manifest that carries one is always verified |
 
 A repository that publishes no manifest still resolves through its newest
 semantic tag. The result says `tagFallback: true`, carries a locally computed
 hash, has no compatibility statement, and is never applied automatically.
 A manifest always wins over a tag.
+
+A networked manifest is signed in place: the release workflow adds
+`sign_alg`, `key_id`, `public_key` and `signature` to `release.json` with
+`peer_identity.sign_record` under the domain `revl.release/1`. The updater
+selects a pinned key by `key_id`, checks that key's `[notBefore, notAfter]`
+window, and calls `peer_identity.verify_record` with the pinned public half.
+The document's own `public_key` is only compared against the pin; it is never
+the key that verifies it. A manifest read from the operator's own disk is not a
+network input and needs no signature.
 
 ## The commands
 
@@ -68,9 +82,9 @@ revl update status  [--home DIR] [--json]
 
 `check` compares the running toolchain (`compiler_version()`, `gate_version()`,
 the IR revision and the interpreter) with the newest release, reports the
-semver bump, whether the release declares itself live-safe, and whether the
-host satisfies its declared gate, language and Python requirements. Exit
-codes are stable for automation:
+semver bump, whether the release declares itself live-safe, whether the
+manifest is signed, and whether the host satisfies its declared gate, language
+and Python requirements. Exit codes are stable for automation:
 
 | exit | meaning |
 | --- | --- |
@@ -82,18 +96,24 @@ codes are stable for automation:
 sha256 and declared size, extracts it safely under the update home
 (`$REVL_UPDATE_HOME`, default `~/.revl/updates`) and writes a
 `provenance.json` beside the sources, with the sha256 of every extracted
-file. A staging is reused only while every file still has that digest and
-none was added or removed, and no link was planted in the tree; otherwise
-the release is fetched and extracted again. Nothing is compiled and nothing is
-executed. Extraction refuses absolute paths, `..`, backslashes, drive paths,
-links and device entries, and bounds the archive at 300 MB and 50,000 files.
+file. A staging is reused only while the kept artifact archive still hashes
+to the signed manifest's declared sha256, no link was planted in the tree, and
+the tree holds exactly the files that archive extracts to, byte for byte: the
+archive is extracted again to compare, so an edit to a source file is caught
+even when the digest in `provenance.json` was edited with it. Otherwise the
+release is fetched and extracted again. Nothing is compiled and
+nothing is executed. Extraction refuses absolute paths, `..`, backslashes,
+drive paths, links and device entries, and bounds the archive at 300 MB and
+50,000 files.
 
 `status` prints the running identity, the staged releases and the update
-journal, which is an append-only JSONL file in the update home.
+journal, which is an append-only JSONL log in the update home.
 
 `--manifest PATH_OR_URL` bypasses the feed and reads that manifest directly.
 The same validation runs, so a mirror document is not a second code path. A
-path that cannot be read is the `MANIFEST_UNREADABLE` refusal, exit 2.
+path that cannot be read is the `MANIFEST_UNREADABLE` refusal, exit 2. A
+manifest fetched over the network is still signature-checked; an operator who
+must accept an unsigned mirror passes `--trust-unsigned`.
 
 ## Applying a release to a running composition
 
@@ -101,52 +121,80 @@ The operator surface is `revl mcp serve --update --update-repo OWNER/NAME`
 (the repository, channel, token environment, staging home and an API mirror
 are all operator flags; a caller cannot name them). Four verbs:
 
+The consent flags are operator grants too: `revl_update_apply` honours one
+only when the server was started with `--update-allow-consent NAME`, so the
+caller that asks for an apply cannot also grant itself a downgrade, an
+incompatible release or a widening.
+
 1. `revl_update_check` reads the feed and compares identities. Nothing is
    fetched or compiled. The release version is compared with the release the
    running composition was updated to (`runningRelease`), never with the
    toolchain's own version: an application feed versions the application.
-   Each apply is recorded in the update journal with the digest of the
-   composition it produced, so the record survives a server restart and a
-   rollback consumes it. A composition no release was applied to has no known
-   release version; one swapped or reloaded by hand after an apply has a
-   version unknown since that apply (`since`, `lastApplied`). Either way
-   `relation` is `unknown`, `updateAvailable` is null and the check fails
-   closed: `applyAvailable` is false and a plan needs `acceptUnknownVersion`.
-   An applied release is not offered again.
+   The applied release is recorded on the generation history entry the apply
+   produced, and in that entry's snapshot meta beside `approval`. The update
+   journal is a log only: a local writer who appends to it cannot move the
+   version gate. An operator restore of a snapshot carries the release; a
+   plain restart without one has no running release. A composition no release
+   was applied to has no known release version; one swapped or reloaded by
+   hand after an apply has a version unknown since that apply (`since`,
+   `lastApplied`). Either way `relation` is `unknown`, `updateAvailable` is
+   null and the check fails closed: `applyAvailable` is false and a plan
+   needs `acceptUnknownVersion`. An applied release is not offered again.
 2. `revl_update_apply` with no `planHash` stages the release, hashes the
    staged bytes, compiles and admits the release against the running
    manifest, plans the swap and returns a `planHash`. Nothing is mutated.
 3. `revl_update_apply` with that `planHash` refuses if the running generation
    or composition moved (the plan is bound to both), refuses if the staged
    bytes changed after they were admitted (the plan is bound to their digest),
-   requires `acknowledgeWidening` when the release widens any authority axis
-   (crossings, reach, capability scopes, host backends, recovery inverses,
-   registers or emission cardinality), swaps the release in and verifies the
-   successor serves the running keys. A successor that does not is reverted
-   automatically. The swap compiles the bytes apply hashed, written to a
-   fresh private directory under the update home, so a write to the staging
+   requires both the operator's `--update-allow-consent acknowledgeWidening`
+   grant and the caller's `acknowledgeWidening` when the release widens any
+   authority axis (crossings, reach, capability scopes, host backends, recovery
+   inverses, registers or emission cardinality), swaps the release in and
+   verifies the successor serves the running keys. A successor that does not is
+   reverted automatically. The swap compiles the bytes apply hashed, written to
+   a fresh private directory under the update home, so a write to the staging
    after the check cannot reach the running composition. The swap copies only
    the release's `.rvl` source files.
 
    Each departure from a plain upgrade needs its own consent on the planning
-   call, and the plan answer reports them under `consents`:
+   call, and the plan answer reports the caller's consents under `consents`
+   and the grants under `operatorConsents`:
 
    | argument | consents to |
    | --- | --- |
    | `force` | planning the release the composition already runs, again |
-   | `acceptUnknownVersion` | a release that cannot be ordered against the running composition, including the first apply to a composition never updated (`UPDATE_VERSION_UNKNOWN` otherwise); a release older than the last applied one still needs `allowDowngrade` |
+   | `acceptUnknownVersion` | a release that cannot be ordered against the running composition, including the first apply to a composition never updated (`UPDATE_VERSION_UNKNOWN` otherwise); a release older than the last applied one still needs `allowDowngrade`. When no retained generation records an applied release, as after a plain restart, the updater cannot order the release at all and this grant also admits an older release, a replayed older signed manifest included, without `allowDowngrade` |
    | `allowDowngrade` | a release older than the running one (`force` alone is `UPDATE_DOWNGRADE`) |
    | `acceptNotLive` | a release whose manifest says `live: false` (`UPDATE_NOT_LIVE` otherwise) |
    | `acceptIncompatible` | a release whose declared gate, language or Python requirements this host does not meet (`UPDATE_INCOMPATIBLE` otherwise); the running gate still admits or refuses it |
+
+   Every consent except `force` is honoured only under the operator's
+   `--update-allow-consent NAME` grant. A caller that passes an ungranted
+   consent is refused with `UPDATE_CONSENT_NOT_GRANTED` where that consent
+   would have lifted the refusal, so a consent flag unlocks nothing a caller
+   grants itself. `force` needs no grant: it re-plans the release the
+   composition already runs and opts into nothing else.
 
    The plan answer reports `live` and `restartRequired`.
 4. `revl_update_rollback` returns to the generation before the last applied
    release, through the same admitted undo `revl_undo` runs (the same
    authoring profile, and an `approvalRequired` ticket answered the same
-   way). A rollback consumes its apply, so a second rollback is
-   `UPDATE_NOTHING_APPLIED`, and it is `UPDATE_ROLLBACK_STALE` when a later
-   generation than the one the apply started is running: going back would
-   also discard that change, so `revl_undo` is the tool for it.
+   way). It reads the generation history, not the journal. A rollback consumes
+   its apply, so a second rollback is `UPDATE_NOTHING_APPLIED`, and it is
+   `UPDATE_ROLLBACK_STALE` when a later generation than the one the apply
+   started is running: going back would also discard that change, so
+   `revl_undo` is the tool for it.
+
+   Each apply writes the bytes it swaps into a fresh directory under
+   `<home>/applied`, and its journal record names that directory. After an
+   apply and after a rollback, the directories this server session's
+   unconsumed applies can still roll back to are kept and the rest are
+   removed: the update home keeps the release chain this session can undo,
+   not every release ever applied. The retained set is bounded like the undo
+   history itself, so a long-lived session does not keep one directory per
+   release ever applied. A directory whose swap was refused or reverted is
+   removed at once, and servers sharing one update home serialize the
+   materialise, swap and prune through a lock file in that home.
 
 A release with no manifest (tag fallback) is never applied unless the
 operator explicitly enabled `--update-trust-tags`: it has no declared sha256,
@@ -163,23 +211,31 @@ still check and stage it.
 Nothing a feed says is trusted until it is verified, and verification never
 replaces the gate:
 
-1. the manifest must validate, and must name the feed's project;
+1. a networked manifest must validate, must name the feed's project, and must
+   carry a valid signature from a pinned key active at the check instant
+   (`UPDATE_UNSIGNED` otherwise; `--update-trust-unsigned` is the operator
+   escape for a manifest that carries no signature at all, never for one whose
+   signature fails);
 2. the artifact must hash to the manifest's sha256;
-3. the running compiler and admission gate must accept the release sources
+3. a reused staging's kept archive must still hash to that sha256, and its
+   tree must be what that archive extracts to, so a source file rewritten
+   together with its `provenance.json` digest is fetched again;
+4. the running compiler and admission gate must accept the release sources
    before any swap is planned;
-4. the operator surface that applies a staged release is a two-stage call
+5. the operator surface that applies a staged release is a two-stage call
    bound to a plan hash, so what is applied is what was planned against the
    generation that is running;
-5. a post-apply health check reverts automatically when the successor does
+6. a post-apply health check reverts automatically when the successor does
    not serve its keys.
 
-There is no signature. The manifest and the artifact are as authentic as the
-channel that served them: TLS to the release host, and the account that
-publishes releases on the feed repository. Whoever can publish a release
-there can publish a manifest whose sha256 matches their own artifact; the
-sha256 binds the artifact to the manifest, not to an author. A manifest
-fetched over the network may not name a `file://` artifact, so a publisher
-cannot choose a file on the host to stage.
+A manifest fetched over the network may not name a `file://` artifact, so a
+publisher cannot choose a file on the host to stage. The signature binds the
+manifest to a release key the maintainer pinned in the installed tree, and the
+artifact sha256 is inside that manifest. A publishing account without the
+signing key can replace an artifact, but not the signed manifest that names
+it, so a host with the key pinned refuses the substitution. A manifest read
+from the operator's own disk is not a network input; it is trusted the way the
+operator trusts their own files.
 
 A release whose bytes are verified is operator-sanctioned code: it may carry
 host bodies, exactly as a checkout the operator compiled would. A release
@@ -213,3 +269,19 @@ python3 tools/release_manifest.py --validate release.json
 sdist and wheel; `release-dryrun.yml` generates and validates it on a schedule
 and on PRs that touch the release path, so the writer cannot drift from the
 reader without a red run.
+
+The release job then signs `release.json` with the private key from the
+protected `pypi` environment and fails when the secret is absent, so a release
+cannot be published unsigned by accident. The maintainer provisions the key
+once:
+
+```
+python3 tools/release_signing.py keygen --private-key-out ~/.config/revl/release-key.json
+```
+
+`keygen` writes the private identity at mode 0600 and prints the entry to paste
+into `RELEASE_KEYS` in `src/revl/update/release_keys.py`. The private identity
+file's whole contents are the `REVL_RELEASE_SIGNING_KEY` environment secret in
+the protected environment. The pinned tuple is empty until then, which refuses
+every networked manifest rather than trusting one; keeping more than one entry
+lets a key rotate without a flag day.

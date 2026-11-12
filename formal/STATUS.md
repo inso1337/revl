@@ -63,7 +63,7 @@ no oracle row is checked against the *paper*, not against `src/revl`.
 | **A3** host-safe identifiers | **none** | 0 | no | lexical, checked by extraction rather than by a theorem shape. **Out of scope by kind** |
 | **A5** compensation accompanies an emission | partial: the registry rule, at every declared computer-use token | 26 | **yes** (one A5 row per declared computer-use capability of every extern, and one per checker-reported A5 refusal; 2 agree-G4) | since issue #2114 `RevL.A5.legalToken` decides A5 — a declaration whose token's reversibility class is `compensatable` must fill its `compensate` slot, and one whose class has NO INVERSE must not. `compensate` is an optional slot (DESIGN.md §3.5), so the guarantee is vacuous until the registry says WHEN it is required; `revl.ui_family.REVERSIBILITY` says exactly that, and the row carries the DECLARED TOKEN so both sides read the class off it through their own copy of the registry (`_a5_class` / `legalToken`), which is what makes their agreement a check rather than a restatement. **The code that carries it is G4 with category `reversibility`, NOT an A5 code — there is none.** `parser.py` calls `ui_family.teardown_refusal` at the extern declaration (the one point where the capability scope, the extern name and the `compensate` clause are all in hand) and raises `code="G4", category="reversibility"`; `reversibility` is the only category in the tree with that one raiser, and the three pre-existing `REFUSED-AT-PARSE` G4 documents report category `guarantee`, so the row's second `checker_alignment` pass discriminates cleanly. Both halves are proved: `RevL.A5.compensatable_without_compensate_refused`, `RevL.A5.no_inverse_may_not_declare`, and `RevL.A5.reversible_untouched` (neither half reaches a verb that already has its inverse). `RevL.A5.registersB_iff`, `RevL.A5.claimsNothingB_iff` and `RevL.A5.legalB_iff` decide each half and their conjunction at one declaration; `RevL.A5.a5B_iff` lifts the rule to a whole file; `RevL.A5.legalToken_iff` decides it at the token and `RevL.A5.legalCols_iff` at the two STRING columns the row carries (the declared token and the `compensate` column), so the class is read from the declared token rather than from a column the exporter computed; `RevL.A5.not_legal_of_legalB_false` is what lets a `fail` explain a refusal instead of being a harness error; `RevL.A5.rung_is_not_an_escape_hatch`, `RevL.A5.valuation_does_not_move_the_class` and `RevL.A5.outside_the_family_is_out_of_the_row` fix the three boundaries of reading the class off a token (a rung is its verb's class, an item-294 valuation does not move it, and an unclassified token is out of the row). `RevL.A5.fixtures_decided` decides the corpus's own declarations at five polarities and `RevL.A5.a5_not_vacuous` / `RevL.A5.witness_bites` show the verdict flips when NOTHING but the `compensate` column moves, in both directions, and does NOT flip for the reversible pair. `a5_coverage` fails the gate unless the corpus carries an admitted `compensatable` declaration WITH its `compensate`, an admitted class-with-no-inverse declaration, and at least one violating row whose file the checker reports as `G4`/`reversibility` (`agree-G4`; `missed-G4` is FATAL). The row is assembled in two places because a parse refusal has no `file_facts`: admitted rows from the export, violating rows from the refusal's own sentence, cross-checked against the shipped registry (a disagreement is recorded in `_A5_UNREADABLE` and fails the gate rather than being silently skipped). Refusing examples: `examples/rejections/a5_compensatable_without_compensate.rvl`, `examples/rejections/a5_no_inverse_declares_compensate.rvl`. `docs/rejections.md`'s former "no refusing example CAN exist" argument is superseded: it held only while `compensate` was read as unconditional, and the registry is what makes it conditional. **Not modelled**: `ui_family`'s scope/session caveats (a token the registry classifies but whose crossing the checker does not reach), and the `witnessed`/`irreversible` classes' own separate rules, which are G4's and not this row's |
 | **A6** provide-methods match the service signature | partial: the call-site half | 4 | **yes** for the call-site half (one MS row per component; 1 agree-A6) | since issue #1809 `RevL.Prelude.MethodOK` decides that every operation a component names (a crossing or a provide-block implementation) is declared by its service. The signature match itself (arity, parameter and return types) is not modelled: the oracle's P row is a *capability bound* check, and `methodBoundOK` is a private restatement. **Unbuilt work** |
-| **A8** mid-body failure reverts and contains | full over the WAL model | 18 | **yes** (1620 O rows) | the row WRITES each scenario's records as a real JSON-Lines WAL and runs `src/revl/recovery.py` over it, diffing recover's own verdict, the set it actually applied to the `World`, and its reported residue against the model's `outcome` / `replayed` / `reported`. It found the legacy-`effect` family's item-309 fence branch missing from `RevL.Lemmas.dispose` (see below). Crash cuts covered: fence-to-apply, abort-then-crash, the approved-to-discharged window. **Not covered and not claimed**: a crash between a witnessed mutation and its record (the reference logs the descriptor *after* the forward extern returns), the roll-forward `flush-residue` surface, cascading abort, escrow. Durability is a floor, not a theorem |
+| **A8** mid-body failure reverts and contains | full over the WAL model | 26 | **yes** (1620 O rows) | the row WRITES each scenario's records as a real JSON-Lines WAL and runs `src/revl/recovery.py` over it, diffing recover's own verdict, the set it actually applied to the `World`, and its reported residue against the model's `outcome` / `replayed` / `reported`. It found the legacy-`effect` family's item-309 fence branch missing from `RevL.Lemmas.dispose` (see below). Crash cuts covered: fence-to-apply, abort-then-crash, the approved-to-discharged window. Since issue #2740 the in-process deferral queue is stated too, as inversions of the step relation: `RevL.A8.abort_drops_deferred` (any step that settles on abort empties the queue and leaves the crossings unchanged) and `RevL.A8.commit_discharges_deferred` (any step that settles on commit empties the queue, firing each entry FIFO and writing a `flushed` record for each), restated over a whole run as `RevL.A8.abort_run_drops_deferred` (the queue is empty and the crossings unchanged), `RevL.A8.commit_run_queue_empty` (the queue is empty) and `RevL.A8.commit_run_discharges_deferred` (the crossings gain the entries queued at the start and then those the run enqueued, FIFO, with a `flushed` record each), with `RevL.A8.deferred_abort_run` / `RevL.A8.deferred_commit_run` / `RevL.A8.deferred_commit_run_from_queued` as non-vacuity witnesses. **Two windows remain open, and are not claimed**: the roll-forward `flush-residue` surface (a deferred emission whose host body RAISED at the flush; the commit theorem fires every entry successfully), and a crash between a witnessed mutation and its record (the reference logs the descriptor *after* the forward extern returns, and `SemStep.witnessed` collapses that into one step). Cascading abort and escrow are also not modelled. Durability is a floor, not a theorem |
 | **A9** provide key declared in `provides`, both directions | full over the installed blocks and routes | 16 | **yes** (one A9 row per component that declares or installs anything; the gate prints the count) | the installed `provide k { … }` block keys and the `isolate k in realms(...)` routed keys are modelled beside the L0 `LComponent` (`RevL.A9.Installed`, no L0 edit); `A9OK` is `BlocksDeclared` (every block key is in the clause, issue 1167) AND `DeclaredInstalled` (every clause key has a block or a route, issue #1172 / PR #1184). `installed_block_is_slot` is the bridge to G2/G3: under A9 every block answers a `(key, realm)` slot of the universe `LinkOK` reasons over; `undeclared_block_is_no_slot` and `declared_uninstalled_refused` are the two fixtures' shapes, `unrouted_needs_a_block` the converse as stated for an ordinary provider, `routed_installs_without_block` the exemption (`stdlib/router.rvl`'s `RoundRobin`). The oracle exports the blocks as `PB` facts and the routes as `PR` facts (the `C` row reads the clause, not the body) and decides `a9B` per component that declares or installs anything; `a9_coverage` fails the gate unless the corpus carries an admitted provider, both refused shapes (`examples/rejections/a9_provide_key_not_declared.rvl`, `examples/rejections/a9_provides_without_block.rvl`, both `agree-A9`; `missed-A9` is FATAL) and the routed shape admitted (`tests/formal_corpus/a9_routes_installs_key.rvl`). The double install ("provision `k` is installed twice", uncoded) is `NoDoubleInstall`, proved distinct from A9 and not under the row: no corpus file installs twice and the refusal carries no code. **Not modelled**: the checker's skip of the converse for a body that recovered past a refused statement (item 386), which can only land in `formal-found-other`; and the route's realm legs, elided from the V row (see the fidelity limits) |
 | **T1/T2/T3** typing, `Opt[T]`, holes | **none** | 0 | no | the type checker is outside the guarantee backbone. **Out of scope by kind** |
 | **R4** no residue | full for the **abort path** | 9 | **yes** (the residue column of the 1620 O rows) | the column is the model's `reported`, diffed against `recover`'s `residue.outstanding`; it is printed only under `outcome = rolledBack`, which is R4's own scope condition. Stated over the abort; the roll-forward window's `flush-residue` surface is still not modelled and the column says `n/a` there rather than agreeing about a claim neither side makes. **Unbuilt work** |
@@ -108,6 +108,79 @@ Three summary readings of that map:
   *which* paths exist — is named in the G9 section rather than left for a
   reader to infer.
 
+## How the guarantees compose
+
+Every guarantee above is checked at one of three scopes, and the scope
+decides what a composition theorem owes. Issue #2742 asked for the
+statement, not an assumption:
+
+- **per-component**: decided over one component (one statement, one
+  declaration, one activation of it). A composition satisfies it exactly
+  when each member does, so linking neither weakens nor strengthens it.
+  `LinkOK` still carries the component's *wiring* side (the requirement
+  is provided somewhere), but the guarantee itself is local.
+- **composition-wide**: a property of the whole set of components and
+  their `(key, realm)` wiring. A component can satisfy its own half and
+  the composition still fail, so the judgment must re-check the union.
+- **lineage-wide**: a property of a chain of admitted activations
+  (spawns). Neither one component's declaration nor the static set of
+  components decides it: the same component can sit under the ceiling at
+  the root of one lineage and exceed it when reached by a spawn edge.
+
+G2 and G3 are the only composition-wide guarantees. Issue #2742 states
+the two facts that make `LinkOK` behave like a composition judgment:
+
+- `RevL.Lemmas.linkOK_append_tail`: `LinkOK (B ++ A) → LinkOK A`.
+  Withdrawing later-admitted work leaves the earlier-admitted part
+  admitted. This is the "hot-swap of B does not invalidate A" statement,
+  and it means a user does not re-check `A` after removing `B`.
+- `RevL.Lemmas.linkOK_append_of_admittedOver`: `LinkOK A` plus
+  `AdmittedOver A B` gives `LinkOK (B ++ A)`. `AdmittedOver` is the
+  per-component admission condition (distinct slots, no clash with the
+  rest of the composition, needs provided in `B` or `A` in order), and
+  `A`'s admission is a hypothesis, so admitting `B` does not replay `A`'s
+  proof. `RevL.Lemmas.append_conflict_refused` is the negative control: a
+  second provider of the same slot fails the side condition and the
+  union it would build does not link.
+
+| Code | Scope | Evidence, and what composition does not change |
+|---|---|---|
+| **G1** declared access | per-component | `RevL.G1.declared_only_access` is stated over one `Component`'s `body` and `requires` (`confined`). The wiring half, that every declared requirement is provided, is `RevL.G2.linkOK_requires_closed` and is composition-wide; the access rule itself is not. |
+| **G2** provision disjointness | composition-wide | `RevL.G2.linkOK_provision_disjoint`. Tail closure keeps a sub-composition disjoint; `AdmittedOver`'s per-component clause is exactly "the component's slots are distinct and collide with nothing else", the incremental form of the rule. |
+| **G3** acyclic dependencies | composition-wide | `RevL.G3.linkOK_no_cycles`, via the admission order as a layering (`RevL.G3.linkOK_layered`, `RevL.G3.linkOK_layeredBy_rankOf`). A component admitted only over strictly earlier work cannot close a cycle (`RevL.Lemmas.linkOK_append_of_admittedOver`); withdrawing later work cannot introduce one (`RevL.Lemmas.linkOK_append_tail`). |
+| **G4** inverse-or-emit | per-component | `RevL.G4.inverse_or_emit` is one statement; its lattice form `RevL.G4Classified.inverse_or_emit_classified` is one extern declaration's class and its `undo`/`emit` marker. Another component can neither satisfy nor break it. |
+| **G5** teardown registers nothing | per-component | `RevL.G5Classified.inverse_reaches_no_emission` is over one admitted extern's inverse and the calls beneath it. The shape-level `RevL.G5.teardown_registers_nothing` is the registered contentless finding, not composition evidence. |
+| **G6** purity outside effect forms | per-component | `RevL.G6.confinement` is `TypedIn C s → stmtHeads s ⊆ C` for one statement with the component's own declared context `C`; no other component appears. The binding rule is likewise one scope's `BE` steps (`RevL.G6Binding.bindingB_iff`). |
+| **G7** derived LIFO teardown | per-component (one activation) | `RevL.Semantics.replays_or_discharges` and the `RevL.G7.*` rows compute the replay book of one activation's stack. LIFO is the order inside that activation, so a neighbouring component's teardown cannot change it. |
+| **G8** boundary enumerable | per-component | `RevL.G8.boundary_only_declared` is over one component body's crossing surface; `RevL.G8Classified.surface_only_declared_crossings` is one reconstructed statement against that component's declared crossings. |
+| **G9** no authority from untrusted | per-component | `RevL.G9.no_authority_from_untrusted` is over one `Flow` inside a component body, at the sink the checker reports. Cross-component authority is capability lineage, classified below. |
+| **G-SECRET**, **G-SECRET-FLOW** | per-component | `RevL.G9.secret_confined` and `RevL.G9.confidential_needs_declassification` are rules on a component's own binding and flow; the corpus decision `RevL.G9Flow.g9RowB_iff` is one reported sink's row. |
+| **G-RETAIN** | per-component | `RevL.GRetain.rowB_iff` decides one reported retention refusal: one scope's walk to one persistence sink against its own policy. |
+| **G-MODEL-PLACE** | per-component | `RevL.ModelPlace.placeB_iff` decides one routed component's placement, and the reach rule is the oracle's `modelReachB_iff` over that component's held set and the role's declared reach. |
+| **G-COUNCIL-SPLIT** | per-component | `RevL.ModelCouncil.splitB_iff` is one declared council's aggregation over its declared members. |
+| **A1** iteration boundaries only during activation | per-component | `RevL.A1Async.siteB_iff` and `RevL.A1Async.sigB_iff` decide one site and one provide method against the declarations the compilation already carries; the rule is about that site's activation. |
+| **A2** no acquisition after a provision | per-component (one activation body) | `RevL.A2.a2B_iff` is the fold over one activation body's ordered steps, and `RevL.A2.phase1_of_brackets` lifts it to that body's teardown. |
+| **A3** host-safe identifiers | per-component | **open**: no theorem. The rewrite is lexical and applied per compilation unit; linking adds nothing to it. Out of scope by kind. |
+| **A5** compensation accompanies an emission | per-component | `RevL.A5.legalB_iff` and `RevL.A5.a5B_iff` decide each extern declaration's token and its `compensate` slot; a composition has no second chance to fill it. |
+| **A6** provide-methods match the service signature | per-component | `RevL.Prelude.methodB_iff` decides one component's named operations against its service declaration. |
+| **A8** mid-body failure reverts and contains | per-component (one activation) | `RevL.A8.revert_on_failure` is over the WAL and world of one activation's run; a neighbouring component's abort cannot make this one's revert true or false. |
+| **A9** provide key declared in `provides` | per-component | `RevL.A9.a9B_iff` decides one component's declared and installed keys; the slot discipline that consumes them is G2/G3's (`RevL.A9.installed_block_is_slot`). |
+| **T1/T2/T3**, **T-UNRESOLVED** | per-component | **open**: no theorem. Typing is decided per compilation unit and never looks at the link; the composition consumes already-typed components. |
+| **R4** no residue | per-component (the abort path) | `RevL.R4.residue_sound` and `RevL.R4.residue_complete` are over one activation's abort and its WAL; an adjacent component leaves the residue set unchanged. |
+| **items 66/294/260** capability ceilings | lineage-wide | `RevL.CapCeilings.lineage_ceiling_le` and `RevL.CapCeilings.budget_never_exceeds_root_ceiling` are over the `Lineage` a spawn chain induces, with `RevL.CapCeilings.derived_lineage` reading that chain off an admitted program. A component's own ceiling is not enough: the guarantee is that each descendant stays within its ancestor's, and `RevL.CapCeilings.attenuation_monotone` is the per-edge content the chain composes. |
+| **item 133** cross-tier agreement | per-component | `RevL.CrossTier.cross_tier_agreement` is over one IR under two conformant profiles; it is a lowering property, not a composition property. |
+
+Two caveats, so the table is not read wider than it is:
+
+- Tail closure is about the **end** of the admission order, not arbitrary
+  removal. Dropping a provider from the middle of an admitted composition
+  can leave its consumers unclosed; there is no theorem for that, and
+  there should not be.
+- `AdmittedOver` is a per-component check against the fixed remainder,
+  not a pairwise condition: a component's requirement may be satisfied by
+  any strictly later `B` entry or by `A`, so the checks are ordered, and
+  checking `B` without `A`'s surface is not enough.
+
 ## Theorem status
 
 | Theorem | Guarantee (DESIGN.md §4) | Status | Axioms | Notes |
@@ -125,6 +198,8 @@ Three summary readings of that map:
 | `RevL.G3.self_provision_refused` | G3 — non-vacuity | **proved** | `propext` | `Ouroboros` (requires a key it provides) cannot link |
 | `RevL.G3.mutual_cycle_refused` | G3 — non-vacuity | **proved** | `propext` | `g3_dependency_cycle.rvl` refused in both orderings |
 | `RevL.G3.layering_exists_for_admitted` | G3 — non-vacuity | **proved** | `propext, Quot.sound` | the certificate is reachable, not just refutable |
+| `RevL.Lemmas.linkOK_append_tail` | G2/G3 composition — tail closure | **proved** | none | `LinkOK (B ++ A) → LinkOK A`: withdrawing later-admitted work cannot invalidate the earlier-admitted part |
+| `RevL.Lemmas.linkOK_append_of_admittedOver` | G2/G3 composition — extension | **proved** | none | `LinkOK A` plus `AdmittedOver A B` gives `LinkOK (B ++ A)`: the base's proof is not replayed |
 | `RevL.G4.inverse_or_emit` | G4 — inverse-or-emit (Def. 8) | **proved (shape-level)** | none | *weaker*: content is the shape of `Typed`, which has no `raw` constructor, so the same sentence holds of a relation admitting nothing. **Superseded by `RevL.G4Classified.inverse_or_emit_classified`** (item 418 step 4); kept as the syntactic statement |
 | `RevL.G5.teardown_registers_nothing` | G5, teardown registers nothing | **proved, and CONTENTLESS** | none | `registrations` ignores its argument (constant zero), so a `sneakyUndo` calling `db.insert` counts 0 and the conclusion holds by definition rather than by any property of undo bodies. `RevL.G5.registrations_ignores_its_argument` proves the review's own probe, so the emptiness is on the record. **Superseded by `RevL.G5Classified.inverse_reaches_no_emission`** (item 418 step 4); kept as the grammar-level statement |
 | `RevL.G6.confinement` | G6 — confinement (Def. 48) | **proved** | `propext, Quot.sound` | content is the shape of `TypedIn`/`ReachIn` |
@@ -308,6 +383,8 @@ Three summary readings of that map:
 
 | `RevL.G1.g1_not_vacuous` | G1, non-vacuity (item 418 step 8) | **proved** | `propext, Classical.choice, Quot.sound` | a component admitted under its own `requires`, and the same body neither admitted nor confined under a smaller manifest |
 | `RevL.G3.g3_not_vacuous` | G3, non-vacuity (step 8) | **proved** | `propext, Quot.sound` | a link, a layering, a dependency path with a strict rank drop, and a genuine self-path on the cyclic composition |
+| `RevL.Lemmas.append_compose_witness` | G2/G3 composition, non-vacuity | **proved** | `propext` | a base store links, a cache is admitted over it, and the union `[cacheOver, baseStore]` links |
+| `RevL.Lemmas.append_conflict_refused` | G2/G3 composition, non-vacuity | **proved** | `propext` | a second `kv` provider fails `AdmittedOver` and the union it would build does not link |
 | `RevL.G4.g4_shape_not_vacuous` | G4, non-vacuity (step 8) | **proved** | none | both conclusion branches inhabited, and the `raw` branch shown to close because `Typed` lacks a constructor |
 | `RevL.G5.registrations_ignores_its_argument` | G5, the FINDING (step 8) | **proved** | none | the review's constant-function probe, proved, plus an undo body that calls an emission and still scores zero |
 | `RevL.G6.g6_not_vacuous` | G6, non-vacuity (step 8) | **proved** | `propext, Classical.choice, Quot.sound` | an admitted statement with a non-empty reach surface, and a refused one |
@@ -2214,13 +2291,32 @@ Known fidelity limits of the shaped model, deliberately not papered over:
    this work**. The farm carries (a) the record set, decision function
    and roll-back walk of `src/revl/wal.py` + `src/revl/recovery.py`, (b)
    a `Run`/`RunStep` model in which a crash is a *prefix*, and (c) a
-   five-form small-step relation `SemStep`/`SemSteps` in which taking an
+   six-form small-step relation `SemStep`/`SemSteps` in which taking an
    effect step is what **appends its record and creates its referent** —
    so R4/A8 are stated over the effects that actually ran, not over a
-   fabricated log. `Body.done` and `Body.fail` are stuck, and `fail` is
-   L-Raise's failing step (418 step 3's prerequisite; the log also
-   distinguishes a discharged transactional entry from a replayed one,
-   which is 418 step 5's distinction).
+   fabricated log. The sixth form, `Body.deferred`, is the class-(b)
+   queue step and is modelled one level out in `FrameStep`, with the
+   commit flush and the abort drop as its two verdict steps. `Body.done`
+   and `Body.fail` are stuck, and `fail` is L-Raise's failing step (418
+   step 3's prerequisite; the log also distinguishes a discharged
+   transactional entry from a replayed one, which is 418 step 5's
+   distinction).
+
+   **The deferral queue (issue #2740).** `abort_drops_deferred` and
+   `abort_run_drops_deferred` state that any abort step, and any whole
+   run settling on abort, empties the queue and leaves the crossings
+   unchanged. `commit_discharges_deferred` states that any commit step
+   empties the queue, firing each queued entry FIFO and leaving a
+   `flushed` record for each. Over a whole run settling on commit,
+   `commit_run_queue_empty` states that the queue is empty, and
+   `commit_run_discharges_deferred` that the crossing list gains the
+   entries queued at the start and then those the run enqueued (the
+   run's `deferred-emission` records), in that order, with one `flushed`
+   record each, in the same order, after `commit-approved`.
+   `deferred_abort_run`, `deferred_commit_run` and
+   `deferred_commit_run_from_queued` are the witnesses, so neither family
+   quantifies over the empty queue, and the whole-run commit witness has
+   both an entry queued at the start and one the run enqueued.
 
    **Crash cuts covered:** between the durable write and the effect
    (`fence_before_apply_at_every_cut`, quantified over every cut);
@@ -2238,10 +2334,11 @@ Known fidelity limits of the shaped model, deliberately not papered over:
    platter is a host obligation.
 
    **Also not modelled:** the roll-forward window's `flush-residue`
-   surface (R4 is stated for the abort path), cascading abort,
-   compensation drain and escrow, and item 250's frozen fork beyond
-   being a third `Outcome` the commit/abort dichotomy is hypothesised
-   away from.
+   surface (a queued emission whose host body RAISED at the flush; the
+   commit theorem fires every entry successfully, so R4 is stated for the
+   abort path), cascading abort, compensation drain and escrow, and item
+   250's frozen fork beyond being a third `Outcome` the commit/abort
+   dichotomy is hypothesised away from.
 
    **Honest weighting of the rows**, per item 418's finding that a
    statement can be true and empty: `revert_on_failure`,

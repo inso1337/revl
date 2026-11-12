@@ -59,6 +59,7 @@ def _members(**overrides):
                         "value": D("classify this ticket"), "reason": None},
         template_digest=D("classify {ticket}"),
         origins=["input", "web"],
+        reasoning=me.reasoning_span(),
         candidates=[D("candidate a"), D("candidate b"), D("candidate c")],
         chosen=1,
         outcome="validated",
@@ -99,6 +100,31 @@ def sealed_v1(**overrides):
     return body
 
 
+def _members_v2(**overrides):
+    """A 2.0 body: the 3.0 reasoning member is absent.
+
+    Built from the current body and reduced to the frozen 2.0 member set, so a
+    record sealed before the reasoning bump still verifies under its own body.
+    """
+    body = dict(_members(**overrides))
+    body.setdefault("retained", None)
+    body.setdefault("fallback_reason", None)
+    body.setdefault("template_absence_reason", None)
+    body.update(kind=me.EVIDENCE_KIND, sign_alg=me.SIGN_ALG,
+                hash_alg=me.HASH_ALG, key_id=me.key_id(KEY),
+                recorded_at="2026-11-04T00:00:00+00:00", version="2.0")
+    body = {k: v for k, v in body.items() if k in me.BODY_MEMBERS_V2}
+    body.update(overrides)
+    return body
+
+
+def sealed_v2(**overrides):
+    """A genuinely sealed 2.0 record, MACed under the 2.0 domain."""
+    body = _members_v2(**overrides)
+    body[me.SIGNATURE_FIELD] = me._sign(body, KEY)
+    return body
+
+
 # ---------------------------------------------------------------------------
 # the well-formed record
 # ---------------------------------------------------------------------------
@@ -125,6 +151,9 @@ def test_the_record_carries_every_member_the_item_names():
     for member in ("fallback_reason", "template_digest",
                    "template_absence_reason", "model_digest_basis"):
         assert member in record
+    # and issue #2808's reasoning span, which makes a new record say how much
+    # of the span the host returned even when the answer is all it gives back.
+    assert "reasoning" in record
     assert set(record) == set(me.BODY_MEMBERS) | {me.SIGNATURE_FIELD}
     assert record["version"] == me.EVIDENCE_VERSION
 
@@ -367,8 +396,47 @@ def test_an_old_version_record_reconstructs_without_inventing_new_claims():
     assert decision["modelDigestBasis"] is None
 
 
+def test_a_2_0_record_still_verifies_under_its_own_body():
+    """Envelope 3.0 adds `reasoning` and does not break the 2.0 records sealed
+    before it: each version checks against the body it was sealed with."""
+    record = sealed_v2()
+    assert record["version"] == "2.0"
+    assert "reasoning" not in record
+    verdict = me.verify(record, KEY)
+    assert verdict.ok, verdict.reason
+    reading = me.reconstruct(record, KEY)
+    assert reading["decision"]["version"] == "2.0"
+    assert reading["decision"]["reasoning"] is None
+
+
+def test_a_3_0_record_cannot_drop_the_reasoning_member():
+    """A new record that is silent about the reasoning span is exactly the
+    record issue #2808 exists to refuse. The MAC catches a plain removal; a key
+    holder who re-MACs the shortened body is refused by the 3.0 member set."""
+    record = sealed()
+    assert record["version"] == me.EVIDENCE_VERSION
+    without = {k: v for k, v in record.items() if k != "reasoning"}
+    assert me.verify(without, KEY).link == me.EVIDENCE_SIGNATURE
+    without[me.SIGNATURE_FIELD] = me._sign(without, KEY)
+    verdict = me.verify(without, KEY)
+    assert not verdict.ok
+    assert verdict.link == me.EVIDENCE_INCOMPLETE
+    assert "reasoning" in verdict.reason
+
+
+def test_a_2_0_record_cannot_be_presented_as_3_0():
+    """The other direction: a 2.0 body relabelled 3.0 lacks the reasoning
+    member, even when a key holder re-MACs it under the 3.0 domain."""
+    record = dict(sealed_v2(), version="3.0")
+    record[me.SIGNATURE_FIELD] = me._sign(record, KEY)
+    verdict = me.verify(record, KEY)
+    assert not verdict.ok
+    assert verdict.link == me.EVIDENCE_INCOMPLETE
+    assert "reasoning" in verdict.reason
+
+
 def test_a_new_record_cannot_be_downgraded_to_an_old_one():
-    """Relabelling a 2.0 record 1.0 must not turn it into a valid old record:
+    """Relabelling a 3.0 record 1.0 must not turn it into a valid old record:
     the version is inside the MAC, and even a key holder who re-MACs the
     relabelled body is holding members 1.0 does not define."""
     record = sealed()

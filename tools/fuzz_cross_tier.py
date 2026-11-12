@@ -745,7 +745,7 @@ def assertion_source(program_src: str, ret, value) -> str | None:
 #   pass    — the tier agreed with the reference.
 #   skip    — the tier's toolchain is absent (honest unavailability).
 #   refusal — the tier's EMITTER refused the construct at compile time. This is
-#             a DECLARED, LOUD capability boundary (e.g. wasm has no Float value
+#             a DECLARED, LOUD capability boundary (e.g. wasm has no Map value
 #             representation — docs/wasm-capabilities.md), tracked by the
 #             conformance matrix, not a silent wrong answer. A differential
 #             fuzzer must not cry "divergence" on a tier honestly saying "I do
