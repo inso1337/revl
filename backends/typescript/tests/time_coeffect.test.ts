@@ -5,7 +5,7 @@
 // is a revertible schedule: arming registers work with the clock coeffect, its
 // inverse is cancellation, and the clock advances only when the harness drives
 // it — so firings are deterministic timeline steps, never wall-clock races.
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   Clock,
   hostLog,
@@ -13,6 +13,7 @@ import {
   resetHost,
   scheduleAfter,
   scheduleEvery,
+  TimerHandle,
 } from '../runtime.ts'
 
 beforeEach(() => resetHost())
@@ -77,5 +78,68 @@ describe('timer — a revertible schedule', () => {
   it('rejects a non-positive interval', () => {
     expect(() => scheduleEvery(0, () => {})).toThrow()
     expect(() => scheduleAfter(-1, () => {})).toThrow()
+  })
+})
+
+// A long-running host (issue #3377): the same rules tests/test_time_coeffect.py
+// pins for the python clock.
+describe('Clock, a long-running host', () => {
+  it('nextDue names the ms to the earliest live timer, null with none', () => {
+    expect(Clock.nextDue()).toBeNull() // nothing armed
+    const every = scheduleEvery(30, () => {}) // due at 30, 60, ...
+    scheduleAfter(50, () => {}) // due at 50
+    expect(Clock.nextDue()).toBe(30)
+    Clock.advance(10)
+    expect(Clock.nextDue()).toBe(20)
+    Clock.advance(25) // now 35: every -> 60
+    expect(Clock.nextDue()).toBe(15) // the after, at 50
+    every.cancel()
+    expect(Clock.nextDue()).toBe(15)
+    Clock.advance(15) // the after fires
+    expect(Clock.nextDue()).toBeNull() // spent and cancelled
+  })
+
+  it('releases spent and cancelled handles: the clock holds only live ones', () => {
+    const cancelled = Array.from({ length: 20 }, () => scheduleEvery(10, () => {}))
+    const spent = Array.from({ length: 20 }, () => scheduleAfter(5, () => {}))
+    scheduleEvery(7, () => {})
+    for (const h of cancelled) h.cancel()
+    expect(Clock.advance(5)).toBe(20) // every `after` fires
+    expect(Clock._held()).toBe(1)
+    expect(Clock.pending()).toBe(1)
+    for (const h of [...cancelled, ...spent]) expect(h.cancel()).toBe(false)
+  })
+
+  it('keeps only the most recent FIRINGS_CAP firings', () => {
+    const cap = Clock.FIRINGS_CAP
+    scheduleEvery(1, () => {})
+    expect(Clock.advance(cap * 3)).toBe(cap * 3)
+    const log = Clock.firings()
+    expect(log.length).toBe(cap)
+    expect(log[0]).toEqual([1, cap * 2 + 1])
+    expect(log[log.length - 1]).toEqual([1, cap * 3])
+  })
+
+  it('advance visits as many handles after 500 swaps as after none', () => {
+    // A swap cancels the old generation's timer and arms the new one. The
+    // count is of handle state reads, not a wall-clock time.
+    const visitsAfter = (swaps: number): number => {
+      resetHost()
+      let h = scheduleEvery(16, () => {})
+      for (let i = 0; i < swaps; i++) {
+        Clock.advance(16)
+        h.cancel()
+        h = scheduleEvery(16, () => {})
+      }
+      const spy = vi.spyOn(TimerHandle.prototype, 'state')
+      try {
+        expect(Clock.advance(16)).toBe(1)
+        expect(Clock.pending()).toBe(1)
+        return spy.mock.calls.length
+      } finally {
+        spy.mockRestore()
+      }
+    }
+    expect(visitsAfter(500)).toBe(visitsAfter(0))
   })
 })

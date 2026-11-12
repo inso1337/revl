@@ -578,6 +578,27 @@ class EmitError(ValueError):
     """The IR document violates the backend contract."""
 
 
+def _host_body_scanner():
+    """The shared host-body scanner (`src/revl/host_body.py`).
+
+    Imported lazily so a standalone `python3 emit.py <ir.json>` keeps working:
+    when the emitter runs through the compiler `revl` is importable, and a bare
+    script run falls back to the source tree beside this file. The scanner is
+    the one place every tier splits an extern body and checks that it cannot
+    leave the function it is spliced into (#3130, #3131, #3162, #3164, #3166).
+    """
+    try:
+        from revl.host_body import body_lines, check_host_body
+    except ModuleNotFoundError:  # standalone `python3 emit.py`: put src/ on the path
+        import pathlib
+        import sys as _sys
+        src = pathlib.Path(__file__).resolve().parents[2] / "src"
+        if src.is_dir() and str(src) not in _sys.path:
+            _sys.path.insert(0, str(src))
+        from revl.host_body import body_lines, check_host_body
+    return body_lines, check_host_body
+
+
 def _finite_float(value):
     """The literal's value, refused when a `Float` is not finite (issue #312).
 
@@ -4286,7 +4307,12 @@ def _emit_v3_externs(externs: list, journal: bool = False) -> list[str]:
             lines.append("    " + config_bind)
         body = bodies["java"].strip()
         if body:
-            for line in body.splitlines() or [""]:
+            # #3162/#3166: refuse a body Java reads as unbalanced, and split on
+            # newlines only so a comment cannot become a statement.
+            body_lines, check_host_body = _host_body_scanner()
+            check_host_body("java", body,
+                            where=f"extern `{ext.get('name')}`", error=EmitError)
+            for line in body_lines(body):
                 lines.append("    " + line)
         else:
             lines.append("    // (empty @java body)")
@@ -7041,7 +7067,7 @@ def _method_body(env: _Env, key: str, method: dict) -> str:
                     f"operation declared to return a value"
                 )
             return "return;"
-        rename = {b: f"this.{b}" for b in _binds(env.component)}
+        rename = {b: f"this.{_ident(b, 'binding')}" for b in _binds(env.component)}
         # A required service is a field of the provider class, same as a bind.
         rename.update({local: f"this.{env.req_fields[local]}" for local in env.reqs})
         value = _expr(steps[0]["expr"], None, rename, env)
@@ -8397,7 +8423,7 @@ def _method_body_lines(
     lines: list[str] = []
     v3_ctx.arrows = {}  # arrow bindings are local to one body
     _pin_value_map_locals(method.get("body"), method.get("params"), v3_ctx)
-    rename = {b: f"this.{b}" for b in _binds(env.component)}
+    rename = {b: f"this.{_ident(b, 'binding')}" for b in _binds(env.component)}
     rename.update({local: f"this.{env.req_fields[local]}" for local in env.reqs})
 
     def render(steps: list, lines: list[str], pad: str) -> None:
@@ -8880,7 +8906,13 @@ def _emit_component_stmts(
                 # declaration (`Map<...> store = Map.create();`) — `var` would
                 # infer `Map<Object>` from the generic static factory and the
                 # emitted insert/get calls would lose their static types.
-                surface = (map_values or {}).get(bind)
+                # The type table is keyed by the IR's raw bind name while the
+                # local is declared through the binding ladder, so a bind that
+                # the ladder escaped (`ctx` -> `ctx_`) still gets its declared
+                # type here; a lookup by the escaped spelling leaves `var` and
+                # the provider constructor's `Map<V>` parameter then rejects
+                # `Map<Object>` (issue #3095).
+                surface = (map_values or {}).get(step["bind"])
                 decl = f"Map<{_java_v3_type(surface, boxed=True)}>" if surface else "var"
                 out.append(f"{pad}{decl} {bind} = {_expr(step['acquire'], v3_ctx, None, env)};")
             else:
@@ -8901,7 +8933,8 @@ def _emit_component_stmts(
             struct = f"{cname}{_camel(_host_key(key))}"
             ctor_args = ", ".join(
                 ["ctx", "fx"] + (["frame"] if frame_expr else [])
-                + [env.req_fields[b] for b in env.reqs] + list(_binds(component))
+                + [env.req_fields[b] for b in env.reqs]
+                + [_ident(b, "binding") for b in _binds(component)]
                 + [_ident(f.get("name"), "config field")
                    for f in _provider_config_fields(component)]
             )
@@ -9293,7 +9326,7 @@ def _emit_component_modern(
             out.append(f"    private final {service} {env.req_fields[local]};")
         for b in _binds(component):
             btype = _bind_type(component, b, v3_ctx, map_values, env, functions)
-            out.append(f"    private final {btype} {b};")
+            out.append(f"    private final {btype} {_ident(b, 'binding')};")
         # A provide method that reads `config.<f>` needs the field HERE, not
         # only on the plugin (see `_provider_config_fields`).
         for f in provider_config:
@@ -9303,7 +9336,8 @@ def _emit_component_modern(
             ["Context ctx", "Context.EffectScope fx"]
             + (["RevlFrame frame"] if needs_frame else [])
             + [f"{service} {env.req_fields[local]}" for local, service in env.reqs.items()]
-            + [f"{_bind_type(component, b, v3_ctx, map_values, env, functions)} {b}"
+            + [f"{_bind_type(component, b, v3_ctx, map_values, env, functions)} "
+               f"{_ident(b, 'binding')}"
                for b in _binds(component)]
             + [f"{_java_v3_type(f.get('type'))} {_ident(f.get('name'), 'config field')}"
                for f in provider_config]
@@ -9317,7 +9351,8 @@ def _emit_component_modern(
             field = env.req_fields[local]
             out.append(f"        this.{field} = {field};")
         for b in _binds(component):
-            out.append(f"        this.{b} = {b};")
+            field = _ident(b, "binding")
+            out.append(f"        this.{field} = {field};")
         for f in provider_config:
             fname = _ident(f.get("name"), "config field")
             out.append(f"        this.{fname} = {fname};")
@@ -9575,18 +9610,18 @@ def _emit_component(
             out.append(f"    private final {req_service} {env.req_fields[local]};")
         for b in _binds(component):
             out.append(
-                f"    private final {bind_decl(b)} {b};")
+                f"    private final {bind_decl(b)} {_ident(b, 'binding')};")
         ctor_args = ", ".join(
             [f"{req_service} {env.req_fields[local]}"
              for local, req_service in env.reqs.items()]
-            + [f"{bind_decl(b)} {b}"
+            + [f"{bind_decl(b)} {_ident(b, 'binding')}"
                for b in _binds(component)]
         )
         out.append(f"    {struct}({ctor_args}) {{")
         for local in env.reqs:
             out.append(f"        this.{env.req_fields[local]} = {env.req_fields[local]};")
         for b in _binds(component):
-            out.append(f"        this.{b} = {b};")
+            out.append(f"        this.{_ident(b, 'binding')} = {_ident(b, 'binding')};")
         out.append("    }")
         provide = next(
             (s for s in component.get("body") or []
@@ -9653,7 +9688,8 @@ def _emit_component(
             service = step.get("service")
             struct = f"{cname}{_camel(_host_key(key))}"
             ctor_args = ", ".join(
-                [env.req_fields[b] for b in env.reqs] + list(_binds(component)))
+                [env.req_fields[b] for b in env.reqs]
+                + [_ident(b, "binding") for b in _binds(component)])
             # The provision's disposable joins the teardown list — the
             # modern path tracks it via fx.track(ctx.provide(...)); dropping
             # it would leave the provision registered after unload.

@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>revl wasm component in a browser</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #10141b;
+      --panel: #18202b;
+      --ink: #e7edf6;
+      --muted: #93a1b5;
+      --accent: #73d0ff;
+      --ok: #7ee2a8;
+      --wait: #f0c674;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--ink);
+      font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      display: grid;
+      place-items: center;
+    }
+    main { width: min(92vw, 760px); padding: 2rem 0; }
+    h1 { margin: 0 0 .25rem; font-size: 1.35rem; letter-spacing: .01em; }
+    p.lede { margin: 0 0 1.25rem; color: var(--muted); }
+    canvas {
+      width: 100%;
+      height: auto;
+      display: block;
+      border-radius: 12px;
+      background: linear-gradient(180deg, #1b2c40 0%, #16212e 60%, #131922 60%, #131922 100%);
+      box-shadow: 0 12px 32px rgb(0 0 0 / 35%);
+    }
+    .row { display: flex; flex-wrap: wrap; gap: .6rem 1.2rem; margin-top: .9rem; color: var(--muted); }
+    .row code { color: var(--ink); }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: .45rem;
+      padding: .25rem .7rem;
+      border-radius: 999px;
+      background: var(--panel);
+      color: var(--wait);
+      font-size: .85rem;
+      font-variant-numeric: tabular-nums;
+    }
+    .pill.active { color: var(--ok); }
+    .dot { width: .5rem; height: .5rem; border-radius: 50%; background: currentColor; }
+    .note { margin-top: 1.4rem; color: var(--muted); font-size: .85rem; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>revl component, compiled to wasm, driven by JavaScript</h1>
+  <p class="lede">
+    The module's <code>coeffect:clock</code> import is bound to a JavaScript
+    operation. Its <code>provide:motion.step</code> export takes and returns a
+    native <code>f64</code>.
+  </p>
+  <canvas id="stage" width="720" height="260" aria-label="a cart moving right"></canvas>
+  <div class="row">
+    <span id="status" class="pill"><span class="dot"></span><span id="status-text">loading component</span></span>
+    <span>position <code id="pos">0.0</code></span>
+    <span>host dt <code id="dt">0.000 s</code></span>
+  </div>
+  <p class="note" id="note">
+    The component stays gated until the host provides its coeffect, then
+    activates and starts receiving frames.
+  </p>
+</main>
+<script type="module">
+  import { CordisHost } from "./cordis-host.mjs";
+
+  const canvas = document.querySelector("#stage");
+  const ctx = canvas.getContext("2d");
+  const status = document.querySelector("#status");
+  const statusText = document.querySelector("#status-text");
+  const posLabel = document.querySelector("#pos");
+  const dtLabel = document.querySelector("#dt");
+  const note = document.querySelector("#note");
+
+  const host = new CordisHost({ log: (line) => console.debug(`[cordis] ${line}`) });
+
+  // The browser's resource, exposed to the wasm module as a coeffect. It is
+  // read on every call, so the component never snapshots it.
+  let frameDt = 0;
+  const clock = { frame_dt: () => frameDt };
+
+  function setStatus(text, active) {
+    statusText.textContent = text;
+    status.classList.toggle("active", active);
+  }
+
+  function draw(position) {
+    const width = canvas.width;
+    const height = canvas.height;
+    const roadY = height * 0.72;
+    ctx.clearRect(0, 0, width, height);
+
+    // road
+    ctx.fillStyle = "#1b2430";
+    ctx.fillRect(0, roadY, width, height - roadY);
+    ctx.strokeStyle = "#2c3a4c";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(0, roadY);
+    ctx.lineTo(width, roadY);
+    ctx.stroke();
+    ctx.setLineDash([18, 14]);
+    ctx.strokeStyle = "#3b4a5d";
+    ctx.beginPath();
+    ctx.moveTo(0, roadY + 26);
+    ctx.lineTo(width, roadY + 26);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // cart, drawn from the Float position the wasm module returned
+    const cartW = 74;
+    const cartH = 34;
+    const x = Math.max(0, Math.min(position, width - cartW));
+    const y = roadY - cartH - 10;
+    ctx.fillStyle = "#73d0ff";
+    ctx.beginPath();
+    ctx.roundRect(x, y, cartW, cartH, 7);
+    ctx.fill();
+    ctx.fillStyle = "#0f1620";
+    ctx.fillRect(x + 12, y + 9, cartW - 24, 9);
+    ctx.fillStyle = "#d7e5f5";
+    for (const cx of [x + 17, x + cartW - 17]) {
+      ctx.beginPath();
+      ctx.arc(cx, y + cartH + 8, 9, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.fillStyle = "#9fb3c8";
+    ctx.font = "13px ui-monospace, SFMono-Regular, Menlo, monospace";
+    ctx.fillText(`x = ${position.toFixed(1)}`, 14, 24);
+  }
+
+  draw(0);
+
+  let last = performance.now();
+  let position = 40;
+
+  function frame(now) {
+    const seconds = Math.min((now - last) / 1000, 0.05);
+    last = now;
+    frameDt = seconds;
+    if (host.state("Cart") === "active") {
+      position = host.call("Cart", "provide:motion.step", position);
+      if (position > canvas.width - 40) position = -40;
+    }
+    posLabel.textContent = position.toFixed(1);
+    dtLabel.textContent = `${seconds.toFixed(3)} s`;
+    draw(position);
+    requestAnimationFrame(frame);
+  }
+
+  try {
+    const bytes = await (await fetch("./demo.wasm")).arrayBuffer();
+    await host.load("Cart", bytes);
+    setStatus(`gated: missing ${host.missing("Cart").join(", ")}`, false);
+    note.textContent =
+      "Waiting for the JavaScript host to provide the clock coeffect...";
+    // A beat later the host supplies it, which activates the module.
+    setTimeout(() => {
+      host.provideHost("clock", clock);
+      setStatus("active: cart steps through the wasm export", true);
+      note.textContent =
+        "Each animation frame passes the host's dt through the coeffect import " +
+        "and gets the next Float position back from the wasm export.";
+      last = performance.now();
+      requestAnimationFrame(frame);
+    }, 700);
+  } catch (error) {
+    setStatus(`failed: ${error.message}`, false);
+    note.textContent = String(error);
+    console.error(error);
+  }
+</script>
+</body>
+</html>

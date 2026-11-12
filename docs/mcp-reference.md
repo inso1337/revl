@@ -92,7 +92,7 @@ ends with the same remedy in words, so the two never disagree. Remedies today:
 | ------- | ------ |
 | nothing is loaded (any verb that acts on the running composition) | `revl_load` with the `source`/`files`/`modules` this session last ran, `ready`; or with nothing, not ready, when it never ran one |
 | a runtime verb on a server whose interpreter cannot import cordis (below) | an operator step: run `backends/python/setup.sh`, then restart the server |
-| the held-source note on a refused or failed answer: `revl_load {files}` on a warm session with nothing to boot, a `revl_check {files}` that read a differing disk file and failed, and the unload that would discard an unexported edit of a loaded composition | `revl_verbs {name: "revl_export", args: {}}`, `ready` (`revl_export` is not a listed verb) |
+| the held-source note on a refused or failed answer: `revl_load {files}` on a warm session with nothing to boot, a `revl_check {files}` that read a differing disk file and failed, and the unload that would discard an unexported edit of a loaded composition | `revl_export {}`, `ready` |
 
 A composition loaded from `files` is edited and swapped by name directly, and
 the server holds its text from the load on (issue #1842), so neither needs a
@@ -360,6 +360,7 @@ answering compiler's identity beside it. Under `revl mcp proxy` the `initialize`
 | `revl_escalate` | no | no | `hash` |
 | `revl_override` | no | yes | `hash`, `reason` |
 | `revl_quorum` | yes | no | `hash` |
+| `revl_approvals` | yes | no | `action` |
 | `revl_distillation_offers` | yes | no | - |
 | `revl_apply_distillation` | no | no | `offerId` |
 | `revl_revoke_distillation` | no | no | `rule` |
@@ -433,14 +434,15 @@ or not an approval policy is on.
 `tools/list` advertises the core tier by default (issue #1697): the authoring
 loop `initialize` describes (`revl_resolve`, `revl_scaffold`, `revl_edit`,
 `revl_query_withdraw`, `revl_check`, `revl_admit`, `revl_plan` before a swap,
-and `revl_explain` for a diagnostic code), the verbs that run it (`revl_load`, `revl_call`, `revl_swap`), and
-`revl_verbs`. That is about a quarter of the full list's schema size, which
-matters on every cold start. Every verb `initialize` names is in the core tier,
-and a test holds the two together. Every other verb is still served and
-**callable** by name without being listed, but whether a client emits a call for
-a name it was not shown depends on the client. `revl_verbs` is itself a listed
-tool and takes `name` and `args`, so a call through it *is* the call it names
-(see below), and it reaches the verb for every client. A client that wants
+and `revl_explain` for a diagnostic code), the verbs that run it (`revl_load`, `revl_call`, `revl_swap`),
+`revl_export` (the verb that writes the held source out, promoted on measurement
+in issue #2625), and `revl_verbs`. That is about a quarter of the full list's
+schema size, which matters on every cold start. Every verb `initialize` names is
+in the core tier, and a test holds the two together. Every other verb is still
+served and **callable** by name without being listed, but whether a client emits
+a call for a name it was not shown depends on the client. `revl_verbs` is itself
+a listed tool and takes `name` and `args`, so a call through it *is* the call it
+names (see below), and it reaches the verb for every client. A client that wants
 the whole list up front starts the
 server with `revl mcp serve --all-tools`, or sets `REVL_MCP_ALL_TOOLS=1` - that
 costs about 22,800 extra cold-start tokens, where the hatch costs about a
@@ -464,7 +466,9 @@ verb directly. A verb that is not in the core tier is therefore one listed tool
 away, which is what issue #2073 is about: a function-calling model emits a call
 for a tool it was *shown*, so a schema returned as text is a document, not a
 tool. `revl_export` - the verb that writes the held source out, and so the one
-that prevents a silent no-op in an agent loop - is reachable this way.
+that prevents a silent no-op in an agent loop - was the measured case, and
+issue #2625 put it in the tier itself: a listed tool is reached without a prompt
+teaching the hatch.
 
 A hatch that cannot name the verb it means refuses by name rather than
 answering the lookup: an unknown `name`, a missing `args`, or an `args` that is
@@ -1326,9 +1330,9 @@ disagreeing until `revl_export` runs. The verbs of the change loop
 `"disk": {"inSync": bool, "stale": [path]}`, where `stale` names every loaded
 file whose held text differs from the bytes on disk. When `inSync` is false on
 a success, the answer also carries a `note` naming `revl_export`. Any answer
-that carries that note also carries a `next` that calls it through the
-`revl_verbs` hatch, `revl_verbs {name: "revl_export", args: {}}` (issue #2537;
-`revl_export` is not a listed verb), unless the running composition is already
+that carries that note also carries a `next` that calls the listed verb
+directly, `revl_export {}` (issue #2537; direct since #2625 listed the verb),
+unless the running composition is already
 on disk and only an open edit buffer differs, when an export would write
 nothing. It is a
 sibling of `sessionState`, never a field of it: `sessionState.dirty` means a
@@ -1849,11 +1853,19 @@ gate a swap runs, so a target the current checker rejects is refused
 (`ok:false`, with the diagnostic) and the running composition is untouched. The
 dossier rides along: what unloads, what state drops, and the interim boundary
 crossings that no undo can un-emit ([generation-history.md](generation-history.md)).
-An undo starts the target cold and does not run a `handoff` in reverse, so every
-running component holding live state is listed in `dossier.stateDropped.components`
-with a `note` (issue #2346). A forward `revl_change` with `replace` that re-applies
-the earlier source keeps the state a declared `handoff` (or a template's live
-instances) carries; any other component starts cold either way.
+A provider's live state is carried back across a `handoff` that both the
+generation being left and the one being restored declare on the same key, when
+the restored shape accepts the running state in that direction (issue #3293):
+those components are listed in `dossier.stateDropped.carried`, and the result
+carries the same `handoff` report a forward swap does. Everything else still
+starts cold, and is listed in `dossier.stateDropped.components` with a `note`
+(issue #2346) - a component with no such hand-off, a shape that cannot accept
+the state in the restore direction, or a template's live instance (the undo
+keeps the instance layer at `respawn`). A refused undo reports the plan's
+`components` and `carried` but omits the note, because nothing ran. A
+forward `revl_change` with `replace` that re-applies the earlier source keeps
+the state a declared `handoff` (or a template's live instances) carries; any
+other component starts cold either way.
 The answer carries the `"disk": {"inSync", "stale"}` block (issue #2037): a
 revert of a change that had been exported leaves disk holding the retracted
 change, so `stale` names it and a `note` points at `revl_export`; a revert of a
@@ -1912,6 +1924,18 @@ and/or `uses`/`ttlMs` INSTEAD of a bare hash to mint a session-scoped standing
 grant, so n prompts become one. Gated by the `approve` operator verb: who may
 say yes is scoped in the same profile grammar as who may commit. Class (a)
 (witnessed-revertible) and class (b) (deferred) crossings never reach here.
+
+The approval is also bound to who asked (issue #3216). Under an operator
+profile the ticket lists `proposers`: the operators whose call raised it and is
+still waiting for a yes. A yes is minted for ONE of them, named by the optional
+`proposer` argument, and only that operator's identical re-issue spends it. The
+response and the `approval-granted` WAL record carry it as `proposers`. A bare
+`hash` names the raiser when only one operator has raised that call; when two or
+more have, it is refused with the raisers listed, and each is approved on its own
+with `proposer`. Approving the same raiser again returns the yes already minted.
+Another operator sending the byte-identical call after a yes gets its own ticket.
+A quorum yes covers the operator who asked the question it answers. With no
+operator profile there is one identity, and the behaviour is unchanged.
 
 The ticket carries `ceilings` (issue #1755): for each class-(c) capability it
 asks about, the crossing component's item-260 crossing ceiling, read from
@@ -2084,6 +2108,50 @@ is refused rather than reported as fact.
 Read-only and ungated: it decides nothing and mints nothing.
 
 - Inputs: `hash` (required); `verify`.
+
+### `revl_approvals`
+
+The approval query surface over the LIVE session (issue #2991): every
+`class-(c)` ticket the session issued, what one of them would let through, and
+how its decisions have gone. Three actions:
+
+- `list`: one row per ticket - its effect, candidate-hash binding, asking round,
+  raisers, state (`pending`, `granted`, `consumed`, `expired`, `revoked`,
+  `refused`, `satisfied`, `denied`, `escalated`, `closed`), the counts by state,
+  and the honest absence of a pending single-party question's age/expiry (the
+  table records the asking round, not a timestamp, and a pending question has no
+  ttl of its own; the policy ttl bounds the approval a yes mints). `pending: true`
+  keeps only the questions still waiting for an answer.
+- `show`: one ticket by `hash` - the full ticket body, the policy rules that
+  answer for it, the binding hashes, the decision graph, the grants minted for
+  it and the durable `approval-consumed`/`approval-emission` provenance once a
+  yes was spent, and the deterministic next actions. `diff: true` adds the blast
+  radius: each crossing with its inverse classification (one-way emission with
+  no checked inverse, compensated emission, deferred, witnessed, or a
+  first-class value widening), the external-effect count, secret flows (taint
+  origins, untrusted arguments, resource scopes, caller-value durability), and
+  the capability widenings.
+- `stats`: folds the session's in-memory decision mirror with the durable
+  approval log - counts by state, the average time from `quorum-open` to its
+  terminal row, the recorded times to decision, and the override, escalation
+  and revocation history.
+
+It reads the session's own fields and writes nothing. It is gated by the
+`approve` operator verb (unlike `revl_quorum`): enumerating the pending
+questions and their blast radius is the same authority as answering them, and a
+`show` hash scopes to its crossing component while `list`/`stats` name no one
+component and need the literal `may approve on *`, whatever other target keys
+the call carries. For `revl_approvals`, a scoped operator's `show` of another
+component's ticket gets the same refusal as an unknown hash, so its refusal
+does not reveal which tickets exist. The other hash-taking approval verbs do not
+give that guarantee yet: `revl_approve`, `revl_escalate`, `revl_override` and
+`revl_revoke` refuse another component's hash by naming that component and an
+unknown hash differently, and `revl_quorum` is not gated. There is no model
+recommendation for approvals anywhere in the tree, so `advice.model` is `null`
+and says so; the actions are the deterministic next steps the facts support.
+
+- Inputs: `action` (required; `list` | `show` | `stats`); `hash`,
+  `pending`, `diff`, `session`.
 
 ### `revl_distillation_offers`
 
@@ -2527,7 +2595,13 @@ running toolchain. Reports the release, the semver bump, whether the release
 declares itself live-safe (`live`), whether it changes host bytes
 (`hostChanges`), and whether this host satisfies the declared gate, language
 and Python requirements. Reads only: fetches no artifact and compiles
-nothing. `applyAvailable` says whether a live apply is possible right now
+nothing. A networked manifest that carries a signature is verified against a
+key pinned in `src/revl/update/release_keys.py` and valid at the check instant;
+an invalid or expired signature is `UPDATE_UNSIGNED`. A manifest that carries
+no signature at all is also `UPDATE_UNSIGNED` unless the operator started the
+server with `--update-trust-unsigned`. The release report carries `signed` and
+the `signature` (`status`, `keyId`, `notAfter`). `applyAvailable` says whether a
+live apply is possible right now
 (a composition is loaded and the release carries a `source` artifact).
 
 - Inputs: none. The feed is the server's configuration.
@@ -2539,22 +2613,32 @@ With no `planHash` it stages the newest release, compiles and admits it
 against the running manifest, plans the swap and returns a server-side
 `planHash`; nothing is mutated. With `planHash` it refuses a stale plan
 (another generation or composition is running, or the staged bytes changed
-after admission), requires `acknowledgeWidening` when the release widens any
-authority axis, swaps the release in, and verifies the successor serves the
-running keys. A successor that does not is reverted automatically and the
+after admission), requires both the operator's
+`--update-allow-consent acknowledgeWidening` grant and the caller's
+`acknowledgeWidening` when the release widens any authority axis, swaps the
+release in, and verifies the successor serves the
+running keys. The applied release is recorded on the generation history entry
+and in its snapshot meta beside `approval`; the update journal is a log. A
+successor that does not is reverted automatically and the
 answer says so. A release declaring `live: false` is refused for a running
-composition unless `force` is passed; the plan answer reports `live` and
-`restartRequired`.
+composition unless `acceptNotLive` is passed; the plan answer reports `live`
+and `restartRequired`.
 
 - Inputs: `planHash` (the plan to apply), `force` (plan even when already up
-  to date), `acknowledgeWidening` (accept the reported widening).
+  to date), `allowDowngrade`, `acceptUnknownVersion`, `acceptIncompatible`,
+  `acceptNotLive` (consent to each departure from a plain upgrade) and
+  `acknowledgeWidening` (accept the reported widening). Every consent except
+  `force` is honoured only when the server was started with
+  `--update-allow-consent NAME` for it; a caller that passes an ungranted
+  consent is refused with `UPDATE_CONSENT_NOT_GRANTED`.
 
 ### `revl_update_status`
 
 What the update surface knows: whether it is enabled, the feed
-configuration, the running identity and generation, the staged releases under
-the update home, the plans held server side, and the tail of the journal.
-Answers even when updates are disabled, so an operator can see why a verb
+configuration (including `--update-trust-unsigned`), the running identity and
+generation, the staged releases under
+the update home, the plans held server side, and the tail of the journal (a
+log). Answers even when updates are disabled, so an operator can see why a verb
 refuses.
 
 - Inputs: none.
@@ -2563,7 +2647,7 @@ refuses.
 
 Roll the running composition back to the generation that ran before the last
 applied release, through the same admitted undo a hand-made generation uses.
-Reads the journal for the target generation and refuses by name when no
+Reads the release from the generation history and refuses by name when no
 release was applied or the target has aged out of the bounded history.
 
 - Inputs: none.
@@ -2572,7 +2656,8 @@ The feed token (a private repository's bearer token) is sent only to the feed
 host and GitHub's release hosts, and only over https or loopback http; a
 cross-host redirect drops it. A release with no manifest (tag fallback) is
 never applied unless the operator explicitly enabled `--update-trust-tags`.
-A stage is reused only when its digest is the manifest's sha256.
+A stage is reused only when its extracted files, its kept artifact archive and
+its provenance all still match the signed manifest.
 
 ## See also
 

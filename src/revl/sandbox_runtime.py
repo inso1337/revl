@@ -101,6 +101,7 @@ import sys
 import threading
 from pathlib import Path
 
+from . import _childproc
 from ._paths import backends_root
 
 # One place for every container-runtime call's timeout. A hung daemon must
@@ -271,7 +272,7 @@ def _run(argv: list[str], *, timeout: float = _DOCKER_TIMEOUT) -> tuple[int, str
     daemon and a non-zero exit all come back as a return code the caller turns
     into a refusal."""
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        proc = _childproc.run(argv, capture_output=True, timeout=timeout)
     except FileNotFoundError:
         return 127, "", f"{argv[0]}: not found"
     except subprocess.TimeoutExpired:

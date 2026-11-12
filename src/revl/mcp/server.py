@@ -75,6 +75,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+from .. import _childproc
 from ..admit_profile import AdmissionProfile
 from ..compiler import compile_files, compile_source, escaping_use_path
 from ..diagnostics import FIXES, GUARANTEES, classify, explain, report
@@ -1774,7 +1775,10 @@ def _boot(ir: dict, source, modules, config, record: bool, origin: dict,
         include_trusted_files=True)
     _with_authored_host_bodies(origin, authored)
     try:
-        state = SESSION.load(ir, config, record=record, origin=origin)
+        # issue #3293: the generation records who wrote it, as a forward swap
+        # does, so an undo back to it applies the agent-authored rules
+        state = SESSION.load(ir, config, record=record, origin=origin,
+                             agent_authored=bool(compile_report.get("authored")))
     except SessionError as error:
         return _session_error(error)
     except ApprovalRequired as exc:
@@ -2633,15 +2637,14 @@ _DISK_NOTE_REVERT = "the reverted source is not on disk; revl_export writes it"
 
 
 def _export_next() -> dict:
-    """The call a disk note's prose names (issue #2537): `revl_export`, through
-    the `revl_verbs` hatch (#2073), because `revl_export` is not a listed verb:
-    the server serves it by name, but some clients will not emit a direct call
-    to an unlisted name, and the hatch is the one form that reaches it for
-    every client (issue #2581). Ready: a disk note exists only for a
-    composition loaded from files, whose export takes no arguments."""
-    return _remedy.call(_disclosure.DISCOVERY,
-                        {_disclosure.HATCH_NAME: "revl_export",
-                         _disclosure.HATCH_ARGS: {}})
+    """The call a disk note's prose names (issues #2537, #2625): `revl_export`,
+    a listed verb since #2625, so the note hands over the direct call. It went
+    through the `revl_verbs` hatch (#2073, #2581) while the verb was outside the
+    tier, because some clients will not emit a call to a name they were not
+    shown; listing the verb removed the indirection for every client. Ready: a
+    disk note exists only for a composition loaded from files, whose export
+    takes no arguments."""
+    return _remedy.call("revl_export", {})
 
 
 def _export_next_if_owed() -> dict | None:
@@ -3599,7 +3602,8 @@ def _tool_approve(arguments: dict) -> dict:
                               "(+ `uses`/`ttlMs`) to mint a standing grant")
     try:
         return {"ok": True, **SESSION.approve_ticket(
-            ticket_hash, vote=vote or "approve", as_token=as_token,
+            ticket_hash, vote=vote or "approve",
+            proposer=arguments.get("proposer"), as_token=as_token,
             as_secret=as_secret, as_proof=as_proof)}
     except SessionError as error:
         return _session_error(error)
@@ -3684,6 +3688,44 @@ def _tool_override(arguments: dict) -> dict:
     except ValueError as error:
         return _session_error(error)
     except SessionError as error:
+        return _session_error(error)
+
+
+def _tool_approvals(arguments: dict) -> dict:
+    """The approval query surface (issue #2991): `list`, `show` and `stats` over
+    the live session's outstanding-ticket table, decision graph and ledger.
+
+    Read-only by construction: it projects the session's own fields and never
+    spends, mints, revokes or writes. It is gated on the `approve` verb because
+    the questions, their blast radius and their history are the same authority
+    as answering them."""
+    from . import approvals_surface  # noqa: PLC0415 — lazy, no cordis
+    action = arguments.get("action")
+    try:
+        if action == "list":
+            return {"ok": True, **approvals_surface.list_approvals(
+                SESSION,
+                pending=bool(arguments.get("pending")),
+                session_id=arguments.get("session"))}
+        if action == "show":
+            ticket_hash = arguments.get("hash")
+            if not ticket_hash:
+                return _session_error(SessionError(
+                    "`revl_approvals` with `action: \"show\"` needs the ticket "
+                    "`hash` the approvalRequired response carried"))
+            if not isinstance(ticket_hash, str):
+                return _session_error(SessionError(
+                    "`revl_approvals` `hash` must be a string, the ticket "
+                    "hash the approvalRequired response carried"))
+            return {"ok": True, **approvals_surface.show_approval(
+                SESSION, ticket_hash, diff=bool(arguments.get("diff")))}
+        if action == "stats":
+            return {"ok": True, **approvals_surface.stats(
+                SESSION, session_id=arguments.get("session"))}
+        return _session_error(SessionError(
+            f"unknown `revl_approvals` action {action!r}: use `list`, `show` or "
+            f"`stats` (issue #2991)"))
+    except (ValueError, SessionError) as error:
         return _session_error(error)
 
 
@@ -5535,10 +5577,10 @@ def _run_affected_tests_selector(script: Path, root: Path, base: str,
         "PYTHONNOUSERSITE": "1",
     }
     try:
-        completed = subprocess.run(
+        completed = _childproc.run(
             [sys.executable, "-c", _AFFECTED_TESTS_SELECTOR_PROGRAM,
              str(script), str(root), base],
-            cwd=root, input=json.dumps(paths), capture_output=True, text=True,
+            cwd=root, input=json.dumps(paths), capture_output=True,
             check=False, timeout=_AFFECTED_TESTS_SELECTOR_TIMEOUT, env=environment)
     except subprocess.TimeoutExpired:
         return None, (f"affected-test selector timed out after "
@@ -5587,9 +5629,9 @@ def _tool_affected_tests(arguments: dict) -> dict:
     top = None
     for allowed_root in roots:
         try:
-            candidate = subprocess.run(
+            candidate = _childproc.run(
                 ["git", "rev-parse", "--show-toplevel"],
-                cwd=allowed_root, capture_output=True, text=True, check=False,
+                cwd=allowed_root, capture_output=True, check=False,
                 timeout=2)
         except (OSError, subprocess.TimeoutExpired):
             continue
@@ -5625,9 +5667,9 @@ def _tool_affected_tests(arguments: dict) -> dict:
     base = None
     for ref in ("origin/main", "main"):
         try:
-            merged = subprocess.run(
+            merged = _childproc.run(
                 ["git", "merge-base", ref, "HEAD"], cwd=root,
-                capture_output=True, text=True, check=False, timeout=2)
+                capture_output=True, check=False, timeout=2)
         except (OSError, subprocess.TimeoutExpired):
             continue
         if merged.returncode == 0 and merged.stdout.strip():
@@ -6637,7 +6679,14 @@ TOOLS = [
                        "undo never bypasses the gate. The dossier rides along: what "
                        "unloads, what state drops (item 53's honesty in reverse), and "
                        "the interim boundary crossings that no undo can un-emit "
-                       "(compensation is not inversion — paper §6.1). A revert of "
+                       "(compensation is not inversion — paper §6.1). A provider's "
+                       "live state is carried back across a `handoff` both "
+                       "generations declare on the same key when the restored shape "
+                       "accepts the running one in that direction (issue #3293): "
+                       "`stateDropped.carried` names it, and the result carries the "
+                       "same `handoff` report a forward swap does. A component with "
+                       "no such hand-off starts cold and is named in "
+                       "`stateDropped.components` with a note. A revert of "
                        "an exported change leaves disk holding the retracted text: "
                        "the answer carries a `disk` block (issue #2037) naming the "
                        "stale path and pointing at `revl_export`. "
@@ -6857,6 +6906,15 @@ TOOLS = [
                           "description": "item 344: how long (ms) the standing "
                                          "grant stays live; checked at the "
                                          "crossing against the session clock"},
+                "proposer": {"type": "string",
+                             "description": "issue #3216: the operator whose "
+                                            "call this yes lets through, one "
+                                            "of the ticket's `proposers`. A "
+                                            "yes is spent only by the operator "
+                                            "it names. Required only when more "
+                                            "than one operator raised the same "
+                                            "call; otherwise it defaults to "
+                                            "the one that did"},
                 "vote": {"type": "string", "enum": ["approve", "deny"],
                          "description": "item 471: a ticket whose rule demands a "
                                         "QUORUM takes votes, not a yes/no, so it "
@@ -7167,6 +7225,60 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_quorum,
+    },
+    {
+        "name": "revl_approvals",
+        "description": "THE APPROVAL QUERY SURFACE (issue #2991): one read-only "
+                       "view over the live session's outstanding and answered "
+                       "class-(c) tickets. `action: \"list\"` returns every ticket "
+                       "the session issued - its effect, candidate-hash binding, "
+                       "asking round, raisers, state (pending, granted, consumed, "
+                       "expired, revoked, refused, satisfied, denied, escalated) "
+                       "and the counts by state; `pending: true` keeps only the "
+                       "questions still waiting for an answer. `action: \"show\"` "
+                       "returns one ticket by `hash`: the full ticket body, the "
+                       "policy rules that answer for it, the binding hashes, the "
+                       "decision graph, grant provenance once a yes was minted or "
+                       "spent, and the deterministic next actions; `diff: true` "
+                       "adds the blast radius (the crossings with whether each has "
+                       "a checked inverse, external effects, secret flows, "
+                       "capability widenings and what the ticket discloses about "
+                       "caller-supplied resource values). `action: \"stats\"` "
+                       "folds this session's decision mirror with the durable "
+                       "approval log: counts by state, average time to decision, "
+                       "and the override/escalation/revocation history. It reads "
+                       "the session's own fields and writes nothing. Gated by the "
+                       "`approve` operator verb: seeing the questions and what "
+                       "they would let through is the same authority as answering "
+                       "them. Honest limits it states rather than invents: a "
+                       "pending single-party question carries no timestamp or "
+                       "ttl, and no model recommendation is recorded for "
+                       "approvals.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "show", "stats"],
+                           "description": "list the tickets, show one ticket, or "
+                                          "fold the decision history"},
+                "hash": {"type": "string",
+                         "description": "for `show`: the ticket hash from the "
+                                        "approvalRequired response"},
+                "pending": {"type": "boolean",
+                            "description": "for `list`: keep only questions still "
+                                           "waiting for an answer"},
+                "diff": {"type": "boolean",
+                         "description": "for `show`: add the blast-radius "
+                                        "projection (crossings and their inverse "
+                                        "classification, secret flows, "
+                                        "capability widenings)"},
+                "session": {"type": "string",
+                            "description": "the live session id; naming another "
+                                           "session is refused rather than read "
+                                           "as a whole-table request"}},
+            "required": ["action"],
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_approvals,
     },
     {
         "name": "revl_distillation_offers",
@@ -7985,6 +8097,74 @@ def _actionable_first(payload):
     return {**head, **{k: v for k, v in payload.items() if k not in head}}
 
 
+# ------------------------------------------------- server attestation (#2990)
+#
+# `revl mcp serve --attestation-key FILE` makes the server say WHO it is and
+# WHICH tool manifest it serves, signed under a key a client can pin. Off by
+# default: a server with no key configured answers no attestation, and the
+# proxy's historical trust-by-address mode stays reachable when no pin is
+# declared. The identity is loaded once at startup; the session token is
+# generated once, so two attestations of one run share it and an upstream
+# swapped mid-exchange does not.
+
+_ATTESTATION_IDENTITY = None
+_ATTESTATION_SERVER_ID = "revl-mcp-serve"
+_ATTESTATION_SESSION: str | None = None
+_ATTESTATION_TTL = 3600.0
+
+
+def set_attestation(identity, *, server_id: str = "revl-mcp-serve",
+                    ttl: float = 3600.0) -> None:
+    """Bound the server to a key and a run (issue #2990)."""
+    global _ATTESTATION_IDENTITY, _ATTESTATION_SERVER_ID
+    global _ATTESTATION_SESSION, _ATTESTATION_TTL
+    _ATTESTATION_IDENTITY = identity
+    _ATTESTATION_SERVER_ID = server_id
+    _ATTESTATION_SESSION = secrets.token_hex(16)
+    _ATTESTATION_TTL = float(ttl)
+
+
+def listed_tools() -> list:
+    """The exact tool list this server serves, in one place, so the record it
+    signs and the list it returns cannot disagree."""
+    return _disclosure.listed(_ADVERTISED)
+
+
+def attestation_for(tools) -> dict | None:
+    """The signed record for `tools`, or None when no key is configured."""
+    if _ATTESTATION_IDENTITY is None:
+        return None
+    from . import attestation  # noqa: PLC0415 - leaf module, no cycle
+
+    return attestation.make_attestation(
+        _ATTESTATION_IDENTITY, server_id=_ATTESTATION_SERVER_ID, tools=tools,
+        session=_ATTESTATION_SESSION, ttl=_ATTESTATION_TTL)
+
+
+def attestation_pin(tools=None) -> dict:
+    """The public pin a client stores for this server (issue #2990)."""
+    if _ATTESTATION_IDENTITY is None:
+        raise RevlError("<mcp>", 0,
+                        "this server has no attestation key, so there is no "
+                        "identity to pin; pass --attestation-key")
+    from . import attestation  # noqa: PLC0415
+
+    tools = listed_tools() if tools is None else tools
+    # `capabilities` is the CLIENT's declared scope, so the server writes a
+    # pin that grants the whole attested manifest and an operator narrows it by
+    # editing the list. The server's own scope is signed in the record.
+    return attestation.make_pin(_ATTESTATION_IDENTITY,
+                                server_id=_ATTESTATION_SERVER_ID, tools=tools)
+
+
+def _attested(result: dict, tools) -> dict:
+    """Attach the record to an `initialize` or `tools/list` result."""
+    record = attestation_for(tools)
+    if record is not None:
+        result["_meta"] = {"revl/attestation": record}
+    return result
+
+
 def handle(message: dict) -> dict | None:
     """One JSON-RPC request -> one response (or None for a notification)."""
     method = message.get("method")
@@ -8001,9 +8181,15 @@ def handle(message: dict) -> dict | None:
             "serverInfo": {**SERVER_INFO, **_identity.identity()},
             "instructions": _instructions(),
         }
+        # issue #2990: the server names its key and its tool manifest in the
+        # same result that names its revision. A client that pinned a key
+        # verifies this BEFORE it asks for a tool.
+        result = _attested(result, listed_tools())
     elif method == "tools/list":
-        # issue #1697: the core tier unless the client asked for every verb
-        result = {"tools": _disclosure.listed(_ADVERTISED)}
+        # issue #1697: the core tier unless the client asked for every verb.
+        # One list, so the signed digests and the served tools cannot drift.
+        tools = listed_tools()
+        result = _attested({"tools": tools}, tools)
     elif method == "tools/call":
         params = message.get("params") or {}
         name = params.get("name")
@@ -8014,7 +8200,7 @@ def handle(message: dict) -> dict | None:
         # lookup but a CALL of the verb it names, resolved here to that verb's
         # own name so the pipeline below cannot tell the difference. The
         # tiered list therefore stays exactly `CORE`: every verb is one listed
-        # tool away without a fifteenth listed verb.
+        # tool away, and the hatch itself adds no listed verb.
         payload = _unknown_arguments(name, arguments)
         if payload is not None:
             pass

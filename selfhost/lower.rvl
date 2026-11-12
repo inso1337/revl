@@ -2690,6 +2690,53 @@ fn fn_params_i(ts: List[Token], i: Int) -> Int {
 // operation's compare in the same namespace. Only the FIRST bracket is the
 // scope — the reference refuses a second one at parse, and a type-parameter
 // bracket sits after `fn <name>`, never here.
+// The reference's parse refusal for `ensures` after a signature that is not a
+// top-level `fn` (issue #2705, `parser.py::_spec_outside_fn`), byte for byte.
+fn spec_outside_fn_msg(where_: Str) -> Str {
+  return "a spec (`ensures`) is only supported on a top-level `fn`, not on "
+    .concat(where_)
+}
+
+// Whether a method signature in `lo..hi` writes `ensures` after its return
+// type: a `fn NAME (` head whose `-> T` slot is followed by the clause.
+fn spec_sig_in(ts: List[Token], lo: Int, hi: Int) -> Bool {
+  var k = lo
+  while (k < hi) {
+    if (atw(ts, k, "fn") && atk(ts, k + 2, "(")) {
+      let cp = close_paren(ts, k + 2)
+      if (cp != 0 - 1 && ati(ts, ret_at(ts, cp), "ensures")) { return true }
+    }
+    k += 1
+  }
+  return false
+}
+
+// The same, over the `provide` blocks of a component body in `lo..hi`.
+fn spec_in_provides(ts: List[Token], lo: Int, hi: Int) -> Bool {
+  var k = lo
+  while (k < hi) {
+    if (atw(ts, k, "provide")) {
+      var b = k + 1
+      while (b < hi && !atk(ts, b, "{")) { b += 1 }
+      let e = close_brace(ts, b)
+      if (e != 0 - 1 && spec_sig_in(ts, b, e)) { return true }
+    }
+    k += 1
+  }
+  return false
+}
+
+// Whether the extern at `i` names its class right after `extern`, the shape the
+// reference's parser requires before it reads anything else (the G8 rule
+// `stmt_parse_scan` applies).
+fn ext_classified_at(ts: List[Token], i: Int) -> Bool {
+  let c = tkc(ts, i + 1)
+  let named = (c.text == "pure") || (c.text == "acquire") || (c.text == "emission")
+    || (c.text == "witnessed") || (c.text == "local")
+  let shaped = (c.kind == "kw") || at_word(ts, i + 1, "witnessed") || at_word(ts, i + 1, "local")
+  return named && shaped
+}
+
 fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
   var j = i + 1
   var isAcq = false
@@ -2733,6 +2780,16 @@ fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
   let nm = tkc(ts, j + 1).text
   let ps = params_at(ts, j + 3)
   var k = ret_at(ts, ps.i)
+  // issue #2705: a spec is checked as a generated `prop test` that calls the
+  // fn, which an extern cannot be; the reference refuses the clause at parse
+  // (`parser.py::_spec_outside_fn`), in these words. The host-body skip below
+  // would otherwise step over it and admit the extern silently. The reference
+  // reads the classification first, so an UNCLASSIFIED extern is left to the
+  // G8 refusal `stmt_parse_scan` reports, exactly as without the clause.
+  if (ati(ts, k, "ensures") && ext_classified_at(ts, i)) {
+    return { pg: bad_prog(pg, spec_outside_fn_msg("an extern")),
+             i: skip_line(ts, k) }
+  }
   let inv = isAcq ? declared_inverse_at(ts, k) : ""
   // skip any `= @host { ... }` bodies without letting a brace end the decl early.
   //
@@ -2793,10 +2850,29 @@ fn inverse_slots(ts: List[Token], i: Int, depth: Int, acc: Str, fresh: Bool) -> 
   return inverse_slots(ts, i + 1, depth + up - down, acc, false)
 }
 
+// The named refusal for a `fn` that states a spec (issue #2705). Every
+// verdict entry reports it under the UNSUPPORTED tag, the family of the other constructs
+// the reference admits and this compiler does not mirror.
+fn fn_spec_unsupported() -> Str {
+  return "a function spec (`ensures`) is not supported by the self-host compiler"
+}
+
+// A parse-stage refusal as a verdict: BAD, except the named spec refusal.
+fn bad_verdict(msg: Str) -> Str {
+  return tagged(msg == fn_spec_unsupported() ? "UNSUPPORTED" : "BAD", msg)
+}
+
 fn p_fn(ts: List[Token], i: Int, pg: Prog) -> PStep {
   let nm = tkc(ts, i + 1).text
   let ps = fn_params_at(ts, fn_params_i(ts, i))
   var rti = ret_at(ts, ps.i)
+  // issue #2705: the `ensures` clause the reference accepts here is lowered
+  // to a generated `prop test`, a section this producer does not emit. It is
+  // refused BY NAME rather than read as a missing `{`, so the gap is a named
+  // refusal and never a misleading parse error or a silently dropped fn.
+  if (ati(ts, rti, "ensures")) {
+    return mk_step(bad_prog(pg, fn_spec_unsupported()), rti)
+  }
   let cachePure = ati(ts, rti, "cache") && atw(ts, rti + 1, "pure")
   if (cachePure) { rti += 2 }
   if (!atk(ts, rti, "{")) {
@@ -3110,8 +3186,10 @@ fn p_service(ts: List[Token], i: Int, pg: Prog) -> PStep {
   }
   let ms = p_methods(ts, i + 3, end - 1, [])
   if (!ms.ok) {
-    return { pg: bad_prog(pg, "bad method signature in service ".concat(nm)),
-             i: end }
+    // issue #2705: the reference names a spec on an operation
+    let why = spec_sig_in(ts, i + 3, end - 1) ? spec_outside_fn_msg("a service operation")
+      : "bad method signature in service ".concat(nm)
+    return { pg: bad_prog(pg, why), i: end }
   }
   return { pg: push_svc(pg, { name: nm, methods: ms.xs }), i: end }
 }
@@ -3790,8 +3868,10 @@ fn p_component(ts: List[Token], i: Int, pg: Prog) -> PStep {
   let body = p_comp_body(ts, j + 1, end - 1, provh, reqs, nm, [], [], [], [],
                          [], no_hoff(), false)
   if (!body.ok) {
-    return { pg: bad_prog(pg, "bad provide block in component ".concat(nm)),
-             i: end }
+    // issue #2705: the reference names a spec on a provided method
+    let why = spec_in_provides(ts, j + 1, end - 1) ? spec_outside_fn_msg("a provided method")
+      : "bad provide block in component ".concat(nm)
+    return { pg: bad_prog(pg, why), i: end }
   }
   // each declared provision key carries the realm its `isolate` names (shared
   // when unisolated); the linker's per-(key, realm) G2 reads these. Keys are
@@ -23327,11 +23407,7 @@ fn stmt_parse_scan(ts: List[Token]) -> Verd {
         "dynamic realm labels are not supported — a realm is a static string literal"), ln)
     }
     if (atw(ts, i, "extern")) {
-      let c = tkc(ts, i + 1)
-      let named = (c.text == "pure") || (c.text == "acquire") || (c.text == "emission")
-        || (c.text == "witnessed") || (c.text == "local")
-      let shaped = (c.kind == "kw") || at_word(ts, i + 1, "witnessed") || at_word(ts, i + 1, "local")
-      if (!named || !shaped) { return mk_verd(tagged("G8", ext_unclassified_msg()), ln) }
+      if (!ext_classified_at(ts, i)) { return mk_verd(tagged("G8", ext_unclassified_msg()), ln) }
       let ui = sp_ui_teardown(ts, i)
       if (ui != "") { return mk_verd(tagged("G4", ui), ln) }
     }
@@ -23353,7 +23429,7 @@ pub fn parse_refusal(src: Str) -> Str {
   let cav = closure_assign_scan(ts)
   if (cav.v != "") { return cav.v }
   let pg = parse_prog_ts(ts)
-  if (pg.bad != "") { return tagged("BAD", pg.bad) }
+  if (pg.bad != "") { return bad_verdict(pg.bad) }
   let pps = first_parse_verd(verified_parse_scan(ts), effect_no_undo_scan(ts))
   if (pps.v != "") { return pps.v }
   let rph = realm_placeholder_scan(ts)
@@ -23530,7 +23606,7 @@ pub fn admit_src(src: Str) -> Str {
   let cav = closure_assign_scan(ts)
   if (cav.v != "") { return cav.v }
   let pg = parse_prog_ts(ts)
-  if (pg.bad != "") { return tagged("BAD", pg.bad) }
+  if (pg.bad != "") { return bad_verdict(pg.bad) }
   // issue #1897 (`verified` heading anything but `effect`) and issue #1963
   // (an undo-less dotted `effect`): parser refusals, the earlier line first.
   let pps = first_parse_verd(verified_parse_scan(ts), effect_no_undo_scan(ts))
@@ -23580,7 +23656,7 @@ pub fn admit_all(src: Str) -> Str {
   let cav = closure_assign_scan(ts)
   if (cav.v != "") { return fmt_all([cav]) }
   let pg = parse_prog_ts(ts)
-  if (pg.bad != "") { return fmt_all([mk_verd(tagged("BAD", pg.bad), 0)]) }
+  if (pg.bad != "") { return fmt_all([mk_verd(bad_verdict(pg.bad), 0)]) }
   let pps = first_parse_verd(verified_parse_scan(ts), effect_no_undo_scan(ts))
   if (pps.v != "") { return fmt_all([mk_verd(pps.v, 0)]) }
   let rph = realm_placeholder_scan(ts)
@@ -24502,7 +24578,7 @@ pub fn admit_ambient(src: Str, manifest: Str) -> Str {
   let cav = closure_assign_scan(ts)
   if (cav.v != "") { return cav.v }
   let pg = parse_prog_ts(ts)
-  if (pg.bad != "") { return tagged("BAD", pg.bad) }
+  if (pg.bad != "") { return bad_verdict(pg.bad) }
   // issues #1897 and #1963, as in `admit_src`: parser refusals.
   let pps = first_parse_verd(verified_parse_scan(ts), effect_no_undo_scan(ts))
   if (pps.v != "") { return pps.v }
@@ -25147,6 +25223,35 @@ fn taint_top_qualifier(ty: Str) -> Str {
   return ""
 }
 
+// Whether a `want` qualifier head sits anywhere the value itself reaches: the
+// outermost head or a container argument, never a function type's arguments.
+// The reference's `taint._holds_qualifier`.
+fn taint_holds_qualifier(ty: Str, want: Str) -> Bool {
+  if (ty == "" || !taint_has_qualifier(ty)) { return false }
+  if (taint_top_qualifier(ty) == want) { return true }
+  let p = ty_parse(ty)
+  if (p.head == "->" || p.head == "Fn") { return false }
+  var i = 0
+  while (i < p.args.length()) {
+    if (taint_holds_qualifier(p.args[i], want)) { return true }
+    i += 1
+  }
+  return false
+}
+
+// The primary qualifier a declared return mints a source from (`Untrusted`,
+// then `Secret`), read inside a container too (issue #3192), else "": the
+// reference's `taint.source_qualifier`. An outermost `Trusted` or `Retained`
+// head decides on its own and mints nothing here.
+fn taint_source_qualifier(ty: Str) -> Str {
+  let top = taint_top_qualifier(ty)
+  if (top == "Untrusted" || top == "Secret") { return top }
+  if (top != "" || ty == "" || ty_parse(ty).head == "Retained") { return "" }
+  if (taint_holds_qualifier(ty, "Untrusted")) { return "Untrusted" }
+  if (taint_holds_qualifier(ty, "Secret")) { return "Secret" }
+  return ""
+}
+
 // A service operation's `params` list: `ir_params_json` plus the issue #1937
 // stamps `"trusted": true` / `"untrusted": true`, read off the DECLARED types
 // `raw` (before alias substitution, as the reference's `extract_and_normalize`
@@ -25346,8 +25451,7 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str
   var nexti = ps.i
   if (atk(ts, ps.i, "arrow")) {
     let tr = type_at(ts, ps.i + 1)
-    let rq = taint_top_qualifier(tr.ty)
-    if (rq == "Untrusted" || rq == "Secret") { retQual = rq }
+    retQual = taint_source_qualifier(tr.ty)
     rawRet = taint_strip(alias_subst(tr.ty, al))
     if (rawRet == "Criterion") {
       term = "criterion"
@@ -31377,6 +31481,148 @@ fn adt_case_row(ts: List[Token], i: Int, al: Map[Str, Str],
   return tenv_put(acc, "cases ".concat(nm), names)
 }
 
+// The PROVIDED variant rows, in `model_answer.ANSWER_TYPES`' declaration
+// order: the case list the reference's seeded type table carries for a program
+// that NAMES a provided type. "" for a head this gate does not provide.
+fn tk_provided_cases(head: Str) -> Str {
+  if (head == "Aggregate") { return "Agreed,Split,Inquorate" }
+  if (head == "Answer") { return "Says,Abstains,Unreachable" }
+  return ""
+}
+
+// `model_answer.mentions`: does this type spelling name a provided type
+// APPLIED at any depth (`Aggregate[Str]`, `List[Answer[Str]]`)? A bare head is
+// not a use of the generic provided type, and the reference admits a match over
+// one because its table holds no entry for it.
+fn tk_provided_ty(t: Str) -> Bool {
+  let s = ty_trim(t)
+  if (s == "") { return false }
+  let h = parse_head(s)
+  let a = type_args(s)
+  if ((h == "Aggregate" || h == "Answer") && a.length() > 0) { return true }
+  var i = 0
+  while (i < a.length()) {
+    if (tk_provided_ty(a[i])) { return true }
+    i += 1
+  }
+  return false
+}
+
+// One declaration's parameter types, aliases erased exactly as
+// `_resolve_type_aliases` erases them before the reference reads the strings.
+fn tk_provided_params(ps: List[ParamN], al: Map[Str, Str]) -> Bool {
+  var i = 0
+  while (i < ps.length()) {
+    if (tk_provided_ty(alias_subst(ps[i].ty, al))) { return true }
+    i += 1
+  }
+  return false
+}
+
+// The field and case-payload rows one `type` or `event` declaration
+// contributes, which `decl_cases` and `event_field_binds` already erase.
+fn tk_provided_rows(rows: List[Bind]) -> Bool {
+  var i = 0
+  while (i < rows.length()) {
+    if (tk_provided_ty(rows[i].ty)) { return true }
+    i += 1
+  }
+  return false
+}
+
+// A `service` body's method signatures, the third position
+// `_declared_type_strings` reads. A service block holds declarations only, so
+// this is a header walk and never an expression one.
+fn tk_provided_service(ts: List[Token], i: Int, al: Map[Str, Str]) -> Bool {
+  var j = i + 2
+  if (!atk(ts, j, "{")) { return false }
+  let bend = close_brace(ts, j)
+  if (bend == 0 - 1) { return false }
+  var k = j + 1
+  while (k < bend) {
+    if (atw(ts, k, "fn") && atk(ts, k + 2, "(")) {
+      let ps = params_at(ts, k + 3)
+      if (ps.ok) {
+        if (tk_provided_params(ps.ps, al)) { return true }
+        var nx = ps.i
+        if (atk(ts, nx, "arrow")) {
+          let tr = type_at(ts, nx + 1)
+          if (tr.ok && tk_provided_ty(alias_subst(tr.ty, al))) { return true }
+          nx = tr.i
+        }
+        k = nx > k ? nx : k + 1
+      } else { k += 1 }
+    } else { k += 1 }
+  }
+  return false
+}
+
+// Does the program NAME a provided type APPLIED in one of the positions
+// `model_answer.seeded` reads? `_declared_type_strings` is that list: module
+// `fn` and `extern` signatures, service methods, and declared record fields
+// and case payloads, all after `_resolve_type_aliases` has erased aliases into
+// their targets. A `let` annotation inside a body is NOT one of them, so a
+// program whose only mention sits in a body must keep its table unseeded (a
+// bare `Aggregate` match there is one the reference admits); the same holds for
+// a mention in a `component` or `test` body, and the walk steps those whole.
+// Reading each position through its own reader is what applies alias erasure by
+// construction, so a declared position spelled through an alias counts and an
+// unused alias declaration does not.
+fn tk_provided_mentioned(ts: List[Token], al: Map[Str, Str]) -> Bool {
+  var i = 0
+  while (i < ts.length() && !atk(ts, i, "eof")) {
+    let t = tkc(ts, i)
+    if (at_boot(ts, i)) { i += 1 }
+    else if (at_event(ts, i)) {
+      if (tk_provided_rows(event_field_binds(ts, i, [], al))) { return true }
+      i = event_decl_end(ts, i)
+    }
+    else if (at_qual_test(ts, i)) {
+      let qe = qual_test_end(ts, i)
+      i = qe == 0 - 1 ? skip_line(ts, i) : qe
+    }
+    else if (t.kind != "kw") { i = skip_line(ts, i) }
+    else if (at_pub_prefix(ts, i)) { i += 1 }
+    else if (t.text == "use") { i = skip_line(ts, i) }
+    else if (t.text == "type") {
+      let d = decl_cases(ts, i, { binds: [], amb: [] }, al)
+      if (tk_provided_rows(d.a.binds)) { return true }
+      i = d.i > i ? d.i : i + 1
+    }
+    else if (t.text == "test") {
+      let e = test_block_end(ts, i)
+      i = e == 0 - 1 ? skip_line(ts, i) : e
+    }
+    else if (t.text == "extern") {
+      let h = ext_head(ts, i)
+      let nx = p_extern(ts, i, empty_prog()).i
+      if (h.ok && (tk_provided_params(h.ps, al)
+                   || tk_provided_ty(alias_subst(h.ret, al)))) { return true }
+      i = nx > i ? nx : i + 1
+    }
+    else if (t.text == "service") {
+      if (tk_provided_service(ts, i, al)) { return true }
+      let nx = p_service(ts, i, empty_prog()).i
+      i = nx > i ? nx : i + 1
+    }
+    else if (t.text == "component") {
+      let nx = p_component(ts, i, empty_prog()).i
+      i = nx > i ? nx : i + 1
+    }
+    else if (t.text == "fn") {
+      let sp = fb_span(ts, i)
+      if (!sp.ok) { i = skip_line(ts, i) }
+      else {
+        if (tk_provided_params(sp.ps, al)
+            || tk_provided_ty(alias_subst(sp.ret, al))) { return true }
+        i = sp.next > i ? sp.next : i + 1
+      }
+    }
+    else { i = skip_line(ts, i) }
+  }
+  return false
+}
+
 // The built-in half of `_case_table`, declared first so a user ADT can shadow
 // `Ok`/`Err` and a user reuse of `Some`/`None` collides with something.
 fn case_binds(ts: List[Token], al: Map[Str, Str]) -> List[Bind] {
@@ -31389,7 +31635,23 @@ fn case_binds(ts: List[Token], al: Map[Str, Str]) -> List[Bind] {
   b = b.push({ name: "payload Ok", ty: "" })
   b = b.push({ name: "case Err", ty: "Result[Any, Any]" })
   b = b.push({ name: "payload Err", ty: "" })
-  return case_binds_walk(ts, 0, { binds: b, amb: [] }, al).binds
+  var env = case_binds_walk(ts, 0, { binds: b, amb: [] }, al).binds
+  // `model_answer.seeded`: the provided types join the table when the program
+  // names one, so `tk_exhaustive`'s head lookup finds the case list the
+  // reference's seeded table carries. A provided type is never a `type`
+  // declaration here, so without these rows the general rule found nothing for
+  // an applied scrutinee and stayed silent where the reference refuses the
+  // missing case (issue #2981). The user's own declaration wins a name
+  // collision, as `{**ANSWER_TYPES, **types}` does in the reference.
+  if (tk_provided_mentioned(ts, al)) {
+    if (tenv_get(env, "cases Aggregate") == "") {
+      env = tenv_put(env, "cases Aggregate", tk_provided_cases("Aggregate"))
+    }
+    if (tenv_get(env, "cases Answer") == "") {
+      env = tenv_put(env, "cases Answer", tk_provided_cases("Answer"))
+    }
+  }
+  return env
 }
 
 // `_tagged_case`: the ADT a name constructs, or "" when it constructs none.

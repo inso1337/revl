@@ -63,6 +63,8 @@ from .typecheck import (
     bind_local as _bind_typed_local,
     check_ir,
     infer_ast,
+    infer_memo,
+    infer_memo_active,
     infer_ir,
     mismatch,
     pin_hole,
@@ -4751,6 +4753,13 @@ _ROUTE_METHODS = ("get", "post", "put", "patch", "delete", "head")
 _ROUTE_QUERY_METHODS = ("get", "head", "delete")
 _ROUTE_BODY_METHODS = ("post", "put", "patch")
 
+#: the two verbs a browser sends from ANY page without an `Origin` header: an
+#: `<img>`, `<script>` or `<link>` GET, a form GET, or a top-level navigation.
+#: Issue #3186: a mutating operation routed with one is reachable from every page
+#: the operator visits, so an operation whose reach is an emission may not use
+#: them.
+_ROUTE_ORIGINLESS_METHODS = ("get", "head")
+
 
 def _route_scalar(type_name: str | None) -> bool:
     return type_name in _ROUTE_SCALARS
@@ -4786,6 +4795,9 @@ def _method_route_ir(m, types: dict, filename: str, service_name: str) -> dict:
         template does not name;
       * a `Bearer` / `Request` parameter appearing more than once;
       * a non-scalar / non-`Opt[scalar]` query parameter on a safe verb;
+      * a `route get` or `route head` on an `emission` operation (issue #3186):
+        a browser sends no `Origin` on the cross-site GET a page can fire, so an
+        emission reached by one fires from any page the operator visits;
       * anything other than exactly one record body on an unsafe verb;
       * a body / query / path type that is not `fully_expressible` (item 257);
       * a `Result[T, E]` return whose `E` is not `ApiError`.
@@ -4803,6 +4815,14 @@ def _method_route_ir(m, types: dict, filename: str, service_name: str) -> dict:
     def refuse(message: str, hint: str | None = None):
         raise RevlError(filename, line, message, hint=hint,
                         code="G4", category="route")
+
+    if m.emission and method in _ROUTE_ORIGINLESS_METHODS:
+        refuse(f"{where} is an `emission` operation, but is routed with `{method}`",
+               hint="a browser sends no Origin on a cross-site GET (an <img>, "
+                    "<script>, <link>, form GET or top-level navigation), so any "
+                    "page the operator visits could fire it; route an emission "
+                    "with `post`, which a cross-site page cannot send without a "
+                    "preflighted Origin")
 
     try:
         template = _route_template_names(path)
@@ -6285,8 +6305,21 @@ def _check_generatable(filename: str, line: int, type_name: str, types: dict,
 
 def _lower_prop_tests(program: Program, filename: str, types: dict,
                       services: dict | None = None) -> list:
-    """Lower `prop test` blocks to IR prop units (docs/prop-test.md)."""
-    if not program.prop_tests:
+    """Lower `prop test` blocks to IR prop units (docs/prop-test.md).
+
+    Issue #2705 adds the second source of units: a `fn` with an `ensures`
+    clause is lowered to a generated property over the fn's parameter types
+    whose body binds `result` to one call of the fn and asserts the clause.
+    The expansion lives here, at lowering, rather than as a synthesized
+    `PropTestDecl` in the parsed program, so the fn's types and value names are
+    the ones the module merge already resolved and the fn's own callable scope
+    is the one the property body lowers in. The unit carries `spec_of`/`spec`
+    so the runner and the audit can attribute the result to the function
+    (docs/function-specs.md).
+    """
+    spec_fns = [fn for fn in program.fn_decls
+                if getattr(fn, "ensures", None) is not None]
+    if not program.prop_tests and not spec_fns:
         return []
     merged_callables = (_HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | _DECLASSIFY_BUILTINS
                         | {fn.name for fn in program.fn_decls}
@@ -6294,6 +6327,30 @@ def _lower_prop_tests(program: Program, filename: str, types: dict,
     units: list[dict] = []
     seen: set[str] = set()
     scoped: dict = {}
+
+    def _unit(name, params, stmts, decl_file, callables, provenance=None):
+        scope: dict[str, bool] = {}
+        type_env: dict[str, str] = {}
+        for param in params:
+            check_type_wellformed(decl_file, param.line, param.type)
+            _check_generatable(decl_file, param.line, param.type, types, name)
+            scope[param.name] = False
+            type_env[param.name] = param.type
+        body: list[dict] = []
+        check_list_index_bounds(stmts, decl_file)
+        for stmt in stmts:
+            _lower_pure_stmt(stmt, scope, callables, {}, body, decl_file,
+                             type_env, types)
+        unit = {
+            "name": name,
+            "params": [{"name": _predeclared_mangle(p.name), "type": p.type}
+                       for p in params],
+            "body": body,
+        }
+        if provenance:
+            unit.update(provenance)
+        return unit
+
     for decl in program.prop_tests:
         callables = _block_callables(program, decl, merged_callables, scoped)
         # issue #1904, as in `_lower_tests`: a prop test carried in from an
@@ -6302,23 +6359,28 @@ def _lower_prop_tests(program: Program, filename: str, types: dict,
         if decl.name in seen:
             raise RevlError(decl_file, decl.line, f"duplicate prop test `{decl.name}`")
         seen.add(decl.name)
-        scope: dict[str, bool] = {}
-        type_env: dict[str, str] = {}
-        for param in decl.params:
-            check_type_wellformed(decl_file, param.line, param.type)
-            _check_generatable(decl_file, param.line, param.type, types, decl.name)
-            scope[param.name] = False
-            type_env[param.name] = param.type
-        body: list[dict] = []
-        check_list_index_bounds(decl.body, decl_file)
-        for stmt in decl.body:
-            _lower_pure_stmt(stmt, scope, callables, {}, body, decl_file, type_env, types)
-        units.append({
-            "name": decl.name,
-            "params": [{"name": _predeclared_mangle(p.name), "type": p.type}
-                       for p in decl.params],
-            "body": body,
-        })
+        units.append(_unit(decl.name, decl.params, decl.body, decl_file, callables))
+
+    for fn in spec_fns:
+        spec = fn.ensures
+        decl_file = program.decl_files.get(id(fn), filename)
+        name = f"{fn.name} ensures"
+        if name in seen:
+            raise RevlError(
+                decl_file, spec.line,
+                f"`fn {fn.name}`'s spec is checked as prop test `{name}`, "
+                "which is already declared",
+                hint="rename the `prop test`, or the function")
+        seen.add(name)
+        callables = _block_callables(program, fn, merged_callables, scoped)
+        call = ExprCall(ExprVar(fn.name, spec.line),
+                        [ExprVar(p.name, p.line) for p in fn.params],
+                        spec.line)
+        stmts = [LetStmt("result", call, False, spec.line),
+                 AssertStmt(spec.expr, spec.line)]
+        units.append(_unit(name, fn.params, stmts, decl_file, callables,
+                           {"spec_of": fn.name, "spec": spec.text,
+                            "spec_file": decl_file}))
     return units
 
 
@@ -7609,6 +7671,26 @@ def _refuse_foreign_increment(expr, filename: str, type_env: dict | None,
 
 def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filename: str,
                      type_env: dict | None = None, types: dict | None = None) -> dict:
+    """Lower one pure-stratum expression.
+
+    Issue #3400: the operator arms below ask `infer_ast` for the type of each
+    operand after lowering it, and each answer walks the operand's subtree, so
+    the outermost call opens an `infer_memo()` and every node of the
+    expression is inferred once. Sound here because every statement scope this
+    lowering opens inside an expression works on a copy (`dict(type_env)`), so
+    no environment an operand was inferred under changes meanwhile.
+    """
+    if infer_memo_active():
+        return _lower_pure_expr_node(expr, scope, callables, alias_fns, filename,
+                                     type_env, types)
+    with infer_memo():
+        return _lower_pure_expr_node(expr, scope, callables, alias_fns, filename,
+                                     type_env, types)
+
+
+def _lower_pure_expr_node(expr, scope: dict, callables: set, alias_fns: dict,
+                          filename: str, type_env: dict | None = None,
+                          types: dict | None = None) -> dict:
     type_env = type_env if type_env is not None else {}
     types = types if types is not None else {}
     if isinstance(expr, ExprHole):

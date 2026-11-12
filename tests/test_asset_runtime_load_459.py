@@ -938,7 +938,10 @@ _MUTATIONS = {
         '        raise ConfinementError(\n'
         '            "EOUTSIDE",\n'
         '            "path escapes the session workspace root",\n'
-        '            real,\n'
+        '            # the CALLER\'s spelling, never `real`: the resolved path expands\n'
+        '            # every symlink outside the root, a fact about what lives there\n'
+        '            # (#3184)\n'
+        '            _sanitized(path),\n'
         '        )',
         '    if False:\n'
         '        raise ConfinementError("EOUTSIDE", "x", real)'),
@@ -946,11 +949,11 @@ _MUTATIONS = {
         '    target = path if os.path.isabs(path) else os.path.join(root, path)',
         '    target = os.path.join(root, path.replace("../", ""))'),
     "realpath-skipped": (
-        '    real = os.path.realpath(target)',
+        '    real = os.path.realpath(os.path.normpath(target))',
         '    real = os.path.normpath(target)'),
     "dotdot-refused-textually-instead": (
-        '    real = os.path.realpath(target)',
-        '    real = target if ".." not in path else os.path.realpath(target)'),
+        '    real = os.path.realpath(os.path.normpath(target))',
+        '    real = target if ".." not in path else os.path.realpath(os.path.normpath(target))'),
     "unset-root-falls-back-to-cwd": (
         '    if not root:\n'
         '        raise ConfinementError(\n'

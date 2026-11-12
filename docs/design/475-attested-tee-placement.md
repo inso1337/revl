@@ -68,7 +68,10 @@ change.
      only accepted value is `"forbidden"`, and the module refuses `"allowed"`
      because a requirement that asks for an open network is not the placement
      this item describes and silently honouring it would widen the very
-     confinement the requirement exists to narrow.
+     confinement the requirement exists to narrow. Since issue #3156 it also
+     carries `tdx`, the :class:`TdxPolicy` naming the permitted runtime-register
+     quadruples, the TCB floors and the quoting-enclave identities a TDX quote
+     must meet, and `sev_min_tcb` for the SEV-SNP TCB floor.
    * `EnclaveEvidence` (`tee_attestation.py:316`) is the proof: `peer_id` (the
      peer it is about), `bundle` (the approved bundle's content hash),
      `measurement` (what is running inside the enclave), `region`,
@@ -87,7 +90,11 @@ change.
      or absent, when the challenge is not this placement's, when
      `outbound_network` is not forbidden, when the proof is expired, when it is
      stamped further in the future than a clock skew allows, and when the
-     challenge has already been consumed.
+     challenge has already been consumed. Since issue #3156 it also compares the
+     hardware facts the quote carries against the requirement's policy: a TDX
+     quote is refused outright when the requirement states no `TdxPolicy`, and a
+     stated policy's runtime registers, TCB floors and quoting-enclave identities
+     are compared, as is a SEV-SNP report's TCB floor.
    * **The load-bearing refusal.** `tee_admits` refuses when
      `attester_key == peer_key`: a peer that signs its own attestation has
      proven nothing an `attestation` facet did not already prove, and admitting
