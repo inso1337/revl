@@ -1019,6 +1019,13 @@ A swap that lands, inline or by name, carries `blastRadius` in the shape
 `revl_edit` gives it below, read off the composition that was running before
 the swap (issue #1704).
 
+A swap that lands also carries `compensationResidue`, in the shape `unload`
+gives it: one record for each key an `undo` of a disposed frame did not put
+back (`error.type: "NotReversed"`), empty when every undo reversed (issue
+#3381). A record is reported once: the answer that names it drains it. A
+record no answer reported, such as one left by a swap that was rolled back, is
+reported by `unload`, whose `noResidue` is then false.
+
 - Inputs: `source` / `files` / `modules` (all optional); `replacing`;
   `service` (the WIT interface name the quarantine tier groups the
   candidate's functions under, when a policy arms it; default: the sole
