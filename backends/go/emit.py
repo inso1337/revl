@@ -6412,7 +6412,7 @@ def _v3_ident(name, role: str) -> str:
     (`_REVL_HELPER_PREFIX_RE`, issue #3168), by exactly one `_`. The plain
     "reserved -> name + '_'" map sent both `func` and the equally legal revl
     identifier `func_` to `func_`, so two distinct revl locals became one Go
-    local and `go build` reported "no new variables on left side of :=" — a
+    local and `go build` reported "no new variables on left side of :=": a
     loud break here, a SILENT capture on the python tier from the same shape.
     A `revl*` user binding is escaped for the same reason a keyword is: the
     emitter's bare helper call inside the function must keep binding the
