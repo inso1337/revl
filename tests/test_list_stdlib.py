@@ -40,7 +40,7 @@ STDLIB = ROOT / "stdlib" / "list.rvl"
 #: emitters reach for — `x in set` (list_contains) and `sorted(set)`
 #: (list_sort(list_dedup(...))) — in PURE revl, using ONLY the kit.
 CONSUMER = """\
-use "stdlib/list.rvl" { str_lt, list_contains, list_sort, list_dedup }
+use "stdlib/list.rvl" { str_lt, list_contains, list_sort, list_dedup, list_reverse }
 
 // membership — the `str_in` replacement
 fn has(xs: List[Str], x: Str) -> Bool { return list_contains(xs, x) }
@@ -52,6 +52,11 @@ fn sorted_set(xs: List[Str]) -> List[Str] { return list_sort(list_dedup(xs)) }
 fn sort_join(xs: List[Str]) -> Str { return list_sort(xs).join("|") }
 fn dedup_join(xs: List[Str]) -> Str { return list_dedup(xs).join("|") }
 fn sorted_set_join(xs: List[Str]) -> Str { return sorted_set(xs).join("|") }
+
+fn rev_join(xs: List[Str]) -> Str { return list_reverse(xs).join("|") }
+fn rev_len(xs: List[Str]) -> Int { return list_reverse(xs).length() }
+fn rev_twice_join(xs: List[Str]) -> Str { return list_reverse(list_reverse(xs)).join("|") }
+fn rev_ints(xs: List[Int]) -> List[Int] { return list_reverse(xs) }
 
 // the codepoint comparator, exposed for a direct pin
 fn lt(a: Str, b: Str) -> Bool { return str_lt(a, b) }
@@ -76,7 +81,7 @@ def consumer_ir(tmp_path_factory):
 
 def test_module_imports_and_functions_reach_the_ir(consumer_ir):
     names = {f["name"] for f in consumer_ir["functions"]}
-    assert {"str_lt", "list_contains", "list_sort", "list_dedup"} <= names
+    assert {"str_lt", "list_contains", "list_sort", "list_dedup", "list_reverse"} <= names
     # PURE revl: no @py externs are introduced by the kit
     assert consumer_ir.get("externs", []) == []
 
@@ -86,6 +91,7 @@ def test_module_file_is_the_documented_surface():
     assert "pub fn list_contains(xs: List[Str], x: Str) -> Bool" in text
     assert "pub fn list_sort(xs: List[Str]) -> List[Str]" in text
     assert "pub fn list_dedup(xs: List[Str]) -> List[Str]" in text
+    assert "pub fn list_reverse[T](xs: List[T]) -> List[T]" in text
     assert "pub fn str_lt(a: Str, b: Str) -> Bool" in text
 
 
@@ -204,3 +210,38 @@ def test_sorted_set_is_sorted_unique(ns):
     # the emitter's `sorted(set(uses))` shape: dedup then codepoint sort
     xs = ["Pool", "Map", "Pool", "Frame", "Map", "Job"]
     assert ns["sorted_set_join"](xs) == "|".join(sorted(set(xs)))
+
+
+# ---- list_reverse: edges, double reverse, fuzz vs reversed() ----------------
+
+def test_reverse_empty(ns):
+    assert ns["rev_len"]([]) == 0
+    assert ns["rev_join"]([]) == ""
+
+
+def test_reverse_single(ns):
+    assert ns["rev_join"](["x"]) == "x"
+
+
+def test_reverse_abc(ns):
+    assert ns["rev_join"](["a", "b", "c"]) == "c|b|a"
+
+
+def test_reverse_is_generic_over_element_type(ns):
+    assert list(ns["rev_ints"]([1, 2, 3])) == [3, 2, 1]
+
+
+def test_reverse_does_not_mutate_input(ns):
+    xs = ["a", "b", "c"]
+    ns["rev_join"](xs)
+    assert xs == ["a", "b", "c"]
+
+
+def test_reverse_fuzz_matches_reversed_and_twice_is_identity(ns):
+    alphabet = ["a", "A", "b", "z", "1", "_", "", "aa", "Ab"]
+    rnd = random.Random(3463)
+    for _ in range(2000):
+        xs = [rnd.choice(alphabet) for _ in range(rnd.randint(0, 9))]
+        assert ns["rev_join"](xs) == "|".join(reversed(xs)), xs
+        assert ns["rev_len"](xs) == len(xs), xs
+        assert ns["rev_twice_join"](xs) == "|".join(xs), xs

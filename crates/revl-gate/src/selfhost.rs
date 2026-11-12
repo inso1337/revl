@@ -40199,6 +40199,16 @@ pub fn list_dedup(xs: Vec<String>) -> Vec<String> {
     return out;
 }
 
+pub fn list_reverse<T: Clone>(xs: Vec<T>) -> Vec<T> {
+    let mut out: Vec<T> = vec![];
+    let mut i = (xs.revl_length()).checked_sub(1i64).expect("revl: Int overflow");
+    while (i >= 0i64) {
+        out.push((xs)[(i) as usize].clone());
+        i = (i).checked_sub(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
 pub fn list_map<T: Clone, U: Clone>(xs: Vec<T>, f: impl Fn(T) -> U) -> Vec<U> {
     let mut out = vec![];
     for x in xs {
