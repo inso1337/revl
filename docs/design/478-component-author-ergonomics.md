@@ -159,6 +159,9 @@ its own PR series. Listed in the review's own priority order.
 12. **Opaque host `Map` values (review item).** A host `Map`'s value type is
     unmodelled, so reads off it stay on the G8 audit surface. Typing it is a
     host-frontier decision (`docs/contract-errata.md`), design-only here.
+    Issue #3342 slice 1 types one case: the single host Map of a component
+    whose `handoff` declares `Map[K, V]` (`docs/state-handoff.md`). Every
+    other host Map is still unmodelled.
 
 13. **Coeffects: `time`/`random` (review item).** No ambient clock or RNG in a
     provide body. A new coeffect family, design-only.

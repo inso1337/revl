@@ -263,7 +263,7 @@ def test_3_refused_swap_retains_ownership_and_keeps_serving():
         # teardown; the change is cancelled, not the service (contract §2, a
         # refused swap is a completed cancellation of the CHANGE).
         with pytest.raises(RevlError, match="state hand-off on `ranking` differs"):
-            compile_source(_ranker("weighted", 3, handoff="Map[Str, Int]"),
+            compile_source(_ranker("weighted", 3, handoff="List[Str]"),
                            "ranker.rvl", manifest=session.ir,
                            replacing=("TrendingRanker",))
 

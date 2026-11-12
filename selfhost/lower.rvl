@@ -8501,6 +8501,77 @@ fn hv_fam(env: List[Bind], v: Str) -> Str {
   return tenv_get(env, "host ".concat(v))
 }
 
+// Issue #3342 (`lower._handoff_map_binding`): a `handoff <key>: Map[K, V]`
+// declaration types the component's host Map when the activation body
+// acquires exactly ONE (`let m = effect Map.new() undo ...`). The rows
+// `hmapk <m>`, `hmapv <m>` and `hmapd <m>` carry K, V and the declaration's
+// spelling; with no Map, several, or a non-Map handoff type nothing is added.
+fn hm_is_new(s: Stmt) -> Bool {
+  if (hv_family(s) != "Map") { return false }
+  return match s.e {
+    Call(c) => match c.target { Field(fl) => fl.name == "new", _ => false, },
+    _ => false,
+  }
+}
+
+fn hm_rows(env: List[Bind], comp: CompD) -> List[Bind] {
+  let t = comp.hoff.ty
+  if (comp.hoff.name == "" || t.indexOf("Map[") != 0) { return env }
+  let targs = tk_args(t)
+  if (targs.length() != 2) { return env }
+  var bind = ""
+  var n = 0
+  var i = 0
+  while (i < comp.setup.length()) {
+    if (hm_is_new(comp.setup[i])) { bind = comp.setup[i].bind  n += 1 }
+    i += 1
+  }
+  if (n != 1) { return env }
+  let decl = "handoff ".concat(comp.hoff.name).concat(": ").concat(tk_render(t))
+  return tenv_put(tenv_put(tenv_put(env, "hmapk ".concat(bind), targs[0]),
+                           "hmapv ".concat(bind), targs[1]),
+                  "hmapd ".concat(bind), decl)
+}
+
+// `lower._check_handoff_map_verb`: a key or value argument held to K or V.
+fn hm_roles(verb: Str) -> List[Str] {
+  if (verb == "insert" || verb == "insert_if_absent") { return ["key", "value"] }
+  if (verb == "get" || verb == "remove") { return ["key"] }
+  return []
+}
+
+fn hm_check(v: Str, verb: Str, args: List[Expr], env: List[Bind]) -> Str {
+  let decl = tenv_get(env, "hmapd ".concat(v))
+  if (decl == "") { return "" }
+  let roles = hm_roles(verb)
+  var i = 0
+  while (i < roles.length() && i < args.length()) {
+    let r = tk_infer(args[i], env)
+    let actual = r.v == "" ? r.ty : ""
+    let expected = tenv_get(env, (roles[i] == "key" ? "hmapk " : "hmapv ").concat(v))
+    if (actual != "" && !tk_compatible(expected, actual)) {
+      return tk_mismatch("`".concat(verb).concat("` ").concat(roles[i])
+                           .concat(" of the Map typed by `").concat(decl).concat("`"),
+                         expected, actual).v
+    }
+    i += 1
+  }
+  return ""
+}
+
+// `infer_ir`'s #3342 arm: a `get` off the handoff-typed Map is `Opt[V]`.
+fn hm_get_ty(c: CallN, env: List[Bind]) -> Str {
+  return match c.target {
+    Field(f) => match f.target {
+      Var(v) => f.name == "get" && hv_fam(env, v) == "Map"
+        && tenv_get(env, "hmapv ".concat(v)) != ""
+        ? "Opt[".concat(tenv_get(env, "hmapv ".concat(v))).concat("]") : "",
+      _ => "",
+    },
+    _ => "",
+  }
+}
+
 // A `subscribe` head (`parser.py::_stream_chain`): past a bare stream name,
 // every `.<stage>(<arg>)` link is a `StreamStage`, so the link itself is no
 // call to judge, while its argument (a `map`/`filter` arrow) is lowered like
@@ -8525,7 +8596,10 @@ fn hv_node(c: CallN, env: List[Bind]) -> Str {
   }
   if (fam == "") { return "" }
   let verb = match c.target { Field(f) => f.name, _ => "", }
-  return hv_check(fam, verb, hv_arg_tys(fam, c.args, 0, env, []))
+  let hv = hv_check(fam, verb, hv_arg_tys(fam, c.args, 0, env, []))
+  if (hv != "" || fam != "Map") { return hv }
+  let root = match c.target { Field(f) => match f.target { Var(v) => v, _ => "", }, _ => "", }
+  return hm_check(root, verb, c.args, env)
 }
 
 // `_host_arg_types`: a host Map's arguments are not compared (its key and
@@ -10137,7 +10211,7 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind],
   // is held to its service signature exactly as a method-body call is. The
   // environment it leaves behind is what every provide method starts from — the
   // reference lowers setup first and restores to that map after each method.
-  let setupTv = mth_type_verdict(comp.setup, 0, ir_stratum_env(gtys), scx,
+  let setupTv = mth_type_verdict(comp.setup, 0, hm_rows(ir_stratum_env(gtys), comp), scx,
                                  "", "", comp.line)
   if (setupTv.v != "") {
     // the per-statement A1 rules below are raised while the statements are
@@ -10150,7 +10224,7 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind],
     }
     return setupTv
   }
-  let setupTys = mth_body_tys(comp.setup, 0, ir_stratum_env(gtys), scx)
+  let setupTys = mth_body_tys(comp.setup, 0, hm_rows(ir_stratum_env(gtys), comp), scx)
   // rule C1 on the component lowering path (`_assert_colour_is_positional`): a
   // self-declared arrow colour in setup is refused as it is anywhere else.
   let setupSda = self_async_body(comp.setup, 0)
@@ -16116,6 +16190,8 @@ fn tk_call(c: CallN, env: List[Bind]) -> TInf {
   // The requirement call's own ARGUMENT rule is untouched: it lives in
   // `ct_args`, which infers each argument itself against the service's declared
   // parameter type, exactly where `_component_req_call` does.
+  let hg = hm_get_ty(c, env)
+  if (hg != "") { return tk_ok(hg) }
   if (ir_stratum(env) && ct_host_object_call(c.target, env)) { return tk_ok("") }
   let a = tk_arg_walk(c.args, 0, env, [])
   if (a.v != "") { return a.r }

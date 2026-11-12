@@ -15571,6 +15571,84 @@ fn hv_fam(env: &[Bind], v: &str) -> String {
     return tenv_get(env, &(String::from("host ").revl_concat(&v)));
 }
 
+fn hm_is_new(s: Stmt) -> bool {
+    if (hv_family(s.clone()) != "Map") {
+        return false;
+    }
+    return match s.e.clone() {
+    Expr::Call(c) => { let c = *c; match c.target {
+    Expr::Field(fl) => { let fl = *fl; (fl.name == "new") },
+    _ => false,
+} },
+    _ => false,
+};
+}
+
+fn hm_rows(env: Vec<Bind>, comp: CompD) -> Vec<Bind> {
+    let t = comp.hoff.ty;
+    if ((comp.hoff.name == "") || (t.revl_index_of("Map[") != 0i64)) {
+        return env;
+    }
+    let targs = tk_args(&t);
+    if (targs.revl_length() != 2i64) {
+        return env;
+    }
+    let mut bind = String::from("");
+    let mut n = 0i64;
+    let mut i = 0i64;
+    while (i < comp.setup.revl_length()) {
+        if hm_is_new((comp.setup)[(i) as usize].clone()) {
+            bind = (comp.setup)[(i) as usize].bind.clone();
+            n = (n).checked_add(1i64).expect("revl: Int overflow");
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    if (n != 1i64) {
+        return env;
+    }
+    let decl = ((String::from("handoff ").revl_concat(&comp.hoff.name)).revl_concat(": ")).revl_concat(&tk_render(t.clone()));
+    return tenv_put(&tenv_put(&tenv_put(&env, String::from("hmapk ").revl_concat(&bind), (targs)[(0i64) as usize].clone()), String::from("hmapv ").revl_concat(&bind), (targs)[(1i64) as usize].clone()), String::from("hmapd ").revl_concat(&bind), decl);
+}
+
+fn hm_roles(verb: &str) -> Vec<String> {
+    if ((verb == "insert") || (verb == "insert_if_absent")) {
+        return vec![String::from("key"), String::from("value")];
+    }
+    if ((verb == "get") || (verb == "remove")) {
+        return vec![String::from("key")];
+    }
+    return vec![];
+}
+
+fn hm_check(v: &str, verb: &str, args: &[Expr], env: Vec<Bind>) -> String {
+    let decl = tenv_get(&env, &(String::from("hmapd ").revl_concat(&v)));
+    if (decl == "") {
+        return String::from("");
+    }
+    let roles = hm_roles(verb);
+    let mut i = 0i64;
+    while ((i < roles.revl_length()) && (i < args.revl_length())) {
+        let r = tk_infer((args)[(i) as usize].clone(), env.clone());
+        let actual = if (r.v == "") { r.ty } else { String::from("") };
+        let expected = tenv_get(&env, &((if ((roles)[(i) as usize] == "key") { String::from("hmapk ") } else { String::from("hmapv ") }).revl_concat(&v)));
+        if ((actual != "") && (!tk_compatible(expected.clone(), actual.clone()))) {
+            return tk_mismatch(&((((((String::from("`").revl_concat(&verb)).revl_concat("` ")).revl_concat(&(roles)[(i) as usize])).revl_concat(" of the Map typed by `")).revl_concat(&decl)).revl_concat("`")), expected, actual.clone()).v;
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return String::from("");
+}
+
+fn hm_get_ty(c: CallN, env: &[Bind]) -> String {
+    return match c.target {
+    Expr::Field(f) => { let f = *f; match f.target.clone() {
+    Expr::Var(v) => if (((f.name == "get") && (hv_fam(env, &v) == "Map")) && (tenv_get(env, &(String::from("hmapv ").revl_concat(&v))) != "")) { (String::from("Opt[").revl_concat(&tenv_get(env, &(String::from("hmapv ").revl_concat(&v))))).revl_concat("]") } else { String::from("") },
+    _ => String::from(""),
+} },
+    _ => String::from(""),
+};
+}
+
 fn ct_sub_head(e: Expr, cx: Ctx__m2, env: Vec<Bind>) -> String {
     return match e.clone() {
     Expr::Call(c) => { let c = *c; match c.target.clone() {
@@ -15596,7 +15674,18 @@ fn hv_node(c: CallN, env: Vec<Bind>) -> String {
     Expr::Field(f) => { let f = *f; f.name },
     _ => String::from(""),
 };
-    return hv_check(&fam, &verb, &hv_arg_tys(&fam, &c.args, 0i64, env, vec![]));
+    let hv = hv_check(&fam, &verb, &hv_arg_tys(&fam, &c.args, 0i64, env.clone(), vec![]));
+    if ((hv != "") || (fam != "Map")) {
+        return hv;
+    }
+    let root_ = match c.target.clone() {
+    Expr::Field(f) => { let f = *f; match f.target.clone() {
+    Expr::Var(v) => v,
+    _ => String::from(""),
+} },
+    _ => String::from(""),
+};
+    return hm_check(&root_, &verb, &c.args, env);
 }
 
 fn hv_arg_tys(fam: &str, args: &[Expr], i: i64, env: Vec<Bind>, acc: Vec<String>) -> Vec<String> {
@@ -16968,7 +17057,7 @@ fn check_component(comp: CompD, cx: Ctx__m2, gtys: &[Bind], fns: &[FnD], ts: &[T
     if (sa.msg != "") {
         return mk_verd(tagged(&sa.tag, &sa.msg), body_line(&comp.setup, scx, comp.line));
     }
-    let setupTv = mth_type_verdict(&comp.setup, 0i64, ir_stratum_env(gtys), scx.clone(), String::from(""), "", comp.line);
+    let setupTv = mth_type_verdict(&comp.setup, 0i64, hm_rows(ir_stratum_env(gtys), comp.clone()), scx.clone(), String::from(""), "", comp.line);
     if (setupTv.v != "") {
         let eA1 = stmt_a1_verdict(comp.clone(), &comp.setup, 0i64, scx.clone());
         let eLn = stmt_a1_line(comp.clone(), &comp.setup, 0i64, scx.clone());
@@ -16977,7 +17066,7 @@ fn check_component(comp: CompD, cx: Ctx__m2, gtys: &[Bind], fns: &[FnD], ts: &[T
         }
         return setupTv;
     }
-    let setupTys = mth_body_tys(&comp.setup, 0i64, ir_stratum_env(gtys), scx.clone());
+    let setupTys = mth_body_tys(&comp.setup, 0i64, hm_rows(ir_stratum_env(gtys), comp.clone()), scx.clone());
     let setupSda = self_async_body(&comp.setup, 0i64);
     if (setupSda != "") {
         return mk_verd(tagged("A1", &setupSda), comp.line);
@@ -22009,6 +22098,10 @@ fn tk_call(c: CallN, env: Vec<Bind>) -> TInf {
     let rq = tk_req_row(c.target.clone(), &env);
     if (rq != "") {
         return tk_ok(rq);
+    }
+    let hg = hm_get_ty(c.clone(), &env);
+    if (hg != "") {
+        return tk_ok(hg);
     }
     if (ir_stratum(&env) && ct_host_object_call(c.target.clone(), env.clone())) {
         return tk_ok(String::from(""));

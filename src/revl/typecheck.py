@@ -3754,6 +3754,14 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
         if local_call is not None:
             return local_call
         target = node.get("target")
+        # issue #3342: a `get` off the host Map a `handoff` declaration types
+        # (lower._bind_handoff_map writes its value type under this key) is
+        # `Opt[V]`; every other host verb result stays opaque.
+        if isinstance(target, dict) and target.get("kind") == "name" \
+                and node.get("method") == "get":
+            handoff_value = tenv.get(f"handoff_map.{target.get('id')}")
+            if handoff_value is not None:
+                return f"Opt[{handoff_value}]"
         if isinstance(target, dict) and target.get("kind") == "req":
             svc = services.get(tenv.get(f"req.{target.get('name')}") or "")
             if svc is not None:

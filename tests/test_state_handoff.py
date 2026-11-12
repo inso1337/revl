@@ -26,7 +26,8 @@ from revl import RevlError, compile_source  # noqa: E402
 
 
 def _cache(state_type: str = "Map[Str, Str]", *, version: int = 1,
-           name: str = "Cache") -> str:
+           name: str = "Cache", get: str = "m.get(k)",
+           put: str = "effect m.insert(k, v) undo m.remove(k)") -> str:
     return f"""
 service Store {{
   fn get(k: Str) -> Opt[Str]
@@ -37,8 +38,8 @@ component {name} provides cache: Store {{
   handoff cache: {state_type}
   let m = effect Map.new() undo m.drop()
   provide cache {{
-    fn get(k) = m.get(k)
-    fn put(k, v) {{ effect m.insert(k, v) undo m.remove(k) }}
+    fn get(k) = {get}
+    fn put(k, v) {{ {put} }}
     fn version() = {version}
   }}
 }}
@@ -106,21 +107,38 @@ def test_narrowed_acceptor_is_refused():
         compile_source(_cache("Str"), "c.rvl", manifest=old, replacing=("Cache",))
 
 
+# The incompatible successor below declares `List[Str]`. It used to declare
+# `Map[Str, Int]` over the Str-valued `Store`, a body that contradicts its own
+# declaration: since issue #3342 that successor is refused by its own checker
+# (its `get` returns `Opt[Int]`), before admission is reached.
 def test_incompatible_successor_is_refused_at_admission():
     old = compile_source(_cache("Map[Str, Str]"), "c.rvl")
     with pytest.raises(RevlError, match="state hand-off on `cache` differs"):
-        compile_source(_cache("Map[Str, Int]"), "c.rvl",
+        compile_source(_cache("List[Str]"), "c.rvl",
                        manifest=old, replacing=("Cache",))
+
+
+def test_same_map_head_with_a_different_value_type_is_refused_at_admission():
+    # the successor's body agrees with its own `Map[Str, Int]` (issue #3342),
+    # so the refusal is admission's: the exported Map[Str, Str] cannot cross
+    old = compile_source(_cache("Map[Str, Str]"), "c.rvl")
+    successor = _cache(
+        "Map[Str, Int]", get="None",
+        put="effect m.insert(k, v.length()) undo m.remove(k)")
+    with pytest.raises(RevlError, match="state hand-off on `cache` differs") as info:
+        compile_source(successor, "c.rvl", manifest=old, replacing=("Cache",))
+    assert "Map[Str, Int]" in str(info.value)
+    assert "Map[Str, Str]" in str(info.value)
 
 
 def test_refusal_names_both_shapes_and_carries_a_why_trace():
     old = compile_source(_cache("Map[Str, Str]"), "c.rvl")
     try:
-        compile_source(_cache("Map[Str, Int]"), "c.rvl",
+        compile_source(_cache("List[Str]"), "c.rvl",
                        manifest=old, replacing=("Cache",))
         assert False, "expected refusal"
     except RevlError as exc:
-        assert "Map[Str, Int]" in str(exc) and "Map[Str, Str]" in str(exc)
+        assert "List[Str]" in str(exc) and "Map[Str, Str]" in str(exc)
         assert exc.why is not None and exc.why.kind == "state-handoff-drift"
         roles = {step.kind for step in exc.why.steps}
         assert {"accept", "export"} <= roles
@@ -131,7 +149,7 @@ def test_renamed_successor_correlates_by_provided_key():
     # the gate correlates by the *key*, not the component name
     old = compile_source(_cache("Map[Str, Str]", name="Cache"), "c.rvl")
     with pytest.raises(RevlError, match="state hand-off on `cache` differs"):
-        compile_source(_cache("Map[Str, Int]", name="CacheV2"), "c.rvl",
+        compile_source(_cache("List[Str]", name="CacheV2"), "c.rvl",
                        manifest=old, replacing=("Cache",))
 
 
