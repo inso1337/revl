@@ -40,21 +40,33 @@
 
 ["function", "extern-declared-compensate-item-254-issue-1979-declared", "_as_fn_call", 5, 5]
 
-["reason", "float-valued-module-signatures-operands-are-refused-by", "Float-valued module signatures/operands are refused by this backend. Residual Float formatting/finite-value validation is not evidence of a supported arithmetic family; _refuse_float_operands explicitly raises for operands=Float."]
-
-["function", "float-valued-module-signatures-operands-are-refused-by", "_f64_literal", 1, 1]
-
-["function", "float-valued-module-signatures-operands-are-refused-by", "_finite_float", 3, 3]
-
-["function", "float-valued-module-signatures-operands-are-refused-by", "_refuse_float_operands", 1, 1]
-
 ["reason", "host-body-scanner-standalone-bootstrap", "`_host_body_scanner` is the lazy import of the shared `revl.host_body` scanner added for the host-body containment fixes (#3130, #3131, #3162, #3164, #3166). Its `except ModuleNotFoundError` arm runs only when `emit.py` is executed as a script with `revl` not importable, an invocation mode that no corpus document and no refusal document reaches. It is the same class recorded for the `_refuse_deferred_emissions` and `_refuse_validated_emissions` bootstrap above. On the tiers whose corpus carries a host-bodied extern the import and the return are reached and only that arm stays unrun; the java and wasm corpora carry no host-bodied extern, so the whole helper stays unrun there."]
 
 ["function", "host-body-scanner-standalone-bootstrap", "_host_body_scanner", 10, 10]
 
+["reason", "issue-3425-float-is-a-native-f64-on", "Issue #3425: Float is a native f64 on the WASM reference since #3295, and selfhost/emit_wasm.rvl has no f64 lowering, so a document carrying a Float value is a named port gap, not a byte-agreement case, and no CORPUS document can reach these statements. The reference EMITS such a document, so it cannot sit in tests/fixtures/emit_wasm_refusals/ either (tests/fixtures/wasm_true_division_port_gap.rvl left that directory for this reason). `_f64_literal` (the bit-exact f64.const payload) and `_finite_float` (the issue #312 refusal of a non-finite literal, which the frontend already rejects) are the Float literal path and sit here for the same reason. The Float paths are asserted by tests/test_wasm_backend.py, tests/test_wasm_true_division_2201.py and tests/test_458_float_division_and_remainder.py instead; these records leave when the port learns f64."]
+
+["function", "issue-3425-float-is-a-native-f64-on", "_V3Emitter._float_operand", 8, 8]
+
+["function", "issue-3425-float-is-a-native-f64-on", "_V3Emitter._helper_f64_mod", 1, 1]
+
+["function", "issue-3425-float-is-a-native-f64-on", "_V3Emitter._slot_load", 1, 1]
+
+["function", "issue-3425-float-is-a-native-f64-on", "_V3Emitter._slot_value", 1, 1]
+
+["function", "issue-3425-float-is-a-native-f64-on", "_f64_literal", 1, 1]
+
+["function", "issue-3425-float-is-a-native-f64-on", "_finite_float", 3, 3]
+
+["function", "issue-3425-float-is-a-native-f64-on", "_wasm_ty", 1, 1]
+
 ["reason", "item-459-f6-refuse-bodyless-extern-states-by", "Item 459 F6. `_refuse_bodyless_extern` states, by name, that a DECLARED extern carrying no `@wasm` body is not portable to this tier, naming the tiers that do carry one - the sentence the other five emitters have always given, where wasm answered `callee 'x' is not a lowerable function`, which is also what it says for a MISSPELLED callee. EVERY statement of it is on a refusal path: it raises on every input that reaches it, and its one quiet arm returns straight into the caller's own raise, so NO successfully emitted document executes a line of it. A corpus document therefore cannot reach it, and that is structural rather than inconvenient - the corpus is the list of documents the reference EMITS and holds byte-identical against the port, and tools/selfhost_line_coverage.py::measure() calls emit() with no `except`, so a refusing document would abort the measurement itself. WHAT WOULD HAVE TO CHANGE for a document to be possible, stated so this is a decision and not a shrug: (1) the oracle would need a REFUSAL workload beside `CORPUS` holding both sides to the same diagnostic rather than to the same bytes, the diagnostic-agreement shape tests/test_selfhost_lower.py already has and this tier's emit oracle does not; (2) measure() would need to run that workload and count the lines executed before the raise, which measure_full_tree() in the same module already does deliberately (a refusal path is reference logic too), so this half is small; and (3) selfhost/emit_wasm.rvl would have to be able to REFUSE at all. It cannot: a pure self-host emitter fn cannot `fail`, which is why every deferred family on this tier answers with an `<<UNSUPPORTED-...>>` marker instead (test_fn_type_param_refused, test_deferred_families_remain_explicit). (3) is the real blocker and it is a PORT property, not a corpus one. Until it lifts the refusal is pinned by tests/test_selfhost_emit_wasm.py::test_reference_refuses_a_bodyless_extern_by_name, which drives BOTH entry points (_call_expr for a call in expression position, _call_type for a `let` initializer; they refuse independently), by tests/test_json_stdlib.py::test_wasm_tier_refuses_extern_without_body, and by tests/test_asset_runtime_load_459.py's per-tier refusal sweep."]
 
 ["function", "item-459-f6-refuse-bodyless-extern-states-by", "_V3Emitter._refuse_bodyless_extern", 3, 3]
+
+["reason", "one-refusal-no-corpus-document-can-carry-the", "One refusal no corpus document can carry: the raise in `_declare_local` that rejects rebinding one emitted local name at incompatible WASM widths. Valid typed source locals retain their declared width, so a document the reference emits never reaches it, and a document that does reach it is refused, so it has no bytes for the oracle to hold."]
+
+["function", "one-refusal-no-corpus-document-can-carry-the", "_V3Emitter._declare_local", 1, 1]
 
 ["reason", "only-the-negative-lookup-for-a-nonvariant-non", "Only the negative lookup for a nonvariant, non-Opt/Result type remains. The no-expected-type lookup is covered by bare Some; typed tagged constructors supply a valid tagged layout."]
 
@@ -72,15 +84,15 @@
 
 ["reason", "remaining-arms-cover-explicitly-deferred-coalescing-float-op", "Remaining arms cover explicitly deferred coalescing/Float operations, invalid/void operand refusals, and legacy List +. Current frontend rejects List + (only numeric or Str +), so that compatibility branch is not a missing accepted source corpus family. Item 458's `&&`/`||` short-circuit branch lives in the same function and is now reached: shortcircuit.rvl spells the trapping right operands and arith.rvl the trap-free ones, so only that branch's void-operand refusal stays unrun, alongside the other invalid-operand guards."]
 
-["function", "remaining-arms-cover-explicitly-deferred-coalescing-float-op", "_V3Emitter._bin_expr", 20, 20]
+["function", "remaining-arms-cover-explicitly-deferred-coalescing-float-op", "_V3Emitter._bin_expr", 29, 29]
 
 ["reason", "remaining-assembly-paths-detect-in-file-test-name", "Remaining assembly paths detect in-file test name collisions, emit tests/externs/missing-body comments, and append demanded interpolation/indexOf/split/join helpers. Each is an explicit scaffold deferral, not absent ordinary pure-function emission."]
 
-["function", "remaining-assembly-paths-detect-in-file-test-name", "_V3Emitter.emit", 13, 13]
+["function", "remaining-assembly-paths-detect-in-file-test-name", "_V3Emitter.emit", 14, 14]
 
 ["reason", "remaining-branches-are-checked-division-indexof-split-join", "Remaining branches are checked division, indexOf/split/join/to_char helper demand, Map operations rejected by this backend, and wrong/void receiver or unsupported-method refusals. Covered length/concat/push and arithmetic conversions must not be conflated with these precise deferred families. Item 458 adds four: the `Int.MIN / -1` arm of checked division, which answers Err(\"revl: Int overflow\") as a value where `i64.div_s` used to trap. Same deferred family as the rest of the arm; the reference half is executed on all six tiers by tests/test_int_min_edges_cross_tier.py."]
 
-["function", "remaining-branches-are-checked-division-indexof-split-join", "_V3Emitter._builtin_expr", 44, 44]
+["function", "remaining-branches-are-checked-division-indexof-split-join", "_V3Emitter._builtin_expr", 46, 46]
 
 ["function", "remaining-branches-are-checked-division-indexof-split-join", "_V3Emitter._builtin_type", 26, 26]
 
@@ -112,7 +124,7 @@
 
 ["reason", "remaining-expression-paths-are-malformed-unbound-unsupported", "Remaining expression paths are malformed/unbound/unsupported literals, component-injected __wat, Float, interpolation/tagged reads, and explicit refusals of escaping arrow values, Map, optional chaining and record update."]
 
-["function", "remaining-expression-paths-are-malformed-unbound-unsupported", "_V3Emitter._expr", 17, 17]
+["function", "remaining-expression-paths-are-malformed-unbound-unsupported", "_V3Emitter._expr", 26, 26]
 
 ["reason", "remaining-fallback-declines-folding-when-textual-constant-wi", "Remaining fallback declines folding when textual constant width disagrees with the typed operand width; canonical rendering and widening select matching widths before this call."]
 
@@ -128,11 +140,11 @@
 
 ["reason", "remaining-inference-includes-deferred-coalescing-interpolati", "Remaining inference includes deferred coalescing/interpolation/match/Float/component __wat, legacy List + and Str index rejected by today's frontend, and malformed/unbound/unsupported kinds and type errors. Expected-free user ADT inference is now covered."]
 
-["function", "remaining-inference-includes-deferred-coalescing-interpolati", "_V3Emitter._infer_type", 41, 41]
+["function", "remaining-inference-includes-deferred-coalescing-interpolati", "_V3Emitter._infer_type", 44, 44]
 
 ["reason", "remaining-literal-pool-branches-collect-checked-division-err", "Remaining literal-pool branches collect checked-division error text and interpolation/legacy-format text; checked division and interpolation are deferred, and format is component vocabulary. Item 458 adds two: the pooling of that arm's second Err reason (`revl: Int overflow`), which only the three quotient forms carry."]
 
-["function", "remaining-literal-pool-branches-collect-checked-division-err", "_V3Emitter._collect_string_literals.walk", 5, 5]
+["function", "remaining-literal-pool-branches-collect-checked-division-err", "_V3Emitter._collect_string_literals.walk", 7, 7]
 
 ["reason", "remaining-loop-pools-extra-component-descriptor-strings-pass", "Remaining loop pools extra component descriptor strings passed by component planning; pure function literals use the covered tree traversal."]
 
@@ -220,7 +232,7 @@
 
 ["reason", "remaining-raises-reject-void-operands-and-unsupported-unary", "Remaining raises reject void operands and unsupported unary operators; canonical numeric negation, Bool not and Int32 complement are covered."]
 
-["function", "remaining-raises-reject-void-operands-and-unsupported-unary", "_V3Emitter._un_expr", 2, 2]
+["function", "remaining-raises-reject-void-operands-and-unsupported-unary", "_V3Emitter._un_expr", 3, 3]
 
 ["reason", "remaining-scanner-paths-attach-the-comments-preceding-deferr", "Remaining scanner paths attach the comments preceding deferred str_concatN helpers to their removable function block, skip escaped export-string characters, or terminate an EOF comment. Pure named exports do not need escaped names; noncanonical/raw-WAT text belongs to the explicitly deferred extern/component paths."]
 
@@ -308,11 +320,11 @@
 
 ["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._route_op_spec", 20, 20]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._scalar_operator", 26, 26]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._scalar_operator", 27, 27]
 
 ["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._statement", 2, 2]
 
-["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._tail", 8, 8]
+["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._tail", 9, 9]
 
 ["function", "the-entire-componentemitter-is-instantiated-only-for-live-2", "_ComponentEmitter._teardown_section", 4, 4]
 
@@ -347,7 +359,3 @@
 ["function", "these-helper-text-generators-are-demanded-only-by", "_V3Emitter._helper_str_of_code_point", 1, 1]
 
 ["function", "these-helper-text-generators-are-demanded-only-by", "_V3Emitter._helper_str_split", 1, 1]
-
-["reason", "two-refusals-neither-of-which-a-corpus-document", "Two refusals, neither of which a corpus document can carry: the raise that rejects rebinding one emitted local name at incompatible WASM widths, and the raise that rejects a `Float` BINDING by name. Valid typed source locals retain their declared width. A Float local cannot become a corpus case for the same reason every other Float position cannot — the emitter REFUSES it, and a corpus document is one the reference emits and holds byte-identical against the port. Before that refusal the binding emitted an f64 into an i32 local and the module failed wasmtime validation at load; tests/test_458_conversion_dispatch.py and tests/test_wasm_backend.py execute both halves instead."]
-
-["function", "two-refusals-neither-of-which-a-corpus-document", "_V3Emitter._declare_local", 2, 2]

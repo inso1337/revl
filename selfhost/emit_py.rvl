@@ -3015,6 +3015,20 @@ fn method_value(node: Any, externs: List[Any]) -> Str {
   return cexpr(node)
 }
 
+// issue #3304: whether a provide-method bracket's `undo` is an ABSOLUTE table
+// inverse on a literal or named key (`remove`, or the #1980 `match` restore),
+// which `Frame.adopt_bracket` may coalesce. The #2640 computed append (`if`) is
+// relative and never is. Mirrors the reference's `_coalescable_bracket`.
+fn coalescable_bracket(step: Any) -> Bool {
+  if (value_str(value_field(step, "inverse")) != "table") { return false }
+  // a `table` step is a host write, so its acquire always carries the key
+  let key = node_kind(value_list(value_field(value_field(step, "acquire"), "args"))[0])
+  if (key != "lit" && key != "name") { return false }
+  let inv = value_field(step, "undo")
+  if (node_kind(inv) == "call") { return value_str(value_field(inv, "method")) == "remove" }
+  return node_kind(inv) == "match"
+}
+
 fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp_name: Str, counter: Int, externs: List[Any]) -> EmitLines {
   let kind = value_str(value_field(step, "step"))
   if (kind == "let" || kind == "assign") {
@@ -3040,7 +3054,10 @@ fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp
     out = out.push(line(indent + 1, `yield _revl_frame._guard(${inverse_lambda(step, "undo", "")}: ${cexpr(value_field(step, "undo"))})`))
     let c = counter + 1
     let label = `${comp_name}.${provide_name}.${method_name}#${c}`
-    out = out.push(line(indent, `_revl_frame.adopt(_revl_ctx.effect(${fname}, ${py_repr(label)}))`))
+    // issue #3304: an absolute table inverse may be coalesced with the frame's
+    // older record for the same key, as the reference's `_coalescable_bracket`
+    let adopt = coalescable_bracket(step) ? "adopt_bracket" : "adopt"
+    out = out.push(line(indent, `_revl_frame.${adopt}(_revl_ctx.effect(${fname}, ${py_repr(label)}))`))
     return { lines: out, counter: c }
   }
   if (kind == "let-effect") {
