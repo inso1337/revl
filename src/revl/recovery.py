@@ -396,7 +396,8 @@ def recover(wal_path: str, *, world: Optional[World] = None,
             session=None, snapshot: Optional[dict] = None,
             reissue: Optional[str] = None,
             forward_admissions: bool = False,
-            callers: Optional[dict] = None) -> dict:
+            callers: Optional[dict] = None,
+            committed: Optional[bool] = None) -> dict:
     """Read the WAL at ``wal_path`` and prove a way back.
 
     Returns a stated verdict (``rolled-forward`` or ``rolled-back``) with a
@@ -422,6 +423,15 @@ def recover(wal_path: str, *, world: Optional[World] = None,
     runtime — the py in-process driver or a non-py (go/rust/java/wasm)
     subprocess — with no backend on the path.
 
+    ``committed=False`` (issue #2725) is a caller holding a durable answer that
+    the multi-participant step this WAL belongs to did NOT commit (an abort or
+    pending federation decision, or none at all): the latest opening of the
+    WAL (and the uncommitted openings just before it, as a plain recover would
+    walk them; an earlier committed opening is kept) is rolled back LIFO even
+    when it carries ``activation-complete``, because that marker settles this
+    participant's own activation, not the step. ``None``, the default,
+    leaves the WAL's own markers to decide, so a plain recover is unchanged.
+
     ``callers`` (issue #1889) is placement recover's map of every OTHER process
     of the run to the effect seqs its WAL holds, ``{process: {seq, ...}}``. A
     record this process made while serving a call from one of them names that
@@ -429,7 +439,7 @@ def recover(wal_path: str, *, world: Optional[World] = None,
     WAL holds it (:func:`_split_nested`). ``None`` for a single-process WAL.
     """
     from .wal import (  # noqa: PLC0415 - tier-agnostic core, lazy
-        opening_intervals, read_wal)
+        expired_tickets, opening_intervals, read_wal, revoked_tickets)
 
     try:
         wal = read_wal(wal_path)
@@ -454,7 +464,14 @@ def recover(wal_path: str, *, world: Optional[World] = None,
         # recover treats it as RETIRED at k — a terminal, non-live state — and
         # does NOT re-admit it as a callable continuation. The branch (its own
         # distinct WAL) recovers independently to its own fork point.
-        return _with_world(_fork_retired(wal, frozen), world, tally)
+        report = _fork_retired(wal, frozen)
+        revoked = revoked_tickets(records)
+        if revoked:
+            report["revokedTickets"] = revoked
+        expired = expired_tickets(records)
+        if expired:
+            report["expiredTickets"] = expired
+        return _with_world(report, world, tally)
     # issue #3147: one WAL file can hold more than one OPENING (a later run
     # reusing the same `--wal` path, or a --watch reload). A later opening
     # starts at its own `generation` record (or, from a compiled tier, at a
@@ -467,7 +484,17 @@ def recover(wal_path: str, *, world: Optional[World] = None,
     intervals = opening_intervals(records)
     latest = intervals[-1]
     approved = _approval(latest)
-    if any(r.get("record") == "activation-complete" for r in latest):
+    if committed is False:
+        # issue #2725: the caller holds a durable answer that the step did NOT
+        # commit, so the latest opening is rolled back even when it carries
+        # `activation-complete` (that marker settles this participant's own
+        # activation, not the step).
+        # A stronger answer never rolls back less than `None`: the trailing
+        # uncommitted openings before the latest are inverted too.
+        report = _roll_back(
+            _scoped_wal(wal, _trailing_open(intervals[:-1]) + latest),
+            world=bound(), wal_path=wal_path)
+    elif any(r.get("record") == "activation-complete" for r in latest):
         report = _roll_forward(_scoped_wal(wal, latest),
                                session=session, snapshot=snapshot)
     elif approved is not None:
@@ -485,6 +512,18 @@ def recover(wal_path: str, *, world: Optional[World] = None,
                              reissue=reissue)
     if windows:
         _with_prior_windows(report, windows)
+
+    # issue #2991: name the approval questions a halt or an operator left in a
+    # TERMINAL disposition, and keep `revoked` apart from `expired`. Both are
+    # decisions about a question, not effects and not residue: an expired
+    # question ran out of time and can be asked afresh, a revoked one was
+    # withdrawn. A WAL with neither record is byte-identical to before.
+    revoked = revoked_tickets(records)
+    if revoked:
+        report["revokedTickets"] = revoked
+    expired = expired_tickets(records)
+    if expired:
+        report["expiredTickets"] = expired
 
     # design 460 §5: the forward-recovery scan runs in BOTH branches — an
     # admission can be owed under either verdict, because the session's activation
@@ -2817,6 +2856,21 @@ def render(report: dict) -> str:
                      f"({binding.get('digest', '')[:19]}...); providers booted: "
                      f"{booted}{refused}.")
     lines += [report["decision"], ""]
+    # issue #2991: an approval question's TERMINAL disposition. `revoked` and
+    # `expired` are different outcomes, so they are different lines here too -
+    # a halt that withdrew a question must not read as one that merely timed out.
+    for entry in report.get("revokedTickets") or []:
+        lines.append(
+            f"  REVOKED  {entry.get('component') or '(component)'} "
+            f"ticket {entry.get('hash')} ({entry.get('kind') or 'single'})"
+            f"{' by E-Stop' if entry.get('estop') else ''} by "
+            f"{entry.get('by') or 'an operator'}: "
+            f"{entry.get('reason') or 'no reason recorded'}")
+    for entry in report.get("expiredTickets") or []:
+        lines.append(
+            f"  expired  {entry.get('component') or '(component)'} "
+            f"ticket {entry.get('hash')} ({entry.get('kind') or 'quorum'}): "
+            f"the deadline passed with no decision")
     if report["verdict"] == "rolled-forward" and "owedFlushes" in report:
         # item 245's approved-to-discharged window verdict shares the
         # `rolled-forward` name but carries a different body (no

@@ -156,6 +156,12 @@
 
 ["function", "issue-1474-a-provided-method-named-after-a", "_method_def_name", 2, 2]
 
+["reason", "issue-3407-direct-read-guards-on-input-the-frontend-refuses", "issue #3407: defensive guards in the direct-read analysis whose input the frontend refuses. The duplicate-fn guard (`duplicate function `move``) and the callee-or-let-named-like-a-parameter check (`f` is already declared in this function; `move` is bound here and called in this body, and a module function of that name is in scope): no compiled document reaches them."]
+
+["function", "issue-3407-direct-read-guards-on-input-the-frontend-refuses", "_dict_receivers", 1, 1]
+
+["function", "issue-3407-direct-read-guards-on-input-the-frontend-refuses", "_dict_receivers.builds", 1, 1]
+
 ["reason", "item-130-4-5-replay-rendering-backends-python", "Item 130 §4.5 replay rendering: backends/python/emit.py::_replay_kwarg renders the `replay=` keyword for a provider declaration or a consumer request. selfhost/emit_py.rvl ports the component `host` call but refuses a replay-declaring `Stream.source()` by name, and no corpus document can declare replay yet: the self-host gate refuses the `replay(…)` clause with G1, a false reject the gate/reference census reports for any census-directory document. The reference half is pinned by tests/test_stream_reactive.py, the port's refusal by tests/test_selfhost_emit_py.py::test_a_declared_stream_replay_is_named_not_dropped, and the runtime half by backends/python/tests/test_stream_runtime.py."]
 
 ["function", "item-130-4-5-replay-rendering-backends-python", "_replay_kwarg", 3, 3]
