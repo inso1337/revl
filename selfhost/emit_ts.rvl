@@ -716,9 +716,10 @@ fn render_builtin(method: Str, target: Str, args: List[Str], arg_nodes: List[Any
     return { text: `((_rc: string) => _rc === " " || _rc === "\t" || _rc === "\n" || _rc === "\r")(${target})`, counter: counter }
   }
   // trim (issue #3361): both ends, over exactly the is_space set; not the host
-  // `trim()`, whose whitespace set differs from every other tier's.
+  // `trim()`, whose whitespace set differs from every other tier's. An index
+  // scan from each end, not a regex, which is quadratic on a long interior run.
   if (method == "trim") {
-    return { text: `(${target}).replace(/^[ \t\n\r]+|[ \t\n\r]+$/g, "")`, counter: counter }
+    return { text: `((_rc: string) => { let _a = 0; let _b = _rc.length; while (_a < _b) { const _c = _rc.charCodeAt(_a); if (_c !== 32 && _c !== 9 && _c !== 10 && _c !== 13) break; _a++ } while (_b > _a) { const _c = _rc.charCodeAt(_b - 1); if (_c !== 32 && _c !== 9 && _c !== 10 && _c !== 13) break; _b-- } return _rc.slice(_a, _b) })(${target})`, counter: counter }
   }
   if (method == "set") {
     return { text: `(<K, V>(_m: Map<K, V>, _k: K, _v: V) => { const _c = new Map(_m); _c.set(_k, _v); return _c })(${target}, ${args[0]}, ${args[1]})`, counter: counter }

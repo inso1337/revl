@@ -66,6 +66,13 @@ test "trim keeps characters outside the is_space set" {
   assert " ".concat(ch(160)).concat(" ").trim() == ch(160)
 }
 
+test "trim keeps a long interior run of spaces and is not quadratic on it" {
+  let gap = " ".repeat(200000)
+  let t = gap.concat("a").concat(gap).concat("b").concat(gap).trim()
+  assert t.length() == 200002
+  assert t.startsWith("a ") && t.endsWith(" b")
+}
+
 test "trim of a sliced reply line" {
   let line = "CANNOT:   the rules cannot read files  "
   assert line.slice(7, line.length()).trim() == "the rules cannot read files"

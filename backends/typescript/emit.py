@@ -3671,9 +3671,12 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx",
                 f'|| _rc === "\\n" || _rc === "\\r")({target})')
     # trim (issue #3361): both ends, over exactly the is_space set above. Not
     # the host `trim()`, whose set is the Unicode White_Space class plus
-    # U+FEFF and differs from every other tier's (#3265).
+    # U+FEFF and differs from every other tier's (#3265). An index scan from
+    # each end, not a regex: `/[set]+$/` retries at every interior run and is
+    # quadratic on a long run of spaces inside the text. The four characters
+    # are ASCII, so a UTF-16 index never splits a surrogate pair.
     if method == "trim":
-        return f'({target}).replace(/^[ \\t\\n\\r]+|[ \\t\\n\\r]+$/g, "")'
+        return (f'((_rc: string) => {{ let _a = 0; let _b = _rc.length; while (_a < _b) {{ const _c = _rc.charCodeAt(_a); if (_c !== 32 && _c !== 9 && _c !== 10 && _c !== 13) break; _a++ }} while (_b > _a) {{ const _c = _rc.charCodeAt(_b - 1); if (_c !== 32 && _c !== 9 && _c !== 10 && _c !== 13) break; _b-- }} return _rc.slice(_a, _b) }})({target})')
     # The Map value type (docs/stdlib-2.0.md §Map): the built-in JS Map,
     # copied on write. There is no expression-form copy, so `set` goes
     # through an immediately-applied closure: operands evaluate exactly
