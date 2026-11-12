@@ -6622,10 +6622,11 @@ SYMBOLS_RS = r'''//! The native NAVIGATION surface: the declarations the self-ho
 //! # What it covers
 //!
 //! The self-host front end (`selfhost/lower.rvl::parse_prog`) recognises
-//! top-level `fn`, `extern ... fn`, `service` and `component` declarations. It
-//! does not model `pub`, `verified`, `type` declarations, fn type parameters,
-//! parameters or `let` bindings, so those are NOT in the table, and a document
-//! using the ones it cannot parse at all yields [`Symbols::Undecided`].
+//! top-level `fn`, `extern ... fn`, `service` and `component` declarations,
+//! with the `pub` and `verified` prefixes the reference reads before `fn`. It
+//! does not model `type` declarations, fn type parameters, parameters or `let`
+//! bindings, so those are NOT in the table, and a document using the ones it
+//! cannot parse at all yields [`Symbols::Undecided`].
 //!
 //! # How the lines are recovered
 //!
@@ -7030,10 +7031,22 @@ fn signature(tokens: &[Tok], raw: &[selfhost::Token], decl: &Decl) -> Option<Str
         SymbolKind::Service => Some(format!("service {}", decl.name)),
         SymbolKind::Component => Some(format!("component {}", decl.name)),
         SymbolKind::Fn => {
-            let public = decl.fn_at.checked_sub(1)
-                .and_then(|index| tokens.get(index))
-                .is_some_and(|token| token.kind == "kw" && token.text == "pub");
-            let prefix = if public { "pub " } else { "" };
+            // `pub fn`, `verified fn` and `pub verified fn` are the reference's
+            // spellings (`analysis.py`'s `prefix = "pub " + "verified "`), and
+            // the `verified` prefix sits between `pub` and `fn`.
+            let before = decl.fn_at.checked_sub(1)
+                .and_then(|index| tokens.get(index));
+            let verified = before.is_some_and(|token| token.kind == "kw" && token.text == "verified");
+            let public = before.is_some_and(|token| token.kind == "kw" && token.text == "pub")
+                || (verified
+                    && decl.fn_at.checked_sub(2)
+                        .and_then(|index| tokens.get(index))
+                        .is_some_and(|token| token.kind == "kw" && token.text == "pub"));
+            let prefix = format!(
+                "{}{}",
+                if public { "pub " } else { "" },
+                if verified { "verified " } else { "" }
+            );
             Some(format!("{prefix}fn {}", callable_tail(tokens, raw, decl)?))
         }
         SymbolKind::Extern => {
@@ -7198,7 +7211,7 @@ fn an_unclassified_extern_gets_no_signature() {
 #[test]
 fn a_construct_the_front_end_cannot_parse_makes_the_whole_document_undecided() {
     for source in [
-        "verified fn f() -> Int {\n  return 1\n}\n",
+        "commutative service S { fn op() -> Int }\n",
         "fn broken( {\n",
     ] {
         let found = symbols(source);
@@ -7209,11 +7222,25 @@ fn a_construct_the_front_end_cannot_parse_makes_the_whole_document_undecided() {
 }
 
 #[test]
+fn a_verified_fn_declares_a_navigable_symbol() {
+    // issue #3107: the front end reads the `verified` prefix, so the document is
+    // decided and the declaration is navigable.
+    let found = symbols("verified fn f() -> Int {\n  return 1\n}\n");
+    let symbol = found.get("f").expect("the declaration is navigable");
+    assert_eq!(symbol.kind, SymbolKind::Fn);
+    assert_eq!(symbol.line, 1);
+}
+
+#[test]
 fn public_and_cached_functions_preserve_reference_signatures() {
     for (source, expected) in [
         ("pub fn f() -> Int { return 1 }\n", "pub fn f() -> Int"),
         ("fn f() -> Int cache pure { return 1 }\n", "fn f() -> Int"),
         ("pub fn f() -> Int cache pure { return 1 }\n", "pub fn f() -> Int"),
+        // issue #3107: the reference's prefix is `pub ` + `verified `, and the
+        // self-host walker reaches the `fn` through both.
+        ("verified fn f() -> Int { return 1 }\n", "verified fn f() -> Int"),
+        ("pub verified fn f() -> Int { return 1 }\n", "pub verified fn f() -> Int"),
     ] {
         let found = table(source);
         let symbol = found.get("f").unwrap();

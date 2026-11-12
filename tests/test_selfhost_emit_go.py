@@ -231,7 +231,10 @@ CORPUS = [
     # division, a Float `%` and Int-to-Float widening (issues #2259, #2198),
     # and the checked Int32 `+ - *` and unary minus (issue #2262)
     "comp_provide_arith.rvl",
-    "to_char.rvl",  # Int.to_char, the primitive behind str_char (issue #2285)
+    # Int.to_char, the primitive behind str_char (issue #2285), and locals
+    # spelled like Go builtins or in the emitter's `revl` helper namespace,
+    # which take one `_` (issues #3161 and #3168)
+    "to_char.rvl",
     "comp_to_char.rvl",  # Int.to_char in a provide body (issue #2285)
     # ... and method-body `let` bindings on the combined path (issue #2898):
     # an untyped `[]` typed from the method's declared return and its pin, and

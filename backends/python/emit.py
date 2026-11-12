@@ -424,19 +424,24 @@ def _deferred_register_kwargs(ext: dict, args: list) -> str:
 # site both flow through), exactly as it already does for Python keywords. The
 # emitter's bare `len(...)` is untouched and keeps resolving to the builtin.
 #
-# `next` is deliberately ABSENT: it is emitted bare only inside the routed-
-# require router (a self-contained emitted class, item 167), and it is also a
-# common, legitimate revl identifier (a `next` callback parameter, a `next`
-# record field) whose every checked-in use is a local/field that shares no scope
-# with that class. Renaming those would be churn with no collision behind it, so
-# `next` stays off the list until a colliding *module-scope* spelling motivates
-# a narrower guard.
+# `next` is emitted bare only inside the routed-require router (a self-contained
+# emitted class, item 167), but that class's methods resolve `next` through the
+# MODULE globals, so a module-scope `fn next` (or a `type next`) rebinds it for
+# the router too. Issue #3129 also names the other bare references this list
+# missed: `chr` (the `to_char` helper), `IndexError`/`KeyError` (the list/str and
+# map index guards), `AssertionError` (the lifecycle residue check), `setattr`
+# (keyword-named provide-method registration) and the imported `realm_label`
+# (the realm router). They join the same ladder, so a user declaration of any of
+# them is escaped and every emitter reference keeps reaching the runtime name.
+# A local of one of these spellings is renamed too; the ladder is the one
+# module-global rename site, and the churn is a pure injective shift.
 _EMITTED_BUILTINS = frozenset({
-    "AttributeError", "Exception", "OverflowError", "RuntimeError", "TypeError",
-    "abs", "bool", "bytes", "callable", "dict", "float", "getattr", "globals",
-    "hasattr", "hash", "int", "isinstance", "len", "list", "max", "min",
-    "object", "ord", "range", "repr", "reversed", "set", "sorted", "str",
-    "tuple", "type",
+    "AssertionError", "AttributeError", "Exception", "IndexError", "KeyError",
+    "OverflowError", "RuntimeError", "TypeError",
+    "abs", "bool", "bytes", "callable", "chr", "dict", "float", "getattr",
+    "globals", "hasattr", "hash", "int", "isinstance", "len", "list", "max",
+    "min", "next", "object", "ord", "range", "realm_label", "repr", "reversed",
+    "set", "setattr", "sorted", "str", "tuple", "type",
 })
 
 # Type names the python emitter injects at module scope, which a user *type* of

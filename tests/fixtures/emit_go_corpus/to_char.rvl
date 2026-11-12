@@ -7,3 +7,29 @@ fn ch(n: Int) -> Str { return n.to_char() }
 fn crlf() -> Str { return 13.to_char().concat(10.to_char()) }
 
 fn width(n: Int) -> Int { return ch(n).length() }
+
+// Go's predeclared identifiers and the emitter's `revl` namespace at value
+// positions (issues #3161 and #3168). This rides in an existing document
+// rather than a new one so the go corpus keeps its independence floor
+// (tests/fixtures/corpus_provenance.json).
+//
+//   - A local or parameter spelled like a Go builtin (`complex`, `imag`,
+//     `print`, `uint`) would shadow it inside its function, so it takes one
+//     `_`, at its declaration and at every read.
+//   - A name spelled `REVL_..`, `_REVL..` or `revl` plus an upper case letter
+//     is in the emitter's helper namespace and takes one `_` too.
+//   - `revlate` (a lower case letter after `revl`) and `count` are outside it
+//     and keep their spelling.
+
+pub fn spell(x: Int) -> Int {
+  let complex = x + 1
+  let imag = complex + 1
+  let print = imag + 1
+  let uint = print + 1
+  let REVL_MAX = uint + 1
+  let _REVLX = REVL_MAX + 1
+  let revlTotal = _REVLX + 1
+  let revlate = revlTotal + 1
+  let count = revlate + 1
+  return count
+}

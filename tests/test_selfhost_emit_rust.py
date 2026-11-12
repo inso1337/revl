@@ -133,7 +133,6 @@ CORPUS = [
     "float_pub.rvl", # finite Float literals/arithmetic, Int->Float widening, pub fn
     "checked_div.rvl", # total checked division/modulo and Result matching
     "checked_arith.rvl",  # total checked_add/sub/mul (docs/arithmetic.md)
-    "checked_arith_read.rvl",  # the same forms bound by a let and matched
     "str_borrows.rvl",  # fixpoint signatures, owned boundaries, &str call sites
     "borrow_boundaries.rvl",  # callbacks, escaping captures, nested-list needles
     "borrow_shadowing.rvl",  # later/sibling bindings cannot hide function values
@@ -396,6 +395,9 @@ CORPUS = [
     # issue #2494: the same variant on the component tier, in a service
     # signature and in provide methods
     "comp_provide_generic_variant.rvl",
+    # issues #3159 and #3168: the helper namespace and the prelude constructors
+    # at value positions (fns, externs, params, locals, binds, arrow params)
+    "revl_namespace.rvl",
 ]
 
 
@@ -807,6 +809,18 @@ def test_selfhosted_emitter_unbuilt_same_shape_record_is_a_twin_alias(emitted, r
     assert "pub struct Cell {" in src
     assert "pub type UnusedCell = Cell;" in src
     assert "pub struct UnusedCell" not in src
+
+
+def test_selfhosted_emitter_checked_arith_read_matches_reference(emitted, reference):
+    """The checked_add/sub/mul forms bound by a let and matched (docs/arithmetic.md).
+
+    The document lives in the python tier's corpus, byte-identical to the copy
+    this tier used to carry; the gate crate's admit oracle reads this module's
+    `CORPUS` as basenames of `emit_rust_corpus/`, so it is NOT added there:
+    this test compares the whole document byte for byte itself."""
+    ir = compile_files(
+        [str(ROOT / "tests" / "fixtures" / "emit_py_corpus" / "checked_arith_read.rvl")])
+    assert emitted["emit_rust_src"](ir) == reference.emit(ir)
 
 
 def test_selfhosted_emitter_output_scaffold(emitted):
