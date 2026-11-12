@@ -21725,9 +21725,12 @@ fn model_council_refusal(ts: List[Token]) -> Verd {
 //
 // The gate's expression walk (`calls_in`) is WIDER than the reference's
 // `collect_expr`, which does not enter a `match`, an interpolation, an `emit` or
-// a `?.` chain. A cycle through one of those is refused here and admitted by the
-// reference: a loud difference, recorded in tests/test_selfhost_lower.py
-// (`GATE_3107_LOUD_REFUSALS`), never a silent one.
+// a `?.` chain. A cycle through a `match`, an interpolation or a `?.` chain is
+// refused here and admitted by the reference: a loud difference, recorded in
+// tests/test_selfhost_lower.py (`GATE_3107_LOUD_REFUSALS`), never a silent one.
+// A cycle through an `emit` has no entry there, because the reference admits no
+// program that has one: it refuses an `emit` in a top-level fn body, and a
+// `verified fn` cannot be a component member.
 fn callees_of(fs: List[FnD], n: Str, i: Int, acc: List[Str]) -> List[Str] {
   if (i >= fs.length()) { return acc }
   if (fs[i].name == n) { return callees_of(fs, n, i + 1, push_all(acc, fs[i].totCalls, 0)) }

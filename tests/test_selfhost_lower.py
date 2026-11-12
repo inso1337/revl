@@ -8931,6 +8931,10 @@ def test_the_spellings_around_3107_are_refused_in_the_reference_words(
 # is DELETED rather than reworded when the gate follows the reference.
 #   * `match_arm_recursion`: `_fn_call_graph` does not enter a `match`, so the
 #     reference sees no edge there; the gate's edge walk (`calls_in`) does.
+#   * `templ_recursion`: the same for an interpolation: `collect_expr` does not
+#     enter a template's parts, `calls_in` does.
+#   * `optchain_recursion`: the same for a `?.` chain: `collect_expr` does not
+#     enter its receiver, `calls_in` does.
 #   * `endorse_before_verified`, `verified_before_endorse`: the gate does not
 #     read the `endorse[...]` declaration slot in either position.
 #   * `endorse_expression_in_verified`: the gate's expression reader cannot read
@@ -8943,6 +8947,15 @@ GATE_3107_LOUD_REFUSALS: dict[str, tuple[str, str]] = {
     "match_arm_recursion": (
         "type C = Red | Green\n"
         "verified fn f(c: C) -> Int = match c { Red => f(Green), Green => 0 }\n",
+        "G7|verified fn `f` is not total: it participates in direct or mutual "
+        "recursion (verified totality, syntax-2.0 §7)"),
+    "templ_recursion": (
+        "verified fn f(n: Int) -> Str = `${f(n)}`\n",
+        "G7|verified fn `f` is not total: it participates in direct or mutual "
+        "recursion (verified totality, syntax-2.0 §7)"),
+    "optchain_recursion": (
+        "type R = { a: R? }\n"
+        "verified fn f(r: R?) -> R? = f(r)?.a\n",
         "G7|verified fn `f` is not total: it participates in direct or mutual "
         "recursion (verified totality, syntax-2.0 §7)"),
     "endorse_before_verified": (
