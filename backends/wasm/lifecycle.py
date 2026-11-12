@@ -13,10 +13,11 @@ faked as a pass:
 
 * a `load … with { … }` — the wasm tier has no instantiation-config channel,
   so a configured component does not even lower (docs/wasm-capabilities.md);
-* a `call` whose signature crosses a non-scalar boundary (Str/List/record/
-  variant/Opt/Result/Float) — those cross as pointers into the module's own
-  linear memory, which the Python host cannot marshal at the coeffect table
-  seam (the once-mode boot only ever moves Int/Bool across it);
+* a `call` whose signature crosses a compound boundary (Str/List/record/
+  variant/Opt/Result) — those cross as pointers into the module's own linear
+  memory, which the Python host cannot marshal at the coeffect table seam.
+  Float is a native scalar on the substrate but this driver's step interpreter
+  parses and evaluates Int/Bool only, so a Float signature skips too;
 * an `assert` over a non-scalar value (e.g. `hit == Some("v")`) — same reason,
   there is nothing scalar to compare host-side;
 * an `advance` step — timers (`every`/`after`, item 57) are not yet lowerable
@@ -31,8 +32,9 @@ executor stay a thin scalar interpreter.
 
 from __future__ import annotations
 
-# Int is i64, Bool is i32 (backends/wasm/README.md "Widths"); everything richer
-# crosses the service boundary as a linear-memory pointer the host cannot read.
+# Int is i64, Bool is i32 (backends/wasm/README.md "Widths"); Float is f64 but
+# this step interpreter evaluates Int/Bool only, and everything compound crosses
+# the service boundary as a linear-memory pointer the host cannot read.
 _SCALAR_TYPES = frozenset({"Int", "Bool"})
 
 
@@ -107,10 +109,11 @@ def classify(ir: dict, test: dict) -> tuple[bool, str]:
                 if not _is_scalar_type(param.get("type")):
                     return (False,
                             f"calls `{key}.{method}`, whose parameter `"
-                            f"{param.get('name')}: {param.get('type')}` crosses a "
-                            "non-scalar (Str/List/record/variant/Opt/Float) boundary "
-                            "the wasm substrate cannot marshal from the host "
-                            "(docs/wasm-capabilities.md)")
+                            f"{param.get('name')}: {param.get('type')}` is not "
+                            "marshalled by this lifecycle driver (it evaluates "
+                            "Int/Bool only; Str/List/record/Opt/Result are "
+                            "linear-memory pointers and a Float step value is "
+                            "not parsed yet) (docs/wasm-capabilities.md)")
             for arg in step.get("args") or []:
                 if not _scalar_expr(arg, scalar_binds):
                     return (False,

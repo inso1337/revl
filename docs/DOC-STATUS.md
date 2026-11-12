@@ -52,17 +52,17 @@ regenerated rather than edited.
 | README.md | needs-work | 0 |  |
 | analyze-liveness.md | needs-work | 15 |  |
 | apply.md | needs-work | 19 |  |
-| arithmetic.md | needs-work | 6 |  |
+| arithmetic.md | needs-work | 5 |  |
 | attested-result-delivery.md | needs-work | 0 |  |
 | attested-tee-placement.md | needs-work | 0 |  |
-| audit-diff.md | needs-work | 14 |  |
+| audit-diff.md | needs-work | 12 |  |
 | authoring-for-agents.md | needs-work | 0 |  |
 | auto-mocks.md | needs-work | 16 |  |
 | backend-go-v3.md | needs-work | 14 | yes |
 | backend-ir-v1.md | needs-work | 16 |  |
 | backend-ir-v3.md | needs-work | 0 |  |
 | backend-ir.md | needs-work | 11 |  |
-| backends-roadmap.md | needs-work | 42 |  |
+| backends-roadmap.md | needs-work | 41 |  |
 | bench-selfhost.md | live-owned (not audited) | 49 |  |
 | boundary-policy.md | needs-work | 27 |  |
 | bundle.md | needs-work | 0 |  |
@@ -79,7 +79,7 @@ regenerated rather than edited.
 | composition-rows.md | needs-work | 24 |  |
 | conformance.md | needs-work | 0 |  |
 | contract-errata.md | needs-work | 56 | yes |
-| crash-recovery.md | needs-work | 52 |  |
+| crash-recovery.md | needs-work | 51 |  |
 | dash.md | current | 9 |  |
 | delivery-semantics.md | needs-work | 0 |  |
 | deploy.md | needs-work | 12 |  |
@@ -97,6 +97,7 @@ regenerated rather than edited.
 | fix-code.md | needs-work | 10 |  |
 | fmt.md | needs-work | 12 |  |
 | frontend-assets.md | needs-work | 13 |  |
+| function-specs.md | needs-work | 0 |  |
 | function-types.md | needs-work | 31 |  |
 | gate-as-a-service.md | needs-work | 21 | yes |
 | gate-dependency-contract.md | stale-fixed | 0 |  |
@@ -113,8 +114,8 @@ regenerated rather than edited.
 | import-cordis.md | needs-work | 58 |  |
 | import-openapi.md | needs-work | 45 |  |
 | import-wit.md | needs-work | 29 |  |
-| int32-proposal.md | needs-work | 8 |  |
-| integer-proposal.md | needs-work | 20 |  |
+| int32-proposal.md | current | 6 |  |
+| integer-proposal.md | needs-work | 18 |  |
 | interchange-format.md | needs-work | 7 |  |
 | interop-bridge.md | needs-work | 51 |  |
 | label-compile-audit-2563.md | needs-work | 0 |  |
@@ -185,7 +186,7 @@ regenerated rather than edited.
 | verified-canary.md | needs-work | 24 |  |
 | verified-effect.md | needs-work | 18 |  |
 | vision.md | current | 0 |  |
-| wasm-capabilities.md | needs-work | 41 | yes |
+| wasm-capabilities.md | needs-work | 39 | yes |
 | webapp-competitiveness-report.md | needs-work | 33 |  |
 | why-runtime.md | needs-work | 29 |  |
 | why-traces.md | needs-work | 26 |  |

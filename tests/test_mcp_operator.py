@@ -345,3 +345,187 @@ def test_authorized_swap_lands_and_the_trace_names_who(_profiled_session):
     assert refused["ok"] is False and refused["authorized"] is False
     # and unload is denied outright
     assert _call("revl_unload", {})["authorized"] is False
+
+
+# ------------------------- issue #3188: a changed component's realms, both sides
+#
+# A swap is scoped to the components it changes, each labelled with its name
+# and its realms. Those realms are read from the running manifest AND the
+# candidate, so a candidate cannot pick the realm the gate sees by editing the
+# realm clauses of the component it changes.
+
+DENY_PROFILE = """
+operator carol may swap on *
+operator carol may not swap on tenant_b
+"""
+
+
+def _move_b_to_tenant_c():
+    # the tenant_b component's body changes AND it is moved to another realm
+    return _swap_b().replace('realm("tenant_b")', 'realm("tenant_c")')
+
+
+def _add_tenant_a_realm_to_b():
+    # the tenant_b component's body changes AND it gains a requirement that is
+    # isolated in tenant_a, while it stays in tenant_b
+    return _swap_b().replace(
+        'component TenantBCache provides cb: Cache {\n  isolate cb in realm("tenant_b")',
+        'component TenantBCache requires ca: Cache provides cb: Cache {\n'
+        '  isolate cb in realm("tenant_b")\n  isolate ca in realm("tenant_a")')
+
+
+def test_body_only_change_is_refused_by_a_realm_deny():
+    # the control: the deny holds while the component stays in tenant_b
+    carol = parse_profile(DENY_PROFILE).get("carol")
+    sess = _FakeSession(compile_source(TWO_REALM), carol)
+    d = decide(sess, "revl_swap", {"source": _swap_b()})
+    assert d.gated and not d.allowed
+    assert "TenantBCache" in d.message
+
+
+def test_moving_a_component_out_of_a_denied_realm_is_still_refused():
+    carol = parse_profile(DENY_PROFILE).get("carol")
+    sess = _FakeSession(compile_source(TWO_REALM), carol)
+    labels = dict(op._changed_targets(sess.ir, compile_source(_move_b_to_tenant_c())))
+    # an allow is matched where it goes first, a deny where it was AND where it goes
+    assert labels == {"TenantBCache": frozenset({"TenantBCache", "tenant_c"})}
+    assert labels["TenantBCache"].was == frozenset({"TenantBCache", "tenant_b"})
+    assert labels["TenantBCache"].deny == frozenset({"TenantBCache", "tenant_b", "tenant_c"})
+    d = decide(sess, "revl_swap", {"source": _move_b_to_tenant_c()})
+    assert d.gated and not d.allowed
+    assert "TenantBCache" in d.message
+
+
+def test_realm_move_refused_by_a_deny_never_reaches_the_handler(_profiled_session):
+    server.SESSION.operator = parse_profile(DENY_PROFILE).get("carol")
+    running = compile_source(TWO_REALM)
+    server.SESSION.ir = running
+    try:
+        payload = _call("revl_swap", {"source": _move_b_to_tenant_c()})
+        assert payload["ok"] is False
+        assert payload["authorized"] is False
+        assert payload["authority"].get("allowed") is not True
+        assert "TenantBCache" in payload["diagnostics"][0]["message"]
+        # the gate refused before the handler: the running IR is the same one
+        assert server.SESSION.ir is running
+    finally:
+        server.SESSION.ir = None
+
+
+def test_a_move_that_stays_inside_the_allowed_realm_is_authorized():
+    # alice may swap on tenant_a*: moving her own component between two
+    # tenant_a* realms stays inside her grant on both sides
+    alice = parse_profile(PROFILE).get("alice")
+    sess = _FakeSession(compile_source(TWO_REALM), alice)
+    moved = _swap_a().replace('realm("tenant_a")', 'realm("tenant_a2")')
+    d = decide(sess, "revl_swap", {"source": moved})
+    assert d.gated and d.allowed
+    assert d.subjects == ("TenantACache",)
+
+
+@pytest.mark.parametrize("with_body_change", [True, False])
+def test_moving_an_allowed_component_out_of_the_allowed_realm_is_refused(
+        with_body_change):
+    # alice may swap on tenant_a*: moving TenantACache to tenant_b leaves her
+    # grant, and the realm it leaves must not count toward her allow
+    alice = parse_profile(PROFILE).get("alice")
+    sess = _FakeSession(compile_source(TWO_REALM), alice)
+    base = _swap_a() if with_body_change else TWO_REALM
+    moved = base.replace('realm("tenant_a")', 'realm("tenant_b")')
+    d = decide(sess, "revl_swap", {"source": moved})
+    assert d.gated and not d.allowed
+    assert "TenantACache" in d.message
+
+
+@pytest.mark.parametrize("with_body_change", [True, False])
+def test_moving_a_component_into_the_allowed_realm_from_outside_is_refused(
+        with_body_change):
+    # alice may swap on tenant_a*: moving the tenant_b component INTO tenant_a
+    # is still a change to a component her grant does not cover where it runs,
+    # so the candidate's new realm must not select it
+    alice = parse_profile(PROFILE).get("alice")
+    sess = _FakeSession(compile_source(TWO_REALM), alice)
+    base = _swap_b() if with_body_change else TWO_REALM
+    moved = base.replace('realm("tenant_b")', 'realm("tenant_a")')
+    d = decide(sess, "revl_swap", {"source": moved})
+    assert d.gated and not d.allowed
+    assert "TenantBCache" in d.message
+
+
+def test_adding_an_allowed_realm_to_a_component_outside_it_is_refused():
+    # the issue's T1: a body change plus a requirement isolated in tenant_a
+    # used to put TenantBCache inside `may swap on tenant_a*`; the allow is
+    # now matched on the running side too
+    alice = parse_profile(PROFILE).get("alice")
+    sess = _FakeSession(compile_source(TWO_REALM), alice)
+    d = decide(sess, "revl_swap", {"source": _add_tenant_a_realm_to_b()})
+    assert d.gated and not d.allowed
+    assert "TenantBCache" in d.message
+    labels = dict(op._changed_targets(
+        sess.ir, compile_source(_add_tenant_a_realm_to_b())))
+    assert labels["TenantBCache"] == frozenset(
+        {"TenantBCache", "tenant_b", "tenant_a"})
+    assert labels["TenantBCache"].was == frozenset({"TenantBCache", "tenant_b"})
+
+
+def test_adding_an_allowed_realm_refuses_before_the_handler(_profiled_session):
+    running = compile_source(TWO_REALM)
+    server.SESSION.ir = running
+    try:
+        payload = _call("revl_swap", {"source": _add_tenant_a_realm_to_b()})
+        assert payload["ok"] is False
+        assert payload["authorized"] is False
+        assert payload["authority"].get("allowed") is not True
+        assert "TenantBCache" in payload["diagnostics"][0]["message"]
+        assert server.SESSION.ir is running
+    finally:
+        server.SESSION.ir = None
+
+
+def test_a_new_component_in_the_allowed_realm_is_authorized():
+    # an added component has no running side: its candidate labels are the
+    # only side an allow must select
+    alice = parse_profile(PROFILE).get("alice")
+    sess = _FakeSession(compile_source(TWO_REALM), alice)
+    added = TWO_REALM + """
+service Metrics { fn count() -> Int }
+component TenantAMetrics provides cm: Metrics {
+  isolate cm in realm("tenant_a")
+  provide cm { fn count() = 1 }
+}
+"""
+    d = decide(sess, "revl_swap", {"source": added})
+    assert d.gated and d.allowed
+    assert d.subjects == ("TenantAMetrics",)
+
+
+def test_a_new_component_outside_the_allowed_realm_is_refused():
+    # the missing running side must not turn an addition into a grant-less
+    # admit: the candidate labels alone still have to be selected
+    alice = parse_profile(PROFILE).get("alice")
+    sess = _FakeSession(compile_source(TWO_REALM), alice)
+    added = TWO_REALM + """
+service Metrics { fn count() -> Int }
+component TenantBMetrics provides cm: Metrics {
+  isolate cm in realm("tenant_b")
+  provide cm { fn count() = 1 }
+}
+"""
+    d = decide(sess, "revl_swap", {"source": added})
+    assert d.gated and not d.allowed
+    assert "TenantBMetrics" in d.message
+
+
+def test_a_move_between_two_allowed_realms_is_authorized():
+    # an allow must select the component on both sides; separate allow rules
+    # that cover one side each are enough, because the operator holds both
+    both = """
+operator alice may swap on tenant_a*
+operator alice may swap on tenant_b*
+"""
+    alice = parse_profile(both).get("alice")
+    sess = _FakeSession(compile_source(TWO_REALM), alice)
+    moved = _swap_a().replace('realm("tenant_a")', 'realm("tenant_b")')
+    d = decide(sess, "revl_swap", {"source": moved})
+    assert d.gated and d.allowed
+    assert d.subjects == ("TenantACache",)

@@ -252,3 +252,56 @@ def test_bare_emission_component_reports_the_policy_leg_not_the_import_leg():
     msg = str(excinfo.value)
     assert "declared caps subset-of policy-allowed FAILED" in msg
     assert "import section exceeds" not in msg
+
+
+# ------------------------------------------- the deny rules (issue #3185)
+
+def test_deny_rule_refuses_a_wasm_cell_the_allow_list_never_names():
+    # `may not reach` is a deny rule, not an allow rule: before issue #3185 the
+    # leg read `_allow_for` only, so this returned [] while `policy.evaluate`
+    # refused the same composition.
+    ir = compile_source(STORE)
+    modules, _ = _emit(ir)
+    policy = parse_policy("component * may not reach kv")
+    breaches = least_authority_breaches(ir, policy, modules)
+    assert [b.leg for b in breaches] == ["declared>deny"]
+    assert breaches[0].component == "Store"
+    assert breaches[0].capabilities == ("kv",)
+    with pytest.raises(RevlError) as excinfo:
+        enforce_wasm_least_authority(ir, policy, modules)
+    assert "may not reach" in str(excinfo.value)
+
+
+def test_deny_wins_over_an_allow_that_covers_the_capability():
+    ir = compile_source(TWO_KEYS)
+    modules, _ = _emit(ir)
+    policy = parse_policy("component Writer may reach kv, log\n"
+                          "component * may not reach log")
+    breaches = least_authority_breaches(ir, policy, modules)
+    assert [(b.leg, b.capabilities) for b in breaches] == [
+        ("declared>deny", ("log",))]
+
+
+def test_deny_for_another_capability_admits():
+    ir = compile_source(STORE)
+    modules, _ = _emit(ir)
+    policy = parse_policy("component * may not reach net")
+    assert least_authority_breaches(ir, policy, modules) == []
+
+
+def test_component_breaches_deny_leg_reads_the_declared_set():
+    breaches = component_breaches(
+        "W", import_caps={"kv"}, declared_caps={"kv", "net"}, allow=None,
+        deny=("net",))
+    assert [(b.leg, b.capabilities) for b in breaches] == [
+        ("declared>deny", ("net",))]
+
+
+def test_component_breaches_deny_leg_reads_the_import_set():
+    # an import outside the declared set is the first leg's breach, and the
+    # deny leg names it too when a deny rule matches it
+    breaches = component_breaches(
+        "W", import_caps={"kv", "net"}, declared_caps={"kv"}, allow=None,
+        deny=("net",))
+    assert [(b.leg, b.capabilities) for b in breaches] == [
+        ("import>declared", ("net",)), ("declared>deny", ("net",))]

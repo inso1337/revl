@@ -64,6 +64,7 @@ from pathlib import Path
 # `go build` path (backends/go/emit.py::emit_placement -> the runner's `emitted`
 # package) the cross-tier bridge already uses. We drive the resulting binary in
 # `once` mode.
+from . import _childproc
 from . import placement as _placement
 from ._once_proof import SPEC_FLAG, OnceProof
 from ._paths import backends_root
@@ -132,8 +133,8 @@ def _resolve_probe(tmp: Path) -> tuple[bool, str | None]:
         "var _ = stc.NewKey[any]\n", encoding="utf-8")
 
     env = dict(os.environ)
-    offline = subprocess.run(
-        ["go", "build", "./..."], cwd=str(tmp), text=True, capture_output=True,
+    offline = _childproc.run(
+        ["go", "build", "./..."], cwd=str(tmp), capture_output=True,
         env={**env, "GOFLAGS": "-mod=mod", "GOPROXY": "off"},
     )
     if offline.returncode == 0:
@@ -151,8 +152,8 @@ def _resolve_probe(tmp: Path) -> tuple[bool, str | None]:
         return False, ("stc-go is not in the local module cache and "
                        "proxy.golang.org is unreachable — run `go build` once "
                        "with network to populate the module cache")
-    networked = subprocess.run(
-        ["go", "build", "./..."], cwd=str(tmp), text=True, capture_output=True,
+    networked = _childproc.run(
+        ["go", "build", "./..."], cwd=str(tmp), capture_output=True,
         env=env,
     )
     if networked.returncode == 0:
@@ -251,10 +252,10 @@ def run_go(ir: dict, config: dict, files, once: bool = False,
                              encoding="utf-8")
 
         print("== load composition (go tier) ==", flush=True)
-        proc = subprocess.Popen(
+        proc = _childproc.popen(
             [binary, str(spec_file)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, text=True,
+            stderr=subprocess.STDOUT,
         )
         # the proof token is stdin's only line; then stdin closes, as before,
         # so the runner never blocks on it (issue #1621)

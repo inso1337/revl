@@ -702,13 +702,16 @@ export type TimerMode = 'every' | 'after'
 export type TimerState = 'live' | 'cancelled' | 'done'
 
 let timerCounter = 0
+// The live handles only, arm order (issue #3377): cancelling a handle, or an
+// `after` firing, releases it, so a host that swaps for hours neither scans
+// dead handles on every advance nor keeps the generation that armed them.
 const timers: TimerHandle[] = []
 
 export class TimerHandle {
   readonly serial: number
   readonly mode: TimerMode
   readonly intervalMs: number
-  private readonly body: () => void
+  private body: (() => void) | null
   private status: TimerState = 'live'
   nextAt: number
   fired = 0
@@ -741,34 +744,48 @@ export class TimerHandle {
   cancel(): boolean {
     if (this.status !== 'live') return false
     this.status = 'cancelled'
+    this.release()
     liveResources.delete(this.label)
     record(`${this.label}.cancel`)
     return true
+  }
+
+  /** Leave the clock's live list and drop the body (issue #3377). */
+  private release(): void {
+    const at = timers.indexOf(this)
+    if (at >= 0) timers.splice(at, 1) // absent: an `after` body cancelled itself
+    this.body = null
   }
 
   /** @internal — driven only by Clock.advance. */
   fire(now: number): void {
     this.fired += 1
     clockFirings.push([this.serial, now])
+    if (clockFirings.length > CLOCK_FIRINGS_CAP) clockFirings.shift()
     record(`${this.label}.fire #${this.fired} at ${now}ms`)
-    this.body()
+    this.body?.()
     if (this.mode === 'after') {
       // a one-shot's schedule is spent once it fires; release it through the
       // same path as cancel so `liveResources` clears and the teardown's own
       // `handle.cancel()` is a clean no-op.
       this.status = 'done'
+      this.release()
       liveResources.delete(this.label)
       record(`${this.label}.cancel`)
     }
   }
 }
 
+/** How many of the most recent firings `Clock.firings()` keeps (issue #3377).
+ *  The log is a test aid; a host that runs for hours never reads it. */
+const CLOCK_FIRINGS_CAP = 1024
 const clockFirings: Array<[number, number]> = []
 let clockNow = 0
 
 /** The clock coeffect (item 57): time advances only when the harness calls
  *  `advance`, so timer firings are deterministic timeline steps. */
 export const Clock = {
+  FIRINGS_CAP: CLOCK_FIRINGS_CAP,
   now(): number {
     return clockNow
   },
@@ -808,9 +825,24 @@ export const Clock = {
   },
   /** Live timers — a teardown that abandons one leaves this > 0. */
   pending(): number {
-    return timers.filter((t) => t.state() === 'live').length
+    return timers.length
   },
-  /** The recorded firing log: `[timerSerial, firedAtMs]` in order. */
+  /** Milliseconds from `now()` until the earliest live timer is due, or null
+   *  with no live timer. A host pumping `advance` from a real monotonic source
+   *  sleeps this long, then advances by it, so a timer fires on its tick
+   *  rather than on a fixed slice (issue #3377). */
+  nextDue(): number | null {
+    if (timers.length === 0) return null
+    let earliest = timers[0].nextAt
+    for (const t of timers) if (t.nextAt < earliest) earliest = t.nextAt
+    return earliest - clockNow
+  },
+  /** @internal test aid: how many handles the clock holds (live ones only). */
+  _held(): number {
+    return timers.length
+  },
+  /** The recorded firing log: `[timerSerial, firedAtMs]` in order, the most
+   *  recent `FIRINGS_CAP` firings only. */
   firings(): Array<[number, number]> {
     return clockFirings.map((f) => [f[0], f[1]])
   },
@@ -1350,13 +1382,66 @@ export class Frame {
     return this.seqCounter
   }
 
+  /** Render a thrown value as the residue schema's `{type, message}`. A host
+   *  may throw anything, including `Object.create(null)` (which has no
+   *  `String()` conversion at all) or an object whose `toString` throws;
+   *  recording a residue must never throw out of the unwind loop, so every step
+   *  falls back (#3235). */
   private static errorOf(err: unknown): { type: string; message: string } {
-    if (err instanceof Error) return { type: err.constructor.name, message: err.message }
-    return { type: 'Error', message: String(err) }
+    const fallback = { type: 'Error', message: '<unprintable>' }
+    try {
+      if (err instanceof Error) {
+        try {
+          return { type: err.constructor.name, message: err.message }
+        } catch {
+          return fallback
+        }
+      }
+      try {
+        return { type: 'Error', message: String(err) }
+      } catch {
+        return fallback
+      }
+    } catch {
+      return fallback
+    }
+  }
+
+  /** One argument of a residue referent as text. `Int` is a `bigint` on this
+   *  tier and `JSON.stringify` THROWS on one, so a bigint renders as its
+   *  decimal digits (no `n`, no quotes: the text the config echo and the other
+   *  tiers write), at any depth. Anything the encoder still cannot render
+   *  falls back to `String(...)`, so recording a residue never throws. */
+  private static showArg(value: unknown, seen: Set<object> = new Set()): string {
+    try {
+      if (typeof value === 'bigint') return value.toString()
+      if (value !== null && typeof value === 'object') {
+        // a circular argument used to recurse until the stack overflowed: a
+        // value already on the current path renders as a marker instead, and
+        // the set is unwound after the branch so a shared (non-cyclic) value
+        // still renders in full
+        if (seen.has(value)) return '<circular>'
+        seen.add(value)
+        try {
+          if (Array.isArray(value)) {
+            return `[${value.map((v) => Frame.showArg(v, seen)).join(',')}]`
+          }
+          if (Object.getPrototypeOf(value) === Object.prototype) {
+            const o = value as Record<string, unknown>
+            return `{${Object.keys(o).map((k) => `${JSON.stringify(k)}:${Frame.showArg(o[k], seen)}`).join(',')}}`
+          }
+        } finally {
+          seen.delete(value)
+        }
+      }
+      return JSON.stringify(value) ?? String(value)
+    } catch {
+      try { return String(value) } catch { return '<unprintable>' }
+    }
   }
 
   private static referentOf(crossing: Crossing): string {
-    const args = crossing.args.map((a) => JSON.stringify(a)).join(', ')
+    const args = crossing.args.map((a) => Frame.showArg(a)).join(', ')
     return `${crossing.key}.${crossing.method}(${args})`
   }
 

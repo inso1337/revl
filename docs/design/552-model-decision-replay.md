@@ -154,6 +154,14 @@ asked, under which rule, and how far down the ladder and why, plus
 `reproducible()`. A `1.0` record is readable too; the members its version does
 not carry read as `None`, alongside the version that explains why.
 
+A version `3.0` record also reports its `reasoning` span (issue #2808): how
+much of it the host returned, its host-reported token count, and a digest of
+returned reasoning text only when the input's origins permit one. The span's
+text is never written. `revl.replay_modes.plan` turns the member into two
+per-entry verdicts: `fromRecord` (a retained answer can be served without
+calling the model) and `rederivable` (the answer can be reproduced from the
+prompt; a hidden or summary span makes it false with the reason named).
+
 **`decision` is `None` whenever `verified` is false.** This is stronger than the
 exit clause's "an edited field fails its digest", and deliberately: a reader
 that returned a reading *plus a warning* is a reader some caller eventually uses
