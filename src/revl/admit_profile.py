@@ -101,9 +101,9 @@ PLAIN: dict[str, dict[str, str]] = {
         "ungranted": "This change may only use what it has been given, and "
                      "`{name}` is not among it: remove that use, or ask for "
                      "`{name}` to be given.",
-        "ungranted_key": "`{name}` was given to another part of this change, "
-                         "not this one: ask for it to be given here too, or "
-                         "provide it inside the change.",
+        "ungranted_key": "`{name}` has not been given for this use: ask "
+                         "for it to be given here too, or provide it inside "
+                         "the change.",
     },
 }
 
