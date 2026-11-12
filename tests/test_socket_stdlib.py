@@ -6,7 +6,9 @@ against: `Knock` (`seq`, `kind: Opened | Said | Shut(Why)`, `line`, `who`,
 fixed token, `wire.take`, `wire.say`, `wire.close`. `stdlib/socket.rvl`'s
 `SocketWire` provides it on the py tier over `backends/python/revl_socket.py`,
 which is standard library only (the RFC 6455 handshake and framing are written
-there). What this suite pins:
+there), and on the ts tier over `backends/typescript/revl_socket_ts.ts`, whose
+behaviour is pinned by backends/typescript/tests/ts_socket_wire.test.ts. What
+this suite pins:
 
   * the three events arrive in order on one line, `who` carrying the Origin;
   * every limit is the provider's config: the origin rule answers 403 before
@@ -17,7 +19,9 @@ there). What this suite pins:
   * the listener is `acquire`: unloading releases the port, and a bind failure
     fails the activation by name;
   * `revl audit` names the five crossings, the three verbs with the contract's
-    tokens;
+    tokens, on py and ts;
+  * the provider emits on ts, each extern a stdlib-root ref into
+    `revl_socket_ts.ts` pinned to its digest;
   * a provider declaring its own token under `Wire` is refused (the seam a
     page-to-page provider rests on), and a user body importing the engine is
     refused with a hint naming `stdlib/socket.rvl`.
@@ -415,15 +419,15 @@ def test_audit_names_the_crossings(tmp_path, capsys):
     for name, (klass, caps) in CROSSINGS.items():
         assert externs[name]["class"] == klass, name
         assert externs[name].get("capabilities", []) == caps, name
-        assert externs[name]["backends"] == ["py"], name
+        assert externs[name]["backends"] == ["py", "ts"], name
 
     assert main(["audit", str(game), str(SOCKET)]) == 0
     text = capsys.readouterr().out
-    for line in ("socket_take [wire.take] (emission, py)",
-                 "socket_say [wire.say] (emission, py)",
-                 "socket_close [wire.close] (emission, py)",
-                 "socket_listen (acquire, py)",
-                 "socket_shut (acquire, py)"):
+    for line in ("socket_take [wire.take] (emission, py+ts)",
+                 "socket_say [wire.say] (emission, py+ts)",
+                 "socket_close [wire.close] (emission, py+ts)",
+                 "socket_listen (acquire, py+ts)",
+                 "socket_shut (acquire, py+ts)"):
         assert line in text, line
     assert "capabilities: wire.close, wire.say, wire.take" in text
 
@@ -472,6 +476,50 @@ def test_the_engine_is_a_trusted_stdlib_host_module():
     from revl.stdlib_hosts import STDLIB_HOST_MODULES
     assert "revl_socket" in STDLIB_HOST_MODULES
     assert (ROOT / "backends" / "python" / "revl_socket.py").is_file()
+
+
+# the extern each `@ts ref` names, and the symbol it imports
+TS_REFS = {
+    "socket_listen": "listen",
+    "socket_shut": "shut",
+    "settled": "settled",
+    "socket_take": "take",
+    "socket_say": "say",
+    "socket_close": "close",
+}
+TS_ENGINE = "backends/typescript/revl_socket_ts.ts"
+
+
+def test_ts_emit_of_socket_provider(tmp_path):
+    """The provider emits on the ts tier: every extern is a stdlib-root ref
+    into `revl_socket_ts.ts`, pinned to the file's digest, and the component
+    acquires the listener and releases it in its teardown."""
+    import hashlib
+    externs = {e["name"]: e for e in IR["externs"]}
+    digest = hashlib.sha256((ROOT / TS_ENGINE).read_bytes()).hexdigest()
+    for name, symbol in TS_REFS.items():
+        ref = externs[name]["refs"]["ts"]
+        assert ref == {"symbol": symbol, "path": TS_ENGINE, "sha256": digest,
+                       "root": "stdlib"}, name
+
+    out = tmp_path / "socket.ts"
+    assert main(["emit", "--backend", "ts", str(SOCKET), "-o", str(out)]) == 0
+    text = out.read_text(encoding="utf-8")
+    for line in ("export function socket_listen(door: Door): Listener {",
+                 "export function socket_shut(l: Listener): void {",
+                 "export function socket_take(l: Listener, most: bigint): Raw[] {",
+                 "export function socket_say(l: Listener, line: bigint, text: string)"
+                 ": boolean {",
+                 "export function socket_close(l: Listener, line: bigint, code: bigint,"
+                 " why: string, text: string): boolean {"):
+        assert line in text, line
+    load = f'_revl_require(_revl_ref_path_stdlib("{TS_ENGINE}"))'
+    assert text.count(load) == len(TS_REFS)
+    for symbol in TS_REFS.values():
+        assert f'_f = _m["{symbol}"]' in text, symbol
+    assert "export const SocketWire = {" in text
+    assert "const door = socket_listen({address: config.address" in text
+    assert '"socket_shut", () => socket_shut(door))' in text
 
 
 def test_close_code_table_matches_the_engine():

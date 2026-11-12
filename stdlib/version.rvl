@@ -121,6 +121,10 @@
 //        `close_code`. Same reason as item 104: a vendored copy under the old
 //        stamp has no socket binding, so its author is still writing the
 //        socket as host code whose crossing `revl audit` cannot name.
+//  15 -> `stdlib/socket.rvl`'s `SocketWire` runs on the ts tier too (issue
+//        #3357): its host bodies gain a `@ts ref` into
+//        `backends/typescript/revl_socket_ts.ts`. A vendored copy under the
+//        old stamp has py bodies only, so its provider does not run on ts.
 pub fn stdlib_version() -> Str {
-  return "14"
+  return "15"
 }
