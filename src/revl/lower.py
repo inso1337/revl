@@ -65,6 +65,8 @@ from .typecheck import (
     infer_ast,
     infer_memo,
     infer_memo_active,
+    infer_ir_memo,
+    infer_ir_memo_active,
     infer_ir,
     mismatch,
     pin_hole,
@@ -10343,6 +10345,26 @@ def _component_scope_value_is_callee(name: str, env: Env,
 
 def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables: set,
                                pure_only: bool = False) -> dict:
+    """Lower one component-stratum expression.
+
+    Issue #3457: the operator arms below ask `infer_ir` for the type of each
+    operand after lowering it, and each answer walked the operand's subtree,
+    so the outermost call opens an `infer_ir_memo()` and every node of the
+    expression is inferred once per type environment. Sound under the in-place
+    binds this lowering makes to `env.type_env` because that memo keys the
+    environment by content.
+    """
+    if infer_ir_memo_active():
+        return _lower_component_pure_expr_node(expr, env, scope, callables,
+                                               pure_only)
+    with infer_ir_memo():
+        return _lower_component_pure_expr_node(expr, env, scope, callables,
+                                               pure_only)
+
+
+def _lower_component_pure_expr_node(expr, env: Env, scope: dict[str, str],
+                                    callables: set,
+                                    pure_only: bool = False) -> dict:
     filename = env.filename
     line = getattr(expr, "line", 0)
 
