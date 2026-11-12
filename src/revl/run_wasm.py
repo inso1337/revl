@@ -53,6 +53,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from . import _childproc
 from ._once_proof import SPEC_FLAG, OnceProof
 from ._paths import backends_root, venv_python
 from .errors import RevlError
@@ -242,11 +243,11 @@ def wasm_runtime_reason() -> str | None:
         return (f"no cordis-wasm interpreter found (looked for {cordis_wasm}/.venv, "
                 "or set REVL_CORDIS_WASM_PYTHON) — a wasmtime-bearing venv is "
                 "needed to boot the WAT modules")
-    probe = subprocess.run(
+    probe = _childproc.run(
         [python, "-c",
          "import sys; sys.path.insert(0, sys.argv[1]); import wasmtime; "
          "from runtime import Runtime", str(cordis_wasm)],
-        capture_output=True, text=True,
+        capture_output=True,
     )
     if probe.returncode == 0:
         return None
@@ -387,10 +388,10 @@ def run_wasm(ir: dict, config: dict, files, once: bool = False,
         env = dict(os.environ)
         env["CORDIS_WASM"] = str(_cordis_wasm_dir())
         print("== load composition (wasm tier) ==", flush=True)
-        proc = subprocess.Popen(
+        proc = _childproc.popen(
             [_cordis_wasm_python(), str(_HARNESS), str(spec_file)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, text=True, env=env,
+            stderr=subprocess.STDOUT, env=env,
         )
         # the proof token is stdin's only line; then stdin closes, as before,
         # so the runner never blocks on it (issue #1621)

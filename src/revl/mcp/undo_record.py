@@ -27,8 +27,10 @@ generation move like an edit, undone by `revl_undo` to the generation before
 it; a speculative one leaves the running generation unchanged and says so.
 `revl_export` writes disk, not the session, and is in `IRREVERSIBLE`. The inverse of a generation move
 is a gated change itself: `revl_undo` re-admits the earlier generation's
-sources through the same gate a swap runs (docs/generation-history.md), so an
-undo never bypasses admission.
+sources through the same gate a swap runs (docs/generation-history.md), and
+carries live provider state back across a `handoff` both generations declare
+when the restored shape accepts it (issue #3293), so an undo never bypasses
+admission.
 """
 
 from __future__ import annotations
@@ -91,12 +93,12 @@ _LEASE_NO_INVERSE = ("only a fresh lease claim has an exact inverse (its "
 
 
 def undo_cold_start_note(components: list[str], to: int | None, *,
-                         done: bool = False, tool: str = "revl_undo") -> str:
-    """Issue #2346: what an undo does to live state, said where a caller reads
-    it (the forward call's `undoNote`, the undo dossier's `stateDropped`).
-    `done` is True only for an undo that ran; advice says "would be".
-    `tool` names the verb that re-admits (`revl_rollback` says the same of a
-    rollback, issue #2424)."""
+                         done: bool = False, tool: str = "revl_rollback") -> str:
+    """Issues #2424 and #2346: what a rollback does to live state, said where
+    a caller reads it. A rollback restores the generation it left behind
+    `respawn`, a cold start that runs no `handoff` in reverse, so the state
+    named here is dropped. `done` is True only for a rollback that ran;
+    advice says "would be"."""
     target = f"generation {to}" if to is not None else "the earlier generation"
     verb = "is dropped" if done else "would be dropped"
     return (f"{tool} re-admits {target}'s sources and starts it cold: a "
@@ -108,6 +110,32 @@ def undo_cold_start_note(components: list[str], to: int | None, *,
             f"component that declares a `handoff` on both sides, and of a "
             f"template's live instances; any other component starts cold "
             f"either way.")
+
+
+def undo_dropped_state_note(components: list[str], to: int | None, *,
+                            done: bool = False,
+                            carried: list[str] | None = None) -> str:
+    """Issue #3293: what an undo still starts cold, said where a caller reads
+    it (the forward call's `undoNote`, the undo dossier's `stateDropped`). A
+    `handoff` both sides declare on the same key, whose restored shape accepts
+    the running state, is now carried back exactly as a forward swap threads
+    it; a component named here has no such hand-off, so its state is dropped.
+    `done` is True only for an undo that ran; advice says "would be"."""
+    target = f"generation {to}" if to is not None else "the earlier generation"
+    verb = "is dropped" if done else "would be dropped"
+    note = (f"revl_undo re-admits {target}'s sources and starts it cold where "
+            f"no hand-off crosses: the live state held by "
+            f"{', '.join(components)} {verb}. A `handoff` both sides declare "
+            f"on the same key, whose restored shape accepts the running state, "
+            f"is carried back like a forward swap's")
+    if carried:
+        note += f"; this undo carries {', '.join(carried)} back"
+    note += (". A forward change that re-applies that generation's source "
+             "(revl_change with `replace` and `commit: true`) keeps the state "
+             "of a component that declares a `handoff` on both sides, and of a "
+             "template's live instances; any other component starts cold "
+             "either way.")
+    return note
 
 
 def _none(reason: str) -> dict:
@@ -202,7 +230,11 @@ def _describe_generation(session, pre: PreState) -> dict:
     fields = {"undo": {"tool": "revl_undo", "arguments": {"to": pre.generation}}}
     held = _live_state(session)
     if held:
-        fields["undoNote"] = undo_cold_start_note(held, pre.generation)
+        carried = _undo_carried(session, pre.generation)
+        dropped = [name for name in held if name not in carried]
+        if dropped:
+            fields["undoNote"] = undo_dropped_state_note(
+                dropped, pre.generation, carried=carried)
     return fields
 
 
@@ -212,6 +244,19 @@ def _live_state(session) -> list[str]:
     try:
         return reader() if callable(reader) else []
     except Exception:  # noqa: BLE001 - the note is advice; the undo stands
+        return []
+
+
+def _undo_carried(session, generation: int | None) -> list[str]:
+    """The running components whose live state an undo to `generation` carries
+    back across a compatible `handoff` (issue #3293). A report: a failure reads
+    as nothing carried, so the advice stays conservative."""
+    reader = getattr(session, "undo_carried_components", None)
+    if generation is None or not callable(reader):
+        return []
+    try:
+        return list(reader(generation))
+    except Exception:  # noqa: BLE001 - the note is advice; nothing carried
         return []
 
 

@@ -981,6 +981,7 @@
   "tests/fixtures/emit_py_corpus/control.rvl",
   "tests/fixtures/emit_py_corpus/declared_type_shapes.rvl",
   "tests/fixtures/emit_py_corpus/destructure.rvl",
+  "tests/fixtures/emit_py_corpus/direct_reads.rvl",
   "tests/fixtures/emit_py_corpus/else_if.rvl",
   "tests/fixtures/emit_py_corpus/events.rvl",
   "tests/fixtures/emit_py_corpus/extern_config.rvl",
