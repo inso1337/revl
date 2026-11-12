@@ -282,8 +282,8 @@ def _write_between_gate_and_boot(monkeypatch, path: Path, text: str) -> None:
     runs on a disk that differs from the one the gate read."""
     real_decide = server._operator.decide
 
-    def decide_then_write(session, name, arguments):
-        decision = real_decide(session, name, arguments)
+    def decide_then_write(session, name, arguments, **kwargs):
+        decision = real_decide(session, name, arguments, **kwargs)
         path.write_text(text)
         return decision
 
@@ -487,3 +487,93 @@ def test_a_restore_with_no_operator_still_reads_the_disk(
                     {"snapshot": _files_snapshot(path, ["Store"])})
     assert payload["ok"] is True, payload
     assert _loaded_names(loaded) == ["Store"]
+
+
+PLACEHOLDER = """
+service KV { fn get() -> Str }
+component Store provides kv: KV {
+  isolate kv in realm(?tenant)
+  provide kv { fn get() = "ok" }
+}
+"""
+
+
+@pytest.mark.parametrize("denied", ["Store", "acme"])
+def test_a_deny_meets_a_component_whose_realm_the_boot_binds(
+        server_with_a_recorder, tmp_path, denied):
+    """The operator binds `realm(?tenant)` to `acme`. The gate compiles with
+    the same binding as the boot, so it sees `Store` in `acme` and a
+    `may not restore on <it>` deny refuses the restore. Without the binding
+    the gate's compile failed, the action scoped to `*`, and the boot then
+    bound the realm and loaded the denied component."""
+    session, loaded = server_with_a_recorder
+    server.set_authoring_trust(host_code=False, granted=None, providers=None,
+                               roots=(str(tmp_path),),
+                               realm_bindings=(("tenant", "acme"),))
+    session.operator = parse_profile(
+        "operator root may restore on *\n"
+        f"operator root may not restore on {denied}").get("root")
+    payload = _call("revl_restore",
+                    {"snapshot": {"sources": {"source": PLACEHOLDER},
+                                  "manifest": {"components": []},
+                                  "meta": {"components": ["Store"]}}})
+    assert payload["ok"] is False, payload
+    assert payload["authority"]["allowed"] is False, payload
+    assert loaded == [], payload
+
+
+def test_a_bound_placeholder_restores_when_nothing_denies_it(
+        server_with_a_recorder, tmp_path):
+    """The control: the same snapshot under `may restore on *` alone loads,
+    scoped to the component the boot bound, not to the whole composition."""
+    session, loaded = server_with_a_recorder
+    server.set_authoring_trust(host_code=False, granted=None, providers=None,
+                               roots=(str(tmp_path),),
+                               realm_bindings=(("tenant", "acme"),))
+    session.operator = parse_profile(
+        "operator root may restore on *").get("root")
+    payload = _call("revl_restore",
+                    {"snapshot": {"sources": {"source": PLACEHOLDER},
+                                  "manifest": {"components": []},
+                                  "meta": {"components": ["Store"]}}})
+    assert payload["ok"] is True, payload
+    assert payload["authority"]["subjects"] == ["Store"]
+    assert _loaded_names(loaded) == ["Store"]
+
+
+def test_a_trusted_agents_snapshot_without_meta_components_is_refused(
+        server_with_a_recorder, tmp_path):
+    """Under `--author-trust trusted` the authoring profile is None, but the
+    snapshot is still the agent's document: the unconditional
+    `meta.components` check keys on the caller, not on the profile."""
+    _session, loaded = server_with_a_recorder
+    server.set_authoring_trust(host_code=True, granted=None, providers=None,
+                               roots=(str(tmp_path),))
+    payload = _call("revl_restore",
+                    {"snapshot": _snapshot(PURE, claimed=None,
+                                           meta_components=None)})
+    assert payload["ok"] is False, payload
+    assert "no longer reproduce the snapshotted composition" in \
+        _messages(payload), payload
+    assert loaded == []
+
+
+def test_a_path_the_gate_read_and_the_boot_did_not_is_refused():
+    """The digest check is two-sided: a module the gate's compile read from
+    disk that the boot compile no longer reads is drift too, since the gate
+    decided on a composition that included it."""
+    from revl.mcp import persist
+    from revl.mcp.session import Session
+
+    session = Session()
+    loaded: list = []
+    session.load = lambda ir, config=None, **_kwargs: (
+        loaded.append(ir) or {"loaded": True})
+    snap = {"sources": {"source": PURE}, "manifest": {"components": []},
+            "meta": {"components": ["Store"]}}
+    gone = "/nowhere/dep.rvl"
+    with pytest.raises(persist.RestoreError, match="dep.rvl"):
+        persist.restore(session, snap, gate_reads={gone: "0" * 64})
+    assert loaded == []
+    # the control: matching (empty) reads restore
+    assert persist.restore(session, snap, gate_reads={})["restored"] is True

@@ -1066,7 +1066,7 @@ def _snapshot_targets(snap: dict | None) \
     return _restore_targets(snap)[0]
 
 
-def _restore_targets(snap: dict | None) \
+def _restore_targets(snap: dict | None, profile=None) \
         -> tuple[list[tuple[str, frozenset[str]]] | None, dict[str, str]]:
     """A restore's targets, derived from the composition its `sources` compile
     to, never from the `manifest` the caller writes; and what that compile
@@ -1088,13 +1088,18 @@ def _restore_targets(snap: dict | None) \
     snapshot: a module read from disk keeps resolving its `asset`, `ref` and
     body files beside it.
 
-    Two compiles stay (this one unprofiled, the handler's under the authoring
+    Two compiles stay (this one, and the handler's under the authoring
     profile) and they cannot disagree on the component set: they read the
-    same texts (checked by digest), and the profile may only REFUSE a compile,
-    never reshape the composition a successful one produces. Unprofiled by the
-    same rule as :func:`_compile_candidate`: it derives names and realms,
-    lowers no host body and boots nothing, and accepts everything the
-    profiled one does.
+    same texts (checked by digest), and `profile` here carries the boot
+    compile's operator realm bindings and nothing else, so a `realm(?NAME)`
+    placeholder binds to the same realm in both. Every other profile field
+    may only REFUSE a compile, never reshape the composition a successful one
+    produces. Without the bindings an unbound placeholder failed this compile
+    alone, the target set became undecidable, and a `may restore on *`
+    holder's `may not restore on <name>` deny never met the component the
+    boot then bound and loaded. Otherwise unprofiled by the same rule as
+    :func:`_compile_candidate`: it derives names and realms, lowers no host
+    body and boots nothing, and accepts everything the profiled one does.
 
     The targets are ``None`` when the document names no sources or does not
     compile: an *undecidable* target set, which :func:`decide` fails closed
@@ -1107,7 +1112,7 @@ def _restore_targets(snap: dict | None) \
 
     report: dict = {}
     try:
-        ir = recompile_snapshot(snap, report=report)
+        ir = recompile_snapshot(snap, profile=profile, report=report)
     except Exception:  # noqa: BLE001 - a failed derivation must not widen
         return None, {}
     return _live_targets(ir), read_digests(report.get("disk_reads"))
@@ -1501,7 +1506,8 @@ def mint_refusal(operator: Operator | None, *, capability: str,
             f"470 stage 3). Widen the `may mint` line, or mint within it")
 
 
-def decide(session, tool_name: str, arguments: dict) -> Decision:
+def decide(session, tool_name: str, arguments: dict, *,
+           restore_profile=None) -> Decision:
     """Gate one MCP verb dispatch against the session's bound operator.
 
     Returns a :class:`Decision`. When no operator is bound (no profile) or the
@@ -1528,7 +1534,11 @@ def decide(session, tool_name: str, arguments: dict) -> Decision:
     running composition is refused by the handler outright (`load` never
     replaces or activates a live composition). The gate is kept for that
     already-live case, and for every state-changing verb (swap/edit/unload/
-    restore/undo)."""
+    restore/undo).
+
+    `restore_profile` is the profile a `restore`'s target derivation compiles
+    under: the boot compile's operator realm bindings only (issue #3197, see
+    :func:`_restore_targets`)."""
     verb = TOOL_VERB.get(tool_name)
     if verb is None and tool_name in COMPOSED_TOOL_VERB:
         # a composed verb: gated as the operation it performs underneath, and
@@ -1553,7 +1563,8 @@ def decide(session, tool_name: str, arguments: dict) -> Decision:
     disk_reads = None
     if verb == "restore":
         # issue #3197: the handler boots only what this compile read
-        targets, disk_reads = _restore_targets(arguments.get("snapshot"))
+        targets, disk_reads = _restore_targets(arguments.get("snapshot"),
+                                               restore_profile)
     else:
         targets = _targets(verb, session, arguments)
     if targets is None:

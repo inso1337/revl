@@ -3754,17 +3754,20 @@ class Session:
 
     def restore(self, snap: dict, profile=None,
                 report: dict | None = None, *,
-                gate_reads: dict[str, str] | None = None) -> dict:
+                gate_reads: dict[str, str] | None = None,
+                agent_supplied: bool = False) -> dict:
         """Re-admit a snapshot into this (empty) session by replaying
         admission — compile through the gate, then boot. A component the
         current checker rejects fails loudly and loads nothing. `profile` is
         the authoring trust the snapshot's text compiles under (`None` for the
         operator's own snapshot). `gate_reads` refuses a boot compile whose
-        disk reads differ from the operator gate's (`persist.restore`)."""
+        disk reads differ from the operator gate's, and `agent_supplied`
+        makes the `meta.components` check unconditional
+        (`persist.restore`)."""
         from .persist import restore as _restore  # noqa: PLC0415 — lazy
 
         return _restore(self, snap, profile=profile, report=report,
-                        gate_reads=gate_reads)
+                        gate_reads=gate_reads, agent_supplied=agent_supplied)
 
     def unload(self) -> dict:
         """Tear down and report the residue checks — R4 from inside the

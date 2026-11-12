@@ -393,7 +393,8 @@ def _refuse_policy_downgrade(session, meta: dict) -> None:
 
 def restore(session, snap: dict, profile=None,
             report: dict | None = None, *,
-            gate_reads: dict[str, str] | None = None) -> dict:
+            gate_reads: dict[str, str] | None = None,
+            agent_supplied: bool = False) -> dict:
     """Re-admit a snapshot into `session`, replaying admission.
 
     Refuses if a composition is already loaded. Refuses a snapshot taken under an
@@ -417,10 +418,11 @@ def restore(session, snap: dict, profile=None,
     `asset`, `ref` and body files beside it.
 
     The `meta.components` cross-check is unconditional for an agent-supplied
-    snapshot (`profile` set): a caller-written document that leaves the
-    field out claims nothing, and an absent claim is not a match. The
-    operator's own paths (`revl mcp serve --restore`, crash recovery) keep
-    the older rule and skip the check when the snapshot names no components.
+    snapshot (`agent_supplied=True`, which `revl_restore` passes whatever the
+    authoring trust): a caller-written document that leaves the field out
+    claims nothing, and an absent claim is not a match. The operator's own
+    paths (`revl mcp serve --restore`, crash recovery) pass nothing and keep
+    the older rule, skipping the check when the snapshot names no components.
     """
     from .session import SessionError  # noqa: PLC0415
 
@@ -461,14 +463,15 @@ def restore(session, snap: dict, profile=None,
     # defence in depth: the runtime IR is the freshly compiled one, never the
     # stored manifest. Verify re-admission produced the composition the
     # snapshot described, so a silent drift is a loud refusal, not a smuggle.
-    # Issue #3197: unconditional for an agent-supplied snapshot (`profile`
-    # set), whose document is caller-written: leaving `meta.components` out
-    # claims nothing, and an absent claim is not a match. The operator's own
-    # snapshot keeps the older rule.
+    # Issue #3197: unconditional for an agent-supplied snapshot, whose
+    # document is caller-written: leaving `meta.components` out claims
+    # nothing, and an absent claim is not a match. Keyed on the caller, not
+    # on `profile`, which is None under trusted authoring too. The
+    # operator's own snapshot keeps the older rule.
     claimed = set(meta.get("components") or [])
     got = {entry.get("name")
            for entry in (ir.get("manifest") or {}).get("components") or []}
-    if (claimed or profile is not None) and claimed != got:
+    if (claimed or agent_supplied) and claimed != got:
         raise RestoreError(
             f"restore refused: re-admission produced components {sorted(got)}, "
             f"but the snapshot claimed {sorted(claimed)} — the sources no "

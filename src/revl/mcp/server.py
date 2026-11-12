@@ -1119,6 +1119,18 @@ def _bound_only(profile: AdmissionProfile | None) -> AdmissionProfile | None:
     return replace(profile, realm_bindings=AUTHORING.realm_bindings)
 
 
+def _restore_gate_profile() -> AdmissionProfile | None:
+    """The profile the operator gate's `restore` target derivation compiles
+    under (issue #3197): the realm bindings the boot compile
+    (`AUTHORING.profile()`) carries, and nothing else, so a `realm(?NAME)`
+    binds the same way in the gate and in the boot. None when the boot binds
+    nothing."""
+    boot = AUTHORING.profile()
+    if boot is None or not boot.realm_bindings:
+        return None
+    return _bound_only(None)
+
+
 def _candidate_of(arguments: dict) -> tuple:
     """The candidate a tool call carries, as the `(source, files, modules)`
     triple `_compile` takes positionally. Read here ONCE, so a verb cannot
@@ -4196,7 +4208,8 @@ def _tool_restore(arguments: dict) -> dict:
         gated = ({"gate_reads": _RESTORE_GATE_READS or {}}
                  if getattr(SESSION, "operator", None) is not None else {})
         result = SESSION.restore(snap, profile=profile,
-                                 report=compile_report, **gated)
+                                 report=compile_report, agent_supplied=True,
+                                 **gated)
     except ApprovalRequired as error:
         from .persist import admitted_name  # noqa: PLC0415
 
@@ -8087,7 +8100,11 @@ def _call_tool_in_scope(name: str, arguments: dict, record: bool) -> dict:
     # profile bound -> ungated, today's behaviour unchanged. Skipped when the
     # call is already refused, so a refused path is never even resolved
     # against an operator's grants.
-    decision = _operator.decide(SESSION, name, arguments)
+    # issue #3197: a restore's target derivation binds realm placeholders
+    # the way its boot compile will; every other verb's call is unchanged
+    gate_kwargs = ({"restore_profile": _restore_gate_profile()}
+                   if name == "revl_restore" else {})
+    decision = _operator.decide(SESSION, name, arguments, **gate_kwargs)
     if decision.gated and not decision.allowed:
         return _canonicalised(_refused_by_operator(decision),
                               canonicalised)
