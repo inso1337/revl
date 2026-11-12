@@ -62,8 +62,9 @@ CODE_TOO_LARGE = 1009
 CODE_TOO_SLOW = 1008
 
 # close codes a peer may send (RFC 6455 section 7.4): 1004-1006 and 1015 are
-# never on the wire, 1012-2999 are unassigned or reserved
-_PEER_CODES = frozenset({1000, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011})
+# never on the wire, 1016-2999 are unassigned or reserved
+_PEER_CODES = frozenset({1000, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011,
+                         1012, 1013, 1014})
 
 
 def _http(status: str, extra: str = "") -> bytes:
@@ -300,6 +301,8 @@ class Listener:
                 sock, _addr = self._server.accept()
             except (BlockingIOError, InterruptedError):
                 return
+            except ConnectionAbortedError:
+                continue    # a client reset while in the backlog: next one
             except OSError:
                 # out of descriptors (EMFILE) or the like: the listener stays
                 # readable, so stop accepting for a while instead of spinning
@@ -353,7 +356,11 @@ class Listener:
     def _expire(self) -> None:
         now = time.monotonic()
         for conn in list(self._conns.values()):
-            if conn.deadline and now >= conn.deadline:
+            if conn.phase == "head" and self._full():
+                # its head is not read while the queue is full, so its time
+                # to send one does not run either
+                conn.deadline = now + _HEAD_S
+            elif conn.deadline and now >= conn.deadline:
                 self._drop(conn)
 
     def _drop(self, conn: _Line) -> None:

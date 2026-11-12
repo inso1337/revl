@@ -680,3 +680,41 @@ def test_a_malformed_peer_close_is_refused_1002(wire_factory, payload):
     code = 1007 if payload.endswith(b"\xff") else 1002
     assert client.close_frame()[0] == code
     assert [k[1] for k in wire.until(2)] == ["Opened", "Shut(Refused)"]
+
+
+class _FailingAccept:
+    """The listening socket, whose next `accept` raises `error` once."""
+
+    def __init__(self, server, error):
+        self._server, self.error, self.raised = server, error, 0
+
+    def accept(self):
+        if not self.raised:
+            self.raised += 1
+            raise self.error
+        return self._server.accept()
+
+    def __getattr__(self, name):
+        return getattr(self._server, name)
+
+
+@needs_cordis
+@pytest.mark.parametrize(("error", "paused"), [
+    (OSError(24, "Too many open files"), True),
+    (ConnectionAbortedError(53, "Software caused connection abort"), False),
+])
+def test_a_failed_accept_pauses_only_when_out_of_descriptors(
+        wire_factory, monkeypatch, error, paused):
+    monkeypatch.setattr(_engine(), "_ACCEPT_PAUSE_S", 1.5)
+    wire = wire_factory()
+    listener = _listener(wire)
+    with listener._lock:
+        failing = _FailingAccept(listener._server, error)
+        listener._server = failing
+    started = time.monotonic()
+    client = Client(wire.port)
+    elapsed = time.monotonic() - started
+    assert failing.raised == 1
+    assert client.status == "HTTP/1.1 101 Switching Protocols"   # accepting resumed
+    assert (elapsed >= 1.0) is paused, elapsed
+    client.shut()
