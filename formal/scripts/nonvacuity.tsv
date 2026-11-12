@@ -125,6 +125,14 @@ RevL.G9.secret_rules_not_vacuous	concrete	-	confidential downgrades, secret neve
 RevL.G9.authority_refusal_is_not_universal	concrete	-	one flow, admitted at a disclosure sink and refused at an authority sink
 RevL.G9.sink_rules_are_distinct	concrete	-	the four Admits rules separated pairwise
 RevL.G9.secret_refusal_is_load_bearing	concrete	-	the algebra can clear a secret, so taint.py's two refusals carry the theorem
+RevL.G9.secret_noninterference	instance	RevL.G9.noninterference_witness	the witness applies the theorem to a real declassifier-free step list over two values that differ only in the hidden component
+RevL.G9.execution_labels_match_the_flow	instance	RevL.G9.noninterference_witness	the witness flow's label transition is the one the value semantics computes
+RevL.G9.public_changes_require_a_declassifier	instance	RevL.G9.noninterference_witness,RevL.G9.declassify_breaks_noninterference	the declassifier-free flow takes the left disjunct and the admitted endorse the right one, so neither branch is dead
+RevL.G9.declassifier_changes_only_its_origin	instance	RevL.G9.declassify_breaks_noninterference	the witness endorses confidential, publishes the hidden component and leaves the foreign web origin on the label
+RevL.G9.endorse_gate_preserves_foreign_origins	instance	RevL.G9.declassify_breaks_noninterference	the same witness keeps web across an endorse[confidential] gate
+RevL.G9.noninterference_witness	concrete	-	computes a declassifier-free flow over two secret-differing values with equal public output
+RevL.G9.declassify_breaks_noninterference	concrete	-	the same shape with an admitted endorse publishes the hidden component, so the exception is real
+RevL.G9.noDeclassify_of_declassifiersOf_eq_nil	instance	RevL.G9.noninterference_witness	the witness path is declassifier-free, so its declassifiersOf is empty and the bridge applies
 RevL.R4.residue_is_exactly_what_remains	instance	RevL.R4.txn_run,RevL.R4.r4_side_conditions_are_inhabited	the semantics genuinely takes the run and both side conditions hold at its trace
 RevL.R4.abort_leaves_no_residue	necessity	RevL.R4.txn_run,RevL.R4.r4_side_conditions_are_inhabited,RevL.R4.residue_necessary	the no-crossing hypothesis holds on one run and fails on a one-step variant whose conclusion is then false
 RevL.R4.residue_complete	instance	RevL.R4.emit_run,RevL.R4.r4_side_conditions_are_inhabited	the emitting run reports a non-empty residue, so completeness is not about the empty report

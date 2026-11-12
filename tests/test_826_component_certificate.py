@@ -488,7 +488,8 @@ def test_a_code_the_ledger_says_nothing_about_is_named_rather_than_dropped(tmp_p
     [
         ("G1", "| **G1** declared access | partial |",
          "| **G1** declared access | full |", C.PARTIAL, C.PROVED),
-        ("G9", "| full for the rule at the sink and the coverage of the walk;",
+        ("G9", "| full for the rule at the sink, the coverage of the walk and "
+               "the two-run value-semantics statement (issue #2738);",
          "| rule proved; **coverage unproved and unstatable**;",
          C.PROVED, C.PARTIAL),
         ("G-SECRET", "| partial, inside the G9 development |",

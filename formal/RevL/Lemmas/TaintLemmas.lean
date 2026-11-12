@@ -435,4 +435,183 @@ theorem originOfCap_mem {Γ : List String} {k : String} :
   intro h
   exact List.mem_map.mpr ⟨k, h, rfl⟩
 
+/-! ## A value semantics for the walk (issue #2738)
+
+`Flow` relates labels, not values: the rule at the sink says which origins
+may reach it, never what a run computes. The property the ledger sold as
+"non-interference" is a statement about runs, so it needs a value to be
+about. This is the little semantics it quantifies over, and it is
+deliberately small.
+
+A `Val` carries a public projection (`pub`), the hidden component a secret
+input can differ in (`hidden`), and the label the walk carries. A `Step`
+is a total function on `Val` whose label transition is exactly the one
+`Flow` states, and no step reads `hidden` except `.declassify`, which
+publishes it. That single inspection point is the whole content of
+`RevL.G9.secret_noninterference`: a path with no `.declassify` cannot move
+the hidden component into the public projection, so two runs that agree on
+the public input end with the same public output.
+
+The model lives here, with the walk, because the L1 layering rule lets a
+farm file import L0 only and never another farm file: `Step` and `Flow`
+are shared by two L2 files (`RevL.G9`, the guarantee, and `RevL.G9Flow`,
+the differential-oracle row), so a value semantics stated over them has
+to sit below both. -/
+
+/-- A value in the little execution model: its PUBLIC projection (`pub`),
+the hidden component a secret input can differ in (`hidden`), and the
+label the flow walk carries. -/
+structure Val where
+  pub : Nat
+  hidden : Nat
+  label : Label
+  deriving Repr, DecidableEq
+
+/-- One step of the value semantics. The label transition is exactly
+`Flow`'s; no step reads `hidden` except `.declassify`, which publishes it
+as the public projection. Admission is `Flow`'s job, not this function's. -/
+def stepVal : Step → Val → Val
+  | .source o, v => { v with label := o :: v.label }
+  | .join m, v => { v with label := join m v.label }
+  | .propagate, v => v
+  | .declassify d, v => { v with pub := v.hidden, label := applyD d v.label }
+
+/-- Run a path over a value, left to right. -/
+def exec : List Step → Val → Val
+  | [], v => v
+  | s :: st, v => exec st (stepVal s v)
+
+/-- Whether a path performs no declassifier. A Bool so the concrete
+witnesses in `RevL.G9` can decide it and a `.declassify` step is refuted
+by computation. -/
+def noDeclassifyB : List Step → Bool
+  | [] => true
+  | .declassify _ :: _ => false
+  | _ :: st => noDeclassifyB st
+
+/-- The non-interference antecedent: the path performs no declassifier. -/
+def NoDeclassify (st : List Step) : Prop := noDeclassifyB st = true
+
+/-- Without a declassifier the execution changes only the label: the
+public projection and the hidden component come out exactly as they went
+in. This is the semantic fact the value model was built to state. -/
+theorem exec_eq_of_noDeclassify (st : List Step) (v : Val)
+    (h : NoDeclassify st) :
+    exec st v = { v with label := (exec st v).label } := by
+  induction st generalizing v with
+  | nil => rfl
+  | cons s st ih =>
+    cases s with
+    | source o =>
+      exact ih (stepVal (.source o) v)
+        (by simpa [NoDeclassify, noDeclassifyB] using h)
+    | join m =>
+      exact ih (stepVal (.join m) v)
+        (by simpa [NoDeclassify, noDeclassifyB] using h)
+    | propagate =>
+      exact ih (stepVal .propagate v)
+        (by simpa [NoDeclassify, noDeclassifyB] using h)
+    | declassify d =>
+      exact absurd h (by simp [NoDeclassify, noDeclassifyB])
+
+/-- Corollary: a declassifier-free path preserves the public projection of
+a value exactly. -/
+theorem exec_pub_eq_of_noDeclassify (st : List Step) (v : Val)
+    (h : NoDeclassify st) :
+    (exec st v).pub = v.pub := by
+  simpa using congrArg Val.pub (exec_eq_of_noDeclassify st v h)
+
+/-- Two executions of one step list have equal labels when their inputs
+have equal labels, whatever their payloads: the label transition of
+`exec` is a function of the input label and the steps alone. This is the
+label half of `RevL.G9.secret_noninterference` and it needs no `Flow`. -/
+theorem exec_label_congr (st : List Step) {v₁ v₂ : Val}
+    (h : v₁.label = v₂.label) :
+    (exec st v₁).label = (exec st v₂).label := by
+  induction st generalizing v₁ v₂ with
+  | nil => exact h
+  | cons s st ih =>
+    cases s with
+    | source o => exact ih (by simp [stepVal, h])
+    | join m => exact ih (by simp [stepVal, h])
+    | propagate => exact ih h
+    | declassify d => exact ih (by simp [stepVal, h])
+
+/-- The value semantics computes the label transition `Flow` states. This
+ties the label half to `Flow`; it does not make `Flow` responsible for the
+public projection, which is `exec`'s own property. -/
+theorem exec_label_eq_of_flow {P : Profile} {G : Grants}
+    {ℓin : Label} {st : List Step} {ℓout : Label}
+    (hf : Flow P G ℓin st ℓout) :
+    ∀ v : Val, v.label = ℓin → (exec st v).label = ℓout := by
+  induction hf with
+  | nil ℓ => intro v hv; exact hv
+  | source o ℓ st out _ ih =>
+    intro v hv
+    exact ih ⟨v.pub, v.hidden, o :: v.label⟩ (by rw [hv])
+  | join m ℓ st out _ ih =>
+    intro v hv
+    exact ih ⟨v.pub, v.hidden, join m v.label⟩ (by rw [hv])
+  | propagate ℓ st out _ ih =>
+    intro v hv
+    exact ih v hv
+  | declassify d ℓ st out hok _ ih =>
+    intro v hv
+    exact ih ⟨v.hidden, v.hidden, applyD d v.label⟩ (by rw [hv])
+
+/-- **Only a declassifier can make the public projection depend on the
+hidden component.** If two runs start with the same public projection and
+end with different ones, then a `.declassify` step is on the path. This is
+the declassification exception stated as a theorem rather than left as a
+hole in the non-interference statement. -/
+theorem pub_eq_or_declassify (st : List Step) (v₁ v₂ : Val)
+    (hpub : v₁.pub = v₂.pub) :
+    (exec st v₁).pub = (exec st v₂).pub ∨ ∃ d, .declassify d ∈ st := by
+  induction st generalizing v₁ v₂ with
+  | nil => exact Or.inl hpub
+  | cons s st ih =>
+    cases s with
+    | declassify d => exact Or.inr ⟨d, by simp⟩
+    | source o =>
+      rcases ih (stepVal (.source o) v₁) (stepVal (.source o) v₂) hpub with
+        h | ⟨d, hd⟩
+      · exact Or.inl h
+      · exact Or.inr ⟨d, List.mem_cons_of_mem _ hd⟩
+    | join m =>
+      rcases ih (stepVal (.join m) v₁) (stepVal (.join m) v₂) hpub with
+        h | ⟨d, hd⟩
+      · exact Or.inl h
+      · exact Or.inr ⟨d, List.mem_cons_of_mem _ hd⟩
+    | propagate =>
+      rcases ih v₁ v₂ hpub with h | ⟨d, hd⟩
+      · exact Or.inl h
+      · exact Or.inr ⟨d, List.mem_cons_of_mem _ hd⟩
+
+/-- A `.declassify` step is the only step that can remove an origin, and it
+removes only the origins it is admitted for. An origin no declassifier on
+the path clears is still on the value when the path ends: the semantic
+form of `origin_persists_or_is_declassified`, and the invariant an
+`endorse` gate is declared for. -/
+theorem exec_preserves_uncleared_origin (o : Origin) :
+    ∀ (st : List Step) (v : Val),
+      (∀ d, .declassify d ∈ st → ¬ Clears d o) →
+      o ∈ v.label → o ∈ (exec st v).label
+  | [], v, _, ho => ho
+  | .source o' :: st, v, h, ho =>
+      exec_preserves_uncleared_origin o st (stepVal (.source o') v)
+        (fun d hd => h d (List.mem_cons_of_mem _ hd))
+        (List.mem_cons_of_mem o' ho)
+  | .join m :: st, v, h, ho =>
+      exec_preserves_uncleared_origin o st (stepVal (.join m) v)
+        (fun d hd => h d (List.mem_cons_of_mem _ hd))
+        (mem_join_right ho)
+  | .propagate :: st, v, h, ho =>
+      exec_preserves_uncleared_origin o st (stepVal .propagate v)
+        (fun d hd => h d (List.mem_cons_of_mem _ hd))
+        ho
+  | .declassify d :: st, v, h, ho =>
+      exec_preserves_uncleared_origin o st (stepVal (.declassify d) v)
+        (fun d' hd' => h d' (List.mem_cons_of_mem _ hd'))
+        (applyD_preserves (h d (by simp)) ho)
+
 end RevL.Lemmas

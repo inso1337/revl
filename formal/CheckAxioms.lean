@@ -188,6 +188,20 @@ import RevL
 #print axioms RevL.G9.sink_rules_are_distinct
 #print axioms RevL.G9.secret_refusal_is_load_bearing
 
+-- G9 semantic non-interference (issue #2738): the flow rules are stated
+-- for labels; these are stated for runs of the little value semantics in
+-- RevL.Lemmas.TaintLemmas. `secret_noninterference` is the two-run
+-- statement, the public-projection theorem is the label/value bridge, and
+-- the exception and the endorse invariant are theorems rather than holes.
+#print axioms RevL.G9.secret_noninterference
+#print axioms RevL.G9.execution_labels_match_the_flow
+#print axioms RevL.G9.public_changes_require_a_declassifier
+#print axioms RevL.G9.declassifier_changes_only_its_origin
+#print axioms RevL.G9.endorse_gate_preserves_foreign_origins
+#print axioms RevL.G9.noninterference_witness
+#print axioms RevL.G9.declassify_breaks_noninterference
+#print axioms RevL.G9.noDeclassify_of_declassifiersOf_eq_nil
+
 -- TODO 3 / R4: the abort's residue surface is exactly what the runtime
 -- reports, stated over the small-step semantics that accumulates the log
 -- (soundness + completeness), plus the two runs that make it non-vacuous.

@@ -53,8 +53,8 @@ no oracle row is checked against the *paper*, not against `src/revl`.
 | **G6** purity outside effect forms, binding uniqueness | full at head granularity; the shape-level statement is the content of `TypedIn`/`ReachIn` | 3 + 8 | **yes** (one C row per reconstructed statement, one BU row per binding scope; the gate prints the count) | the row reconstructs each lowered statement from its exported heads (`Oracle.exprOfHeads`, proved non-lossy by `heads_exprOfHeads`) and decides `∀ k ∈ stmtHeads s, k ∈ C` with `confinedB` (`confinedB_iff`), against a declared context of the component's require locals (M) plus its require-held binding roots (K). The reference computes the same head-roots membership independently from the TSV, and the two agree on every one of them. A leak is a `fail` on both sides, so the row bites without an admitted violation to point at (the checker refuses those at parse); `confinement_coverage` fails the gate unless the corpus carries both a confined statement over a non-empty reach and a caught violation (281 today), and `g6_row_not_vacuous` proves the verdict flips when a leaking head is accepted. Still not under the row: the derived form (reach computed from program text) lives only in `CapCeilings.derived_confinement_within_ceiling`, and host builtins and let-bound locals count as reach, so a component using them is a faithful `fail` rather than a claim it is unsafe. Binding uniqueness (issue #1812) is `RevL.G6Binding.BindingOK` over each scope's `BE` steps, decided by the `BU` row (`bindingB_iff`), and the corpus's one G6 binding refusal is `agree-G6` |
 | **G7** derived LIFO teardown | full for *which* entries run, in *what order*, under *which verdict* — including the E-Stop | 32 + 7 | **yes** (267 D rows) | the row RUNS `backends/python/runtime.py` over an enumerated scenario corpus and diffs the reference's observed disposition against the model's predicted one, with a coverage ratchet (`teardown_coverage`) that fails the gate if the corpus stops distinguishing LIFO from FIFO, Phase 2 from Phase 1, or the three dispositions from one another. Still deliberately not modelled, and so not under the row: Phase-1 continue-and-record and its residue severities, the Phase-2 budget, escrow under a pending session verdict (item 245), cascading abort. This model says which entries run, **not what happens when one of them fails**. The cordis LIFO unwind of the activation-body stack is supplied by the harness, not observed — only `drain`'s own `reversed` loop (item 369) is revl's own ordering code. **Modelling limit, scoped on purpose** |
 | **G8** boundary enumerable | full over the lattice; the marker-level statement is weak and marked | 3 + 9 | **yes** (one S8 row per reconstructed statement; the gate prints the count) | `G8.boundary_only_declared` rests on `boundaryOf (.effect _ _) = []` **by definition**. The lattice form drops the typing hypothesis entirely. The oracle now decides `RevL.G8Classified.stmtSurface` over each reconstructed statement's heads against the file's `Prog` (`Oracle.stmtSurfaceB`, `stmtSurfaceB_iff`); the reference recomputes the same reach caps independently from the `EX`/`FN` rows, and the two agree on every one of them. `prog_coverage` fails the gate unless the corpus carries both a non-empty and an empty surface, and `g8_row_not_vacuous` proves the surface goes empty when the wrapping fn stops reaching the crossing. First-class dispatch (`star`) is `n/a` on both sides |
-| **G9** no authority from untrusted | full for the rule at the sink and the coverage of the walk; coverage is stated over an L0 component body since issue #2108, and the rule is decided on the corpus, on the sink the checker REPORTS | 18 + 16 | **yes** (one TAINT row per checker-reported taint refusal, and one COVERAGE row per component the checker's walk actually visited — 15 files over 21 components today; the gate prints both counts; 4 agree-G9) | `Flow` starts from a path that is *given*. That the checker WALKS every path is where the real bugs were (`_walk_component_methods` skipped activation bodies entirely). **The modelling limit is closed** (issue #2108): L0 grew component bodies with the provide/activation distinction and typed parameters, so the obligation is a theorem rather than prose — `RevL.G9Coverage.coversBodyB` decides the walk against the body's own scopes on the **label**, the **statement count** and the **origin-carrying parameters**, one conjunct per bug that actually occurred, and `coversB_refuses_a_shortened_walk` is the witness that stops elaborating if the walk skips a statement. This is no longer the one **UNPROVED** row for coverage. Still not proved, and named rather than smuggled: the *interprocedural fixed point* (`_Signature`, `_infer_signatures`) that discovers **which** paths exist — the theorem is stated over the scopes a component's own body induces, so a path the walk never learns of is outside it. Since issue #1811 group 2 the oracle's `TAINT` row decides the rule at the sink and on the label the checker itself reports, via `RevL.G9Flow.g9RowB` — route B of the issue, and explicitly **the rule on the corpus, not the coverage of the walk**; the `GC` row below is what carries the coverage half |
-| **G-SECRET / G-SECRET-FLOW** | partial, inside the G9 development | (within the 18) | **partial** (the same TAINT row, plus the G9 COVERAGE row; 1 agree-G9) | `secret_persists`, `secret_confined` and `confidential_needs_declassification` prove the *rule*. The coverage gap those three inherited is closed the same way G9's is (issue #2108): the walk-coverage theorem's **parameter** conjunct is exactly the `Secret[T]`-strip bug, so `RevL.G9Coverage.coversB_refuses_a_walk_that_strips_a_secret_param` is stated over the receiver body's own scope. The disclosure rule is now decided on the corpus through the same TAINT row, and **that is the rule on the corpus, not coverage of the checker's walk** — the same caveat G9 carries. The `G-SECRET-FLOW` refusal carries no `navigate`, so the exporter reads its sink out of the refusal message and its origin out of a table spelled in the harness, not out of the hint's prose |
+| **G9** no authority from untrusted | full for the rule at the sink, the coverage of the walk and the two-run value-semantics statement (issue #2738); coverage is stated over an L0 component body since issue #2108, and the rule is decided on the corpus, on the sink the checker REPORTS | 26 + 16 | **yes** (one TAINT row per checker-reported taint refusal, and one COVERAGE row per component the checker's walk actually visited — 15 files over 21 components today; the gate prints both counts; 4 agree-G9) | `Flow` starts from a path that is *given*. That the checker WALKS every path is where the real bugs were (`_walk_component_methods` skipped activation bodies entirely). **The modelling limit is closed** (issue #2108): L0 grew component bodies with the provide/activation distinction and typed parameters, so the obligation is a theorem rather than prose — `RevL.G9Coverage.coversBodyB` decides the walk against the body's own scopes on the **label**, the **statement count** and the **origin-carrying parameters**, one conjunct per bug that actually occurred, and `coversB_refuses_a_shortened_walk` is the witness that stops elaborating if the walk skips a statement. This is no longer the one **UNPROVED** row for coverage. Still not proved, and named rather than smuggled: the *interprocedural fixed point* (`_Signature`, `_infer_signatures`) that discovers **which** paths exist — the theorem is stated over the scopes a component's own body induces, so a path the walk never learns of is outside it. Since issue #1811 group 2 the oracle's `TAINT` row decides the rule at the sink and on the label the checker itself reports, via `RevL.G9Flow.g9RowB` — route B of the issue, and explicitly **the rule on the corpus, not the coverage of the walk**; the `GC` row below is what carries the coverage half |
+| **G-SECRET / G-SECRET-FLOW** | partial, inside the G9 development | (within the 26) | **partial** (the same TAINT row, plus the G9 COVERAGE row; 1 agree-G9) | `secret_persists`, `secret_confined` and `confidential_needs_declassification` prove the *rule*. The coverage gap those three inherited is closed the same way G9's is (issue #2108): the walk-coverage theorem's **parameter** conjunct is exactly the `Secret[T]`-strip bug, so `RevL.G9Coverage.coversB_refuses_a_walk_that_strips_a_secret_param` is stated over the receiver body's own scope. The disclosure rule is now decided on the corpus through the same TAINT row, and **that is the rule on the corpus, not coverage of the checker's walk** — the same caveat G9 carries. The `G-SECRET-FLOW` refusal carries no `navigate`, so the exporter reads its sink out of the refusal message and its origin out of a table spelled in the harness, not out of the hint's prose |
 | **G-MODEL-PLACE** model placement and model reach | partial: the placement and reach rules | 6 | **yes** (one MPV row per routed component, one MAV row per consulted role; 9 agree-G-MODEL-PLACE) | since issue #1811 `RevL.ModelPlace.PlaceOK` decides that a confidentiality origin is placed on the device only, through a council member that receives it too (`placeB_iff`), and the model-reach rule of item 519 (a consulted role's `reaches [...]` within what the component holds) is decided with the spawn rule's proved `attenuatesB`. Which roles a component consults, and whether it consults a model at all, are the exporter's, read as `lower._model_reach_edges` / `_consults_a_model` read them. Not modelled: the route-block shape rules and the value-level origin ceiling (item 514) |
 | **G-COUNCIL-SPLIT** tie policy | partial: the tie-outcome rule | 7 | **yes** (one CTV row per declared council; 1 agree-G-COUNCIL-SPLIT) | since issue #1811 `RevL.ModelCouncil.SplitOK` decides that no declared council admits when its members disagree, over the tie outcome the checker reads for each council — the declared `on_tie`, or the `split` default an omitted clause resolves to (`splitB_iff`). This is a finite check over declarations with no reach, so it needs no component body; the exporter reads `prog.model_councils` and nothing else. The other `model-council` refusals are different rules with the same code and this row is deliberately silent on them: the unknown tie outcome, the aggregation vocabulary and its totality on the declared member set, the member functions and their uniqueness, `quorum` bases other than `declared`, and "exactly one aggregate rule". A council declaring no aggregation emits no `CV` row at all, so its refusal lands in `out-of-fragment` rather than being read as an agreement this row cannot make |
 | **G-RETAIN** retained data at a persistence sink | partial: the deadline rule | 9 | **yes** (one RETAIN row per checker-reported retention refusal; 1 agree-G-RETAIN) | since issue #1811 group 3 `RevL.GRetain.retainRowB` decides that a `Retained[T, P]` value does not reach a persistence sink after `P`'s deadline, over the scope, the sink and the walk the checker itself REPORTS and at the instant the checker itself COMPARED — the harness pins that instant with `REVL_RETENTION_AS_OF`, so the verdict is reproducible rather than wall-clock. The rule is the checker's own strict `as_of > until` with its three escapes (erase and keep the receipt, extend `until`, declare a `hold`); the `hold` override is proved as `hold_clears_the_deadline`. **This row is the rule on the corpus, not the coverage of the checker's walk** — the same caveat G9 carries. The `G-RETAIN` refusal carries no `navigate`, so the exporter reads its sink, scope, policy, `until`, `now` and chain out of the refusal message and hint, not out of structured fields. The declaration-level `G-RETAIN` refusal (`taint._refuse_retention_declaration`) needs no flow at all and is a different judgment; it emits no row and falls through to `out-of-fragment` |
@@ -284,6 +284,14 @@ Two caveats, so the table is not read wider than it is:
 | `RevL.G9.authority_refusal_is_not_universal` | G9 — anti-tautology (item 418) | **proved** | `propext` | one flow, admitted at a disclosure sink and refused at an authority sink |
 | `RevL.G9.sink_rules_are_distinct` | G9 — anti-tautology (item 418) | **proved** | `propext` | the four `Admits` rules separated pairwise; not one predicate four times |
 | `RevL.G9.secret_refusal_is_load_bearing` | item 256 — anti-tautology (418) | **proved** | `propext` | the algebra CAN clear a `secret`; `taint.py`'s two refusals are what stop it |
+| `RevL.G9.secret_noninterference` | G9: semantic non-interference (issue #2738) | **proved** | `propext` | two declassifier-free executions of one step list that agree on the public projection and label and differ only in the hidden component end with the same public projection and label |
+| `RevL.G9.execution_labels_match_the_flow` | G9: semantic non-interference (issue #2738) | **proved** | none | the value semantics computes the label transition `Flow` states; the label half is tied to `Flow`, the public half is `exec`'s own property |
+| `RevL.G9.public_changes_require_a_declassifier` | G9: semantic non-interference (issue #2738) | **proved** | `propext` | a different public projection needs a `.declassify` step on the path; the declassification exception is exact |
+| `RevL.G9.declassifier_changes_only_its_origin` | G9: semantic non-interference (issue #2738) | **proved** | `propext` | a `.declassify` publishes the hidden component and its label effect is exactly `applyD`; every origin it does not clear survives |
+| `RevL.G9.endorse_gate_preserves_foreign_origins` | G9: semantic non-interference (issue #2738) | **proved** | `propext` | an `endorse[o]` gate cannot remove any origin other than `o`, the invariant item 249 declares it for |
+| `RevL.G9.noninterference_witness` | G9: semantic non-interference (issue #2738), non-vacuity | **proved** | `propext` | a real declassifier-free step list over two values that differ only in the hidden component, with equal public output |
+| `RevL.G9.declassify_breaks_noninterference` | G9: semantic non-interference (issue #2738), non-vacuity | **proved** | `propext` | an admitted `endorse[confidential]` publishes the hidden component, so the public outputs differ, and the foreign `web` origin survives |
+| `RevL.G9.noDeclassify_of_declassifiersOf_eq_nil` | G9: semantic non-interference (issue #2738) | **proved** | `propext` | `declassifiersOf st = []` implies no step is a declassifier, the bridge from the audit surface to the value semantics |
 | `RevL.G9Coverage.coversB_iff` | G9 — path coverage (issue #2108) | **proved** | `propext` | `coversB` is exactly the three projections being equal out to the LONGER list, so a walk that drops, shortens, re-seeds or pads a scope flips the Bool |
 | `RevL.G9Coverage.coversBodyB_iff` | G9 — path coverage (issue #2108) | **proved** | `propext` | `coversBodyB_iff` is `coversB_iff` at the body's own scopes: the printed `coverage` verdict is this Bool, so the oracle cannot print `ok` for a walk the theorem refuses |
 | `RevL.G9Coverage.coversB_self` | G9 — path coverage (issue #2108) | **proved** | `propext` | a scope list covers itself — the base case every refusal witness is measured against, so those are not satisfied by a `coversB` that always returned `false` |
@@ -764,6 +772,46 @@ antidote to "G1 and G6 are literally the same theorem"); and
 `secret_persists` holds because of `taint.py`'s two explicit refusals,
 not because the datatype lacks a constructor. Delete either refusal from
 `kindOK` and the theorem becomes false.
+
+### Semantic non-interference (issue #2738)
+
+The table above is a set of rules at the sink. A reader of the ledger took
+"non-interference **Done**" for the Goguen-Meseguer property, which is a
+statement about executions, so issue #2738 added the value side. The
+model is deliberately small and lives with the walk in
+`RevL.Lemmas.TaintLemmas`: `Val` pairs a public projection, a hidden
+(secret) component and a label, and `stepVal`/`exec` run a path over a
+value with exactly `Flow`'s label transition. No step reads `hidden`
+except `.declassify`, which publishes it.
+
+`RevL.G9.secret_noninterference` is the two-run statement: two executions
+of the same step list that agree on the public projection and on the
+input label, and differ only in the hidden component, end with the same
+public projection and label, provided no declassifier sits on the path.
+This is a property of the value semantics, not a consequence of the G9
+flow rules: no step writes `pub` from any input except `.declassify`, and
+the flow rules constrain labels rather than computation.
+`execution_labels_match_the_flow` is the separate label bridge to `Flow`.
+
+The declassification exception is not a hole.
+`public_changes_require_a_declassifier` proves that a different public
+output needs a `.declassify` step on the path;
+`declassifier_changes_only_its_origin` states what that step may change
+(it publishes `hidden`, its label effect is exactly `applyD`, and every
+origin it does not clear survives); and
+`endorse_gate_preserves_foreign_origins` is the `endorse[o]` gate's
+invariant. The witnesses
+`noninterference_witness` and `declassify_breaks_noninterference` are
+registered non-vacuity evidence: a real declassifier-free step list over
+two values differing only in `hidden`, and the same shape with an admitted
+`endorse[confidential]` where the public outputs differ and the foreign
+`web` origin survives.
+
+**Limit, stated rather than smuggled:** this is non-interference of the
+model (the walk plus values), not of the language. The Python checker is
+tied to the model only on the corpus by the `TAINT` row, and the
+interprocedural fixed point that discovers which paths exist is still
+unproved. `P36` and `P37` cite the theorem and keep that caveat.
 
 ### G9 path coverage — closed by issue #2108, and the residue it leaves
 
@@ -2246,24 +2294,39 @@ Known fidelity limits of the shaped model, deliberately not papered over:
    integer-valued capability parameter, so the two agree vacuously — but
    the comparison exists, so the first one to appear is checked rather
    than ignored.
-3. **L3**: `Trusted[T]`/`Secret[T]` non-interference. **Done**, see *G9*
-   below. (The WAL half is item 4; these two used to be one entry numbered
-   3 twice, with the taint half called done in one and deferred in the
-   other.) The taint half turned out **not** to need an
-   L0 change: taint is a property of a value flowing along a path, L0's
-   `Ctx`/`ReachIn` is a property of which keys a statement touches, and
-   the two meet at one bridge (`taint._origin_of`: the origin a crossing
-   mints is read off its declared capability scope). So the label algebra
-   went into the new L1 farm `RevL.Lemmas.TaintLemmas` and the guarantees
-   into the new L2 file `RevL.Theorems.G9_NoAuthorityFromUntrusted`,
-   exactly as items 294/66/260 went into `CapLemmas` + `CapCeilings`.
-   **L0 was untouched by this work and no pre-existing theorem's axiom set
-   moved.** (Item 418 step 5 later did change L0, in `RevL.Semantics`; that
-   is scoped to G7 and is described above.) What is proved is the flow
-   *rule*; what remains open is
-   the *coverage* of the checker's walk, which needs the L0 growth item
-   418's ordered exit schedules ahead of it — see the G9 section for the
-   named obligation and why it is not statable today.
+3. **L3**: `Trusted[T]`/`Secret[T]`. **The flow rule is done, and since
+   issue #2738 so is a semantic non-interference statement over a small
+   value model**; the Goguen-Meseguer property of the *language* is still
+   not what is proved, and the ledger no longer says otherwise. (The WAL
+   half is item 4; these two used to be one entry numbered 3 twice, with
+   the taint half called done in one and deferred in the other.) The taint
+   half turned out **not** to need an L0 change: taint is a property of a
+   value flowing along a path, L0's `Ctx`/`ReachIn` is a property of which
+   keys a statement touches, and the two meet at one bridge
+   (`taint._origin_of`: the origin a crossing mints is read off its
+   declared capability scope). So the label algebra went into the new L1
+   farm `RevL.Lemmas.TaintLemmas` and the guarantees into the new L2 file
+   `RevL.Theorems.G9_NoAuthorityFromUntrusted`, exactly as items 294/66/260
+   went into `CapLemmas` + `CapCeilings`. **L0 was untouched by this work
+   and no pre-existing theorem's axiom set moved.** (Item 418 step 5 later
+   did change L0, in `RevL.Semantics`; that is scoped to G7 and is
+   described above.)
+
+   What is proved is the flow *rule* at the sink, the *coverage* of the
+   checker's walk (issue #2108), and, since issue #2738, the two-run
+   statement `RevL.G9.secret_noninterference` over the little value
+   semantics in `RevL.Lemmas.TaintLemmas`: two declassifier-free
+   executions of the same step list that agree on the public projection
+   and differ only in the hidden component end with the same public
+   projection. That is a property of the value semantics, not a
+   consequence of the flow rules: no step writes `pub` from any input
+   except `.declassify`, and the flow rules constrain labels rather than
+   computation. The declassification exception is a theorem
+   (`public_changes_require_a_declassifier`), the endorse gate's
+   invariant is a theorem (`endorse_gate_preserves_foreign_origins`), and
+   the model says nothing about the Python checker (the differential
+   oracle decides the rule on the corpus) or about the interprocedural
+   fixed point that discovers which paths exist. See *G9* below.
 4. **WAL commit/abort discharge. Done**, as R4 and A8 in the table above.
 
    This needed an operational semantics, which roadmap item 418 correctly
