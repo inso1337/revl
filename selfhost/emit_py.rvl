@@ -628,6 +628,9 @@ fn render_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
   // strings carry no escapes, so the two-character `\t` written here IS the
   // python escape the emitted source must contain.
   if (method == "is_space") { return `(${target} in (" ", "\t", "\n", "\r"))` }
+  // trim (issue #3361): both ends, over exactly the is_space set; an explicit
+  // `strip` argument, never python's wider default set.
+  if (method == "trim") { return `(${target}).strip(" \t\n\r")` }
   if (method == "set") { return `({**${target}, ${args[0]}: ${args[1]}})` }
   if (method == "lookup") { return `${target}.get(${args[0]})` }
   if (method == "has") { return `(${args[0]} in ${target})` }

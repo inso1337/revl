@@ -1954,6 +1954,19 @@ fn value_int(v: Value) -> i64 {
         }
 }
 
+fn value_float(v: Value) -> f64 {
+    // a JSON number of either kind reads back through `as_f64` (an i64 or u64
+        // is converted with `as f64`, round-to-nearest); every other variant, a
+        // bool included, and a box that is not a serde_json::Value yield 0.0
+        match v.downcast::<serde_json::Value>() {
+            Ok(j) => match &*j {
+                serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0),
+                _ => 0.0,
+            },
+            Err(_) => 0.0,
+        }
+}
+
 fn value_bool(v: Value) -> bool {
     match v.downcast::<serde_json::Value>() {
             Ok(j) => match &*j {
@@ -2651,7 +2664,7 @@ fn builtin_return_type(node: Value, ctx_: Ctx__m1) -> String {
     if (((((((((m == "length") || (m == "charCodeAt")) || (m == "codepoint_at")) || (m == "indexOf")) || (m == "div_trunc")) || (m == "div_floor")) || (m == "div_euclid")) || (m == "mod")) || (m == "size")) {
         return String::from("Int");
     }
-    if ((((((m == "charAt") || (m == "join")) || (m == "repeat")) || (m == "str")) || (m == "to_str")) || (m == "to_char")) {
+    if (((((((m == "charAt") || (m == "join")) || (m == "repeat")) || (m == "str")) || (m == "to_str")) || (m == "to_char")) || (m == "trim")) {
         return String::from("Str");
     }
     if (((((((m == "startsWith") || (m == "endsWith")) || (m == "has")) || (m == "is_alnum")) || (m == "is_digit")) || (m == "is_alpha")) || (m == "is_space")) {
@@ -4013,6 +4026,9 @@ fn render_builtin(node: Value, ctx_: Ctx__m1) -> String {
     }
     if (method == "length") {
         return format!("{}.revl_length()", target);
+    }
+    if (method == "trim") {
+        return format!("{{ let _rc: &str = &{}; _rc.trim_matches(&[' ', '\\t', '\\n', '\\r'][..]).to_string() }}", target);
     }
     return format!("<<UNSUPPORTED-BUILTIN:{}>>", method);
 }
@@ -22737,7 +22753,7 @@ fn tk_bsig_family(m: &str, th: String) -> String {
     if ((m == "push") || (m == "join")) {
         return String::from("List");
     }
-    if (((((((((((m == "charAt") || (m == "charCodeAt")) || (m == "codepoint_at")) || (m == "split")) || (m == "repeat")) || (m == "startsWith")) || (m == "endsWith")) || (m == "is_alnum")) || (m == "is_digit")) || (m == "is_alpha")) || (m == "is_space")) {
+    if ((((((((((((m == "charAt") || (m == "charCodeAt")) || (m == "codepoint_at")) || (m == "split")) || (m == "repeat")) || (m == "startsWith")) || (m == "endsWith")) || (m == "is_alnum")) || (m == "is_digit")) || (m == "is_alpha")) || (m == "is_space")) || (m == "trim")) {
         return String::from("Str");
     }
     if ((((((((((m == "div_trunc") || (m == "div_floor")) || (m == "div_euclid")) || (m == "mod")) || (m == "to_int32")) || (m == "to_char")) || (m == "checked_div_trunc")) || (m == "checked_div_floor")) || (m == "checked_div_euclid")) || (m == "checked_mod")) {
@@ -23315,7 +23331,7 @@ fn tk_no_call() -> CallN {
 }
 
 fn tk_stdlib_surface() -> String {
-    return ((((String::from("charAt, charCodeAt, checked_div_euclid, checked_div_floor, ").revl_concat("checked_div_trunc, checked_mod, codepoint_at, concat, div_euclid, ")).revl_concat("div_floor, div_trunc, endsWith, field, has, indexOf, is_alnum, ")).revl_concat("is_alpha, is_digit, is_space, join, keys, length, list, lookup, ")).revl_concat("mod, push, remove, repeat, set, size, slice, split, startsWith, ")).revl_concat("str, to_char, to_int, to_int32, to_str");
+    return ((((String::from("charAt, charCodeAt, checked_div_euclid, checked_div_floor, ").revl_concat("checked_div_trunc, checked_mod, codepoint_at, concat, div_euclid, ")).revl_concat("div_floor, div_trunc, endsWith, field, has, indexOf, is_alnum, ")).revl_concat("is_alpha, is_digit, is_space, join, keys, length, list, lookup, ")).revl_concat("mod, push, remove, repeat, set, size, slice, split, startsWith, ")).revl_concat("str, to_char, to_int, to_int32, to_str, trim");
 }
 
 fn tk_divides_by(m: &str) -> bool {
@@ -34737,7 +34753,7 @@ fn struct_field(t: &str, name: &str) -> String {
 }
 
 fn is_builtin_method(m: &str) -> bool {
-    return ((((((((((((((((((((((((((((((((((((((m == "length") || (m == "push")) || (m == "slice")) || (m == "charAt")) || (m == "charCodeAt")) || (m == "codepoint_at")) || (m == "indexOf")) || (m == "concat")) || (m == "split")) || (m == "join")) || (m == "repeat")) || (m == "startsWith")) || (m == "endsWith")) || (m == "is_alnum")) || (m == "is_digit")) || (m == "is_alpha")) || (m == "is_space")) || (m == "div_trunc")) || (m == "div_floor")) || (m == "div_euclid")) || (m == "mod")) || (m == "to_int")) || (m == "to_int32")) || (m == "checked_div_trunc")) || (m == "checked_div_floor")) || (m == "checked_div_euclid")) || (m == "checked_mod")) || (m == "set")) || (m == "lookup")) || (m == "has")) || (m == "size")) || (m == "keys")) || (m == "remove")) || (m == "to_str")) || (m == "to_char")) || (m == "field")) || (m == "str")) || (m == "list"));
+    return (((((((((((((((((((((((((((((((((((((((m == "length") || (m == "push")) || (m == "slice")) || (m == "charAt")) || (m == "charCodeAt")) || (m == "codepoint_at")) || (m == "indexOf")) || (m == "concat")) || (m == "split")) || (m == "join")) || (m == "repeat")) || (m == "startsWith")) || (m == "endsWith")) || (m == "is_alnum")) || (m == "is_digit")) || (m == "is_alpha")) || (m == "is_space")) || (m == "trim")) || (m == "div_trunc")) || (m == "div_floor")) || (m == "div_euclid")) || (m == "mod")) || (m == "to_int")) || (m == "to_int32")) || (m == "checked_div_trunc")) || (m == "checked_div_floor")) || (m == "checked_div_euclid")) || (m == "checked_mod")) || (m == "set")) || (m == "lookup")) || (m == "has")) || (m == "size")) || (m == "keys")) || (m == "remove")) || (m == "to_str")) || (m == "to_char")) || (m == "field")) || (m == "str")) || (m == "list"));
 }
 
 fn is_host_root(n: &str) -> bool {
@@ -34773,6 +34789,9 @@ fn builtin_ret(method: &str, recvTy: String) -> String {
         return String::from("Str");
     }
     if (method == "repeat") {
+        return String::from("Str");
+    }
+    if (method == "trim") {
         return String::from("Str");
     }
     if (((method == "startsWith") || (method == "endsWith")) || (method == "has")) {

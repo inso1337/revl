@@ -16917,7 +16917,7 @@ fn tk_bsig_family(m: Str, th: Str) -> Str {
   if (m == "charAt" || m == "charCodeAt" || m == "codepoint_at" || m == "split"
       || m == "repeat" || m == "startsWith" || m == "endsWith"
       || m == "is_alnum" || m == "is_digit" || m == "is_alpha"
-      || m == "is_space") { return "Str" }
+      || m == "is_space" || m == "trim") { return "Str" }
   if (m == "div_trunc" || m == "div_floor" || m == "div_euclid" || m == "mod"
       || m == "to_int32" || m == "to_char" || m == "checked_div_trunc"
       || m == "checked_div_floor" || m == "checked_div_euclid"
@@ -17580,7 +17580,7 @@ fn tk_stdlib_surface() -> Str {
     .concat("div_floor, div_trunc, endsWith, field, has, indexOf, is_alnum, ")
     .concat("is_alpha, is_digit, is_space, join, keys, length, list, lookup, ")
     .concat("mod, push, remove, repeat, set, size, slice, split, startsWith, ")
-    .concat("str, to_char, to_int, to_int32, to_str")
+    .concat("str, to_char, to_int, to_int32, to_str, trim")
 }
 
 fn tk_divides_by(m: Str) -> Bool {
@@ -30123,6 +30123,7 @@ fn is_builtin_method(m: Str) -> Bool {
     || m == "concat" || m == "split"
     || m == "join" || m == "repeat" || m == "startsWith" || m == "endsWith"
     || m == "is_alnum" || m == "is_digit" || m == "is_alpha" || m == "is_space"
+    || m == "trim"
     || m == "div_trunc" || m == "div_floor" || m == "div_euclid" || m == "mod"
     || m == "to_int" || m == "to_int32" || m == "checked_div_trunc"
     || m == "checked_div_floor" || m == "checked_div_euclid" || m == "checked_mod"
@@ -30161,6 +30162,8 @@ fn builtin_ret(method: Str, recvTy: Str) -> Str {
   if (method == "split") { return "List[Str]" }
   if (method == "join") { return "Str" }
   if (method == "repeat") { return "Str" }
+  // Both-ends whitespace strip over the is_space set (issue #3361).
+  if (method == "trim") { return "Str" }
   if (method == "startsWith" || method == "endsWith" || method == "has") { return "Bool" }
   // `mod` is the named integer remainder that rides the same Int-family dispatch
   // as its `div_*` siblings (issue #549). Without it here `a.mod(b)` inferred as

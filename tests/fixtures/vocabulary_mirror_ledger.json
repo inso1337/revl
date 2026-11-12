@@ -475,9 +475,10 @@
         "to_char",
         "to_int",
         "to_int32",
-        "to_str"
+        "to_str",
+        "trim"
       ],
-      "note": "The thirty-seven builtin method names, declared once in lowering and once in the type checker. The largest vocabulary in the tree by token count: a method in one and not the other either type-checks and fails to lower or lowers and is never checked."
+      "note": "The thirty-nine builtin method names (`trim` joined them for issue #3361, both copies together), declared once in lowering and once in the type checker. The largest vocabulary in the tree by token count: a method in one and not the other either type-checks and fails to lower or lowers and is never checked."
     },
     {
       "sites": [
