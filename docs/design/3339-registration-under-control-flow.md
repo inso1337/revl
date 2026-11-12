@@ -143,13 +143,19 @@ Under "The three entry kinds, one stack", after the table:
   per-execution registration (py `backends/python/emit.py:4296-4315`; ts
   `backends/typescript/emit.py:1848` is the method `effect`/`let-effect` arm;
   rust `backends/rust/emit.py:5352`; go `backends/go/emit.py:2424`,
-  `ctx.Effect(...)`; java `backends/java/emit.py:8472`). The `if`/`while`/`for`
-  method renderers on every tier already call the method step renderer for the
-  arm bodies (py `backends/python/emit.py:4425-4462`, `_method_control`,
-  "Byte-for-byte the fn-grammar shape"), so an `effect` step placed inside an
-  arm's step list renders where the arm renders. The slices must still run
-  each tier's golden and its runtime test; this note read the py path and the
-  entry points of the others.
+  `ctx.Effect(...)`; java `backends/java/emit.py:8472`). Four of the five
+  render the arms of a method `if`/`while`/`for` through the method step
+  renderer itself (py `backends/python/emit.py:4425-4462`, `_method_control`;
+  ts `backends/typescript/emit.py:1929-1944`, `_method_body` recursion; go
+  `backends/go/emit.py:2440-2453`, `_emit_method_body` recursion; java
+  `backends/java/emit.py:8432-8445`, `render` recursion), so an `effect` step
+  placed inside an arm's step list renders where the arm renders. rust does
+  not: `backends/rust/emit.py:5524-5533` renders method control through
+  `_rust_render_pure_stmts` (the shared pure renderer, `:4947`) "its arms are
+  pure", while its `_iter_method_steps` (`:5064-5074`) already descends the
+  arms. So: py, ts, go, java: no emitter change; rust: route method control
+  arms through the method step renderer (`backends/rust/emit.py:5524`). Each
+  tier's golden and runtime test still run in the slice.
 - wasm refuses every plain method-time effect today, control flow or not:
   "method-time effects are not lowerable, the wasm accumulator is fixed at
   activation (state machine)" (`backends/wasm/emit.py:2512-2516`). The issue's
@@ -261,16 +267,17 @@ What changes:
   the same `_lower_effect_step` the method top level uses
   (`src/revl/lower.py:15819-15846`), appending the `{"step": "effect", ...}`
   or `{"step": "let-effect", ...}` to the ARM's step list (`then_body` /
-  `else_body`, `:15617-15627`), when `loop_depth[0] == 0`. Under a loop the
+  `else_body`, `:15620-15627`), when `loop_depth[0] == 0`. Under a loop the
   refusal stays, with a message that names this note and the loop slice.
   `AwaitStmt`, `LetApprovalStmt` and `TimerStmt` stay refused in that arm (not
   asked for; see Q1). `_lower_scoped_block` (`:15585`) already gives a
   `let x = effect ...` bind arm-local visibility with a method-unique emitted
   name, so a bind in one arm cannot alias one in a sibling arm.
-- No emitter change is expected on py, ts, rust, go, java: the method control
-  renderer hands arm steps to the method step renderer (§1.4). The slice
-  verifies that by golden on each tier and fixes any tier whose method `if`
-  renderer special-cases the arm's step kinds. wasm: no change (Decision 1.4).
+- Emitters: py, ts, go, java: no emitter change, their method control
+  renderers hand arm steps to the method step renderer (§1.4); rust: route
+  method control arms through the method step renderer instead of
+  `_rust_render_pure_stmts` (`backends/rust/emit.py:5524`). Golden per tier.
+  wasm: no change (Decision 1.4).
 - `_validate_no_loop_scoped_registration`: no change (an `if` is not a loop).
 - Self-host checker: `selfhost/lower.rvl` `es_flow_block_verd` (`:26541`)
   refuses the first registering head inside any `if`/`while`/`for` block; it
