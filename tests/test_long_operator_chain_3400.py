@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from revl import RevlError, compile_source  # noqa: E402
 import revl.lower as lower  # noqa: E402
 import revl.typecheck as typecheck  # noqa: E402
+from revl.parser import recursion_headroom  # noqa: E402
 
 
 def _chain(n: int) -> str:
@@ -74,7 +75,9 @@ def test_memo_keeps_answers_only_inside_its_scope():
 
 _BASE = "fn odd() -> Int = 1\n"
 
-# The four texts of issue #3399, in its table order.
+# The four texts of issue #3399, in its table order. neg-400 and neg-700 are
+# the table's baselines: they compiled both ways before the fix too. neg-1000
+# and add-1000 raised RecursionError against a manifest.
 _TEXTS_3399 = {
     "neg-400": "-" * 400 + "1",
     "neg-700": "-" * 700 + "1",
@@ -100,7 +103,10 @@ def test_chain_compiles_bare_and_against_a_manifest(name, default_recursion_limi
     base = compile_source(_BASE, "g.rvl")
     bare = compile_source(src, "g.rvl")
     admitted = compile_source(src, "g.rvl", manifest=base)
-    assert bare["functions"] == admitted["functions"]
+    # comparing ~1000-deep dicts counts against the limit on python 3.11, so
+    # the test's own check runs with the compiler's headroom
+    with recursion_headroom():
+        assert bare["functions"] == admitted["functions"]
 
 
 def test_hole_at_the_bottom_of_a_deep_chain_is_still_refused(default_recursion_limit):
