@@ -7909,6 +7909,74 @@ def _actionable_first(payload):
     return {**head, **{k: v for k, v in payload.items() if k not in head}}
 
 
+# ------------------------------------------------- server attestation (#2990)
+#
+# `revl mcp serve --attestation-key FILE` makes the server say WHO it is and
+# WHICH tool manifest it serves, signed under a key a client can pin. Off by
+# default: a server with no key configured answers no attestation, and the
+# proxy's historical trust-by-address mode stays reachable when no pin is
+# declared. The identity is loaded once at startup; the session token is
+# generated once, so two attestations of one run share it and an upstream
+# swapped mid-exchange does not.
+
+_ATTESTATION_IDENTITY = None
+_ATTESTATION_SERVER_ID = "revl-mcp-serve"
+_ATTESTATION_SESSION: str | None = None
+_ATTESTATION_TTL = 3600.0
+
+
+def set_attestation(identity, *, server_id: str = "revl-mcp-serve",
+                    ttl: float = 3600.0) -> None:
+    """Bound the server to a key and a run (issue #2990)."""
+    global _ATTESTATION_IDENTITY, _ATTESTATION_SERVER_ID
+    global _ATTESTATION_SESSION, _ATTESTATION_TTL
+    _ATTESTATION_IDENTITY = identity
+    _ATTESTATION_SERVER_ID = server_id
+    _ATTESTATION_SESSION = secrets.token_hex(16)
+    _ATTESTATION_TTL = float(ttl)
+
+
+def listed_tools() -> list:
+    """The exact tool list this server serves, in one place, so the record it
+    signs and the list it returns cannot disagree."""
+    return _disclosure.listed(_ADVERTISED)
+
+
+def attestation_for(tools) -> dict | None:
+    """The signed record for `tools`, or None when no key is configured."""
+    if _ATTESTATION_IDENTITY is None:
+        return None
+    from . import attestation  # noqa: PLC0415 - leaf module, no cycle
+
+    return attestation.make_attestation(
+        _ATTESTATION_IDENTITY, server_id=_ATTESTATION_SERVER_ID, tools=tools,
+        session=_ATTESTATION_SESSION, ttl=_ATTESTATION_TTL)
+
+
+def attestation_pin(tools=None) -> dict:
+    """The public pin a client stores for this server (issue #2990)."""
+    if _ATTESTATION_IDENTITY is None:
+        raise RevlError("<mcp>", 0,
+                        "this server has no attestation key, so there is no "
+                        "identity to pin; pass --attestation-key")
+    from . import attestation  # noqa: PLC0415
+
+    tools = listed_tools() if tools is None else tools
+    # `capabilities` is the CLIENT's declared scope, so the server writes a
+    # pin that grants the whole attested manifest and an operator narrows it by
+    # editing the list. The server's own scope is signed in the record.
+    return attestation.make_pin(_ATTESTATION_IDENTITY,
+                                server_id=_ATTESTATION_SERVER_ID, tools=tools)
+
+
+def _attested(result: dict, tools) -> dict:
+    """Attach the record to an `initialize` or `tools/list` result."""
+    record = attestation_for(tools)
+    if record is not None:
+        result["_meta"] = {"revl/attestation": record}
+    return result
+
+
 def handle(message: dict) -> dict | None:
     """One JSON-RPC request -> one response (or None for a notification)."""
     method = message.get("method")
@@ -7925,9 +7993,15 @@ def handle(message: dict) -> dict | None:
             "serverInfo": {**SERVER_INFO, **_identity.identity()},
             "instructions": _instructions(),
         }
+        # issue #2990: the server names its key and its tool manifest in the
+        # same result that names its revision. A client that pinned a key
+        # verifies this BEFORE it asks for a tool.
+        result = _attested(result, listed_tools())
     elif method == "tools/list":
-        # issue #1697: the core tier unless the client asked for every verb
-        result = {"tools": _disclosure.listed(_ADVERTISED)}
+        # issue #1697: the core tier unless the client asked for every verb.
+        # One list, so the signed digests and the served tools cannot drift.
+        tools = listed_tools()
+        result = _attested({"tools": tools}, tools)
     elif method == "tools/call":
         params = message.get("params") or {}
         name = params.get("name")

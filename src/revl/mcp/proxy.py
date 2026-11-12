@@ -42,6 +42,7 @@ import threading
 
 from ..compiler import compile_source
 from ..errors import RevlError
+from . import attestation as _attestation
 from .approval import ApprovalRequired
 from .schema import (EFFECT_EMISSION, EFFECT_PLAIN, EFFECT_WITNESSED,
                      classify_imported_tools, render_imported_source)
@@ -293,13 +294,19 @@ class Proxy:
     live session (`revl.mcp.server.SESSION`)."""
 
     def __init__(self, upstream: Upstream, *, undo: dict | None = None,
-                 trust_read_only: bool = False, stdout=None) -> None:
+                 trust_read_only: bool = False, stdout=None,
+                 pin: dict | None = None) -> None:
         from . import server  # noqa: PLC0415 - the session the verbs act on
 
         self.server = server
         self.upstream = upstream
         self.undo = dict(undo or {})
         self.trust_read_only = trust_read_only
+        # issue #2990: the pinned server identity and manifest, or None for the
+        # historical trust-by-address mode. Present only when the operator
+        # declared a pin; a pin makes the upstream's attestation mandatory.
+        self.pin = pin
+        self.attestation: dict | None = None
         self.stdout = stdout or sys.stdout
         self._out_lock = threading.Lock()
         self.upstream_info: dict = {}
@@ -338,7 +345,12 @@ class Proxy:
             _ACTIVE = None
 
     def connect(self) -> None:
-        """Initialize the upstream, list its tools, classify and load them."""
+        """Initialize the upstream, list its tools, classify and load them.
+
+        With a pin, the upstream's attestation is read and verified BEFORE a
+        single tool is classified: an upstream that cannot prove it is the
+        server the operator pinned is refused by name, not proxied and then
+        judged (issue #2990)."""
         result = self.upstream.request("initialize", {
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {},
@@ -346,11 +358,84 @@ class Proxy:
         })
         self.upstream_info = result.get("serverInfo") or {}
         self.upstream_capabilities = result.get("capabilities") or {}
+        self._adopt_attestation(result, phase="initialize")
         self.upstream.notify("notifications/initialized")
         self.manifest = {"tools": self._list_upstream_tools()}
         self._build()
         self.session.approval_policy = "auto"
         self._ensure_loaded()
+
+    def _adopt_attestation(self, result: dict, *, phase: str) -> None:
+        """Verify one upstream record against the pin, or remember it when
+        there is no pin.
+
+        The initialize record binds the server identity and the session; the
+        tools/list record binds the manifest. Both are checked against the
+        SAME pinned key, and a record that names a different session is a
+        different server answering mid-exchange.
+        """
+        record = (result.get("_meta") or {}).get(_attestation.META_ATTESTATION)
+        if self.pin is None:
+            self.attestation = record if isinstance(record, dict) else None
+            return
+        if not isinstance(record, dict):
+            raise UpstreamError(
+                f"the upstream presented no attestation in its {phase} result, "
+                "and this proxy is pinned: it cannot trust a server by address "
+                "alone")
+        verdict = _attestation.verify_pin(record, self.pin)
+        if not verdict["ok"]:
+            raise UpstreamError(
+                f"refused the upstream attestation from its {phase} result: "
+                f"{verdict['reason']}")
+        previous = self.attestation
+        if previous is not None:
+            if record.get("session") != previous.get("session"):
+                raise UpstreamError(
+                    "refused the upstream: its tools/list attestation names "
+                    f"session {record.get('session')!r}, but its initialize "
+                    f"attestation named {previous.get('session')!r}, so a "
+                    "different server answered midway")
+            if record.get("server_id") != previous.get("server_id"):
+                raise UpstreamError(
+                    "refused the upstream: its tools/list attestation names "
+                    f"server {record.get('server_id')!r}, but its initialize "
+                    f"attestation named {previous.get('server_id')!r}")
+        self.attestation = record
+
+    def _relayable_record(self) -> dict | None:
+        """The held record if it is still inside its window, else None.
+
+        A proxy outlives a record's TTL. A record that expired after connect
+        must stop being relayed, and a pinned proxy must stop answering, rather
+        than keep presenting a statement about a moment that has passed
+        (review item 3 on #3103)."""
+        record = self.attestation
+        if not isinstance(record, dict) or _attestation.record_expired(record):
+            return None
+        return record
+
+    def _attested_origin(self) -> dict | None:
+        """The record a result may name as an ATTESTED origin: only a pinned,
+        still-valid one. Without a pin the proxy has no trust anchor, so any
+        relayed record is provenance only and the label says unattested."""
+        return self._relayable_record() if self.pin is not None else None
+
+    def _attestation_refusal(self) -> str | None:
+        """Why a pinned proxy must refuse now, or None.
+
+        Re-verifies the held record under the pinned key on every use, so an
+        expired record (or one that could not be re-verified) stops answering
+        even though it verified at connect."""
+        if self.pin is None or not isinstance(self.attestation, dict):
+            return None
+        ok, reason = _attestation.verify_attestation(
+            self.attestation, bytes.fromhex(self.pin["public_key"]))
+        if ok:
+            return None
+        return (f"the upstream attestation is no longer valid: {reason}; the "
+                "proxy will not answer until the upstream re-attests (restart "
+                "or reconnect it)")
 
     def _list_upstream_tools(self) -> list:
         tools: list = []
@@ -361,9 +446,58 @@ class Proxy:
             page = result.get("tools") or []
             tools.extend(page if isinstance(page, list) else [])
             cursor = result.get("nextCursor")
+            # A pin covers ONE signed list. A server that pages its tools could
+            # hide one past page one, so a pinned proxy refuses pagination
+            # rather than pinning a prefix (issue #2990).
+            if self.pin is not None and cursor:
+                raise UpstreamError(
+                    "refused the upstream: a pinned manifest is one signed "
+                    "tools/list, and this server paginates it, so the pin "
+                    "covers only the first page")
+            self._adopt_attestation(result, phase="tools/list")
+            record = (result.get("_meta") or {}).get(
+                _attestation.META_ATTESTATION)
             if not cursor:
+                # Compare the ACCUMULATED list once pagination ends: a
+                # paginated upstream may sign its whole manifest once, so
+                # checking page one against the full signed list would refuse
+                # a perfectly honest server (fix-verify #3103). Only a pinned
+                # proxy compares: without a pin the record is unverified, and
+                # the upstream is relayed unchanged whatever it carries.
+                if self.pin is not None and isinstance(record, dict):
+                    self._refuse_served_manifest(tools, record)
                 return tools
         raise UpstreamError("the upstream server's tools/list did not terminate")
+
+    @staticmethod
+    def _refuse_served_manifest(served_tools: list, record: dict) -> None:
+        """The served tools must BE the tools the record signed.
+
+        Verifying the record against the pin says nothing about the list the
+        upstream returned next to it: a genuine record can travel beside an
+        edited description, a changed schema or an added tool. `served_tools`
+        is the ACCUMULATED list, so a paginated response is compared as a
+        whole. Compare the served digests with the signed ones and refuse,
+        naming the tools that differ (blocking review on #3103).
+        """
+        signed = record.get("tools") or {}
+        try:
+            served = _attestation.tool_digests(served_tools)
+        except _attestation.AttestationError as error:
+            if signed:
+                raise UpstreamError(
+                    "refused the upstream: it served a tool list that does not "
+                    f"match the manifest it signed ({error}); the signed tools "
+                    "are: " + ", ".join(sorted(signed))) from error
+            return
+        changed = sorted(
+            set(served) ^ set(signed)
+            | {name for name in set(served) & set(signed)
+               if served[name] != signed[name]})
+        if changed:
+            raise UpstreamError(
+                "refused the upstream: it served a tool list that does not "
+                "match the manifest it signed: " + ", ".join(changed))
 
     def _classify(self) -> tuple[list[dict], list[dict]]:
         classified = classify_imported_tools(
@@ -380,6 +514,13 @@ class Proxy:
             elif tool["name"] in seen:
                 excluded.append({**tool, "excludedBecause":
                                  "a duplicate of a tool already proxied under this name"})
+            elif self.pin is not None and self.pin.get("capabilities") \
+                    and tool["name"] not in self.pin["capabilities"]:
+                # issue #2990 item 4: the CLIENT's declared scope for this
+                # origin. A tool the server attests but the pin does not grant
+                # is not proxied, so a proxied call can never exceed it.
+                excluded.append({**tool, "excludedBecause":
+                                 "outside the pinned capability scope"})
             else:
                 seen.add(tool["name"])
                 # A fixed prefix keeps every generated identifier clear of the
@@ -390,9 +531,13 @@ class Proxy:
         return proxied, excluded
 
     def _render(self, proxied: list[dict]) -> str:
+        # issue #2990 item 5: every answer from the upstream enters the real
+        # session as `Untrusted[...]` with the `net` origin, so a plan built on
+        # this surface cannot treat it as authority (G9). The authority class
+        # (plain/emission/witnessed) is still the classifier's.
         return render_imported_source(proxied, service=SERVICE, key=KEY,
                                       backend="py", host_body=_host_body,
-                                      signature="json")
+                                      signature="json", origin="net")
 
     @staticmethod
     def _compile(source: str) -> dict:
@@ -430,7 +575,18 @@ class Proxy:
         failure, a lease the policy enforces, a refused swap), every tool whose
         class would have changed is refused by name until the proxy restarts."""
         if relist:
-            self.manifest = {"tools": self._list_upstream_tools()}
+            try:
+                self.manifest = {"tools": self._list_upstream_tools()}
+            except UpstreamError as error:
+                # the pinned manifest moved: fail closed rather than serve a
+                # surface the pin no longer covers. The refusal names the tool
+                # the verification rejected.
+                reason = (f"the upstream's tool list changed and the "
+                          f"attestation pin refused it ({error}); every tool "
+                          "is refused until the proxy restarts")
+                for tool in self.tools:
+                    self.refused[tool["name"]] = reason
+                return
         try:
             proxied, excluded = self._classify()
         except ValueError as error:
@@ -479,6 +635,15 @@ class Proxy:
     # -- the host-body side --------------------------------------------------
 
     def _upstream_call(self, tool: dict, arguments: dict, meta: dict | None) -> dict:
+        # The caller-side check in `call_tool` is not enough: an approved
+        # class-(c) call, or a witnessed call resumed after its ticket, reaches
+        # the upstream through the host body, which calls this directly. Refuse
+        # here, before the request, so a mutation staged before expiry cannot
+        # reach the upstream after it (fix-verify #3103). `revert` stays
+        # outside this check: an abort must still reach the upstream to undo.
+        refusal = self._attestation_refusal()
+        if refusal is not None:
+            raise UpstreamError(refusal)
         params: dict = {"name": tool["name"], "arguments": arguments}
         if meta:
             params["_meta"] = meta
@@ -538,6 +703,9 @@ class Proxy:
             return _error_result(f"unknown tool: {name}")
         if name in self.refused:
             return _payload_result(self.server._session_error(self.refused[name]))
+        refusal = self._attestation_refusal()
+        if refusal is not None:
+            return _payload_result(self.server._session_error(refusal))
         if not isinstance(arguments, dict):
             return _error_result("`arguments` must be an object")
         # item 55: a proxied tool is a call on the proxied composition, so it
@@ -551,9 +719,11 @@ class Proxy:
             return _payload_result(self.server._refused_by_operator(decision))
         self._last = None
         self._pending_meta = meta
+        call_result: dict | None = None
         try:
             self._ensure_loaded()
-            self.session.call(KEY, tool["op"], [json.dumps(arguments, sort_keys=True)])
+            call_result = self.session.call(
+                KEY, tool["op"], [json.dumps(arguments, sort_keys=True)])
         except ApprovalRequired as exc:
             return _payload_result(self.server._approval_required(exc))
         except SessionError as error:
@@ -571,6 +741,18 @@ class Proxy:
         verdict = self._observe(tool, last["observed"])
         meta_out = dict(result.get("_meta") or {})
         meta_out["revl/proxy"] = verdict
+        # issue #2990 item 5: every external MCP answer carries the origin it
+        # came from and the fact that it is untrusted DATA. The label sits on
+        # the response itself, so a chained proxy relays B's origin and never
+        # becomes the origin of B's answer.
+        label = _attestation.origin(
+            self._attested_origin(),
+            server_name=(self.upstream_info or {}).get("name"))
+        meta_out[_attestation.META_ORIGIN] = label
+        # ...and in the call's trace, additively: the response label is what a
+        # client reads, the trace record is what a recorder keeps.
+        meta_out["revl/trace"] = _origin_trace(
+            (call_result or {}).get("trace"), label)
         result["_meta"] = meta_out
         return result
 
@@ -597,6 +779,10 @@ class Proxy:
         return {
             "ok": True,
             "upstream": self.upstream_info,
+            "attested": self._attested_origin() is not None,
+            "origin": _attestation.origin(
+                self._attested_origin(),
+                server_name=(self.upstream_info or {}).get("name")),
             "tools": [_verdict(t) | ({"refused": self.refused[t["name"]]}
                                      if t["name"] in self.refused else {})
                       for t in self.tools],
@@ -658,7 +844,7 @@ class Proxy:
             if passthrough in self.upstream_capabilities:
                 capabilities[passthrough] = self.upstream_capabilities[passthrough]
         name = self.upstream_info.get("name") or "the upstream server"
-        return {
+        result = {
             "protocolVersion": requested if requested in _KNOWN_PROTOCOLS
             else PROTOCOL_VERSION,
             "capabilities": capabilities,
@@ -670,6 +856,13 @@ class Proxy:
                 "it with revl_approve. revl_proxy_verdicts lists each tool's "
                 "class and why."),
         }
+        record = self._relayable_record()
+        if record is not None:
+            # the verified upstream record is RELAYED, not replaced: a client
+            # pinning the upstream through this proxy still sees the record B
+            # signed, and this proxy claims nothing about B it did not verify.
+            result["_meta"] = {_attestation.META_ATTESTATION: record}
+        return result
 
     def handle(self, message: dict) -> dict | None:
         """One client JSON-RPC message -> one response (None for a notification)."""
@@ -684,9 +877,18 @@ class Proxy:
         request_id = message.get("id")
         params = message.get("params") or {}
         if method == "initialize":
+            refusal = self._attestation_refusal()
+            if refusal is not None:
+                return _error(request_id, -32603, refusal)
             result = self.describe(params.get("protocolVersion"))
         elif method == "tools/list":
+            refusal = self._attestation_refusal()
+            if refusal is not None:
+                return _error(request_id, -32603, refusal)
             result = {"tools": self._advertised()}
+            record = self._relayable_record()
+            if record is not None:
+                result["_meta"] = {_attestation.META_ATTESTATION: record}
         elif method == "tools/call":
             name = params.get("name")
             if name in MANAGEMENT_VERBS:
@@ -702,8 +904,23 @@ class Proxy:
                 result = self.call_tool(name, params.get("arguments") or {},
                                         params.get("_meta"))
         elif method in PASSTHROUGH:
+            # a resource or a prompt comes from the same upstream, so a pinned
+            # proxy that refuses it for tools refuses it here too
+            refusal = self._attestation_refusal()
+            if refusal is not None:
+                return None if request_id is None else _error(
+                    request_id, -32603, refusal)
             try:
                 result = self.upstream.request(method, params)
+                # issue #2990: a resource read or a prompt is an external MCP
+                # answer too, so it carries the same untrusted origin label.
+                if isinstance(result, dict):
+                    label = _attestation.origin(
+                        self._attested_origin(),
+                        server_name=(self.upstream_info or {}).get("name"))
+                    meta_out = dict(result.get("_meta") or {})
+                    meta_out[_attestation.META_ORIGIN] = label
+                    result["_meta"] = meta_out
             except UpstreamError as error:
                 return None if request_id is None else _error(request_id, -32603,
                                                               str(error))
@@ -809,6 +1026,20 @@ def _error_result(message: str) -> dict:
     return {"content": [{"type": "text", "text": message}], "isError": True}
 
 
+def _origin_trace(trace, label: dict) -> list:
+    """The call's host trace plus one `origin` record naming the answer's
+    origin (issue #2990). The trace keeps the shape `Session.call` returns
+    (`channel`/`subject`/`detail`), so an existing reader ignores the new
+    channel and a reader that looks for it finds the label on every external
+    answer."""
+    events = list(trace or [])
+    subject = label.get("server") or "upstream"
+    detail = ("untrusted mcp answer" if label.get("attested")
+              else "untrusted mcp answer, unattested origin")
+    events.append({"channel": "origin", "subject": subject, "detail": detail})
+    return events
+
+
 class _Discard:
     """The proxy's stdout under HTTP, where nothing is written to stdout: the
     transport routes every client-bound notification through `Proxy.sink`
@@ -824,7 +1055,7 @@ class _Discard:
 def run(command: list[str], *, undo: dict | None = None,
         trust_read_only: bool = False, timeout: float = 120.0,
         stdin=None, stdout=None, stderr=None, http: dict | None = None,
-        live=None) -> int:
+        live=None, pin: dict | None = None) -> int:
     """`revl mcp proxy -- COMMAND...`: serve until the client closes stdin, or,
     with `http` (`{"exposure", "auth", and "profile_path" or "registry"}`),
     until interrupted. `live` is the stdio loop's per-message hook
@@ -832,7 +1063,7 @@ def run(command: list[str], *, undo: dict | None = None,
     stderr = stderr or sys.stderr
     upstream = Upstream(command, timeout=timeout)
     proxy = Proxy(upstream, undo=undo, trust_read_only=trust_read_only,
-                  stdout=_Discard() if http is not None else stdout)
+                  stdout=_Discard() if http is not None else stdout, pin=pin)
     proxy.activate()
     try:
         upstream.start()
