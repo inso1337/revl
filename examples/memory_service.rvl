@@ -1,0 +1,47 @@
+// A typed memory service for a long-lived component (issue #2696,
+// stdlib/memory.rvl, docs/stdlib-memory.md).
+//
+// The Notebook keeps a fetched page between turns. `remember` stores it with the
+// origin label it came from; `recall` reads it back and logs it; `drop` forgets
+// it. The store does not slice the page's provenance: the `Untrusted[Str]` the
+// fetch minted is still untrusted after `get`, so a Trusted sink would refuse it
+// and an operator can see the origin in the item's metadata.
+//
+// A log is a disclosure sink, not an authority sink, so the untrusted page is
+// admitted there. Reaching a `Trusted[T]` sink (a shell command, a capability
+// argument) needs the same `endorse[web](page, reason = "...")` every other
+// untrusted value needs; the store neither grants nor removes it.
+
+use "stdlib/memory.rvl" { put, get, forget, MemoryMeta }
+
+extern emission[web] fn fetch(url: Str) -> Untrusted[Str] = @py { return "" }
+extern emission[log] fn note(msg: Str) = @py { return }
+
+service Notes {
+  emission fn remember(key: Str, url: Str)
+  emission fn recall(key: Str) -> Str
+  emission fn drop(key: Str)
+}
+
+component Notebook provides notes: Notes {
+  provide notes {
+    fn remember(key, url) {
+      let page = emit fetch(url)
+      let ok = emit put(key, page,
+                        { origin: "web", purpose: "turn draft", policy: "" })
+      return
+    }
+
+    fn recall(key) {
+      let got: Opt[Str] = emit get(key)
+      let page = match got { Some(x) => x, None => "" }
+      emit note(page)
+      return page
+    }
+
+    fn drop(key) {
+      emit forget(key)
+      return
+    }
+  }
+}

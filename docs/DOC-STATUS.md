@@ -169,6 +169,7 @@ regenerated rather than edited.
 | stdlib-2.0.md | current | 0 | yes |
 | stdlib-json.md | needs-work | 56 |  |
 | stdlib-list.md | current | 14 |  |
+| stdlib-memory.md | current | 0 |  |
 | stdlib-str.md | current | 13 |  |
 | stdlib-value.md | current | 26 |  |
 | stdlib-version.md | needs-work | 0 |  |
