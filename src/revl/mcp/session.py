@@ -1918,6 +1918,11 @@ class Session:
         self._refuse_if_halted("load")   # item 443
         if self._driver is not None:
             raise SessionError("a composition is already loaded — swap or unload it")
+        # issue #3430: a face that serves this session keeps the surface it
+        # bound at boot across an unload, so a cold load (and a restore, which
+        # loads through here) answers to it as a swap does. The boot load runs
+        # before any face is built, so it has no check to meet.
+        self._enforce_served_surface(ir)
         checkpoint = _LoadCheckpoint(self)
         try:
             state = self._boot(ir, config, record, origin)
@@ -2771,7 +2776,11 @@ class Session:
         # aborted (it was made permanent — the swap-owner-scoping data-loss bug).
         self._install_session_owner(ir)
         try:
-            self._run(driver._load(ir, self._prepare_module(ir, plan.rendered)))
+            module = self._prepare_module(ir, plan.rendered)
+            # item 457: the successor's module is the one a typed `Request`
+            # must be rebuilt through, as `_boot` keeps it (issue #3430)
+            self._module = module
+            self._run(driver._load(ir, module))
             # item 334 (EDGE 1): the POST-ACTIVATION HEALTH GATE. `driver._load`
             # returns WITHOUT raising for the two most likely candidate faults —
             # item 372 makes a mid-body FAILED activation "honest and observable"
@@ -3089,8 +3098,11 @@ class Session:
         self._install_session_owner(old_ir)
         try:
             rendered = self._render_cached(driver, old_ir)
-            self._run(driver._load(old_ir,
-                                   self._prepare_module(old_ir, rendered)))
+            module = self._prepare_module(old_ir, rendered)
+            # the reloaded predecessor's module, not the refused successor's
+            # (item 457, issue #3430)
+            self._module = module
+            self._run(driver._load(old_ir, module))
         finally:
             driver.runtime.clear_session_owner()
         for name, info in pre.items():
