@@ -199,8 +199,10 @@ def attach_refusal(payload: dict, code: str, message: str,
 
     Called where a handler refuses, so the shared error envelope does not have
     to spell these fields itself and stay one vocabulary across transports."""
+    detail = (payload.get("diagnostics") or [{}])[0]
     payload["refusal"] = refusal(code, message, payload.get("location"),
-                                 payload.get("repair") or fix)
+                                 payload.get("repair") or fix,
+                                 detail.get("plain"))
     return payload
 
 

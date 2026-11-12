@@ -101,13 +101,18 @@ class SessionError(RuntimeError):
     already knows (issue #2845): `target` (what to change), `edit` (the one
     edit), and `reason` (the rule that refused). It rides the MCP refusal
     payload through `server._session_error`, and it is structured only, so a
-    refusal's prose is unchanged."""
+    refusal's prose is unchanged.
+
+    An optional `plain` carries the author-facing sentence of the compile
+    refusal this error rewraps (issue #3432), so the rewrap does not drop it;
+    it rides the diagnostic beside the message."""
 
     def __init__(self, *args: object, code: str | None = None,
-                 repair: dict | None = None) -> None:
+                 repair: dict | None = None, plain: str | None = None) -> None:
         super().__init__(*args)
         self.code = code
         self.repair = repair
+        self.plain = plain
 
 
 def _unencodable_args(key: str, method: str, purpose: str,
@@ -3185,7 +3190,8 @@ class Session:
             message = error.message + (f" ({error.hint})" if error.hint else "")
             raise SessionError(
                 f"rollback refused: {message}. The running composition is "
-                f"untouched.", code=error.code) from error
+                f"untouched.", code=error.code,
+                plain=getattr(error, "plain", None)) from error
 
     def _live_state_or_reason(self) -> tuple[list[str], str | None]:
         """The components holding live state, or why that could not be read:
@@ -10607,7 +10613,8 @@ class Session:
             raise SessionError(
                 f"the recorded turn no longer compiles against the restored base "
                 f"({error}); forward recovery does not resume it on stale "
-                f"authority (design 460 §2.1)") from None
+                f"authority (design 460 §2.1)",
+                plain=getattr(error, "plain", None)) from None
         merged = self._merged_turn_ir(turn_doc)
         return {"baseManifestHash": self._base_manifest_hash(),
                 "classMapDigest": self._class_map_digest(

@@ -81,6 +81,27 @@ def test_every_refusal_site_passes_its_plain_sentence():
     assert bare == [], f"admit_profile.py refusals with no plain=: lines {bare}"
 
 
+def test_every_site_names_its_own_code_and_a_known_kind():
+    """`plain=_plain(code, kind, name)` at each site names the same code as the
+    refusal's `code=`, and a kind that code's sentences hold, so a typo fails
+    here rather than as a KeyError when the refusal fires."""
+    wrong = []
+    for call in _raise_sites():
+        code = _keyword(call, "code").value
+        plain = _keyword(call, "plain")
+        if not (isinstance(plain, ast.Call) and isinstance(plain.func, ast.Name)
+                and plain.func.id == "_plain" and len(plain.args) == 3
+                and all(isinstance(a, ast.Constant) for a in plain.args[:2])):
+            wrong.append((call.lineno, "not _plain(<code>, <kind>, name)"))
+            continue
+        said, kind = plain.args[0].value, plain.args[1].value
+        if said != code:
+            wrong.append((call.lineno, f"code={code} but _plain names {said}"))
+        elif kind not in PLAIN.get(code, {}):
+            wrong.append((call.lineno, f"{code} has no sentence kind {kind!r}"))
+    assert wrong == []
+
+
 def test_every_plain_kind_belongs_to_a_code_the_profile_refuses_with():
     assert sorted(set(PLAIN) - _profile_codes()) == []
 
@@ -161,3 +182,55 @@ def test_the_extern_refusal_carries_plain_in_the_mcp_answer(_untrusted_server):
     assert "`peek`" in plain
     assert payload["refusal"]["plain"] == plain
     assert payload["refusal"]["message"] == payload["diagnostics"][0]["message"]
+
+
+# --------------------------- (4) sentences true in every case they cover
+
+def _key_precise_refusal(granted_requires, *components) -> RevlError:
+    profile = AdmissionProfile.untrusted_author({"Db"}, requires=granted_requires)
+    with pytest.raises(RevlError) as refused:
+        admit_profile.check_allowlist(
+            {"filename": "c.rvl", "components": list(components)}, profile)
+    return refused.value
+
+
+@pytest.mark.parametrize("granted_requires", [
+    {("C", "db1")},      # the same component holds it under another key
+    {("Elsewhere", "x")},  # the holder is not in this change
+    set(),               # nothing holds it
+], ids=["same-component-other-key", "holder-outside", "no-holder"])
+def test_the_key_precise_sentence_is_true_whoever_holds_the_grant(
+        granted_requires):
+    error = _key_precise_refusal(
+        granted_requires,
+        {"name": "C", "requires": {"db1": "Db", "db2": "Db"}}
+        if granted_requires == {("C", "db1")}
+        else {"name": "C", "requires": {"db2": "Db"}})
+    assert error.code == "R2"
+    assert "no grant names `C.db2`" in error.message
+    assert error.plain == PLAIN["R2"]["ungranted_key"].format(name="Db")
+    # it claims nothing about who holds the grant
+    assert "another part" not in error.plain
+
+
+def test_a_rollback_rewrap_keeps_the_sentence():
+    """The rollback path turns the realm-removal refusal into a session error;
+    the author's sentence rides through to the answer's diagnostic."""
+    from revl.compiler import compile_source
+    from revl.mcp.session import Session, SessionError
+
+    placed = ("service Kv { fn get(k: Str) -> Str }\n"
+              "component Vault provides kv: Kv {\n"
+              '  isolate kv in realm("tenant_a")\n'
+              "  provide kv { fn get(k) = k }\n"
+              "}\n")
+    shared = placed.replace('  isolate kv in realm("tenant_a")\n', "")
+    session = Session()
+    session.ir = compile_source(placed, "vault.rvl")
+    target = compile_source(shared, "vault.rvl")
+    with pytest.raises(SessionError) as refused:
+        session._refuse_realm_removal(target, AdmissionProfile.untrusted_author(()))
+    assert refused.value.code == "G9"
+    assert refused.value.plain and "`Vault`" in refused.value.plain
+    payload = server._session_error(refused.value)
+    assert payload["diagnostics"][0]["plain"] == refused.value.plain

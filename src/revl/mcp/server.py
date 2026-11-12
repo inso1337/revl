@@ -1282,6 +1282,12 @@ def _repair_field(repair: dict | None) -> dict:
     return {} if repair is None else {"repair": repair}
 
 
+def _plain_field(plain: str | None) -> dict:
+    """The author-facing sentence a rewrapped compile refusal carried (issue
+    #3432), or nothing at all; spelled in a helper like `_fix_field`."""
+    return {} if not plain else {"plain": plain}
+
+
 def _session_error(message: str | BaseException, category: str | None = None,
                    fix: str | None = None, refusal_code: str | None = None,
                    **extra) -> dict:
@@ -1313,7 +1319,8 @@ def _session_error(message: str | BaseException, category: str | None = None,
         category = _answer.define(refusal_code).category
     diagnostic = {"severity": "error", "code": "REVL",
                   "category": category or "session",
-                  "message": message, **_fix_field(fix)}
+                  "message": message, **_fix_field(fix),
+                  **_plain_field(getattr(refused_error, "plain", None))}
     payload = {"ok": False, "diagnostics": [diagnostic], **extra}
     if carried is not None and "repair" not in payload:
         payload.update(_repair_field(carried))

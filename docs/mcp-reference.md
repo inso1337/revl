@@ -120,13 +120,17 @@ than reaching an answer.
 
 **The author's sentence (`plain`).** A refusal of the untrusted-author profile
 (new host code, a file read, a self-chosen realm, a self-minted declassifier,
-an ungranted service) carries `plain` on its diagnostic and on the answer's
-`refusal`: one sentence for the person who wrote the source, naming their own
-identifier and no code, item number or profile term, for example "This change
-may not carry its own code for the machine it runs on: remove `peek` and use
-what you have been given." A product shows that sentence to its user and keeps
-`code`, `message` and `hint` for whoever wants them. The sentences live in
-`revl.admit_profile.PLAIN`, one per refusal (issue #3432).
+an ungranted service) carries `plain`: one sentence for the person who wrote
+the source, naming their own identifier and no code, item number or profile
+term, for example "This change may not carry its own code for the machine it
+runs on: remove `peek` and use what you have been given." A product shows that
+sentence to its user and keeps `code`, `message` and `hint` for whoever wants
+them. The sentences live in `revl.admit_profile.PLAIN`, one per refusal (issue
+#3432). It rides every diagnostic built from the compile refusal (`revl_check`,
+`revl_load`, `revl_swap` and `--json-diagnostics`), the answer's `refusal`, and
+the session refusals that rewrap one (a `revl_rollback` that would move a
+provider out of its realm). The in-language `admit(...)` verdict and the gate's
+`propose` result carry the refusal's `message` and `code` only.
 
 **Refusal codes.** The stable contract across the converted verbs. Message text
 stays free to improve; a script or an agent branches on the code and its
