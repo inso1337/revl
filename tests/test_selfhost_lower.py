@@ -4327,27 +4327,21 @@ fn f(m: Mb[Int]) -> Int {{
         _agree(admit, src)
 
 
-def test_provided_variant_exhaustiveness_matches_reference(admit):
-    """Issue #2981: a provided variant resolves through its provided case row.
-
-    The reference seeds `model_answer.ANSWER_TYPES` into its type table when the
-    program names one of the provided types, so the general exhaustiveness check
-    reaches `Aggregate[Str]` through the applied head (PR #2934). The gate's
-    table carried rows only for `type` declarations, and a provided type is
-    never declared there, so it found nothing and stayed silent. Seeding the two
-    provided variant rows under the same condition closes it.
-    """
+# Issue #2981's gate regression cases, in the long `{ ... }` body. The
+# issue #3107 section below holds the same cases in the shorthand `= expr`
+# and the `verified fn` spellings.
+PROVIDED_VARIANT_CASES_2981: list[tuple[str, str]] = [
     # the issue's reproducer: the applied head is a module `fn` parameter
-    _agree(admit, """fn settle(a: Aggregate[Str]) -> Str {
+    ("fn_parameter", """fn settle(a: Aggregate[Str]) -> Str {
   return match a {
     Split(d) => "no",
     Inquorate(d) => "no",
   }
 }
-""")
+"""),
     # the other declared positions the reference seeds from, and a transparent
     # alias, which `_resolve_type_aliases` erases into its target first
-    _agree(admit, """type Box = { a: Aggregate[Str] }
+    ("record_field", """type Box = { a: Aggregate[Str] }
 
 fn settle(b: Box) -> Str {
   return match b.a {
@@ -4355,8 +4349,8 @@ fn settle(b: Box) -> Str {
     Inquorate(d) => "no",
   }
 }
-""")
-    _agree(admit, """service Review { fn settle(answer: Aggregate[Str]) -> Str }
+"""),
+    ("provide_block", """service Review { fn settle(answer: Aggregate[Str]) -> Str }
 
 component Reviewer provides out: Review {
   provide out {
@@ -4366,8 +4360,8 @@ component Reviewer provides out: Review {
     }
   }
 }
-""")
-    _agree(admit, """type Agg = Aggregate[Str]
+"""),
+    ("transparent_alias", """type Agg = Aggregate[Str]
 
 fn settle(a: Agg) -> Str {
   return match a {
@@ -4375,17 +4369,17 @@ fn settle(a: Agg) -> Str {
     Inquorate(d) => "no",
   }
 }
-""")
-    _agree(admit, """fn settle(a: Answer[Str]) -> Str {
+"""),
+    ("answer_complete", """fn settle(a: Answer[Str]) -> Str {
   return match a {
     Says(v) => v,
     Abstains => "no",
   }
 }
-""")
+"""),
     # the provided entries seed together, so a BARE head is checked only when
     # the program names one of them applied somewhere, exactly as `seeded` does
-    _agree(admit, """fn other(a: Aggregate[Str]) -> Str {
+    ("bare_head_beside_applied", """fn other(a: Aggregate[Str]) -> Str {
   return match a {
     Agreed(v) => v,
     Split(d) => "no",
@@ -4399,19 +4393,19 @@ fn settle(a: Aggregate) -> Str {
     Inquorate(d) => "no",
   }
 }
-""")
+"""),
     # a bare head alone names nothing applied, and a complete match stays
     # admitted: both are programs the reference lets through
-    _agree(admit, """fn settle(a: Aggregate) -> Str {
+    ("bare_head_alone", """fn settle(a: Aggregate) -> Str {
   return match a {
     Split(d) => "no",
     Inquorate(d) => "no",
   }
 }
-""")
+"""),
     # a BODY annotation is not one of the declared positions `seeded` reads, so
     # the bare-head match above stays admitted beside one
-    _agree(admit, """fn settle(a: Aggregate) -> Str {
+    ("body_annotation", """fn settle(a: Aggregate) -> Str {
   return match a {
     Split(d) => "no",
     Inquorate(d) => "no",
@@ -4422,15 +4416,51 @@ fn helper() -> Str {
   let xs: List[Aggregate[Str]] = []
   return "no"
 }
-""")
-    _agree(admit, """fn settle(a: Aggregate[Str]) -> Str {
+"""),
+    ("aggregate_complete", """fn settle(a: Aggregate[Str]) -> Str {
   return match a {
     Agreed(v) => v,
     Split(d) => "no",
     Inquorate(d) => "no",
   }
 }
-""")
+"""),
+]
+
+
+@pytest.mark.parametrize("name,src", PROVIDED_VARIANT_CASES_2981,
+                         ids=[n for n, _ in PROVIDED_VARIANT_CASES_2981])
+def test_provided_variant_exhaustiveness_matches_reference(admit, name, src):
+    """Issue #2981: a provided variant resolves through its provided case row.
+
+    The reference seeds `model_answer.ANSWER_TYPES` into its type table when the
+    program names one of the provided types, so the general exhaustiveness check
+    reaches `Aggregate[Str]` through the applied head (PR #2934). The gate's
+    table carried rows only for `type` declarations, and a provided type is
+    never declared there, so it found nothing and stayed silent. Seeding the two
+    provided variant rows under the same condition closes it.
+    """
+    _agree(admit, src)
+
+
+# Issue #2981: the `event` field case, whose two refusals differ in tag (see
+# the test below), so it is held to both pinned verdicts instead of `_agree`.
+PROVIDED_VARIANT_EVENT_FIELD_2981 = """event Voted(key: id) { id: Str, a: Aggregate[Str] }
+
+fn settle(v: Voted) -> Str {
+  return match v.a {
+    Split(d) => "no",
+    Inquorate(d) => "no",
+  }
+}
+"""
+
+
+def _assert_event_field_verdicts_2981(admit, src):
+    assert _ref(src) == ("G4", "`event Voted` reaches `Aggregate[Str]`, which "
+                         "has no JSON-Schema derivation, so its delivered "
+                         "items cannot be checked against a schema")
+    assert admit(src) == "T1|non-exhaustive match: missing case `Agreed`"
 
 
 def test_provided_variant_event_field_seeds_the_gate_fail_closed(admit):
@@ -4442,20 +4472,8 @@ def test_provided_variant_event_field_seeds_the_gate_fail_closed(admit):
     the missing `Agreed` case only because its provided-type walk reads event
     fields. Without that arm the gate admits a program the reference refuses.
     """
-    src = """event Voted(key: id) { id: Str, a: Aggregate[Str] }
-
-fn settle(v: Voted) -> Str {
-  return match v.a {
-    Split(d) => "no",
-    Inquorate(d) => "no",
-  }
-}
-"""
     # `_agree` cannot hold: both refuse, under different tags (G4 vs T1).
-    assert _ref(src) == ("G4", "`event Voted` reaches `Aggregate[Str]`, which "
-                         "has no JSON-Schema derivation, so its delivered "
-                         "items cannot be checked against a schema")
-    assert admit(src) == "T1|non-exhaustive match: missing case `Agreed`"
+    _assert_event_field_verdicts_2981(admit, PROVIDED_VARIANT_EVENT_FIELD_2981)
 
 
 def test_issue_2842_scope_and_non_emission_controls_stay_admitted(admit):
@@ -8845,6 +8863,115 @@ def test_a_shorthand_fn_body_is_checked_at_the_return_position(admit):
     src = 'fn f(x: Int) -> Int = "s"\n'
     assert _ref(src)[0] == "T1"
     _agree(admit, src)
+
+
+# Issue #2981's gate regression cases (`PROVIDED_VARIANT_CASES_2981` and the
+# `event` field case) were written with the long `{ ... }` body because the
+# gate's parser refused both spellings above. That pin (#3063's
+# `GATE_PARSER_REFUSALS_ISSUE_3107`) is deleted now that both are read, and the
+# cases are held to the reference in each spelling they can express:
+#   * `verified`: every module `fn` of the long case, marked `verified`.
+#   * `shorthand`: every module `fn` whose body is one `return match`, as
+#     `= match ...`. `body_annotation`'s `helper` keeps its `{ ... }` body: the
+#     `let` with the annotation is the point of the case, and a shorthand body
+#     is one expression, so it cannot hold one.
+#   * `provide_block` is in neither: its `fn settle(answer) = match ...` is
+#     already the shorthand spelling, and the reference's parser refuses
+#     `verified` on a `provide` block method (`expected fn, found 'verified'`).
+GATE_2981_SHORTHAND: dict[str, str] = {
+    "fn_parameter": """fn settle(a: Aggregate[Str]) -> Str = match a {
+  Split(d) => "no",
+  Inquorate(d) => "no",
+}
+""",
+    "record_field": """type Box = { a: Aggregate[Str] }
+
+fn settle(b: Box) -> Str = match b.a {
+  Split(d) => "no",
+  Inquorate(d) => "no",
+}
+""",
+    "transparent_alias": """type Agg = Aggregate[Str]
+
+fn settle(a: Agg) -> Str = match a {
+  Split(d) => "no",
+  Inquorate(d) => "no",
+}
+""",
+    "answer_complete": """fn settle(a: Answer[Str]) -> Str = match a {
+  Says(v) => v,
+  Abstains => "no",
+}
+""",
+    "bare_head_beside_applied": """fn other(a: Aggregate[Str]) -> Str = match a {
+  Agreed(v) => v,
+  Split(d) => "no",
+  Inquorate(d) => "no",
+}
+
+fn settle(a: Aggregate) -> Str = match a {
+  Split(d) => "no",
+  Inquorate(d) => "no",
+}
+""",
+    "bare_head_alone": """fn settle(a: Aggregate) -> Str = match a {
+  Split(d) => "no",
+  Inquorate(d) => "no",
+}
+""",
+    "body_annotation": """fn settle(a: Aggregate) -> Str = match a {
+  Split(d) => "no",
+  Inquorate(d) => "no",
+}
+
+fn helper() -> Str {
+  let xs: List[Aggregate[Str]] = []
+  return "no"
+}
+""",
+    "aggregate_complete": """fn settle(a: Aggregate[Str]) -> Str = match a {
+  Agreed(v) => v,
+  Split(d) => "no",
+  Inquorate(d) => "no",
+}
+""",
+}
+
+GATE_2981_EVENT_FIELD_SHORTHAND = """event Voted(key: id) { id: Str, a: Aggregate[Str] }
+
+fn settle(v: Voted) -> Str = match v.a {
+  Split(d) => "no",
+  Inquorate(d) => "no",
+}
+"""
+
+
+def _verified_2981(src: str) -> str:
+    return re.sub(r"^fn ", "verified fn ", src, flags=re.M)
+
+
+GATE_2981_IN_3107_SPELLINGS = (
+    [(f"shorthand-{n}", s) for n, s in GATE_2981_SHORTHAND.items()]
+    + [(f"verified-{n}", _verified_2981(s))
+       for n, s in PROVIDED_VARIANT_CASES_2981 if n != "provide_block"])
+
+
+@pytest.mark.parametrize("name,src", GATE_2981_IN_3107_SPELLINGS,
+                         ids=[n for n, _ in GATE_2981_IN_3107_SPELLINGS])
+def test_provided_variant_exhaustiveness_in_the_3107_spellings(admit, name, src):
+    # the spelling is really there, so a case cannot fall back to the long body
+    spelled = "verified fn settle(" if name.startswith("verified-") else ") -> Str = match "
+    assert spelled in src, name
+    _agree(admit, src)
+
+
+@pytest.mark.parametrize("src", [
+    GATE_2981_EVENT_FIELD_SHORTHAND,
+    _verified_2981(PROVIDED_VARIANT_EVENT_FIELD_2981),
+], ids=["shorthand", "verified"])
+def test_provided_variant_event_field_in_the_3107_spellings(admit, src):
+    # `_agree` cannot hold: both refuse, under different tags (G4 vs T1).
+    _assert_event_field_verdicts_2981(admit, src)
 
 
 def test_verified_totality_matches_the_reference(admit):
