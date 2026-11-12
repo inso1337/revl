@@ -1,0 +1,13 @@
+service Clock {
+  fn frame_dt() -> Float
+}
+
+service Motion {
+  fn step(x: Float) -> Float
+}
+
+component Cart requires clock: Clock provides motion: Motion {
+  provide motion {
+    fn step(x: Float) -> Float = x + clock.frame_dt() * 120.0
+  }
+}

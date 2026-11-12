@@ -74,6 +74,7 @@
   "backends/typescript/tests/fixtures/match_sync_arms.rvl",
   "backends/typescript/tests/fixtures/str_scan.rvl",
   "backends/typescript/tests/fixtures/unique_writes.rvl",
+  "backends/wasm/host/demo.rvl",
   "backends/wasm/scenarios/crashproof/crashproof.rvl",
   "backends/wasm/scenarios/router.rvl",
   "demo/components/evolve.rvl",
@@ -1215,7 +1216,6 @@
   "tests/fixtures/emit_wasm_refusals/fn_named_memory.rvl",
   "tests/fixtures/emit_wasm_refusals/nested_empty_list.rvl",
   "tests/fixtures/emit_wasm_refusals/secret_fed_plain_witness.rvl",
-  "tests/fixtures/emit_wasm_refusals/true_division.rvl",
   "tests/fixtures/emit_wasm_refusals/ui_transaction_unit.rvl",
   "tests/fixtures/emit_wasm_refusals/untyped_empty_list.rvl",
   "tests/fixtures/emit_wasm_refusals/validated_emission_operation.rvl",
@@ -1440,7 +1440,8 @@
   "tests/fixtures/verified_method_effect/ok_witnessed.rvl",
   "tests/fixtures/verified_method_effect/t1_emit.rvl",
   "tests/fixtures/verified_method_effect/t1_let_bound.rvl",
-  "tests/fixtures/verified_method_effect/t1_plain_site_undo.rvl"
+  "tests/fixtures/verified_method_effect/t1_plain_site_undo.rvl",
+  "tests/fixtures/wasm_true_division_port_gap.rvl"
  ],
  "tracked_buckets": {
   "false-reject/T1": [
