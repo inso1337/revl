@@ -173,6 +173,27 @@ class EmitError(ValueError):
     """The IR document cannot be lowered to the wasm tier."""
 
 
+def _host_body_scanner():
+    """The shared host-body scanner (`src/revl/host_body.py`).
+
+    Imported lazily so a standalone `python3 emit.py <ir.json>` keeps working:
+    when the emitter runs through the compiler `revl` is importable, and a bare
+    script run falls back to the source tree beside this file. The scanner is
+    the one place every tier splits an extern body and checks that it cannot
+    leave the function it is spliced into (#3130, #3131, #3162, #3164, #3166).
+    """
+    try:
+        from revl.host_body import body_lines, check_host_body
+    except ModuleNotFoundError:  # standalone `python3 emit.py`: put src/ on the path
+        import pathlib
+        import sys as _sys
+        src = pathlib.Path(__file__).resolve().parents[2] / "src"
+        if src.is_dir() and str(src) not in _sys.path:
+            _sys.path.insert(0, str(src))
+        from revl.host_body import body_lines, check_host_body
+    return body_lines, check_host_body
+
+
 #: The tiers that DO lower the item-130 subscription protocol, named by the two
 #: stream refusals below so a reader is sent somewhere that works. This tier's
 #: refusal is correct behaviour and not a gap (design §4.6, §8: wasm has no
@@ -3243,6 +3264,12 @@ def _emit_extern_func(ext: dict, check_type) -> str:
     """
     name = _ident(ext.get("name"), "extern name")
     body = (_extern_wasm_body(ext) or "").strip()
+    # #3164: the body is raw WAT, so an extra `)` closes this function and the
+    # fields after it are emitted at module scope (a `(start ...)` runs at
+    # instantiation). Check the parens with WAT's own lexical rules.
+    _body_lines, check_host_body = _host_body_scanner()
+    check_host_body("wasm", body,
+                    where=f"extern `{ext.get('name')}`", error=EmitError)
     decl: list[str] = []
     for param in ext.get("params") or []:
         pname = _ident(param.get("name"), f"extern {name}: parameter")

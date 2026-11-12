@@ -4327,6 +4327,137 @@ fn f(m: Mb[Int]) -> Int {{
         _agree(admit, src)
 
 
+def test_provided_variant_exhaustiveness_matches_reference(admit):
+    """Issue #2981: a provided variant resolves through its provided case row.
+
+    The reference seeds `model_answer.ANSWER_TYPES` into its type table when the
+    program names one of the provided types, so the general exhaustiveness check
+    reaches `Aggregate[Str]` through the applied head (PR #2934). The gate's
+    table carried rows only for `type` declarations, and a provided type is
+    never declared there, so it found nothing and stayed silent. Seeding the two
+    provided variant rows under the same condition closes it.
+    """
+    # the issue's reproducer: the applied head is a module `fn` parameter
+    _agree(admit, """fn settle(a: Aggregate[Str]) -> Str {
+  return match a {
+    Split(d) => "no",
+    Inquorate(d) => "no",
+  }
+}
+""")
+    # the other declared positions the reference seeds from, and a transparent
+    # alias, which `_resolve_type_aliases` erases into its target first
+    _agree(admit, """type Box = { a: Aggregate[Str] }
+
+fn settle(b: Box) -> Str {
+  return match b.a {
+    Split(d) => "no",
+    Inquorate(d) => "no",
+  }
+}
+""")
+    _agree(admit, """service Review { fn settle(answer: Aggregate[Str]) -> Str }
+
+component Reviewer provides out: Review {
+  provide out {
+    fn settle(answer) = match answer {
+      Split(d) => "no",
+      Inquorate(d) => "no",
+    }
+  }
+}
+""")
+    _agree(admit, """type Agg = Aggregate[Str]
+
+fn settle(a: Agg) -> Str {
+  return match a {
+    Split(d) => "no",
+    Inquorate(d) => "no",
+  }
+}
+""")
+    _agree(admit, """fn settle(a: Answer[Str]) -> Str {
+  return match a {
+    Says(v) => v,
+    Abstains => "no",
+  }
+}
+""")
+    # the provided entries seed together, so a BARE head is checked only when
+    # the program names one of them applied somewhere, exactly as `seeded` does
+    _agree(admit, """fn other(a: Aggregate[Str]) -> Str {
+  return match a {
+    Agreed(v) => v,
+    Split(d) => "no",
+    Inquorate(d) => "no",
+  }
+}
+
+fn settle(a: Aggregate) -> Str {
+  return match a {
+    Split(d) => "no",
+    Inquorate(d) => "no",
+  }
+}
+""")
+    # a bare head alone names nothing applied, and a complete match stays
+    # admitted: both are programs the reference lets through
+    _agree(admit, """fn settle(a: Aggregate) -> Str {
+  return match a {
+    Split(d) => "no",
+    Inquorate(d) => "no",
+  }
+}
+""")
+    # a BODY annotation is not one of the declared positions `seeded` reads, so
+    # the bare-head match above stays admitted beside one
+    _agree(admit, """fn settle(a: Aggregate) -> Str {
+  return match a {
+    Split(d) => "no",
+    Inquorate(d) => "no",
+  }
+}
+
+fn helper() -> Str {
+  let xs: List[Aggregate[Str]] = []
+  return "no"
+}
+""")
+    _agree(admit, """fn settle(a: Aggregate[Str]) -> Str {
+  return match a {
+    Agreed(v) => v,
+    Split(d) => "no",
+    Inquorate(d) => "no",
+  }
+}
+""")
+
+
+def test_provided_variant_event_field_seeds_the_gate_fail_closed(admit):
+    """Issue #2981: an `event` field is one of the positions the reference
+    seeds from, because its parser adds every event to `program.type_decls`.
+
+    The reference refuses this program on G4 (no JSON-Schema derivation for
+    `Aggregate[Str]`), a check the gate does not run; the gate refuses it on
+    the missing `Agreed` case only because its provided-type walk reads event
+    fields. Without that arm the gate admits a program the reference refuses.
+    """
+    src = """event Voted(key: id) { id: Str, a: Aggregate[Str] }
+
+fn settle(v: Voted) -> Str {
+  return match v.a {
+    Split(d) => "no",
+    Inquorate(d) => "no",
+  }
+}
+"""
+    # `_agree` cannot hold: both refuse, under different tags (G4 vs T1).
+    assert _ref(src) == ("G4", "`event Voted` reaches `Aggregate[Str]`, which "
+                         "has no JSON-Schema derivation, so its delivered "
+                         "items cannot be checked against a schema")
+    assert admit(src) == "T1|non-exhaustive match: missing case `Agreed`"
+
+
 def test_issue_2842_scope_and_non_emission_controls_stay_admitted(admit):
     shadowed = """extern emission fn send(x: Str) -> Int = @py { return 1 }
 service Ops { emission fn invoke(send: (Str) -> Int) -> Int }
@@ -4353,7 +4484,27 @@ component C provides ops: Ops {
 # statement grammar ported the reference's `type_` rule (issue #2396).
 PARSE_REFUSED_PROGRAMS = [
     ("issue 2396: a return arrow with no type", "fn f() -> { }"),
+    # the gate's host-body skip stepped over the clause and admitted it
+    ("issue 2705: a spec on an extern",
+     "extern pure fn f(x: Int) -> Int ensures result == x = @py { return x }"),
+    ("issue 2705: a spec on a service operation",
+     "service Ops { fn f(x: Int) -> Int ensures result == x }"),
+    ("issue 2705: a spec on a provided method",
+     "service Ops { fn f(x: Int) -> Int }\n"
+     "component C provides s: Ops {\n"
+     "  provide s { fn f(x) ensures result == x { return x } }\n"
+     "}"),
 ]
+
+
+def test_an_unclassified_extern_with_a_spec_is_refused_as_unclassified(admit):
+    """Issue #2705: the reference reads an extern's classification before its
+    signature, so a spec on an unclassified extern is the G8 refusal, not the
+    spec one."""
+    src = "extern fn f(x: Int) -> Int ensures result == x = @py { return x }"
+    ref_tag, ref_msg = _ref(src)
+    assert ref_tag == "G8", (ref_tag, ref_msg)
+    assert admit(src) == f"G8|{ref_msg}"
 
 
 @pytest.mark.parametrize("case", PARSE_REFUSED_PROGRAMS,
@@ -7451,6 +7602,26 @@ def test_a_defaulted_parameter_list_is_marked_sigd_so_its_arity_is_not_counted(a
     assert got.startswith("UNSUPPORTED|"), got
     assert "self-host compiler" in got, got
     assert "argument(s)" not in got, got
+
+
+def test_a_fn_spec_is_a_named_refusal_not_a_parse_error_or_a_dropped_fn(ns, admit):
+    """Issue #2705: the reference accepts `ensures` on a `fn` and lowers it to a
+    generated `prop test`, a section the self-host producer does not emit. The
+    gate refuses the program BY NAME, under UNSUPPORTED, where it used to answer
+    `BAD|expected { after fn signature` while `lower_to_ir` dropped the fn. The
+    controls pin that only the clause is refused: the same fn without it, and
+    `ensures` as an ordinary name, are admitted by both stages."""
+    spec = "fn f(x: Int) -> Int ensures result == x { return x }\n"
+    assert _ref(spec) == ("", "")
+    expected = ("UNSUPPORTED|a function spec (`ensures`) is not supported by "
+                "the self-host compiler")
+    assert admit(spec) == expected
+    assert ns["parse_refusal"](spec) == expected
+    for control in ("fn f(x: Int) -> Int { return x }\n",
+                    "fn ensures(x: Int) -> Int { let ensures = x\n"
+                    "  return ensures }\n"):
+        assert _ref(control) == ("", ""), control
+        assert admit(control) == "", control
 
 
 def test_the_call_layer_stays_silent_where_it_cannot_prove_the_premise(admit):

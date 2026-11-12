@@ -116,6 +116,66 @@ trust = deploy.TrustStore(keys={key_id: verify_key}, backend="python",
                           require_gauntlet=True, require_conformance=True)
 ```
 
+### Setting the receiver's rules on the far host
+
+`TrustStore` is the receiver's, so the far host sets these rules on its OWN
+command line, never in a request (design S2.4). `revl deploy-admit` accepts one
+flag per rule, and all of them are opt-in:
+
+| flag | `TrustStore` field | refuses |
+| --- | --- | --- |
+| `--max-age SECONDS` | `evidence_ttl_seconds` | `evidence-stale` when the signed timestamp is more than SECONDS old |
+| `--not-before INSTANT` | `not_before` | `evidence-stale` when the attestation predates INSTANT (a unix timestamp or an ISO-8601 instant), typically the last deploy this host accepted |
+| `--capability-ceiling NAME` | `capability_ceiling` | `capability-ceiling` when the staged composition reaches a capability outside the repeated names |
+| `--revoked-key KEY_ID` | `revoked` | `signer-untrusted` when the signer's key is listed; repeatable, so one signer is revoked while the other key files stay in force |
+| `--recheck-source` | `recheck_source` | `source-or-ir-hash` unless the host's own frontend admits the staged source and reproduces the staged IR |
+
+A runner that names none of them keeps Slice 1's behaviour: the rules default
+to off, and an unconfigured host still admits what a trusted key signed.
+
+Two checks run when the runner starts. `--max-age` and `--not-before` each take
+one value, so giving either one twice is refused with a message naming the flag
+(a repeat would otherwise let the later value quietly replace the earlier one).
+`--revoked-key` refuses an empty id and an id that matches no key loaded with
+`--key`, so a typo cannot leave the signer trusted without a signal.
+
+Behind `via = ssh`, the same flags arrive through the deploy map's `extra_args`
+(the allowlist there is exactly the runner's own flags):
+
+```toml
+[processes.worker.deploy]
+via             = "ssh"
+host            = "deploy@edge"
+known_hosts     = "/etc/revl/known_hosts"
+host_key        = "/etc/revl/edge-receipt.key"
+remote_bundle   = "/srv/revl/app.revlbundle"
+extra_args      = ["--key", "/etc/revl/deploy/trust.key",
+                   "--max-age", "604800",
+                   "--not-before", "2026-01-01T00:00:00+00:00"]
+```
+
+That map is the conductor's file. A conductor the host does not control can
+leave these flags out, and the far runner then starts with none of the rules
+set. A host that needs its rules to hold whatever the conductor sends pins them
+itself: an sshd forced command (`command=` on the conductor's key in
+`authorized_keys`, or `ForceCommand`) or a host-side wrapper script that runs
+`revl deploy-admit` with the flags already on its command line. A rule the
+wrapper does not carry stays off.
+
+A wrapper must not forward the conductor's arguments to `revl deploy-admit`.
+Most of the runner's flags can be repeated or replaced, so forwarded arguments
+can widen a `--capability-ceiling`, add a trusted `--key` or replace
+`--host-key`. If a wrapper has to forward any, it filters them down to the
+switches that only tighten the rules: `--require-gauntlet`,
+`--require-conformance` and `--recheck-source`. The startup refusal of a
+repeated `--max-age` or `--not-before` covers those two flags only; it is not a
+guard for the others.
+
+The local `revl deploy --bundle` check (`admit_bundle_chain`) is the conductor
+verifying a bundle on its own disk; it takes the keys, the backend and the two
+`--require-*` floors, and none of the receiver-side rules above. Those belong to
+the host that will run the bytes, which is the `revl deploy-admit` runner.
+
 ### The ceiling is measured off the IR, not off `policy.json`
 
 `policy.json` is a **projection**: `build_bundle` derives it from the IR with
@@ -557,6 +617,68 @@ the participant tried to write it *mid-COMMIT*, where the only verdict left is
 unreachable daemon, an image that does not resolve) is likewise a refusal before
 launch, never a downgrade to running the participant unconfined on the
 conductor's own kernel.
+
+## 6. Participant classes and one durable decision (issue #2725)
+
+A participant's finishability is already implicit in the declarations its
+components' crossings carry. `revl.participant_classes` reads those declarations
+and derives **one class per participant**; it invents no new syntax and adds no
+distributed protocol. The vocabulary is closed:
+
+| class | declaration it reads | what it means |
+| --- | --- | --- |
+| `prepare-reversible` | `undo` | an exact inverse; ABORT replays it |
+| `deferred-irreversible` | `deferred` | ABORT drops it, COMMIT flushes it once |
+| `recoverable-forward` | `witnessed` (or a deferred emission with an idempotency register) | recovery goes through the recorded witness or register, not a bare inverse |
+| `compensable` | `compensate` | a best-effort offset, not a restoration; residue is possible |
+| `irreversible` | an immediate emission with no declared finish | nothing can be undone |
+| `irreversible-needs-approval` | `requires approval`, or a `with` edge | nothing can be undone, so it must commit last |
+| `no-crossing` | none | the participant crosses no boundary |
+
+A participant with several crossings takes the **worst** class, because the
+weakest finish is the one that decides what can be settled.
+
+```sh
+revl audit app.rvl --deploy-map deploy.toml
+```
+
+prints one line per process (and `--json` carries the same table under
+`participantClasses`). A deploy map is a placement map, so it is read by the same
+loader `revl deploy` uses.
+
+### The plan-time refusal
+
+An `irreversible-needs-approval` participant may not be ordered before a
+participant that can still fail. If a later participant fails at COMMIT, the
+approved crossing is already out and cannot be undone. `admit_deploy_map(...,
+ir=...)` refuses such a plan at admission, and the diagnostic names both
+participants. `revl deploy deploy.toml --bundle B --dry-run` runs the same
+check when the bundle's IR is available (the declarations are not in the map
+alone), and `revl audit --deploy-map` reports the same refusal and exits
+nonzero. The commit order is the order `run_deploy` sends COMMIT in, which the
+local and ssh entry points build as `sorted(processes)`.
+
+### One durable decision
+
+`revl deploy` writes **one decision file** next to its deploy state,
+`<wal-dir>/deploy/<map-stem>/0/decision.jsonl`:
+
+* `federation-decision-pending` at the start of the run, so a conductor killed
+  before deciding is never read as the previous run's approval;
+* `federation-commit-approved` after every participant applied;
+* `federation-abort-decided` before any ABORT message goes out on a failure.
+
+`revl recover --wal <participant.wal> --decision <decision.jsonl>` reads that
+record and settles the participant through `recovery.py`'s existing rule, not a
+second one: a commit-approved record rolls forward, an abort/pending/absent
+record rolls back LIFO, and an unreadable record fails closed as `unresolved`
+rather than guessing between the two.
+
+This is still not global atomicity. The class is a property of one participant's
+declarations, and the file is one durable record, not a replicated WAL or a
+quorum coordinator. A peer the conductor cannot reach remains `unresolved`,
+never `rolled-back`, and `revl recover` settling a stranded participant is a
+separate step from the deploy verdict.
 
 ## Not landed yet
 

@@ -82,6 +82,34 @@ A WAL with no `model-decision` record cannot be told apart from a run that made
 no model completion. Both read as "no decision recorded", and the plan says so
 rather than guessing, the same blind spot `revl.branch.NOT_COMPARABLE` states.
 
+## Per-entry replay status, and opaque reasoning spans
+
+Since issue #2808 a verified decision also carries a per-entry replay status,
+and the plan reports it beside the reconstructed decision:
+
+- `fromRecord`: the recorded ANSWER can be served without calling the model.
+  True only when the evidence retained the completion text; a decision that
+  kept no answer has nothing to serve.
+- `rederivable`: the answer can be reproduced from the prompt. It requires the
+  record to be re-runnable under `reproducible` (model digest, placement
+  digest, seed, temperature, top_p and a content-addressed prompt binding) AND
+  the recorded reasoning span not to be opaque. A `hidden` or `summary` span
+  makes it false, with the reason named: part of the decision is not on the
+  record. A pre-3.0 record is not claimed rederivable either, because it does
+  not say whether an opaque span existed.
+
+A hidden span does not make `fromRecord` false. The two verdicts answer
+different questions, and keeping them apart is what lets the first slice of
+inso1337/revl#2749 serve a retained answer from a WAL whose reasoning was
+opaque.
+
+The plan also reports which crossings had an opaque span and how many:
+`opaqueSpans` in the JSON document, and a `opaque reasoning spans: N of M
+verified decision(s)` line in the rendered report. The span itself is never
+written, only its visibility and the host-reported size, so the count names
+what is opaque and claims nothing about what was in it. `revl compare`'s
+`NOT_COMPARABLE` states the same limit for a comparison of two histories.
+
 ## The live executor (deferred, with its requirements)
 
 `revl replay branch` re-running a branch belongs in the run/session machinery,

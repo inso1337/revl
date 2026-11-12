@@ -52,6 +52,7 @@ from revl.tee_attestation import (  # noqa: E402
     EnclaveEvidence,
     TeeError,
     TeeRequirement,
+    TdxPolicy,
     build_sev_snp_evidence,
     build_tdx_evidence,
     tee_admits,
@@ -101,8 +102,12 @@ def hardware_root(**overrides) -> q.HardwareRoot:
 
 
 def requirement(**overrides) -> TeeRequirement:
+    """The acceptance baseline. The TDX policy accepts MRTD alone, so the tests
+    about the ROOT are not tests about the runtime-register policy; the policy
+    itself is pinned in tests/test_tee_tdx_runtime_registers_3156.py."""
     fields = {"bundle": BUNDLE, "measurements": frozenset({MRTD}),
-              "regions": frozenset({REGION}), "nonce": NONCE, "max_age_s": 120.0}
+              "regions": frozenset({REGION}), "nonce": NONCE, "max_age_s": 120.0,
+              "tdx": TdxPolicy(accept_mrtd_only=True)}
     fields.update(overrides)
     return TeeRequirement(**fields)
 
@@ -507,7 +512,10 @@ def test_re_signing_the_offer_around_a_forged_quote_does_not_help():
 
 def attest_table(**overrides) -> dict:
     table = {"requires": plc.TEE_WORD_ATTESTED, "bundle": BUNDLE,
-             "measurements": [MRTD], "region": REGION, "nonce": NONCE}
+             "measurements": [MRTD], "region": REGION, "nonce": NONCE,
+             # `tdx_proof()` builds a quote whose RTMRs are all zero, and a TDX
+             # quote is refused unless the table permits the registers it read.
+             "runtime_measurements": [["00" * 48] * 4]}
     table.update(overrides)
     return table
 

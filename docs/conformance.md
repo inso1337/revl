@@ -257,9 +257,9 @@ The six host columns share their verdict wherever a register does not separate t
 | `T3` | no repro | no repro | no repro | no repro | no repro | no repro | no repro | [`src/revl/gate.py`](../src/revl/gate.py) |
 | `G-COUNCIL-SPLIT` | proved | proved | proved | proved | proved | proved | proved | [`examples/rejections/gcouncilsplit_on_tie_allow.rvl`](../examples/rejections/gcouncilsplit_on_tie_allow.rvl) |
 | `G-MODEL-PLACE` | proved | proved | proved | proved | proved | proved | proved | [`examples/rejections/gmodelplace_confidential_off_device.rvl`](../examples/rejections/gmodelplace_confidential_off_device.rvl) |
-| `G-RETAIN` | proved | proved | proved | proved | proved | proved | unimpl | [`examples/rejections/gretain_expired_at_persistence_sink.rvl`](../examples/rejections/gretain_expired_at_persistence_sink.rvl) |
-| `G-SECRET` | no repro | no repro | no repro | no repro | no repro | no repro | no repro | [`src/revl/taint.py`](../src/revl/taint.py) |
-| `G-SECRET-FLOW` | proved | proved | proved | proved | proved | proved | unimpl | [`examples/rejections/gsecret_service_return_discloses.rvl`](../examples/rejections/gsecret_service_return_discloses.rvl) |
+| `G-RETAIN` | proved | proved | proved | proved | proved | proved | unimpl | [`examples/rejections/gretain_closure_capture_at_persistence_sink.rvl`](../examples/rejections/gretain_closure_capture_at_persistence_sink.rvl) |
+| `G-SECRET` | proved | proved | proved | proved | proved | proved | unimpl | [`examples/rejections/gsecret_bound_key_closure_capture_discloses.rvl`](../examples/rejections/gsecret_bound_key_closure_capture_discloses.rvl) |
+| `G-SECRET-FLOW` | proved | proved | proved | proved | proved | proved | unimpl | [`examples/rejections/gsecret_closure_capture_discloses.rvl`](../examples/rejections/gsecret_closure_capture_discloses.rvl) |
 | `T-UNRESOLVED` | no repro | no repro | no repro | no repro | no repro | no repro | no repro | [`src/revl/typecheck.py`](../src/revl/typecheck.py) |
 
 **Why a cell is not `proved`.** Every non-`proved` cell above, with the register or the reason that decided it:
@@ -281,7 +281,7 @@ The six host columns share their verdict wherever a register does not separate t
 - `A9` on revl is **unimplemented**. The self-host gate raises no objection to any A9 reproducer (the self-host frontier, roadmap item 391; the type layer is item 417).
 - `T3` on py, ts, rust, java, wasm, go, revl has **no reproducer**. An open hole is refused at the ADMISSION gate rather than by `compile_files`, so a hole fixture compiles here and is refused one stage later; the reproducers live with the gate (`src/revl/holes.py`, `docs/holes.md`).
 - `G-RETAIN` on revl is **unimplemented**. The self-host gate answers every G-RETAIN reproducer under BAD (the self-host frontier, roadmap item 391; the type layer is item 417).
-- `G-SECRET` on py, ts, rust, java, wasm, go, revl has **no reproducer**. The confidentiality fixtures in `examples/rejections/` are refused under `G-SECRET-FLOW` (the disclosure-sink half). `G-SECRET` (the capability-reach half) is enforced in `src/revl/taint.py` and exercised by the per-tier secret registry suites, not by a fixture this corpus compiles.
+- `G-SECRET` on revl is **unimplemented**. The self-host gate raises no objection to any G-SECRET reproducer (the self-host frontier, roadmap item 391; the type layer is item 417).
 - `G-SECRET-FLOW` on revl is **unimplemented**. The self-host gate raises no objection to any G-SECRET-FLOW reproducer (the self-host frontier, roadmap item 391; the type layer is item 417).
 - `T-UNRESOLVED` on py, ts, rust, java, wasm, go, revl has **no reproducer**. Refused by the checker (`src/revl/typecheck.py`) for a type the compilation does not declare, which is a multi-file condition a single-file fixture in this corpus cannot set up; the reproducers are the doc fences tagged `revl reject T-UNRESOLVED`, compiled by `tests/test_doc_examples.py`.
 <!-- GUARANTEE-TIER-MATRIX:END -->

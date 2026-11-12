@@ -6,7 +6,7 @@ import { host } from '../../runtime.ts'
 const REVL_I64_MIN = -(2n ** 63n)
 const REVL_I64_MAX = 2n ** 63n - 1n
 function revlI64(v: bigint): bigint {
-  if (v < REVL_I64_MIN || v > REVL_I64_MAX) throw new RangeError('revl: Int overflow')
+  if (BigInt.asIntN(64, v) !== v) throw new RangeError('revl: Int overflow')
   return v
 }
 
@@ -16,11 +16,12 @@ export interface Pt {
 }
 
 export function built(n: bigint): bigint[] {
+    let $revl_i64 = 0n
     let xs: bigint[] = []
     let i = 0n
     while ((i < n)) {
       xs.push(i)
-      i = revlI64(i + 1n)
+      i = (BigInt.asIntN(64, $revl_i64 = i + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
     }
     return xs
 }
@@ -43,39 +44,42 @@ export function dropped(keys: string[], gone: string): Map<string, bigint> {
 }
 
 export function moved(n: bigint): Pt {
+    let $revl_i64 = 0n
     let p = {x: 1n, y: 2n}
     let i = 0n
     while ((i < n)) {
       Object.assign(p, { x: p.y, y: p.x })
-      i = revlI64(i + 1n)
+      i = (BigInt.asIntN(64, $revl_i64 = i + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
     }
     return p
 }
 
 export function snapshots(n: bigint): bigint[][] {
+    let $revl_i64 = 0n
     let xs = [0n]
     let out: bigint[][] = []
     let i = 1n
     while ((i < n)) {
       out.push(xs)
       xs = [...xs, i]
-      i = revlI64(i + 1n)
+      i = (BigInt.asIntN(64, $revl_i64 = i + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
     }
     return out
 }
 
 export function chunked(n: bigint): bigint[][] {
+    let $revl_i64 = 0n
     let out: bigint[][] = []
     let i = 0n
     while ((i < n)) {
       let res: bigint[] = []
       let j = 0n
       while ((j < 2n)) {
-        res.push(revlI64(revlI64(i * 2n) + j))
-        j = revlI64(j + 1n)
+        res.push((BigInt.asIntN(64, $revl_i64 = (BigInt.asIntN(64, $revl_i64 = i * 2n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64)) + j) === $revl_i64 ? $revl_i64 : revlI64($revl_i64)))
+        j = (BigInt.asIntN(64, $revl_i64 = j + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
       }
       out.push(res)
-      i = revlI64(i + 1n)
+      i = (BigInt.asIntN(64, $revl_i64 = i + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
     }
     return out
 }
