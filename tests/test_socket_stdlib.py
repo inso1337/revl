@@ -478,7 +478,7 @@ def test_close_code_table_matches_the_engine():
     sys.path.insert(0, str(ROOT / "backends" / "python"))
     import revl_socket
     table = {line.split("=>")[0].strip(): int(line.split("=>")[1].strip(" ,"))
-             for line in SOCKET.read_text().split("pub fn close_code")[1]
+             for line in SOCKET.read_text(encoding="utf-8").split("pub fn close_code")[1]
              .split("}")[0].splitlines() if "=>" in line}
     assert table["Closed"] == revl_socket.CODE_CLOSED
     assert table["TooLarge"] == revl_socket.CODE_TOO_LARGE
