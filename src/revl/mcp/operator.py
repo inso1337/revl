@@ -88,6 +88,16 @@ TOOL_VERB = {
     # scoped `may approve on payments` grant is usable while other components are
     # live.
     "revl_approve": "approve",
+    # issue #2991: the approval query surface is READ-ONLY, but reading the
+    # questions, their blast radius and their history is the same authority as
+    # answering them - a bystander who could enumerate what an irreversible
+    # crossing would reach and who is being asked is inside the approval
+    # boundary. So it gates under `approve`, never ungated like `revl_quorum`
+    # (which reads one hash the caller already holds). `_approvals_targets`
+    # resolves a `show` hash to its crossing component; `list`/`stats` name no
+    # one component, so they scope to the whole composition and need the
+    # literal `may approve on *`, whatever target keys the arguments add.
+    "revl_approvals": "approve",
     # item 379: revoking a standing grant early is the mirror of granting it —
     # withdrawing consent is the SAME authority as saying yes, so `revl_revoke`
     # gates under the same `approve` verb. Its `_approve_targets` branch resolves
@@ -431,23 +441,37 @@ class Operator:
 
     def allows(self, verb: str, labels: frozenset[str],
                deny_labels: frozenset[str] | None = None,
+               was_labels: frozenset[str] | None = None,
                ) -> tuple[bool, Grant | None]:
         """Decide one (verb, target) pair. Deny wins over allow; an allow must
         exist for the pair or it is refused (closed by default).
 
         `deny_labels`, when given, is the label set a `may not` is matched
-        against, and `labels` the set an allow is matched against. A swap
-        passes a wider deny set (see `ChangedLabels`)."""
+        against. `was_labels`, when given, is the label set the target had in
+        the running composition: an allow must select the target on BOTH sides
+        of a change, so a candidate cannot add a realm its grant matches to a
+        component the grant does not already cover (issue #3188). An added
+        component has no running side; a removed one is matched on the only
+        side it has."""
         deny_on = labels if deny_labels is None else deny_labels
         for grant in self.grants:
             if not grant.allow and grant.covers_verb(verb) \
                     and grant.covers_subject(deny_on):
                 return False, grant  # explicit prohibition
-        for grant in self.grants:
-            if grant.allow and grant.covers_verb(verb) \
-                    and grant.covers_subject(labels):
-                return True, grant
-        return False, None  # no allow selects it — refused
+        sides = (labels,) if was_labels is None else (labels, was_labels)
+        chosen: Grant | None = None
+        for side in sides:
+            on_side = next(
+                (grant for grant in self.grants
+                 if grant.allow and grant.covers_verb(verb)
+                 and grant.covers_subject(side)),
+                None,
+            )
+            if on_side is None:
+                return False, None  # no allow selects it on this side
+            if chosen is None:
+                chosen = on_side
+        return True, chosen
 
 
 @dataclass(frozen=True)
@@ -982,27 +1006,40 @@ def _labels_for(ir: dict, name: str, realms) -> frozenset[str]:
 class ChangedLabels(frozenset):
     """The labels of a component a swap changes (issue #3188).
 
-    As a set it is the labels an ALLOW is matched against: the name plus the
-    realms the candidate puts the component in (the running manifest's realms
-    when the swap removes it). `deny` is the set a `may not` is matched
-    against: those labels plus the realms the running manifest puts it in, so
-    a deny applies to where the component was as well as where it goes.
+    As a set it is the labels an ALLOW is matched against on the candidate
+    side: the name plus the realms the candidate puts the component in (the
+    running manifest's realms when the swap removes it). `was` is the allow
+    label set for the running side, or None when the component is new: an
+    allow must select the component on both sides, so editing its realm
+    clauses cannot put it inside a grant it is otherwise outside.
+
+    `deny` is the set a `may not` is matched against: those labels plus the
+    realms the running manifest puts it in, so a deny applies to where the
+    component was as well as where it goes.
 
     The two differ on purpose. Matching an allow against the union would let
     the realm a component is leaving satisfy an allow it does not satisfy
-    where it goes."""
+    where it goes, and the realm being added satisfy one it does not have
+    where it was."""
 
     deny: frozenset[str]
+    was: frozenset[str] | None
 
-    def __new__(cls, labels, deny):
+    def __new__(cls, labels, deny, was=None):
         self = super().__new__(cls, labels)
         self.deny = frozenset(deny) | self
+        self.was = None if was is None else frozenset(was)
         return self
 
 
 def deny_labels_of(labels: frozenset[str]) -> frozenset[str]:
     """The label set a `may not` is matched against for one target."""
     return labels.deny if isinstance(labels, ChangedLabels) else labels
+
+
+def was_labels_of(labels: frozenset[str]) -> frozenset[str] | None:
+    """The running-side label set an allow is also matched against, if any."""
+    return labels.was if isinstance(labels, ChangedLabels) else None
 
 
 def _live_targets(ir: dict | None) -> list[tuple[str, frozenset[str]]] | None:
@@ -1036,12 +1073,15 @@ def _changed_targets(old_ir: dict, new_ir: dict) \
     IR entry differs (modulo provenance) between the running composition and
     the candidate.
 
-    Each label set is a `ChangedLabels`: the allow labels come off whichever
-    side declares the component, preferring the candidate; the deny labels add
-    the running manifest's realms (issue #3188). Reading only the candidate
-    for a deny let the swap itself choose the labels the gate saw, so a
-    candidate that moved a component out of a realm escaped a `may not` rule
-    written against that realm."""
+    Each label set is a `ChangedLabels`. The allow labels come off whichever
+    side declares the component, preferring the candidate, and `was` carries
+    the running side's labels for a component present on both sides: an allow
+    must select it on both, so a candidate cannot add a realm its grant
+    matches to a component the grant does not cover. The deny labels add the
+    running manifest's realms, so a deny applies to where a component was as
+    well as where it goes (issue #3188). Reading only one side let the swap
+    itself choose the labels the gate saw, so a candidate that added or moved
+    a realm escaped a realm-scoped rule."""
     from ..policy import component_realms  # noqa: PLC0415 — read-only reuse of item 33
 
     old = {c["name"]: _semantic(c) for c in old_ir.get("components") or []}
@@ -1052,11 +1092,15 @@ def _changed_targets(old_ir: dict, new_ir: dict) \
     for name in sorted(set(old) | set(new)):
         if old.get(name) == new.get(name):
             continue  # untouched by this swap
-        man = new_man if name in new else old_man
-        source_ir = new_ir if name in new else old_ir
-        allow = _labels_for(source_ir, name, component_realms(man, name))
-        was = component_realms(old_man, name) if name in old else frozenset()
-        changed.append((name, ChangedLabels(allow, deny=was)))
+        candidate_side = name in new
+        declaring_ir = new_ir if candidate_side else old_ir
+        declaring_man = new_man if candidate_side else old_man
+        allow = _labels_for(declaring_ir, name,
+                            component_realms(declaring_man, name))
+        was = (_labels_for(old_ir, name, component_realms(old_man, name))
+               if candidate_side and name in old else None)
+        changed.append((name, ChangedLabels(allow, deny=was or frozenset(),
+                                           was=was)))
     return changed
 
 
@@ -1354,11 +1398,58 @@ def _distillation_targets(session, arguments: dict) \
     return out
 
 
+def _approvals_targets(session, arguments: dict) \
+        -> list[tuple[str, frozenset[str]]] | None:
+    """A `revl_approvals` call's target (issue #2991), resolved from the ACTION.
+
+    `show` reads one ticket, so a hash the outstanding-ticket table holds scopes
+    to that ticket's crossing component, exactly as `revl_approve` does. `list`
+    and `stats` read every component's tickets, so they scope to the whole
+    composition (None, which `decide` fails closed to `*`) whatever other keys
+    the arguments carry: `_approve_targets` would read `hash`, `requestId`,
+    `capability`, `offerId` or `rule` and scope a whole-table read to one
+    component. An unknown hash is undecidable too, so a scoped operator gets
+    the same refusal for it as for another component's ticket."""
+    if arguments.get("action") != "show":
+        return None
+    ticket_hash = arguments.get("hash")
+    tickets = getattr(session, "_tickets", None) or {}
+    if not isinstance(ticket_hash, str) or ticket_hash not in tickets:
+        return None
+    return _approve_targets(session, {"hash": ticket_hash})
+
+
+def _approvals_refusal(operator: Operator, verb: str, arguments: dict,
+                       ) -> tuple[WhyTrace, str]:
+    """The ONE refusal a `revl_approvals` call gets (issue #2991). It names the
+    action and never the resolved component or whether a `may not` matched, so
+    a refused `show` cannot tell a scoped operator whether a hash names a
+    ticket, or whose ticket it is."""
+    action = arguments.get("action")
+    action = action if action in {"list", "show", "stats"} else "query"
+    need = ("a grant over the ticket's crossing component" if action == "show"
+            else "`may approve on *`")
+    message = (f"operator `{operator.token}` may not read approvals with "
+               f"`{action}`: it needs `{verb}` authority, {need} (operator "
+               f"capabilities, item 55; issue #2991)")
+    why = WhyTrace(
+        kind="operator-authority", subject=operator.token, shape=CHAIN,
+        steps=[
+            TraceStep(operator.token, "operator", None, None,
+                      f"attempts `{verb}`"),
+            TraceStep("the approval query", "component", None, None,
+                      f"target of `{verb}`", ("*",)),
+        ])
+    return why, message
+
+
 def _refusal(operator: Operator, verb: str,
              offender: tuple[str, frozenset[str]], grant: Grant | None,
              ) -> tuple[WhyTrace, str]:
     name, labels = offender
-    if grant is not None:  # a deny matched the deny labels; name those
+    if isinstance(labels, ChangedLabels):
+        # name every side of the change, whether a deny matched or an allow
+        # failed: the realm the component was in is part of the target too
         labels = deny_labels_of(labels)
     subject = name if name != WHOLE else "the whole composition"
     named = sorted(l for l in labels if l != WHOLE) or ["*"]
@@ -1560,8 +1651,11 @@ def decide(session, tool_name: str, arguments: dict, *,
             and not _cold_load_activation_emits(arguments):
         return Decision(gated=False)  # cold load: not yet a privileged mutation
 
+    approvals = tool_name == "revl_approvals"
     disk_reads = None
-    if verb == "restore":
+    if approvals:
+        targets = _approvals_targets(session, arguments)
+    elif verb == "restore":
         # issue #3197: the handler boots only what this compile read
         targets, disk_reads = _restore_targets(arguments.get("snapshot"),
                                                restore_profile)
@@ -1580,9 +1674,12 @@ def decide(session, tool_name: str, arguments: dict, *,
 
     for offender in targets:
         _name, labels = offender
-        allowed, grant = operator.allows(verb, labels, deny_labels_of(labels))
+        allowed, grant = operator.allows(verb, labels, deny_labels_of(labels),
+                                         was_labels_of(labels))
         if not allowed:
-            why, message = _refusal(operator, verb, offender, grant)
+            why, message = (_approvals_refusal(operator, verb, arguments)
+                            if approvals
+                            else _refusal(operator, verb, offender, grant))
             return Decision(gated=True, allowed=False, operator=operator.token,
                             verb=verb, why=why, message=message)
 

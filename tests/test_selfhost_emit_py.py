@@ -123,6 +123,7 @@ CORPUS = [
     "strings.rvl",     # the stdlib string builtins and `${…}` interpolation
     "control.rvl",     # while/for/if, match (Some/None/wildcard), sync arrow
     "records.rvl",     # record literal, functional record update, list literal
+    "direct_reads.rvl",  # issue #3407: direct reads of records built here, dispatch kept elsewhere
     "optionals.rvl",   # optional-call chaining (opt receiver)
     "mixed.rvl",       # a cross-section of the above in three functions
     "user_names_like_temps.rvl",  # user locals spelled like emitter temporaries (issue #2913)
@@ -367,6 +368,7 @@ CORPUS = [
     # which is what the line-coverage ledger reported.
     "keyword_config_value_field.rvl",
     "services_method_effects.rvl",  # method-body `effect` + saga `emit ... compensate`: the `_revl_frame.adopt` accumulator + `_label`/`_effect_N`/`_emit_N` counter
+    "method_effect_coalesce.rvl",  # issue #3304: `adopt_bracket` for an absolute table inverse, `adopt` for a computed key
     # item 383 / 391 (self-host port) — the `.map`/`.filter`/`.reduce` transforms
     # desugar (frontend) to `list_map`/`list_filter`/`list_reduce` free calls; the
     # py tier lowers the function-value params, arrow args, and `f(x)` calls.

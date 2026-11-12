@@ -27,17 +27,27 @@ token is exactly the string printed after the `+` for each addition.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+import re
+
+from ._paths import relpath_or_abs
 from .cardinality import cardinality
 from .distribute import distributability
 from .inverse import inverse_class, inverse_rank
 from .resources import retention_surface
 
 
-def audit_report(ir: dict) -> dict:
+def audit_report(ir: dict, spec_results: dict | None = None) -> dict:
     """Build the same dict `revl audit --json` emits, from a compiled ir.
 
     Reuses the one authoritative boundary computation (`_boundary`) rather
     than recomputing the surface a second, divergent way.
+
+    ``spec_results`` is the recorded `function_specs` map from the last
+    `revl test --report json` run (issue #2705); absent, every spec lists
+    `last_result: "unrun"`, which is what a static audit honestly knows.
     """
     from .boundary import _boundary  # noqa: PLC0415 — lazy, avoids import cycle
 
@@ -138,6 +148,10 @@ def audit_report(ir: dict) -> dict:
         # issue #1896: each `revl gen-types` file's model document and digest,
         # checked at load. ADDITIVE and present only when one was compiled.
         **_generated_surface(ir),
+        # issue #2705: the functions that state an `ensures` spec, with the
+        # last recorded result. ADDITIVE and present only when a fn states a
+        # spec, so every other composition's audit is byte-identical.
+        **_function_specs_surface(ir, spec_results),
     }
 
 
@@ -194,6 +208,164 @@ def _secrets_surface(ir: dict) -> dict:
     (the same conditional-presence discipline as `_parallel_plan_surface`)."""
     table = _secrets_table(ir)
     return {"secrets": table} if table else {}
+
+
+def spec_results_from_report(report: dict) -> dict:
+    """The `function_specs` map a `revl test --report json` payload carries.
+
+    `revl audit --spec-results` reads that payload so the audit can list each
+    function's spec next to the result of the last recorded run (issue #2705).
+    Anything else (no section, an entry with no function, no status) loads as
+    absent, which the audit renders as `unrun` rather than inventing a result.
+    """
+    results: dict[str, dict] = {}
+    for row in report.get("function_specs") or []:
+        if not isinstance(row, dict):
+            continue
+        function = row.get("function")
+        if not function:
+            continue
+        entry = {"status": row.get("status") or "unrun",
+                 "spec": row.get("spec"),
+                 "digest": row.get("digest")}
+        if row.get("counterexample"):
+            entry["counterexample"] = row["counterexample"]
+        results[function] = entry
+    return results
+
+
+_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _names_in(node, out: set) -> None:
+    """Every identifier spelled in any string of a lowered IR node: a callee, a
+    type in a signature or a payload, a constructor, a field. Reading strings
+    rather than node kinds over-approximates what a node reaches, which only
+    ever makes the digest more sensitive, never less."""
+    if isinstance(node, str):
+        out.update(_IDENT.findall(node))
+    elif isinstance(node, dict):
+        for value in node.values():
+            _names_in(value, out)
+    elif isinstance(node, list):
+        for item in node:
+            _names_in(item, out)
+
+
+def _spec_closure(ir: dict, unit: dict) -> dict:
+    """The lowered declarations a spec's result depends on: the generated
+    property, then every function, extern and type declaration reachable from
+    it by name, transitively. A helper the fn calls and a type its parameters
+    reach (a new variant changes what the generator draws) are both in it."""
+    functions = {fn.get("name"): fn for fn in ir.get("functions") or []}
+    externs = {ex.get("name"): ex for ex in ir.get("externs") or []}
+    types = ir.get("types") or {}
+    case_owner = {case.get("name"): name for name, decl in types.items()
+                  for case in decl.get("cases") or []}
+    reached: dict = {"functions": {}, "externs": {}, "types": {}}
+    pending = {"params": unit.get("params"), "body": unit.get("body")}
+    while pending is not None:
+        names: set = set()
+        _names_in(pending, names)
+        pending = None
+        fresh = []
+        for name in sorted(names):
+            for table, section in ((functions, "functions"), (externs, "externs"),
+                                   (types, "types")):
+                if name in table and name not in reached[section]:
+                    reached[section][name] = table[name]
+                    fresh.append(table[name])
+            owner = case_owner.get(name)
+            if owner is not None and owner not in reached["types"]:
+                reached["types"][owner] = types[owner]
+                fresh.append(types[owner])
+        if fresh:
+            pending = fresh
+    return reached
+
+
+def _project_path(path: str | None) -> str | None:
+    """The file a fn is declared in, relative to the project root (the working
+    directory, as `revl composition` uses it), so a report recorded in one
+    checkout matches an audit run in another."""
+    if not path:
+        return None
+    return relpath_or_abs(os.path.abspath(path)).replace(os.sep, "/")
+
+
+def function_spec_digest(ir: dict, unit: dict) -> str:
+    """The identity a recorded spec result is bound to (issue #2705).
+
+    A sha256 over the revl version, the clause, the generated property, every lowered function,
+    extern and type declaration the property reaches (the fn's own signature
+    and body, its transitive callees and the types its parameters and callees
+    use) and the path of the fn's file relative to the project root.
+    `revl test --report json` records it and `function_specs_table` recomputes
+    it from the program being audited, so a result recorded before any of
+    those changed is never attributed to what the audit is showing now.
+    """
+    from ._version import version  # noqa: PLC0415
+
+    document = {
+        # the generator and the shrinker are revl's: a result recorded under
+        # another revl version is not a result for this one
+        "revl": version(),
+        "file": _project_path(unit.get("spec_file")),
+        "function": unit.get("spec_of"),
+        "spec": unit.get("spec") or "",
+        "params": unit.get("params"),
+        "property": unit.get("body"),
+        "reaches": _spec_closure(ir, unit),
+    }
+    canonical = json.dumps(document, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def function_specs_table(ir: dict, results: dict | None = None) -> list:
+    """One row per fn that states an `ensures` clause (issue #2705).
+
+    The spec, the parameter types the generated property drew its inputs from,
+    and the last result the caller recorded. `unrun` is NOT a failure: the
+    audit is a static surface, so a spec that no recorded `revl test` run has
+    checked yet is listed with that fact rather than a guess
+    (docs/function-specs.md).
+    """
+    results = results or {}
+    rows = []
+    for unit in ir.get("prop_tests") or []:
+        function = unit.get("spec_of")
+        if not function:
+            continue
+        result = results.get(function) or {}
+        # a record from a different spelling of the clause is not this spec's
+        # result; report `unrun` rather than attributing another claim's check
+        if result.get("spec") is not None and result["spec"] != (unit.get("spec") or ""):
+            result = {}
+        # a record is this spec's result only when its digest is the one the
+        # audited program has now: an edited body, a record from another file
+        # with a fn of the same name, or a record with no digest reads `unrun`
+        if result and result.get("digest") != function_spec_digest(ir, unit):
+            result = {}
+        row = {
+            "function": function,
+            "spec": unit.get("spec") or "",
+            "property": unit.get("name"),
+            "params": [{"name": p.get("name"), "type": p.get("type")}
+                       for p in unit.get("params") or []],
+            "last_result": result.get("status") or "unrun",
+        }
+        if result.get("counterexample"):
+            row["counterexample"] = result["counterexample"]
+        rows.append(row)
+    rows.sort(key=lambda row: row["function"])
+    return rows
+
+
+def _function_specs_surface(ir: dict, results: dict | None = None) -> dict:
+    """The additive `function_specs` audit key, or `{}` when no fn states a
+    spec, so every other composition's audit surface stays byte-identical."""
+    rows = function_specs_table(ir, results)
+    return {"function_specs": rows} if rows else {}
 
 
 def _generated_surface(ir: dict) -> dict:

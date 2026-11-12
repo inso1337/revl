@@ -279,8 +279,10 @@ below; the exhaustive per-command flag reference is
 | `revl update check` | compare the running toolchain with the newest release on a GitHub release feed, its manifest and compatibility statement (exit 10 when an update is available, `--json`) | [updates.md](updates.md) |
 | `revl update fetch` | download a release, verify the artifact sha256 against its manifest, and stage it under the update home; nothing is compiled or executed | [updates.md](updates.md) |
 | `revl contract FILES` | federated contracts between sovereign compositions: export a consumer surface, or check a provider against a pinned one | [federation.md](federation.md) |
+| `revl federation-apply PLAN` | admit a federation plan (new sources, consumer contracts, health probes) and apply it as one all-or-nothing update of co-located compositions, unwinding it when a health probe fails, times out or is interrupted (`--dry-run` runs only the admission half, `--json`, `--state-dir`, `--probe-timeout`) | [commands-reference.md](commands-reference.md#revl-federation-apply) |
 | `revl erase-report FILES --realm R` | right-to-erasure evidence for one realm (`--json`, `--no-residue-proof`) | [erase-report.md](erase-report.md) |
 | `revl retention-receipt FILES --policy P --requester W` | sign an erasure receipt over a `retention` policy's replicas and derivatives, or `--verify` one | [commands-reference.md](commands-reference.md) |
+| `revl receipts export --actions F --session S` | sign one receipt per consequential action and chain them; `revl receipts verify CHAIN` checks a presented chain, detect removal, reordering or alteration, and names the key each receipt was signed with | [commands-reference.md](commands-reference.md) |
 | `revl plan FILES` | dry run for admission (`--manifest RUNNING.json`, `--replacing`); `-o change.plan` serializes an executable plan | [plan.md](plan.md) |
 | `revl apply change.plan` | execute a plan: drift-refuse, verify each step, roll back on failure (`--against RUNNING.json`) | [apply.md](apply.md) |
 | `revl undo --history H` | operator undo: replay a generation history and return to an earlier generation through the gate | [generation-history.md](generation-history.md) |
@@ -323,7 +325,7 @@ below; the exhaustive per-command flag reference is
 | `revl bundle FILES --out DIR` | emit every tier plus the runtime manifest into one portable bundle (`--backend`, `--topology`) | [deploy.md](deploy.md) |
 | `revl verify BUNDLE` | check a bundle tier by tier; nonzero on a failing tier, so it is usable as a release gate | [commands-reference.md](commands-reference.md#revl-verify) |
 | `revl deploy MAP` | deploy a composition across process seams with attested admission (the receiver re-hashes IR+artifact and checks the signed evidence chain) and coordinated two-phase rollback; `--dry-run`, `--json` | [deploy.md](deploy.md) |
-| `revl deploy-admit` | the far-side deploy runner: reads JSON admit/commit requests on stdin and writes signed verdicts on stdout, verifying each against this host's own trust store (`--key`, `--host-key`, `--require-gauntlet`, `--require-conformance`) | [deploy.md](deploy.md) |
+| `revl deploy-admit` | the far-side deploy runner: reads JSON admit/commit requests on stdin and writes signed verdicts on stdout, verifying each against this host's own trust store (`--key`, `--host-key`, the two `--require-*` floors, and the receiver rules `--max-age`, `--not-before`, `--capability-ceiling`, `--revoked-key`, `--recheck-source`) | [deploy.md](deploy.md) |
 | `revl truc VERB …` | the component manager namespaced under the compiler, `add`/`rm`/`assemble`/`ship`/`reproduce`, tail passed through unchanged | [truc.md](truc.md) |
 
 Two module entry points sit outside the `revl` subcommand tree. `python -m

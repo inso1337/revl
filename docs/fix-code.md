@@ -150,6 +150,63 @@ pre-edit text that never compiled. A compile the caller describes only by disk
 paths carries the prose repairs. The record itself is unchanged in shape either
 way, and the MCP `revl_check` answer carries it as classified.
 
+### G1, G2 and R2: the verified candidate repairs
+
+A capability or admission refusal carries a `repairs` list beside `fix`
+(issue #2759): every mechanical way out the engine could verify, in a fixed
+order, rather than one sentence of advice. Three refusal kinds are covered,
+and they share the G4 entry vocabulary above (`kind`, `action`, and a verified
+`fix_code`) plus one new field, `widens_authority`:
+
+| refusal | kinds |
+| --- | --- |
+| G1 `requirement` - a body reaches a key its component does not declare | `add-requires`, `remove-call` |
+| G2 `linking` - two components install the same provision key | `rename-key` |
+| R2 `admission` - a `requires` binds a service outside the granted set | `route-via-granted-service` |
+
+`fixgen.generate_repairs` is the engine. A generator emits candidate seeds;
+the engine applies each seed to the refused text and re-checks the patch, and
+keeps only the candidates that clear the refusal and introduce no new
+diagnostic. `diagnostics.report` runs it when it holds the compiled text and
+the caller's verifier, exactly as it does for the G4 `site-undo` edit, and
+attaches the survivors to the record. An empty list means the engine ran and
+nothing verified, which is different from a record produced without the text
+(the field is then absent).
+
+Each check is a full compile, so one `report` call spends at most
+`diagnostics.REPAIR_COMPILE_BUDGET` (8) verification compiles across all its
+records, the G4 `site-undo` check (one compile per record) included. A record
+is checked whole or not at all: its candidates are reserved from the budget
+together, narrowing ones checked first, and a record whose candidates do not
+all fit is not checked. That first record closes the budget, so every later
+record is unchecked too, even a smaller one. An unchecked G1/G2/R2 record keeps
+no list, as if the text were absent; an unchecked G4 record keeps its prose
+repairs with no `fix_code`, as when the verifier cannot check the patch.
+
+The authority rule is the safety half. A candidate that enlarges the reach the
+source *declares* is marked `widens_authority: true`, omitted unless the
+caller passes `widens_authority=True`, and never ordered first. `add-requires`
+is always widening: a new `requires` row enlarges the authority the component
+declares, whether a sibling component or an ambient provider satisfies it, so
+it is opt-in. `remove-call`, `rename-key` and `route-via-granted-service` are
+always narrowing. Survivors are ordered narrowest authority first, then by the
+smallest edit, then by kind, so the list is deterministic and a later learned
+ordering can only reorder verified entries.
+
+Verified means the patch clears the refusal and introduces no new diagnostic,
+not that the rewrite preserves behaviour. `rename-key` renames the second
+provider of the contested key, so a call site that reached that provider
+through the original key now reaches the surviving one; the author picks
+between the two providers by deciding which one keeps the key. The record's
+`action` says which provider is renamed. A covered code is only repairable in
+the modes its generator understands, so G1's `binding` mode and G2's "differs
+from the running manifest" refusal keep the record they always had rather than
+an empty list.
+
+`revl explain G1` and `revl explain G2` print their candidate kinds. R2 stays
+in the evolution curriculum's reserved set (issue #2028), so `revl explain R2`
+still refuses it on purpose; its record carries the same list.
+
 ## The agent payload
 
 `fix_code(rejection, source)` takes a structured rejection (the
@@ -185,6 +242,8 @@ fix.
 
 A new fixable code is one entry in `_GENERATORS`, its generator, and a proof in
 `tests/test_fixgen.py`. The generator returns a candidate `Fix`; the engine and
-both front doors need no change. The proof is end to end: the diagnostic, the
+both front doors need no change. A new code in the candidate-repair list is an
+entry in `_REPAIR_GENERATORS`, its generator, a kind tuple in
+`diagnostics.REPAIR_KINDS`, and a proof in `tests/test_repairs_2759.py`. The proof is end to end: the diagnostic, the
 generated edit, and a re-check of the *patched* source showing the rejection is
 gone — the same bar every code here already clears.

@@ -907,6 +907,20 @@ def test_the_admission_mirror_matches_the_rust(census):
                        "service A {\n  fn g(x: Int) -> Int\n}\n")
     assert not certify("service A {\n  fn f(x: Int) -> Int\n"
                        "  fn f(y: Int) -> Int\n}\n")
+    # `a_dunder_service_method_is_not_certified` (issue #3155): the reference
+    # refuses a dunder service-method name (issue #319) and `admit_src` raises
+    # no objection, so the certifier has to withhold it.
+    for source in ("service S {\n  fn __init__()\n}\n",
+                   "service S {\n  fn __proto__(x: Int) -> Int\n}\n",
+                   "service S {\n  fn __x__()\n}\n"):
+        assert not certify(source), source
+    # The other name positions this surface sees are admitted by the reference
+    # and stay inside it, and `___` has no byte between its `__` pairs.
+    for source in ("service __init__ {\n}\n", "type __k__ = Str\n",
+                   "component __c__ {\n}\n",
+                   "service S {\n  fn f(__x__: Int) -> Int\n}\n",
+                   "service S {\n  fn ___()\n}\n"):
+        assert certify(source), source
     # `a_declaration_may_not_shadow_a_reference_builtin_type`
     for source in ("service Int {\n}\n", "type Opt = Str\n", "type Principal = Str\n"):
         assert not certify(source), source

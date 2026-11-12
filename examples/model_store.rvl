@@ -15,6 +15,13 @@
 // an in-memory Map here; a sqlite/postgres driver would provide the SAME `Store`
 // service, so model and query code never change when the driver is swapped.
 //
+// The surface is the full typed CRUD set: `create` (insert, store-assigned
+// key), `get`/`list` (select), `update` (overwrite) and `delete` (remove).
+// Every mutation is a revertible effect with its EXACT inverse: `create` undoes
+// to `remove`, `update` restores the value the row held before the write, and
+// `delete` re-inserts the row it removed. A missing key on `update`/`delete` is
+// a typed no-op (`None`), never a silent insert, and never registers an effect.
+//
 // Two verbs beyond the first slice (#767) close the ergonomics gaps the
 // exemplary app's boring half (#777) filed against this pattern:
 //
@@ -39,13 +46,17 @@ type Note = { id: Str, body: Str }
 // key assignment (Minato `autoInc`), so the caller never invents an id.
 type Draft = { body: Str }
 
-// The persistence service: typed CRUD verbs, no SQL. `create` is an `emission`
-// (a witnessed mutation) whose provider carries the inverse and RETURNS the
-// store-assigned key; `get` and `list` are pure reads.
+// The persistence service: typed CRUD verbs, no SQL. `create`, `update` and
+// `delete` are `emission`s (witnessed mutations) whose provider carries the
+// inverse; `update`/`delete` are keyed and RETURN the row they changed (or
+// `None` when the key is absent, so a miss is a typed no-op, not a silent
+// insert); `get` and `list` are pure reads.
 service Store {
   fn get(id: Str) -> Opt[Note]
   fn list() -> List[Note]
   emission[store] fn create(draft: Draft) -> Str
+  emission[store] fn update(id: Str, draft: Draft) -> Opt[Note]
+  emission[store] fn delete(id: Str) -> Opt[Note]
 }
 
 // The memory driver. Any other driver (sqlite, postgres) provides this same
@@ -95,6 +106,44 @@ component MemoryStore provides store: Store {
       undo   rows.remove(id)
       return id
     }
+
+    // UPDATE is an overwrite, so its inverse is the value the row held BEFORE
+    // the write, not `remove` (which would drop a row that existed). The read
+    // is the same table and key, bound before the effect; the compiler's
+    // inverse check admits exactly `match prev { Some(v) => insert(v), None =>
+    // remove }` (issue #1980), so an overwrite of an absent key and an
+    // overwrite of a present one are both inverted exactly. A missing key is a
+    // typed no-op: `None` in, `None` out, no effect registered.
+    fn update(id, draft) {
+      let cur = rows.get(id)
+      if (cur == None) {
+        return None
+      }
+      effect rows.insert(id, { id: id, body: draft.body })
+      undo   match cur {
+        Some(v) => rows.insert(id, v),
+        None => rows.remove(id),
+      }
+      return Some({ id: id, body: draft.body })
+    }
+
+    // DELETE removes the row and carries its prior value as the inverse, so a
+    // row removed during activation is restored in LIFO order on
+    // teardown/abort. The value restored is the one the read observed, not a
+    // default: a missing key is a typed no-op and registers no effect.
+    fn delete(id) {
+      let cur = rows.get(id)
+      if (cur == None) {
+        return None
+      }
+      let old = match cur {
+        Some(v) => v,
+        None => { id: id, body: "" },
+      }
+      effect rows.remove(id)
+      undo   rows.insert(id, old)
+      return cur
+    }
   }
 }
 
@@ -129,6 +178,33 @@ lifecycle test "a reloaded store starts empty" {
   assert stale == None
   let empty = call store.list()
   assert empty == []
+  unload MemoryStore
+  assert no_residue
+}
+
+lifecycle test "update overwrites the row and delete removes it, and both revert residue-free" {
+  load MemoryStore
+  let id = call store.create({ body: "first" })
+  let edited = call store.update(id, { body: "second" })
+  assert edited == Some({ id: "note-0", body: "second" })
+  let hit = call store.get(id)
+  assert hit == Some({ id: "note-0", body: "second" })
+  let removed = call store.delete(id)
+  assert removed == Some({ id: "note-0", body: "second" })
+  let gone = call store.get(id)
+  assert gone == None
+  unload MemoryStore
+  assert no_residue
+}
+
+lifecycle test "update and delete of an absent key are typed no-ops" {
+  load MemoryStore
+  let edited = call store.update("note-0", { body: "x" })
+  assert edited == None
+  let removed = call store.delete("note-0")
+  assert removed == None
+  let all = call store.list()
+  assert all == []
   unload MemoryStore
   assert no_residue
 }
