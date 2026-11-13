@@ -128,7 +128,8 @@ its own PR series. Listed in the review's own priority order.
    at the method's top level. A guard-then-emit method (a top-level `if` that
    `return`s early, then a top-level `emit`) is the realistic shape this
    admits. REMAINDER: a conditional/looped teardown-registering step needs the
-   teardown contract amended and stays deferred to its own note.
+   teardown contract amended; its note is
+   `docs/design/3339-registration-under-control-flow.md` (issue #3339).
 
 9. **`while`/`for` in provide-method bodies (review item 1).** LANDED for the
    PURE case alongside item 8. `while`/`for` STATEMENTS now compute values in a
@@ -143,7 +144,8 @@ its own PR series. Listed in the review's own priority order.
    memory walk against the method path (`$for_ptr`/`$for_cnt`/`$for_idx`, the
    `_SLOT`-strided element load), with `break`/`continue` re-testing at an inner
    `$cnt` block exactly as the fn `for` does. REMAINDER: registering steps
-   inside a loop (teardown across iterations).
+   inside a loop (teardown across iterations), designed in
+   `docs/design/3339-registration-under-control-flow.md` (issue #3339).
 
 10. **Expression-bodied top-level fns (review item 3).** `fn f(x) = expr` works
     in a provide method but not at module top level, so an author writing a

@@ -184,9 +184,11 @@ class CliRule:
                                 else PROFILED_COPY)
 
     def compile_files(self, compile_once, paths, sources, profile, profiles,
-                      operator_sources, report, admitting: bool = False):
+                      operator_sources, report, admitting: bool = False,
+                      disk_relative_use: bool = True):
         """Run `compile_once(sources=, profile=, profiles=, operator_sources=,
-        report=)` for a `compile_files` call under this rule. `admitting` is a
+        report=, disk_relative_use=)` for a `compile_files` call under this
+        rule. `admitting` is a
         compile against a running composition (the admission hot path): its
         in-memory text is asked about by name first (`exported_text`). Any
         other in-memory text whose name is a file, such as text a caller read
@@ -208,7 +210,8 @@ class CliRule:
             document = compile_once(sources=sources or None, profile=profile,
                                     profiles=profiles,
                                     operator_sources=operator_sources,
-                                    report=seen)
+                                    report=seen,
+                                    disk_relative_use=disk_relative_use)
             self._say([p for p in seen.get("disk_reads") or ()
                        if self.exported(p)], TRUSTED_LINE)
             if report is not None:
@@ -231,12 +234,13 @@ class CliRule:
                 document = compile_once(
                     sources={**sources, **authored}, profile=author,
                     profiles=_profile_exported(profiles, author, is_exported),
-                    operator_sources=operator, report=seen)
+                    operator_sources=operator, report=seen,
+                    disk_relative_use=disk_relative_use)
             else:
                 document = compile_once(
                     sources=sources or None, profile=profile,
                     profiles=profiles, operator_sources=operator_sources,
-                    report=seen)
+                    report=seen, disk_relative_use=disk_relative_use)
             pending = {p: t for p, t in (seen.get("disk_reads") or {}).items()
                        if p not in authored and self.exported(p)}
             if not pending:

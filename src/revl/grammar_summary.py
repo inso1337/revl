@@ -105,8 +105,9 @@ type      := 'Str'|'Int'|'Float'|'Bool'|'Bytes'|'Unit'
 -- no null/undefined: absence is Opt[T]. Float is IEEE754 (NaN != NaN).
 
 --- pure expressions & functions (stratum 1: TS subset, verbatim syntax) ---
-fndecl    := ['verified'] [endorse] 'fn' IDENT '(' (IDENT ':' type)* ')' ['->' type] block
+fndecl    := ['verified'] [endorse] 'fn' IDENT '(' (IDENT ':' type)* ')' ['->' type] [derives] ['ensures' expr] block
 endorse   := 'endorse' '[' IDENT (',' IDENT)* ']'     -- taint classes the body may declassify
+derives   := 'derives' IDENT 'of' IDENT
 block     := '{' stmt* '}'
 stmt      := let | var | assign(var-only) | 'if' '(' expr ')' block ['else' block]
              | 'for' '(' IDENT 'of' expr ')' block | 'while' '(' expr ')' block
@@ -121,10 +122,10 @@ expr      := literal | IDENT | expr '.' IDENT | expr '?.' IDENT | expr '??' expr
              | expr ('+'|'-'|'*'|'/'|'%') expr | expr ('=='|'!='|'<'|'<='|'>'|'>=') expr
              | expr ('&&'|'||') expr | '!' expr | expr '?' expr ':' expr
              | `template ${expr} text`  | 'match' expr '{' (pattern '=>' expr ',')+ '}'
-             | 'hole' ['[' type ']'] [STRING]         -- typed obligation (docs/holes.md)
-             | 'asset' STRING                         -- external file, resolved + jailed +
-                                                         sha256-pinned at compile time
-                                                         (docs/frontend-assets.md)
+             | 'hole' ['[' type ']'] [STRING] -- typed obligation (docs/holes.md)
+             | 'asset' STRING                 -- external file, resolved + jailed +
+                                                 sha256-pinned at compile time
+                                                 (docs/frontend-assets.md)
 -- == and === are one operator (canonicalized to == in IR); same for != / !==.
 -- EXCLUDED (named in diagnostics): class, new, this, function, import, export,
 -- typeof, delete, try/catch, ++/--, compound-assign on non-var, async arrows
@@ -148,7 +149,7 @@ acquire   := 'let' IDENT '=' 'effect' (expr | '{' stmt* expr '}'
              | 'spawn' IDENT ['with' record_literal])   -- spawn: dynamic instance
              ['undo' expr]                             -- G5: undo has no stmt position
 emit_stmt := 'emit' expr ['compensate' expr]            -- also legal in expr position
-fail_stmt := 'fail' STRING                              -- deliberate L-Raise (A8)
+fail_stmt := 'fail' STRING  -- deliberate L-Raise (A8)
 isolate   := 'isolate' IDENT 'in' 'realm(' STRING ')'
 intercept := 'intercept' IDENT 'with' record_literal
 provide   := 'provide' IDENT '{' ('fn' IDENT '(' IDENT* ')' ('=' expr | block))* '}'
@@ -159,15 +160,16 @@ provide   := 'provide' IDENT '{' ('fn' IDENT '(' IDENT* ')' ('=' expr | block))*
 composition := 'composition' IDENT '{' (use | row | remote | place | grant | stack | site)* '}'  -- contextual kw
 row       := 'row' '@' IDENT 'from' STRING 'provides' ('nothing' | IDENT (',' IDENT)*)
              ['component' IDENT]            -- disambiguator; provenance, not identity
-             ['config' '{' (IDENT ':' literal)* '}']  -- checked against the header
+             ['config' '{' (IDENT ':' (literal|'['literal*']'))* '}'] -- checked
              ['granted' '{' IDENT (',' IDENT)* '}']   -- reach allowlist, empty default
 place     := 'place' address 'on' 'process' STRING ['backend' IDENT]   -- which process runs the row
 grant     := 'grant' address 'with' '{' IDENT (',' IDENT)* '}'          -- the `requires` keys a row may reach
-stack     := 'stack' STRING          -- a level-1 peer layer; conflicts REFUSE
-site      := 'site' STRING           -- the level-2 layer; exactly one, resolves
+stack     := 'stack' STRING -- a level-1 peer layer; conflicts REFUSE
+site      := 'site' STRING  -- the level-2 layer; exactly one, resolves
 remote    := 'remote' '@' IDENT 'provides' IDENT ':' IDENT       -- key : Service
              ['in' 'realm(' STRING ')']     -- two peers of one service = two realms
              'at' 'host(' STRING ')'        -- bare authority; userinfo REFUSED
+             ['pinned' STRING]              -- FULL sha256 of the TLS leaf SPKI
              ['through' IDENT]              -- transport name, recorded on the row
              ['on_failure(' ('withdraw' | 'result') ')']   -- default: withdraw
              ['redirect(' ('refuse' | 'same_origin') ')']  -- default: refuse
@@ -178,16 +180,16 @@ remote    := 'remote' '@' IDENT 'provides' IDENT ':' IDENT       -- key : Servic
 -- service plus the peer address, so consumers keep `requires key: Service`
 -- unchanged and remoteness is an ADMISSION fact, not a wiring fact. Every method
 -- must declare an emission bound (G4 at the client); no inverse is synthesized
--- and a remote effect survives unwind. `remote`/`at`/`host`/`through`/
+-- and a remote effect survives unwind. `remote`/`at`/`host`/`pinned`/`through`/
 -- `on_failure`/`redirect` are CONTEXTUAL keywords: the lexer's KEYWORDS set is
--- untouched. A redirect is REFUSED by default: the peer address is what the row
--- promises, so a transport that followed `Location` elsewhere would make it false.
+-- untouched. A redirect is REFUSED by default; the address is the promise. A
+-- pin is the FULL SHA-256 of the peer's TLS leaf SPKI.
 
 --- layers (a patch over a row table; docs/composition-layers.md) ---
 layer     := ['site'] 'layer' IDENT 'for' IDENT '{' (touches | op)* '}'  -- contextual
 touches   := 'touches' address (',' address)*   -- enforced; a layer's reach, readable
 op        := 'add' row | 'remove' address | 'replace' address 'with' row
-           | 'configure' address 'with' '{' (IDENT ':' literal)* '}'
+           | 'configure' address 'with' '{' (IDENT ':' (literal|'['literal*']'))* '}'
            | 'resolve' address 'to' label 'over' label     -- site layer only
            | place | grant                                 -- site layer only, as in a composition
 address   := 'key' '(' STRING [',' 'realm' ':' STRING] ')' | label
@@ -203,7 +205,7 @@ label     := [(IDENT | '.') '::'] '@' IDENT
 
 --- host blocks (extern; typed boundary, opaque verbatim body) ---
 extern    := 'extern' ('pure'|'acquire'|'emission') 'fn' IDENT '(' (IDENT ':' type)* ')'
-             ['->' type] ['undo' expr] ['compensate' expr]
+             ['->' type] [derives] ['undo' expr] ['compensate' expr]
              ['config' '{' (IDENT ':' type ['=' literal])* '}']
              ('=' '@'('ts'|'py'|'rs'|'go'|'java'|'wasm') '{' <verbatim host code> '}')+
 -- classification is mandatory: pure (no effect), acquire (needs undo over the
@@ -211,7 +213,7 @@ extern    := 'extern' ('pure'|'acquire'|'emission') 'fn' IDENT '(' (IDENT ':' ty
 -- config is resolved once at plug time, bound as `_revl_config` in the body.
 
 --- other declarations (CONTEXTUAL keywords: each heads a decl only in this shape) ---
-secret    := 'secret' IDENT 'for' CAP            -- CAP: dotted capability token, e.g. net.send
+secret    := 'secret' IDENT 'for' CAP -- CAP: dotted capability token, e.g. net.send
 -- binds a NAME to one capability. The value is never in source: it is supplied
 -- at plug and read as a local of the host body of each `extern emission[CAP]`.
 -- It reaches no other extern and no revl construct; a secret with no

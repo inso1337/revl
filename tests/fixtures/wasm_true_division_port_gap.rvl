@@ -1,0 +1,24 @@
+// `Int / Int` yields `Float`. The REFERENCE emitter lowers it to `f64.div`
+// over converted operands since Float became a native f64 value (issue #3295,
+// docs/wasm-capabilities.md), instead of the pre-#2201 `i64.div_s` that
+// answered `3` where the language says `3.5`.
+//
+// This document now pins a PORT gap, not a reference refusal: the revl port in
+// selfhost/emit_wasm.rvl carries the scalar Int/Bool subset only and names `/`
+// as `<<UNSUPPORTED-TRUE-DIVISION:Float>>`; that port gap is issue #3425.
+// Both positions are here because they reach different code: `ratio` is the
+// scalar binding (the port's render_bin gap), and `half` is the
+// interpolation (the port refuses `<<UNSUPPORTED-EXPR:interp>>` before it
+// reaches the division).
+//
+// It is not a byte-agreement case, so it cannot live in the tier's CORPUS, and
+// the reference EMITS it, so it cannot live in tests/fixtures/emit_wasm_refusals/
+// either: that directory holds only documents the reference refuses, and
+// tests/test_selfhost_line_coverage.py fails on one it emits. It sat there
+// while the reference refused `/` (issue #2201) and left when Float lowered.
+// The reference-side facts (f64.div, never i64.div_s) are asserted by
+// tests/test_selfhost_emit_wasm.py::
+// test_true_division_lowers_on_the_reference_but_is_a_named_port_gap.
+fn ratio(a: Int, b: Int) { return a / b }
+
+fn half(a: Int, b: Int) -> Str { return `${a / b}` }

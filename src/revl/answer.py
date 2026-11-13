@@ -11,9 +11,10 @@ An answer says four things before it says what it found:
 `ok` was already universal, so the envelope adds `verdict`, `payloadKey` and
 the optional `refusal` object. It is additive by design: a converted verb keeps
 every key it answered with before, at the same place, so existing consumers
-keep working while a new consumer can branch on the envelope alone. The first
-slice converts `revl_check` and `revl_test_run` (`PAYLOAD_KEYS`); a later verb
-joins by adding its payload key here and stamping the answer in the server.
+keep working while a new consumer can branch on the envelope alone. The
+converted verbs are named in `PAYLOAD_KEYS` (`revl_check`, `revl_test_run` and
+the apply-repair verb of issue #2855); a later verb joins by adding its payload
+key there and stamping the answer in the server.
 
 `verdict` separates two `ok: false` answers that used to need prose to tell
 apart:
@@ -108,6 +109,18 @@ REFUSALS: dict[str, Entry] = {
         "every selected test was skipped, and a skipped run is not a passing "
         "run"),
 
+    # `revl_apply_repair` (issue #2855)
+    "UNKNOWN_REPAIR": Entry(
+        "usage",
+        "`repairId` names no repair this session minted: no refusing "
+        "`revl_check` issued it, or it has been dropped to keep the store "
+        "bounded"),
+    "STALE_REPAIR": Entry(
+        "session",
+        "`repairId` was minted before a load, swap, rollback or undo moved the "
+        "session's unit of work, so the candidate it repairs no longer belongs "
+        "to this unit"),
+
     # fallbacks for a refusal made before a verb's handler ran
     "USAGE": Entry(
         "usage",
@@ -154,6 +167,7 @@ CATEGORY_CODES: dict[str, str] = {
 #: substance. A verb joins the envelope by being named here.
 PAYLOAD_KEYS: dict[str, str] = {
     "revl_check": "selfCheck",
+    "revl_apply_repair": "repaired",
     "revl_test_run": "tests",
 }
 

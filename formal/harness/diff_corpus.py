@@ -110,6 +110,7 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "backends" / "python"))
 
 from revl import cap_order
+from revl import lower  # the lowering walk, observed (issue #2744)
 from revl import recovery
 from revl import taint  # the shipped walk, observed (issue #2108)
 from revl import ui_family  # the shipped computer-use reversibility registry
@@ -3556,6 +3557,543 @@ def access_rows(rel: str, comp, roots: set[str], resolved: set[str],
     return ["\t".join(["GA", rel, comp.name, root]) for root in sorted(access)]
 
 
+# ----------------------------- declared-access COVERAGE (issue #2744)
+#
+# THE VISITING HALF OF G1, which the `GA`/`G1` row above cannot state. G1 is
+# enforced by name resolution DURING lowering (`lower.py`'s own guarantee map:
+# "G1 undeclared access -> `_lower_postfix` name resolution"), so the walk that
+# resolves roots is the lowering walk itself. `RevL.G1Coverage.coversAccessBodyB`
+# states the obligation over `RevL.Syntax.Body`: every scope a body induces is
+# opened, as many statements of it visited as the scope declares, and every
+# declared parameter seeded
+# into the scope's own environment. This section is the corpus half.
+#
+# THE TWO SIDES ARE INDEPENDENT OBSERVATIONS.
+#
+#   G1B <file> <comp> <stmts>
+#       The component body's ACTIVATION, as the PARSE sees it: how many
+#       statements the activation declares. `0` means the body has no
+#       activation scope at all, which `Body.scopes` reads as no scope. Unlike
+#       the G9 `GB` row, every non-provide statement counts: the lowering
+#       walk dispatches `handoff`/`route` statements too, so it visits them
+#       and has to be compared against a body that includes them.
+#
+#   G1P <file> <comp> <key> <method> <stmts> <params>
+#       One provide method: the number of statements its body declares and
+#       its declared parameter NAMES, comma-joined (empty string for none).
+#       Names only, no qualifiers: for G1 every declared parameter is a local
+#       of ITS OWN scope whatever origin it carries, which is exactly the
+#       per-scope fact a component-wide classification cannot express.
+#
+#   G1W <file> <comp> <scope> <stmts> <params>
+#       One scope the shipped checker's lowering ACTUALLY visited, recorded
+#       while `compile_files` ran: the scope's label (`activation` or
+#       `<provide key>.<method>`), how many of the scope's TOP-LEVEL
+#       statements the lowering loop REACHED (recorded at the loop head,
+#       before dispatch, so a dispatch that skips a reached statement is not
+#       seen), and the parameter names it seeded into the scope's own
+#       environment when it opened it. The rows are in `Body.scopes` order:
+#       the activation scope first when it was visited, then the provide
+#       scopes in the order the walk opened them. The checker accepts an
+#       `emit` or an `if` after a `provide` block and then opens the provide
+#       scope first, so the activation scope is moved to the front; nothing
+#       else is reordered.
+#
+#       Statements inside an `if`/`while`/`for` body are lowered by the
+#       scope's own recursion and are NOT counted a second time: the count is
+#       per scope, at the granularity of the flat `Stmt` list `Body.scopes`
+#       carries. That is the same subject the G9 row counts, and the
+#       limitation is stated in `RevL.G1Coverage`'s docstring.
+#
+#   G1C <file> <comp> <scope> coverage=ok|fail
+#       The oracle's OUTPUT, not an export row: `RevLOracle.g1covVerdicts`
+#       prints `Walked.matches` per scope over `G1B`/`G1P`/`G1W`, out to the
+#       longer of the two lists, so a walk that opened FEWER scopes than the
+#       body still produces a NAMED `fail` for the missing one. That is the
+#       per-scope projection of `coversAccessBodyB`, not the whole-walk Bool.
+#
+#   G1M <kind> <file> <comp> <walk>
+#       The recorded walk (`as-walked`) and its four shortenings (`drop`,
+#       `bump`, `strip`, `extra`, `_g1_shortenings`), one row each, the walk
+#       as `label|count|params` joined by `;`. The oracle answers each with
+#       `G1CM <kind> <file> <comp> covers=ok|fail`, the whole-walk
+#       `RevLOracle.accessCoverageRowB` the bridge theorem is about, and the
+#       ratchet requires `ok` on a recorded walk and `fail` under each
+#       shortening from the LEAN side, not only from the Python one.
+#
+# THE PRIVATE SEAM THIS PINS. The checker has no separate access-walk function
+# to wrap the way the G9 row wraps `taint._walk_component_methods`: the walk
+# IS `_lower_component`'s `_dispatch_action` and `_lower_provide`'s statement
+# loop, which call `lower._note_access_visit` / `lower._note_access_scope`
+# while a log is installed. The recorder below installs that log for ONE
+# `compile_files` call and reads it back, so a moved or renamed call site
+# leaves the log short; that is the harness's OWN blind spot, filed under
+# `missed-G1-coverage-observation` and never as a coverage disagreement.
+#
+# WHAT THIS ROW IS NOT. It is not the rule (`RevL.G1Access`, the `G1` verdict)
+# and not yet the per-scope ROOT classification: the exporter still classifies
+# a root as local, callable, import, host family or constructor component-wide
+# (the issue's second slice). The parameter conjunct is that slice's observable
+# precondition, not the slice itself. It is also not a proof about Python: no
+# Lean theorem can be, and the theorem's docstring says so.
+
+#: One component's coverage obligation as the export carries it:
+#: `rel -> [(component, body scopes, walk scopes)]`, each scope a
+#: `(label, statement count, [param name, ...])` triple. Read by
+#: `g1coverage_coverage`.
+_G1_COVERAGE_ROWS: dict = {}
+
+#: How the observation pass classified the corpus. Read by
+#: `g1coverage_coverage` so a corpus that stopped being OBSERVED fails the
+#: ratchet instead of passing it vacuously.
+_G1_COVERAGE_CENSUS: dict = {}
+
+#: Files where the parse says a component has scopes and the recorder captured
+#: NONE of them: the harness's own blind spot, bucketed as
+#: `missed-G1-coverage-observation` and never as `missed-G1-coverage`.
+_G1_UNOBSERVED: dict = {}
+
+#: Files whose walk covers their bodies, filled by `checker_alignment` and
+#: printed as a second axis (a coverage agreement is not a bucket: the chain
+#: above already gives every file one).
+_G1_COVERED: list = []
+
+
+def g1_body_scopes(rel: str, prog) -> tuple[dict, list[str]]:
+    """The scopes of every component body in `prog`, as the PARSE sees them:
+    `{component: [(label, stmts, [param name, ...])]}` in
+    `RevL.Syntax.Body.scopes` order, the activation first and only when it
+    has a statement, then one scope per provide method, in declaration order.
+
+    Independent of the walk: nothing here reads the checker's output, so the
+    two sides of the comparison can only agree by the checker actually
+    lowering the body."""
+    out: dict = {}
+    problems: list[str] = []
+    for c in prog.components:
+        if not isinstance(c, ComponentDecl):
+            continue
+        scopes: list = []
+        act = [s for s in c.body if not isinstance(s, ProvideStmt)]
+        if act:
+            scopes.append(("activation", len(act), []))
+        for stmt in c.body:
+            if not isinstance(stmt, ProvideStmt):
+                continue
+            for m in stmt.methods:
+                scopes.append((f"{stmt.key}.{m.name}", len(m.body or []),
+                               list(m.params or [])))
+        labels = [s[0] for s in scopes]
+        if len(set(labels)) != len(labels):
+            problems.append(
+                f"{rel}/{c.name}: scopes {labels} are not distinct, so a "
+                "per-scope verdict could not name one")
+            continue
+        out[c.name] = scopes
+    return out, problems
+
+
+@contextlib.contextmanager
+def _access_observation():
+    """Install the checker's access-walk log for one compile.
+
+    Both the log and the module attribute are restored on the way out,
+    including when the compile refuses. `_ACCESS_WALK` is None in production,
+    so the only thing this context manager changes is the duration of ONE
+    `compile_files` call."""
+    saved = lower._ACCESS_WALK
+    log: list = []
+    lower._ACCESS_WALK = log
+    try:
+        yield log
+    finally:
+        lower._ACCESS_WALK = saved
+
+
+def _access_walk_scopes(observed: dict) -> list:
+    """The walk's scopes for one component as `(label, statement count,
+    parameter names)` triples, in the order `Body.scopes` defines: the
+    activation scope first when the walk visited an activation statement,
+    then the provide scopes in the order the checker opened them.
+
+    The checker's own opening order is NOT the model's order on every
+    admitted body. It refuses an `effect`, a `let`-effect or a `timer` after a
+    `provide` block, but it accepts an `emit` or an `if` there, and the
+    lowering loop then opens the provide scope before it visits that
+    activation statement. Comparing that raw order would print `fail` on both
+    scopes of a correct walk. Moving the activation scope to the front is the
+    one reordering applied: it is the order the model defines, and the
+    provide scopes keep the order the checker opened them in, so the label
+    conjunct still reads them as walked."""
+    act = [("activation", v["stmts"], list(v["params"]))
+           for label, v in observed.items() if label == "activation"]
+    rest = [(label, v["stmts"], list(v["params"]))
+            for label, v in observed.items() if label != "activation"]
+    return act + rest
+
+
+def g1coverage_rows(rel: str, prog) -> list[str]:
+    """The `G1B`/`G1P`/`G1W` rows of one modeled file (issue #2744).
+
+    `G1B`/`G1P` come from the parse; `G1W` from a real `compile_files` run
+    with the lowering walk's log installed. Also fills `_G1_COVERAGE_ROWS`
+    (the per-component comparison the ratchet re-runs under shortening) and
+    `_G1_COVERAGE_CENSUS`/`_G1_UNOBSERVED`.
+
+    A file the checker REFUSES emits no row: the walk that would have been
+    observed did not complete, so the row has no subject. That is counted,
+    not dropped, and it is NOT a coverage failure."""
+    body, problems = g1_body_scopes(rel, prog)
+    problems = [f"{rel}: {p}" for p in problems]
+    if not body:
+        return []
+    with _access_observation() as log:
+        try:
+            compile_files([str(REPO / rel)])
+        except RevlError:
+            _G1_COVERAGE_CENSUS["refused"] = (
+                _G1_COVERAGE_CENSUS.get("refused", 0) + 1)
+            return []
+    _G1_COVERAGE_CENSUS["checked"] = (
+        _G1_COVERAGE_CENSUS.get("checked", 0) + 1)
+    walk: dict = {}
+    for kind, comp, scope, params in log:
+        if comp not in body:
+            # a component the parse does not carry (a `use`d module's or a
+            # name this file never declared): not this row's subject
+            continue
+        if kind == "scope":
+            _G1_COVERAGE_CENSUS["scope_opens"] = (
+                _G1_COVERAGE_CENSUS.get("scope_opens", 0) + 1)
+        elif scope == "activation":
+            _G1_COVERAGE_CENSUS["activation_visits"] = (
+                _G1_COVERAGE_CENSUS.get("activation_visits", 0) + 1)
+        entry = walk.setdefault(comp, {})
+        if kind == "scope":
+            entry.setdefault(scope, {"stmts": 0, "params": list(params)})
+        else:
+            cur = entry.setdefault(scope, {"stmts": 0, "params": []})
+            cur["stmts"] += 1
+    if not any(walk.get(comp) for comp in body):
+        # The checker accepted the file and the lowering walk left no scope
+        # at all: the instrument did not fire, not the checker skipping.
+        _G1_COVERAGE_CENSUS["no_walk"] = (
+            _G1_COVERAGE_CENSUS.get("no_walk", 0) + 1)
+        if any(scopes for scopes in body.values()):
+            _G1_UNOBSERVED[rel] = (
+                "the parse gives the file's components scopes and the "
+                "lowering recorder captured none")
+        return []
+    _G1_COVERAGE_CENSUS["active"] = (
+        _G1_COVERAGE_CENSUS.get("active", 0) + 1)
+    _G1_COVERAGE_CENSUS["scopes"] = _G1_COVERAGE_CENSUS.get("scopes", 0) + sum(
+        len(v) for v in walk.values())
+
+    rows: list[str] = []
+    per_file: list = []
+    for comp in body:
+        scopes = body[comp]
+        observed = walk.get(comp, {})
+        if scopes and not observed:
+            _G1_UNOBSERVED[rel] = (
+                f"the parse gives {comp} {len(scopes)} scope(s) and the "
+                "lowering recorder captured none")
+        act = next((n for lb, n, _p in scopes if lb == "activation"), 0)
+        rows.append("\t".join(["G1B", rel, comp, str(act)]))
+        for label, n, params in scopes:
+            if label == "activation":
+                continue
+            key, _, method = label.partition(".")
+            rows.append("\t".join(["G1P", rel, comp, key, method, str(n),
+                                   ",".join(params)]))
+        ordered = _access_walk_scopes(observed)
+        for label, n, params in ordered:
+            rows.append("\t".join(["G1W", rel, comp, label, str(n),
+                                   ",".join(params)]))
+        if ordered:
+            # the same walk, as recorded and under each shortening, for the
+            # Lean oracle to decide with `accessCoverageRowB` (the ratchet
+            # requires the Lean verdict to flip, not only the Python one)
+            for kind, mutated in _g1_shortenings(ordered):
+                rows.append("\t".join(["G1M", kind, rel, comp,
+                                       _g1_walk_field(mutated)]))
+        per_file.append((comp, scopes, ordered))
+    _G1_COVERAGE_ROWS[rel] = per_file
+    _G1_COVERAGE_CENSUS["components"] = (
+        _G1_COVERAGE_CENSUS.get("components", 0) + len(per_file))
+    _G1_COVERAGE_CENSUS.setdefault("findings", []).extend(problems)
+    return rows
+
+
+def _g1_covers(body: list, walk: list) -> list[tuple[str, str]]:
+    """`RevL.G1Coverage.coversAccessB` at the carried columns, respelled in
+    Python so the reference's verdict is an INDEPENDENT recomputation of the
+    three conjuncts the theorem names, label, statement count and declared
+    parameters, out to the longer of the two lists, so a walk that opened
+    FEWER scopes still yields a named `fail` for the missing one."""
+    out: list[tuple[str, str]] = []
+    for i in range(max(len(body), len(walk))):
+        s = body[i] if i < len(body) else None
+        w = walk[i] if i < len(walk) else None
+        label = (s[0] if s is not None else (w[0] if w is not None else ""))
+        ok = (s is not None and w is not None and w[0] == s[0]
+              and w[1] == s[1] and w[2] == s[2])
+        out.append((label, "ok" if ok else "fail"))
+    return out
+
+
+#: The kinds of `G1M` row, in export order: the walk as recorded (the
+#: positive control, the Lean oracle must print `ok` on it) and its four
+#: shortenings (each must make the Lean oracle print `fail` somewhere).
+G1_SHORTENINGS = ("as-walked", "drop", "bump", "strip", "extra")
+
+
+def _g1_shortenings(walk: list) -> list[tuple[str, list]]:
+    """The recorded walk and its four shortenings, `(kind, walk)` in
+    `G1_SHORTENINGS` order: drop the first scope, bump every visited count,
+    strip every scope's last parameter, add a scope the body does not have.
+    ONE definition, so the Python ratchet and the `G1M` rows the Lean oracle
+    decides mutate the same walk the same way."""
+    return [
+        ("as-walked", list(walk)),
+        ("drop", walk[1:]),
+        ("bump", [(lb, n + 1, p) for lb, n, p in walk]),
+        ("strip", [(lb, n, p[:-1]) for lb, n, p in walk]),
+        ("extra", walk + [("activation", 1, [])]),
+    ]
+
+
+def _g1_walk_field(walk: list) -> str:
+    """One walk as a single `G1M` column: `label|count|params` per scope,
+    `;`-joined, parameters `,`-joined, the empty walk the empty column. A
+    label is `key.method` and a key may be namespaced (`acme::greeter`), so
+    `:` is NOT a safe separator; `|` and `;` are checked rather than assumed
+    absent, and a label or parameter carrying one stops the run."""
+    for lb, _n, ps in walk:
+        for part in (lb, *ps):
+            if "|" in part or ";" in part or (part != lb and "," in part):
+                raise SystemExit(
+                    f"differential oracle: G1 walk label or parameter {part!r} "
+                    "carries a G1M separator")
+    return ";".join(f"{lb}|{n}|{','.join(p)}" for lb, n, p in walk)
+
+
+def _g1_lean_mutant_verdicts(formal_text: str) -> dict:
+    """The Lean oracle's `G1CM <kind> <file> <comp> covers=ok|fail` rows:
+    `RevLOracle.accessCoverageRowB`, the whole-walk Bool the bridge theorem
+    is about, over each `G1M` row."""
+    out: dict = {}
+    for line in formal_text.splitlines():
+        parts = line.split("\t")
+        if parts[0] == "G1CM" and len(parts) == 5:
+            out[(parts[1], parts[2], parts[3])] = parts[4].split("=", 1)[1]
+    return out
+
+
+def _g1_lean_findings(formal_text: str) -> list[str]:
+    """The Lean half of the ratchet: every `G1M` row the export carried got
+    a `G1CM` verdict, that verdict is the Python whole-walk verdict, the
+    as-recorded walk prints `ok` somewhere and each shortening prints `fail`
+    somewhere. An oracle that printed a constant fails here."""
+    got = _g1_lean_mutant_verdicts(formal_text)
+    findings: list[str] = []
+    missing: list = []
+    differ: list = []
+    oks = {k: 0 for k in G1_SHORTENINGS}
+    fails = {k: 0 for k in G1_SHORTENINGS}
+    for rel, per_file in sorted(_G1_COVERAGE_ROWS.items()):
+        for comp, body, walk in per_file:
+            if not walk:
+                continue
+            for kind, mutated in _g1_shortenings(walk):
+                want = ("ok" if all(v == "ok" for _lb, v
+                                    in _g1_covers(body, mutated)) else "fail")
+                lean = got.get((kind, rel, comp))
+                if lean is None:
+                    missing.append((kind, rel, comp))
+                    continue
+                if lean != want:
+                    differ.append((kind, rel, comp, want, lean))
+                (oks if lean == "ok" else fails)[kind] += 1
+    if missing:
+        findings.append(
+            f"g1 coverage (Lean): {len(missing)} G1M row(s) got no G1CM "
+            f"verdict from the oracle, e.g. {missing[:3]}")
+    if differ:
+        findings.append(
+            f"g1 coverage (Lean): {len(differ)} G1CM verdict(s) differ from "
+            f"the Python whole-walk verdict (kind, file, comp, python, lean), "
+            f"e.g. {differ[:3]}")
+    if not oks["as-walked"]:
+        findings.append(
+            "g1 coverage (Lean): the oracle printed `ok` on no recorded walk, "
+            "so its `fail` under the shortenings proves nothing")
+    for kind in G1_SHORTENINGS[1:]:
+        if not fails[kind]:
+            findings.append(
+                f"g1 coverage (Lean): the {kind!r} shortening makes the Lean "
+                f"oracle print `fail` on no walk, so the printed verdict does "
+                f"not read what that shortening changes")
+    if not findings:
+        print(f"g1 coverage (Lean): {sum(oks.values()) + sum(fails.values())} "
+              f"G1M walks decided by `accessCoverageRowB`, "
+              f"{oks['as-walked']} recorded walks ok, fail under "
+              + ", ".join(f"{k} {fails[k]}" for k in G1_SHORTENINGS[1:]))
+    return findings
+
+
+def _g1_params(field: str) -> list[str]:
+    """One carried comma-joined parameter-NUMBER column as a list. The empty
+    string is the empty list; an empty member stops the run rather than being
+    dropped, so a malformed row cannot silently compare as fewer parameters."""
+    if not field:
+        return []
+    out: list[str] = []
+    for member in field.split(","):
+        if not member:
+            raise SystemExit(
+                f"differential oracle: malformed G1 coverage parameter "
+                f"{field!r}")
+        out.append(member)
+    return out
+
+
+def g1coverage_coverage(formal_text: str | None = None) -> list[str]:
+    """The non-vacuity ratchet for the `G1B`/`G1P`/`G1W`/`G1C` rows
+    (issue #2744).
+
+    COVERAGE OF THE ACCESS WALK, which is the half the `G1` verdict cannot
+    state. The ratchet has to fail in each of these ways:
+
+      * the corpus must EXERCISE the row, at least one component with a
+        non-empty activation scope, at least one provide scope, and at least
+        one provide scope declaring a parameter, and the observation must
+        have RUN, so a corpus that stopped reaching the walk fails here
+        instead of passing vacuously;
+      * the observation must have SUCCEEDED for every component the parse
+        says has scopes: a component with scopes and no recorded visit is
+        `missed-G1-coverage-observation`, this harness's own blind spot; and
+      * the verdict must FLIP under each of four SHORTENINGS of the recorded
+        walk, drop a scope, bump a count, strip a parameter, and add a scope
+        the body does not have. `RevL.G1Coverage` proves each shortening is a
+        distinct way to fail; this is the corpus half, and a row that
+        returned a constant fails all four. Given the oracle's output
+        (`formal_text`), the same four shortenings, exported as `G1M` rows,
+        must also make the LEAN oracle's `accessCoverageRowB` print `fail`,
+        and the walk as recorded must make it print `ok`, so an oracle that
+        printed a constant fails too (`_g1_lean_findings`).
+
+    A verdict that comes out `fail` on the corpus, the walk genuinely having
+    skipped a scope, is NOT reported here: it is `checker_alignment`'s
+    `missed-G1-coverage` bucket. This ratchet is evidence the row BITES; the
+    bucket is the row's verdict.
+
+    Returns findings, treated as gate failures."""
+    findings = [f"g1 coverage observation: {rel}: {why}"
+                for rel, why in sorted(_G1_UNOBSERVED.items())]
+    findings.extend(f"g1 coverage: {p}"
+                    for p in _G1_COVERAGE_CENSUS.get("findings", []))
+    if not _G1_COVERAGE_ROWS:
+        findings.append("g1 coverage: no G1B/G1P/G1W rows at all, the row "
+                        "would decide nothing and agree vacuously")
+        return findings
+    if not _G1_COVERAGE_CENSUS.get("active"):
+        findings.append(
+            "g1 coverage: the observation ran over no ACTIVE file, the "
+            "lowering recorder captured nothing, so the row is its own blind "
+            "spot")
+        return findings
+    if not _G1_COVERAGE_CENSUS.get("scopes"):
+        findings.append(
+            "g1 coverage: the observation recorded no SCOPE at all, the "
+            "`lower._note_access_visit` seam this pins did not fire, so a "
+            "`fail` row would be reporting a coverage failure that is really "
+            "an instrument failure")
+        return findings
+    any_activation = any(
+        any(lb == "activation" for lb, _n, _p in body)
+        for per_file in _G1_COVERAGE_ROWS.values()
+        for _c, body, _w in per_file)
+    any_provide = any(
+        any(lb != "activation" for lb, _n, _p in body)
+        for per_file in _G1_COVERAGE_ROWS.values()
+        for _c, body, _w in per_file)
+    if any_activation and not _G1_COVERAGE_CENSUS.get("activation_visits"):
+        findings.append(
+            "g1 coverage: components declare activation statements but the "
+            "`lower._note_access_visit` activation call site recorded none, "
+            "an instrument failure, not a walk that skipped them")
+    if any_provide and not _G1_COVERAGE_CENSUS.get("scope_opens"):
+        findings.append(
+            "g1 coverage: components declare provide scopes but the "
+            "`lower._note_access_scope` call site recorded none, an "
+            "instrument failure, not a walk that skipped them")
+    acts = provs = params = 0
+    drop_scope = bump = strip = extra = 0
+    for rel, per_file in sorted(_G1_COVERAGE_ROWS.items()):
+        for comp, body, walk in per_file:
+            if any(lb == "activation" for lb, _n, _p in body):
+                acts += 1
+            if any(lb != "activation" for lb, _n, _p in body):
+                provs += 1
+            if any(p for _lb, _n, ps in body for p in ps):
+                params += 1
+            if not walk:
+                continue
+            short = dict(_g1_shortenings(walk))
+            if _g1_covers(body, short["drop"]) != _g1_covers(body, walk):
+                drop_scope += 1
+            if _g1_covers(body, short["bump"]) != _g1_covers(body, walk):
+                bump += 1
+            if _g1_covers(body, short["strip"]) != _g1_covers(body, walk):
+                strip += 1
+            if _g1_covers(body, short["extra"]) != _g1_covers(body, walk):
+                extra += 1
+    if not acts:
+        findings.append(
+            "g1 coverage: no component in the corpus has a non-empty "
+            "activation scope, so the row never decides an activation walk")
+    if not provs:
+        findings.append(
+            "g1 coverage: no component in the corpus has a provide scope, so "
+            "the row never decides a receiver body")
+    if not params:
+        findings.append(
+            "g1 coverage: no provide scope in the corpus declares a "
+            "parameter, so the row never decides the per-scope parameter "
+            "observation")
+    if not drop_scope:
+        findings.append(
+            "g1 coverage: dropping a scope from every recorded walk changes "
+            "no verdict, the row does not read the scope list")
+    if not bump:
+        findings.append(
+            "g1 coverage: bumping a visited-statement count changes no "
+            "verdict, the row does not read the count")
+    if not strip:
+        findings.append(
+            "g1 coverage: stripping a parameter changes no verdict, the row "
+            "does not read the parameters")
+    if not extra:
+        findings.append(
+            "g1 coverage: adding a scope the body does not have changes no "
+            "verdict, the row does not read the label list")
+    if formal_text is not None:
+        findings.extend(_g1_lean_findings(formal_text))
+    if not findings:
+        print(f"g1 coverage: {len(_G1_COVERAGE_ROWS)} files over "
+              f"{_G1_COVERAGE_CENSUS['components']} components "
+              f"({acts} with an activation scope, {provs} with a provide "
+              f"scope, {params} declaring a parameter), observation "
+              f"active={_G1_COVERAGE_CENSUS['active']} "
+              f"refused={_G1_COVERAGE_CENSUS.get('refused', 0)} "
+              f"no-walk={_G1_COVERAGE_CENSUS.get('no_walk', 0)}, each verdict "
+              "flipping under dropping a scope, bumping a count, stripping a "
+              "parameter and adding a scope, coverage of the checker's "
+              "lowering walk ON THE CORPUS")
+    return findings
+
+
 # ------------------------------------ binding uniqueness (issue #1812)
 #
 # The checker's G6 `binding` refusal (`Env.bind_local` in the activation body,
@@ -4354,6 +4892,7 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
         tsv.extend(council_rows(rel, prog))
         tsv.extend(g9_rows(rel))
         tsv.extend(g9coverage_rows(rel, prog))
+        tsv.extend(g1coverage_rows(rel, prog))
         tsv.extend(retain_rows(rel))
         tsv.extend(g4inverse_rows(rel, prog))
         tsv.extend(a5_rows(rel, prog))
@@ -6201,7 +6740,11 @@ class Verdicts(NamedTuple):
     REPORTS under `G4`/`reversibility`, issue #2114), and `gc` GC rows (G9
     coverage: the walk the checker PERFORMED visits every statement of the
     body the parse enumerates and seeds every origin-carrying parameter — the
-    obligation `RevL.G9Coverage.coversBodyB` states, issue #2108), and `ev`
+    obligation `RevL.G9Coverage.coversBodyB` states, issue #2108), and `g1cov`
+    G1C rows (G1 declared-access coverage: the lowering walk the checker
+    PERFORMED visits as many statements of each scope as the body the parse
+    enumerates declares, and seeds every declared parameter of each scope, the obligation
+    `RevL.G1Coverage.coversAccessBodyB` states, issue #2744), and `ev`
     EV rows (G4 emission value: an emission is reached only by a call, never
     as a function value, issues #2842 and #2834)."""
     files: dict[str, tuple[str, str, str]]
@@ -6236,6 +6779,7 @@ class Verdicts(NamedTuple):
     sw: dict[tuple[str, str, str], str]
     a5: dict[tuple[str, str, str], str]
     gc: dict[tuple[str, str, str], str]
+    g1cov: dict[tuple[str, str, str], str]
     ev: dict[str, str]
 
     def total(self) -> int:
@@ -6254,6 +6798,7 @@ class Verdicts(NamedTuple):
                 + len(self.councils) + len(self.g9) + len(self.retain)
                 + len(self.inv)
                 + len(self.sw) + len(self.a5) + len(self.gc)
+                + len(self.g1cov)
                 + len(self.ev))
 
 
@@ -6298,6 +6843,7 @@ def parse_verdicts(text: str) -> Verdicts:
     sw: dict[tuple[str, str, str], str] = {}
     a5: dict[tuple[str, str, str], str] = {}
     gc: dict[tuple[str, str, str], str] = {}
+    g1cov: dict[tuple[str, str, str], str] = {}
     ev: dict[str, str] = {}
 
     for line in text.splitlines():
@@ -6460,13 +7006,26 @@ def parse_verdicts(text: str) -> Verdicts:
             # did not visit a statement the body declares), which is what
             # explains the two historical walk bugs; `ok` is coverage HELD.
             gc[(parts[1], parts[2], parts[3])] = parts[4].split("=", 1)[1]
+        elif parts[0] == "G1C" and len(parts) == 5:
+            # G1 coverage (issue #2744): (file, component, scope) -> ok|fail,
+            # the projection of `coversAccessBodyB` per scope, as `GC` is for
+            # G9. `fail` is coverage VIOLATED: the lowering walk did not visit
+            # as many statements as a scope the body declares, or seeded a
+            # different parameter set than that scope declares.
+            g1cov[(parts[1], parts[2], parts[3])] = parts[4].split("=", 1)[1]
+        elif parts[0] == "G1CM" and len(parts) == 5:
+            # G1 coverage under a shortening (issue #2744): not a corpus
+            # verdict, the Lean half of `g1coverage_coverage`'s ratchet, which
+            # reads these rows from the oracle's output itself.
+            continue
         else:
             raise SystemExit(f"differential oracle: malformed verdict row {line!r}")
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
                     recoveries, confinements, g8surface, g5reg, a9, configs,
                     a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
-            places, model_reach, councils, g9, retain, inv, sw, a5, gc, ev)
+            places, model_reach, councils, g9, retain, inv, sw, a5, gc, g1cov,
+            ev)
 
 
 
@@ -6883,6 +7442,44 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
                                          gc_walks.get(key, [])):
             gc[(rel, comp, label)] = verdict
 
+    # G1C rows: declared-access coverage (issue #2744), the reference's own
+    # verdict, recomputed independently from the three export rows in Python.
+    # `G1B`/`G1P` are the body as the PARSE sees it; `G1W` is the lowering walk
+    # the checker PERFORMED. Same projection as GC: per scope, out to the
+    # longer of the two lists, so a walk that opened FEWER scopes still yields
+    # a named `fail` for the missing one.
+    g1cov: dict[tuple[str, str, str], str] = {}
+    g1_bodies: dict[tuple[str, str], list] = {}
+    g1_walks: dict[tuple[str, str], list] = {}
+    g1_order: list[tuple[str, str]] = []
+    for r in rows:
+        if not r:
+            continue
+        if r[0] == "G1B" and len(r) == 4:
+            key = (r[1], r[2])
+            if key not in g1_order:
+                g1_order.append(key)
+            scopes = g1_bodies.setdefault(key, [])
+            if int(r[3]):
+                scopes.append(("activation", int(r[3]), []))
+        elif r[0] == "G1P" and len(r) == 7:
+            key = (r[1], r[2])
+            if key not in g1_order:
+                g1_order.append(key)
+            g1_bodies.setdefault(key, []).append(
+                (f"{r[3]}.{r[4]}", int(r[5]), _g1_params(r[6])))
+        elif r[0] == "G1W" and len(r) == 6:
+            key = (r[1], r[2])
+            if key not in g1_order:
+                g1_order.append(key)
+            g1_walks.setdefault(key, []).append(
+                (r[3], int(r[4]), _g1_params(r[5])))
+    for key in g1_order:
+        rel, comp = key
+        for label, verdict in _g1_covers(g1_bodies.get(key, []),
+                                         g1_walks.get(key, [])):
+            g1cov[(rel, comp, label)] = verdict
+
     spawns: dict[tuple[str, str, str], str] = {}
     _ATTENUATION_HALVES.clear()
     for r in srows:
@@ -7233,7 +7830,7 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
                     configs, a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
                     places, model_reach, councils, g9, retain, inv, sw, a5,
-                    gc, ev)
+                    gc, g1cov, ev)
 
 
 #: What the REFERENCE decided for each config field, for the CD row's
@@ -7371,6 +7968,7 @@ FATAL_BUCKETS = ("missed-G1", "missed-G4", "missed-G2", "missed-G5",
                  "missed-G-MODEL-PLACE", "missed-G-COUNCIL-SPLIT", "missed-G9",
                  "missed-G-RETAIN", "missed-G9-coverage",
                  "missed-G9-coverage-observation",
+                 "missed-G1-coverage", "missed-G1-coverage-observation",
                  "formal-strict", "formal-found-other")
 
 
@@ -7480,6 +8078,7 @@ def checker_alignment(file_facts: dict, componentless: list[str],
     _ALIGN_SAMPLES.clear()
     _G5_WITNESS.clear()
     _GC_COVERED.clear()
+    _G1_COVERED.clear()
     g5_resolved = g5_files_the_prog_resolves(tsv)
 
     def record(key: str, rel: str) -> None:
@@ -7833,6 +8432,29 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         elif any(k[0] == rel for k in v.gc):
             _GC_COVERED.append(rel)
 
+        # G1 DECLARED-ACCESS COVERAGE (issue #2744), on the same axis and with
+        # the same split. A `fail` here is the lowering walk having SKIPPED a
+        # scope or a statement the body has (or seeded a scope a different
+        # parameter set than it declares): G1's name resolution never visited
+        # it, so its undeclared reads were never refused. That is fatal on its
+        # own bucket. An UNOBSERVED walk takes the other bucket and never this
+        # one: when the parse gives a component scopes and the recorder
+        # captured none of it, the harness is blind for that whole component,
+        # and folding that into a coverage disagreement would let a fully
+        # broken seam read as a checker regression. The split is only
+        # component-level: a seam that stops firing for ONE call site while the
+        # other still records cannot be told apart from a checker that skipped
+        # that call site, so it lands here as a coverage disagreement; the
+        # ratchet's per-seam census names a wholly dead call site as an
+        # instrument failure. The AGREEMENT is again a second axis, not a
+        # bucket.
+        if rel in _G1_UNOBSERVED:
+            record("missed-G1-coverage-observation", rel)
+        elif any(x == "fail" for k, x in v.g1cov.items() if k[0] == rel):
+            record("missed-G1-coverage", rel)
+        elif any(k[0] == rel for k in v.g1cov):
+            _G1_COVERED.append(rel)
+
     # Files with no composition to model, and files revl refused at parse:
     # named, not omitted. Neither carries a computed verdict, so neither can
     # agree or disagree with the model — but the code the checker gives them
@@ -7916,6 +8538,19 @@ def checker_alignment(file_facts: dict, componentless: list[str],
           f"every scope the bodies have is one the model's walk visits, with "
           f"the statement count and the parameter qualifiers it seeds. The "
           f"two `missed-G9-coverage*` buckets above are the disagreements.")
+
+    # G1 DECLARED-ACCESS COVERAGE (issue #2744), its own line for the same
+    # reason: the two disagreements are buckets above, the agreement is a
+    # count on a second reading and is outside the "files bucketed" total.
+    g1_covered = set(_G1_COVERED)
+    g1_covered_scopes = sum(1 for k in v.g1cov if k[0] in g1_covered)
+    print(f"G1 coverage of the access walk (issue #2744; a second axis over "
+          f"the files above, not a bucket and outside the total): "
+          f"{len(_G1_COVERED)} file(s) over {g1_covered_scopes} scope(s) "
+          f"agree. Every scope the bodies have is one the checker's lowering "
+          f"walk visits, with the statement count and the declared parameters "
+          f"it seeds. The two `missed-G1-coverage*` buckets above are the "
+          f"disagreements.")
 
     print(f"no-manifest ({len(componentless)} files parsed with no component, "
           f"outside the model's fragment):")
@@ -8419,6 +9054,7 @@ ROW_KINDS = (
     ("sw", "SW witnessed site (G4)"),
     ("a5", "A5 compensation"),
     ("gc", "GC walk coverage (G9)"),
+    ("g1cov", "G1C access coverage (G1)"),
     ("ev", "EV emission value (G4)"),
 )
 
@@ -8437,6 +9073,9 @@ ONE_SIDED: dict[str, tuple[str, str]] = {
     "gc": ("refused", "a document the checker refuses completes no walk, so "
            "it has no row; the refusing side is the Lean "
            "coversB_refuses_* theorems"),
+    "g1cov": ("refused", "a document the checker refuses completes no "
+              "lowering walk, so it has no row; the refusing side is the "
+              "Lean coversAccessB_refuses_* theorems"),
 }
 
 
@@ -8571,6 +9210,7 @@ def main() -> int:
             ("g9", ref.g9, formal.g9),
             ("retain", ref.retain, formal.retain),
             ("g9_coverage", ref.gc, formal.gc),
+            ("g1_coverage", ref.g1cov, formal.g1cov),
             ("inv", ref.inv, formal.inv),
             ("sw", ref.sw, formal.sw),
             ("a5", ref.a5, formal.a5),
@@ -8609,6 +9249,7 @@ def main() -> int:
         f"{len(ref.councils)} council tie policies + "
         f"{len(ref.g9)} taint walks + "
         f"{len(ref.gc)} coverage scopes + "
+        f"{len(ref.g1cov)} access-coverage scopes + "
         f"{len(ref.retain)} retention refusals + "
         f"{len(ref.inv)} inverse refusals + "
         f"{len(ref.sw)} witnessed-site refusals) — "
@@ -8635,6 +9276,7 @@ def main() -> int:
     mismatches.extend(council_coverage())
     mismatches.extend(g9_coverage())
     mismatches.extend(g9coverage_coverage())
+    mismatches.extend(g1coverage_coverage(formal_text))
     mismatches.extend(retain_coverage())
     mismatches.extend(g4inverse_coverage())
     mismatches.extend(sw_coverage())
