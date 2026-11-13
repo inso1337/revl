@@ -852,6 +852,14 @@ def _activation_error():
     return ActivationError
 
 
+def _component_config(ir: dict, config: dict, name: str) -> dict:
+    """`run.component_config`: a component's composition row config under the
+    host-supplied table (issue #3484)."""
+    from ..run import component_config  # noqa: PLC0415 — lazy: run imports cordis
+
+    return component_config(ir or {}, config, name)
+
+
 def _capturing_driver_class():
     """`run._Driver`, with its trace captured instead of printed."""
     from ..run import _Driver  # noqa: PLC0415 — lazy: importing run pulls cordis
@@ -4014,7 +4022,7 @@ class Session:
             "componentStates": states,
         }
 
-    async def _plug(self, name: str, module) -> None:
+    async def _plug(self, name: str, module, ir: dict) -> None:
         """Bring one component up from `module`, awaiting an async body exactly
         as `run._Driver._load` does for the whole composition."""
         driver = self._driver
@@ -4023,7 +4031,8 @@ class Session:
             raise SessionError(
                 f"the composition has no component `{name}` to load — the plan "
                 "artifact is inconsistent with its resulting IR")
-        fiber = driver.root.plugin(body, driver.config.get(name, {}))
+        fiber = driver.root.plugin(body,
+                                   _component_config(ir, driver.config, name))
         driver.fibers[name] = fiber
         await driver._flush()
         if fiber.state == driver.FiberState.LOADING:
@@ -4045,7 +4054,7 @@ class Session:
             return {"name": name, "absent": name not in driver.fibers,
                     "state": None, "providedKeys": self._provided_keys()}
         if op["op"] == "load":
-            self._run(self._plug(name, module))
+            self._run(self._plug(name, module, driver.ir))
             fiber = driver.fibers.get(name)
             state = driver.FiberState(fiber.state).name if fiber is not None else None
             return {"name": name, "absent": fiber is None, "state": state,
@@ -4092,7 +4101,7 @@ class Session:
                 # reported through `_restore_entry` like a FAILED fiber.
                 state: str | None = None
                 try:
-                    self._run(self._plug(name, running_module))
+                    self._run(self._plug(name, running_module, running_ir))
                     fiber = driver.fibers.get(name)
                     state = (driver.FiberState(fiber.state).name
                              if fiber is not None else None)
@@ -6063,8 +6072,9 @@ class Session:
         async def _plug() -> None:
             for comp in turn_components:
                 name = comp["name"]
-                fiber = runtime_mod.plug(driver.root, getattr(module, name),
-                                         driver.config.get(name, {}))
+                fiber = runtime_mod.plug(
+                    driver.root, getattr(module, name),
+                    _component_config(driver.ir, driver.config, name))
                 driver.fibers[name] = fiber
                 await driver._flush()
                 if fiber.state == driver.FiberState.LOADING:
