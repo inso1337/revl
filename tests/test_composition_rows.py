@@ -34,6 +34,9 @@ import json
 import sys
 from pathlib import Path
 
+import os
+import pathlib
+
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -618,3 +621,179 @@ def test_the_formatter_keeps_a_row_label_tight(tmp_path):
     doc.write_text(formatted)
     assert resolve_file(str(doc), str(tmp_path)).to_ir() == before
     assert format_source(formatted, str(doc)) == formatted, "idempotent"
+
+
+# ------------------------------------------- a row `from` names a shipped stdlib
+
+STDLIB_SOCKET = """
+composition Web {
+  row @wire from "stdlib/socket.rvl" provides wire
+    config { address: "127.0.0.1", port: 8080, origins: ["http://localhost"] }
+}
+"""
+
+
+def test_row_from_stdlib_resolves_against_the_shipped_stdlib(tmp_path):
+    """Issue #3483: `row ... from "stdlib/socket.rvl"` resolves the way
+    `use "stdlib/..."` does, against the stdlib the compiler ships."""
+    doc = tmp_path / "web.rvl"
+    doc.write_text(STDLIB_SOCKET)
+    table = resolve_file(str(doc), str(tmp_path))
+    (row,) = table.rows
+    assert row.component == "SocketWire"
+    assert row.config["port"] == 8080
+    # the recorded source is the path as written behind a marker, never a
+    # machine path
+    assert row.source == "stdlib:stdlib/socket.rvl"
+    assert not os.path.isabs(row.source)
+
+
+def test_row_from_stdlib_composition_compiles(tmp_path):
+    doc = tmp_path / "web.rvl"
+    doc.write_text(STDLIB_SOCKET)
+    document = compile_composition(str(doc), str(tmp_path))
+    assert [c["name"] for c in document["components"]] == ["SocketWire"]
+    assert document["rows"]["rows"][0]["component"] == "SocketWire"
+
+
+def test_row_from_a_missing_stdlib_path_keeps_the_old_refusal(tmp_path):
+    doc = tmp_path / "web.rvl"
+    doc.write_text(STDLIB_SOCKET.replace("socket.rvl", "nope.rvl"))
+    with pytest.raises(RevlError) as caught:
+        resolve_file(str(doc), str(tmp_path))
+    assert "row `@wire` reads `stdlib/nope.rvl`, which does not exist" \
+        in str(caught.value)
+
+
+def test_row_from_a_local_file_named_like_a_stdlib_path_wins(tmp_path):
+    """Same precedence as `use`: the importer-relative file wins over the
+    shipped stdlib."""
+    (tmp_path / "stdlib").mkdir()
+    (tmp_path / "stdlib" / "socket.rvl").write_text(DB)
+    (tmp_path / "services.rvl").write_text(SERVICES)
+    doc = tmp_path / "web.rvl"
+    doc.write_text("""
+composition Web {
+  use "services.rvl"
+  row @db from "stdlib/socket.rvl" provides db
+    config { url: "x" }
+}
+""")
+    table = resolve_file(str(doc), str(tmp_path))
+    assert table.rows[0].component == "PgDatabase"
+
+
+def test_row_from_stdlib_in_a_subdirectory_ignores_a_project_stdlib_file(tmp_path):
+    """The header is checked against, and the compile reads, ONE file: the
+    shipped stdlib. A `<root>/stdlib/socket.rvl` the composition's own
+    directory does not see must not stand in for it at compile time."""
+    (tmp_path / "services.rvl").write_text(SERVICES)
+    (tmp_path / "stdlib").mkdir()
+    (tmp_path / "stdlib" / "socket.rvl").write_text(DB)  # PgDatabase, a decoy
+    sub = tmp_path / "app"
+    sub.mkdir()
+    doc = sub / "web.rvl"
+    doc.write_text(STDLIB_SOCKET)
+    table = resolve_file(str(doc), str(tmp_path))
+    assert table.rows[0].component == "SocketWire"
+    document = compile_composition(str(doc), str(tmp_path))
+    assert [c["name"] for c in document["components"]] == ["SocketWire"]
+
+
+@pytest.mark.parametrize("spelling", ["stdlib/../db.rvl", "stdlib/./socket.rvl",
+                                      "stdlib//socket.rvl"])
+def test_row_from_a_non_canonical_stdlib_spelling_is_refused(
+        tmp_path, monkeypatch, spelling):
+    """`stdlib/../x` must not climb out of the stdlib base into the project (a
+    search-path base can be the project root) and borrow the shipped verdict."""
+    (tmp_path / "services.rvl").write_text(SERVICES)
+    (tmp_path / "db.rvl").write_text(DB)
+    monkeypatch.setenv("REVL_IMPORT_PATH", str(tmp_path))
+    doc = tmp_path / "sub" / "web.rvl"
+    doc.parent.mkdir()
+    doc.write_text(f"""
+composition Web {{
+  use "../services.rvl"
+  row @db from "{spelling}" provides db
+    config {{ url: "x" }}
+}}
+""")
+    with pytest.raises(RevlError) as caught:
+        resolve_file(str(doc), str(tmp_path))
+    assert f"reads `{spelling}`, which does not exist" in str(caught.value)
+
+
+def test_row_from_stdlib_prefers_import_path_and_keeps_it_ordinary(
+        tmp_path, monkeypatch):
+    """A REVL_IMPORT_PATH hit wins over the shipped stdlib (the `use` order) and
+    is an ordinary file: its source is recorded as a path, not as shipped."""
+    imp = tmp_path / "imp"
+    (imp / "stdlib").mkdir(parents=True)
+    (imp / "stdlib" / "socket.rvl").write_text(DB)
+    (tmp_path / "services.rvl").write_text(SERVICES)
+    (imp / "stdlib" / "services.rvl").write_text(SERVICES)
+    monkeypatch.setenv("REVL_IMPORT_PATH", str(imp))
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "services.rvl").write_text(SERVICES)
+    doc = proj / "web.rvl"
+    doc.write_text("""
+composition Web {
+  use "services.rvl"
+  row @db from "stdlib/socket.rvl" provides db
+    config { url: "x" }
+}
+""")
+    table = resolve_file(str(doc), str(proj))
+    assert table.rows[0].component == "PgDatabase"
+    assert not table.rows[0].source.startswith("stdlib:")
+
+
+def test_a_project_path_cannot_claim_the_shipped_record(tmp_path):
+    """A project file `<root>/stdlib:stdlib/socket.rvl` records as the shipped
+    form, so the header would be checked on it while the compile read the
+    shipped file. Refused instead."""
+    (tmp_path / "services.rvl").write_text(SERVICES)
+    d = tmp_path / "stdlib:stdlib"
+    d.mkdir()
+    (d / "socket.rvl").write_text('use "../services.rvl" { }\n'
+                                  + DB.split("\n", 2)[2])
+    doc = tmp_path / "web.rvl"
+    doc.write_text("""
+composition W {
+  row @db from "stdlib:stdlib/socket.rvl" provides db config { url: "x" }
+}
+""")
+    with pytest.raises(RevlError) as caught:
+        resolve_file(str(doc), str(tmp_path))
+    assert "reserved form" in str(caught.value)
+
+
+def test_a_stdlib_colon_directory_cannot_redirect_to_an_absolute_file(tmp_path):
+    """A directory named `stdlib:` recorded `stdlib:/abs/path`, and joining that
+    remainder dropped the stdlib parent: the compile opened an arbitrary file."""
+    (tmp_path / "services.rvl").write_text(SERVICES)
+    target = tmp_path / "elsewhere" / "other.rvl"
+    target.parent.mkdir()
+    target.write_text("this is not rvl\n")
+    mirror = pathlib.Path(str(tmp_path / "stdlib:") + str(target))
+    mirror.parent.mkdir(parents=True)
+    mirror.write_text(f'use "{os.path.relpath(tmp_path / "services.rvl", mirror.parent)}" {{ }}\n'
+                      + DB.split("\n", 2)[2])
+    rel = os.path.relpath(mirror, tmp_path)
+    doc = tmp_path / "web.rvl"
+    doc.write_text(f"""
+composition W {{
+  row @db from "{rel}" provides db config {{ url: "x" }}
+}}
+""")
+    with pytest.raises(RevlError) as caught:
+        compile_composition(str(doc), str(tmp_path))
+    assert "reserved form" in str(caught.value)
+
+
+def test_at_reads_only_a_canonical_shipped_remainder(tmp_path):
+    from revl.composition import _at
+    for rest in ("/etc/passwd", "stdlib/../x.rvl", "other/x.rvl"):
+        assert _at(str(tmp_path), "stdlib:" + rest) == os.path.join(
+            str(tmp_path), "stdlib:" + rest)
