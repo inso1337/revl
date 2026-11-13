@@ -37,9 +37,10 @@ so writing one is a parse error naming the clauses that do exist.
 from __future__ import annotations
 
 import os
+import posixpath
 from urllib.parse import urlsplit
 
-from ._paths import relpath_or_abs
+from ._paths import relpath_or_abs, stdlib_root
 from .admit_profile import AdmissionProfile
 from .errors import RevlError
 from .lower import _config_default_type
@@ -764,32 +765,46 @@ def _require_pin(truc: str, root: str, doc: str, line: int) -> None:
                  "`sourceHash` is no pin.")
 
 
-def _stdlib_row_source(path: str) -> str | None:
-    """The file a `stdlib/...` row `from` path names in the stdlib this
-    compiler ships, or `None` (issue #3483). The same search path `use` falls
-    back to, after the composition-relative file: `REVL_IMPORT_PATH` entries,
-    then the shipped stdlib's parent. Only a `stdlib/` spelling is tried, and
-    a path that climbs out of its base is not."""
+#: The recorded-source prefix of a row that resolved to the stdlib this
+#: compiler ships (issue #3483). The IR stays machine-independent (the path as
+#: written follows the prefix), and `_at` follows the record instead of
+#: guessing, so a project file at `<root>/stdlib/...` never stands in for it.
+_SHIPPED = "stdlib:"
+
+
+def _stdlib_row_source(path: str) -> tuple[str, bool] | None:
+    """The file a `stdlib/...` row `from` path names, and whether it is in the
+    stdlib this compiler ships, or `None` (issue #3483).
+
+    Tried after the composition-relative file, over the same search path `use`
+    falls back to: `REVL_IMPORT_PATH` entries, then the shipped stdlib's parent.
+    Only a canonical `stdlib/...` spelling is tried: a path with a `..` or `.`
+    part, or any other non-normal form, is refused here so it cannot climb out
+    of the stdlib directory into the project and borrow the shipped verdict.
+    A hit outside the shipped stdlib (a `REVL_IMPORT_PATH` entry) is an ordinary
+    file: the caller keeps the vendored-dir jail and the lock pin for it."""
     from .compiler import _default_search_path  # noqa: PLC0415 - import cycle
 
-    if not path.startswith("stdlib/"):
+    if (not path.startswith("stdlib/") or ".." in path.split("/")
+            or posixpath.normpath(path) != path):
         return None
+    shipped_root = os.path.realpath(str(stdlib_root()))
     for base in _default_search_path():
         candidate = os.path.abspath(os.path.join(base, path))
+        real = os.path.realpath(candidate)
         real_base = os.path.realpath(base)
         if os.path.isfile(candidate) and os.path.commonpath(
-                [os.path.realpath(candidate), real_base]) == real_base:
-            return candidate
+                [real, real_base]) == real_base:
+            return candidate, os.path.commonpath([real, shipped_root]) == shipped_root
     return None
 
 
 def _at(root: str, rel: str) -> str:
-    """The file a recorded row source names: under `root`, or, when no such
-    file is there, the shipped stdlib file a `stdlib/...` source stands for."""
-    path = os.path.join(root, rel)
-    if not os.path.isfile(path):
-        return _stdlib_row_source(rel) or path
-    return path
+    """The file a recorded row source names: the shipped stdlib file for a
+    `_SHIPPED` record, otherwise under `root`."""
+    if rel.startswith(_SHIPPED):
+        return os.path.join(str(stdlib_root().parent), rel[len(_SHIPPED):])
+    return os.path.join(root, rel)
 
 
 def _resolve_row(row: RowDecl, origin: str, doc: str, base: str,
@@ -804,9 +819,10 @@ def _resolve_row(row: RowDecl, origin: str, doc: str, base: str,
     source = os.path.abspath(os.path.join(base, row.path))
     shipped = False
     if not os.path.isfile(source):
-        source = _stdlib_row_source(row.path)
-        shipped = source is not None
-    if source is None:
+        found = _stdlib_row_source(row.path)
+        if found is not None:
+            source, shipped = found
+    if not os.path.isfile(source):
         raise RevlError(
             doc, row.line,
             f"row `@{row.label}` reads `{row.path}`, which does not exist",
@@ -838,9 +854,10 @@ def _resolve_row(row: RowDecl, origin: str, doc: str, base: str,
     if vendored is not None and _vendor_truc_of(base, root) != vendored:
         _require_pin(vendored, root, doc, row.line)
 
-    # A shipped-stdlib row records the path as written (like `use`), so the IR
-    # stays machine-independent; the compile resolves it the same way.
-    rel = row.path if shipped else _relative(source, root)
+    # A row that resolved to the shipped stdlib records the path as written
+    # behind `_SHIPPED`, so the IR stays machine-independent and `_at` follows
+    # the record. A `REVL_IMPORT_PATH` hit is an ordinary file.
+    rel = _SHIPPED + row.path if shipped else _relative(source, root)
     header = _pick_component(row, _headers(source), doc, rel)
     claims, extra = _check_claims(row, header, doc, rel)
     config = _check_config(row, header, doc, rel)

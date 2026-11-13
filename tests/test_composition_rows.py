@@ -34,6 +34,8 @@ import json
 import sys
 from pathlib import Path
 
+import os
+
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -639,15 +641,18 @@ def test_row_from_stdlib_resolves_against_the_shipped_stdlib(tmp_path):
     (row,) = table.rows
     assert row.component == "SocketWire"
     assert row.config["port"] == 8080
-    # the recorded source is the path as written, not a machine path
-    assert row.source == "stdlib/socket.rvl"
+    # the recorded source is the path as written behind a marker, never a
+    # machine path
+    assert row.source == "stdlib:stdlib/socket.rvl"
+    assert not os.path.isabs(row.source)
 
 
 def test_row_from_stdlib_composition_compiles(tmp_path):
     doc = tmp_path / "web.rvl"
     doc.write_text(STDLIB_SOCKET)
     document = compile_composition(str(doc), str(tmp_path))
-    assert document is not None
+    assert [c["name"] for c in document["components"]] == ["SocketWire"]
+    assert document["rows"]["rows"][0]["component"] == "SocketWire"
 
 
 def test_row_from_a_missing_stdlib_path_keeps_the_old_refusal(tmp_path):
@@ -675,3 +680,69 @@ composition Web {
 """)
     table = resolve_file(str(doc), str(tmp_path))
     assert table.rows[0].component == "PgDatabase"
+
+
+def test_row_from_stdlib_in_a_subdirectory_ignores_a_project_stdlib_file(tmp_path):
+    """The header is checked against, and the compile reads, ONE file: the
+    shipped stdlib. A `<root>/stdlib/socket.rvl` the composition's own
+    directory does not see must not stand in for it at compile time."""
+    (tmp_path / "services.rvl").write_text(SERVICES)
+    (tmp_path / "stdlib").mkdir()
+    (tmp_path / "stdlib" / "socket.rvl").write_text(DB)  # PgDatabase, a decoy
+    sub = tmp_path / "app"
+    sub.mkdir()
+    doc = sub / "web.rvl"
+    doc.write_text(STDLIB_SOCKET)
+    table = resolve_file(str(doc), str(tmp_path))
+    assert table.rows[0].component == "SocketWire"
+    document = compile_composition(str(doc), str(tmp_path))
+    assert [c["name"] for c in document["components"]] == ["SocketWire"]
+
+
+@pytest.mark.parametrize("spelling", ["stdlib/../db.rvl", "stdlib/./socket.rvl",
+                                      "stdlib//socket.rvl"])
+def test_row_from_a_non_canonical_stdlib_spelling_is_refused(
+        tmp_path, monkeypatch, spelling):
+    """`stdlib/../x` must not climb out of the stdlib base into the project (a
+    search-path base can be the project root) and borrow the shipped verdict."""
+    (tmp_path / "services.rvl").write_text(SERVICES)
+    (tmp_path / "db.rvl").write_text(DB)
+    monkeypatch.setenv("REVL_IMPORT_PATH", str(tmp_path))
+    doc = tmp_path / "sub" / "web.rvl"
+    doc.parent.mkdir()
+    doc.write_text(f"""
+composition Web {{
+  use "../services.rvl"
+  row @db from "{spelling}" provides db
+    config {{ url: "x" }}
+}}
+""")
+    with pytest.raises(RevlError) as caught:
+        resolve_file(str(doc), str(tmp_path))
+    assert f"reads `{spelling}`, which does not exist" in str(caught.value)
+
+
+def test_row_from_stdlib_prefers_import_path_and_keeps_it_ordinary(
+        tmp_path, monkeypatch):
+    """A REVL_IMPORT_PATH hit wins over the shipped stdlib (the `use` order) and
+    is an ordinary file: its source is recorded as a path, not as shipped."""
+    imp = tmp_path / "imp"
+    (imp / "stdlib").mkdir(parents=True)
+    (imp / "stdlib" / "socket.rvl").write_text(DB)
+    (tmp_path / "services.rvl").write_text(SERVICES)
+    (imp / "stdlib" / "services.rvl").write_text(SERVICES)
+    monkeypatch.setenv("REVL_IMPORT_PATH", str(imp))
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "services.rvl").write_text(SERVICES)
+    doc = proj / "web.rvl"
+    doc.write_text("""
+composition Web {
+  use "services.rvl"
+  row @db from "stdlib/socket.rvl" provides db
+    config { url: "x" }
+}
+""")
+    table = resolve_file(str(doc), str(proj))
+    assert table.rows[0].component == "PgDatabase"
+    assert not table.rows[0].source.startswith("stdlib:")
