@@ -337,3 +337,20 @@ def test_the_committed_ledger_covers_the_real_tree():
     assert report.new_findings == []
     assert {e.get("kind") for e in report.ledger} <= {"missing", "stale"}
     assert all(e["reason"].strip() for e in report.ledger)
+
+
+def test_ci_lint_job_runs_the_checker_advisory():
+    """Issue #2844: the CI lint job runs `--check` and does not fail on it.
+
+    Static, like the other `*_runs_in_ci` pins: it reads the workflow as
+    text. Dropping the step would let a stale anchor land unreported; dropping
+    `continue-on-error` before the ledger is small would red every PR that
+    shifts a cited line. Making the gate fatal is a deliberate edit of both
+    this test and the workflow.
+    """
+    text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8")
+    step = "      - run: python3 tools/check_doc_refs.py --check\n"
+    assert text.count(step) == 1
+    after = text.split(step, 1)[1].splitlines()[0]
+    assert after.strip() == "continue-on-error: true"
