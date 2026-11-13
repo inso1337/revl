@@ -2470,6 +2470,82 @@ def _apply_overlay(overlay: dict, slots, decl, doc) -> None:
                                (3, "<invocation>", "configure")]
 
 
+class _IRConfigField:
+    """One declared config field read back from a compiled component's IR, in
+    the shape `_check_config` reads off a parsed `config` declaration."""
+
+    __slots__ = ("name", "type", "default")
+
+    def __init__(self, field: dict):
+        self.name = field["name"]
+        self.type = field.get("type")
+        self.default = field.get("default")
+
+
+class _IRHeader:
+    """The config half of a component header, built from its IR, so a host
+    table is checked by the same `_check_config` a row's values are."""
+
+    __slots__ = ("name", "config")
+
+    def __init__(self, component: dict):
+        self.name = component["name"]
+        self.config = {f["name"]: _IRConfigField(f)
+                       for f in component.get("config") or []}
+
+
+HOST_LAYER = "<host>"
+
+
+def configure_rows_from_host(document: dict, config: dict | None,
+                             where: str = "<host config>") -> dict:
+    """The admitted `document` with the host-supplied config table folded into
+    its rows, at the invocation overlay's rank (issue #3484, 426 §3.1 level 3).
+
+    A host table for a component a row places is a value change to that row,
+    like `--set`: each field is typed against the component's declared config
+    by `_check_config`, wins over the row's own value, and is recorded in the
+    row's provenance as `(3, "<host>", "configure")`. The rows IR and the
+    manifest's copy of it then say what the component runs with. A table for a
+    component no row places is left to the runtime, as before. Returns
+    `document` itself when nothing changes, otherwise a copy (the caller's
+    document is never mutated)."""
+    table = (document or {}).get("rows") or {}
+    rows = table.get("rows") or []
+    if not config or not rows:
+        return document
+    by_name = {c["name"]: c for c in document.get("components") or []}
+    changed = False
+    out_rows = []
+    for row in rows:
+        supplied = config.get(row.get("component"))
+        component = by_name.get(row.get("component"))
+        if not supplied or component is None:
+            out_rows.append(row)
+            continue
+        merged = {**(row.get("config") or {}), **supplied}
+        decl = RowDecl(label=row.get("label", "?"), path="", claims=[], line=1,
+                       component=row.get("component"),
+                       config=[(n, v, 1) for n, v in merged.items()])
+        checked = _check_config(decl, _IRHeader(component), where,
+                                row.get("source", "?"))
+        new_row = dict(row)
+        new_row["config"] = checked
+        new_row["provenance"] = [
+            *(row.get("provenance")
+              or [{"level": 0, "layer": "<base>", "op": "row"}]),
+            {"level": 3, "layer": HOST_LAYER, "op": "configure"}]
+        out_rows.append(new_row)
+        changed = True
+    if not changed:
+        return document
+    new_table = {**table, "rows": out_rows}
+    out = {**document, "rows": new_table}
+    if isinstance(document.get("manifest"), dict):
+        out["manifest"] = {**document["manifest"], "rows": new_table}
+    return out
+
+
 def sole_composition(program: Program, path: str) -> CompositionDecl:
     """The one composition a document declares, or a refusal naming what it
     found instead."""

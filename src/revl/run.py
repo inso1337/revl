@@ -195,6 +195,38 @@ def _components(ir: dict) -> list[dict]:
     return ir.get("components") or []
 
 
+def component_config(ir: dict, config: dict, name: str) -> dict:
+    """The config a component starts with: its composition row's `config`
+    values (issue #3484), then the host-supplied table for `name` over them.
+
+    A composition document's resolved rows reach the IR as `ir["rows"]`, each
+    already checked against the component's declared config at admission
+    (`composition._check_config`). The row is the composition's own statement
+    of what the component runs with, so it seeds the table and the component's
+    declared defaults fill only what neither the row nor the host names. A
+    field the host supplies (`--config`, `Session.load`'s map) wins over the
+    row's, field by field. An IR with no rows carries no row config, so a plain
+    module compile starts exactly as before."""
+    supplied = config.get(name) or {}
+    rows = [row for row in (ir.get("rows") or {}).get("rows") or []
+            if row.get("component") == name]
+    if len(rows) > 1:
+        # the runtime keys a component by name, so two rows placing one
+        # component cannot each start with their own values; never blend them
+        labels = ", ".join(f"`{row.get('qualified') or row.get('label')}`"
+                           for row in rows)
+        raise RevlError(
+            "<composition>", 0,
+            f"component `{name}` is placed by {len(rows)} rows ({labels}), so "
+            "it has no one row config to start with",
+            hint="place a component by one row; the runtime starts one "
+                 "instance per component name")
+    seeded = (rows[0].get("config") or {}) if rows else {}
+    if not seeded:
+        return supplied
+    return {**seeded, **supplied}
+
+
 # ── item 350: the environment contract (`boot component`) ───────────────────
 #
 # The host must know the port, the auth token, the data dir and the model
@@ -442,7 +474,7 @@ def _required_config_problem(ir: dict, config: dict) -> str | None:
     missing: list[str] = []
     for name in _load_order(ir):
         fields = (by_name.get(name) or {}).get("config") or []
-        supplied = config.get(name) or {}
+        supplied = component_config(ir, config, name)
         for field in fields:
             if field.get("default") is None and field["name"] not in supplied:
                 # item 350: a boot component's fields arrive through `--env`, the
@@ -675,7 +707,7 @@ def _print_plan(ir: dict, config: dict, backend: str) -> None:
         comp = by_name[name]
         requires = ", ".join(comp.get("requires") or {}) or "-"
         provides = ", ".join(comp.get("provides") or {}) or "-"
-        cfg = config.get(name)
+        cfg = component_config(ir, config, name)
         print(f"\ncomponent {name}")
         print(f"  requires: {requires}")
         print(f"  provides: {provides}")
@@ -2008,7 +2040,8 @@ class _Driver:
             # realms. For a component with no placements this is byte-identical to
             # a bare ctx.plugin.
             fiber = self.runtime.plug(
-                self.root, getattr(module, name), self.config.get(name, {}))
+                self.root, getattr(module, name),
+                component_config(ir, self.config, name))
             self.fibers[name] = fiber
             await self._flush()
             # roadmap item 372: DRIVE the deferred activation to completion and
