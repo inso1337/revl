@@ -1,14 +1,13 @@
-# 571: The circuit breaker: three states, one failure definition, and a way back
+# 571: The circuit breaker: a guard on the provision edge, three states, one failure rule
 
 Design note for issue #2710. Design number 571, assigned rather than claimed:
-570 is claimed by PR #3136 on an open branch, and main's highest merged design
-number is 569. A scan of the open pull requests on 2026-11-09 found no claim on
-571.
+570 is on main (`570-action-receipt-chain.md`) and a scan of main and the open
+pull requests on 2026-11-13 found no claim on 571.
 
-Status: this is the first slice the issue asks for. It settles the surface, the
-defaults and the interactions and changes no code. The issue's remaining
-acceptance items (the Python-tier open, close and half-open behaviour, and the
-tests) are slice 2, planned at the end of this note.
+Status: the first slice the issue asks for. It fixes the surface, the hook, the
+state's identity, the failure rule and the interactions, and changes no code.
+The Python-tier behaviour, the docs line and the tests are slice 2, planned at
+the end of this note.
 
 ## The gap
 
@@ -16,415 +15,493 @@ A component that keeps failing keeps being called. Four pieces exist around the
 problem and none of them trips on repeated failure:
 
 - `fault.py` injects one failure at a step and asserts the paradigm's own
-  guarantee (FAILED, inverses newest first, siblings unaffected,
-  [fault-tests.md](../fault-tests.md)). It is a test-time injection, not a
-  runtime policy.
-- The `slo` block measures a windowed success rate and, on a breach, diverts to
-  a declared fallback provider or pauses (`slo.admit_divert`, `slo.pause`,
+  guarantee ([fault-tests.md](../fault-tests.md)). It is test-time injection,
+  not a runtime policy.
+- The `slo` block measures a windowed success rate over activations and, on a
+  breach, diverts to a declared fallback provider, pauses or halts
+  (`slo.admit_divert`, `slo.pause`, `slo.halt`,
   [473-slo-contracts.md](473-slo-contracts.md)). The divert is one-way: nothing
   probes the original provider again.
-- Retries are metered by the monotone retry budget
-  (`lawful_retry.RETRY_BUDGET_KEY`), so a retry storm is impossible; the budget
-  says how many replays remain, not whether the provider is worth replaying to.
+- The retry machinery meters its own loops: the validation retry of a model
+  completion (`validated ... retry N`), the idempotent-emission retry
+  (`runtime.retry_idempotent`) and the peer-pool replay budget
+  (`lawful_retry.RETRY_BUDGET_KEY`). None of them wraps a call to a provided
+  key.
 - The E-Stop latch (`estop.py`, [443-estop.md](443-estop.md)) halts everything,
-  by hand, and is deliberately not reachable from the language (rule E8 of
-  [443-estop-tier-contract.md](443-estop-tier-contract.md)).
+  by hand.
 
 A search of the compiler, stdlib, runtime and docs for circuit breaker,
 half-open, consecutive failures and failure threshold finds nothing that
-applies. This note supplies the missing policy, not a new runtime primitive:
-every mechanism the policy needs already exists.
+applies. The missing piece is a policy over calls to one provider, and the
+runtime has no hook on that path today. This note names the hook.
 
 ## The decision, in one paragraph
 
-A composition may declare a `breaker` block naming one or more of its rows. A
-named row gets a per-row, per-live-generation state machine with three states.
-CLOSED counts consecutive failed CALLS to that row within a window and trips to
-OPEN when the count reaches N. OPEN refuses a call to that row by name, without
-crossing a boundary and without spending a retry budget. After a cooldown, the
-next call moves the breaker to HALF_OPEN and is admitted as the single probe; a
-probe success closes the breaker and resets the count, a probe failure reopens
-it and restarts the cooldown. A failure is a call that raises, classified with
-the same diagnostic vocabulary the runtime already uses for a failed lifecycle,
-so the breaker and the declared `success_rate` cannot disagree about what a
-failure is; they count different populations and are never pooled. Every trip,
-probe admission and close is a recorded decision, so a reader and a replay see
-the same decisions. The breaker is not a latch: no operator action is needed to
-clear it, and it never arms an E-Stop.
+A composition may declare a `breaker` block addressing rows. For each addressed
+row the py runtime installs a GUARD on the object the row's component registers
+for its provided key, so every call to that key from every caller passes the
+guard: a component that requires the key, `Session.call`, and `revl run`. The
+guard is a per-row state machine with three states. CLOSED counts consecutive
+failed calls and trips to OPEN when N consecutive failures span no more than the
+window. OPEN refuses the call by name with a typed `BreakerOpen`, before the
+provider's body runs. After the cooldown the next call is admitted as the single
+HALF_OPEN probe; a probe success closes the breaker, a probe failure reopens it.
+A failure is a call whose provider method raises, with a short, closed list of
+exceptions that are not the provider's fault. The breaker's state belongs to the
+provider's identity, so it survives a swap that leaves the provider unchanged
+and resets when the provider changes. Every decision is traced, the status is
+reported, and an operator can reset a row. A tier that cannot enforce the block
+refuses the composition by name.
+
+## Where the guard runs
+
+### The hook
+
+A call to a provided key is not an emission and it is not a `Session` verb. A
+component that `requires` a key calls the provider's object directly, and
+`Session.call` resolves the same object through `driver._namespace()`. `revl
+run` resolves it through `run.resolve_key`. The one point all of those share is
+the object the providing component registers with `_revl_ctx.set(key, impl)` in
+its emitted `provide` step.
+
+So the hook is a guard around that object, in the style `run._Router` already
+establishes for an interposed provider: a proxy whose `__getattr__` forwards a
+method call and refuses `_`-prefixed names, so cordis's traceable probe passes it
+through unwrapped. `runtime.plug` installs it, for a component whose entry
+carries a `breaker` clause, by presenting the component a context whose `set`
+wraps the value registered under a guarded key. `plug` is already the one entry
+every py activation passes and already hosts an E-Stop check, and a recording
+context wrapper (`replay._RecordingContext`) is the precedent for a context
+wrapper at that level.
+
+A component with no clause is activated exactly as today and its emitted Python
+does not change, so no backend golden moves.
+
+### Why not a Session hook, and why not a seam row
+
+The issue's problem is "a component that keeps failing keeps being called". The
+callers that matter include components calling an injected provider, and `revl
+run` has no `Session`. A guard in `Session.call` would govern only callers
+outside every realm, which is the wrong half.
+
+A `seam` row ([composition-rows.md](../composition-rows.md)) is the language's
+existing interposition, and it is the wrong tool: it is a distinct-key
+forwarder, so the wrapped provider has to be re-keyed in its own source
+("Inserting the wrapper is a source edit to a component the seam author does not
+own"), and the same-key form is the documented hole in `run.py`. A breaker that
+required editing every guarded provider would not be a composition-level policy.
+
+### The call paths, stated
+
+| path | reaches the guard | how |
+|---|---|---|
+| a component calling its injected provider | yes | it holds the registered (guarded) object |
+| `Session.call` and `Session.act` | yes | `driver._namespace()` returns the same object |
+| `revl run` | yes | `run.resolve_key` reads the same registration |
+| a routed key (`run._Router`) | not guarded | the router is not a plugged fiber; a clause on a routed key is refused at compile time |
+| a call served from the session's cache | no | no provider call happens, so nothing crossed |
+
+Slice 2 pins the first three with one test each, and that test is the exit
+criterion for this section: if the guard is not seen on one of them the design
+is wrong, not the test.
+
+### How a provided key maps to a row
+
+The block addresses a row the way `place` and `grant` do (426 section 2.3):
+`@label`, or `key("k")` and `key("k", realm: "r")`. A row's claims are
+`(key, realm)` pairs, and an address that resolves to a row providing more than
+one key guards each of them under the one entry. An address that matches no row
+is refused and the hint lists the rows and keys the composition has.
 
 ## The surface
 
 ### The grammar
 
 ```text
-composition_clause := ... | breaker_block
-breaker_block      := 'breaker' '{' breaker_entry (',' breaker_entry)* '}'
-breaker_entry      := row ':' [ INT ] breaker_qualifier*
-breaker_qualifier  := 'over' duration | 'cooldown' duration
+composition_clause := ... | 'breaker' breaker_block
+breaker_block      := '{' breaker_entry (',' breaker_entry)* '}'
+breaker_entry      := address ':' breaker_setting+
+breaker_setting    := INT | 'over' duration | 'cooldown' duration
+address            := '@' label | 'key' '(' string [',' 'realm' ':' string] ')'
 ```
 
-`breaker` is contextual, recognized only in the clause-head slot beside `row`,
-`slo`, `place`, `grant` and the others, so the word stays an ordinary name
-everywhere else. `over` and `cooldown` are matched by spelling as plain
-identifiers, the same discipline `slo`'s `over`, `min` and `of` keep. The
-duration goes through the same `_duration_literal` as `slo`, `cache ... ttl`
-and `liveness` (`ms`, `s`, `m`, `h`, `d`; a bare number is seconds), so the
-unit is fixed at the surface and cannot be re-read downstream.
+`breaker` is contextual, read only in the clause-head slot beside `row`, `slo`,
+`place` and `grant`. `over` and `cooldown` are matched by spelling, as `slo`'s
+`over`, `min` and `of` are. A bare integer is N. The duration is the one every
+other duration clause uses, `<n>[ms|s|m|h]` with a bare number meaning seconds
+(`parser._duration_literal`, which funnels through `policy._parse_ttl`). There
+is no `d` unit.
 
-At most one block per composition. An unknown row is a refusal that lists the
-rows the composition actually declares. A repeated row in the block is a
-refusal. An entry must write at least one of the threshold, `over` or
-`cooldown`; an entry that writes none is refused rather than silently
-defaulted, so `breaker { db: }` is a typo with an error, not a policy.
+At most one block per composition and one entry per row. An entry writes at
+least one setting; an entry that writes none is refused.
 
 ```revl sketch
 composition storefront {
-  row db from "db.rvl"
-  row cache from "cache.rvl"
+  row @db from "db.rvl" provides db
+  row @cache from "cache.rvl" provides cache
   breaker {
-    db: 5 over 60s cooldown 30s
-    cache: 3 over 2m
+    @db: 5 over 60s cooldown 30s,
+    key("cache"): 3 over 2m
   }
 }
 ```
 
-### Where it attaches, and why not lower
+The block is parsed into `CompositionDecl.breaker`, checked during composition
+admission, and carried on the row table under its own conditional IR key, as
+`slo` is (`RowTable.to_ir`'s conditional `slo` key in `composition.py`). A
+composition with no block emits no `breaker` key, so its document is
+byte-identical to today's, and slice 2 pins that.
 
-On the composition, keyed by row, for the three reasons `slo` attaches there.
-
-Not on the component. A breaker is a statement about the ASSEMBLED system: how
-many failures of this provider the composition is willing to absorb before it
-stops calling it. A component author cannot promise the provider will be
-reachable, and a component does not own the retry budget, the E-Stop latch or
-the trace the decision is recorded in; the composition does.
-
-Not on the service method. A method-level breaker would key on a capability
-rather than a provider, so two rows providing the same service would share a
-counter that one provider's failures did not earn, and a method that never
-crosses would carry a policy that never fires. The row is the composition's
-name for one component plus one provider, which is exactly the unit a breaker
-governs.
-
-Not on the row declaration itself. The row is the provider binding; the breaker
-is a policy over failures of that binding. Keeping it a composition-level block
-means a `site` layer or a `use` can change the provider without silently
-changing the policy, and it follows the `slo` precedent: the block is parsed
-into `CompositionDecl.breaker`, domain-checked during composition admission,
-carried on the row table under its own conditional IR key, and byte-identical
-to the pre-feature document when the block is absent.
-
-The IR carries the entry with units in the key names:
+The IR carries every addressed row with its settings RESOLVED, the defaults
+written in, keyed by row label, with the units in the key names:
 
 ```json
-"breaker": {"db": {"threshold": 5, "overMs": 60000, "cooldownMs": 30000}}
+"breaker": {"db": {"key": "db", "realm": null,
+                   "threshold": 5, "windowMs": 60000, "cooldownMs": 30000}}
 ```
 
-Only the entries that declared an override appear; a default is applied by the
-reader, the same way `slo`'s absent `over` is the whole population. A
-composition with no block emits no `breaker` key.
+Resolved rather than left to a reader, because a tier, the operator's status and
+the provider fingerprint below must all see the number actually in force, and a
+later change to a default must not silently move a deployed policy.
+
+### Where the configuration lives, and who owns it
+
+In the composition, which is the operator's file. The block is read from the
+base composition only, as `slo` is; a `site` layer cannot override it in slice
+2, and that is a stated gap rather than an accident. The operator owns the
+running state through the reset verb below.
 
 ### The defaults
 
-| setting | default when omitted | why |
+| setting | default | why |
 |---|---|---|
-| the block | absent | opt-in; a composition that did not declare it emits the pre-feature document byte for byte |
-| N, the threshold | 5 | the number the issue leaves undefined; small enough to stop a clearly broken provider, large enough not to trip on one retry |
-| the window | 60s | a failure older than a minute does not belong to the same streak; a minute spans a typical backoff-and-redeliver cycle |
-| the cooldown | 30s | half a window: long enough for a provider to recover from a restart, short enough that the way back is not a manual act |
-| probe calls | exactly 1 | one probe, not a ramp; the probe's result is the whole evidence |
-| reset rule | probe success closes and resets the count; probe failure reopens and restarts the cooldown | stated below |
-
-The defaults are the reader's constants, named here so the admission and the
-runtime cannot drift: an omitted value is not written into the IR, it is read
-from this table, and a reader can always tell which number will be used.
+| the block | absent | opt in; absent means byte-identical |
+| N | 5 | small enough to stop a clearly broken provider, large enough not to trip on one bad call |
+| the window | 60s | a streak that took longer than a minute is not one outage |
+| the cooldown | 30s | half the window: time for a restart, short enough that the way back needs no person |
+| probe calls | 1 | one probe, not a ramp |
+| reset rule | a probe success closes and clears the streak; a probe failure reopens and restarts the cooldown | |
 
 ### Compile-time refusals
 
-The block is checked during composition admission, in the same style as the
-`slo` bounds refusal (`composition._check_slo_bounds`, code `G4`, category
-`slo`), under its own category `breaker`:
+Under `G4`, category `breaker`, beside the `slo` refusal:
 
-- an unknown row, with the rows the composition declares listed in the hint;
-- a repeated row;
-- a non-positive threshold or a non-positive duration (a threshold of zero
-  would trip before the first call and a zero cooldown would probe on every
-  call, so neither is a policy);
-- a malformed or duplicated qualifier.
+- an address that matches no row, a repeated row, a second block, an entry that
+  writes nothing, a non-positive N or duration, an unknown setting;
+- a row the guard cannot observe, refused by name with the reason: a `remote`
+  row (its failures are already the row's own `on_failure` decision: a fault
+  withdraws the provider, or comes back in band), a `host` row, a `seam` row, and
+  a key served by a router.
 
-Nothing is checked at compile time about the provider's health, for the same
-reason `slo` cannot predict a latency: the contract is over observed outcomes.
+A breaker that silently did nothing would be the failure this feature exists to
+remove, so none of these is accepted and ignored.
 
 ## The states and the transitions
 
+One window rule: the breaker trips when the N most recent calls are all failures
+and the oldest of those N is no more than the window older than the newest. A
+success clears the streak. A streak that reaches N failures spread over more than
+the window drops its oldest failure and keeps counting, so a slow trickle never
+trips it. Implementation is a queue of at most N failure instants, cleared on
+success.
+
 ```text
-              N failures in the window
-   CLOSED -----------------------------------> OPEN
-     ^                                          |
-     |  probe success            cooldown elapses|
-     |  (reset count)                            v
-     +-------------------------------------- HALF_OPEN
-                  probe failure reopens:
-                  OPEN, cooldown restarts
+          N consecutive failures within the window
+   CLOSED -----------------------------------------> OPEN
+     ^                                                 |
+     | probe succeeds                  cooldown elapsed |
+     |                                                 v
+     +------------------------------------------- HALF_OPEN
+                  probe fails: back to OPEN,
+                  cooldown restarts
 ```
 
-| state | a call | consequence |
+| state | a call | effect on the state |
 |---|---|---|
-| CLOSED | dispatched | a FAILED settle increments the streak; a success resets it; at N the breaker trips |
-| OPEN | refused by name | no crossing, no retry budget spent, not counted as a failure or a success |
-| HALF_OPEN | one probe admitted, all other calls refused | probe success closes; probe failure reopens and restarts the cooldown |
+| CLOSED | dispatched | a failure joins the streak, a success clears it, N within the window trips |
+| OPEN | refused by name, provider body not run | none; a refusal is neither failure nor success |
+| HALF_OPEN | the first arrival is the probe, every other is refused | the probe's outcome settles the state once |
 
-A refusal in OPEN names the row and the state, and says when the next probe is
-due. It is a typed runtime refusal in the shape of `Session._refuse_if_paused`,
-not a generic exception, so a caller can tell "the provider is quarantined" from
-"the call failed".
+A refusal is a typed `BreakerOpen` exception in `runtime.py`, carrying the row,
+the state and the milliseconds until the next probe, and identified by a marker
+attribute rather than class identity, as `TransportFault` is. It is not an
+uncoded `SessionError`: `Session._refuse_if_paused` raises one, which is why a
+caller cannot tell a pause from anything else by code. `diagnostics.classify`
+reads a compile-time `RevlError` and is not involved.
 
-### The failure definition
+## What counts as a failure
 
-The unit a breaker governs is a CALL, because a call is what the caller makes
-and what the breaker refuses. A failure is a call to the named row's provided
-operation that raises after the crossing seam; a success is a call that returns.
-The population is calls, per row, per live generation.
+One rule. A call fails when the provider method raises an `Exception` out of its
+body. Nothing else counts, and there is no second definition anywhere in the
+note.
 
-The CLASSIFICATION is not new. The runtime has one way to say what a failure
-was: the observed `FAILED` settle `metrics._is_failed` reads, and the `RevlError`
-code `metrics._failure_metrics` buckets, with a bare crash left unclassified. A
-provide-method error is not a lifecycle fault today: it propagates to the
-caller and the component stays ACTIVE (see
-[fault-tests.md](../fault-tests.md), section 12). So the per-call outcome is the
-one record the breaker needs that the runtime does not already write. Slice 2
-writes it, and the record carries the same `diagnostics.classify` code the
-lifecycle failure carries. That is the one definition the issue asks for: one
-classification, two populations. The breaker's streak is over calls; the
-declared `success_rate of activations` divides over lifecycles; the two are
-never pooled and a verdict always names which population it measured.
+The `slo` monitor's `success_rate of activations` counts something else: the
+lifecycles that settled into FAILED (`metrics._is_failed`). A provide-method
+error leaves the component ACTIVE, so that population cannot see the failures a
+breaker exists to stop, and `metrics._failure_metrics` reads only FAILED
+withdraws. The two measurements are different populations with no shared code
+and may disagree; neither is pooled with the other. The per-call outcome this
+guard records is exactly the numerator `success_rate of crossings` is missing
+today, which is a reason to keep it a plain record and a candidate for that
+slice, not a promise.
 
-Consequences, stated because they are choices:
+The cases a definition has to settle, each with its reason:
 
-- A component that fails to load is not a failed call. It never served one. The
-  load failure is a different event with its own cause, and folding it in would
-  count a population the caller never reached. Slice 2 may extend the counter to
-  a load failure under the same classification, but that is a widening with its
-  own test, not a silent equivalence.
-- A call that returns an in-band `Err` is a success to the breaker: the breaker
-  watches the crossing, not the application's result type. A `remote` row
-  declared `on_failure(result)` turns a transport fault into an in-band `Err`,
-  so that row does not trip the breaker. Counting it would need the breaker to
-  know the row's result type, which is a widening slice 2 does not take.
-- A call refused by an open breaker is not a failure and not a success. If it
-  were a failure the breaker would never close; if it were a success it would
-  hide the outage.
-- A success anywhere in the streak resets the count to zero. "Consecutive" is
-  literal.
+| case | counted | reason |
+|---|---|---|
+| the body raises an `Exception` | failure | the rule |
+| the call returns, including an in-band `Err` | success | the guard watches the crossing, not the result type; a row whose failures come back in band is a `remote ... on_failure(result)` row, and those are refused rather than half-watched |
+| arguments that do not bind the method's signature | not counted, raised to the caller | a caller error, decided before the body runs |
+| `ApprovalRequired`, `ApprovalRefused`, a policy refusal | not counted | raised by the session's gate before the guard, so the guard never sees them; the peek below keeps them from spending anything |
+| `EstopHalted`, `ReadOnlyRefused` | not counted, re-raised | an operator verdict, not the provider's fault |
+| the caller cancels (`CancelledError`, `KeyboardInterrupt`) | not counted | not an `Exception` outcome and not evidence; a cancelled probe frees the probe slot with no verdict |
+| the call hangs | not counted until it ends | nothing can interrupt it; see the probe lease |
+| a refusal by this breaker | not counted | else it would never close, or would hide the outage |
+| a retry inside the provider's own body | invisible | the guard sees one call and its final outcome |
 
-### The window and "consecutive"
+## Exactly one probe, and a probe that never returns
 
-A failure joins the current streak only when the previous counted failure is no
-older than the window; otherwise the streak restarts at one. This makes the
-window the answer to "how stale may the previous failure be and still count",
-which is the only reading under which both `N` and `over` have independent
-work. A success resets the streak regardless of the clock.
+Admission is decided under a lock held for the state read and write only, never
+across the provider call, so two concurrent callers on a HALF_OPEN breaker admit
+exactly one probe and refuse the other. The admission carries an epoch number.
 
-### Exactly one probe
+A hung probe is bounded by a LEASE, not a timer: the probe slot expires one
+cooldown after the probe started, measured on `time.monotonic()`. The lease is
+read lazily, by the next call that arrives on any other task or thread; on
+expiry that call records `probe-timeout`, reopens the breaker and restarts the
+cooldown. There is no background task, so there is nothing a test has to
+reproduce.
 
-HALF_OPEN admits exactly one call: the admission flag is set atomically with
-the state transition, and every call that arrives while the probe is in flight
-is refused with the same typed refusal as OPEN. The probe result settles the
-state exactly once.
+What the lease does not do: it cannot interrupt a call that never returns, and
+under `Session.call` the session's own loop is blocked in `run_until_complete`,
+so no second call can arrive while a call hangs. That is an existing property of
+the session, not one this guard adds or removes. The lease protects the
+concurrent callers of `revl run` and of components, which is where a stuck probe
+would otherwise queue them all behind it.
 
-A probe that never returns is the one case the state machine cannot resolve on
-its own. The design refuses to add a background timer, which a replay could not
-reproduce: instead a probe older than the window is PRESUMED failed at the next
-call, the breaker reopens, and the cooldown restarts. The presumption is
-recorded as `probe-timeout`, with both timestamps, so it is visible rather than
-a silent clock read. This keeps the breaker self-clearing without a daemon and
-without a latch.
+The late result of an expired probe carries a stale epoch. It changes no state
+and is traced as `late-result`, so a provider that recovers after the lease
+cannot close a breaker that has already moved on.
+
+Every comparison uses the monotonic clock. The wall-clock `ts` on a traced
+decision is for readers and never decides anything.
+
+## What the state belongs to
+
+The state is owned by the guard registry the driver holds, not by the fiber and
+not by `Session._generation`. `Session._generation` is bumped by load, swap,
+rollback, undo and apply, so keying on it would close every breaker on every
+operation. The trace's `gen` is a process-global reload counter and has the same
+problem.
+
+The state is keyed on the provision edge, `(row label, key, realm)`, and carries
+a PROVIDER FINGERPRINT: a digest of the row's source text and configuration and
+of its resolved breaker settings.
+
+- A swap or an apply that re-admits the row with an equal fingerprint keeps the
+  state. A deploy of something else does not reset a quarantine.
+- A swap that changes the row's source, its configuration or the breaker
+  settings resets the row to CLOSED and traces `reset` with the reason. A
+  failure streak against code that was just replaced says nothing about its
+  replacement, and replacing the provider is the ordinary way to fix a broken
+  one.
+- Unload or a fresh session starts CLOSED. The state is not durable.
+
+A divert is a swap: it re-admits the composition with the row's `from` pointing
+at the fallback (`slo.admit_divert`), which changes the fingerprint, so the row
+resets and any breaker on the fallback is a new one. This note does not give the
+divert a way back. Probing the original means keeping a provider loaded that the
+divert has just disposed, and that is a new primitive, which is the standby-row
+vocabulary of slice 7 in [473-slo-contracts.md](473-slo-contracts.md). The
+issue's third missing piece stays open and is recorded under "Not decided here".
+
+Rewind, fork and forward replay do not restore breaker state: it is not provider
+state, and un-doing a provider's effects does not un-fail it.
+`Session.replay_forward` re-invokes `self.call` live, so a replayed call is a
+real call through the same guard on the live clock. It is counted, and it is
+refused by name if the breaker is open, as an unapproved class-(c) step is. The
+issue's phrase "replay sees the same decisions" is met in the weaker sense that
+the trace records every decision with the numbers that produced it, so a reader
+can reconstruct why a call was refused. Replay does not re-derive the decisions
+from the trace, and the note does not claim it does.
 
 ## The interactions
 
-### Retry budget
+### Where it sits in `Session.call`
 
-The breaker and the retry budget answer different questions. The budget says how
-many lawful replays remain; the breaker says whether the provider is worth
-replaying to. The rule the issue asks for:
+The order is: halted, paused, key resolution, the cache lookups, then a
+read-only PEEK at the guard, then the approval decision, the loop-axis count and
+the invocation, where the guard itself decides atomically.
 
-- a retry inside a CLOSED breaker consumes retry budget exactly as any replay
-  does, through `lawful_retry._retry_grant`'s decrement of `RETRY_BUDGET_KEY`;
-  the breaker neither reads nor holds a budget of its own;
-- an OPEN breaker refuses the call BEFORE a replay is constructed, so no
-  `_retry_grant` is built and nothing is decremented. A refusal is not a
-  replay, so it cannot spend a replay's budget;
-- a HALF_OPEN probe is a normal call: if it is itself a replay, it pays the
-  budget; if it is a first attempt, it does not.
+- E-Stop and a `slo` pause come first and win: a halted or paused session never
+  consults a breaker.
+- A cache hit returns before the peek, because no provider call happens.
+- The peek runs before `_approval_decide_call`, because an approval decision can
+  spend a standing approval or raise a ticket, and a refusal after that would
+  leave the spend unmatched. An open breaker therefore spends no approval and
+  adds no loop-axis count.
+- The guard's own check is the authoritative one. If the breaker opens between
+  the peek and the dispatch, the refusal comes after the approval decision and is
+  treated like any raise after the gate; slice 2 has a test that says so.
 
-The test that pins this is named in "The tests this design owes"; it fails today
-because neither the clause nor the refusal exists.
+### The E-Stop
 
-### E-Stop
+The E-Stop overrides the breaker, as above. A breaker never arms the latch and
+has no halt response: a breaker quarantines one provider, and halting a run is a
+different decision. A composition that wants a halt on a breach already has
+`slo { ... on breach halt }`, which is a declared and composition-authorized
+halt. This is narrower than saying nothing in the language halts, which rule E8
+of [443-estop-tier-contract.md](443-estop-tier-contract.md) does not say: E8 is
+that no extern, stdlib binding or host body reaches the latch.
 
-The E-Stop overrides the breaker, and the order is fixed:
-`_refuse_if_halted` runs first, then the declared `slo` pause, then the
-breaker. A halted session never consults a breaker; the halt is the verdict and
-its own message stands. An open breaker never arms the latch: rule E8 of
-[443-estop-tier-contract.md](443-estop-tier-contract.md) says nothing in the
-language halts itself, and a breaker that latched an E-Stop on five failed calls
-would be exactly that self-halt. Clearing the breaker is never an operator act:
-the cooldown and the probe are the way back, which is the difference between a
-quarantine and a latch.
+### The retry loops
 
-### The slo block, and the divert
+No retry loop wraps a call to a provided key today. `lawful_retry.dispatch_on_loss`
+has no caller in `src/revl` and concerns peer-pool loss; `validated ... retry N`
+re-asks a model completion; `retry_idempotent` retries an emission inside a
+provider body on `TransientError`. So the issue's "a retry consumes budget, an
+open breaker does not" has nothing to attach to yet, and the note scopes it
+rather than inventing a path.
 
-The two surfaces are independent and compose in one direction:
+What the guard does guarantee, and what is testable now: `BreakerOpen` is not a
+`TransientError` and is never retried by `retry_idempotent`; a retry above the
+guard is one more call that counts; a retry below it is invisible. When a retry
+loop is later put around a provider call it must sit above the guard, and the
+refusal is then a non-retryable fault that spends no budget by construction.
 
-- `slo` measures a rate over a population and responds to a breach; a breaker
-  counts consecutive failures of one provider and responds to that provider's
-  own record. A composition may declare both, neither or one.
-- A breach and a trip may coincide, and they mean different things: the breach
-  says the service-level objective is not holding; the trip says this provider
-  is not worth calling. Neither implies the other.
-- The way back after a divert, which is the issue's third missing piece: the
-  breaker records the provider SOURCE it was bound to, and a half-open probe is
-  dispatched to that source, not to whatever a divert last put in the row's
-  `from`. A probe success closes the breaker and is the evidence that the
-  original is reachable again; lifting the divert (re-admitting the row with the
-  original provider) is the divert machinery's own re-admission, not a second
-  breaker decision. That is the only shape in which "a way back" is not a second
-  divert: the breaker supplies one probe and a close verdict, and the existing
-  divert path performs the re-admission, so the two features do not each grow a
-  private router.
-- Slice 2 proves the no-divert case. Making the diverted row's probe reach the
-  original source, and treating a close as the un-divert signal, is the
-  integration with the 473 slice 7 standby vocabulary. This note fixes the part
-  the two must agree on: the breaker's source is the one captured at bind time,
-  never the diverted one.
+### The `slo` block and the divert
+
+Independent and composable. `slo` measures a rate over activations and answers a
+breach; a breaker counts consecutive failed calls of one provider and
+quarantines it. Either, both or neither may be declared. A breach and a trip may
+coincide and mean different things, and neither implies the other. The divert is
+as described under "What the state belongs to".
 
 ### The fault test
 
-A fault test is a source-level experiment: it injects one failure at a named
-step and asserts the paradigm's guarantee (FAILED, no residue, LIFO inverses,
-siblings unaffected), and it runs once under the test runner. A breaker is a
-runtime policy: it counts real failures over a window and refuses real calls. A
-fault test can produce the failures that trip a breaker, and a breaker can trip
-during a fault test, but neither is the other. In particular a breaker does not
-assert residue, and a fault test does not clear a breaker. The docs line the
-issue asks for belongs with slice 2: it goes in
-[fault-tests.md](../fault-tests.md), beside the fault test's own definition,
-because it describes behaviour that only exists once the clause is enforced.
+A fault test injects one failure at a step and asserts the paradigm's guarantee,
+once, under the test runner. A breaker is a runtime policy over real calls. A
+fault test can produce failures that count toward a breaker and a breaker can
+trip during one, but neither is the other. The docs line the issue asks for goes
+in [fault-tests.md](../fault-tests.md) with slice 2, because it describes
+behaviour that exists only once the clause is enforced.
 
-### Replay and the trace
+## What is recorded, reported and controlled
 
-Every DECISION is recorded: `trip`, `probe`, `close`, `reopen` and
-`probe-timeout`, each with the row, the generation, the state entered, the count
-at that moment, the threshold, window and cooldown that decided it, and the
-timestamp. The trace gains one event kind, `breaker`, and `why_runtime`'s
-`SCHEMA_VERSION` moves from 3 to 4 additively, the same way v2 and v3 added
-without changing a v1 field.
+### The trace
 
-What is NOT recorded, stated so the claim is not read wider than it is: every
-counted failure and every success in the streak are not individually traced.
-The decisions carry the count that produced them, so a replay sees the same
-decisions, which is what the issue asks for; it does not re-derive the streak
-from individual calls, because those calls are not what the trace owes. A
-reader that sees no breaker event reports the breaker as `unrecorded`, never as
-`closed`: an absent record is not a healthy provider.
+One new event kind, `breaker`, whose decisions are `trip`, `probe`, `close`,
+`reopen`, `probe-timeout`, `late-result`, `reset` and `refused`. Each carries the
+row, key, the state entered, the failure count, the settings that decided it and
+the wall-clock `ts`. `why_runtime.SCHEMA_VERSION` moves from 3 to 4 additively. A
+reader that sees no breaker event reports the row as `unrecorded`, never
+`closed`.
 
-Replay reads the recorded timestamps, not its own clock. A refusal that falls
-between events is derived from the recorded state and the recorded opening
-time. That is the honest scope: the decisions the breaker took are recorded; a
-call that was never made is not a decision the trace can owe.
+`refused` is recorded per refusal, so an operator can see what an open breaker
+turned away. Individual counted failures and successes are not traced: the
+decisions carry the count that produced them.
 
-## What is refused and what is advisory
+### The status
 
-Refused, at compile time: the block's own domain (rows, repeats, positive
-values, one block, known qualifiers).
+`Session.state()` gains a `breaker` entry only when a clause is declared, as
+`slo` does. Per row: `{row, key, realm, state, failures, threshold, windowMs,
+cooldownMs, fingerprint, openedAgoMs, nextProbeInMs, lastDecision}`.
 
-Refused, at runtime: a call to an OPEN or probe-busy HALF_OPEN row, by name.
+### Operator control and abuse
 
-Advisory, and stated so nobody builds on it: the threshold, window and cooldown
-are a policy the author declares, not a measurement of the provider's health.
-The breaker cannot prove a provider is healthy after one probe; it proves only
-that one call succeeded. A probe success closes the breaker even if the provider
-is flapping, and the next N failures trip it again. That is the circuit
-breaker's contract and this note does not pretend to a stronger one.
+Any caller can raise N times and quarantine the row for every other caller, and
+the guard cannot tell a provider fault from a caller who feeds a provider input
+it raises on. The bounds are these, none stronger:
 
-## The tests this design owes (slice 2)
+- the pre-body checks above keep caller errors that are decided before the body
+  from counting;
+- N consecutive failures within the window is the price, and the quarantine ends
+  by itself after one cooldown and one good probe;
+- every trip and every refusal is traced with its row, so abuse is visible;
+- a provider whose methods should not raise on bad input should return `Err`,
+  which is a success to the guard.
 
-The issue's acceptance names the trip, the probe (close and reopen) and the
-retry-budget cases. The four below make each one a named test, and each fails on
-the base because the clause does not exist:
+An operator may reset a row. `breaker_reset` is an operator verb under its own
+authority, held like `estop` and never folded into `unload` or `commit`
+(`operator.py`'s verb table); it returns the row to CLOSED and traces `reset`
+with the operator. It is not needed to clear a trip, so no operator is required
+for the way back, but one is available to override.
 
-1. **Trip and refusal.** A provider that fails N calls in a row is refused by
-   name on call N+1, and the refusal does not cross a boundary.
-2. **One probe, then close.** After the cooldown exactly one probe is admitted;
-   a success closes the breaker and the next call is dispatched.
-3. **One probe, then reopen.** A probe failure reopens the breaker, restarts the
-   cooldown, and no second probe is admitted before it elapses.
-4. **Open does not spend the retry budget.** A call refused by an OPEN breaker
-   leaves `lawful_retry.retry_budget` unchanged, while the same failure under a
-   CLOSED breaker spends it exactly as a lawful replay does.
+## Tiers
 
-The tests classify the failing calls with the same `metrics._failure_metrics`
-codes the runtime already buckets, so the breaker cannot invent a failure the
-metrics would call something else.
+The IR clause is tier-neutral and the guard is py-only in slice 2. A tier that
+does not enforce the block refuses the composition by name at admission, until
+that tier enforces it. `estop.TIERS_WITH_ESTOP` is the precedent for naming the
+honoring set, and the new set is `TIERS_WITH_BREAKER = frozenset({"py"})`. There
+is no `unenforced` report, because there is no accepted, ignored declaration.
+Other tiers follow the tier-parity rules once the Python behaviour is pinned
+(slice 3).
+
+## The tests slice 2 owes
+
+The issue's acceptance and the review of this note give the list. Every test
+fails on the base: the block does not parse, and the guard does not exist.
+
+1. A provider that fails N calls in a row is refused by name on call N+1 and the
+   refusal does not run its body.
+2. After the cooldown exactly one probe is admitted; a probe success closes it
+   and a probe failure reopens it and restarts the cooldown.
+3. Two concurrent calls on a HALF_OPEN breaker admit exactly one probe.
+4. A probe that hangs: the lease expires on the next call, the breaker reopens,
+   and the late result changes nothing.
+5. A stale failure outside the window does not trip, and a success clears the
+   streak.
+6. State across a swap: an equal fingerprint keeps it, a changed source resets
+   it, and a divert resets it.
+7. The guard is seen by a component calling its provider, by `Session.call` and
+   by `revl run`.
+8. A halted or paused session refuses before the breaker, an open breaker spends
+   no approval, and a breaker that opens between the peek and the dispatch
+   behaves as stated.
+9. `BreakerOpen` is not retried by `retry_idempotent` and spends nothing.
+10. Replayed calls go through the guard and are refused when it is open.
+11. The trace events, the `state()["breaker"]` shape and the reset verb.
+12. Each compile refusal, including every row kind that is refused.
+13. IR byte-identity for a composition with no block.
 
 ## The slice plan
 
-**Slice 1, this note.** The surface, the states, the defaults, the interactions
-and the test contract. No code.
+**Slice 1, this note.**
 
-**Slice 2, the Python tier.** `breaker` in the grammar, parser, `CompositionDecl`
-and the conditional IR key; the state machine in a pure `src/revl/breaker.py`
-(the `slo.py` shape: a pure module the runtime and the tests can both drive);
-the wiring in `Session.call` after `_refuse_if_halted` and `_refuse_if_paused`;
-the `breaker` trace event; the read-only status the session reports; and the
-four tests above. `revl grammar --write` regenerates the derived grammars.
+**Slice 2, the Python tier.** The grammar, `CompositionDecl.breaker`, the
+conditional IR key and the refusals; the guard and its registry (a pure
+`src/revl/breaker.py` for the state machine, the proxy in `runtime.py`); the
+`plug` wiring; the `Session.call` peek; the trace event; the status; the reset
+verb; the docs line; and the tests above. `revl grammar --write` regenerates the
+derived grammars.
 
-**Slice 3, other tiers.** The IR clause is tier-neutral, so each tier reads the
-same `breaker` key. The tier-parity rule applies: a tier that does not enforce
-the clause says so in its status the way `estop.TIERS_WITH_ESTOP` splits
-honoring from static from unknown, and a composition placed on a non-honoring
-tier reports the breaker as `unenforced` rather than silently calling it
-enforced.
+**Slice 3, other tiers.** Each tier either enforces the block or keeps refusing
+it by name.
 
-**Later, with 473 slice 7.** The diverted-row probe described in "The slo block,
-and the divert".
+## Not decided here
 
-## Honest limits
-
-- The counter is per live generation and per process. A restart starts CLOSED,
-  which is the pre-trip state, not a restored one. The recorded events are for
-  replay and audit, not for restoring a quarantine across a restart. A durable
-  breaker state is a state-format decision with its own note, and it is not
-  needed for the issue's acceptance.
-- The breaker counts failed calls to the row, not failed lifecycles and not the
-  component's activation outcome. The two populations are deliberately kept
-  apart: a call error leaves the component ACTIVE today, so counting a lifecycle
-  would miss the very failures the breaker exists to stop. Slice 2 adds the
-  per-call record under the shared classification, with a test that proves a
-  failure is counted once and not once per population.
-- The probe presumption is a clock read, and the recorded timestamps make it
-  reproducible; it is not a provider health check.
-- A composition-wide breaker (one state across processes) is not available for
-  the same reason a composition-wide percentile is not: there is no shared time
-  base. This note keys on the row and leaves the realm aggregate open.
+- The way back after a divert. It needs a provider kept loaded for a probe, which
+  is the standby vocabulary of slice 7 in 473, and a close would then be the
+  signal to lift the divert.
+- Breakers on `remote`, `host` and `seam` rows and on routed keys. Each has its
+  own failure semantics and needs its own decision.
+- A `site`-layer override of the block.
+- A durable breaker state across restarts, and a composition-wide state across
+  processes, which has no shared time base.
+- A per-call `slo` population, which this guard's outcome record could feed.
 
 ## Relates to
 
-- [473-slo-contracts.md](473-slo-contracts.md): the measure-and-respond surface
-  this note composes with, the `success_rate of activations` failure definition
-  it imports, the pause it defers to, and the one-way divert it gives a way back.
-- [fault-tests.md](../fault-tests.md): the injection-time experiment this note
-  distinguishes from a runtime policy.
+- [473-slo-contracts.md](473-slo-contracts.md): the measure-and-respond surface,
+  the conditional-key precedent and the divert.
+- [fault-tests.md](../fault-tests.md): the injection-time experiment.
 - [443-estop.md](443-estop.md) and
-  [443-estop-tier-contract.md](443-estop-tier-contract.md): the halt that
-  overrides the breaker, and rule E8 that stops a breaker from halting anything.
-- `src/revl/lawful_retry.py`: the monotone retry budget the open state must not
-  spend.
-- `src/revl/metrics.py` and `src/revl/slo.py`: `_is_failed`,
-  `_failure_metrics` and `_activation_observations`, the shared classification
-  and the lifecycle population the breaker does not pool with its own.
-- `src/revl/why_runtime.py`: the trace vocabulary and `SCHEMA_VERSION` the
-  `breaker` event extends.
-- [460-two-phase-admission-forward-recovery.md](460-two-phase-admission-forward-recovery.md)
-  and [lifecycle-contract.md](../lifecycle-contract.md): the lifecycle states a
-  breaker reports over, and the reason the breaker is a dispatch decision rather
-  than a new fiber state.
+  [443-estop-tier-contract.md](443-estop-tier-contract.md): the halt that wins,
+  and the tier set the breaker's set follows.
+- [composition-rows.md](../composition-rows.md): the row spelling, the seam row
+  this note declines, and `on_failure`.
+- `src/revl/run.py`: `resolve_key` and `_Router`, the paths the guard covers.
+- `src/revl/mcp/session.py`: `Session.call` and its gate order.
+- `src/revl/lawful_retry.py` and `backends/python/runtime.py`'s
+  `retry_idempotent`: the retry loops this guard does not wrap.
+- `src/revl/why_runtime.py`: the trace vocabulary the new event extends.
