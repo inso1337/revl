@@ -395,6 +395,33 @@ def _capability_hint(service: str, method: str, declared, extra: list[str],
             f"capability (G4)")
 
 
+def _admit_required_scopes(extra: list[str], declared, scopes: dict) -> list[str]:
+    """The capabilities an `emission[...]` declaration still fails to cover,
+    once a crossing through a required key may be named by the scoped tokens
+    its verbs declare (issue #3485).
+
+    `extra` is `used - declared`, where a required key appears as the key. A
+    key whose every reached verb is scoped (`scopes[key]` a set) is covered
+    when all of those tokens are declared: `emission[wire.take]` covers
+    `emit wire.take(...)` because `Wire.take` declares `emission[wire.take]`.
+    It never widens: a reached token the method did not declare leaves the
+    key uncovered, and when the declaration names some of the key's tokens
+    the missing ones are reported in its place, so the refusal names the
+    verb's token rather than the binding. An unscoped crossing stays the key."""
+    declared = set(declared)
+    out: set = set()
+    for cap in extra:
+        tokens = scopes.get(cap)
+        if not tokens:
+            out.add(cap)
+            continue
+        missing = set(tokens) - declared
+        if not missing:
+            continue
+        out.update(missing if set(tokens) & declared else {cap})
+    return sorted(out)
+
+
 def _witnessed_hint(service: str, method: str) -> str:
     """The repair for a `witnessed[...]` provider that crosses a TRUE emission
     (issue #1912). The declaration bounds the provider to the reversible class
@@ -499,7 +526,8 @@ class _EmissionEvidence:
 
 def _method_emissions(body: list, env: "Env",
                       steps_out: dict | None = None, *,
-                      irreversible_only: bool = False) -> tuple[list[str], set]:
+                      irreversible_only: bool = False,
+                      scopes_out: dict | None = None) -> tuple[list[str], set]:
     """What calling a provide-method irreversibly causes: `emit` steps and
     reachable emitting functions/externs. Teardown-position emissions count
     — calling the method schedules them.
@@ -525,7 +553,13 @@ def _method_emissions(body: list, env: "Env",
     byte-identical to before. The one conservatism that survives the filter:
     a host `emit` head whose reached names the analysis cannot name (an empty
     reach, a first-class dispatch) still counts, because nothing says it is
-    reversible."""
+    reversible.
+
+    `scopes_out` (optional, filled in place, issue #3485) maps each require
+    key the walk crossed to the union of the scoped tokens its reached verbs
+    declare (`wire` -> {`wire.take`}), or to None when any crossing through
+    that key is not scoped (a bare `emission` verb, an unknown verb, an alias
+    carry, a token not qualified by the key). `_admit_required_scopes` reads it; the returned pair is unchanged."""
     found: list[str] = []
     seen: set = set()
     caps: set = set()
@@ -611,6 +645,25 @@ def _method_emissions(body: list, env: "Env",
             result.add("*")
         return result
 
+    def record_scope(local: str | None, method: str | None) -> None:
+        """Note the tokens `local.method` declares for `scopes_out`. Only a
+        token qualified by the key itself (`wire.take` under `wire`) is a
+        name for this crossing: an unqualified one (`emission[db] fn put` on
+        a service bound as `cache`) names the provider's own downstream
+        boundary, which stays the provider's (test_capabilities.py's
+        local-key rule), so the crossing keeps the key."""
+        if scopes_out is None or local is None:
+            return
+        carry_map = getattr(env, "require_carry", None) or {}
+        service = env.services.get(env.requires.get(local) or "")
+        decl = service.methods.get(method) if service is not None else None
+        tokens = getattr(decl, "capabilities", None) if decl is not None else None
+        if (carry_map.get(local) or not tokens
+                or not all(t.startswith(f"{local}.") for t in tokens)):
+            scopes_out[local] = None
+        elif scopes_out.get(local, set()) is not None:
+            scopes_out.setdefault(local, set()).update(tokens)
+
     # issues #1682 and #1508: a crossing through a resolved receiver (a spawn
     # handle, an alias, a service-typed local or parameter), recorded by the
     # body walk (`lower._resolved_crossings`): the op's declared scope,
@@ -641,6 +694,7 @@ def _method_emissions(body: list, env: "Env",
                                                    expr.get("method")))
                         caps.update(crossing_caps(target.get("name"),
                                                   expr.get("method")))
+                        record_scope(target.get("name"), expr.get("method"))
                 else:
                     # every host emission reaches a named `emission` extern
                     # (`_is_emission_call` admits nothing else); `*` is the
@@ -680,6 +734,7 @@ def _method_emissions(body: list, env: "Env",
                                                    node.get("method")))
                         caps.update(crossing_caps(target.get("name"),
                                                   node.get("method")))
+                        record_scope(target.get("name"), node.get("method"))
             calls: set = set()
             values: set = set()
             _calls_in(node, calls, values=values)

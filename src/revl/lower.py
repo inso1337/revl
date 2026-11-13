@@ -11203,6 +11203,7 @@ from .emission_analysis import (  # noqa: E402,F401
     _is_async_fn_type,
     _calls_in,
     _capability_hint,
+    _admit_required_scopes,
     _emission_chain,
     _emission_value_externs,
     _emitting_capabilities,
@@ -16143,8 +16144,10 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
             # *where* a provider may cross, so the body's capability set must
             # be a subset. A provider using fewer capabilities is purer than
             # declared, which is the sound direction (docs/capabilities.md).
-            caused, used = _method_emissions(mbody, env)
-            extra = sorted(used - set(decl.capabilities))
+            scopes: dict = {}
+            caused, used = _method_emissions(mbody, env, scopes_out=scopes)
+            extra = _admit_required_scopes(sorted(used - set(decl.capabilities)),
+                                           decl.capabilities, scopes)
             if extra:
                 declared = ", ".join(decl.capabilities)
                 offending = ", ".join(
