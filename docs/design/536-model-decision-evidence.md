@@ -85,10 +85,10 @@ in the issue.
 
 ## 2. What the object binds
 
-One record, `kind: "revl.model-decision"`, version `2.0`, in
+One record, `kind: "revl.model-decision"`, version `3.0`, in
 `src/revl/model_evidence.py`. `BODY_MEMBERS` is the closed body; every member
-is required and every member is inside the MAC. Version `1.0` is still
-accepted, under its own body and its own MAC domain (§2.1).
+is required and every member is inside the MAC. Versions `1.0` and `2.0` are
+still accepted, under their own bodies and their own MAC domains (§2.1, §2.2).
 
 | member | what it binds | why it is here |
 | ------ | ------------- | -------------- |
@@ -103,6 +103,7 @@ accepted, under its own body and its own MAC domain (§2.1).
 | `prompt_binding` | the input, as a mode and a value | the item's "prompt hash", gated (§4.1) |
 | `template_digest` / `template_absence_reason` | the template behind the prompt, or a named absence | issue #2750's "which template" (§2.1) |
 | `origins` | item 249's origin classes on the input | the item's "input taint" |
+| `reasoning` | how much of the model's reasoning span the host returned, its reported size, and a gated digest of returned text | issue #2808's opaque span (§2.2) |
 | `candidates` / `chosen` / `outcome` | what could have been said, and what was | the item's "candidate set" |
 | `sampling` | temperature, top_p, top_k, seed, max_tokens, stop_digest | the item's "sampling parameters" (§4) |
 | `policy_digest` | the policy in force | the item's "policy in force" |
@@ -170,12 +171,61 @@ MAC, and even a key holder who re-MACs it is refused for carrying members `1.0`
 does not define. A `1.0` record rewritten as `2.0` is missing the claims `2.0`
 requires.
 
-The limit, stated rather than implied: `seal()` only ever writes `2.0`, so a
-record this tree produces carries the three claims. A provider that holds the
-key can still choose to MINT a fresh `1.0` record, exactly as it can lie inside
-a well-formed `2.0` body; the shared-secret threat model in §9 is what bounds
-that, not the version check. What the version check rules out is presenting a
-sealed `2.0` decision as an old one to shed the members.
+The limit, stated rather than implied: `seal()` only ever writes `3.0`, so a
+record this tree produces carries the reasoning member. A provider that holds
+the key can still choose to MINT a fresh `1.0` record, exactly as it can lie
+inside a well-formed `3.0` body; the shared-secret threat model in §9 is what
+bounds that, not the version check. What the version check rules out is
+presenting a sealed record as an old one to shed the members.
+
+### 2.2 Version 3.0: the reasoning span (issue #2808)
+
+A decision said what was asked and what was chosen, and nothing about whether
+the model also reasoned in a span the host did not return. That silence read
+exactly like a run that had nothing to hide. Version `3.0` adds one required
+member, `reasoning`, and bumps the envelope for the same reason `2.0` did:
+each record is checked against the body it was sealed with, so a `2.0` record
+cannot be presented as `3.0` without the member and a `3.0` record cannot shed
+it as an older one.
+
+The member has three parts:
+
+* `visibility` is `full` or `summary` when the host returned the span or a
+  summary of it, `hidden` when it reported a span without the text, and
+  `none-reported` when it reported no span at all. `summary` is the one value
+  only the host knows; revl does not infer it from the text.
+* `tokens` is `{"value": <non-negative integer or None>, "provenance":
+  "host-reported"}`. revl cannot measure the reasoning channel, so the count
+  is the host's report and the tag says so; a host that reported a span but
+  not its size gives `None`.
+* `digest` is the SHA-256 of the returned reasoning text, and ONLY that. The
+  text itself is never written. Over an input whose `origins` carry `secret`
+  or `confidential` the digest is refused, because it is the same cross-run
+  confirmation oracle that suppresses a content-addressed `prompt_binding`
+  (§4.3); the visibility and the size are still recorded. A `hidden` span has
+  no returned text to digest, so it cannot carry one, and `none-reported`
+  carries neither a size nor a digest.
+
+The member makes no claim about what the span contained. It records that an
+opaque span existed and how large the host said it was, and §9 keeps that
+limit.
+
+**Why this does not open the door item 121 closed.** The permission rule is
+the one already governing `prompt_binding`, restated in `_check_reasoning`, and
+`seal` and `verify` run the same check. The runtime's own digest gate is not
+widened: a provider that mints a record around the gate is refused by the
+verifier, exactly as for the prompt binding.
+
+**Per-entry replay status.** `revl.replay_modes` turns the member into two
+per-entry verdicts. `fromRecord` says the recorded ANSWER can be served
+without calling the model, which only a retained completion makes true.
+`rederivable` says the answer can be reproduced from the prompt; a `hidden` or
+`summary` span makes it false with the reason named, and a pre-3.0 record is
+not claimed rederivable because it does not say whether an opaque span
+existed. A hidden span does not make `fromRecord` false: a retained answer is
+still there to serve. The plan reports which crossings were opaque and how
+many. `NOT_COMPARABLE`'s `decisionCause` axis states the same limit for a
+comparison of two histories.
 
 ---
 
@@ -532,6 +582,14 @@ the template identity and the model-digest basis (§2.1, §4.5) as required
 members, and `verify` still accepts `1.0` records under their own body and MAC
 domain. No compiler, IR, emitter or CLI surface changes; `reconstruct` reports
 the new members, as `None` for a `1.0` record, alongside the envelope version.
+
+**Post-3.0 addendum (issue #2808).** Envelope `3.0` adds the required
+`reasoning` member (§2.2), and `verify` still accepts `1.0` and `2.0` records
+under their own bodies and MAC domains. No compiler, IR or emitter change: the
+provider declares the member, as it already declares the rest of the body.
+`revl.replay_modes` reports the two per-entry replay verdicts and which
+crossings carried an opaque span, and `revl.branch.NOT_COMPARABLE` states the
+same limit for a comparison of two histories.
 
 ---
 

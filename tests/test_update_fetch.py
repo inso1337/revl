@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import io
 import json
 import tarfile
@@ -10,10 +11,16 @@ import zipfile
 
 import pytest
 
-from _update_feed_fixture import serve_feed, source_tar
+from _update_feed_fixture import pin_test_key, serve_feed, source_tar
 from revl.update.errors import UpdateError
-from revl.update.fetch import extract_archive, find_staged, stage_release
+from revl.update.fetch import (extract_archive, find_staged, stage_release,
+                               staged_artifact_intact)
 from revl.update.feed import resolve_release
+
+
+@pytest.fixture(autouse=True)
+def _pin_fixture_release_key(monkeypatch):
+    pin_test_key(monkeypatch)
 
 
 def _malicious_tar(entries: list[tarfile.TarInfo]) -> bytes:
@@ -226,4 +233,56 @@ def test_a_link_planted_in_a_staging_is_not_intact(tmp_path):
     finally:
         feed.close()
     assert not (second.source_root / "planted.rvl").is_symlink()
+    assert staged_intact(second) is True
+
+
+def test_a_staging_whose_kept_archive_was_rewritten_is_fetched_again(tmp_path):
+    feed = serve_feed(version="1.2.0")
+    try:
+        release = resolve_release("owner/app", api_base_override=feed.base_url)
+        first = stage_release(release, home_dir=str(tmp_path))
+        archive = first.directory / first.artifact_name
+        assert staged_artifact_intact(first) is True
+        # a local writer rewrites the kept archive; the extracted tree and its
+        # provenance can agree with each other and still not be the release
+        archive.write_bytes(b"rewritten bytes")
+        assert staged_artifact_intact(first) is False
+        second = stage_release(release, home_dir=str(tmp_path))
+    finally:
+        feed.close()
+    assert hashlib.sha256(archive.read_bytes()).hexdigest() == second.digest
+    assert (second.source_root / "app.rvl").is_file()
+
+
+def _rewrite_source_and_its_provenance(staged, name: str, body: str) -> None:
+    """A local writer edits a staged source and the digest recorded for it,
+    and leaves the kept archive alone."""
+    (staged.source_root / name).write_text(body, encoding="utf-8")
+    record = staged.directory / "provenance.json"
+    provenance = json.loads(record.read_text(encoding="utf-8"))
+    provenance["sources"]["files"][name] = hashlib.sha256(
+        body.encode("utf-8")).hexdigest()
+    record.write_text(json.dumps(provenance, indent=2, sort_keys=True) + "\n",
+                      encoding="utf-8")
+
+
+def test_a_source_rewritten_with_its_provenance_digest_is_not_reused(tmp_path):
+    from revl.update.fetch import staged_intact
+
+    feed = serve_feed(version="1.2.0")
+    try:
+        release = resolve_release("owner/app", api_base_override=feed.base_url)
+        first = stage_release(release, home_dir=str(tmp_path))
+        original = (first.source_root / "app.rvl").read_text(encoding="utf-8")
+        _rewrite_source_and_its_provenance(
+            first, "app.rvl", "service Planted { fn x() -> Int }\n")
+        found = find_staged(tmp_path, project="app")[0]
+        # the archive is untouched, so it still hashes to the signed sha256
+        assert staged_artifact_intact(found) is True
+        assert staged_intact(found) is False
+        second = stage_release(release, home_dir=str(tmp_path))
+    finally:
+        feed.close()
+    assert (second.source_root / "app.rvl").read_text(
+        encoding="utf-8") == original
     assert staged_intact(second) is True

@@ -345,6 +345,42 @@ extern pure fn mangle(name: Str) -> Str
     }
     name
   }
+// `_in_revl_namespace` + `_REVL_NAMESPACE_RE` (`^(?:revl[A-Z_]|REVL_|_revl|_REVL)`):
+// the emitted module declares `revl_concat`, `REVL_JOURNAL_DEPTH`, ..., so a
+// user value of that spelling would shadow a bare helper call. A regex prefix
+// test, so a shorter trailing-`_` root can never match where the name did not.
+fn in_revl_namespace(name: Str) -> Bool {
+  if (name.startsWith("REVL_") || name.startsWith("_REVL")) { return true }
+  if (name.startsWith("_revl") || name.startsWith("revl_")) { return true }
+  if (name.length() < 5 || !name.startsWith("revl")) { return false }
+  let c = name.charCodeAt(4)
+  return c >= 65 && c <= 90
+}
+
+// `_ident(name, role)` at a `_RUST_VALUE_ROLES` position (a local, a
+// parameter, a binding, a fn read): a name in the helper namespace takes one
+// `_` (issue #3168 family), every other name the keyword ladder.
+fn value_ident(name: Str) -> Str {
+  if (in_revl_namespace(name)) { return name.concat("_") }
+  return mangle(name)
+}
+
+// `_ident(name, "function name" | "extern name")`: the value positions at
+// module scope also reserve the prelude constructors `_RUST_VALUE_RESERVED`
+// (issue #3159), on the same injective ladder as `type_ident`, so a module
+// `fn Err` emits `fn Err_` and every `Err(..)` still names the constructor.
+fn fn_ident(name: Str) -> Str {
+  if (in_revl_namespace(name)) { return name.concat("_") }
+  let reserved = ["Ok", "Err", "Some", "None"]
+  var root = name
+  while (root != "") {
+    if (reserved.indexOf(root) >= 0) { return name.concat("_") }
+    if (!root.endsWith("_")) { return mangle(name) }
+    root = root.slice(0, root.length() - 1)
+  }
+  return mangle(name)
+}
+
 // `_snake` verbatim: the component/service name -> the snake-case plugin-fn /
 // dispatch-fn name (`Hello` -> `hello`, `EmitRust` -> `emit_rust`). A word
 // boundary is an upper following a lower/digit; every char is lowercased. Host
@@ -1712,13 +1748,13 @@ fn match_pattern(ctx: Ctx, arm: Any) -> Str {
     if (is_builtin_ctor(pattern)) { prefix = pattern }
     else { return `<<UNSUPPORTED-match:${pattern}>>` }
   }
-  if (bind != "") { return `${prefix}(${mangle(bind)})` }
+  if (bind != "") { return `${prefix}(${value_ident(bind)})` }
   return prefix
 }
 
 fn render_var(node: Any, ctx: Ctx) -> Str {
   let name = value_str(value_field(node, "name"))
-  let mangled = mangle(name)
+  let mangled = value_ident(name)
   let adt = map_get(ctx.ca, name)
   if (resolved(adt)) { return `${type_ident(adt)}::${mangled}` }
   if (is_builtin_ctor(name)) { return name }
@@ -1932,7 +1968,7 @@ fn render_arrow(node: Any, ctx: Ctx) -> Str {
     rn = rn.remove(name)
     bp = bp.remove(name)
     lp = lp.remove(name)
-    var param = mangle(name)
+    var param = value_ident(name)
     if (ptype != "" && !is_fn_type(ptype)) {
       param = `${param}: ${rust_type_t(ptype, ctx.tn)}`
     }
@@ -2057,7 +2093,7 @@ fn render_inner(node: Any, ctx: Ctx) -> Str {
     // already rendered; otherwise it is a plain identifier (`_ident(id)`).
     let idv = value_str(value_field(node, "id"))
     if (ctx.rn.has(idv)) { return map_get(ctx.rn, idv) }
-    return mangle(idv)
+    return value_ident(idv)
   }
   if (kind == "var") { return render_var(node, ctx) }
   if (kind == "req") {
@@ -2077,7 +2113,7 @@ fn render_inner(node: Any, ctx: Ctx) -> Str {
   if (kind == "fn") {
     // Component dialect: the same borrowed slots as a v3 `call`.
     let raw = value_str(value_field(node, "name"))
-    let fname = mangle(raw)
+    let fname = value_ident(raw)
     let anodes = value_list(value_field(node, "args"))
     var parts = []
     var i = 0
@@ -2357,7 +2393,7 @@ fn stream_stage_arrow(stage: Any, ctx: Ctx) -> Str {
     return `<<UNSUPPORTED-stream-stage-arrow:${value_str(value_field(stage, "stage"))}>>`
   }
   let raw = value_str(params[0])
-  let pname = mangle(raw)
+  let pname = value_ident(raw)
   var ret = "String"
   if (value_str(value_field(stage, "stage")) == "filter") { ret = "bool" }
   let body = render_expr(value_field(fnode, "body"), set_rn(ctx, ctx.rn.set(raw, pname)))
@@ -2465,7 +2501,7 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
   let step = value_str(value_field(node, "step"))
   if (step == "let" || step == "assign") {
     let raw = value_str(value_field(node, "name"))
-    let nm = mangle(raw)
+    let nm = value_ident(raw)
     let valnode = value_field(node, "value")
     let inferred = v3_infer_type(valnode, ctx)
     // the binding's type so far is the type a call on the right flows into
@@ -2550,7 +2586,7 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
     return { lines: out, ctx: bodyR.ctx }
   }
   if (step == "for") {
-    let bind = mangle(value_str(value_field(node, "bind")))
+    let bind = value_ident(value_str(value_field(node, "bind")))
     let iterable_node = value_field(node, "iterable")
     let iterable_type = v3_infer_type(iterable_node, ctx)
     let element_type = list_element_type(iterable_type)
@@ -2861,7 +2897,7 @@ fn emit_v3_functions(functions: List[Any], fr: Map[Str, Str], tables: TypeTables
   let fp = fn_params_map(functions)
   for (fnode of functions) {
     let raw = value_str(value_field(fnode, "name"))
-    let name = mangle(raw)
+    let name = fn_ident(raw)
     let params = value_list(value_field(fnode, "params"))
     var vt: Map[Str, Str] = Map.empty()
     for (p of params) { vt = vt.set(value_str(value_field(p, "name")), value_str(value_field(p, "type"))) }
@@ -2891,7 +2927,7 @@ fn emit_v3_functions(functions: List[Any], fr: Map[Str, Str], tables: TypeTables
           lp = lp.set(pname, "1")
         }
       }
-      ps = ps.push(`${mangle(pname)}: ${ptype}`)
+      ps = ps.push(`${value_ident(pname)}: ${ptype}`)
       i = i + 1
     }
     let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tn, rn: Map.empty(), fb: borrow, bp: bp, flb: list_borrow, lp: lp, ft: tables.ft, mu: reused_names(body), mf: movable_for_iterables(body, reused_names(body)), fo: 0, fp: fp, tp: tparams, dz: dead_lets(body), cr: value_str(value_field(fnode, "returns")), rm: Map.empty() }
@@ -3263,7 +3299,7 @@ fn extern_body_defer(ext: Any, body: Str) -> Str {
 fn emit_v3_externs(externs: List[Any], tnames: Map[Str, Str]) -> List[Str] {
   var out = []
   for (ext of externs) {
-    let name = mangle(value_str(value_field(ext, "name")))
+    let name = fn_ident(value_str(value_field(ext, "name")))
     var ps = []
     for (p of value_list(value_field(ext, "params"))) {
       ps = ps.push(`${mangle(value_str(value_field(p, "name")))}: ${rust_type_pos(value_field(p, "type"), tnames)}`)
@@ -3333,7 +3369,7 @@ fn emit_service_traits(services: Any, tnames: Map[Str, Str]) -> List[Str] {
       let method = value_field(methods, mn)
       var ps = []
       for (p of value_list(value_field(method, "params"))) {
-        ps = ps.push(`${mangle(value_str(value_field(p, "name")))}: ${rust_type_t(value_field(p, "type"), tnames)}`)
+        ps = ps.push(`${value_ident(value_str(value_field(p, "name")))}: ${rust_type_t(value_field(p, "type"), tnames)}`)
       }
       var ret = "()"
       let r = value_field(method, "returns")
@@ -5132,10 +5168,10 @@ fn pure_stmts(steps: List[Any], ctx: Ctx, params: List[Str]) -> List[Str] {
     let kind = value_str(value_field(step, "step"))
     if (kind == "let") {
       let nm = value_str(value_field(step, "name"))
-      let cshadow = set_rn(c, c.rn.set(nm, mangle(nm)))
+      let cshadow = set_rn(c, c.rn.set(nm, value_ident(nm)))
       var mut = ""
       if (value_bool(value_field(step, "mutable"))) { mut = "mut " }
-      parts = parts.push(`let ${mut}${mangle(nm)} = ${render_expr(value_field(step, "value"), cshadow)};`)
+      parts = parts.push(`let ${mut}${value_ident(nm)} = ${render_expr(value_field(step, "value"), cshadow)};`)
       c = cshadow
     } else {
       parts = parts.push(pure_stmt(step, kind, c, params))
@@ -5148,13 +5184,13 @@ fn pure_stmts(steps: List[Any], ctx: Ctx, params: List[Str]) -> List[Str] {
 // cloned, so the call does not move a value the rest of the body reads.
 fn params_cloned(rn: Map[Str, Str], params: List[Str]) -> Map[Str, Str] {
   var out = rn
-  for (p of params) { out = out.set(p, `${p}.clone()`) }
+  for (p of params) { out = out.set(p, `${value_ident(p)}.clone()`) }
   return out
 }
 
 fn pure_stmt(step: Any, kind: Str, c: Ctx, params: List[Str]) -> Str {
   if (kind == "assign") {
-    return `${mangle(value_str(value_field(step, "name")))} = ${render_expr(value_field(step, "value"), c)};`
+    return `${value_ident(value_str(value_field(step, "name")))} = ${render_expr(value_field(step, "value"), c)};`
   }
   if (kind == "return") {
     let e = value_field(step, "expr")
@@ -5177,10 +5213,10 @@ fn pure_stmt(step: Any, kind: Str, c: Ctx, params: List[Str]) -> Str {
     // `.iter().cloned()` yields owned elements without moving the iterable (a
     // param or `self` field may be read again).
     let bind = value_str(value_field(step, "bind"))
-    let inner = set_rn(c, c.rn.set(bind, mangle(bind)))
+    let inner = set_rn(c, c.rn.set(bind, value_ident(bind)))
     let iterable = render_expr(value_field(step, "iterable"), c)
     let body = pure_stmts(value_list(value_field(step, "body")), inner, params).join(" ")
-    return `for ${mangle(bind)} in ${iterable}.iter().cloned() { ${body} }`
+    return `for ${value_ident(bind)} in ${iterable}.iter().cloned() { ${body} }`
   }
   if (kind == "emit") {
     // item 458 / issue #721: a bare `emit` inside an arm registers nothing, so
@@ -5761,8 +5797,8 @@ fn method_scope_rename(comp: Any, services: Any, ctx: Ctx) -> Map[Str, Str] {
   // a key or bind that is a Rust keyword is captured under its mangled name,
   // the one its field and its local carry (issue #1927)
   for (b of binds(comp)) {
-    if (held_bind_type(comp, b, services, ctx) != "") { rn = rn.set(b, `self.${mangle(b)}.clone()`) }
-    else { rn = rn.set(b, `self.${mangle(b)}`) }
+    if (held_bind_type(comp, b, services, ctx) != "") { rn = rn.set(b, `self.${value_ident(b)}.clone()`) }
+    else { rn = rn.set(b, `self.${value_ident(b)}`) }
   }
   for (raw of value_keys(value_field(comp, "requires"))) {
     rn = rn.set(key_binding(raw), `self.${mangle(host_key(raw))}`)
@@ -5780,12 +5816,12 @@ fn method_undo_rename(comp: Any, method: Any) -> Map[Str, Str] {
 fn method_undo_clones(comp: Any, method: Any, indent: Int) -> List[Str] {
   let pad = ind(indent)
   var out = []
-  for (b of binds(comp)) { out = out.push(`${pad}let ${b}_undo = self.${mangle(b)}.clone();`) }
+  for (b of binds(comp)) { out = out.push(`${pad}let ${b}_undo = self.${value_ident(b)}.clone();`) }
   for (raw of value_keys(value_field(comp, "requires"))) {
     let req = key_binding(raw)
     out = out.push(`${pad}let ${req}_undo = self.${mangle(host_key(raw))}.clone();`)
   }
-  for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) out = out.push(`${pad}let ${pn}_undo = ${pn}.clone();`) }
+  for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) out = out.push(`${pad}let ${pn}_undo = ${value_ident(pn)}.clone();`) }
   return out
 }
 // `_bare_param`: the parameter a bare `var`/`name` node names, else ""
@@ -5925,7 +5961,7 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
       if (kind == "effect" || kind == "emit") {
         var undoR = method_undo_rename(comp, method)
         var acqR = scope
-        for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) acqR = acqR.set(pn, `${pn}.clone()`) }
+        for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) acqR = acqR.set(pn, `${value_ident(pn)}.clone()`) }
         if (kind == "emit") {
           // the emission fires, then its `compensate` (item 247, the
           // teardown-contract two-phase abort) is registered on the
@@ -5966,17 +6002,17 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
           // reads it (E0382); a body local stays a move.
           let param = bare_param(value_field(step, "value"), method)
           if (kind == "let") {
-            let cshadow = set_rn(c, c.rn.set(nm, mangle(nm)))
+            let cshadow = set_rn(c, c.rn.set(nm, value_ident(nm)))
             var cvalue = cshadow
-            if (param != "") { cvalue = set_rn(cshadow, cshadow.rn.set(param, `${param}.clone()`)) }
+            if (param != "") { cvalue = set_rn(cshadow, cshadow.rn.set(param, `${value_ident(param)}.clone()`)) }
             var mut = ""
             if (value_bool(value_field(step, "mutable"))) { mut = "mut " }
-            out = out.push(`${pad}let ${mut}${mangle(nm)} = ${render_expr(value_field(step, "value"), cvalue)};`)
+            out = out.push(`${pad}let ${mut}${value_ident(nm)} = ${render_expr(value_field(step, "value"), cvalue)};`)
             c = cshadow
           } else {
             var cvalue = c
-            if (param != "") { cvalue = set_rn(c, c.rn.set(param, `${param}.clone()`)) }
-            out = out.push(`${pad}${mangle(nm)} = ${render_expr(value_field(step, "value"), cvalue)};`)
+            if (param != "") { cvalue = set_rn(c, c.rn.set(param, `${value_ident(param)}.clone()`)) }
+            out = out.push(`${pad}${value_ident(nm)} = ${render_expr(value_field(step, "value"), cvalue)};`)
           }
           if (inferred != "") { c = set_vt(c, nm, inferred) }
           if (kind == "let" && nm != "") { body_locals = body_locals.set(nm, "1") }
@@ -6042,7 +6078,7 @@ fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: Ty
     for (pn of value_list(value_field(method, "params"))) {
       let pname = value_str(pn)
       let ptype = service_param_type(svc_method, pname)
-      ps = ps.push(`${pname}: ${rust_type_t(ptype, tables.tn)}`)
+      ps = ps.push(`${value_ident(pname)}: ${rust_type_t(ptype, tables.tn)}`)
       vt = vt.set(pname, value_str(ptype))
     }
     var ret = "()"
@@ -6075,7 +6111,7 @@ fn emit_provide_construction(comp: Any, step: Any, effectful: Bool, indent: Int)
   let struct = `${name}${camel(host_key(key))}`
   let plocal = key.indexOf("::") < 0 ? key : host_key(key)
   var fields = []
-  for (b of binds(comp)) { fields = fields.push(`${mangle(b)}: ${mangle(b)}.clone()`) }
+  for (b of binds(comp)) { fields = fields.push(`${value_ident(b)}: ${value_ident(b)}.clone()`) }
   for (local of value_keys(value_field(comp, "requires"))) { fields = fields.push(`${mangle(host_key(local))}: ${mangle(host_key(local))}.clone()`) }
   fields = fields.concat(config_ctor_field(comp, key))
   if (effectful) { fields = fields.push("ctx: Arc::new(ctx.clone())") }
@@ -6303,7 +6339,7 @@ fn emit_let_effect_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
   let pad = ind(indent)
   var out = []
   let raw_bind = value_str(value_field(step, "bind"))
-  let bind = mangle(raw_bind)
+  let bind = value_ident(raw_bind)
   let acq_node = value_field(step, "acquire")
   if (value_list(value_field(step, "setup")).length() > 0) {
     out = out.push(`${pad}<<UNSUPPORTED-let-effect-setup:${raw_bind}>>`)
@@ -6509,7 +6545,7 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
     // than emitted with a schema string that is not the reference's.
     let subject = render_expr(value_field(step, "subject"), ctx)
     let raw_bind = value_str(value_field(step, "bind"))
-    let bind = mangle(raw_bind)
+    let bind = value_ident(raw_bind)
     let body = value_list(value_field(step, "body"))
     if (body.length() == 0) { return [`${pad}<<UNSUPPORTED-stream-iter-empty:${name}>>`] }
     let contract = value_field(step, "event")
@@ -6665,7 +6701,7 @@ fn emit_component(comp: Any, services: Any, ir: Any) -> List[Str] {
     let srv = value_str(value_field(provs, key))
     let struct = `${cname}${camel(host_key(key))}`
     out = out.push(`struct ${struct} {`)
-    for (b of binds(comp)) { out = out.push(`    ${mangle(b)}: ${bind_field_type(comp, b, map_values, services, plain_ctx(tables, fr, functions))},`) }
+    for (b of binds(comp)) { out = out.push(`    ${value_ident(b)}: ${bind_field_type(comp, b, map_values, services, plain_ctx(tables, fr, functions))},`) }
     for (local of value_keys(reqs)) { out = out.push(`    ${mangle(host_key(local))}: Arc<Box<dyn ${require_ty(value_str(value_field(reqs, local)))}>>,`) }
     out = out.concat(config_struct_field(comp, key))
     out = out.push("}")
@@ -6745,7 +6781,7 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
     let srv = value_str(value_field(provs, key))
     let struct = `${cname}${camel(host_key(key))}`
     out = out.push(`struct ${struct} {`)
-    for (b of binds(comp)) { out = out.push(`    ${mangle(b)}: ${bind_field_type(comp, b, map_values, services, plain_ctx(tables, fr, functions))},`) }
+    for (b of binds(comp)) { out = out.push(`    ${value_ident(b)}: ${bind_field_type(comp, b, map_values, services, plain_ctx(tables, fr, functions))},`) }
     for (local of value_keys(reqs)) { out = out.push(`    ${mangle(host_key(local))}: Arc<Box<dyn ${require_ty(value_str(value_field(reqs, local)))}>>,`) }
     out = out.concat(config_struct_field(comp, key))
     if (has_eff) { out = out.push("    ctx: Arc<cordis::Context>,") }
@@ -7665,8 +7701,8 @@ fn emit_v3_tests(tests: List[Any], functions: List[Any], externs: List[Any], fr:
   // A test slug shares the module namespace with every top-level fn and extern
   // (both emit a bare `fn <name>`), so those names are taken first (#552 B7).
   var used = []
-  for (f of functions) { used = used.push(mangle(value_str(value_field(f, "name")))) }
-  for (e of externs) { used = used.push(mangle(value_str(value_field(e, "name")))) }
+  for (f of functions) { used = used.push(fn_ident(value_str(value_field(f, "name")))) }
+  for (e of externs) { used = used.push(fn_ident(value_str(value_field(e, "name")))) }
   let borrow = compute_str_param_borrows(functions)
   let list_borrow = compute_list_param_borrows(functions)
   // a generic call inside a test body binds its type parameters from the same

@@ -194,7 +194,7 @@ fn node_step(n: Any) -> Str { return value_str(value_field(n, "step")) }
 fn v3_ident(name: Str) -> Str {
   var root = name
   while (root.length() > 0) {
-    if (is_go_reserved(root)) { return name.concat("_") }
+    if (is_go_reserved(root) || has_revl_prefix(root)) { return name.concat("_") }
     if (root.charAt(root.length() - 1) != "_") { return name }
     root = root.slice(0, root.length() - 1)
   }
@@ -215,13 +215,35 @@ fn is_go_reserved(name: Str) -> Bool {
   if (name == "RevlFrame" || name == "RevlTimer" || name == "RevlTeardownRecord") { return true }
   if (name == "Stream" || name == "Subscription" || name == "EventContract") { return true }
   if (name == "RevlSpawnHandle") { return true }
-  // The predeclared identifiers the emitted code spells by bare name, which a
-  // user binding of the same name would shadow.
+  // The WHOLE predeclared set (issue #3161), the same set
+  // `backends/go/emit.py::_GO_RESERVED` carries: the emitted code spells
+  // `recover`, `close`, `cap`, `clear` and `uint64` in places, and a later
+  // helper can spell any other universe-block name. Reserving the set once is
+  // what keeps the two implementations byte-identical.
   if (name == "any" || name == "append" || name == "bool" || name == "byte") { return true }
-  if (name == "comparable" || name == "copy" || name == "delete" || name == "error") { return true }
-  if (name == "float64" || name == "int" || name == "int32" || name == "int64") { return true }
-  if (name == "len" || name == "make" || name == "panic" || name == "rune") { return true }
-  return name == "string" || name == "uint32"
+  if (name == "cap" || name == "clear" || name == "close" || name == "comparable") { return true }
+  if (name == "complex" || name == "complex64" || name == "complex128") { return true }
+  if (name == "copy" || name == "delete" || name == "error") { return true }
+  if (name == "float32" || name == "float64" || name == "imag") { return true }
+  if (name == "int" || name == "int8" || name == "int16" || name == "int32" || name == "int64") { return true }
+  if (name == "len" || name == "make" || name == "max" || name == "min" || name == "new") { return true }
+  if (name == "panic" || name == "print" || name == "println" || name == "real" || name == "recover") { return true }
+  if (name == "rune" || name == "string") { return true }
+  if (name == "uint" || name == "uint8" || name == "uint16" || name == "uint32" || name == "uint64") { return true }
+  return name == "uintptr"
+}
+
+// The reference's `_REVL_HELPER_PREFIX_RE` (issue #3168): the go emitter's own
+// helpers are spelled `revl<Upper>`, `REVL_`, `_revl` or `_REVL`, and a user
+// binding of that shape would shadow a bare helper call inside its function.
+// Escaped by the same one-rung ladder as a reserved word.
+fn has_revl_prefix(name: Str) -> Bool {
+  if (name.startsWith("REVL_") || name.startsWith("_REVL")) { return true }
+  if (name.startsWith("_revl")) { return true }
+  if (name.length() < 5) { return false }
+  if (!name.startsWith("revl")) { return false }
+  let c = name.charCodeAt(4)
+  return c >= 65 && c <= 90
 }
 
 // `_camel` verbatim (item 390): snake_or_lower / `-` -> UpperCamel, keeping the
@@ -1438,6 +1460,17 @@ fn render_record(node: Any, ctx: Ctx) -> Str {
   return `${tn}{${body.join(", ")}}`
 }
 
+// `_v3_infer_arm_body`: an arm body's type with its binder in scope, typed as the
+// arm's payload (the scrutinee for a wildcard), else as nothing, never as an
+// outer binding of the same name (issue #3075).
+fn infer_arm_body(arm: Any, st: Str, ctx: Ctx) -> Str {
+  let body = value_field(arm, "body")
+  let bind = value_str(value_field(arm, "bind"))
+  if (bind == "" || bind == "_") { return infer_type(body, ctx) }
+  let bound = value_str(value_field(arm, "pattern")) == "_" ? st : value_str(value_field(arm, "payload_type"))
+  return infer_type(body, with_vt_map(ctx, bound == "" ? ctx.vt.remove(bind) : ctx.vt.set(bind, bound)))
+}
+
 // `_go_v3_match`: a `match` over a user variant as a Go type switch wrapped in an
 // IIFE (`func() T { switch _m := scrut.(type) { .. } }()`). The switch/case/body
 // lines carry a LITERAL one/two-tab indent (the reference builds them with a
@@ -1456,7 +1489,7 @@ fn render_match(node: Any, ctx: Ctx, expected: Str) -> Str {
   if (exp_t == "") {
     var i = 0
     while (i < arms.length() && exp_t == "") {
-      exp_t = go_type(infer_type(value_field(arms[i], "body"), ctx), ctx.gv)
+      exp_t = go_type(infer_arm_body(arms[i], st, ctx), ctx.gv)
       i = i + 1
     }
   }
@@ -2959,10 +2992,13 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int, preceding: List[Any]) -> Sout {
     let pinned = inferred != "" && is_interface(inferred, ctx)
     if (got == "int64" || got == "float64" || pinned) {
       out = out.push(line(indent, `var ${nm} ${got} = ${value}`))
+    } else if (nm == "_") {
+      // the blank identifier declares nothing (issue #3074)
+      out = out.push(line(indent, `_ = ${value}`))
     } else {
       out = out.push(line(indent, `${nm} := ${value}`))
     }
-    out = out.push(line(indent, `_ = ${nm}`))
+    if (nm != "_") { out = out.push(line(indent, `_ = ${nm}`)) }
     return { lines: out, ctx: nctx }
   }
   if (step == "assign") {
@@ -4816,10 +4852,14 @@ fn is_go_keyword(name: Str) -> Bool {
                         "defer", "return", "var", "const", "package", "import"], name)
 }
 
-// issue #3053: the lifecycle driver's own names; go renames the USER binding. Mirrors backends/go/emit.py.
+// issue #3053: the lifecycle driver's own names; go renames the USER binding.
+// issue #3095 adds the component activation/provide-impl scaffolding a
+// `let-effect` bind shares scope with. Mirrors backends/go/emit.py.
 fn is_emitter_reserved(name: Str) -> Bool {
   return list_contains(["revlT", "root", "_fibers", "_revlLoadOrder", "_revlAt",
-                        "_svc", "_err", "_r", "_ok"], name)
+                        "_svc", "_err", "_r", "_ok",
+                        "ctx", "cfg", "err", "revlFrame", "revlJournal", "revlSelf",
+                        "_revlUi", "_revlApplyInv", "_revlApplyErr"], name)
 }
 
 fn safe_local(name: Str) -> Str {

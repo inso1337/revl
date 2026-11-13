@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 
 from .._run_backends import KNOWN_BACKENDS, RUNNABLE_BACKENDS
+from .._update_consents import UPDATE_OPERATOR_CONSENTS
 from ..tiers import tier_metavar, tier_type
 
 # The backends `revl bundle` can emit (the emitter package names under
@@ -19,6 +20,22 @@ BUNDLE_BACKENDS = ("python", "typescript", "rust", "java", "go", "wasm")
 # here so parser assembly stays import-light; it mirrors
 # `revl.replay_modes.MODES`, which is the authority.
 REPLAY_MODES = ("exact", "tool-only", "model-substitute", "counterfactual")
+
+
+class _StoreOnce(argparse.Action):
+    """A single-value flag that refuses to be given twice.
+
+    A plain `store` flag keeps the last value, so a host-side wrapper that pins
+    a rule and a later argument list that repeats the flag would let the later,
+    weaker value win without a word. A rule flag that is repeated is a usage
+    error naming the flag instead of a silent override."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        if getattr(namespace, self.dest, None) is not None:
+            raise argparse.ArgumentError(
+                self, f"{option_string or self.option_strings[0]} was given "
+                      f"more than once; give it exactly once")
+        setattr(namespace, self.dest, values)
 
 
 def _attempt_limit(text: str) -> int:
@@ -107,6 +124,10 @@ def _add_update_feed_arguments(sub) -> None:
                      help="read the release manifest from this file or URL "
                           "instead of resolving the feed; the same validation "
                           "runs")
+    sub.add_argument("--trust-unsigned", action="store_true",
+                     help="accept a manifest fetched over the network that "
+                          "carries no signature at all; a manifest that does "
+                          "carry one is still verified")
     sub.add_argument("--home", default=None, metavar="DIR",
                      help="update home (default $REVL_UPDATE_HOME or "
                           "~/.revl/updates)")
@@ -422,6 +443,10 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--json-diagnostics", action="store_true",
                        help="on rejection, print a structured diagnostic (code, guarantee, "
                             "expected/actual, hint) instead of the human rendering")
+    audit.add_argument(
+        "--spec-results", metavar="FILE", default=None,
+        help="list each function's `ensures` spec with its last recorded "
+             "result, read from a `revl test --report json` file")
     # item 439: a COMPOSITION document argument is resolved rather than
     # compiled as a module, so its rows — and the providers a `remote` row
     # synthesizes — are on the surface. Row provenance is recorded against the
@@ -461,6 +486,17 @@ def build_parser() -> argparse.ArgumentParser:
              "table vouches (claimed, unverified); and each model role's "
              "binding per host with the model bindings digest (item 515). "
              "Human output only.")
+    audit.add_argument(
+        "--deploy-map", metavar="MAP", default=None, dest="deploy_map",
+        help="a deploy map (an item-56 placement map with per-process "
+             "`[deploy]` tables): print one typed participant class per "
+             "process (prepare-reversible, deferred-irreversible, "
+             "recoverable-forward, compensable, irreversible, "
+             "irreversible-needs-approval) derived from the declarations of "
+             "the components that process holds, and REFUSE (nonzero) a plan "
+             "that orders an irreversible-needs-approval participant before a "
+             "participant that can still fail (issue #2725). Not with "
+             "`--policy` or `--diff`.")
     # item 309: the replay-class view over the recovery surface.
     audit.add_argument(
         "--recovery", action="store_true", default=None,
@@ -574,8 +610,8 @@ def build_parser() -> argparse.ArgumentParser:
     # two audit graphs for authority drift, with no policy on the path).
     simulate_cmd = sub.add_parser(
         "simulate",
-        help="preview what a change would have done to recorded history "
-             "(item 468)")
+        help="preview a policy change, or re-run a component change, over "
+             "recorded history (item 468, issue #2713)")
     simulate_sub = simulate_cmd.add_subparsers(dest="simulate_command",
                                                required=True)
     sim_policy = simulate_sub.add_parser(
@@ -606,6 +642,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="with a COMPOSITION document passed to `--composition`: the "
              "project root row provenance and origins are recorded against "
              "(default: the working directory). Ignored for module arguments")
+
+    # issue #2713: `revl simulate swap OLD NEW --history RUN.wal` re-runs the
+    # recorded call outcomes of ONE component against a changed version. The
+    # preflight runs nothing and names every missing fact (a history that is
+    # not whole, a crossing whose outcome was never journalled, an absent
+    # `determinism` record, a recorded method whose arguments are not on the
+    # record, a component outside the pure subset); only a replayable history
+    # is executed, offline, and the first returned value that moved is named
+    # and stops the run. Every bound is a fact in the report rather than a
+    # caveat, and the command dispatches no host call and mutates nothing.
+    sim_swap = simulate_sub.add_parser(
+        "swap",
+        help="re-run the recorded outcomes of one component against a changed "
+             "version: the preflight names every missing fact and runs nothing, "
+             "then a pure component's recorded calls are re-executed offline "
+             "and the first returned value that moved is named")
+    sim_swap.add_argument(
+        "old", metavar="OLD",
+        help="the component version that produced the recording (a .rvl source)")
+    sim_swap.add_argument(
+        "new", metavar="NEW",
+        help="the changed component version to re-run (same accepted form)")
+    sim_swap.add_argument(
+        "--history", metavar="RUN.wal", required=True,
+        help="the recorded history to re-run (a WAL)")
+    sim_swap.add_argument(
+        "--component", default=None, metavar="NAME",
+        help="the component to swap when OLD or NEW declares more than one "
+             "(default: the only component either declares)")
+    sim_swap.add_argument("--json", action="store_true",
+                         help="machine-readable swap report an agent can consume")
 
     diff_cmd = sub.add_parser(
         "diff",
@@ -874,6 +941,52 @@ def build_parser() -> argparse.ArgumentParser:
              "never reported valid")
     retention_cmd.add_argument("--json", action="store_true",
                                help="machine-readable receipt or verdict")
+
+    # issue #2757: signed, chained receipts for consequential actions. Two
+    # verbs that point in opposite directions: export signs a session's
+    # actions, verify checks a chain somebody presents. Routed before the
+    # shared compile step because both read a JSON document, not `.rvl`.
+    receipts_cmd = sub.add_parser(
+        "receipts",
+        help="export a session's consequential actions as a signed receipt "
+             "chain, or verify one somebody presents (issue #2757)")
+    receipts_sub = receipts_cmd.add_subparsers(
+        dest="receipts_command", metavar="{export,verify}")
+    receipts_export = receipts_sub.add_parser(
+        "export", help="sign a receipt per action and chain them")
+    receipts_export.add_argument(
+        "--actions", required=True, metavar="FILE",
+        help='a JSON document of actions: a bare list or {"actions": [...], '
+             '"session_verdict": "committed"|"aborted"}')
+    receipts_export.add_argument(
+        "--session", required=True, metavar="NAME",
+        help="the session the chain belongs to (one session per chain)")
+    receipts_export.add_argument(
+        "--session-verdict", default="committed", metavar="VERDICT",
+        # mirrors action_receipt.SESSION_VERDICTS; kept a literal so parser
+        # assembly stays import-light
+        choices=("committed", "aborted"),
+        help="the session's verdict, bound into every receipt")
+    receipts_export.add_argument(
+        "--key", action="append", default=[], metavar="PATH",
+        help="the signing key file. Falls back to REVL_RECEIPT_KEY_FILE (a "
+             "path) or REVL_RECEIPT_KEY (the secret); never hardcoded")
+    receipts_export.add_argument(
+        "--salt", default=None, metavar="HEX",
+        help="the 64-hex commitment salt; random when omitted")
+    receipts_export.add_argument(
+        "--out", default=None, metavar="FILE",
+        help="write the chain here instead of stdout")
+    receipts_verify = receipts_sub.add_parser(
+        "verify", help="check a receipt chain, fail closed")
+    receipts_verify.add_argument("file", metavar="CHAIN",
+                                 help="the chain document to check")
+    receipts_verify.add_argument(
+        "--key", action="append", default=[], metavar="PATH",
+        help="a verification key; repeat to check a chain that spans a key "
+             "rotation. Falls back to REVL_RECEIPT_KEY_FILE / REVL_RECEIPT_KEY")
+    receipts_verify.add_argument("--json", action="store_true",
+                                 help="machine-readable verdict")
 
     plan_cmd = sub.add_parser(
         "plan", help="dry run for admission: the delta a swap would produce, without applying it")
@@ -1350,6 +1463,21 @@ def build_parser() -> argparse.ArgumentParser:
                                 "fallback) as applicable; such a release has no "
                                 "declared sha256 and is never applied "
                                 "automatically")
+    mcp_serve.add_argument("--update-trust-unsigned", action="store_true",
+                           help="accept a networked release manifest that "
+                                "carries no signature at all (UPDATE_UNSIGNED "
+                                "otherwise); a manifest that does carry a "
+                                "signature is still verified, and the accepted "
+                                "manifest is as authentic as the channel that "
+                                "served it")
+    mcp_serve.add_argument("--update-allow-consent", action="append", default=[],
+                           choices=UPDATE_OPERATOR_CONSENTS, metavar="NAME",
+                           help="honour this consent flag from "
+                                "revl_update_apply, repeated for each: "
+                                + ", ".join(UPDATE_OPERATOR_CONSENTS) +
+                                ". Without a grant the caller passing the flag "
+                                "is refused (UPDATE_CONSENT_NOT_GRANTED); "
+                                "force needs none")
     mcp_serve.add_argument("--update-replacing", action="append", default=[],
                            metavar="COMPONENT",
                            help="a provider the release takes over, repeated "
@@ -1364,6 +1492,26 @@ def build_parser() -> argparse.ArgumentParser:
                                 "calls that verb")
     _add_mcp_http_arguments(mcp_serve)
     _add_profile_settle_argument(mcp_serve)
+    # issue #2990: the server's own attestation. Opt-in: no key, no record, and
+    # the historical trust-by-address mode is unchanged for a client with no pin.
+    mcp_serve.add_argument("--attestation-key", default=None, metavar="PATH",
+                           help="sign this server's identity and tool manifest "
+                                "with the private key in PATH (a revl peer "
+                                "identity file), so a client that pinned the "
+                                "public half can verify who answered and which "
+                                "tool list it serves")
+    mcp_serve.add_argument("--attestation-server-id",
+                           default="revl-mcp-serve", metavar="ID",
+                           help="the server id the attestation names (default: "
+                                "revl-mcp-serve)")
+    mcp_serve.add_argument("--attestation-ttl", type=float, default=3600.0,
+                           metavar="SECONDS",
+                           help="how long one attestation is valid (default: "
+                                "3600); an expired record is refused")
+    mcp_serve.add_argument("--attestation-pin-out", default=None, metavar="PATH",
+                           help="write the public pin for this server's current "
+                                "tool manifest to PATH, for `revl mcp proxy "
+                                "--attestation-pin`")
     mcp_schema = mcp_sub.add_parser("schema",
                                     help="project provided services to MCP tool definitions")
     mcp_schema.add_argument("files", nargs="+")
@@ -1409,6 +1557,14 @@ def build_parser() -> argparse.ArgumentParser:
                            metavar="SECONDS",
                            help="how long to wait for one upstream answer "
                                 "(default: 120)")
+    mcp_proxy.add_argument("--attestation-pin", default=None, metavar="PATH",
+                           help="pin the upstream's identity and tool manifest "
+                                "to these signed digests (issue #2990): the "
+                                "proxy refuses an upstream whose attestation "
+                                "does not verify under the pinned key, and a "
+                                "tool that changed after the pin, by name. "
+                                "Without a pin the upstream is trusted by "
+                                "address, as before")
     mcp_proxy.add_argument("--wal", default=None, metavar="PATH",
                            help="the session write-ahead log (default: the "
                                 "per-user state directory)")
@@ -1793,11 +1949,14 @@ def build_parser() -> argparse.ArgumentParser:
                           "Credentials come from the environment variables the "
                           "file names (docs/model-providers.md)")
     run.add_argument("--policy", default=None, metavar="POLICY",
-                     help="boundary policy file (item 33). With --backend wasm it "
-                          "enforces the item-289 least-authority chain (host "
-                          "imports subset-of declared caps subset-of policy-allowed) "
-                          "before booting; a wasm cell exceeding the allow-list is "
-                          "refused (docs/boundary-policy.md)")
+                     help="boundary policy file (item 33). On every backend, "
+                          "and under --placement, the run is refused before boot "
+                          "on any violation `revl audit --policy` refuses (deny "
+                          "and allow rules, pair and evidence rules, `requires "
+                          "approval`); under --watch an edit the policy refuses "
+                          "is rejected. With --backend wasm it also enforces the "
+                          "item-289 least-authority chain over the emitted host "
+                          "imports (docs/boundary-policy.md)")
     run.add_argument("--watch", action="store_true",
                      help="watch the sources and recompile on change; a rejected edit is refused, the run keeps going")
     run.add_argument("--record", action="store_true",
@@ -1958,6 +2117,14 @@ def build_parser() -> argparse.ArgumentParser:
                               "recover reports the classification per un-finalized "
                               "decision and changes nothing, matching `revl estop "
                               "--report`")
+    recover.add_argument(
+        "--decision", default=None, metavar="FILE",
+        help="the conductor's ONE durable decision for this multi-node step: the "
+             "`decision.jsonl` `revl deploy` writes next to its state. Settles "
+             "this participant's WAL against that record (a commit-approved "
+             "record rolls forward; an abort record or a missing file rolls "
+             "back; an unreadable record fails closed). Not with --restore, "
+             "--forward, --operator-resolved or a placement index (issue #2725)")
     recover.add_argument("--composition", nargs="+", default=None,
                          metavar="FILE",
                          help="replay against the REAL world (issue #1477): the "
@@ -2181,10 +2348,19 @@ def build_parser() -> argparse.ArgumentParser:
              "reports that the question is not answerable from the record, "
              "because a crossing's capability token is not on the WAL")
     replay_cmd.add_argument(
-        "--candidate", nargs="+", default=None, metavar="FILE",
+        "--candidate", action="append", nargs="+", default=None, metavar="FILE",
         help="the candidate composition to resolve each recorded crossing's "
-             "capability token from, and to admit under --under. Compiled "
-             "statically: no live effect fires")
+             "capability token from, and to admit under --under. Repeat it to "
+             "compare competing compositions with --probe. Compiled statically: "
+             "no live effect fires")
+    replay_cmd.add_argument(
+        "--probe", action="store_true",
+        help="with --under, print the probe report instead of the "
+             "counterfactual: one row per --candidate composition with its "
+             "content hash, the recorded crossings regraded, the newly refused "
+             "and newly allowed counts, the first dangerous crossing and the "
+             "bounds. Ordering evidence only; a clean row admits nothing and a "
+             "refusal does not fail the command")
     replay_cmd.add_argument("--json", action="store_true",
                             help="machine-readable output")
 
@@ -2965,10 +3141,75 @@ def build_parser() -> argparse.ArgumentParser:
              "request's backend. The host is the floor: a request may add this "
              "requirement but never turn it off (S2.4)")
     admit_cmd.add_argument(
+        "--max-age", metavar="SECONDS", type=float, action=_StoreOnce,
+        help="REFUSE an attestation whose signed timestamp is more than SECONDS "
+             "old (freshness TTL). Off by default: a host that names no window "
+             "accepts any past attestation a trusted key once signed")
+    admit_cmd.add_argument(
+        "--not-before", metavar="INSTANT", action=_StoreOnce,
+        help="REFUSE an attestation signed before INSTANT, a unix timestamp or "
+             "an ISO-8601 instant (typically the last deploy this host "
+             "accepted). An independent anchor: replaying an old-but-still-in-"
+             "window attestation fails against it")
+    admit_cmd.add_argument(
+        "--capability-ceiling", metavar="NAME", action="append",
+        help="REFUSE a staged composition that reaches a capability outside "
+             "these names; repeatable. Measured from the signature-bound "
+             "ir/ir.json, not from policy.json")
+    admit_cmd.add_argument(
+        "--revoked-key", metavar="KEY_ID", action="append",
+        help="REFUSE a chain signed by KEY_ID; repeatable. Revokes one signer "
+             "while the other key files it trusts stay in force")
+    admit_cmd.add_argument(
+        "--recheck-source", action="store_true",
+        help="re-run THIS host's frontend over the staged source and REFUSE "
+             "unless it admits and reproduces the staged IR, instead of trusting "
+             "the signer's gate run")
+    admit_cmd.add_argument(
         "--runtime-version", metavar="NAME=VER", action="append",
         help="a runtime this host reports on its verdicts (e.g. python=3.14); "
              "repeatable. These are the versions bound into the load-time "
              "measurement a later audit correlates against")
+
+    # `revl federation-apply PLAN [--dry-run]`: an all-or-nothing update of
+    # several co-located compositions, written as a plan file (issue #2718).
+    # The admission half compiles each composition's new source, runs the
+    # consumer contracts and the irreversible-crossing rule through
+    # `deploy.federation_admission`, and reports any capability the new
+    # generation reaches and the one it replaces does not. Without --dry-run it
+    # also drives the coordinated PREPARE/COMMIT protocol, runs the plan's
+    # health probes after the commit, and unwinds the update when a probe
+    # fails, times out or is interrupted.
+    fed_cmd = sub.add_parser(
+        "federation-apply",
+        help="admit a federation plan (new sources, consumer contracts, health "
+             "probes) and, without --dry-run, apply it as one co-located "
+             "all-or-nothing update (item 2718)")
+    fed_cmd.add_argument("plan", metavar="PLAN",
+                         help="the federation plan (TOML or JSON): "
+                              "[compositions.<id>] tables with each "
+                              "composition's `source`, optional `prior` "
+                              "generation, `health_probe` and "
+                              "`allow_capabilities`, plus [[contracts]] "
+                              "consumer surfaces")
+    fed_cmd.add_argument(
+        "--dry-run", action="store_true",
+        help="run only the effect-free admission half and print the verdict; "
+             "opens no boundary and moves no composition off its prior "
+             "generation")
+    fed_cmd.add_argument("--json", action="store_true",
+                         help="machine-readable verdict (admission, widened "
+                              "capabilities, participant outcomes, probes)")
+    fed_cmd.add_argument(
+        "--state-dir", metavar="DIR",
+        help="the participant state directory for THIS generation (default: "
+             "<wal-dir>/federation/<federation>/<generation>). It is locked "
+             "for the whole apply and used once: a directory that already "
+             "holds a decision record is refused before anything is written")
+    fed_cmd.add_argument(
+        "--probe-timeout", type=float, default=30.0, metavar="SECONDS",
+        help="how long one declared health probe may run before it counts as "
+             "failed and its process group is killed (default: 30)")
 
     # `revl truc <verb> ...` — a namespaced door onto the standalone `truc`
     # binary (roadmap item 136, slice S2). This is a pure passthrough: the tail

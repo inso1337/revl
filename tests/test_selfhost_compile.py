@@ -784,6 +784,13 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # is the only corpus document that reaches `journalBegin()`/`guard()` —
         # its `provide`-method bracket is the one shape where no activation-body
         # bracket ever created the `Frame`.)
+        # issue #2904: `later(cb: () -> Async[Int], k: Int)` returns
+        # `cb() + k`. The reference IR stamps that `+` `operands: "Int"`, so
+        # it renders through the i64 bound test; the native lower.rvl IR does
+        # not, and the native chain renders a bare `((await cb()) + k)`, an
+        # UNCHECKED add. The emitter half is byte-exact on the reference IR
+        # (asserted above). A lower.rvl gap, not an emitter one.
+        "int_inline_2904.rvl",
     ),
     "go": (
         # (issue #2088: in-file `test` blocks. selfhost/emit_go.rvl already
@@ -833,7 +840,14 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # `stdlib_builtins.rvl` and the borrowed
         # `../emit_ts_corpus/property_edges.rvl` — left it with the
         # `sized_length` property form.)
-        # no residual: the fully-native chain reproduces the whole java corpus.
+        # issue #3095: the native producer leaves the component's `let-effect`
+        # binder raw (`ctx` stays `ctx` in its IR), so the native emitter's
+        # binding ladder lands on `ctx_` while the reference frontend escaped
+        # the binder to `ctx_` and the ladder reaches `ctx__`. The java byte
+        # oracle in tests/test_selfhost_emit_java.py holds this document
+        # byte-exact on the REFERENCE IR, so the residual is the producer's
+        # `_safe_name` handling, not the emitter.
+        "comp_provide_ctx_bind.rvl",
     ),
     "rust": (
         # (`component_edges.rvl` left this list with issue #1818: its provide
@@ -2526,31 +2540,10 @@ GENERIC_VARIANT_LOUD_REFUSALS: dict[str, str] = {
 # them: silent verdict differences, recorded so they cannot read as agreement.
 # The `arm_binds_*` pair (issue #2402) is refused on payload typing (an arm
 # over `Mb[Int]` binds `Int`, so returning it as `Str` is a mismatch); both
-# were admitted by the reference too before the fix. `aggregate_missing_agreed`
-# is issue #2981: the reference refuses the program (a match over a provided
-# `Aggregate[Str]` that leaves out `Agreed`, PR #2934's
-# `test_aggregate_missing_agreed_is_refused`) while the self-host gate admits
-# it. Each entry fails in either direction, on the reference or on the gate.
-GENERIC_VARIANT_SILENT_ADMITS = ("aggregate_missing_agreed",
-                                 "arm_binds_second_parameter",
+# were admitted by the reference too before the fix. Each entry fails in either
+# direction, on the reference or on the gate.
+GENERIC_VARIANT_SILENT_ADMITS = ("arm_binds_second_parameter",
                                  "arm_binds_substituted_payload")
-
-# The reference's program for a difference the docs table does not carry:
-# tests/test_generic_variant_construction.py spells the exhaustiveness case
-# inline in `test_aggregate_missing_agreed_is_refused` rather than in
-# `REFUSED`, so its source and message are recorded here beside the registry.
-GENERIC_VARIANT_INLINE_REFUSED = {
-    "aggregate_missing_agreed": (
-        """fn settle(a: Aggregate[Str]) -> Str {
-  return match a {
-    Split(d) => "no",
-    Inquorate(d) => "no",
-  }
-}
-""",
-        "non-exhaustive match: missing case `Agreed`",
-    ),
-}
 
 
 def _generic_variant_docs():
@@ -2560,10 +2553,7 @@ def _generic_variant_docs():
 
 
 def _generic_variant_silent_admit_doc(name):
-    docs = _generic_variant_docs()
-    if name in docs.REFUSED:
-        return docs.REFUSED[name]
-    return GENERIC_VARIANT_INLINE_REFUSED[name]
+    return _generic_variant_docs().REFUSED[name]
 
 
 @pytest.mark.parametrize("name", sorted(GENERIC_VARIANT_LOUD_REFUSALS))
@@ -2582,8 +2572,8 @@ def test_generic_variant_program_is_refused_loudly_by_the_native_chain(
 
 @pytest.mark.parametrize("name", GENERIC_VARIANT_SILENT_ADMITS)
 def test_generic_variant_difference_is_a_known_silent_admit(compile_to, name):
-    """Issues #2402 and #2981: the reference refuses it, the native chain still
-    emits. Fails the day the native chain refuses too, so the entry is removed."""
+    """Issue #2402: the reference refuses it, the native chain still emits.
+    Fails the day the native chain refuses too, so the entry is removed."""
     source, message = _generic_variant_silent_admit_doc(name)
     with pytest.raises(RevlError) as refused:
         compile_source(source)

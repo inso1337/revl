@@ -47,6 +47,7 @@ from pathlib import Path
 # read-only reuse of the placement machinery (roadmap item 23): the same emit +
 # cargo-build path and the same PascalCase -> snake plugin-name mapping the
 # cross-tier bridge already uses. We drive the resulting binary in `once` mode.
+from . import _childproc
 from . import placement as _placement
 from ._once_proof import SPEC_FLAG, OnceProof
 from .errors import RevlError
@@ -178,10 +179,10 @@ def run_rust(ir: dict, config: dict, files, once: bool = False,
                              encoding="utf-8")
 
         print("== load composition (rust tier) ==", flush=True)
-        proc = subprocess.Popen(
+        proc = _childproc.popen(
             [binary, str(spec_file)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, text=True,
+            stderr=subprocess.STDOUT,
         )
         # the proof token is stdin's only line; then stdin closes, as before,
         # so the runner never blocks on it (issue #1621)

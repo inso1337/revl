@@ -145,6 +145,47 @@ _RUST_TYPE_RESERVED = frozenset({
     "RevlPendingCompensation", "RevlWal",
 })
 
+# Issue #3159: the prelude CONSTRUCTORS the emitted body spells as bare tokens
+# (`Ok(..)`, `Err(..)`, the `Some`/`None` of an `Opt`). They are reserved at the
+# VALUE-name positions a user binding can occupy at module scope, where the
+# rename is injective: a module `fn Err` emitted `fn Err(..)` and every
+# `Err("denied")` in the module resolved to that fn instead of the constructor,
+# so a denial returned `Ok`. `_RUST_TYPE_RESERVED` already carries these names
+# for the type-name position (#1920); a fn lives in the value namespace, so it
+# needs the same names at its own position. Locals and parameters of these
+# spellings are already escaped by the frontend's `_predeclared_mangle` (item
+# #320), so only the module-level value positions are added here, and the
+# existing ladder keeps `Err` -> `Err_`, `Err_` -> `Err__` distinct.
+_RUST_VALUE_RESERVED = frozenset({"Ok", "Err", "Some", "None"})
+
+# The rust helper namespace: the emitted module declares `fn revl_concat`,
+# `revl_ftoa`, `REVL_JOURNAL_DEPTH`, ... and a user value of that spelling can
+# shadow a bare helper call inside its function (and a module fn collides at
+# package scope). Keep the namespace unspellable from user names, the same rule
+# the ts, java, go and python emitters apply. An `extern parameter name` is
+# excluded because a verbatim `@rust` body spells the parameter by its source
+# name.
+_REVL_NAMESPACE_RE = re.compile(r"^(?:revl[A-Z_]|REVL_|_revl|_REVL)")
+
+_RUST_VALUE_ROLES = frozenset({
+    "arrow parameter", "bind", "binding", "extern name", "function",
+    "function name", "loop binding", "match bind", "name", "parameter",
+    "parameter name", "setup assign", "setup binding",
+})
+
+
+def _in_revl_namespace(name: str) -> bool:
+    """Whether *name* (or a trailing-underscore root of it) is in the emitted
+    helper namespace, so a user value of that spelling would shadow a helper."""
+    root = name
+    while root:
+        if _REVL_NAMESPACE_RE.match(root) is not None:
+            return True
+        if not root.endswith("_"):
+            break
+        root = root[:-1]
+    return False
+
 # Method names that collide with Rust's `Drop::drop` destructor must be renamed.
 _METHOD_RENAMES = {"drop": "drop_"}
 
@@ -206,6 +247,27 @@ def _method_ident(name: object) -> str:
 
 class EmitError(ValueError):
     """The IR document violates the backend contract."""
+
+
+def _host_body_scanner():
+    """The shared host-body scanner (`src/revl/host_body.py`).
+
+    Imported lazily so a standalone `python3 emit.py <ir.json>` keeps working:
+    when the emitter runs through the compiler `revl` is importable, and a bare
+    script run falls back to the source tree beside this file. The scanner is
+    the one place every tier splits an extern body and checks that it cannot
+    leave the function it is spliced into (#3130, #3131, #3162, #3164, #3166).
+    """
+    try:
+        from revl.host_body import body_lines, check_host_body
+    except ModuleNotFoundError:  # standalone `python3 emit.py`: put src/ on the path
+        import pathlib
+        import sys as _sys
+        src = pathlib.Path(__file__).resolve().parents[2] / "src"
+        if src.is_dir() and str(src) not in _sys.path:
+            _sys.path.insert(0, str(src))
+        from revl.host_body import body_lines, check_host_body
+    return body_lines, check_host_body
 
 
 def _finite_float(value):
@@ -1748,7 +1810,17 @@ def _ident(name: object, role: str) -> str:
     # A user type must not shadow a Rust prelude / cordis name the emitted
     # module spells as a bare token (#552 B2). Only the type-name position
     # reserves them; a field/local/param of the same spelling is left alone.
-    extra = _RUST_TYPE_RESERVED if role == "type name" else frozenset()
+    # A module-level `fn`/extern is a VALUE name, so it takes the prelude
+    # CONSTRUCTOR set instead (issue #3159).
+    if role == "type name":
+        extra = _RUST_TYPE_RESERVED
+    elif role in ("function name", "extern name"):
+        extra = _RUST_VALUE_RESERVED
+    else:
+        extra = frozenset()
+    if role in _RUST_VALUE_ROLES and _in_revl_namespace(name):
+        # the emitter's own `revl_*`/`REVL_*` helpers must stay reachable bare
+        return name + "_"
     return _mangle(name, extra)
 
 
@@ -4994,7 +5066,7 @@ def _rust_render_pure_stmts(steps: list, env: _Env, scope: dict,
                     f"compensate ...` is not lowerable in the Rust backend")
             arg_scope = dict(scope)
             for param in params:
-                arg_scope[param] = f"{param}.clone()"
+                arg_scope[param] = f"{_ident(param, 'parameter')}.clone()"
             parts.append("let _ = %s;" % _journal_service_emit(
                 step.get("expr"), env, _expr(step['expr'], env, arg_scope)))
         elif kind == "break":
@@ -5257,7 +5329,7 @@ def _method_undo_clones(env: _Env, method: dict, out: list[str], indent: int) ->
     for req in env.reqs:
         out.append(f"{pad}let {req}_undo = self.{_req_ident(req, env)}.clone();")
     for param in method.get("params") or []:
-        out.append(f"{pad}let {param}_undo = {param}.clone();")
+        out.append(f"{pad}let {param}_undo = {_ident(param, 'parameter')}.clone();")
 
 
 def _provide_let_type(env: _Env, value: object, ctx: "_V3Ctx") -> str | None:
@@ -5346,7 +5418,7 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             undo_rename = _method_undo_rename(env, method)
             acquire_rename = dict(rename)
             for param in method.get("params") or []:
-                acquire_rename[param] = f"{param}.clone()"
+                acquire_rename[param] = f"{_ident(param, 'parameter')}.clone()"
             label = _string(f"{env.name}.{method.get('name')}.{kind}.{index}")
             undo_node = step.get("undo")
             acquire_node = step.get("acquire") or step.get("expr")
@@ -5383,7 +5455,7 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
         elif kind == "emit":
             acquire_rename = dict(rename)
             for param in method.get("params") or []:
-                acquire_rename[param] = f"{param}.clone()"
+                acquire_rename[param] = f"{_ident(param, 'parameter')}.clone()"
             acquire_node = step.get("expr")
             env.v3_ctx().declared_skip = acquire_node
             acquire = _expr(acquire_node, env, acquire_rename)
@@ -5443,7 +5515,7 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             param = _bare_param(step.get("value"), method)
             if param is not None:
                 value_rename = dict(rename)
-                value_rename[param] = f"{param}.clone()"
+                value_rename[param] = f"{_ident(param, 'parameter')}.clone()"
             value = _expr(step["value"], env, value_rename)
             if kind == "let":
                 out.append(f"{pad}let {'mut ' if step.get('mutable') else ''}"
@@ -5468,7 +5540,7 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             undo_rename = _method_undo_rename(env, method)
             acquire_rename = dict(rename)
             for param in method.get("params") or []:
-                acquire_rename[param] = f"{param}.clone()"
+                acquire_rename[param] = f"{_ident(param, 'parameter')}.clone()"
             label = _string(f"{env.name}.{method.get('name')}.let-effect.{index}")
             undo_node = step.get("undo")
             acquire_node = step.get("acquire")
@@ -5594,7 +5666,7 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
             original_mname = method.get("name")
             mname = _method_ident(original_mname)
             params = ", ".join(
-                f"{p}: {_rust_type(_param_type(env, key, original_mname, p), env.types)}"
+                f"{_ident(p, 'parameter')}: {_rust_type(_param_type(env, key, original_mname, p), env.types)}"
                 for p in method.get("params") or []
             )
             ret = (_rust_type(_method_return(env, key, original_mname), env.types)
@@ -5613,7 +5685,7 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
             # lets every free-form sink scrub it once the body hands it on.
             secret_params = _secret_method_params(
                 env, key, original_mname, method.get("params") or [])
-            mark = "".join(_secret_mark_call(t, p, tail=" ", types=env.types)
+            mark = "".join(_secret_mark_call(t, _ident(p, 'parameter'), tail=" ", types=env.types)
                            for p, t in secret_params)
             if has_effectful:
                 env.v3_ctx().declared_ctx = "self.ctx"
@@ -5984,7 +6056,7 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
             # Rust spelling is for the `fn` alone.
             mname = method.get("name")
             params = ", ".join(
-                f"{p}: {_rust_type(_param_type(env, key, mname, p), env.types)}"
+                f"{_ident(p, 'parameter')}: {_rust_type(_param_type(env, key, mname, p), env.types)}"
                 for p in method.get("params") or []
             )
             ret = (_rust_type(_method_return(env, key, mname), env.types)
@@ -6003,7 +6075,7 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
             # to a free-form sink is scrubbed.
             secret_params = _secret_method_params(
                 env, key, mname, method.get("params") or [])
-            mark = "".join(_secret_mark_call(t, p, tail=" ", types=env.types)
+            mark = "".join(_secret_mark_call(t, _ident(p, 'parameter'), tail=" ", types=env.types)
                            for p, t in secret_params)
             out.append(f"    fn {_method_ident(mname)}(&self, {params}) -> {ret} {{ {mark}{_method_body(env, method)} }}")
         out.append("}")
@@ -9945,7 +10017,12 @@ def _emit_v3_externs(externs: list, types: dict, journal: bool = False) -> list[
             out.append("    " + config_bind)
         body = bodies["rs"].strip()
         if body:
-            for line in body.splitlines() or [""]:
+            # #3162/#3166: refuse a body Rust reads as unbalanced, and split on
+            # newlines only so a comment cannot become a statement.
+            body_lines, check_host_body = _host_body_scanner()
+            check_host_body("rs", body,
+                            where=f"extern `{ext.get('name')}`", error=EmitError)
+            for line in body_lines(body):
                 out.append("    " + line)
         else:
             out.append("    // (empty @rs body)")

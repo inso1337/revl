@@ -18,8 +18,13 @@ source out — was reachable by name and not by tool.
 The escape hatch is what makes the claim true. `revl_verbs` is listed, so the
 model can call it; given `name` (a verb) and `args` (that verb's arguments) it
 stops being a lookup and IS that call — the same handler, the same gates, the
-same payload. Every verb is therefore one listed tool away, and the tier budget
-is untouched: the hatch is `DISCOVERY`'s role, not a fifteenth `CORE` member.
+same payload. Every verb is therefore one listed tool away. The hatch is
+`DISCOVERY`'s role, and it is where a verb the loop does not need on every task
+belongs: a model reaches a verb it is shown without being told the hatch, and
+the prompt that taught the hatch cost more than the schema it saved. Issue #2625
+measured that for `revl_export`: one extra tool is about 235 schema tokens and
+14,946 fewer input tokens per task over eight reps, so the verb is a `CORE`
+member. `CORE` is fifteen verbs because of it.
 
 A client that wants the whole list says so when the server starts:
 `revl mcp serve --all-tools`, or `REVL_MCP_ALL_TOOLS=1` in its environment.
@@ -44,21 +49,30 @@ DISCOVERY = "revl_verbs"
 #: * running it: load, call, swap;
 #: * `revl_source` and `revl_change`, listed once they exist (#1741's stack);
 #:   a name with no verb behind it is skipped, not listed;
+#: * `revl_export`, the one verb that writes the held source out (#2042): a
+#:   model that is not shown it cannot finish the loop without first learning
+#:   the hatch, and #2625 measured the prompt that taught it against the schema;
 #: * the way to everything else, `revl_verbs`.
+#:
+#: The apply-repair verb of issue #2855 is deliberately NOT a core member: the
+#: tier is capped, and the refusal that mints a repair names the call in `next`
+#: (`{"tool": "revl_apply_repair", "arguments": {"repairId": ...}}`), so the
+#: caller that needs it is the one that was told it exists.
 CORE = ("revl_resolve", "revl_scaffold", "revl_edit", "revl_query_withdraw",
         "revl_check", "revl_admit", "revl_plan", "revl_explain",
         "revl_load", "revl_call", "revl_swap",
-        "revl_source", "revl_change",
+        "revl_source", "revl_change", "revl_export",
         DISCOVERY)
 
 #: `{topic: (what it is for, verbs)}`, in docs/mcp-reference.md's order.
 TOPICS: dict[str, tuple[str, tuple[str, ...]]] = {
-    "author": ("check, admit, plan, select tests and ship a candidate; the loop's "
-               "compact next-step answer; grammar, scaffold, format and explain", (
-        "revl_brief", "revl_check", "revl_admit", "revl_plan",
-        "revl_affected_tests", "revl_ship", "revl_deploy", "revl_audit",
-        "revl_tools", "revl_grammar", "revl_scaffold", "revl_fmt",
-        "revl_explain", "revl_idiom")),
+    "author": ("check, admit, plan, select tests and ship a candidate; apply "
+               "a refusal's repair; the loop's compact next-step answer; "
+               "grammar, scaffold, format and explain", (
+        "revl_brief", "revl_check", "revl_apply_repair", "revl_admit",
+        "revl_plan", "revl_affected_tests", "revl_ship", "revl_deploy",
+        "revl_audit", "revl_tools", "revl_grammar", "revl_scaffold",
+        "revl_fmt", "revl_explain", "revl_idiom")),
     "update": ("check the operator's release feed and apply a verified release "
                "to the running composition through the admission gate", (
         "revl_update_check", "revl_update_apply", "revl_update_status",
@@ -74,8 +88,9 @@ TOPICS: dict[str, tuple[str, tuple[str, ...]]] = {
         "revl_knowledge")),
     "approve": ("approval tickets, revocation, escalation and quorum; "
                 "distillation offers; the E-Stop; forking a session", (
-        "revl_approve", "revl_revoke", "revl_escalate", "revl_override",
-        "revl_quorum", "revl_distillation_offers", "revl_apply_distillation",
+        "revl_approve", "revl_approvals", "revl_revoke", "revl_escalate",
+        "revl_override", "revl_quorum", "revl_distillation_offers",
+        "revl_apply_distillation",
         "revl_revoke_distillation", "revl_estop", "revl_estop_report",
         "revl_fork", "revl_fork_confirm")),
     "grade": ("grade and prove a candidate: gauntlet, quarantine, repair, "
@@ -147,8 +162,9 @@ def listed(advertised: list) -> list:
 
     The tiered list is exactly `CORE`, and stays exactly `CORE`: the hatch
     (#2073) is a second form of `revl_verbs`, which is already in the tier, so
-    every other verb is reachable without a fifteenth listed verb and the tier
-    budget is untouched."""
+    every verb outside it is one listed tool away. A verb joins `CORE` only on a
+    measured product decision, as `revl_export` did (#2625); a convenience is
+    the hatch's job."""
     return list(advertised) if _ALL_TOOLS else core(advertised)
 
 

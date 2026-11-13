@@ -398,3 +398,62 @@ name. The formal layer is tier-independent and already carries the verdict, so
 a later tier's loop is built against the same table, and wiring one is a matter
 of adding it to `revl.estop.TIERS_WITH_ESTOP` once its runtime reads the latch
 and prints the `HALTED` inventory line.
+
+**Single-process runs (issue #3200).** Outside a placement there is no
+conductor to kill and report a seamless tier, and today only the py tier reads
+the latch on its single-process path. So `revl run --backend B` with an E-Stop
+latch (named by `--estop-latch FILE` or by the ambient `REVL_ESTOP_LATCH`)
+refuses the boot for every `B` other than py, before any runtime is imported,
+the same way `--attestation` is refused off the py tier. Without the refusal an
+armed run there would be a halt that silently does nothing. The refusal does
+not depend on whether a halt is already written; a run that asks to be haltable
+on a tier that cannot be halted is refused either way.
+
+The single-process set (`revl.run.SINGLE_PROCESS_ESTOP_TIERS`) is deliberately
+narrower than `revl.estop.TIERS_WITH_ESTOP`. ts and wasm have no seam at all.
+rust, go and java are in `TIERS_WITH_ESTOP` because their placement runners
+honour the latch when the conductor writes it into their spec, but their
+single-process path does not forward it: the rust and go runs write no
+`estopLatch` into the runner's spec, and the java run boots `RunOnce`, which
+does not read the latch. Single-process E-Stop is therefore py-only until those
+tiers forward the latch (and ts gains an in-process seam); each one that does
+joins the single-process set.
+
+## The approval questions the halt strands (issue #2991)
+
+A halt also has to answer "what about the questions a human was still deciding".
+A pending class-(c) ticket asks whether an irreversible crossing may fire; once
+the instance is dead, that question can never be answered, so leaving it live
+would be a consent prompt for an action no live session will take. The halt
+therefore sweeps the approval state, and the sweep is stated here because it is
+an E-Stop *authority*, not a side effect.
+
+* Every open multi-party question is closed with a `quorum-revoked` row
+  (`estop: true`, the operator who halted, the reason). The votes already cast
+  stay recorded and stop counting. A question already past its deadline is
+  left to the expiry vocabulary instead: writing `revoked` over a timeout would
+  retract the distinction the two outcomes exist to keep. The sweep closes it
+  with the ordinary `quorum-expired` row (written once), so the log never ends
+  on a bare `quorum-open`.
+* Every pending single-party asking is refused, and each ticket gets ONE
+  durable `ticket-revoked` row naming its binding, the operator, the reason and
+  the proposers whose asking it refused. An unspent grant minted for one of
+  those askings is withdrawn with an `approval-revoked` row, exactly as an
+  operator's NO withdraws it.
+* A grant already CONSUMED is untouched. It authorized its crossing before the
+  halt, and the E-Stop does not rewrite what already happened: ownership of the
+  fire belongs to the approval that was spent, not to the button that stopped
+  the next one.
+
+The sweep is after the latch flips, so it can only close what the halt already
+made unanswerable. The order has a cost: a process that dies between the latch
+and the sweep writes no revoked rows. `revl recover` then shows an open
+multi-party question as its bare `quorum-open` row, and a pending single-party
+ticket not at all, since a ticket has no durable record at issue time. Nothing
+can answer either question after such a crash (the session that asked it is
+gone), but the log does not say that the halt withdrew it. A failure in one revocation is reported in the halt result
+(`revocationErrors`) rather than hidden and never undoes the halt. `revl
+recover` reports both row families as `REVOKED`, kept distinct from `expired`:
+an expired question ran out of time and can be asked afresh, a revoked one was
+withdrawn by the operator. `revl_approvals` (the read-only query surface) reads
+the same rows back through `estop_report`'s `revokedTickets`.
