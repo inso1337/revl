@@ -127,6 +127,7 @@ CORPUS = [
     "optionals.rvl",   # optional-call chaining (opt receiver)
     "mixed.rvl",       # a cross-section of the above in three functions
     "user_names_like_temps.rvl",  # user locals spelled like emitter temporaries (issue #2913)
+    "chains.rvl",  # long one-operator chains written flat, both renderers (issue #3403)
     # component/service documents (slice 2, item 185)
     "services_basic.rvl",    # SERVICES table, req/provide, effect accumulator, a provide method
     "services_timers.rvl",   # every/after timers -> schedule_* import + cancel inverses

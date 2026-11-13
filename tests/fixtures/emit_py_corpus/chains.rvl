@@ -1,0 +1,51 @@
+// Long chains of one operator (issue #3403): from 16 operators on, the spine
+// is written flat rather than one bracket level per operand. Every family is
+// here: bounded Int and Int32 (`+ - *` mixed), plain Str concat, plain Float
+// `+ -` and `*`, `&&` and `||`; a 15-operator chain that keeps the nested
+// text; a long chain inside a right operand; and the same shapes in a provide
+// method, the second renderer.
+fn ints(a: Int, b: Int) -> Int {
+  return a + b + 1 - a + b * 2 + a + b + 1 - a + b + a + b + 1 - a + b + a + b
+}
+fn int32s(a: Int32, b: Int32) -> Int32 {
+  return a + b - a + b + a + b - a + b + a + b - a + b + a + b - a + b + a
+}
+fn short(a: Int) -> Int {
+  return a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a
+}
+fn strs(s: Str) -> Str {
+  return s + "a" + s + "b" + s + "c" + s + "d" + s + "e" + s + "f" + s + "g" + s + "h" + s
+}
+fn floats(x: Float, y: Float) -> Float {
+  return x + y - x + y + x - y + x + y - x + y + x - y + x + y - x + y + x
+}
+fn fprods(x: Float) -> Float {
+  return x * x * x * x * x * x * x * x * x * x * x * x * x * x * x * x * x
+}
+fn ands(a: Bool, b: Bool) -> Bool {
+  return a && b && a && b && a && b && a && b && a && b && a && b && a && b && a && b && a
+}
+fn ors(a: Bool, b: Bool) -> Bool {
+  return a || b || a || b || a || b || a || b || a || b || a || b || a || b || a || b || a
+}
+fn inner(a: Int) -> Int {
+  return a * (a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a)
+}
+
+service Sums {
+  fn total(a: Int) -> Int
+  fn all(a: Bool) -> Bool
+}
+
+component Chains provides sums: Sums {
+  provide sums {
+    fn total(a) = a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a
+    fn all(a) = a && a && a && a && a && a && a && a && a && a && a && a && a && a && a && a && a
+  }
+}
+
+// A widened chain head: the operand of a mixed equality is marked for the
+// Int -> Float widening, and the whole flat chain is what gets widened.
+fn widened(a: Int, x: Float) -> Bool {
+  return x == a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a
+}
