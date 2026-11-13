@@ -292,6 +292,24 @@ OTHER_CODES = {
         "fix": "re-run the producer (`revl_fmt` with `handle: true`) to mint "
                "one, or pass the text as `source`",
     },
+    "STALE_REPAIR": {
+        "category": "session",
+        "guarantee": "a repair id names a repair minted in the current unit of "
+                     "work",
+        "meaning": "the id was minted before a load, swap, rollback or undo "
+                   "moved the session's unit, so the candidate it repairs no "
+                   "longer belongs to this one",
+        "fix": "re-run `revl_check` to mint a repair for the current unit",
+    },
+    "UNKNOWN_REPAIR": {
+        "category": "usage",
+        "guarantee": "a repair id names a repair the session actually holds",
+        "meaning": "the id names no repair this session minted: no refusing "
+                   "`revl_check` issued it, or it has been dropped to keep the "
+                   "store bounded",
+        "fix": "re-run `revl_check` and pass the `repairId` its refusal "
+               "returns",
+    },
     "MCP-IDENTITY": {
         "category": "identity",
         "guarantee": "every answer comes from the revision the client pinned",
@@ -758,7 +776,10 @@ def report(error: RevlError, *, sources: dict[str, str] | None = None,
     Issue #2684: a G4 missing-undo record's `repairs` list gains a `fix_code`
     on the repair the fixgen engine can verify. The engine applies a candidate
     edit and re-checks the patched source ("verified or nothing"), so a repair
-    that does not resolve the refusal is never offered as code.
+    that does not resolve the refusal is never offered as code. Issue #2855
+    extends the same verified edit to every record whose code has a generator
+    (`fixgen.APPLYABLE`), as `record["fix_code"]`, so the MCP apply-repair verb
+    applies the refusal's own repair rather than synthesizing a second one.
 
     Issue #2759: a capability or admission refusal (G1's undeclared
     requirement, G2's provision conflict, R2's ungranted reach) carries a
@@ -802,13 +823,18 @@ def _attach_repair_fixes(records: list[dict], errors: list[RevlError],
                          *, widens_authority: bool = False) -> None:
     """Attach the verified candidate edits to the records that can carry them.
 
-    Two populations, one engine:
+    Three populations, one engine:
 
     * a G4 missing-undo record already lists its repairs (issue #2684); the
       `site-undo` one is the only mechanical candidate, and it gains a
       `fix_code` when the engine verifies it. Every other repair there is prose
       a person or a model enacts, and stays prose rather than being given an
       edit the engine could not verify.
+    * a record whose code has a generator in `fixgen.APPLYABLE` (T2, A9, REVL,
+      and a G4 with no `site-undo` entry) gets the verified edit as
+      `record["fix_code"]` (issue #2855), so the MCP apply-repair verb applies
+      the refusal's own repair rather than synthesizing a second one. A
+      candidate that does not resolve the refusal is dropped.
     * a G1/G2/R2 record carries no repairs from its raise site (issue #2759);
       the engine generates every candidate, applies each to the new refused
       text, and keeps only the ones that clear the refusal without introducing
@@ -816,13 +842,20 @@ def _attach_repair_fixes(records: list[dict], errors: list[RevlError],
       diagnostic, so the R2 generator can read the granted set from the
       refusal's own `navigate` record.
 
-    The ranged diagnostic is synthesized from the record either way, so this
-    path never recompiles the candidate merely to find its own diagnostic."""
+    The ranged diagnostic is built from the refusal the caller's compile
+    raised, never by compiling the text again: from the record's line, and
+    for an `APPLYABLE` code from the token its message names on that line (the
+    LSP range rule, read from the text). So the candidate is compiled only
+    through the caller's door, and the diagnostic is the refusal that door
+    reported even when the text `use`s a module that exists only as an
+    overlay. `verify` carries the caller's authoring profile and in-memory
+    modules into the patched compile."""
     if not sources or verifier is None:
         return
     baseline = [(record.get("code"), _zero_based_line(record))
                 for record in records]
-    from .lsp import fixgen  # noqa: PLC0415
+    from .lsp import fixgen  # noqa: PLC0415 - analysis imports this module
+    from .lsp.analysis import _range_for  # noqa: PLC0415 - same cycle
 
     # one compile budget for the whole report, not one per record
     budget = fixgen.CompileBudget(REPAIR_COMPILE_BUDGET)
@@ -853,6 +886,21 @@ def _attach_repair_fixes(records: list[dict], errors: list[RevlError],
                     repair["fix_code"] = {"title": fix["title"],
                                           "edits": fix["edits"]}
                     break
+            continue
+        if record.get("code") in fixgen.APPLYABLE:
+            if not budget.reserve(1):
+                continue                 # unverified, so no edit is offered
+            # a refusal raised with no line (policy, least authority) has no
+            # token to tighten onto: the record's clamped line stands
+            ranged = {"code": record["code"], "message": record["message"],
+                      "range": (_range_for(text, one)
+                                if isinstance(one.line, int)
+                                else diagnostic["range"])}
+            fix = fixgen.fix_code(record, text, one.filename,
+                                  diagnostic=ranged, verify=verify)
+            if fix.get("ok"):
+                record["fix_code"] = {"title": fix["title"],
+                                      "edits": fix["edits"]}
             continue
         if (repairs or record.get("code") not in REPAIRABLE_CODES
                 or not fixgen.covers_repairs(diagnostic)):

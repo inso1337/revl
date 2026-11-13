@@ -102,6 +102,7 @@ from . import gauntlet as _gauntlet
 from . import quarantine as _quarantine
 from . import quorum as _quorum
 from . import repair as _repair
+from . import refusal_repair as _refusal_repair
 from . import runtime_gate as _runtime_gate
 from . import ship as _ship
 from . import stdlib as _stdlib
@@ -4540,6 +4541,54 @@ def _tool_check(arguments: dict) -> dict:
         arguments, _canonical.attach(checked, canon))
 
 
+def _tool_apply_repair(arguments: dict) -> dict:
+    """Apply the repair one refusal minted and return the repaired candidate
+    with its re-check (issue #2855).
+
+    Opt-in and read-only. The call names the `repairId` a refusing
+    `revl_check` returned; the verified edit that refusal carried (the fixgen
+    engine, issue #2684) is applied to the very text the check compiled, and
+    the patched candidate is re-checked by `revl_check`'s own handler, so the
+    re-check is that verb's answer to the repaired candidate: the same
+    authoring door, the same `DRAFT_HELD` guard and the same canonical report.
+    The answer names what changed and what still fails: the repaired candidate
+    in the shape it was sent, the applied edit, and the new check outcome,
+    whose own refusal carries a `repairId` when that class is mechanical too.
+    While a draft is held the answer IS the check's `DRAFT_HELD` refusal: the
+    repaired candidate is not the composition the loop is filling.
+    Nothing is installed; `revl_swap`/`revl_load` still decide whether the
+    candidate enters the composition.
+
+    The stored candidate is the text the check COMPILED, so a terse candidate
+    comes back with the punctuation `revl_check` completed (its
+    `canonicalSource.completed`) as well as the repair: the edits are ranges
+    into that text, not into the text as sent."""
+    repair_id = arguments.get(_refusal_repair.REPAIR_KEY)
+    if repair_id is None:
+        return _session_error(
+            f"`{_refusal_repair.REPAIR_KEY}` is required: it is the id a "
+            "refusing `revl_check` returned beside the repair, and only that "
+            "id names the candidate and edit the session already holds",
+            category="usage",
+            fix=f"pass the `{_refusal_repair.REPAIR_KEY}` a refusal returned")
+    try:
+        entry = _refusal_repair.resolve(SESSION, repair_id)
+    except _refusal_repair.RepairError as error:
+        return _session_error(
+            str(error), category="usage", refusal_code=error.code,
+            location=_refusal_repair.REPAIR_KEY,
+            fix="re-run the check that refused to mint a repair for the "
+                "current unit of work")
+    candidate = _refusal_repair.patched_candidate(entry)
+    check = _tool_check(candidate)
+    if check.get("code") == "DRAFT_HELD":
+        return check
+    return {"ok": True,
+            "applied": _refusal_repair.applied(entry),
+            "repaired": candidate,
+            "check": check}
+
+
 def _gate_can_reuse(arguments: dict) -> bool:
     """Whether `_check_as_sent`'s compile of `arguments` is the compile the
     canonicaliser's gate would make for itself (issue #2194).
@@ -4837,14 +4886,27 @@ def _check_as_sent(arguments: dict, held: dict | None = None) -> tuple:
         # rather than only the prose. It is never read from `error.filename`:
         # an edited buffer rides as a `modules` overlay over a real path, and
         # the disk copy there is pre-edit text that did not compile.
+        sources = _compiled_sources(source, modules, held)
         refused = report(
             error,
-            sources=_compiled_sources(source, modules, held),
+            sources=sources,
             verifier=lambda patched, one: _verify_repair(
                 patched, one, source, _files, modules))
         # issue #1704: every guarantee in the same answer, not only the one
         # that refused, so the self-check is one call
         refused["selfCheck"] = _authoring_loop.self_check(refused["diagnostics"])
+        # issue #2855: mint the verified repair this refusal carries, so one
+        # opt-in verb applies it to the same candidate the check compiled
+        # without the caller reconstructing the edit or re-sending the text.
+        # The refusal names that call: the apply verb is not in the core tier,
+        # and the caller that needs it is the one this refusal answers.
+        repair_id = _refusal_repair.mint(
+            SESSION, refused, sources=sources, source=source, files=_files,
+            modules=modules)
+        if repair_id is not None and "next" not in refused:
+            refused["next"] = _remedy.call(
+                "revl_apply_repair",
+                {_refusal_repair.REPAIR_KEY: repair_id})
         return _with_candidate_knowledge(refused, arguments, refused, held), None
     # `holes` is the agent's own remaining work on this draft: every
     # placeholder it wrote that still has a type and no implementation
@@ -5733,6 +5795,39 @@ TOOLS = [
             **_RETURN_CANONICAL}},
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_check,
+    },
+    {
+        "name": "revl_apply_repair",
+        "description": "Apply the verified repair a refusal carries and return "
+                       "the repaired candidate with its re-check (issue #2855). "
+                       "A refusing `revl_check` answers with `repairId` when the "
+                       "refusal's class has a mechanical repair the fixgen "
+                       "engine verified (a T2 `null`, an A9 provide key, a G4 "
+                       "missing undo, a REVL sized receiver). Pass that id and "
+                       "nothing else: the session still holds the candidate and "
+                       "the edit, so the text is not re-sent and the edit is "
+                       "not re-derived. The answer carries `repaired` (the "
+                       "candidate in the shape it was sent: `source`, or `files` "
+                       "with the patched file as a `modules` overlay), "
+                       "`applied` (the code, title, target and verified edits), "
+                       "and `check` (the new outcome: a pass, or the next "
+                       "refusal, which mints its own `repairId` when that class "
+                       "is mechanical too). It is explicit and read-only: "
+                       "nothing is loaded, drafted or written. A repair id this "
+                       "session never minted is refused as `UNKNOWN_REPAIR`; "
+                       "one minted before the unit of work moved (a load, swap, "
+                       "rollback or undo) is `STALE_REPAIR`. The candidate is "
+                       "applied with `revl_swap`/`revl_load` as usual. See "
+                       "docs/fix-code.md and docs/mcp-reference.md.",
+        "inputSchema": {"type": "object", "properties": {
+            "repairId": {"type": "string",
+                         "description": "the id a refusing `revl_check` returned "
+                                        "beside the repair; a refusal with no "
+                                        "mechanically applyable repair mints "
+                                        "none"}},
+            "required": ["repairId"]},
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_apply_repair,
     },
     {
         "name": "revl_admit",
