@@ -47,7 +47,9 @@ The current generation is always `history[-1]`; the previous is `history[-2]`.
 
 This is the load-bearing property. An undo does **not** rehydrate a stored
 runtime; it **re-admits the target generation's sources through the same
-compile + admission gate a live `revl_swap` runs**. Concretely, `undo`:
+compile + admission gate a live `revl_swap` runs**, and then threads a
+provider's live state back across a `handoff` both generations declare when
+the restore direction admits it (issue #3293). Concretely, `undo`:
 
 1. recompiles the target snapshot's sources (`persist._recompile`) — this *is*
    the gate: parse, check, lower, then the holes gate and the runtime boot
@@ -70,8 +72,10 @@ An agent should not have to work out which of `revl_undo`, `revl_rollback`,
 `revl_restore` and `revl_unload` reverts the call it just made. So every
 successful mutating MCP call answers with `undo: {tool, arguments}`, the one
 call that returns the session to the state it had before, byte for byte (the
-snapshot's `sources` and `manifest`; running state is not part of that promise,
-see the dossier below):
+snapshot's `sources` and `manifest`; a provider's live state also comes back
+across a `handoff` both generations declare and the restore direction admits,
+issue #3293, while the template-instance layer is not carried by an undo (see
+the dossier below):
 
 | the call | its `undo` |
 |---|---|
@@ -103,18 +107,28 @@ Because an undo is a change, its plan is computed like any change:
 
 * **what unloads** — the components the revert tears down (the reactive cascade,
   `withdrawn`);
-* **what state drops** — item 53's "state: dropped" honesty, in reverse: the
-  provisions the older shape no longer serves are named, not silently lost.
-  An undo re-admits the target cold (`respawn`) and does not run a `handoff`
-  in reverse, since a rollback never carries the generation it leaves into the
-  one it returns to. So `stateDropped.components` lists every running component
-  that holds live state, a provider whose store is non-empty or a template with
-  a stateful live instance, plus the components the target withdraws, with a
-  `note` when any state is lost (issue #2346). The forward call that offered
-  the undo says the same in its `undoNote`. A forward `revl_change` with
-  `replace` that re-applies the earlier source keeps the state of a component
-  that declares a `handoff` on both sides, and of a template's live instances;
-  any other component starts cold either way;
+* **what state drops** — item 53's "state: dropped" honesty, in reverse. Undo
+  runs the item-53 hand-off in the **restore direction** (issue #3293): when
+  the generation being left and the one being restored both declare a
+  `handoff` on the same key (same placement, same realm), and the restored
+  shape ACCEPTS the running state under the §5 relation
+  (`compatible(restored, running)`), the running provider's state is captured
+  before teardown and re-seated on the restored provider exactly as a forward
+  swap threads it. Such a component is named in `stateDropped.carried`
+  instead of `stateDropped.components`. Everything else still starts cold and
+  is named in `components`: a provider with no `handoff` on one or both sides,
+  a shape that does not accept the running state in the restore direction, and
+  a template's live instances (an undo deliberately keeps the instance layer
+  at `respawn`). `note` says what is lost, and the undo's result carries the
+  same `handoff` report a forward swap does. A refused undo reports the
+  plan's `components` and `carried` but omits the note, because nothing
+  ran. The forward call that offered the undo says the same in its `undoNote`:
+  it names only the components whose state the undo would really drop, is
+  absent when the undo carries it all back, and names the carried ones when a
+  note is needed. A forward `revl_change` with `replace` that re-applies the
+  earlier source keeps the state of a component that declares a `handoff` on
+  both sides, and of a template's live instances; any other component starts
+  cold either way;
 * **the interim boundary crossings that no undo can un-emit** — §6.1.
 
 ## What no undo can un-emit (compensation is not inversion)

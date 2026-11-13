@@ -99,7 +99,7 @@ import re
 # The audited authority helpers (items 416f and 421 F4). A peer address is the
 # same class of value an importer's server URL is, so these are reused rather
 # than re-derived.
-from . import a2a_boundary, a2a_task
+from . import a2a_boundary, a2a_task, tls_pin
 from .crossing_redirect import CROSSING_TIMEOUT, py_policy
 from .errors import RevlError
 from .import_openapi import _authority_host, _comment_safe
@@ -394,7 +394,8 @@ def _transport_fault_class(label: str, op: str, indent: int = 4) -> str:
 
 
 def _py_body(host: str, key: str, op: str, in_band: bool,
-             follow_redirects: bool = False, *, label: str = "") -> str:
+             follow_redirects: bool = False, *,
+             label: str = "", pin: str | None = None) -> str:
     """One crossing, Python tier. The canonical envelope
     (`{"key","method","args"}` -> `{"ok","value"|"error"}`,
     `backends/python/bridge.py:19`) over HTTPS.
@@ -407,10 +408,23 @@ def _py_body(host: str, key: str, op: str, in_band: bool,
     anyway would ship a body that only fails at the tier's own gate. The ts
     projection therefore waits on the async crossing, and a ts-target emit of a
     remote row refuses naming the extern instead of producing broken output.
+
+    `pin` (issue #2719) is the admitted TLS leaf SPKI digest. When present the
+    body installs the pinned HTTPS handler from `tls_pin`, which keeps the
+    ordinary chain and hostname check and then refuses a leaf whose SPKI hashes
+    to anything else. The fault is raised as `TransportFault`, so the row's
+    `on_failure` governs the settlement: withdrawal under the default, the
+    in-band `Err` naming both fingerprints under `on_failure(result)`.
     """
     url = json.dumps(f"https://{host}/{key}/{op}")
     kj, oj = json.dumps(key), json.dumps(op)
-    fault_class = "" if in_band else _transport_fault_class(label, op)
+    # The pin's own fault is a TransportFault in BOTH failure modes, because
+    # it must reach the withdraw path as a marked fault and the in-band path as
+    # a named Err. So the class is emitted even under `on_failure(result)` when
+    # a pin is set; the pin-specific `except` below keeps its message rather
+    # than letting the generic arm replace it with "transport failure".
+    fault_class = ("" if in_band and pin is None
+                   else _transport_fault_class(label, op))
     fail = (
         '        return Err("remote: transport failure")\n'
         if in_band else
@@ -423,10 +437,20 @@ def _py_body(host: str, key: str, op: str, in_band: bool,
            '        raise TransportFault("remote: peer error")\n')
     ok = "    return Ok(_reply.get(\"value\"))\n" if in_band else \
          "    return _reply.get(\"value\")\n"
-    policy = py_policy("remote", follow=follow_redirects)
+    pin_src = tls_pin.py_pin_handler(pin) if pin else ""
+    pin_imports = f"    {tls_pin.PY_PIN_IMPORTS}\n" if pin else ""
+    pin_catch = (
+        ('    except TransportFault as _exc:\n'
+         '        return Err(str(_exc))\n')
+        if pin and in_band else
+        ('    except TransportFault:\n'
+         '        raise\n') if pin else "")
+    policy = py_policy(
+        "remote", follow=follow_redirects,
+        extra_handlers=", _PinnedHTTPSHandler()" if pin else "")
     return f"""
-    import json as _json, urllib.request as _req, urllib.parse as _urlp
-{fault_class}    _payload = _json.dumps({{"key": {kj}, "method": {oj},
+{pin_imports}    import json as _json, urllib.request as _req, urllib.parse as _urlp
+{fault_class}{pin_src}    _payload = _json.dumps({{"key": {kj}, "method": {oj},
                             "args": list(_args)}}).encode()
     _r = _req.Request({url}, data=_payload,
                       headers={{"content-type": "application/json"}})
@@ -441,7 +465,7 @@ def _py_body(host: str, key: str, op: str, in_band: bool,
         # Folding it into an in-band `Err` would lose the one diagnostic that
         # says the peer address was contradicted.
         raise
-    except Exception as _exc:
+{pin_catch}    except Exception as _exc:
 {fail}    if not _reply.get("ok"):
 {err}{ok}    """
 
@@ -611,7 +635,7 @@ def _classify_task_ops(service, *, doc: str, line: int, label: str) -> list:
 def _py_body_a2a(host: str, op: str, in_band: bool,
                  follow_redirects: bool = False, *, rest: bool = False,
                  in_modality: str = "text", out_modality: str = "text",
-                 label: str = "") -> str:
+                 label: str = "", pin: str | None = None) -> str:
     """One crossing, Python tier, over A2A 1.0.0 `message/send`.
 
     This is the `through a2a` / `through a2a_rest` wire (item 439). It maps the
@@ -656,7 +680,17 @@ def _py_body_a2a(host: str, op: str, in_band: bool,
         endpoint = endpoint.rstrip("/") + _HTTPJSON_SEND_PATH
     url = json.dumps(endpoint)
     terminal = json.dumps(list(_TERMINAL_STATES))
-    policy = py_policy(_A2A, follow=follow_redirects)
+    pin_src = tls_pin.py_pin_handler(pin) if pin else ""
+    pin_imports = f"    {tls_pin.PY_PIN_IMPORTS}\n" if pin else ""
+    pin_catch = (
+        ('    except TransportFault as _exc:\n'
+         '        return Err(str(_exc))\n')
+        if pin and in_band else
+        ('    except TransportFault:\n'
+         '        raise\n') if pin else "")
+    policy = py_policy(
+        _A2A, follow=follow_redirects,
+        extra_handlers=", _PinnedHTTPSHandler()" if pin else "")
     wire = ("HTTP+JSON/REST `POST /v1/message:send`" if rest
             else "JSON-RPC 2.0 `message/send`")
 
@@ -743,16 +777,17 @@ def _py_body_a2a(host: str, op: str, in_band: bool,
         '        # undone — a remote effect has no local inverse.\n'
         if not in_band else "")
     ok = "    return Ok(_value)\n" if in_band else "    return _value\n"
-    fault_class = "" if in_band else _transport_fault_class(label, op)
+    fault_class = ("" if in_band and pin is None
+                   else _transport_fault_class(label, op))
     # Item 439 (question (2), the fourth layer) and the correlation identity:
     # both are `a2a_boundary`'s, shared with the four-op wire and the importer
     # so an external peer cannot be read differently per entry point.
     funnel = a2a_boundary.py_funnel("_args")
     correlation = a2a_boundary.py_correlation()
     return f"""
-    import json as _json, urllib.request as _req, urllib.parse as _urlp
+{pin_imports}    import json as _json, urllib.request as _req, urllib.parse as _urlp
     import uuid as _uuid
-{fault_class}{funnel}{correlation}    # A2A {A2A_VERSION}, {wire}. ONE crossing. The one canonical arg is the
+{fault_class}{pin_src}{funnel}{correlation}    # A2A {A2A_VERSION}, {wire}. ONE crossing. The one canonical arg is the
     # message `Part`; the method name rides as `revl.skill`.
     _message = _args[0]
 {send_prep}    _payload = _json.dumps({payload}).encode()
@@ -764,7 +799,7 @@ def _py_body_a2a(host: str, op: str, in_band: bool,
         # NOT a transport failure, and so NOT `on_failure`'s to classify: a
         # redirect is the peer declining to be the declared endpoint at all.
         raise
-    except Exception as _exc:
+{pin_catch}    except Exception as _exc:
 {transport_fail}{fault(8, '"a2a: transport failure"', cause="_exc")}{error_branch}{a2a_boundary.py_result_gate(fault)}    _kind = _result.get("kind")
     if _kind == "task":
 {a2a_boundary.py_task_status_gate(fault, indent=8)}        if _state not in {terminal}:
@@ -814,7 +849,7 @@ def _check_long_running(is_a2a: bool, is_rest: bool, in_band: bool, *,
 
 def _task_ops(service, host: str, capability: str, redirect: str, *,
               doc: str, line: int, label: str,
-              rest: bool = False) -> tuple[list[str], list[str]]:
+              rest: bool = False, pin: str | None = None) -> tuple[list[str], list[str]]:
     """The four-op projection's externs and provide methods (item 439 T1).
 
     Each op is ONE emission crossing exactly as the terminal wire is; the only
@@ -842,7 +877,7 @@ def _task_ops(service, host: str, capability: str, redirect: str, *,
             extern = f"remote_{label}_{op}"
             body_src = a2a_task.task_body(suffix, f"https://{host}", base,
                                           follow_redirects=follow, label=label,
-                                          rest=rest)
+                                          rest=rest, pin=pin)
             # The `tasks/cancel` COMPENSATION of `_start` (item 247) is the
             # consumer's to register, keyed by the `TaskRef` `_start` returns —
             # `_cancel` below is exactly that compensation as a first-class op
@@ -913,6 +948,13 @@ def _remote_source(service, params: dict) -> tuple[str, str]:
     # `Location` elsewhere makes the row stop describing the crossing.
     redirect = params.get("redirect", "refuse")
     doc, line = params["doc"], params["line"]
+    # Issue #2719: the admitted TLS leaf SPKI pin, if the row wrote `pinned`.
+    # `check_pin` runs again here so a direct `synthesize_provider` caller gets
+    # the same admission refusal the resolver gives; normalising twice is
+    # idempotent. `None` means the row wrote no pin, and the emitted body is
+    # byte-identical to the pre-pin one.
+    pin = tls_pin.check_pin(params.get("pin"), doc=doc,
+                            line=params.get("pin_line", line), label=label)
     in_band = on_failure == "result"
 
     # A `through <wire>` naming an unbound transport is refused before a single
@@ -933,7 +975,7 @@ def _remote_source(service, params: dict) -> tuple[str, str]:
                             label=label, transport=transport)
         externs, provides = _task_ops(service, host, capability, redirect,
                                       doc=doc, line=line, label=label,
-                                      rest=is_rest)
+                                      rest=is_rest, pin=pin)
     for op, method in ([] if long_running else service.methods.items()):
         if method.async_ and not method.emission:
             raise RevlError(
@@ -1011,10 +1053,11 @@ def _remote_source(service, params: dict) -> tuple[str, str]:
         # per parameter so the envelope is identical for every arity.
         body_src = (_py_body_a2a(host, op, in_band, redirect == 'same_origin',
                                  rest=is_rest, in_modality=in_modality,
-                                 out_modality=out_modality, label=label)
+                                 out_modality=out_modality, label=label,
+                                 pin=pin)
                     if is_a2a else
                     _py_body(host, key, op, in_band, redirect == 'same_origin',
-                             label=label))
+                             label=label, pin=pin))
         externs.append(
             f"extern emission[{capability}] fn {extern}({sig}){arrow}\n"
             f"  = @py {{\n    _args = [{', '.join(names)}]\n"
@@ -1027,7 +1070,7 @@ def _remote_source(service, params: dict) -> tuple[str, str]:
     isolate = f"  isolate {key} in realm(\"{realm}\")\n" if realm else ""
     header = _remote_header(service, label, key, host, capability, on_failure,
                             transport, realm, redirect,
-                            long_running=long_running)
+                            long_running=long_running, pin=pin)
     body = (f"component {component} provides {key}: {service.name} {{\n"
             f"{isolate}  provide {key} {{\n" + "\n".join(provides) + "\n  }\n}")
     parts = [header, *externs, body]
@@ -1166,7 +1209,7 @@ def _a2a_header_lines(rest: bool = False, long_running: bool = False) -> list[st
 
 def _remote_header(service, label, key, host, capability, on_failure,
                    transport, realm, redirect="refuse", *,
-                   long_running: bool = False) -> str:
+                   long_running: bool = False, pin: str | None = None) -> str:
     safe_host = _comment_safe(host)
     lines = [
         f"// SYNTHESIZED for remote row `@{label}` — this file is not on disk.",
@@ -1179,6 +1222,18 @@ def _remote_header(service, label, key, host, capability, on_failure,
         "//   not an identifier, and must never become part of a capability",
         "//   spelling (item 424 D-424c.10, roadmap 421 F4).",
     ]
+    if pin:
+        lines += [
+            f"// PINNED PEER IDENTITY: sha256:{pin}",
+            "//   The pin names the key the WIRE presents: the peer's TLS leaf",
+            "//   SubjectPublicKeyInfo, as a full SHA-256 hex. The ordinary chain",
+            "//   and hostname check still runs first; a peer presenting any other",
+            "//   key at this address is a TransportFault under `withdraw` (or the",
+            "//   in-band `Err` under `result`) naming both fingerprints, so the",
+            "//   row's `on_failure` settles it. No signature is added to the",
+            "//   canonical envelope, and directory-backed revocation is deferred",
+            "//   to a design note (issue #2719).",
+        ]
     if transport in _A2A_TRANSPORTS:
         lines += _a2a_header_lines(rest=transport == _A2A_REST,
                                    long_running=long_running)

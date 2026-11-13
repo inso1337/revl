@@ -67,7 +67,7 @@ from __future__ import annotations
 
 import json
 
-from . import a2a_boundary
+from . import a2a_boundary, tls_pin
 from .crossing_redirect import CROSSING_TIMEOUT, py_policy
 
 #: The four suffixes the projection speaks, in the LIFO-sane order the design
@@ -376,7 +376,8 @@ def _event_from_result(fault) -> str:
 
 def task_body(kind: str, endpoint: str, base_or_skill: str, *,
               follow_redirects: bool = False, label: str = "",
-              rest: bool = False, push: bool = True) -> str:
+              rest: bool = False, pin: str | None = None,
+              push: bool = True) -> str:
     """One four-op crossing, Python tier, over A2A 1.0.0.
 
     `kind` is one of `SUFFIXES`; `endpoint` is the agent's HTTPS endpoint (the
@@ -396,7 +397,12 @@ def task_body(kind: str, endpoint: str, base_or_skill: str, *,
         raise ValueError(f"unknown task op kind {kind!r}")
     base = json.dumps(endpoint.rstrip("/"))
     url = json.dumps(endpoint)
-    policy = py_policy("a2a", follow=follow_redirects)
+    pin_src = tls_pin.py_pin_handler(pin) if pin else ""
+    pin_imports = f"    {tls_pin.PY_PIN_IMPORTS}\n" if pin else ""
+    pin_catch = ("    except TransportFault:\n        raise\n" if pin else "")
+    policy = py_policy(
+        "a2a", follow=follow_redirects,
+        extra_handlers=", _PinnedHTTPSHandler()" if pin else "")
     faults = transport_fault_class(label, op_name(base_or_skill, kind))
 
     def fault(indent: int, expr: str, cause: str = "") -> str:
@@ -542,13 +548,13 @@ def task_body(kind: str, endpoint: str, base_or_skill: str, *,
     funnel = a2a_boundary.py_funnel("_args")
     header = f"    # A2A 1.0.0, {wire}, task op `{kind}`. ONE crossing.\n"
     return f"""
-    import json as _json, urllib.request as _req, urllib.parse as _urlp
+{pin_imports}    import json as _json, urllib.request as _req, urllib.parse as _urlp
     import uuid as _uuid
-{push_imports}{faults}{funnel}{correlation}{header}{bind}{push_setup}{push_drain}{url_src}{request}{policy}    try:
+{push_imports}{faults}{pin_src}{funnel}{correlation}{header}{bind}{push_setup}{push_drain}{url_src}{request}{policy}    try:
         # A crossing that never returns is not a crossing.
 {unwrap}    except _RedirectRefused:
         # NOT a transport failure: the peer declining to be the declared
         # endpoint, re-raised so it is never flattened into a feed event.
         raise
-    except Exception as _exc:
+{pin_catch}    except Exception as _exc:
 {push_cleanup}{fault(8, '"a2a: transport failure"', cause="_exc")}{gates}{handle}    """

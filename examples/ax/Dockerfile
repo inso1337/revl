@@ -18,7 +18,7 @@ ARG REVL_REF
 # The cordis-py revision revl's test suite runs against
 # (CORDIS_PY_PIN in backends/python/setup.sh). Install it from that fork by
 # URL: the PyPI package named `cordis` is a different project.
-ARG CORDIS_PY_REF=1c5e6f17abf538bf01012f9d72ce0cfa978d91b3
+ARG CORDIS_PY_REF=70a8ce7129b4b5c171743644557cbd37810bf524
 
 RUN test -n "${REVL_REF}" || { echo "pass --build-arg REVL_REF=<revl commit sha>" >&2; exit 1; }
 RUN python3 -m pip install --no-cache-dir \

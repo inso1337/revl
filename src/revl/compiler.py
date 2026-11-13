@@ -156,6 +156,7 @@ _STDLIB_BACKEND_DOORS: dict[str, str] = {
     "revl_fs_workspace": 'use "stdlib/fs.rvl" { resolve_within, lexists, is_dir }',
     "revl_fs_ts": 'use "stdlib/fs.rvl" { resolve_within, lexists, is_dir }',
     "revl_net": 'use "stdlib/net.rvl" { get, post_json, post_form }',
+    "revl_socket": 'row @wire from "stdlib/socket.rvl" provides wire',
 }
 
 
@@ -320,12 +321,26 @@ class _ModuleLoader:
     modules that exist only in memory (an agent iterating on a candidate
     before anything touches the disk). A path present there is parsed from
     the string; everything else is read from the filesystem as usual.
+
+    `disk_relative_use` (issue #3152) keeps that filesystem fallback away from
+    an in-memory importer's OWN directory. When it is False, a `use` written in
+    a supplied module resolves out of `sources` and the search path only; the
+    directory of the path key is not searched. The bridge gate passes False
+    because its keys are paths the CALLER wrote; for the other doors the
+    admitting directory is the operator's, so a relative import inside it is
+    the operator's own layout.
     """
 
     def __init__(self, sources: dict[str, str] | None = None,
                  profile: AdmissionProfile | None = None,
                  profiles: dict[str, AdmissionProfile | None] | None = None,
-                 operator_sources: dict[str, str] | None = None) -> None:
+                 operator_sources: dict[str, str] | None = None,
+                 *, disk_relative_use: bool = True) -> None:
+        # issue #3152: whether a `use` in an in-memory module may resolve
+        # relative to that module's own (caller-named) directory on disk. True
+        # is the historical behaviour and every operator door keeps it; the
+        # bridge gate sets it False (see `resolve_use`).
+        self._disk_relative_use = disk_relative_use
         self._cache: dict[str, _LoadedModule] = {}
         # issue #1715: the operator's own text of the files an in-memory source
         # stands in for. `None` keeps every in-memory source wholly the author's
@@ -541,13 +556,27 @@ class _ModuleLoader:
         read from disk. Under an untrusted-author profile that is the admitted
         source itself (or a module handed in beside it), and its imports are
         confined BEFORE anything is stat'd — see `_confine_use`.
+
+        Issue #3152: when `disk_relative_use` is off, an in-memory importer's
+        own directory is not an import root either. A relative name resolves
+        out of the sources map (a file the caller also supplied) and then the
+        search path; it is never opened from beside the caller-named key. A
+        module read from disk (the stdlib behind a search-path spelling) keeps
+        resolving its own relative imports normally.
         """
         primary = os.path.join(importer_dir, use.path)
         importer_profile = self._profile_for(os.path.abspath(importer_path))
         if in_memory and importer_profile is not None and importer_profile.untrusted \
                 and not self._operator_use(importer_path, use):
             self._confine_use(importer_path, use, primary)
-        if self._exists(primary):
+        # The importer is virtual whenever it was supplied as text, including
+        # the two later resolution passes that do not pass `in_memory`.
+        virtual_importer = in_memory or self.has_source(importer_path)
+        if virtual_importer and not self._disk_relative_use:
+            if self.has_source(primary):
+                self._note_stdlib_shadow(use.path, primary, "importer-relative")
+                return primary
+        elif self._exists(primary):
             self._note_stdlib_shadow(use.path, primary, "importer-relative")
             return primary
         for base in self._search_path:
@@ -571,11 +600,22 @@ class _ModuleLoader:
                     self._install_root_of.setdefault(os.path.abspath(candidate), base)
                 self._note_stdlib_shadow(use.path, candidate, f"search path {base}")
                 return candidate
-        hint = "`use` resolves paths relative to the importing file"
-        if self._search_path:
-            searched = ", ".join(self._search_path)
-            hint += (f", then a search path ({searched}) — `{use.path}` was not "
-                     "found relative to the importer or anywhere on that path")
+        if not self._disk_relative_use:
+            # Issue #3152: do not hand the caller the install tree either, and
+            # keep the refusal independent of what sits beside the caller's key.
+            hint = ("the gate resolves a `use` out of the sources supplied in "
+                    "memory and the operator's installed search path only; it "
+                    "does not read a file relative to a caller-named source "
+                    "path. Supply the imported module in-memory, keyed by the "
+                    "path the import names, or use the search-path spelling of "
+                    "an installed module (`use \"stdlib/str.rvl\"`)")
+        else:
+            hint = "`use` resolves paths relative to the importing file"
+            if self._search_path:
+                searched = ", ".join(self._search_path)
+                hint += (f", then a search path ({searched}) — `{use.path}` was "
+                         "not found relative to the importer or anywhere on "
+                         "that path")
         raise RevlError(importer_path, use.line,
                         f"cannot find imported module `{use.path}`", hint=hint)
 
@@ -627,8 +667,10 @@ class _ModuleLoader:
                  "so an unconfined one would report whether any path on the "
                  "machine exists and what its first token is. Supply the "
                  "imported module in-memory (`modules=`), keyed by the path the "
-                 "import names; write the import relative to the admitting "
-                 "directory; or, for an installed module, use its search-path "
+                 "import names; "
+                 + ("write the import relative to the admitting directory; "
+                    if self._disk_relative_use else "")
+                 + "or, for an installed module, use its search-path "
                  "spelling (`use \"stdlib/str.rvl\"`). A trusted author's file "
                  "on disk resolves its own imports unchanged",
             category="admission",
@@ -1267,9 +1309,19 @@ def compile_files(paths: list[str], manifest: dict | None = None,
                   profile: AdmissionProfile | None = None,
                   profiles: dict[str, AdmissionProfile | None] | None = None,
                   operator_sources: dict[str, str] | None = None,
-                  report: dict | None = None) -> dict:
+                  report: dict | None = None,
+                  *, disk_relative_use: bool = True) -> dict:
     """Compile a composition: all services and components across the files
     are checked and linked together (the composition manifest, DESIGN §4).
+
+    `disk_relative_use` (issue #3152) says whether a `use` written in an
+    in-memory (`sources=`) module may resolve relative to that module's own
+    directory on disk. The default True is the historical behaviour: for the
+    operator-facing doors the admitting directory is the operator's, so a
+    relative import inside it is the operator's own layout. False is for a
+    door whose source keys the CALLER wrote, such as the bridge gate
+    (`gate_service.admit`): such a `use` resolves out of `sources` and the
+    search path only, never from a file beside the caller-named key.
 
     `profiles` (roadmap item 426 S4, DESIGN §9.3 Part 2) makes the admission
     profile PER ROOT: a dict keyed by root path (any spelling in `paths`; both
@@ -1327,9 +1379,11 @@ def compile_files(paths: list[str], manifest: dict | None = None,
 
         return rule.compile_files(once, paths, sources, profile, profiles,
                                   operator_sources, report,
-                                  admitting=manifest is not None)
+                                  admitting=manifest is not None,
+                                  disk_relative_use=disk_relative_use)
     return _compile_files(paths, manifest, replacing, sources, profile,
-                          profiles, operator_sources, report)
+                          profiles, operator_sources, report,
+                          disk_relative_use=disk_relative_use)
 
 
 def _compile_files(paths: list[str], manifest: dict | None = None,
@@ -1338,7 +1392,8 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
                    profile: AdmissionProfile | None = None,
                    profiles: dict[str, AdmissionProfile | None] | None = None,
                    operator_sources: dict[str, str] | None = None,
-                   report: dict | None = None) -> dict:
+                   report: dict | None = None,
+                   *, disk_relative_use: bool = True) -> dict:
     """One compile, exactly as the caller asked: `compile_files` above."""
     # item 426 S4: resolve the per-root profile map keyed by abspath. Every root
     # in `paths` gets an entry: its own profile from `profiles` (looked up by the
@@ -1362,7 +1417,8 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
     # whether their entry is present (value == `profile`) or absent, so this is
     # byte-identical for the default and single-profile paths.
     loader = _ModuleLoader(sources, profile, profiles=per_root_profiles,
-                           operator_sources=operator_sources)
+                           operator_sources=operator_sources,
+                           disk_relative_use=disk_relative_use)
     # item 396: mark every root abspath before loading, so the root-scoped
     # no-extern check and body-file resolution skip apply even to a root that is
     # reached as another root's `use` dependency.
@@ -2235,6 +2291,13 @@ def _rewrite_module(program: Program, val_renames: dict[str, str],
                 _rewrite_expr(p.default, val_renames, type_renames, set())
         _rewrite_body(fn.body, val_renames, type_renames,
                       {p.name for p in fn.params})
+        # issue #2705: a fn's `ensures` clause is lowered into a `prop test`
+        # body that calls the fn, so its value and type references move with
+        # the module exactly as the fn body's do. `result` is the generated
+        # property's binding, never a module value to rename.
+        if getattr(fn, "ensures", None) is not None:
+            _rewrite_expr(fn.ensures.expr, val_renames, type_renames,
+                          {"result"} | {p.name for p in fn.params})
     for test in program.tests:
         _rewrite_body(test.body, val_renames, type_renames, set())
     for ptest in program.prop_tests:

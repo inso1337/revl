@@ -18,7 +18,29 @@ import threading
 import urllib.parse
 from dataclasses import dataclass, field
 
+from revl.peer_identity import identity_from_seed, sign_record
+from revl.update.signing import RELEASE_DOMAIN
+
 COMMIT = "a" * 40
+
+#: The fixture's release-signing identity. Deterministic, so every served
+#: manifest verifies against the same pinned entry; committing it is harmless
+#: because a seed in a test file is a published test key, never a release key.
+TEST_SIGNING_IDENTITY = identity_from_seed("fixture-release",
+                                           b"revl-update-fixture-3021")
+TEST_RELEASE_KEY = {
+    "keyId": TEST_SIGNING_IDENTITY.key_id,
+    "publicKey": TEST_SIGNING_IDENTITY.public_key.hex(),
+    "notBefore": "2020-01-01T00:00:00Z",
+    "notAfter": "2099-01-01T00:00:00Z",
+}
+
+
+def pin_test_key(monkeypatch) -> None:
+    """Pin the fixture's release key for the duration of one test."""
+    from revl.update import release_keys
+
+    monkeypatch.setattr(release_keys, "RELEASE_KEYS", (TEST_RELEASE_KEY,))
 
 
 def tar_gz(files: dict[str, bytes], top: str = "release-1.2.0") -> bytes:
@@ -97,11 +119,15 @@ def serve_feed(*, repo: str = "owner/app", version: str = "1.2.0",
                artifact_bytes: bytes | None = None,
                artifact_override: bytes | None = None,
                live: bool = True, host_changes: bool = False,
-               manifest_extra: dict | None = None) -> FixtureFeed:
+               manifest_extra: dict | None = None,
+               signed: bool = True,
+               signature_tampered: bool = False) -> FixtureFeed:
     """Start a feed serving one (optionally one prerelease) release.
 
     ``artifact_override`` serves bytes that differ from the manifest hash, the
     digest-mismatch case. ``tag_only`` publishes no releases and only tags.
+    ``signed`` signs the served manifest with the fixture's release key;
+    ``signature_tampered`` keeps the signature members but breaks the value.
     """
     files = source_tar(version)
     artifact = files if artifact_bytes is None else artifact_bytes
@@ -185,6 +211,11 @@ def serve_feed(*, repo: str = "owner/app", version: str = "1.2.0",
                     artifact_size=len(state["artifact"]),
                     live=live, host_changes=host_changes,
                     extra=manifest_extra)
+                if signed:
+                    document = sign_record(RELEASE_DOMAIN, document,
+                                           TEST_SIGNING_IDENTITY)
+                    if signature_tampered:
+                        document["signature"] = "0" * 128
                 self._bytes(json.dumps(document).encode())
                 return
             if path.startswith("/assets/"):

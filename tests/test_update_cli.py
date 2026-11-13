@@ -4,8 +4,15 @@ from __future__ import annotations
 
 import json
 
-from _update_feed_fixture import serve_feed
+import pytest
+
+from _update_feed_fixture import pin_test_key, serve_feed
 from revl.__main__ import main
+
+
+@pytest.fixture(autouse=True)
+def _pin_fixture_release_key(monkeypatch):
+    pin_test_key(monkeypatch)
 
 
 def _args(feed, command, *extra):

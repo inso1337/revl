@@ -1,0 +1,41 @@
+// failing_inverse - the inverse raises during the unwind
+//
+// Seeded defect: the charge's `undo` calls a host helper that can raise; the inverse is present and well-shaped, but it fails at teardown.
+// Expected catch: fault-test
+// Corpus index: bench/saga_defects/defects.json (issue #2736)
+
+extern pure fn fail_refund(order: Str, cents: Int) -> Int = @py { raise RuntimeError("refund service down") }
+
+service Inventory {
+  fn reserve(sku: Str, qty: Int) -> Int
+  fn release(sku: Str, qty: Int) -> Int
+}
+
+service Payments {
+  fn charge(order: Str, cents: Int) -> Str
+  fn refund(order: Str, cents: Int) -> Int
+  emission fn settle(order: Str, cents: Int) -> Int
+  fn reverse(order: Str, cents: Int) -> Int
+}
+
+component Warehouse provides inventory: Inventory {
+  let rows = effect Map.new() undo rows.drop()
+  provide inventory {
+    fn reserve(sku, qty) = rows.insert(sku, qty)
+    fn release(sku, qty) = rows.remove(sku)
+  }
+}
+
+component Ledger provides payments: Payments {
+  let rows = effect Map.new() undo rows.drop()
+  provide payments {
+    fn charge(order, cents) = rows.insert(order, cents)
+    fn refund(order, cents) = rows.remove(order)
+    fn settle(order, cents) = rows.insert(order, cents)
+    fn reverse(order, cents) = rows.remove(order)
+  }
+}
+
+component Checkout requires inventory: Inventory, payments: Payments {
+  let auth = effect payments.charge("order-1", 4200) undo fail_refund("order-1", 4200)
+}

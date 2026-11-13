@@ -838,13 +838,16 @@ _TS_RENAMABLE_ROLES = (
     "binding", "loop binding", "match bind", "capture", "inverse capture",
     "arrow parameter", "parameter", "parameter name", "extern parameter name",
     "lifecycle binding", "name", "function", "function name",
+    # issue #3127: an extern is bound inside the emitted module (nothing on
+    # the host resolves it by name, unlike a component), so it is renamed.
+    "extern name",
 )
 _TS_VERBATIM_KEY_ROLES = (
     "record field", "field", "optional field", "binding field", "method",
 )
 _TS_REFUSED_ROLES = (
     "config field", "requirement", "provision key", "type name", "service",
-    "component", "extern name", "secret name", "ref symbol", "case name",
+    "component", "secret name", "ref symbol", "case name",
 )
 _JAVA_RENAMABLE_ROLES = (
     "binding", "loop binding", "match bind", "name", "parameter",
