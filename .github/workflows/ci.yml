@@ -486,7 +486,8 @@ jobs:
       # shows red in the log so the author sees it. Repair the reference, or
       # record it with `python3 tools/check_doc_refs.py --write-ledger`. Make it
       # fatal by deleting the `continue-on-error` line once the ledger is small.
-      # Stdlib only, no revl install, about half a minute.
+      # Stdlib only, no revl install; it reads git history, which this job's
+      # full clone provides.
       - run: python3 tools/check_doc_refs.py --check
         continue-on-error: true
       # The roadmap's in-progress markers, checked against git: a marker naming
