@@ -8660,6 +8660,104 @@ def _called_names(node, out: set) -> None:
         _called_names(getattr(node, field.name, None), out)
 
 
+def _refuse_case_name_collisions(program: Program, filename: str) -> None:
+    """Refuse a module-scope declaration whose name is also an ADT case name
+    (issue #3138).
+
+    The checker keeps constructors and functions apart, so it happily admitted
+    a module `fn Hit` beside the case `Hit(Int)` of some `type T`: `Hit(5)`
+    resolved to the constructor and the enclosing function was typed `T`. Both
+    spellings then became one module-scope binding per tier. The python emitter
+    wrote `class Hit(T)` and, later in the module, `def Hit(x)`, so the `def`
+    replaced the class and the call the checker typed `T` returned whatever the
+    user's function returned. The ts tier wrote two `export function Hit` and
+    the emitted module did not load. A `component` named like a case replaces
+    the class with a `Hit = {...}` record (the loud form, where `isinstance`
+    raises), a record `type` gives two `class Hit` definitions, and a
+    `service` spends the name in the composition's tables.
+
+    The cross-module form (a case in one module, a `type`/`fn`/`extern` of that
+    name in another) is refused earlier by
+    `compiler._reject_cross_module_case_collisions` (issue #1145), which
+    deliberately leaves the single-file form here: the merge seam is where the
+    two spellings stop being visible to their author, and a same-file
+    declaration is as authored as a declaration gets. Visibility is not the
+    point, though: each tier still emits one symbol per name, so the value and
+    the checker's type diverge.
+
+    Runs after `_resolve_type_aliases`, so a transparent alias (which emits no
+    binding and whose right-hand side is not a constructor) is not read as a
+    case. Components and services are included because the merge check above
+    never looked at them. `type Tag = Tag(Str)` (a type named after its own
+    single case, the newtype spelling) is one declaration, not two, and keeps
+    compiling: the python tier's `class Tag(Tag)` resolves the base before the
+    case rebinds the name.
+    """
+    cases: dict[str, tuple[str, str, int]] = {}
+    for decl in program.type_decls:
+        decl_file = program.decl_files.get(id(decl), filename)
+        for case in decl.cases:
+            # a case repeated inside one type is refused by `_lower_type_decls`;
+            # keep the first site so the citation is stable.
+            cases.setdefault(case.name, (decl.name, decl_file, case.line))
+    if not cases:
+        return
+    # (kind, name, line, file, decl) for everything the emitters place at
+    # module scope under the declaration's own name. The decl object is kept so
+    # the self-named-type exception can ask the type about its OWN cases
+    # instead of about whichever type happened to claim the name first.
+    others: list[tuple[str, str, int, str, object]] = []
+    for decl in program.type_decls:
+        others.append(("a type", decl.name, decl.line,
+                       program.decl_files.get(id(decl), filename), decl))
+    for decl in program.fn_decls:
+        others.append(("a function", decl.name, decl.line,
+                       decl.source or program.decl_files.get(id(decl), filename),
+                       decl))
+    for decl in program.externs:
+        others.append(("an extern", decl.name, decl.line,
+                       program.decl_files.get(id(decl), filename), decl))
+    for decl in program.services:
+        others.append(("a service", decl.name, decl.line,
+                       program.decl_files.get(id(decl), filename), decl))
+    for decl in program.components:
+        others.append(("a component", decl.name, decl.line,
+                       decl.source or filename, decl))
+    hint = ("a case name and a module-scope declaration are each emitted as one "
+            "symbol per tier, so the declaration can replace the constructor a "
+            "call was typed against (the python tier's later `def` replaces the "
+            "class, and the ts tier declares the name twice); rename one of the "
+            "two (issue #3138)")
+    for kind, name, line, decl_file, decl in others:
+        case = cases.get(name)
+        if case is None:
+            continue
+        type_name, case_file, case_line = case
+        # `type Tag = Tag(Str)` is the newtype spelling: the type declaration
+        # and its OWN case are one declaration, and the python tier emits
+        # `class Tag:` before `class Tag(Tag):`, which resolves the base before
+        # the case rebinds the name. Ask this type about its own case list, not
+        # about the first type to claim the name: two ADTs may share a case
+        # name, and the order the declarations appear in must not decide
+        # whether the newtype spelling is admitted.
+        if kind == "a type" and any(c.name == name for c in decl.cases):
+            continue
+        if os.path.abspath(decl_file) != os.path.abspath(case_file):
+            raise RevlError(
+                case_file, case_line,
+                f"`{name}` is already declared as {kind} in "
+                f"{os.path.abspath(decl_file)}:{line}", hint=hint)
+        if case_line <= line:
+            raise RevlError(
+                decl_file, line,
+                f"`{name}` is already declared as a case of `{type_name}` "
+                f"on line {case_line}", hint=hint)
+        raise RevlError(
+            decl_file, case_line,
+            f"`{name}` is already declared as {kind} on line {line}",
+            hint=hint)
+
+
 def _refuse_callable_shadowing(program: Program, filename: str) -> None:
     """Refuse a body that both BINDS a name and CALLS it, where that name is
     also a module callable visible to the body.
@@ -9285,6 +9383,11 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     _validate_declared_types(program, program.filename)
     _check_principal_producers(program, program.filename)
     types = _lower_type_decls(program, program.filename)
+    # issue #3138: a module-scope declaration may not reuse an ADT case name.
+    # After the type table (and the alias erasure before it), before any body is
+    # lowered: the emitters place both under one name, so the checker's type and
+    # the emitted value would diverge.
+    _refuse_case_name_collisions(program, program.filename)
     # item 521 slice 4: the computer-use target record and the signatures
     # that carry it. Checked here because the obligation is a program-level
     # fact (a verb declared in one place, a record declared in another) and

@@ -1980,11 +1980,12 @@ def _reject_cross_module_case_collisions(included: list[_LoadedModule]) -> None:
 
     Deliberately NOT refused here:
 
-    * the same file declaring both. The merge seam is where the two spellings
-      stop being visible to their author; inside one file they are, and the
-      single-module rule is unchanged (`examples/rejections/t18_type_alias_cycle
-      .rvl` declares exactly that shape and must keep refusing for its own
-      reason).
+    * the same file declaring both. This check is about the merge seam; the
+      single-file form is refused by `lower._refuse_case_name_collisions`
+      (issue #3138). Being visible to the author is not enough: every tier
+      still emits one module-scope symbol per name, so a same-file `fn` or
+      record beside a case of that name replaced the constructor the checker
+      typed the call against.
     * two modules declaring the SAME case name on different ADTs. That one is
       already loud rather than silent: `lower.py::_case_table` drops an
       ambiguous case from the constructor table, so the use site refuses with

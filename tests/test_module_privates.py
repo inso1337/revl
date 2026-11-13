@@ -364,19 +364,24 @@ def test_renaming_one_side_admits_again(tmp_path):
     assert mk["body"][0]["expr"]["case"] == "Field"
 
 
-def test_one_file_declaring_both_is_unchanged(tmp_path):
-    """Scope: the MERGE SEAM. Inside one file both spellings are in front of
-    their author and the single-module rule is untouched — otherwise
-    `examples/rejections/t18_type_alias_cycle.rvl`, which declares exactly this
-    shape, would start refusing for the wrong reason."""
+def test_one_file_declaring_both_is_refused_by_the_frontend(tmp_path):
+    """Issue #3138 closes the carve-out this test used to pin. Inside one file
+    both spellings are visible to their author, but every tier still emits one
+    module-scope symbol per name (`class Field` for the record and
+    `class Field(Node)` for the case in python), so the record and the
+    constructor cannot share it. The `use`-edge check above stays about the
+    merge seam; the single-file rule lives in
+    `lower._refuse_case_name_collisions`."""
     (tmp_path / "single.rvl").write_text(
         "type Field = { name: Str, ty: Str }\n"
         "pub type Node =\n    Field(Str)\n  | Other\n"
         'pub fn go() -> Node { return Field("a") }\n'
     )
-    ir = compile_files([str(tmp_path / "single.rvl")])
-    assert ir["types"]["Field"]["kind"] == "record"
-    assert ir["types"]["Node"]["kind"] == "variant"
+    with pytest.raises(RevlError) as excinfo:
+        compile_files([str(tmp_path / "single.rvl")])
+    message = str(excinfo.value)
+    assert "`Field` is already declared as a type on line 1" in message, message
+    assert excinfo.value.line == 3, message
 
 
 def test_two_modules_sharing_a_case_name_is_unchanged(tmp_path):
