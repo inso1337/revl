@@ -368,6 +368,7 @@ CORPUS = [
     # which is what the line-coverage ledger reported.
     "keyword_config_value_field.rvl",
     "services_method_effects.rvl",  # method-body `effect` + saga `emit ... compensate`: the `_revl_frame.adopt` accumulator + `_label`/`_effect_N`/`_emit_N` counter
+    "method_effect_coalesce.rvl",  # issue #3304: `adopt_bracket` for an absolute table inverse, `adopt` for a computed key
     # item 383 / 391 (self-host port) — the `.map`/`.filter`/`.reduce` transforms
     # desugar (frontend) to `list_map`/`list_filter`/`list_reduce` free calls; the
     # py tier lowers the function-value params, arrow args, and `f(x)` calls.
@@ -599,10 +600,10 @@ def test_inline_templates_preserve_argument_evaluation(emitted):
     assert ns["run_inline"](4, next_value) == 23
     assert calls == [1, 2, 3, 4]
     assert ns["pure_arguments"]([1, 2]) == 7
-    assert "a = next()" in source
-    assert "b = twice_inline(next())" in source
-    assert "c = ignores(next())" in source
-    assert "d = conditional_only(next())" in source
+    assert "a = next_()" in source
+    assert "b = twice_inline(next_())" in source
+    assert "c = ignores(next_())" in source
+    assert "d = conditional_only(next_())" in source
     assert "return recursive_inline(x)" in source
     assert ns["guarded"](-1) == 0
     assert ns["guarded"](99) == 10

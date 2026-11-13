@@ -424,19 +424,24 @@ def _deferred_register_kwargs(ext: dict, args: list) -> str:
 # site both flow through), exactly as it already does for Python keywords. The
 # emitter's bare `len(...)` is untouched and keeps resolving to the builtin.
 #
-# `next` is deliberately ABSENT: it is emitted bare only inside the routed-
-# require router (a self-contained emitted class, item 167), and it is also a
-# common, legitimate revl identifier (a `next` callback parameter, a `next`
-# record field) whose every checked-in use is a local/field that shares no scope
-# with that class. Renaming those would be churn with no collision behind it, so
-# `next` stays off the list until a colliding *module-scope* spelling motivates
-# a narrower guard.
+# `next` is emitted bare only inside the routed-require router (a self-contained
+# emitted class, item 167), but that class's methods resolve `next` through the
+# MODULE globals, so a module-scope `fn next` (or a `type next`) rebinds it for
+# the router too. Issue #3129 also names the other bare references this list
+# missed: `chr` (the `to_char` helper), `IndexError`/`KeyError` (the list/str and
+# map index guards), `AssertionError` (the lifecycle residue check), `setattr`
+# (keyword-named provide-method registration) and the imported `realm_label`
+# (the realm router). They join the same ladder, so a user declaration of any of
+# them is escaped and every emitter reference keeps reaching the runtime name.
+# A local of one of these spellings is renamed too; the ladder is the one
+# module-global rename site, and the churn is a pure injective shift.
 _EMITTED_BUILTINS = frozenset({
-    "AttributeError", "Exception", "OverflowError", "RuntimeError", "TypeError",
-    "abs", "bool", "bytes", "callable", "dict", "float", "getattr", "globals",
-    "hasattr", "hash", "int", "isinstance", "len", "list", "max", "min",
-    "object", "ord", "range", "repr", "reversed", "set", "sorted", "str",
-    "tuple", "type",
+    "AssertionError", "AttributeError", "Exception", "IndexError", "KeyError",
+    "OverflowError", "RuntimeError", "TypeError",
+    "abs", "bool", "bytes", "callable", "chr", "dict", "float", "getattr",
+    "globals", "hasattr", "hash", "int", "isinstance", "len", "list", "max",
+    "min", "next", "object", "ord", "range", "realm_label", "repr", "reversed",
+    "set", "setattr", "sorted", "str", "tuple", "type",
 })
 
 # Type names the python emitter injects at module scope, which a user *type* of
@@ -652,6 +657,26 @@ def _pins(step: dict, slot: str) -> str:
     a body with no such capture stays byte-identical."""
     names = step.get(f"{slot}_captures") or []
     return ", ".join(f"{_mangle(n)}={_mangle(n)}" for n in names)
+
+
+def _coalescable_bracket(step: dict) -> bool:
+    """Whether a provide-method bracket's `undo` is an ABSOLUTE table inverse
+    on a literal or named key (issue #3304, `Frame.adopt_bracket`): `remove`
+    after `insert`, or the #1980 `match prev` restore. Both
+    set the key to a value fixed when the bracket registered, so a frame's
+    older record for the key does the newer one's work. The #2640 computed
+    list-append inverse is `table` too but drops one item from the list it
+    reads at undo time, so it is relative and never coalesced; so is a key the
+    undo would evaluate again (a call)."""
+    if step.get("inverse") != "table":
+        return False
+    acquire, undo = step.get("acquire") or {}, step.get("undo") or {}
+    key = (acquire.get("args") or [None])[0]
+    if not (isinstance(key, dict) and key.get("kind") in ("lit", "name")):
+        return False
+    if undo.get("kind") == "call":
+        return undo.get("method") == "remove"
+    return undo.get("kind") == "match"
 
 
 def _inverse_lambda(step: dict, slot: str, params: str = "") -> str:
@@ -4312,7 +4337,10 @@ class _ComponentEmitter:
                 out.add(indent + 1,
                         f"yield _revl_frame._guard({_inverse_lambda(step, 'undo')}: "
                         f"{self._inverse_expr(step.get('undo'), where)})")
-                out.add(indent, f"_revl_frame.adopt(_revl_ctx.effect({fn}, {self._label(label)!r}))")
+                # issue #3304: an absolute table inverse may be coalesced with
+                # the frame's older record for the same key
+                adopt = "adopt_bracket" if _coalescable_bracket(step) else "adopt"
+                out.add(indent, f"_revl_frame.{adopt}(_revl_ctx.effect({fn}, {self._label(label)!r}))")
         elif kind == "let-effect":
             wit = self._witnessed_extern(step.get("acquire"))
             if wit is not None:

@@ -75,6 +75,10 @@ The experiment prescribed by [docs/syntax-2.0.md §10](../docs/syntax-2.0.md):
   Tasks over 20+-component compositions with compiler-checked ground truth,
   TypeScript renderings, and a scorer. No model runs. See
   [its section](#the-blast-radius-benchmark-issue-1702).
+- `agentic/`: the six agentic arm drivers (issue #2621), one directory per
+  experiment generation, tracked with sha256 provenance so a published number
+  can be traced to the code that produced it. See
+  [its section](#the-agentic-drivers-issue-2621).
 - `saga_defects/`: the seeded-defect saga corpus (issue #2736). One small
   saga per known saga defect, with the expected catch point
   written as data, and a runner that scores each row as refused at compile
@@ -443,6 +447,16 @@ optionally the session's last `revl_state` result. The score reports:
   as `{numerator, denominator, value}`. An axis the result does not carry is
   `null` and listed under `notInRevlState`, so a missing axis never reads as
   zero.
+
+## The agentic drivers (issue #2621)
+
+`bench/agentic/` holds the six drivers behind the agentic arm comparisons, in
+one directory per experiment generation. They were untracked scratch files
+before; `manifest.json` records each one's source and sha256, a test enforces
+the record, and no driver's docstring can claim another variant's identity.
+Cite the driver name and its hash beside any published number. A run drives a
+real model and is never run by CI. See
+[bench/agentic/README.md](agentic/README.md).
 
 ## Host extern call cost (issue #2709)
 

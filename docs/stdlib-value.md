@@ -196,7 +196,7 @@ go/java are the additive follow-up.
 | rs | a `serde_json::Value` boxed in `cordis::Value` (as `json.rvl` already boxes); `.downcast::<serde_json::Value>()` reads it, each child is re-boxed with `Value::new` | **shipped** (item 391 / #106) — every accessor carries an `@rs` body, verified byte-for-byte against the `@py` outputs in an isolation crate. `value_keys` / `value_children` over a record read the host map in insertion order, so a `Value`-walking crate must build serde_json with `preserve_order` — the identical requirement `json.rvl`'s `json_stringify` canonical key order already imposes |
 | go | `any` (type-switch discrimination) | **deferred** — add `@go` bodies |
 | java | a provider's JSON tree (Jackson/Gson) | **deferred** — needs a provider on the classpath |
-| wasm | — | **no representation**: the substrate value model (Int/Bool/Str/List) holds no Float/Map/record, same limit as `json.rvl` |
+| wasm | — | **no dynamic `Value` representation**: the tier has no `Any` boxing (it carries Int/Int32/Float/Bool/Str/List/record values natively; Map is a stated limit), the same reason `json.rvl` cannot erase |
 
 Adding a tier is purely additive: append its `@<backend>` body to each accessor
 in `stdlib/value.rvl` (the emitter refuses an extern with no body for its tier,

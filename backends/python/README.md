@@ -29,6 +29,7 @@ crash-recovery and backwards replay (`replay.py`, `docs/replay.md`), declared
 | `revl_shell_classify.py` | pure, total shell-command classifier (item 252): lowers a provably-fs-local command onto the witnessed catalog, else one honest `emission` |
 | `revl_shell_host.py` | py-tier host bodies for `stdlib/shell.rvl` (item 252): the opaque `sh -c` fallback plus the re-exported classifier |
 | `revl_net.py` | the stdlib-only HTTPS engine imported by the `stdlib/net.rvl` `@py` bodies: JSON and urlencoded bodies, custom headers, HTTPS only, timeout, bounded response, no redirect following, errors as data |
+| `revl_socket.py` | the stdlib-only accepted-socket engine imported by the `stdlib/socket.rvl` `@py` bodies (issue #3357): one selector thread per listener, the RFC 6455 upgrade handshake and text framing, origin rule, `most`/`held`/`limit` bounds, knocks handed to `take` |
 | `golden/user_cache.py` | emitter output for `examples/user_cache.ir.json`, checked in |
 | `demo.py` | load → put/get → hot-swap the Database provider → unload, with event log |
 | `tests/` | pytest suite; each test names the R1–R5 requirement it covers |

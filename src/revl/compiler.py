@@ -156,6 +156,7 @@ _STDLIB_BACKEND_DOORS: dict[str, str] = {
     "revl_fs_workspace": 'use "stdlib/fs.rvl" { resolve_within, lexists, is_dir }',
     "revl_fs_ts": 'use "stdlib/fs.rvl" { resolve_within, lexists, is_dir }',
     "revl_net": 'use "stdlib/net.rvl" { get, post_json, post_form }',
+    "revl_socket": 'row @wire from "stdlib/socket.rvl" provides wire',
 }
 
 

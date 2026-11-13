@@ -63,6 +63,8 @@ from .typecheck import (
     bind_local as _bind_typed_local,
     check_ir,
     infer_ast,
+    infer_memo,
+    infer_memo_active,
     infer_ir,
     mismatch,
     pin_hole,
@@ -7669,6 +7671,26 @@ def _refuse_foreign_increment(expr, filename: str, type_env: dict | None,
 
 def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filename: str,
                      type_env: dict | None = None, types: dict | None = None) -> dict:
+    """Lower one pure-stratum expression.
+
+    Issue #3400: the operator arms below ask `infer_ast` for the type of each
+    operand after lowering it, and each answer walks the operand's subtree, so
+    the outermost call opens an `infer_memo()` and every node of the
+    expression is inferred once. Sound here because every statement scope this
+    lowering opens inside an expression works on a copy (`dict(type_env)`), so
+    no environment an operand was inferred under changes meanwhile.
+    """
+    if infer_memo_active():
+        return _lower_pure_expr_node(expr, scope, callables, alias_fns, filename,
+                                     type_env, types)
+    with infer_memo():
+        return _lower_pure_expr_node(expr, scope, callables, alias_fns, filename,
+                                     type_env, types)
+
+
+def _lower_pure_expr_node(expr, scope: dict, callables: set, alias_fns: dict,
+                          filename: str, type_env: dict | None = None,
+                          types: dict | None = None) -> dict:
     type_env = type_env if type_env is not None else {}
     types = types if types is not None else {}
     if isinstance(expr, ExprHole):
@@ -14495,6 +14517,48 @@ def _poison_failed_binding(stmt, env: "Env") -> None:
     env.type_env[safe] = POISON
 
 
+# ------------------------------------------- the access walk's observation (G1)
+#
+# THE SEAM THE FORMAL G1 COVERAGE ROW PINS (issue #2744). G1 is enforced by
+# name resolution DURING lowering (`_lower_postfix`), so the checker has no
+# separate walk function to wrap the way the G9 row wraps
+# `taint._walk_component_methods`. The obligation the coverage theorem states
+# is about the walk that lowering IS: every scope a component body induces is
+# opened and each of its top-level statements is REACHED BY THE LOWERING LOOP.
+# A visit is recorded at the loop head, before the statement is dispatched, so
+# the log observes that the loop reached the statement, not that name
+# resolution then ran on it: a dispatch that skipped a reached statement would
+# still log a full walk. `formal/harness/diff_corpus.py` observes that by
+# installing a log here for the duration of ONE `compile_files` call.
+#
+# None in production: every call site is one branch and a module-global
+# lookup, and nothing is allocated or mutated while the log stays None. No
+# behaviour depends on the log. The
+# entries are `("scope", component, label, (param, ...))` when a provide
+# method's scope opens (its declared parameters are seeded there) and
+# `("visit", component, label, ())` once per statement the loop reached.
+# The harness is the only reader; a renamed or moved call site leaves the log
+# short, which the coverage row reports as its own blind spot rather than as
+# the checker having skipped a statement.
+_ACCESS_WALK: "list[tuple[str, str, str, tuple[str, ...]]] | None" = None
+
+
+def _note_access_scope(component: str, scope: str,
+                       params: list[str]) -> None:
+    """Record that the walk opened one scope of one component body."""
+    log = _ACCESS_WALK
+    if log is not None:
+        log.append(("scope", component, scope, tuple(params)))
+
+
+def _note_access_visit(component: str, scope: str) -> None:
+    """Record that the lowering loop reached one statement of one scope,
+    before it is dispatched."""
+    log = _ACCESS_WALK
+    if log is not None:
+        log.append(("visit", component, scope, ()))
+
+
 def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], filename: str,
                      callables: set | None = None, types: dict | None = None,
                      emitting_fns: set | None = None,
@@ -14910,6 +14974,12 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
     # this pass has to bound (item 485)
     check_list_index_bounds(comp.body, filename)
     for stmt in comp.body:
+        # the G1 coverage observation (issue #2744): the loop REACHES this
+        # activation statement here, before any branch decides what it lowers
+        # to, so the log records the reach and not the resolution. A provide block is its own scope and is recorded by
+        # `_lower_provide`, not as an activation statement.
+        if not isinstance(stmt, ProvideStmt):
+            _note_access_visit(comp.name, "activation")
         if isinstance(stmt, HandoffStmt):
             # `handoff <key>: <Type>` (roadmap item 53): the verified state
             # hand-off of a stateful provider. A prelude declaration — it names
@@ -15745,7 +15815,14 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 raise RevlError(filename, getattr(ms, "line", method.line),
                                 "unexpected statement in method control-flow body")
 
+        # the G1 coverage observation (issue #2744): the walk opens this
+        # provide method's scope with exactly the parameters it seeds into the
+        # method's environment, then records each statement the loop reaches,
+        # before it is dispatched.
+        _note_access_scope(comp.name, f"{stmt.key}.{method.name}",
+                           list(env.params))
         for mstmt in method.body:
+            _note_access_visit(comp.name, f"{stmt.key}.{method.name}")
             if returned:
                 raise RevlError(filename, mstmt.line, "unreachable statement after `return`")
             verified_here = getattr(mstmt, "verified", False)

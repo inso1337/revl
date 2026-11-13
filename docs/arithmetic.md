@@ -25,8 +25,9 @@ rust. Rust was the tier out of step with the syntax, not the other two.
 Declaring the result `Int` is now a type error, with the diagnostic naming
 `Float`.
 
-The wasm tier refuses `Int / Int` by name until it can render a non-integer
-Float; use `div_trunc` / `div_floor` / `div_euclid` there.
+The wasm tier lowers `Int / Int` to true division now: both operands convert to
+f64 and the result is a native `Float` (docs/wasm-capabilities.md). Use
+`div_trunc` / `div_floor` / `div_euclid` where an integer quotient is meant.
 
 ## Integer division has names
 
@@ -393,7 +394,7 @@ on `ident(3)`, and not in the same direction:
 | java | `long` -> `double` is an implicit widening (JLS 5.1.2): absorbed it | `ident(((double) (3L)))` |
 | rust | `ident(3i64)` against `f64` is **E0308**, a compile error | `ident((3i64 as f64))` |
 | typescript | `ident(3n)` against `number`; `3n === 3` is false: a **wrong answer** | `ident(Number(3n))` |
-| wasm | refuses `Float` (the tier lowers `Int`/`Bool` only) | refuses, unchanged |
+| wasm | refuses `Float` (the tier lowers `Int`/`Bool` only) | `f64.convert_i64_s` / `f64.convert_i32_s` at the marked site; `Float` is a native f64 value |
 
 A refusal was survivable and the wrong answer was not, so the gap was pinned
 in `tests/test_cross_tier_execution.py` (`DIVERGENCES`) rather than left to
@@ -652,14 +653,16 @@ issue #721 executed them (`tests/test_458_float_division_and_remainder.py`):
 This is why `/` by zero is *not* refused while `div_trunc(0)` and `mod(0)`
 are: integer division at zero has no value, and float division does.
 
-### The wasm tier refuses Float
+### Float on the wasm tier
 
-This tier lowers `Int` and `Bool` and nothing else numeric, so `Float` is a
-**deliberate limit** with a named refusal (`type 'Float' is not lowerable —
-this tier supports Int/Bool`), not a silent approximation. It is a limit of the
-emitter, not of WebAssembly, which has `f64`. That means `/` is unavailable
-there too, since it yields Float. `div_trunc`, `div_floor`, `div_euclid` and
-`mod` all work, at the full 64-bit range.
+`Float` is a native f64 value on this tier: a local, a record field, a list
+element, a tagged-cell payload, an arithmetic operand, a comparison operand and
+a service-boundary value. `%` has no wasm instruction, so the emitter calls
+`$f64_mod`, an exact binary long-division (C fmod semantics: a zero divisor is
+`NaN`, the sign is the dividend's, `-0.0` keeps its sign bit). The *rendering*
+fence is separate and unchanged: `$f64_to_str` renders NaN, ±Infinity and
+integer-valued finites exactly, and traps on a non-integer finite rather than
+emit a string that would diverge from the other tiers (docs/strings.md).
 
 ## Integer division by zero
 

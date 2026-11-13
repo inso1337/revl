@@ -32,29 +32,51 @@ per element, exported through the module's `memory` so a host can read results.
 | record | `i32` pointer (one 8-byte slot per field) | yes, as a pointer |
 | variant / `Opt[T]` / `Result[T, E]` | `i32` pointer to a `[u32 tag][pad][payload]` cell | yes, as a pointer |
 | `Unit` (void op) | no slot | yes (absent) |
-| `Float` | **no value representation** — only the template-interpolation subset (`$f64_to_str`) that renders integer-valued finites and **traps** on the exponent form / non-integers (docs/strings.md) | no |
-| `Map[K, V]` | **no representation** (a persistent map needs a richer value model) | no |
+| `Float` | native `f64` value; in an 8-byte slot its IEEE-754 bit pattern (`i64.reinterpret_f64`) | yes, by value |
+| `Map[K, V]` | **stays out**: a persistent map needs a richer value model than the canonical ABI (see "Why Map stays out") | no |
 | function types | **no representation** (wasm MVP: no closures/function references) — arrows called where they are bound still lower, inlined at the call site | no |
 
 The gate is `_check_type` in `backends/wasm/emit.py`: it accepts
-`Int`/`Int32`/`Bool`/`Str`/`Bytes`/`List`/record/variant/`Opt`/`Result`
+`Int`/`Int32`/`Float`/`Bool`/`Str`/`Bytes`/`List`/record/variant/`Opt`/`Result`
 (recursively, for payloads and elements) and refuses everything else by name:
 
 ```
-type 'Float' is not lowerable — this tier supports
-Int/Bool/Str/Bytes/List/record/variant/Opt/Result values
+type 'Map[Str, Int]' is not lowerable — this tier supports
+Int/Int32/Float/Bool/Str/Bytes/List/record/variant/Opt/Result values
 ```
 
-(`Map[Str, Int]` gets the same message with the type named.)
+A **`let`/`var` binding** of a `Float` is an f64 local, so
+`let x: Float = 0.5` lowers and validates. A record field, list element or
+tagged-cell payload stores the value's bit pattern in its 8-byte slot and reads
+it back as the same f64, so a Float survives every position the value model
+has. Arithmetic and comparison are the native `f64.*` instructions
+(docs/arithmetic.md), `/` is true division over Ints too, and `%` is an exact
+`$f64_mod` (C fmod).
 
-A **`let`/`var` binding** of a `Float` is refused with the same wording, by
-`_declare_local`. Every local on this tier is an `i32` except an `Int`, so
-`let x: Float = 0.5` used to set an `f64` into an `i32` local and produce a
-module that does not validate (`type mismatch: expected i32, found f64`) —
-a diagnostic from wasmtime at load, not from the emitter, and the only Float
-position that emitted anything at all rather than saying no. Interpolating a
-Float *expression* that is never bound (`` `${3.0}` ``, `` `${1.0 + 2.0}` ``)
-still lowers, within the `$f64_to_str` fence below.
+### Limitation: rendering a non-integer Float traps at run time
+
+Turning a Float into text goes through `$f64_to_str`, which renders NaN,
+Infinity and integer-valued finites only; the shortest round-trip renderer for
+other finites is not implemented on this tier (docs/strings.md). Before Float
+lowered, a document that rendered `7 / 2` was refused when the module was
+built. Now it emits, and the render traps at run time instead: both
+`` `${7 / 2}` `` and `(7 / 2).to_str()` validate and then execute `unreachable`,
+while `` `${8 / 2}` `` renders without trapping. A module that renders a
+Float should therefore be run on its real inputs, not only validated. A failed `assert` on
+this tier traps in every case and carries no left/right report, so a failing
+Float comparison reads as a wasm trap there as any failed assertion does.
+
+### Why Map stays out
+
+`Map[K, V]` is still refused, by name, and this is a design decision rather
+than an unimplemented case. The tier's values are canonical-ABI cells: a u32
+count then one 8-byte slot per element, addressed positionally, with no
+representable key hash, no persistent-tree node, and no per-key comparison an
+untagged slot could perform (`List.indexOf` is refused for the same reason).
+A persistent map therefore needs a new value model (key equality, hashing and
+structural sharing), not just another slot encoding. Components that need one
+should use a hosted backend (or express the state through coeffects on this
+tier). `Map.new`/`Pool.open` host builtins stay refused with it.
 
 ## String and collection builtins
 
@@ -74,7 +96,7 @@ arithmetic/rendering builtins) lower; `repeat`, the `Map` operations,
 | `slice(a, b)` | Str, Bytes, List | ✅ | Str slices on code-point boundaries; Bytes on byte offsets; List on element offsets |
 | `charAt(i)` | Str, Bytes | ✅ | Str: the whole scalar at a code-point index; Bytes: the single byte |
 | `charCodeAt(i)` | Str, Bytes | ✅ | Str decodes the UTF-8 scalar; Bytes reads the raw byte |
-| `to_str()` | Int | ✅ | `$int_to_str` (renders `Int.MIN` correctly) |
+| `to_str()` | Int, Float | ✅ | `$int_to_str` (renders `Int.MIN` correctly); Float uses `$f64_to_str`, the same renderer as `${…}` (integer-valued finites and NaN/Infinity; the exponent/non-integer fence in docs/strings.md applies) |
 | `to_int()` / `to_int32()` | Int32 / Int | ✅ | checked width conversions |
 | `div_trunc` / `div_floor` / `div_euclid` / `mod` | Int | ✅ | named integer ops, same result every tier |
 | `checked_div_trunc` / `_floor` / `_euclid` / `checked_mod` | Int | ✅ | total forms: zero divisor → `Err(...)`, no trap |
@@ -84,7 +106,6 @@ arithmetic/rendering builtins) lower; `repeat`, the `Map` operations,
 | `join(sep)` | List[Str] | ✅ | `$str_join`: elements joined by `sep` over the bump heap; `[]` → `""` |
 | `repeat(n)` | Str | ❌ | `unsupported builtin method 'repeat'` |
 | `set` / `lookup` / `has` / `size` / `keys` / `remove` | Map | ❌ | `` `set` is not lowerable on this tier yet — the Map value type has no representation here; use a hosted backend`` |
-
 The harness's *reader* artifacts now cross to the substrate: the durable pipe
 **reader** and the agent's toolbox (`Str.split`), and the web router's
 `route_request` (`Str.indexOf`), lower to `$str_split`/`$str_index_of` over the
@@ -105,30 +126,32 @@ Two different boundaries exist, and they have different widths.
 ### Plain component services (`provide` / `requires` coeffects)
 
 A service operation's declared param/return type crosses at the width of its
-type: a scalar is an `i64`/`i32` **value**, a compound type an **`i32`
-pointer**. Which memory that pointer names decides what is lowerable:
+type: a scalar (`Int` i64, `Bool` i32, `Float` f64) is a **value**, a compound
+type an **`i32` pointer**. Which memory that pointer names decides what is
+lowerable:
 
-- **A provider's export** (`provide:<key>.<op>`): **Int, Bool, Str, Bytes,
-  List, record, variant, Opt, Result** params and returns, compound ones by
-  pointer into the provider's own memory. The module exports `memory`, so a
-  HOST that calls the export reads a compound result out of the right memory.
+- **A provider's export** (`provide:<key>.<op>`): **Int, Int32, Float, Bool,
+  Str, Bytes, List, record, variant, Opt, Result** params and returns,
+  compound ones by pointer into the provider's own memory. The module exports
+  `memory`, so a HOST that calls the export reads a compound result out of the
+  right memory.
 - **A consumer's required call to a key another component of the same
-  composition provides**: **Int and Bool only.** That provider is another
-  cordis-wasm instance with its own linear memory, and the runtime forwards
-  the call's arguments and result as the integers they are, so a compound
-  value would arrive as an address in the wrong memory. Measured before this
-  was refused (issue #1601): a three-element list arrived with length 0, an
-  index into it trapped in `$list_slot`, and a `Str` read correctly only when
-  both modules happened to pool the same literal at the same offset. Refused
-  by name: `` <key>.<op>: param 0 is 'Str', and only scalar (Int/Bool) values
-  cross a service another component provides on this tier ``. The routed
-  require and the spawn instance accessor draw the same line for the same
-  reason.
+  composition provides**: **Int, Bool and Float only.** That provider is
+  another cordis-wasm instance with its own linear memory, and the runtime
+  forwards the call's arguments and result as the scalar values they are, so a
+  compound value would arrive as an address in the wrong memory. Measured
+  before this was refused (issue #1601): a three-element list arrived with
+  length 0, an index into it trapped in `$list_slot`, and a `Str` read
+  correctly only when both modules happened to pool the same literal at the
+  same offset. Refused by name: `` <key>.<op>: param 0 is 'Str', and only
+  scalar (Int/Bool/Float) values cross a service another component provides on
+  this tier ``. The routed require and the spawn instance accessor draw the
+  same line for the same reason.
 - **A consumer's required call to a key no component provides**: the host's.
   cordis-wasm hands a host-provided coeffect the calling fiber, so the host
   reads a compound argument out of the caller's memory, which is the right
   one. Compound values stay allowed here.
-- **Float, Map, function types**: refused everywhere with the named
+- **Map and function types**: refused everywhere with the named
   `_check_type` diagnostic above.
 - **Unit** (void op): no slot.
 - A value whose wasm width disagrees with the declared type (a `List` returned
@@ -148,10 +171,10 @@ pointer**. Which memory that pointer names decides what is lowerable:
 
 Cross-*instance* provision reads are narrower: a rich (pointer) value would
 cross as a pointer into memory the *spawner does not own*, so only scalars
-cross the instance-accessor boundary:
+(Int, Bool, Float) cross the instance-accessor boundary:
 
 ```
-s.k.op param 0 is Str — only scalar (Int/Bool) values cross the
+s.k.op param 0 is Str — only scalar (Int/Bool/Float) values cross the
 instance-accessor boundary on this tier; a Str/record/List would cross as a
 pointer into the instance's own memory (use a hosted backend)
 ```
@@ -376,6 +399,44 @@ static activation chain. A clean unload never walks either list
 (discharge — the emission is the deliverable). The paired activation-body form
 registers statically, exactly as a site-spelled one always did.
 
+## The browser host
+
+`backends/wasm/host/` is a dependency-free JavaScript host for the same
+import/export surface, so a component compiled here runs in a browser page
+instead of only on the Python cordis-wasm runtime:
+
+- a module's `coeffect:<key>` imports are bound to host operations
+  (`host.provideHost(key, ops)`) or to another loaded component's
+  `provide:<key>.<op>` export. The ops are the host object's OWN function
+  properties, so a class instance whose methods live on its prototype is
+  passed as a plain object: `provideHost("clock", { now: () => clock.now() })`;
+- a component whose imports do not resolve is **gated**: its module is
+  compiled but no instance is created. Supplying the op activates it;
+- `activate_step()` drives activation, `deactivate()` runs the compiled
+  inverses on unload, and provisions are published only after activation;
+- a component that cannot activate (a provision conflict, a trap, the step
+  limit) is `failed`: it publishes nothing, `host.error(name)` says why, and
+  only its own `load` rejects;
+- the other states are `loading` (compiling) and `activating` (instantiated,
+  `activate_step` running, nothing published yet). A `load`, `unload` or
+  `provideHost` made from inside activation, `deactivate`, an export reached
+  through `host.call` or the log callback is deferred, in order, to the end
+  of the outer host operation, except an `unload` of the activating
+  component itself, which stops its activation at the next step and runs
+  `deactivate` once. `host.load` resolves to a frozen `{ name, state,
+  missing }` snapshot, not the host's record;
+- scalars cross as native wasm values, so `Float` is an `f64` and arrives in
+  JavaScript as a `number`. No linear-memory marshalling is needed for the
+  scalar boundary.
+
+The synchronous base calculus is the whole host. The async inertia layer
+(`host.job_run`), routed realms, `spawn`, the instance accessors and reactive
+withdrawal need the cordis-wasm runtime's state machine and are refused by name
+rather than bound to a wrong function. The demo (`host/demo.rvl` +
+`host/index.html`) binds `clock.frame_dt` to an animation frame and draws the
+Float position returned by `provide:motion.step`; `host/README.md` has the
+commands and the boundary.
+
 ## Lifecycle tests on the substrate (item 142)
 
 A `lifecycle test` (docs/syntax-2.0.md §7.1) *runs* on the wasm tier when every
@@ -394,7 +455,7 @@ What still **skips, per test, with a reason** (never a false pass):
 | the test … | why it skips |
 |---|---|
 | `load C with { … }` | a `config` block does not lower — no instantiation-config channel |
-| `call`/`assert` crossing a non-scalar boundary (`Str`/`List`/record/variant/`Opt`/`Result`/`Float`) | those cross as linear-memory pointers the host cannot marshal at the coeffect seam; only Int (i64) / Bool (i32) move across it |
+| `call`/`assert` crossing a non-scalar boundary (`Str`/`List`/record/variant/`Opt`/`Result`) | those cross as linear-memory pointers the host cannot marshal at the coeffect seam; the lifecycle driver evaluates Int/Bool (Float, while scalar, is not marshalled by that interpreter yet) |
 | an `advance` step | timers (`every`/`after`, item 57) are not yet lowerable (docs/time-coeffect.md) |
 | any component that does not lower (`Map`/`Pool`, method-time effects, …) | the whole mesh cannot boot, so its lifecycle tests skip with the emit reason |
 
@@ -413,8 +474,8 @@ A harness-shaped component that must also run on the substrate:
    `repeat` and `List.indexOf` still need expressing with the others (or moving
    into a `fn` that stays on hosted tiers).
 2. **Return Str/List/record/Opt/Result from services is fine** (linear-memory
-   boundary); avoid `Float` and `Map` values anywhere, and avoid function-typed
-   service params/returns.
+   boundary), and `Float` is a native f64 value everywhere; avoid `Map` values
+   anywhere, and avoid function-typed service params/returns.
 3. **No config** on components that must boot on wasm (pass values through the
    composition instead), no host builtins, no method-time effects.
 4. **Do not use `spawn` instance accessors with rich payloads** — scalars only.
