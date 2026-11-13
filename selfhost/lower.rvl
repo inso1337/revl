@@ -17948,10 +17948,6 @@ fn tk_low_method(c: CallN, env: List[Bind]) -> Str {
 //
 // Three exemptions, each because the reference's own answer is not G1:
 //
-//   * a `use` declaration switches the rule off for the WHOLE text — the
-//     imported module's `pub fn`s join `callables` (`program.fn_scopes`) and an
-//     aliased `alias.f(..)` call resolves before the name resolver runs, so the
-//     universe stops being knowable from this text alone;
 //   * a name in the item-384 foreign table (`len`, `print`, `and`, ...) draws
 //     the redirect's own sentence. The token-level scanner that ports those
 //     redirects runs ahead of the parse and is deliberately conservative, so a
@@ -17961,6 +17957,15 @@ fn tk_low_method(c: CallN, env: List[Bind]) -> Str {
 //     which shape they are: `_tagged_case` returns ahead of the resolver for a
 //     payload-free case, and distinguishing the rest would trade a withheld
 //     refusal for the risk of a wrong one.
+//
+// A `use` declaration no longer switches the rule off (issues #3004 / #3023):
+// the document this gate admits is a ROOT module, so its bare value namespace is
+// exactly its own `fn`/`extern` declarations plus the names its `use` lists
+// spell. `nr_use_names` reads those names from the text, which is enough — an
+// un-imported `pub` name of a used module is "not declared" here as it is in the
+// reference, and a bare private one is refused by the same rule (the reference
+// words that one as module-private, which needs the used module's declarations
+// and is the module admission's to say).
 
 fn nr_bnd(n: Str) -> Str { return "bnd ".concat(n) }
 fn nr_dcl(n: Str) -> Str { return "dclfn ".concat(n) }
@@ -17982,20 +17987,44 @@ fn nr_fn_names(ts: List[Token], base: List[Bind]) -> List[Bind] {
   return out
 }
 
-fn nr_has_use(ts: List[Token]) -> Bool {
+// The names a top-level `use` puts in bare-value scope: `use "m.rvl" { A, B }`
+// names A and B, and `use "m.rvl" as m` binds the alias m (a namespace, so
+// `m.f(..)` resolves through its field access and the alias itself is never a
+// bare callable). A listed name that is a type or a service is added too, which
+// only withholds a refusal the reference may make.
+fn nr_use_names(ts: List[Token], base: List[Bind]) -> List[Bind] {
+  var out = base
+  var saw_use = false
+  var depth = 0
   var i = 0
   while (i < ts.length()) {
-    if (atw(ts, i, "use")) { return true }
+    let k = ts[i].kind
+    if ((k == "{") || (k == "[") || (k == "(")) { depth += 1 }
+    if ((k == "}") || (k == "]") || (k == ")")) { depth -= 1 }
+    if ((depth == 0) && atw(ts, i, "use") && atk(ts, i + 1, "string")) {
+      saw_use = true
+      if (atk(ts, i + 2, "{")) {
+        var j = i + 3
+        while (atk(ts, j, "ident")) {
+          out = tenv_put(out, nr_dcl(tkc(ts, j).text), "1")
+          j += 1
+          if (atk(ts, j, ",")) { j += 1 }
+        }
+      } else if (atw(ts, i + 2, "as") && atk(ts, i + 3, "ident")) {
+        out = tenv_put(out, nr_dcl(tkc(ts, i + 3).text), "1")
+      }
+    }
     i += 1
   }
-  return false
+  if (saw_use) { out = tenv_put(out, "imports on", "1") }
+  return out
 }
 
-// The program-level rows: the declared callables, and the switch that says the
-// universe is complete enough to refuse against.
+// The program-level rows: the declared callables, the imported ones a `use`
+// list names, and the switch that says the universe is complete enough to
+// refuse against.
 fn nr_binds(ts: List[Token], base: List[Bind]) -> List[Bind] {
-  if (nr_has_use(ts)) { return base }
-  return tenv_put(nr_fn_names(ts, base), "g1 on", "1")
+  return tenv_put(nr_use_names(ts, nr_fn_names(ts, base)), "g1 on", "1")
 }
 
 fn nr_builtin_callable(n: Str) -> Bool {
@@ -18025,6 +18054,11 @@ fn nr_known(n: Str, env: List[Bind]) -> Bool {
   if (contains(foreign_names(), n)) { return true }
   // a builtin spec argument (`@elem`, `@member`, `@self`) is not a name read.
   if (n.slice(0, 1) == "@") { return true }
+  // A capitalized bare value in a text that `use`s something may be a CASE of a
+  // type the text imported: the case table is built from this text alone, so the
+  // gate cannot see it. Withholding is the safe direction (the reference type
+  // layer decides); an un-imported lowercase fn/extern is still refused.
+  if (tenv_get(env, "imports on") == "1" && is_upper_name(n)) { return true }
   return false
 }
 

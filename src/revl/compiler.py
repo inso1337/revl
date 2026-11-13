@@ -1680,33 +1680,39 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
             module.program,
             loader._origin_install_root(module.path) is not None
             or _contained(module.path, loader.stdlib_real()))
-    # issue #3004: a non-`pub` fn or extern of a `use`d (non-root) module is
-    # that module's implementation, reachable by bare name only from its own
-    # bodies. Before, fn bodies resolved externs against EVERY extern of the
-    # merged program, and `test` / `prop test` blocks and components against
-    # every fn and extern of it, so another module's private extern (and, from a
-    # test or component, its private fn) was callable by bare name although
-    # importing it by name is refused. Each module's namespace is now the one it
-    # had, less the OTHER used modules' private declarations; the scopes carry
-    # the externs explicitly, so `_lower_fns` adds none of its own. The ROOT
-    # modules' declarations stay shared: they are one composition (a row file
-    # names the externs of the files its composition `use`s with no `use` of
-    # its own). A `pub` name that was not imported still resolves, as before.
-    hidden_of: dict[int, set[str]] = {}
+    # issue #3004 / #3023: a module's bare value namespace is exactly what it
+    # declares plus what its own `use` lists name by name. Before #3004, fn
+    # bodies resolved externs against EVERY extern of the merged program, and
+    # `test` / `prop test` blocks and components against every fn and extern of
+    # it; #3004 cut off the other `use`d modules' private declarations and left
+    # their `pub` ones leaking. Now a name this module neither declares nor
+    # imports is out of scope in all four body kinds, so an un-imported `pub fn`
+    # or `pub extern` is refused as not declared (the rule docs/syntax-2.0.md
+    # section 1 states) and a non-`pub` one keeps the G1 module-private refusal.
+    # The ROOT modules keep the namespace they had: they are one composition (a
+    # row file names the externs of the files its composition `use`s with no
+    # `use` of its own), so a root fn body still sees every root extern and a
+    # root test/prop-test/component still sees every root fn too. A non-root
+    # module sees its own declarations and the names it imports; an alias import
+    # names a whole interface, so its public fns stay reachable through
+    # `alias.fn(..)` and through the bare call that desugars to (item 230,
+    # `fn_alias_scopes`); an extern is imported by name.
+    root_fns: set[str] = set()
+    root_externs: set[str] = set()
     for module in included:
-        if id(module) not in root_ids:
-            hidden_of[id(module)] = (
-                {fn.name for fn in module.program.fn_decls if not fn.public}
-                | {ext.name for ext in module.program.externs if not ext.public})
-    all_hidden: set[str] = set().union(*hidden_of.values())
-    all_externs = {ext.name for ext in merged.externs}
-    all_fns = {fn.name for fn in merged.fn_decls}
+        if id(module) in root_ids:
+            root_fns.update(fn.name for fn in module.program.fn_decls)
+            root_externs.update(ext.name for ext in module.program.externs)
     for module in included:
-        hidden = all_hidden - hidden_of.get(id(module), set())
-        callables = ({fn.name for fn in module.program.fn_decls}
-                     | set(module.named_fns)
-                     | (all_externs - hidden))
-        blocks_scope = (all_fns | all_externs) - hidden
+        own_fns = {fn.name for fn in module.program.fn_decls}
+        own_externs = {ext.name for ext in module.program.externs}
+        imported = set(module.named_fns) | set(module.named_externs)
+        if id(module) in root_ids:
+            callables = own_fns | imported | root_externs
+            blocks_scope = root_fns | root_externs | imported
+        else:
+            callables = own_fns | own_externs | imported
+            blocks_scope = callables
         alias_fns = {
             alias: set(used.public_fns)
             for alias, used in module.aliases.items()

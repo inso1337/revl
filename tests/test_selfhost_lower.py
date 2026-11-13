@@ -5687,28 +5687,36 @@ def test_an_unresolved_name_read_outranks_the_return_path_on_the_reference(
     assert admit(src) == "G1|`nobody` is not declared in this function"
 
 
-def test_the_name_resolution_rule_stops_at_a_use_declaration(admit):
-    """The declared frontier of the G1 read rule (docs/design/457 §2.3), pinned
-    as a divergence rather than left to be discovered.
+def test_the_name_resolution_rule_reaches_a_text_with_a_use(admit):
+    """Issues #3004 / #3023: a `use` no longer switches the G1 read rule off.
 
-    A `use` declaration puts the imported module's `pub fn`s into `callables`
-    (`program.fn_scopes`) and makes an aliased `alias.f(..)` call resolve before
-    the name resolver runs at all. This gate does not read modules, so the
-    callable universe stops being knowable from the text alone and the rule is
-    switched off for the WHOLE text. That under-refuses, which is the direction
-    the gate is allowed to err in.
+    The document this gate admits is a ROOT module, so its bare value namespace
+    is exactly its own `fn`/`extern` declarations plus the names its `use`
+    lists spell (`nr_use_names`). A name neither declared nor imported is
+    refused, as the reference refuses it; a listed name and an alias's member
+    stay admitted.
 
-    The reference cannot be driven on these texts either (it wants `modules=`),
-    so the assertion is on the GATE alone: the withholding is deliberate."""
-    withheld = """use "./other.rvl" as other
+    The reference cannot be driven on these texts without the modules on disk,
+    so the assertions are on the GATE alone, and they pin the same rule the
+    reference now enforces (docs/syntax-2.0.md section 1)."""
+    refused = """use "./other.rvl" { imported_fn }
 
 fn f() -> Int {
   return nothing_declares_this
 }
 """
-    assert admit(withheld) == ""
-    # the same body WITHOUT the `use` is refused, so the row above is the `use`
-    # doing the withholding and not the reader failing to reach the statement.
+    assert admit(refused) == \
+        "G1|`nothing_declares_this` is not declared in this function"
+    admitted = """use "./other.rvl" { imported_fn }
+use "./more.rvl" as more
+
+fn f() -> Int {
+  return imported_fn(1) + more.other_fn(2)
+}
+"""
+    assert admit(admitted) == ""
+    # the same refused body WITHOUT the `use` draws the identical row, so the
+    # refusal above is not the `use` line changing the reader's path.
     assert admit("fn f() -> Int {\n  return nothing_declares_this\n}\n") == \
         "G1|`nothing_declares_this` is not declared in this function"
 

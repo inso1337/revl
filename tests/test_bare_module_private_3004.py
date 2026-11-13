@@ -7,7 +7,10 @@ could still call `raw(1)` by bare name: fn bodies resolved externs against
 every extern of the merged program, and `test` / `prop test` blocks and
 components against every fn and extern of it. A bare name that is another
 `use`d module's private declaration now earns the G1 module-private
-diagnostic; `pub` names resolve as before.
+diagnostic. A `pub` name the consumer never imported was still reachable by
+bare name here; issue #3023 closes that half, so this file keeps only the
+private-name asserts (the pub boundary is pinned in
+tests/test_use_list_pub_names_3023.py).
 """
 
 import sys
@@ -114,22 +117,23 @@ def test_named_import_refusal_is_unchanged(tmp_path):
     assert PRIVATE in message, message
 
 
-def test_unimported_pub_names_still_resolve_by_bare_name(tmp_path):
-    """Control: a `pub` extern the consumer did not name in its `use` list
-    still resolves by bare name from a fn body, and a `pub` fn from a test, as
-    on base (a fn body never saw an un-imported `pub fn`). Only NON-`pub` declarations
-    are cut off here; requiring the import for a `pub` name is a separate,
-    later change (follow-up to issue #3004), once downstream modules import
-    what they call."""
-    ir = _compile(tmp_path, (
+def test_unimported_pub_names_are_refused_3023(tmp_path):
+    """Issue #3023 closes the control this file used to pin: a `pub` extern the
+    consumer did not name in its `use` list used to resolve by bare name from
+    a fn body, and a `pub` fn from a test. Both are "not declared" now; the
+    private-name refusal above keeps its G1 module-private wording."""
+    message = _refusal(tmp_path, (
         'use "m.rvl" { E }\n'
         'pub fn f() -> Str { return shown(1) }\n'
+    ))
+    assert "`shown` is not declared in this function" in message, message
+    message = _refusal(tmp_path, (
+        'use "m.rvl" { E }\n'
         'test "t" {\n'
-        '  assert shown(1) == "1"\n'
         '  assert wrap(1) == "2"\n'
         "}\n"
     ))
-    assert "f" in {fn["name"] for fn in ir["functions"]}
+    assert "`wrap` is not declared in this function" in message, message
 
 
 DEFAULTED = (

@@ -23738,22 +23738,46 @@ fn nr_fn_names(ts: &[Token], base: Vec<Bind>) -> Vec<Bind> {
     return out;
 }
 
-fn nr_has_use(ts: &[Token]) -> bool {
+fn nr_use_names(ts: &[Token], base: Vec<Bind>) -> Vec<Bind> {
+    let mut out = base;
+    let mut saw_use = false;
+    let mut depth = 0i64;
     let mut i = 0i64;
     while (i < ts.revl_length()) {
-        if atw(ts, i, "use") {
-            return true;
+        let k = (ts)[(i) as usize].kind.clone();
+        if (((k == "{") || (k == "[")) || (k == "(")) {
+            depth = (depth).checked_add(1i64).expect("revl: Int overflow");
+        }
+        if (((k == "}") || (k == "]")) || (k == ")")) {
+            depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
+        }
+        if (((depth == 0i64) && atw(ts, i, "use")) && atk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "string")) {
+            saw_use = true;
+            if atk(ts, (i).checked_add(2i64).expect("revl: Int overflow"), "{") {
+                let mut j = (i).checked_add(3i64).expect("revl: Int overflow");
+                while atk(ts, j.clone(), "ident") {
+                    out = tenv_put(&out, nr_dcl(&tkc(ts, j.clone()).text), String::from("1"));
+                    j = (j).checked_add(1i64).expect("revl: Int overflow");
+                    if atk(ts, j.clone(), ",") {
+                        j = (j).checked_add(1i64).expect("revl: Int overflow");
+                    }
+                }
+            } else {
+                if (atw(ts, (i).checked_add(2i64).expect("revl: Int overflow"), "as") && atk(ts, (i).checked_add(3i64).expect("revl: Int overflow"), "ident")) {
+                    out = tenv_put(&out, nr_dcl(&tkc(ts, (i).checked_add(3i64).expect("revl: Int overflow")).text), String::from("1"));
+                }
+            }
         }
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
-    return false;
+    if saw_use {
+        out = tenv_put(&out, String::from("imports on"), String::from("1"));
+    }
+    return out;
 }
 
 fn nr_binds(ts: &[Token], base: Vec<Bind>) -> Vec<Bind> {
-    if nr_has_use(ts) {
-        return base;
-    }
-    return tenv_put(&nr_fn_names(ts, base), String::from("g1 on"), String::from("1"));
+    return tenv_put(&nr_use_names(ts, nr_fn_names(ts, base)), String::from("g1 on"), String::from("1"));
 }
 
 fn nr_builtin_callable(n: &str) -> bool {
@@ -23786,6 +23810,9 @@ fn nr_known(n: &str, env: &[Bind]) -> bool {
         return true;
     }
     if (n.revl_slice(0i64, 1i64) == "@") {
+        return true;
+    }
+    if ((tenv_get(env, "imports on") == "1") && is_upper_name(n)) {
         return true;
     }
     return false;

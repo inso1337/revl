@@ -1640,17 +1640,49 @@ def test_native_driver_resolves_a_use_on_the_import_path(
     assert got == want
 
 
-def test_native_driver_does_not_yet_refuse_a_bare_private_call_3004(
+def test_native_driver_refuses_a_bare_private_call_3004_3023(
         compile_rvl, tmp_path, monkeypatch):
-    """Issue #3004, pinned self-host gap: the reference refuses a BARE call to
-    another module's non-`pub` fn as module-private (G1), as it refuses the
-    named import of it. The native driver does not yet: its module admission
-    (`ad_imports_refusal`, selfhost/compile.rvl) reads only the names a `use`
-    list spells, and selfhost/lower.rvl's name resolver switches off for a text
-    with a `use`. This test turns red when the rule is ported; flip it then."""
+    """Issue #3004's bare-name rule, ported to the self-host gate by #3023.
+
+    The reference refuses a BARE call to another module's non-`pub` fn as
+    module-private (G1), as it refuses the named import of it. The native gate
+    used to keep the G1 read rule off for any text with a `use`: the imported
+    names were not knowable from the text alone. It reads the document's own
+    `use` lists now (`nr_use_names`), so a fn body that names `helper` bare
+    draws the G1 "not declared" refusal. The gate does not read the used
+    module's declarations on this path, so the sentence is the fn-body one and
+    not module-private; the VERDICT is the same and the driver no longer emits
+    a program the reference rejects.
+
+    The component expression path is pinned beside it: it refuses the same
+    name in its own G1 requirement sentence (it never read the used module's
+    declarations either, and that path is outside the resolver this change
+    ports)."""
     monkeypatch.delenv("REVL_IMPORT_PATH", raising=False)
     # `one` is imported so lib.rvl's pure declarations join the program; a
     # module reached only for a service contributes no fn at all
+    (tmp_path / "lib.rvl").write_text(
+        _LIB_STORE + "pub fn one() -> Int { return 1 }\n"
+        "fn helper(x: Int) -> Int { return x }\n", encoding="utf-8")
+    doc = tmp_path / "doc.rvl"
+    doc.write_text('use "./lib.rvl" { Store, one }\n\n'
+                   "pub fn f() -> Int { return helper(one()) }\n\n"
+                   + _STORE_COMPONENT % "one()", encoding="utf-8")
+    with pytest.raises(RevlError, match="`helper` is module-private in"):
+        compile_files([str(doc)])
+    got = compile_rvl["compile_to_at"](doc.read_text(encoding="utf-8"), "py", str(doc))
+    assert got.startswith("REFUSED|G1|"), got[:300]
+    assert "`helper` is not declared in this function" in got, got[:300]
+
+
+def test_native_driver_refuses_a_component_bare_private_call_3004(
+        compile_rvl, tmp_path, monkeypatch):
+    """The component expression path refuses a bare un-imported name in its own
+    G1 sentence. The gate does not read the used module's declarations, so it
+    keeps "not a declared requirement of <C>" rather than the reference's
+    module-private wording; what this pins is that the program is refused, not
+    emitted, with the requirement path's established diagnostic."""
+    monkeypatch.delenv("REVL_IMPORT_PATH", raising=False)
     (tmp_path / "lib.rvl").write_text(
         _LIB_STORE + "pub fn one() -> Int { return 1 }\n"
         "fn helper(x: Int) -> Int { return x }\n", encoding="utf-8")
@@ -1660,7 +1692,8 @@ def test_native_driver_does_not_yet_refuse_a_bare_private_call_3004(
     with pytest.raises(RevlError, match="`helper` is module-private in"):
         compile_files([str(doc)])
     got = compile_rvl["compile_to_at"](doc.read_text(encoding="utf-8"), "py", str(doc))
-    assert "module-private" not in got, got[:300]
+    assert got.startswith("REFUSED|G1|"), got[:300]
+    assert "`helper` is not a declared requirement of App" in got, got[:300]
 
 
 def test_native_import_check_passes_every_stdlib_and_truc_module(compile_rvl):
