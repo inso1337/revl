@@ -560,3 +560,74 @@ def test_a_real_stray_marker_is_still_refused_beside_marker_shaped_data(tmp_path
 
     assert main(["docs", "check", str(path)]) == 1
     assert "not directly above a component declaration" in capsys.readouterr().err
+
+
+def test_a_leading_byte_order_mark_stays_first_when_a_block_goes_above_line_one(
+        tmp_path, capsys):
+    path = tmp_path / "bom.rvl"
+    path.write_bytes(b"\xef\xbb\xbf" + COMPONENT.encode("utf-8"))
+    one_line = tmp_path / "bom_first_line.rvl"
+    one_line.write_bytes("\ufeffcomponent Lone {\n}\n".encode("utf-8"))
+
+    for target in (path, one_line):
+        assert main(["docs", "gen", str(target)]) == 0
+        data = target.read_bytes()
+        assert data.startswith(b"\xef\xbb\xbf")
+        assert data.count(b"\xef\xbb\xbf") == 1
+        capsys.readouterr()
+        assert main(["compile", str(target)]) == 0
+        assert main(["docs", "check", str(target)]) == 0
+        assert capsys.readouterr().err == ""
+
+
+def test_an_up_to_date_block_is_not_rewritten_in_a_file_with_mixed_endings(
+        tmp_path, capsys):
+    path = _write(tmp_path, COMPONENT)
+    assert main(["docs", "gen", str(path)]) == 0
+    lines = path.read_text(encoding="utf-8").split("\n")
+    # alternate the endings over the whole file, the current block included
+    mixed = "\n".join(line + "\r" if index % 2 else line
+                      for index, line in enumerate(lines)).encode("utf-8")
+    path.write_bytes(mixed)
+    capsys.readouterr()
+
+    assert main(["docs", "gen", str(path)]) == 0
+
+    assert path.read_bytes() == mixed
+    assert "up to date" in capsys.readouterr().out
+    assert main(["docs", "check", str(path)]) == 0
+
+
+def test_a_declaration_on_the_last_line_with_no_final_newline_takes_the_files_ending(
+        tmp_path):
+    source = ("service Db {\r\n  emission[db] fn execute(sql: Str) -> Int\r\n}\r\n\r\n"
+              "component One requires db: Db {\r\n  emit db.execute(\"x\")\r\n}")
+    path = tmp_path / "no_final_newline.rvl"
+    path.write_bytes(source.encode("utf-8"))
+
+    assert main(["docs", "gen", str(path)]) == 0
+
+    data = path.read_bytes()
+    assert not data.endswith(b"\n")
+    assert data.count(b"\n") == data.count(b"\r\n")
+    assert main(["docs", "check", str(path)]) == 0
+
+
+def test_several_data_markers_among_real_ones_are_classified_one_by_one(tmp_path, capsys):
+    # three marker-shaped lines inside a string, one real stray marker after it
+    source = ('fn banner() -> Str {\n  return """\n'
+              "// revl:behavior end\n// revl:behavior end\n"
+              '// revl:behavior begin (managed)\n"""\n}\n'
+              "// revl:behavior end\n"
+              "service Doc {\n  fn text() -> Str\n}\n"
+              "component Writer provides doc: Doc {\n"
+              "  provide doc {\n    fn text() -> Str = banner()\n  }\n}\n")
+    path = _write(tmp_path, source, "classify.rvl")
+    capsys.readouterr()
+
+    assert main(["docs", "check", str(path)]) == 1
+
+    errors = capsys.readouterr().err
+    # the one real comment is refused, at its own line; the data lines are not
+    assert errors.count("not directly above a component declaration") == 1
+    assert "classify.rvl:8:" in errors

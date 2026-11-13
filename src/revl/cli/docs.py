@@ -73,6 +73,8 @@ def _write_atomically(path: Path, text: str) -> None:
     try:
         with os.fdopen(handle, "w", encoding="utf-8", newline="") as out:
             out.write(text)
+            out.flush()
+            os.fsync(out.fileno())
         os.chmod(temporary, mode)
         os.replace(temporary, target)
     except BaseException:

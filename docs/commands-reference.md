@@ -2841,10 +2841,14 @@ and is ignored. A stale block exits 1 naming the file, the line, the committed
 digest and the current one; regenerate it with `revl docs gen` instead of
 editing the derived lines by hand.
 
-`gen` rewrites only the block's own lines. A CRLF file stays CRLF (a written
-block takes the line ending of the declaration under it), every other line is
-kept byte for byte, and the file is replaced through a temporary file in its own
-directory and `os.replace`, so an interrupted run leaves the source as it was.
+`gen` rewrites only the block's own lines. A CRLF file stays CRLF (a new block
+takes the line ending of the declaration under it, or of the line above it when
+the declaration is the last line with no final newline), every other line is
+kept byte for byte, a block that is already current is not touched whatever its
+line endings, and a leading byte-order mark stays the first bytes of the file.
+The file is replaced through a temporary file in its own directory that is
+flushed to disk and then renamed over the source, so an interrupted run leaves
+the source as it was.
 
 `FILES` must be files: a directory is refused with one line and exit 2, because
 the `.rvl` files under a directory are not necessarily one composition. Name the

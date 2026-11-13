@@ -41,9 +41,11 @@ from __future__ import annotations
 import hashlib
 import json
 
+from .errors import RevlError
 from .lexer import lex
 from .parser import parse_text
 
+_BOM = "\ufeff"
 BEGIN = "// revl:behavior begin"
 END = "// revl:behavior end"
 _MARKER_PREFIX = "// revl:behavior"
@@ -368,12 +370,25 @@ def comment_marker_lines(text: str, path: str) -> set[int]:
                           for index, line in enumerate(raw))
         try:
             return _tokens_of(probe, path) == original
-        except Exception:  # a probe that no longer lexes was cutting into a token
+        except RevlError:  # the probe no longer lexes: it was cutting into a token
             return False
 
-    if unchanged_without(candidates):
-        return set(candidates)
-    return {index for index in candidates if unchanged_without([index])}
+    def comments_among(indices: list[int]) -> set[int]:
+        """The candidates that are comments. A set blanked together leaves the
+        tokens unchanged only if every member is a comment, so a failing set is
+        halved until the data lines are isolated: `k` data lines among `n`
+        candidates cost about `k log n` lexes, and none at all of the bisection
+        when every candidate is a comment."""
+        if not indices:
+            return set()
+        if unchanged_without(indices):
+            return set(indices)
+        if len(indices) == 1:
+            return set()
+        middle = len(indices) // 2
+        return comments_among(indices[:middle]) | comments_among(indices[middle:])
+
+    return comments_among(candidates)
 
 
 def _markers_in(lines: list[str], run: tuple[int, int],
@@ -442,6 +457,8 @@ def _component_edits(text: str, path: str, components: list[dict],
     other line keeps its ending, and a written block takes the ending of the
     declaration it sits above, so a CRLF file stays CRLF.
     """
+    bom = text.startswith(_BOM)
+    text = text[len(_BOM):] if bom else text
     lines, carriage = _split_lines(text)
     decls = _declaration_lines(text, path)
     real = comment_marker_lines(text, path)
@@ -458,19 +475,33 @@ def _component_edits(text: str, path: str, components: list[dict],
             derive(component, template=component["name"] in templates,
                    surface=surfaces.get(component["name"]),
                    reach=reaches.get(component["name"])), indent)
-        ending = carriage[decl_index]
         span = _block_span(lines, decl_index, path, real)
         if span is None:
-            edits.append((decl_index, decl_index - 1, expected, ending))
+            edits.append((decl_index, decl_index - 1, expected,
+                          _new_block_ending(carriage, decl_index)))
             written += 1
             continue
-        if lines[span[0]:span[1] + 1] != expected:
-            written += 1
-        edits.append((span[0], span[1], expected, ending))
+        if lines[span[0]:span[1] + 1] == expected:
+            continue  # current: leave its bytes, whatever its endings are
+        written += 1
+        edits.append((span[0], span[1], expected, carriage[span[1]]))
     for start, end, block, ending in edits:
         lines[start:end + 1] = block
         carriage[start:end + 1] = [ending] * len(block)
-    return _join_lines(lines, carriage), written
+    rewritten = _join_lines(lines, carriage)
+    return (_BOM + rewritten if bom else rewritten), written
+
+
+def _new_block_ending(carriage: list[bool], decl_index: int) -> bool:
+    """The line ending a block inserted above the declaration takes.
+
+    The declaration's own ending when it has one. A declaration on the last
+    line of a file with no final newline has none to copy, so the nearest line
+    above it speaks for the file, and a one-line file falls back to LF.
+    """
+    if decl_index < len(carriage) - 1:
+        return carriage[decl_index]
+    return carriage[decl_index - 1] if decl_index > 0 else False
 
 
 def generate(text: str, path: str, components: list[dict], templates: set[str],
@@ -495,6 +526,8 @@ def check(text: str, path: str, components: list[dict], templates: set[str],
     otherwise pass forever.
     """
     reaches = reaches or {}
+    if text.startswith(_BOM):
+        text = text[len(_BOM):]
     lines, _carriage = _split_lines(text)
     decls = _declaration_lines(text, path)
     real = comment_marker_lines(text, path)
