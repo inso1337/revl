@@ -3675,8 +3675,68 @@ def check_ast(expr, expected: str | None, tenv: dict, types: dict,
 
 # ------------------------------------------------------- IR inference (components)
 
+# Issue #3457: the component-stratum operator arms of
+# `lower._lower_component_pure_expr` ask `infer_ir` for each operand's type
+# after lowering it, and each answer walked the operand's subtree, so a chain
+# of n operators in a provide method cost about n*n/2 inferences. Inside
+# `infer_ir_memo()` a non-raising inference is kept for the pass. Unlike
+# `infer_ast`'s memo the type environment is keyed by CONTENT, not identity:
+# the component lowering binds and unbinds names in `env.type_env` in place
+# (match-arm payloads, arrow parameters, setup `let`s), and a content key
+# cannot return an answer computed under different bindings. The node, the
+# type table and the service table are keyed by identity (held by the entry so
+# no id is reused while it lives); `infer_ir` reads none of the keys the
+# lowering adds to a node after inferring it (`operands`, `widen`). A raising
+# inference (`filename` given) is never memoised, and neither is one whose
+# environment holds an unhashable value.
+_INFER_IR_MEMO: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "revl_infer_ir_memo", default=None)
+
+
+@contextlib.contextmanager
+def infer_ir_memo():
+    """Keep non-raising `infer_ir` answers for the duration of the block.
+
+    Re-entrant: a nested scope shares the outermost one's memo. The caller
+    owns the soundness condition: neither the type table nor the service table
+    is mutated inside the block, and no IR node is changed in a key `infer_ir`
+    reads after it was inferred."""
+    if _INFER_IR_MEMO.get() is not None:
+        yield
+        return
+    token = _INFER_IR_MEMO.set({})
+    try:
+        yield
+    finally:
+        _INFER_IR_MEMO.reset(token)
+
+
+def infer_ir_memo_active() -> bool:
+    return _INFER_IR_MEMO.get() is not None
+
+
 def infer_ir(node, tenv: dict, types: dict, services: dict,
              filename: str | None = None, line: int = 0) -> str | None:
+    """Best-effort type of a lowered component-body IR node; see
+    `_infer_ir`. Memoised inside `infer_ir_memo()` (issue #3457)."""
+    memo = _INFER_IR_MEMO.get()
+    if memo is None or filename is not None or not isinstance(node, dict):
+        return _infer_ir(node, tenv, types, services, filename, line)
+    try:
+        key = (id(node), id(types), id(services), tuple(tenv.items()))
+        hit = memo.get(key)
+    except TypeError:  # an unhashable value in the environment
+        return _infer_ir(node, tenv, types, services, filename, line)
+    if hit is not None and hit[0] is node and hit[1] is types \
+            and hit[2] is services:
+        return hit[3]
+    result = _infer_ir(node, tenv, types, services, filename, line)
+    memo[key] = (node, types, services, result)
+    return result
+
+
+def _infer_ir(node, tenv: dict, types: dict, services: dict,
+              filename: str | None = None, line: int = 0) -> str | None:
     """Best-effort type of a lowered component-body IR node. `services` maps
     service name -> ServiceDecl; `tenv` maps *safe* names -> types.
 
