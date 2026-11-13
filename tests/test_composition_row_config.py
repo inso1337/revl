@@ -186,7 +186,7 @@ def _swap_to_second(session, tmp_path: Path) -> None:
     second = tmp_path / "second"
     second.mkdir()
     doc = _project(second)
-    doc.write_text(doc.read_text(encoding="utf-8").replace("sqlite://row", "sqlite://two"))
+    doc.write_text(doc.read_text(encoding="utf-8").replace("sqlite://row", "sqlite://two"), encoding="utf-8")
     session.swap(admit_composition(str(doc), str(second)), agent_authored=False)
 
 
