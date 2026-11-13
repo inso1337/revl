@@ -54,6 +54,7 @@ from pathlib import Path
 
 from .compiler import compile_files
 from .errors import RevlError
+from .export_area import author_profile as _author_profile
 # The real §5 predicate — the same functions `refuse_admission` bottoms out in.
 # We import them read-only and add no compatibility logic of our own.
 from .lower import _service_compatible, _service_equal, _service_from_ir
@@ -1225,8 +1226,8 @@ def _compile_source(name: str, source: str,
     compiler as the name of the text instead of the virtual label, so the export
     rule (`export_area.CliRule`) decides whether the source is author-written by
     THAT PATH, as it decides for every other file the compiler reads. Without it
-    the name is a label no file answers to, the rule sees nothing, and text an
-    agent exported into `.revl/export/` publishes with the operator's trust.
+    the name is a label no file answers to and the text compiles under the
+    authoring profile, since nothing shows it is the operator's.
 
     A path that IS given is resolved to an absolute file first. A relative name
     is resolved from the cwd, and a name with no file behind it is refused
@@ -1239,7 +1240,13 @@ def _compile_source(name: str, source: str,
     reduces them to the same document and the same composition hash.
     """
     if source_path is None:
+        # Fail closed: text with no real file behind it cannot be shown to be
+        # the operator's, and it may be bytes an agent exported. It compiles
+        # under the authoring profile, the one the export rule would install
+        # had the file been named. The operator publishes from a file.
         path = f"/__revl_registry__/{name}/component.rvl"
+        return compile_files([path], sources={path: source},
+                             profile=_author_profile())
     else:
         path = str(Path(source_path).resolve())
         if not os.path.isfile(path):
@@ -1326,10 +1333,8 @@ def release_facts(registry_dir: str | os.PathLike, name: str, source: str,
 
     `source_path` (issue #2563) is the real file `source` was read from, when
     there is one, and is what the export rule decides the source's authorship
-    by. Passing none keeps the previous behaviour: the text is compiled under a
-    virtual label that names no file, without a profile. Making that default
-    refuse is the central rule's slice; this one makes the real file usable
-    here.
+    by. Passing none fails closed: the text has no file the rule could judge, so
+    it is compiled under the authoring profile, as author-written text is.
     """
     entry_dir = _components_dir(registry_dir) / name
     declared = (declared_version or "").strip()
@@ -1580,9 +1585,9 @@ def publish_release(registry_dir: str | os.PathLike, name: str, source: str, *,
 
     `source_path` (issue #2563) is the file `source` was read from, when there
     is one, forwarded to `release_facts` so the export rule decides authorship
-    by where the bytes came from. A caller holding text from no file still
-    passes none and publishes as it did before, under the virtual label; the
-    fail-closed default for that case is the central rule's slice.
+    by where the bytes came from. A caller holding text from no file passes
+    none, and the text is then compiled under the authoring profile (fail
+    closed): a source declaring host code is refused.
 
     `release_facts` also compiles the source as the entry will store it, so a
     source the index cannot be rebuilt from is refused before the first write.
