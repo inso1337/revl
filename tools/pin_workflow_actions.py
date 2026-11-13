@@ -4,12 +4,17 @@
 `tests/test_workflow_action_pins.py` is the hermetic half of this: it asserts,
 with no network, that every external `uses:` is `owner/repo(/path)@<40 hex>` and
 carries a comment. What it cannot see is whether the sha is the right sha, and
-there are exactly two ways to get that wrong:
+there are exactly three ways to get that wrong:
 
   * **The annotated-tag trap.** `refs/tags/v4` for github/codeql-action is a TAG
     object, not a commit, so the sha the API returns for the ref is not the sha
     the workflow needs. Pinning it breaks the run at checkout time. The commit is
     one dereference further.
+  * **The impostor commit.** `/repos/{repo}/commits/{sha}` answers for any commit
+    in the repository's fork network, so a sha that is a real commit but not the
+    commit of the release the comment names passes a bare "is it a commit" test.
+    `--check` therefore resolves the tag the comment names (`# v5.1.0`) to its
+    peeled commit and fails when the pin is a different sha.
   * **Staleness.** A pin records the release that was current when it was
     written, and a moving `@v4` would have kept following the line. A pin is
     supposed to be a decision, so this tool only *reports* a newer release on the
@@ -18,7 +23,8 @@ there are exactly two ways to get that wrong:
 Usage:
 
     python tools/pin_workflow_actions.py            # report every pin
-    python tools/pin_workflow_actions.py --check    # exit 1 on a bad pin
+    python tools/pin_workflow_actions.py --check    # exit 1 on a bad pin or a pin
+                                                    # that is not its tag's commit
     python tools/pin_workflow_actions.py --write    # rewrite pins in place
     python tools/pin_workflow_actions.py --strict   # a newer release is a failure
 
@@ -83,6 +89,38 @@ def _is_commit(repo: str, sha: str) -> bool:
         raise
 
 
+def _tag_commit(repo: str, tag: str) -> str | None:
+    """The commit `tag` points at in `repo`, peeling annotated tags, or None."""
+    payload = _get(f"/repos/{repo}/git/ref/tags/{tag}")
+    if not isinstance(payload, dict):
+        return None
+    obj = payload["object"]
+    # An annotated tag may in principle point at another tag object; bound the walk.
+    for _ in range(5):
+        if obj["type"] == "commit":
+            return obj["sha"]
+        if obj["type"] != "tag":
+            return None
+        tag_object = _get(f"/repos/{repo}/git/tags/{obj['sha']}")
+        if not isinstance(tag_object, dict):
+            return None
+        obj = tag_object["object"]
+    return None
+
+
+def _recorded_tag(comment: str | None) -> str | None:
+    """The exact release tag (`vX.Y.Z`) a pin's comment names, if it names one.
+
+    `# v4.4.0`, `# v7 (v7.6.0)` and `# release/v1 (v1.14.2)` name one; a bare
+    major (`# v4`) is a moving tag and a branch note (`# stable branch @ ...`)
+    names none, so those are not checked against a tag.
+    """
+    if not comment:
+        return None
+    match = re.search(r"(?<![\w./-])v\d+\.\d+\.\d+(?![\w.-])", comment)
+    return match.group(0) if match else None
+
+
 def _releases(repo: str) -> dict[str, str]:
     """{tag name: commit sha} for the repo's tags, newest API page first."""
     payload = _get(f"/repos/{repo}/tags?per_page=100")
@@ -125,6 +163,10 @@ def main(argv: list[str] | None = None) -> int:
 
     problems: list[str] = []
     stale: list[str] = []
+    unchecked: list[str] = []
+    verified = 0
+    tag_commits: dict[tuple[str, str], str | None] = {}
+    release_tags: dict[str, dict[str, str]] = {}
     rewrites: dict[Path, list[tuple[str, str]]] = {}
 
     for path, match in _external_uses():
@@ -162,16 +204,40 @@ def main(argv: list[str] | None = None) -> int:
             )
             continue
 
+        tag = _recorded_tag(comment)
+        if tag is None:
+            unchecked.append(f"{path.name}: {repo}@{ref} ({comment or 'no comment'})")
+        else:
+            if (repo, tag) not in tag_commits:
+                tag_commits[(repo, tag)] = _tag_commit(repo, tag)
+            tagged = tag_commits[(repo, tag)]
+            if tagged is None:
+                problems.append(
+                    f"{path.name}: {repo}@{ref} names {tag} in its comment, but "
+                    f"{repo} has no tag {tag}"
+                )
+            elif tagged != ref:
+                problems.append(
+                    f"{path.name}: {repo}@{ref} is not the commit of {tag}; "
+                    f"{tag} is {tagged}"
+                )
+            else:
+                verified += 1
+
         line = _pinned_major(comment)
         if line is None:
             continue
-        newest = _newest_on_line(_releases(repo), line)
+        if repo not in release_tags:
+            release_tags[repo] = _releases(repo)
+        newest = _newest_on_line(release_tags[repo], line)
         if newest and newest[1] != ref:
             note = f"{path.name}: {repo}@{ref} ({comment}) -- {newest[0]} exists"
             (stale if not args.strict else problems).append(note)
 
     for note in sorted(set(stale)):
         print(f"stale:     {note}")
+    for note in sorted(set(unchecked)):
+        print(f"unchecked: {note} -- no exact release tag in the comment")
     for problem in sorted(set(problems)):
         print(f"problem:   {problem}", file=sys.stderr)
 
@@ -186,7 +252,10 @@ def main(argv: list[str] | None = None) -> int:
     if problems:
         print(f"\n{len(problems)} pin(s) need attention", file=sys.stderr)
         return 1
-    print("every pin is a commit on its recorded release")
+    print(
+        f"every pin is a commit; {verified} pin(s) match the commit of the tag "
+        f"their comment names, {len(set(unchecked))} unchecked"
+    )
     return 0
 
 
