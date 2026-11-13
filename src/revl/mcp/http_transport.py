@@ -52,6 +52,7 @@ import time
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler
 
+from . import disclosure as _disclosure
 from .http_guard import (DispatchLock, Exposure, ExposureError, Listener,
                          request_refusal)
 from .http_stream import (RESOURCES, SUBSCRIPTION_ID, EventHub, RequestStream,
@@ -782,9 +783,12 @@ class HttpTransport:
             params.pop("_meta", None)
         message["params"] = params
         if method == "tools/call":
-            name = params.get("name")
+            # the hatch (#2073) resolves to the verb it names before any rule
+            # keyed on a verb is tested, so a hatch call is held to the same
+            # rules as the direct call it is
+            name, arguments = _disclosure.resolved_call(params)
             if name in CAST_TOOLS:
-                refused = self._cast_refusal(params.get("arguments"), operator)
+                refused = self._cast_refusal(arguments, operator)
                 if refused is not None:
                     return 200, self._result(request_id, refused), []
             if name == "revl_estop":
@@ -793,8 +797,7 @@ class HttpTransport:
             del session
             if method == "tools/call":
                 tools = {t.get("name"): t for t in self.dispatcher.advertised_tools()}
-                bad = _param_headers_refusal(tools.get(params.get("name")),
-                                             params.get("arguments"), headers)
+                bad = _param_headers_refusal(tools.get(name), arguments, headers)
                 if bad is not None:
                     return 400, _rpc_error(request_id, HEADER_MISMATCH, bad), []
             response = self.dispatcher.handle(message)
@@ -1009,7 +1012,7 @@ class HttpTransport:
         # the session is busy: decide, then latch, without waiting for it
         from . import operator as _operator  # noqa: PLC0415
 
-        arguments = (message.get("params") or {}).get("arguments") or {}
+        arguments = _disclosure.resolved_call(message.get("params"))[1] or {}
         view = _CallerView(self.server.SESSION, operator, self.authenticator.registry)
         decision = _operator.decide(view, "revl_estop", arguments)
         if decision.gated and not decision.allowed:

@@ -204,6 +204,23 @@ def hatch(arguments: dict) -> tuple[str, dict, str, dict]:
     return verb, args, "", {}
 
 
+def resolved_call(params) -> tuple[object, object]:
+    """The `(verb, arguments)` a `tools/call` is, with the hatch resolved.
+
+    A `revl_verbs` hatch call IS the call it names (issue #2073), so a rule
+    keyed on the verb or its arguments (the cast rule of issue #979, the
+    E-Stop fast path, the per-parameter headers) has to see the inner verb
+    and its `args`, not the discovery tool. A call that is not a well formed
+    hatch resolves to itself: the server refuses a malformed hatch by name."""
+    params = params if isinstance(params, dict) else {}
+    name, arguments = params.get("name"), params.get("arguments")
+    if name == DISCOVERY and isinstance(arguments, dict) and is_hatch(arguments):
+        verb, args, reason, _next = hatch(arguments)
+        if not reason:
+            return verb, args
+    return name, arguments
+
+
 def _kind(value) -> str:
     return "null" if value is None else type(value).__name__
 
