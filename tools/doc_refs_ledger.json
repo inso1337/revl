@@ -422,12 +422,6 @@
       "reason": "unresolved as written: shorthand, sibling-relative or moved file; triaged for repair (issue #2844)"
     },
     {
-      "path": "backends/rust/test_emit_rust.py",
-      "line": 3806,
-      "kind": "stale",
-      "reason": "line past end of file: anchor shifted or file shortened; triaged for repair (issue #2844)"
-    },
-    {
       "path": "base/entry.ts",
       "line": 9,
       "kind": "missing",

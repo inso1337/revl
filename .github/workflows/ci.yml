@@ -480,6 +480,15 @@ jobs:
       # themselves. Never add `|| true`.
       - run: python3 tools/check_vocabulary_mirrors.py --self-test
       - run: python3 tools/check_vocabulary_mirrors.py --check
+      # issue #2844: hand-written `path:line` references in docs and comments.
+      # ADVISORY: `continue-on-error` keeps a new unrecorded finding from
+      # reddening the job while the ledger is being worked down; the step still
+      # shows red in the log so the author sees it. Repair the reference, or
+      # record it with `python3 tools/check_doc_refs.py --write-ledger`. Make it
+      # fatal by deleting the `continue-on-error` line once the ledger is small.
+      # Stdlib only, no revl install, about half a minute.
+      - run: python3 tools/check_doc_refs.py --check
+        continue-on-error: true
       # The roadmap's in-progress markers, checked against git: a marker naming
       # a branch that already landed, a branch gone from origin, or a sha not
       # reachable from main is a lie the next reader pays for. Needs no
