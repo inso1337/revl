@@ -361,7 +361,14 @@ def test_a_load_time_ticket_still_names_the_candidates_host_code(tmp_path):
     payload = _call("revl_load", {"source": source, "record": True})
     assert payload.get("approvalRequired") is True, payload
     ticket = payload["ticket"]
-    assert ticket["unreviewedHostCode"] == [
+    from revl.compiler import compile_source
+    from revl.mcp.session import host_body_entry
+    announce = next(extern for extern in
+                    compile_source(source, "quiet.rvl")["externs"]
+                    if extern["name"] == "announce")
+    assert ticket["unreviewedHostCode"] == [host_body_entry(announce)]
+    assert [{key: value for key, value in entry.items() if key != "digests"}
+            for entry in ticket["unreviewedHostCode"]] == [
         {"extern": "announce", "classification": "emission", "backends": ["py"]}]
     assert server.SESSION.ir is None
     assert server._AUTHORED_HOST_BODIES == before["_AUTHORED_HOST_BODIES"]

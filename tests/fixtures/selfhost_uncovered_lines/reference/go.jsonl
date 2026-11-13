@@ -110,6 +110,10 @@
 
 ["function", "extern-declared-compensate-item-254-issue-1592-compensated", "_timer_has_compensate", 1, 1]
 
+["reason", "host-body-scanner-standalone-bootstrap", "`_host_body_scanner` is the lazy import of the shared `revl.host_body` scanner added for the host-body containment fixes (#3130, #3131, #3162, #3164, #3166). Its `except ModuleNotFoundError` arm runs only when `emit.py` is executed as a script with `revl` not importable, an invocation mode that no corpus document and no refusal document reaches. It is the same class recorded for the `_refuse_deferred_emissions` and `_refuse_validated_emissions` bootstrap above. On the tiers whose corpus carries a host-bodied extern the import and the return are reached and only that arm stays unrun; the java and wasm corpora carry no host-bodied extern, so the whole helper stays unrun there."]
+
+["function", "host-body-scanner-standalone-bootstrap", "_host_body_scanner", 7, 7]
+
 ["reason", "host-map-acquisition-cas-type-discovery-scans-component", "Host Map acquisition/CAS type discovery scans component and provide-method bodies for insert values. This is the host-component Map ABI, not the pure Map value renderer; no component acquisition is accepted by emit_go.rvl."]
 
 ["function", "host-map-acquisition-cas-type-discovery-scans-component", "_infer_map_value_go_type", 20, 20]
@@ -177,6 +181,10 @@
 ["function", "issue-2545-type-parameter-residuals", "_go_v3_explicit_instantiation", 1, 1]
 
 ["function", "issue-2545-type-parameter-residuals", "_v3_fn_type_params", 1, 1]
+
+["reason", "issue-3168-the-revlstrings-alias-loop-is-unreachable", "Issue #3168: the `_revlStrings` alias loop is unreachable. Every identifier in the module reserved set is the output of `_v3_ident`, which escapes any name matching `_REVL_HELPER_PREFIX_RE` by one `_`, so `_revlStrings` becomes `_revlStrings_` and no user name can spell `_revlStrings` itself. The candidate is therefore never in the set, and the retry body (`candidate = f\"{base}{suffix}\"`, `suffix += 1`) never runs, whatever the document. The loop stays because it is the guard if the namespace rule ever narrows."]
+
+["function", "issue-3168-the-revlstrings-alias-loop-is-unreachable", "_go_v3_fresh_ident", 2, 2]
 
 ["reason", "issue-721-issue-1321-component-is-observable-decides", "issue #721 / issue #1321: `_component_is_observable` decides whether a document that declares a top-level `fn`/`type`/`extern`/plain `test` beside a component takes the pure typed-core path (which routes PAST the component) or `_emit_v3_combined` (which renders both). A corpus document cannot reach it: an emit_go_corpus document declares no component, and one that did would take the combined path, which selfhost/emit_go.rvl has none of, so it would flip the byte-agreement oracle RED rather than cover the line. `_refuse_pure_path_component_drop` is gone from this bucket because issue #1321 removed it: the refusal PR #1317 added is unreachable once the combined path carries the document. The predicate is pinned by tests/test_548_control_flow_in_provide_methods.py::test_go_carries_a_component_the_pure_path_would_drop and by tests/test_selfhost_emit_go.py::test_an_observable_component_on_the_pure_path_is_named_by_the_port, with both boundaries (the live path still carries the same component, and a component with nothing to drop is still routed past silently) pinned beside them."]
 

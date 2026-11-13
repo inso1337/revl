@@ -1,0 +1,9 @@
+// Issue #3127: the placement spec names a component to the runner, so a
+// component spelled like a JS global (`Promise`) cannot be renamed.
+// backends/typescript/emit.py::_refuse_module_collision refuses the document;
+// the port has no refusal channel, so selfhost/emit_ts.rvl names the component
+// with `<<UNSUPPORTED-COMPONENT-MODULE-NAME:Promise>>` instead. Pinned by
+// tests/test_selfhost_emit_ts.py::test_a_reference_refusal_is_named_by_the_port.
+
+component Promise {
+}

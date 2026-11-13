@@ -44,10 +44,48 @@ def process_wal_name(index_path: str, process: str) -> str:
     return f"{os.path.basename(index_path)}.{process}"
 
 
+def entry_problem(index_path: str, entry: object) -> Optional[str]:
+    """Why an index entry does not name its own process WAL, or ``None``.
+
+    An entry's ``wal`` is exactly the name `arm` wrote, `process_wal_name`: a
+    plain file name next to the index. Anything else (a path with a separator,
+    ``..``, an absolute path, another process's name) would make recover read,
+    replay and stamp a WAL the run never wrote (issue #3193)."""
+    if not isinstance(entry, dict) or not isinstance(entry.get("name"), str) \
+            or not isinstance(entry.get("wal"), str):
+        return f"an index entry is not a {{name, wal}} pair: {entry!r}"
+    name, wal = entry["name"], entry["wal"]
+    expected = process_wal_name(index_path, name)
+    separators = {os.sep} | ({os.altsep} if os.altsep else set())
+    plain = (os.path.basename(wal) == wal and wal not in ("", ".", "..")
+             and not any(sep in wal for sep in separators))
+    if not plain or wal != expected:
+        return (f"process {name!r}: its WAL is named {wal!r}, but a placement "
+                f"index names each process WAL {expected!r}, next to the index; "
+                f"refusing to read or stamp any other file")
+    return None
+
+
 def process_wal_path(index_path: str, entry: dict) -> str:
-    """The absolute path of one process's WAL, from its index entry."""
+    """The absolute path of one process's WAL, from its index entry. Raises
+    :class:`PlacementIndexError` for an entry that does not name its own
+    process WAL (:func:`entry_problem`), and for a process WAL that is a
+    symbolic link or does not resolve to a file in the index's own directory:
+    the run never writes one, and following it would read and stamp a file
+    outside that directory (issue #3193)."""
+    problem = entry_problem(index_path, entry)
+    if problem is not None:
+        raise PlacementIndexError(f"{index_path}: {problem}")
     directory = os.path.dirname(os.path.abspath(index_path))
-    return os.path.join(directory, entry["wal"])
+    path = os.path.join(directory, entry["wal"])
+    if os.path.islink(path) or os.path.dirname(os.path.realpath(path)) \
+            != os.path.realpath(directory):
+        raise PlacementIndexError(
+            f"{index_path}: process {entry['name']!r}: its WAL {path} is a "
+            f"symbolic link, or resolves outside the index's directory; a "
+            f"placement run writes each process WAL as a plain file next to "
+            f"the index. Refusing to read or stamp it.")
+    return path
 
 
 def wal_problem(processes: dict, backends: dict, sandboxes: dict) -> Optional[str]:
@@ -154,6 +192,11 @@ def read_index(path: str) -> Optional[dict]:
             f"{path} is a placement index of version "
             f"{header.get('placementVersion')!r}; this revl reads version "
             f"{INDEX_VERSION}")
+    processes = header.get("processes") or []
+    for entry in processes:
+        problem = entry_problem(path, entry)
+        if problem is not None:
+            raise PlacementIndexError(f"{path}: {problem}")
     run, committed = 0, False
     for line in rest:
         try:
@@ -164,5 +207,4 @@ def read_index(path: str) -> Optional[dict]:
             run, committed = record.get("run") or 0, False
         elif record.get("record") == "committed" and record.get("run") == run:
             committed = True
-    return {"processes": header.get("processes") or [], "run": run,
-            "committed": committed}
+    return {"processes": processes, "run": run, "committed": committed}

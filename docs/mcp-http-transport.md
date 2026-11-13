@@ -91,7 +91,8 @@ where two writes in one timestamp tick could leave the signature unchanged.
 twice, at least `--profile-settle-ms` apart (default 1000 ms). A profile caught
 mid-write can still parse, and one cut off just before a `may not` line would
 widen a grant, so an unsettled profile is never used. While the content is
-settling, every request is answered `503` ("the operator profile is changing").
+settling, every request is answered `503` with the same fixed text as a broken
+profile (below); the path and the reason stay in the server's log.
 The previous profile is not used in that window either: the edit in progress may
 be a revocation, and serving the old grants would delay it. So adding `operator
 bob revoked`, removing an operator, or narrowing a grant is refused, then applied,
@@ -106,7 +107,10 @@ partial file at all. `--profile-settle-ms 0` removes the settle protection
 entirely.
 
 A profile that can no longer be read or parsed **fails closed**: every request
-is answered `503` naming the problem, until the file is fixed.
+is answered `503` with a fixed text, until the file is fixed. The caller is told
+no more than that. The path, the parser error and the rejected line (often a
+`key sha256:` credential line being edited) are written to the server's standard
+error log, so a caller without a credential learns nothing about the file.
 
 **E-Stop is never fenced by a profile edit.** While the profile is settling or
 broken, `revl_estop` is still accepted, from a caller authorized for it under the
@@ -142,9 +146,12 @@ Everything that already reads the session's operator therefore sees the caller:
   commit confirm and abort of a leased component are refused (the #1450
   fences), and only the holder can release it;
 - **approval tickets** (item 246): the proposer is the operator that made the
-  call, and `revl_approve` is authorized against the approver's own grants. Give
-  `approve` only to the human's operator and the agent cannot answer its own
-  tickets. At start, the server warns about any operator that may both `call`
+  call, and the ticket lists the waiting ones as `proposers`. A yes is minted
+  for one proposer and spent only by that operator: another operator's
+  byte-identical call gets its own ticket, and when two operators raised the
+  same call `revl_approve` needs `proposer` to say which (issue #3216).
+  `revl_approve` is authorized against the approver's own grants. Give `approve` only to the
+  human's operator and the agent cannot answer its own tickets. At start, the server warns about any operator that may both `call`
   and `approve`;
 - **quorum votes** (item 471): each vote is the caller's own. A cast whose
   `asToken` names another operator is refused before dispatch, even with that
