@@ -117,7 +117,7 @@ Fields every provider accepts:
 | `provider` | `openai-compatible`, `anthropic`, `gemini` or `ollama` | required |
 | `model` | the provider's model name | required |
 | `base_url` | the endpoint | per provider |
-| `api_key_env` | the NAME of the environment variable holding the credential | none (required for `anthropic` and `gemini`) |
+| `api_key_env` | the NAME of the environment variable holding the credential, in upper case (`[A-Z_][A-Z0-9_]*`, at most 64 characters) | none (required for `anthropic` and `gemini`) |
 | `max_tokens` | output token cap | 1024 |
 | `temperature` | sampling temperature | 0 |
 | `timeout` | seconds per request | 120 |
@@ -140,8 +140,12 @@ key back, and a `revl run --trace` of a real crossing).
 What the configuration check refuses, without repeating the value:
 
 - a field named like a credential (`api_key`, `token`, `authorization`, ...);
-- an `api_key_env` that is not an environment variable name (the usual cause is
-  pasting the key itself there);
+- an `api_key_env` that is not an upper-case environment variable name (the
+  usual cause is pasting the key itself there; most keys carry a lower-case
+  letter or a `-`, which a name in this form cannot). A key that happens to
+  fit is not caught, so a message about an unset credential variable says
+  "the variable named in `api_key_env`" for the role and never prints the
+  name;
 - a `base_url` with user info (`https://user:key@host`) or a query string
   (`?key=...`);
 - a credential sent over plain `http://` to a host that is not this machine.

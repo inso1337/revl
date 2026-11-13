@@ -39,8 +39,12 @@ silently dropped is a setting the operator believes is in force.
   value. Credentials are read from the environment variable `api_key_env`
   names, at request time, and live nowhere else.
 * **A credential where the variable NAME goes.** `api_key_env` must be an
-  environment variable name. A pasted key is not one (it has a `-`, or starts
-  with a digit), so it is refused, again without echoing it.
+  environment variable name in the usual upper-case form (`[A-Z_][A-Z0-9_]*`,
+  at most 64 characters). A pasted key is not one: most carry a lower-case
+  letter (`hf_...`, `ghp_...`, `gsk_...`, `AIza...`), a `-` (`sk-ant-...`) or
+  a leading digit, so it is refused, again without echoing it. A key that
+  happens to fit the form is not caught here, so no later message prints the
+  variable's name when it is not set either.
 * **A credential in the URL.** `https://user:key@host` and a query string
   (`?key=...`) are both refused: a URL is printed in errors and logs, and a key
   inside one would travel with it.
@@ -97,6 +101,10 @@ _CREDENTIAL_FIELDS = frozenset({
 })
 
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+#: What `api_key_env` may hold: an upper-case variable name. A lower-case or
+#: mixed-case value is far more likely a pasted key (`hf_...`, `ghp_...`,
+#: `gsk_...`, `AIza...`) than a variable, and the name is printed later.
+_API_KEY_ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,63}\Z")
 _GEMINI_MODEL = re.compile(r"[A-Za-z0-9._-]+\Z")
 _GCP_NAME = re.compile(r"[a-z0-9-]+\Z")
 
@@ -271,13 +279,15 @@ def _binding(role: str, entry, source: str) -> Binding:
 
     env = entry.get("api_key_env")
     if env is not None and (not isinstance(env, str)
-                            or not _ENV_NAME.match(env)):
+                            or not _API_KEY_ENV_NAME.match(env)):
         # never echo the value: the commonest way to get here is pasting the
         # key itself where its variable's name goes
         raise _refuse(where, "`api_key_env` must be the NAME of an environment "
-                             "variable (letters, digits and `_`); the value "
-                             "given is not one, and it is not repeated here in "
-                             "case it is the credential itself")
+                             "variable, in upper case (capital letters, "
+                             "digits and `_`, at most 64 characters, for "
+                             "example `ANTHROPIC_API_KEY`); the value given "
+                             "is not one, and it is not repeated here in case "
+                             "it is the credential itself")
     if provider in ("anthropic", "gemini") and env is None:
         raise _refuse(where, f"provider {provider} is a hosted API and needs "
                              f"`api_key_env`, the name of the environment "

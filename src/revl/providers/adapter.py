@@ -33,15 +33,23 @@ from .config import Binding
 from .transport import ProviderError, redact, request_json
 
 
-def read_credential(env_var: str, environ=None) -> str:
-    """The credential in `env_var`, read now. The error names the variable and
-    never a value. `environ` is a mapping, a lookup function, or None for
-    `os.environ`."""
+def read_credential(env_var: str, environ=None, *, role: str | None = None
+                    ) -> str:
+    """The credential in `env_var`, read now. The error never holds a value.
+    `environ` is a mapping, a lookup function, or None for `os.environ`.
+
+    With `role`, the error names the role and not the variable: a variable
+    that is not set may be a pasted key, and the name would print it."""
     if callable(environ):
         value = environ(env_var)
     else:
         value = (os.environ if environ is None else environ).get(env_var)
     if not value:
+        if role is not None:
+            raise ProviderError(
+                f"the environment variable named in `api_key_env` for role "
+                f"`{role}` is not set (or is empty); it is where this role's "
+                f"credential is read from")
         raise ProviderError(
             f"the environment variable `{env_var}` is not set (or is empty); "
             f"it is where this role's credential is read from")
@@ -73,9 +81,11 @@ class Adapter:
 
     def __repr__(self) -> str:
         b = self.binding
+        # the variable's name is left out: it may be a pasted key
         return (f"Adapter(role={b.role!r}, provider={b.provider!r}, "
                 f"model={b.model!r}, endpoint={b.base_url!r}, "
-                f"residence={b.residence!r}, credential_env={b.api_key_env!r})")
+                f"residence={b.residence!r}, "
+                f"has_credential={bool(b.api_key_env)})")
 
     @property
     def managed(self) -> bool:
@@ -88,7 +98,7 @@ class Adapter:
 
     def _credential(self):
         b = self.binding
-        credential = (read_credential(b.api_key_env, self._lookup)
+        credential = (read_credential(b.api_key_env, self._lookup, role=b.role)
                       if b.api_key_env else None)
         return credential, ((credential,) if credential else ())
 

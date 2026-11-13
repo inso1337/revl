@@ -42,7 +42,7 @@ from revl.providers import (  # noqa: E402
     Adapter, CompletionRequest, PlacementRefused, ProviderConfigError,
     ProviderError, bind_for_run, build_hosts, check_bindings, describe_hosts,
     load_config, model_operations, parse_config, placement_of_program,
-    request_json,
+    read_credential, request_json,
 )
 
 try:  # noqa: SIM105
@@ -302,6 +302,50 @@ def test_a_key_pasted_where_the_variable_name_goes_is_refused_unechoed():
             "provider": "anthropic", "model": "m", "api_key_env": SECRET}}})
     assert "NAME of an environment variable" in str(exc.value)
     assert SECRET not in str(exc.value)
+
+
+# made-up values of the shape of a real key that is also a legal identifier
+_PASTED = ["hf_PASTEDKEYabcdefghijklmnop0123456789",
+           "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+           "gsk_abcdefghijklmnopqrstuvwxyz0123456789ABCD",
+           "AIzaSyAbcdefghijklmnopqrstuvwxyz0123456",
+           "sk-ant-api03-abcdefghijklmnopqrstuvwxyz",
+           "abcdefghijklmnopqrstuvwxyz0123456789ab",
+           "A" * 65]
+
+
+@pytest.mark.parametrize("pasted", _PASTED)
+def test_a_pasted_key_shaped_like_a_name_is_refused_unechoed(pasted):
+    with pytest.raises(ProviderConfigError) as exc:
+        parse_config({"roles": {"r": {
+            "provider": "anthropic", "model": "m", "api_key_env": pasted}}})
+    assert "NAME of an environment variable" in str(exc.value)
+    assert pasted not in str(exc.value)
+
+
+@pytest.mark.parametrize("name", ["ANTHROPIC_API_KEY", "GEMINI_API_KEY", "K1",
+                                  "_KEY", "REVL_TEST_PROVIDER_KEY_1461"])
+def test_an_upper_case_variable_name_is_accepted(name):
+    cfg = parse_config({"roles": {"r": {
+        "provider": "anthropic", "model": "m", "api_key_env": name}}})
+    assert cfg.binding("r").api_key_env == name
+
+
+def test_an_unset_variable_is_never_named_in_a_message(monkeypatch):
+    # a key that is a legal upper-case name cannot be told from one, so the
+    # name stays out of every message while the variable is not set
+    odd = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    monkeypatch.delenv(odd, raising=False)
+    binding = _binding(provider="anthropic", model="m", api_key_env=odd)
+    adapter = Adapter(binding)
+    with pytest.raises(ProviderError) as exc:
+        adapter._credential()
+    assert odd not in str(exc.value)
+    assert "role" in str(exc.value)
+    assert odd not in repr(adapter)
+    with pytest.raises(ProviderError) as exc:
+        read_credential(odd, {}, role="r")
+    assert odd not in str(exc.value)
 
 
 @pytest.mark.parametrize("url", [
@@ -616,11 +660,14 @@ def test_an_async_operation_is_a_coroutine_and_args_become_json(tmp_path,
         == {"a": "x", "b": 2}
 
 
-def test_a_missing_credential_at_dispatch_names_the_variable(tmp_path, fake):
+def test_a_missing_credential_at_dispatch_names_the_role_not_the_variable(
+        tmp_path, fake):
     _, ir = _compile(tmp_path)
     hosts = build_hosts(ir, _placement(), _config(fake), environ={})
-    with pytest.raises(ProviderError, match=ENV):
+    with pytest.raises(ProviderError, match="named in `api_key_env` for role"
+                       ) as exc:
         hosts["llm"].public_label("x")
+    assert ENV not in str(exc.value)
     assert fake.requests == []          # nothing was sent without it
 
 
@@ -733,7 +780,8 @@ def test_run_refuses_an_unset_credential_variable(tmp_path, fake):
     env = {ENV: ""}
     done = _run_cli([str(path), "--plan", "--providers", str(cfg)], env)
     assert done.returncode == 1
-    assert f"`{ENV}` (role `cloud`)" in done.stderr
+    assert "named in `api_key_env` (role `cloud`)" in done.stderr
+    assert ENV not in done.stderr
 
 
 def test_run_refuses_providers_on_another_tier(tmp_path, fake):
