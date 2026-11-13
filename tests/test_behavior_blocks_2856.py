@@ -108,6 +108,57 @@ component Store requires %(key)s: Db provides own: Own {
 """
 
 
+REACHED_FUNCTIONS = """\
+fn base_workers() -> Int { return 4 }
+
+fn default_workers() -> Int { return base_workers() }
+
+fn unrelated() -> Int { return 1 }
+
+service Pool {
+  fn size() -> Int
+}
+
+component Sized provides pool: Pool {
+  provide pool {
+    fn size() -> Int = default_workers()
+  }
+}
+"""
+
+MARKERS_AS_DATA = """\
+fn banner() -> Str {
+  return \"\"\"
+// revl:behavior end
+// revl:behavior begin (managed)
+\"\"\"
+}
+
+fn note() -> Str {
+  return `
+// revl:behavior end
+`
+}
+
+extern pure fn host_note() -> Str = @py {
+  text = \"\"\"
+// revl:behavior begin
+\"\"\"
+  return text
+}
+
+service Doc {
+  fn text() -> Str
+}
+
+component Writer provides doc: Doc {
+  provide doc {
+    fn text() -> Str = banner()
+  }
+}
+"""
+
+
 def _write(tmp_path: Path, text: str, name: str = "program.rvl") -> Path:
     path = tmp_path / name
     path.write_text(text, encoding="utf-8")
@@ -362,3 +413,150 @@ def test_the_corpus_component_carries_a_current_block(capsys):
 
     assert main(["docs", "check", str(CORPUS)]) == 0
     assert capsys.readouterr().err == ""
+
+
+def test_a_change_in_a_called_function_stales_the_block(tmp_path, capsys):
+    path = _write(tmp_path, REACHED_FUNCTIONS, "reached.rvl")
+    assert main(["docs", "gen", str(path)]) == 0
+    text = path.read_text(encoding="utf-8")
+    before = _digest(_block(text.split("\n"), "Sized"))
+
+    # a function the component does not reach is not part of its behavior
+    path.write_text(text.replace("fn unrelated() -> Int { return 1 }",
+                                 "fn unrelated() -> Int { return 2 }"),
+                    encoding="utf-8")
+    capsys.readouterr()
+    assert main(["docs", "check", str(path)]) == 0
+
+    # the function the component calls, and the one that function calls
+    for old, new in (("{ return base_workers() }", "{ return base_workers() + 1 }"),
+                     ("{ return 4 }", "{ return 9 }")):
+        current = path.read_text(encoding="utf-8")
+        assert old in current
+        path.write_text(current.replace(old, new), encoding="utf-8")
+        capsys.readouterr()
+
+        assert main(["docs", "check", str(path)]) == 1
+        assert "outdated" in capsys.readouterr().err
+        assert main(["docs", "gen", str(path)]) == 0
+        assert main(["docs", "check", str(path)]) == 0
+
+    after = _digest(_block(path.read_text(encoding="utf-8").split("\n"), "Sized"))
+    assert after != before
+
+
+def test_a_change_in_a_reached_externs_host_body_stales_the_block(tmp_path, capsys):
+    path = _write(tmp_path, EXTERN_SCOPE, "extern_body.rvl")
+    assert main(["docs", "gen", str(path)]) == 0
+    path.write_text(path.read_text(encoding="utf-8").replace(
+        "@py { return 0 }", "@py { return 1 }"), encoding="utf-8")
+    capsys.readouterr()
+
+    assert main(["docs", "check", str(path)]) == 1
+    assert "outdated" in capsys.readouterr().err
+
+
+def test_a_component_that_reaches_nothing_keeps_its_digest():
+    # the corpus blocks were written before the reach existed and must not move
+    assert main(["docs", "check", str(CORPUS)]) == 0
+
+
+def test_gen_keeps_crlf_line_endings_and_other_lines_byte_for_byte(tmp_path, capsys):
+    path = tmp_path / "crlf.rvl"
+    path.write_bytes(COMPONENT.replace("\n", "\r\n").encode("utf-8"))
+
+    assert main(["docs", "gen", str(path)]) == 0
+    data = path.read_bytes()
+    assert data.count(b"\n") == data.count(b"\r\n") > 0
+    assert b"// revl:behavior begin\r\n" in data
+    capsys.readouterr()
+    assert main(["docs", "check", str(path)]) == 0
+    assert capsys.readouterr().err == ""
+
+    # refreshing a stale block leaves the file CRLF too, and gen is idempotent
+    path.write_bytes(data.replace(b"cache_log", b"cache_log_v2"))
+    assert main(["docs", "check", str(path)]) == 1
+    assert main(["docs", "gen", str(path)]) == 0
+    refreshed = path.read_bytes()
+    assert refreshed.count(b"\n") == refreshed.count(b"\r\n")
+    assert main(["docs", "gen", str(path)]) == 0
+    assert path.read_bytes() == refreshed
+
+
+def test_gen_rewrites_only_the_block_in_a_file_with_mixed_endings(tmp_path):
+    lines = COMPONENT.split("\n")
+    mixed = "\n".join(line + "\r" if index % 2 == 0 else line
+                      for index, line in enumerate(lines))
+    path = tmp_path / "mixed.rvl"
+    path.write_bytes(mixed.encode("utf-8"))
+
+    assert main(["docs", "gen", str(path)]) == 0
+    written = path.read_bytes().decode("utf-8")
+    block_start = written.index("// revl:behavior begin")
+    block_end = written.index("// revl:behavior end") + len("// revl:behavior end")
+    before_block = mixed[:mixed.index("component Store")]
+    assert written.startswith(before_block)
+    assert written[block_end:].lstrip("\r\n").startswith("component Store")
+    assert written.endswith(mixed[mixed.index("component Store"):])
+    assert block_start >= len(before_block)
+
+
+def test_gen_writes_through_a_temporary_file_and_keeps_the_mode(tmp_path):
+    path = _write(tmp_path, COMPONENT)
+    path.chmod(0o640)
+
+    assert main(["docs", "gen", str(path)]) == 0
+
+    assert path.stat().st_mode & 0o777 == 0o640
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == [path.name]
+
+
+def test_a_failed_write_leaves_the_source_untouched(tmp_path, monkeypatch, capsys):
+    path = _write(tmp_path, COMPONENT)
+    original = path.read_bytes()
+
+    def refuse(source, target):
+        raise OSError("disk is full")
+
+    monkeypatch.setattr("os.replace", refuse)
+    assert main(["docs", "gen", str(path)]) == 1
+
+    assert "cannot write" in capsys.readouterr().err
+    assert path.read_bytes() == original
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == [path.name]
+
+
+@pytest.mark.parametrize("verb", ["gen", "check"])
+def test_a_directory_argument_is_refused_with_one_line_and_exit_2(tmp_path, capsys, verb):
+    capsys.readouterr()
+
+    assert main(["docs", verb, str(tmp_path)]) == 2
+
+    err = capsys.readouterr().err.strip().splitlines()
+    assert len(err) == 1
+    assert "is a directory" in err[0]
+
+
+def test_marker_text_inside_a_string_template_or_host_body_is_data(tmp_path, capsys):
+    path = _write(tmp_path, MARKERS_AS_DATA, "data.rvl")
+    assert main(["compile", str(path)]) == 0
+    capsys.readouterr()
+
+    assert main(["docs", "check", str(path)]) == 0
+    assert capsys.readouterr().err == ""
+
+    assert main(["docs", "gen", str(path)]) == 0
+    text = path.read_text(encoding="utf-8")
+    # the data lines are untouched and the one real block sits above Writer
+    assert text.count("// revl:behavior end") == 3
+    assert text.count("// revl:behavior begin") == 3
+    assert _facts(_block(text.split("\n"), "Writer"))["kind"] == "component"
+    assert main(["docs", "check", str(path)]) == 0
+
+
+def test_a_real_stray_marker_is_still_refused_beside_marker_shaped_data(tmp_path, capsys):
+    path = _write(tmp_path, MARKERS_AS_DATA + "\n// revl:behavior end\n", "data.rvl")
+    capsys.readouterr()
+
+    assert main(["docs", "check", str(path)]) == 1
+    assert "not directly above a component declaration" in capsys.readouterr().err

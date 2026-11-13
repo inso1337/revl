@@ -2500,9 +2500,16 @@ The block carries the facts that can be derived from the lowered IR rather
 than reviewed by hand: the effect summary, the capability tokens its emission
 call sites and reached externs name, the realm placement (`isolate`/`routes`),
 the extern surface (declared externs reached transitively plus direct host
-calls) and the sha256 of the IR it was derived from. Source positions are
-excluded from the digest, so moving or reformatting the file does not stale
-the block while a change to the component's lowered behavior does.
+calls) and the sha256 of the IR it was derived from.
+
+The digest covers the component's own lowered entry and the lowered entry of
+every module function and extern its body reaches, transitively (the same
+reference walk the emission analysis uses). A change to the component, to a
+function it calls or to the host body of an extern it reaches therefore stales
+the block. Source positions and the source path are excluded, so moving or
+reformatting the file does not. The digest does not cover another component,
+which carries its own block, or a service declaration, whose signature the
+`capabilities` line already spells.
 
 ```revl sketch
 // the consumer: requires the `db` key, provides the `cache` key ...
@@ -2520,9 +2527,20 @@ component UserCache requires db: Database provides cache: Cache { ... }
 Prose outside the markers is never touched. Adoption is incremental: a
 component with no block is not an error, and it becomes managed the first time
 `revl docs gen` writes a block for it. A block above no component is refused,
-and so is a malformed marker pair. A stale block exits 1 naming the file, the
-line, the committed digest and the current one; regenerate it with
-`revl docs gen` instead of editing the derived lines by hand.
+and so is a malformed marker pair or a marker with trailing text. A marker line
+inside a multi-line string, a template or a host body is data, not a comment,
+and is ignored. A stale block exits 1 naming the file, the line, the committed
+digest and the current one; regenerate it with `revl docs gen` instead of
+editing the derived lines by hand.
+
+`gen` rewrites only the block's own lines. A CRLF file stays CRLF (a written
+block takes the line ending of the declaration under it), every other line is
+kept byte for byte, and the file is replaced through a temporary file in its own
+directory and `os.replace`, so an interrupted run leaves the source as it was.
+
+`FILES` must be files: a directory is refused with one line and exit 2, because
+the `.rvl` files under a directory are not necessarily one composition. Name the
+files of the composition, as `revl compile` takes them.
 
 - `gen` - write or refresh the block above every component and template.
 - `check` - exit 1 on a stale, hand-edited, malformed or orphaned block.

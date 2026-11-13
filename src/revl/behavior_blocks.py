@@ -26,16 +26,22 @@ Adoption is incremental. A component with no block is not an error for
 `revl docs check`; it becomes managed the first time `revl docs gen` writes a
 block for it.
 
-The digest is taken over the component's IR document with its `source` path
-and every source-position field removed, so a move of the file, a reformat
-that keeps the IR, or the insertion of the block itself does not stale the
-block while a change to the component's lowered behavior does.
+The digest is taken over the component's IR entry together with the lowered
+entries of every module function and extern its body reaches (transitively, by
+the same reference walk the G4 emission analysis uses), with the `source` path
+and every source-position field removed. A move of the file, a reformat that
+keeps the IR, or the insertion of the block itself does not stale the block,
+while a change to the component's own behavior, to a function it calls or to
+the host body an extern reaches does. What the digest does NOT cover is another
+component or a service declaration: a service signature is spelled by the
+`capabilities` fact, and another component carries its own block.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 
+from .lexer import lex
 from .parser import parse_text
 
 BEGIN = "// revl:behavior begin"
@@ -113,18 +119,72 @@ def _without_provenance(node, *, top: bool = False):
     return node
 
 
-def _digest(component: dict, template: bool) -> str:
+def reached_declarations(ir: dict) -> dict[str, dict]:
+    """Per component name, the module functions and externs its body reaches.
+
+    The walk is `emission_analysis._calls_in`, the same reference collector the
+    G4 emission fixed point and the G8 boundary walk use: a direct call, a
+    first-class function value and a callee computed from other names all count,
+    and a function's own body is walked in turn, so the reach is transitive.
+    A local variable that happens to share a function's name over-approximates
+    the reach, which only ever makes a digest stricter. Each reached entry is the
+    declaration's whole lowered IR, so the body of a called function and the
+    host body or pinned host-module hash of a reached extern are part of what the
+    digest commits to.
+    """
+    from .emission_analysis import _calls_in  # noqa: PLC0415 - lazy, like boundary
+
+    functions = ir.get("functions") or []
+    if isinstance(functions, dict):
+        functions = list(functions.values())
+    functions_by_name = {fn["name"]: fn for fn in functions
+                         if isinstance(fn, dict) and isinstance(fn.get("name"), str)}
+    externs_by_name = {ext["name"]: ext for ext in ir.get("externs") or ()
+                       if isinstance(ext, dict) and isinstance(ext.get("name"), str)}
+
+    reach: dict[str, dict] = {}
+    for component in ir.get("components") or ():
+        found: set = set()
+        values: set = set()
+        _calls_in(component, found, values)
+        pending = sorted(found | values)
+        seen_functions: dict[str, dict] = {}
+        seen_externs: dict[str, dict] = {}
+        while pending:
+            name = pending.pop()
+            if name in functions_by_name and name not in seen_functions:
+                seen_functions[name] = functions_by_name[name]
+                nested: set = set()
+                nested_values: set = set()
+                _calls_in(functions_by_name[name], nested, nested_values)
+                pending.extend(sorted(nested | nested_values))
+            elif name in externs_by_name and name not in seen_externs:
+                seen_externs[name] = externs_by_name[name]
+        reach[component["name"]] = {
+            "functions": [seen_functions[name] for name in sorted(seen_functions)],
+            "externs": [seen_externs[name] for name in sorted(seen_externs)],
+        }
+    return reach
+
+
+def _digest(component: dict, template: bool, reach: dict | None = None) -> str:
     """The sha256 of the component's lowered behavior, position-independent.
 
-    The component's `source` path and every source-position field are dropped,
-    so a move of the file, a reformat that keeps the IR, or the insertion of
-    the block itself does not change the digest; a change to the component's
-    lowered behavior does. The template flag participates because which
-    manifest list a component sits in is a fact of the composition, not of its
-    body.
+    The payload is the component's own IR entry plus the entries of the module
+    functions and externs it reaches (`reached_declarations`). The component's
+    `source` path and every source-position field are dropped, so a move of the
+    file, a reformat that keeps the IR, or the insertion of the block itself
+    does not change the digest; a change to the component's behavior, to a
+    function it calls or to a reached extern's host body does. The template
+    flag participates because which manifest list a component sits in is a
+    fact of the composition, not of its body. A component that reaches no
+    declaration hashes exactly as before this reach existed, so the key is added
+    only when there is something in it.
     """
     payload = _without_provenance(component, top=True)
     payload["__template__"] = bool(template)
+    if reach and (reach.get("functions") or reach.get("externs")):
+        payload["__reach__"] = _without_provenance(reach)
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"),
                       ensure_ascii=False)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
@@ -201,7 +261,8 @@ def _realms(component: dict) -> str:
     return "; ".join(parts) or "shared"
 
 
-def derive(component: dict, *, template: bool, surface: dict | None) -> dict:
+def derive(component: dict, *, template: bool, surface: dict | None,
+           reach: dict | None = None) -> dict:
     """The derived facts for one component, in render order."""
     capabilities = _capabilities(surface)
     externs = _externs(component, surface)
@@ -211,7 +272,7 @@ def derive(component: dict, *, template: bool, surface: dict | None) -> dict:
         "capabilities": ", ".join(capabilities) or "none",
         "realms": _realms(component),
         "externs": ", ".join(externs) or "none",
-        "digest": _digest(component, template),
+        "digest": _digest(component, template, reach),
     }
 
 
@@ -226,6 +287,31 @@ def _render_lines(facts: dict, indent: str = "") -> list[str]:
         f"{indent}{_DIGEST_PREFIX}{facts['digest']}",
         f"{indent}{END}",
     ]
+
+
+def _split_lines(text: str) -> tuple[list[str], list[bool]]:
+    """The lines of `text` without their line endings, and whether each one
+    ended in a carriage return.
+
+    The file is split on `\n` only and a trailing `\r` is peeled off and
+    remembered, so every comparison below sees the same content whichever ending
+    the file uses and a rewrite can put each unchanged line back byte for byte.
+    """
+    lines: list[str] = []
+    carriage: list[bool] = []
+    for raw in text.split("\n"):
+        if raw.endswith("\r"):
+            lines.append(raw[:-1])
+            carriage.append(True)
+        else:
+            lines.append(raw)
+            carriage.append(False)
+    return lines, carriage
+
+
+def _join_lines(lines: list[str], carriage: list[bool]) -> str:
+    return "\n".join(line + "\r" if cr else line
+                     for line, cr in zip(lines, carriage))
 
 
 def _comment_run(lines: list[str], decl_index: int) -> tuple[int, int] | None:
@@ -252,24 +338,66 @@ def _is_marker(line: str) -> bool:
     return stripped in (BEGIN, END) or stripped.startswith(_MARKER_PREFIX + " ")
 
 
-def _markers_in(lines: list[str], run: tuple[int, int]) -> tuple[list[int], list[int], list[int]]:
-    """The exact BEGIN lines, exact END lines and all marker-like lines."""
+def _tokens_of(text: str, path: str):
+    return [(token.kind, token.value, token.line) for token in lex(text, path)]
+
+
+def comment_marker_lines(text: str, path: str) -> set[int]:
+    """The 0-based lines that look like a marker AND that the lexer reads as a
+    comment.
+
+    A line that starts with `// revl:behavior` is only a marker when it is a
+    comment. The same characters inside a multi-line string, a template or a
+    host body (`@py { ... }`) are data, and refusing them as a stray marker
+    would reject a file that is fine. The lexer is the one authority on which
+    is which, so the question is put to it: blank the candidate lines and lex
+    again. A comment contributes no token, so the token stream is unchanged; a
+    line inside a token changes that token's value or stops it closing. All
+    candidates are tried together first, which is one extra lex in the common
+    case where every one of them is a real comment.
+    """
+    raw = text.split("\n")
+    candidates = [index for index, line in enumerate(raw) if _is_marker(line)]
+    if not candidates:
+        return set()
+    original = _tokens_of(text, path)
+
+    def unchanged_without(indices: list[int]) -> bool:
+        blanked = set(indices)
+        probe = "\n".join("" if index in blanked else line
+                          for index, line in enumerate(raw))
+        try:
+            return _tokens_of(probe, path) == original
+        except Exception:  # a probe that no longer lexes was cutting into a token
+            return False
+
+    if unchanged_without(candidates):
+        return set(candidates)
+    return {index for index in candidates if unchanged_without([index])}
+
+
+def _markers_in(lines: list[str], run: tuple[int, int],
+                real: set[int]) -> tuple[list[int], list[int], list[int]]:
+    """The exact BEGIN lines, exact END lines and all marker-like comment lines
+    of a comment run. `real` is `comment_marker_lines`."""
     start, end = run
     begins: list[int] = []
     ends: list[int] = []
     markers: list[int] = []
     for index in range(start, end + 1):
+        if index not in real:
+            continue
         stripped = lines[index].strip()
         if stripped == BEGIN:
             begins.append(index)
         elif stripped == END:
             ends.append(index)
-        if _is_marker(lines[index]):
-            markers.append(index)
+        markers.append(index)
     return begins, ends, markers
 
 
-def _block_span(lines: list[str], decl_index: int, path: str) -> tuple[int, int] | None:
+def _block_span(lines: list[str], decl_index: int, path: str,
+                real: set[int]) -> tuple[int, int] | None:
     """The 0-based [begin, end] line span of the managed block directly above
     `decl_index`, or None when there is none.
 
@@ -283,7 +411,7 @@ def _block_span(lines: list[str], decl_index: int, path: str) -> tuple[int, int]
     run = _comment_run(lines, decl_index)
     if run is None:
         return None
-    begins, ends, markers = _markers_in(lines, run)
+    begins, ends, markers = _markers_in(lines, run, real)
     if not markers:
         return None
     if (len(begins) == 1 and len(ends) == 1 and len(markers) == 2
@@ -304,16 +432,20 @@ def _committed_digest(block: list[str]) -> str | None:
 
 
 def _component_edits(text: str, path: str, components: list[dict],
-                     templates: set[str], surfaces: dict) -> tuple[str, int]:
+                     templates: set[str], surfaces: dict,
+                     reaches: dict) -> tuple[str, int]:
     """Apply every component's block to `text`.
 
     Returns the new text and the number of blocks written (created or
     changed). Edits are applied bottom-up, so a span that grows or shrinks
-    cannot move a later edit.
+    cannot move a later edit. Only the block's own lines are rewritten: every
+    other line keeps its ending, and a written block takes the ending of the
+    declaration it sits above, so a CRLF file stays CRLF.
     """
-    lines = text.split("\n")
+    lines, carriage = _split_lines(text)
     decls = _declaration_lines(text, path)
-    edits: list[tuple[int, int, list[str]]] = []
+    real = comment_marker_lines(text, path)
+    edits: list[tuple[int, int, list[str], bool]] = []
     written = 0
     for component in sorted(components, key=lambda c: decls.get(c["name"], 0),
                             reverse=True):
@@ -324,32 +456,37 @@ def _component_edits(text: str, path: str, components: list[dict],
         indent = _indent(lines[decl_index])
         expected = _render_lines(
             derive(component, template=component["name"] in templates,
-                   surface=surfaces.get(component["name"])), indent)
-        span = _block_span(lines, decl_index, path)
+                   surface=surfaces.get(component["name"]),
+                   reach=reaches.get(component["name"])), indent)
+        ending = carriage[decl_index]
+        span = _block_span(lines, decl_index, path, real)
         if span is None:
-            edits.append((decl_index, decl_index - 1, expected))
+            edits.append((decl_index, decl_index - 1, expected, ending))
             written += 1
             continue
         if lines[span[0]:span[1] + 1] != expected:
             written += 1
-        edits.append((span[0], span[1], expected))
-    for start, end, block in edits:
+        edits.append((span[0], span[1], expected, ending))
+    for start, end, block, ending in edits:
         lines[start:end + 1] = block
-    return "\n".join(lines), written
+        carriage[start:end + 1] = [ending] * len(block)
+    return _join_lines(lines, carriage), written
 
 
 def generate(text: str, path: str, components: list[dict], templates: set[str],
-             surfaces: dict) -> tuple[str, int]:
+             surfaces: dict, reaches: dict | None = None) -> tuple[str, int]:
     """Return `text` with every component's block created or refreshed.
 
     `components` is the IR component list, `templates` the manifest's template
-    names and `surfaces` the G8 boundary report keyed by component name.
+    names, `surfaces` the G8 boundary report keyed by component name and
+    `reaches` the `reached_declarations` of the same IR.
     """
-    return _component_edits(text, path, components, templates, surfaces)
+    return _component_edits(text, path, components, templates, surfaces,
+                            reaches or {})
 
 
 def check(text: str, path: str, components: list[dict], templates: set[str],
-          surfaces: dict) -> list[BehaviorBlockError]:
+          surfaces: dict, reaches: dict | None = None) -> list[BehaviorBlockError]:
     """Every reason a committed block no longer matches the IR, in file order.
 
     An empty list is a pass. Components with no block are not errors: adoption
@@ -357,8 +494,10 @@ def check(text: str, path: str, components: list[dict], templates: set[str],
     block above no component IS an error -- it describes nothing and would
     otherwise pass forever.
     """
-    lines = text.split("\n")
+    reaches = reaches or {}
+    lines, _carriage = _split_lines(text)
     decls = _declaration_lines(text, path)
+    real = comment_marker_lines(text, path)
     problems: list[BehaviorBlockError] = []
     owned: set[int] = set()
     for component in sorted(components, key=lambda c: decls.get(c["name"], 0)):
@@ -367,12 +506,12 @@ def check(text: str, path: str, components: list[dict], templates: set[str],
             continue
         decl_index = line - 1
         try:
-            span = _block_span(lines, decl_index, path)
+            span = _block_span(lines, decl_index, path, real)
         except BehaviorBlockError as error:
             problems.append(error)
             run = _comment_run(lines, decl_index)
             if run is not None:
-                _begins, _ends, markers = _markers_in(lines, run)
+                _begins, _ends, markers = _markers_in(lines, run, real)
                 owned.update(markers)
             continue
         if span is None:
@@ -380,7 +519,8 @@ def check(text: str, path: str, components: list[dict], templates: set[str],
         owned.update(span)
         indent = _indent(lines[decl_index])
         facts = derive(component, template=component["name"] in templates,
-                       surface=surfaces.get(component["name"]))
+                       surface=surfaces.get(component["name"]),
+                       reach=reaches.get(component["name"]))
         expected = _render_lines(facts, indent)
         committed = lines[span[0]:span[1] + 1]
         if committed == expected:
@@ -398,11 +538,10 @@ def check(text: str, path: str, components: list[dict], templates: set[str],
                 path, decl_index + 1,
                 "behavior block does not match the facts derived from the IR "
                 f"(regenerate with `revl docs gen {path}`)"))
-    for index, line in enumerate(lines):
-        if _is_marker(line) and index not in owned:
-            problems.append(BehaviorBlockError(
-                path, index + 1,
-                "behavior block marker is not directly above a component "
-                f"declaration (remove it or regenerate with "
-                f"`revl docs gen {path}`)"))
+    for index in sorted(real - owned):
+        problems.append(BehaviorBlockError(
+            path, index + 1,
+            "behavior block marker is not directly above a component "
+            f"declaration (remove it or regenerate with "
+            f"`revl docs gen {path}`)"))
     return problems
