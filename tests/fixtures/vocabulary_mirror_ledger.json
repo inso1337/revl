@@ -440,10 +440,13 @@
       "tokens": [
         "charAt",
         "charCodeAt",
+        "checked_add",
         "checked_div_euclid",
         "checked_div_floor",
         "checked_div_trunc",
         "checked_mod",
+        "checked_mul",
+        "checked_sub",
         "codepoint_at",
         "concat",
         "div_euclid",
@@ -477,7 +480,7 @@
         "to_int32",
         "to_str"
       ],
-      "note": "The thirty-seven builtin method names, declared once in lowering and once in the type checker. The largest vocabulary in the tree by token count: a method in one and not the other either type-checks and fails to lower or lowers and is never checked."
+      "note": "The thirty-seven builtin method names, declared once in lowering and once in the type checker. The largest vocabulary in the tree by token count: a method in one and not the other either type-checks and fails to lower or lowers and is never checked. Re-recorded for `checked_add`, `checked_sub` and `checked_mul` (#3259): BOTH copies gained them in one commit, which is the vocabulary moving and not a drift."
     },
     {
       "sites": [

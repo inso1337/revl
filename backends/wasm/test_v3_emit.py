@@ -1084,6 +1084,42 @@ def test_v3_test_block_strings_are_pooled_and_run_on_wasmtime(tmp_path):
     assert int(out.stdout.strip().splitlines()[-1]) == 1
 
 
+@_needs_wasmtime
+def test_v3_total_arithmetic_runs_on_wasmtime(tmp_path):
+    """The total `+ - *` forms answer Ok in range and Err at the i64 edge on
+    the wasm tier, with no trap anywhere: `Int.MIN * -1` is named before the
+    readback division, and the zero case never reaches it. The block runs on
+    real wasmtime rather than being asserted from the emitted text alone."""
+    import subprocess
+
+    _wasmtime_or_fail()
+    src = (
+        "fn hi() -> Int { return 9223372036854775807 }\n"
+        "fn lo() -> Int { return 0 - 9223372036854775807 - 1 }\n"
+        "fn ca(a: Int, b: Int) -> Result[Int, Str] { return a.checked_add(b) }\n"
+        "fn cs(a: Int, b: Int) -> Result[Int, Str] { return a.checked_sub(b) }\n"
+        "fn cm(a: Int, b: Int) -> Result[Int, Str] { return a.checked_mul(b) }\n"
+        "test \"total arithmetic\" {\n"
+        "  assert match ca(1, 2) { Ok(v) => v == 3, Err(e) => false }\n"
+        "  assert match ca(hi(), 1) { Ok(v) => false, Err(e) => e == \"revl: Int overflow\" }\n"
+        "  assert match cs(5, 7) { Ok(v) => v == 0 - 2, Err(e) => false }\n"
+        "  assert match cs(lo(), 1) { Ok(v) => false, Err(e) => true }\n"
+        "  assert match cm(6, 7) { Ok(v) => v == 42, Err(e) => false }\n"
+        "  assert match cm(hi(), 2) { Ok(v) => false, Err(e) => true }\n"
+        "  assert match cm(lo(), 0 - 1) { Ok(v) => false, Err(e) => true }\n"
+        "  assert match cm(0 - 1, lo()) { Ok(v) => false, Err(e) => true }\n"
+        "}"
+    )
+    module = _emitter().emit(compile_source(src))["functions"]
+    wat = tmp_path / "checked_arith.wat"
+    wat.write_text(module, encoding="utf-8")
+    out = subprocess.run(
+        ["wasmtime", "--invoke", "revl_test_total_arithmetic", str(wat)],
+        capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    assert int(out.stdout.strip().splitlines()[-1]) == 1
+
+
 # --- item 432(b)/(d)/(g): the codegen-audit remainder -------------------------
 
 def test_432b_the_prelude_is_swept_to_what_the_module_reaches():

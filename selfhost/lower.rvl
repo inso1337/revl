@@ -17201,7 +17201,8 @@ fn tk_bsig_family(m: Str, th: Str) -> Str {
       || m == "is_alnum" || m == "is_digit" || m == "is_alpha"
       || m == "is_space") { return "Str" }
   if (m == "div_trunc" || m == "div_floor" || m == "div_euclid" || m == "mod"
-      || m == "to_int32" || m == "to_char" || m == "checked_div_trunc"
+      || m == "to_int32" || m == "to_char" || m == "checked_add"
+      || m == "checked_sub" || m == "checked_mul" || m == "checked_div_trunc"
       || m == "checked_div_floor" || m == "checked_div_euclid"
       || m == "checked_mod") { return "Int" }
   if (m == "set" || m == "lookup" || m == "has" || m == "size"
@@ -17223,6 +17224,7 @@ fn tk_bsig_params(m: Str) -> List[Str] {
   if (m == "split" || m == "join" || m == "startsWith"
       || m == "endsWith") { return ["Str"] }
   if (m == "div_trunc" || m == "div_floor" || m == "div_euclid" || m == "mod"
+      || m == "checked_add" || m == "checked_sub" || m == "checked_mul"
       || m == "checked_div_trunc" || m == "checked_div_floor"
       || m == "checked_div_euclid" || m == "checked_mod") { return ["Int"] }
   if (m == "set") { return ["Str", "@elem"] }
@@ -17857,12 +17859,13 @@ fn tk_no_call() -> CallN { return { target: NullLit, args: [] } }
 // `_BUILTIN_METHODS`, sorted — the surface the refusal lists. Held byte-exact
 // against the reference by `tests/test_selfhost_lower.py`.
 fn tk_stdlib_surface() -> Str {
-  return "charAt, charCodeAt, checked_div_euclid, checked_div_floor, "
-    .concat("checked_div_trunc, checked_mod, codepoint_at, concat, div_euclid, ")
-    .concat("div_floor, div_trunc, endsWith, field, has, indexOf, is_alnum, ")
-    .concat("is_alpha, is_digit, is_space, join, keys, length, list, lookup, ")
-    .concat("mod, push, remove, repeat, set, size, slice, split, startsWith, ")
-    .concat("str, to_char, to_int, to_int32, to_str")
+  return "charAt, charCodeAt, checked_add, checked_div_euclid, "
+    .concat("checked_div_floor, checked_div_trunc, checked_mod, checked_mul, ")
+    .concat("checked_sub, codepoint_at, concat, div_euclid, div_floor, ")
+    .concat("div_trunc, endsWith, field, has, indexOf, is_alnum, is_alpha, ")
+    .concat("is_digit, is_space, join, keys, length, list, lookup, mod, push, ")
+    .concat("remove, repeat, set, size, slice, split, startsWith, str, ")
+    .concat("to_char, to_int, to_int32, to_str")
 }
 
 fn tk_divides_by(m: Str) -> Bool {
@@ -30534,7 +30537,8 @@ fn is_builtin_method(m: Str) -> Bool {
     || m == "join" || m == "repeat" || m == "startsWith" || m == "endsWith"
     || m == "is_alnum" || m == "is_digit" || m == "is_alpha" || m == "is_space"
     || m == "div_trunc" || m == "div_floor" || m == "div_euclid" || m == "mod"
-    || m == "to_int" || m == "to_int32" || m == "checked_div_trunc"
+    || m == "to_int" || m == "to_int32" || m == "checked_add" || m == "checked_sub"
+    || m == "checked_mul" || m == "checked_div_trunc"
     || m == "checked_div_floor" || m == "checked_div_euclid" || m == "checked_mod"
     || m == "set" || m == "lookup" || m == "has" || m == "size" || m == "keys"
     || m == "remove" || m == "to_str"
@@ -30609,7 +30613,8 @@ fn builtin_ret(method: Str, recvTy: Str) -> Str {
   if (method == "field") { return "Value" }
   if (method == "str") { return "Str" }
   if (method == "list") { return "List[Value]" }
-  if (method == "checked_div_trunc" || method == "checked_div_floor"
+  if (method == "checked_add" || method == "checked_sub" || method == "checked_mul"
+      || method == "checked_div_trunc" || method == "checked_div_floor"
       || method == "checked_div_euclid" || method == "checked_mod") {
     return "Result[Int, Str]"
   }

@@ -1183,11 +1183,19 @@ _REVL_FTOA_SRC = '''def _revl_ftoa(x):
     return sign + body'''
 
 
-# The total, value-returning division forms (docs/arithmetic.md): same
-# rounding as the faulting operations, Err(reason) at a zero divisor.
+# The total, value-returning forms (docs/arithmetic.md): same value as the
+# faulting operations where it fits, Err(reason) instead of the fault
+# otherwise. `checked_add/sub/mul` answer Err("revl: Int overflow") at the
+# 64-bit edge; the division forms answer Err at a zero divisor (and at the
+# one overflowing quotient).
+_CHECKED_ARITH = ("checked_add", "checked_sub", "checked_mul")
 _CHECKED_DIVS = ("checked_div_trunc", "checked_div_floor",
                  "checked_div_euclid", "checked_mod")
+# Every total form produces a Result, so the Result cases travel with any of
+# them (`_uses_builtin_result`).
+_CHECKED_FORMS = _CHECKED_ARITH + _CHECKED_DIVS
 _DIV_ZERO_MSG = "revl: division by zero"
+_INT_OVERFLOW_MSG = "revl: Int overflow"
 
 # The receiver type a builtin reached through `?.` has: the `optcall` IR node
 # carries no `recv` tag (unlike a `builtin` node, which lowering annotates for
@@ -1796,12 +1804,12 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
         return f"({target})"
     if method == "to_int32":
         return f"_revl_i32({target})"
-    # The total forms (docs/arithmetic.md): same quotient as the faulting
-    # operation, but a zero divisor yields Err(reason) instead of raising —
-    # the whole point is that a pure fn cannot `fail`, so the error travels
-    # as a value. Ok/Err are the tagged classes emitted when the IR uses
-    # Result (gated in `_uses_builtin_result`).
-    if method in _CHECKED_DIVS:
+    # The total forms (docs/arithmetic.md): same value as the faulting
+    # operation, but an overflow (or a zero divisor) yields Err(reason)
+    # instead of raising — the whole point is that a pure fn cannot `fail`,
+    # so the error travels as a value. Ok/Err are the tagged classes emitted
+    # when the IR uses Result (gated in `_uses_builtin_result`).
+    if method in _CHECKED_FORMS:
         return f"_revl_{method}({target}, {args[0]})"
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): python ints on
     # this tier are already i64-clamped, so str() is the exact decimal. A
@@ -6359,7 +6367,7 @@ def _find_host_roots(nodes) -> set[str]:
 def _uses_builtin_result(ir: dict) -> bool:
     """True if the IR constructs or matches the built-in Result (Ok/Err) —
     an `adt` node typed Result, a `match` arm on Ok/Err, or a call to one of
-    the total division forms (which *produce* a Result). Used to decide
+    the total forms (which *produce* a Result). Used to decide
     whether the module needs the built-in Result cases, which it now IMPORTS
     from the shared runtime (`_builtin_result_imports`, issue #1932): the gate
     is dead-code hygiene — a module that never builds or matches a `Result`
@@ -6372,7 +6380,7 @@ def _uses_builtin_result(ir: dict) -> bool:
             if node.get("kind") == "match":
                 if any(arm.get("pattern") in ("Ok", "Err") for arm in node.get("arms") or []):
                     return True
-            if node.get("method") in _CHECKED_DIVS:
+            if node.get("method") in _CHECKED_FORMS:
                 return True
             return any(walk(v) for v in node.values())
         if isinstance(node, list):
@@ -7558,33 +7566,40 @@ def emit(ir: dict) -> str:
                    'so dispatch on the payload."""')
         out.add(0, "    return _revl_ftoa(v) if isinstance(v, float) else str(v)")
         out.add(0)
-    for checked in _CHECKED_DIVS:
+    for checked in _CHECKED_FORMS:
         if checked not in _scan.builtins:
             continue
-        # The total forms (docs/arithmetic.md): the same quotient as the
-        # faulting operation, but a zero divisor yields Err(reason) instead of
-        # raising — a pure fn cannot `fail`, so the error travels as a value.
-        quotient = {
-            "checked_div_trunc":
-                "abs(a) // abs(b) if (a < 0) == (b < 0) else -(abs(a) // abs(b))",
-            "checked_div_floor": "a // b",
-            "checked_div_euclid": "a // b if b > 0 else -(a // -b)",
-            "checked_mod": "a % abs(b)",
-        }[checked]
+        # The total forms (docs/arithmetic.md): the same value as the faulting
+        # operation where it fits, Err(reason) instead of the fault otherwise
+        # — a pure fn cannot `fail`, so the error travels as a value.
         out.add(0, f"def _revl_{checked}(a, b):")
-        out.add(0, f'    """Total `{checked[len("checked_"):]}`: a zero divisor '
-                   'is Err(reason), never a raise."""')
-        out.add(0, "    if b == 0:")
-        out.add(0, f"        return Err({_DIV_ZERO_MSG!r})")
-        out.add(0, f"    q = {quotient}")
+        if checked in _CHECKED_DIVS:
+            out.add(0, f'    """Total `{checked[len("checked_"):]}`: a zero divisor '
+                       'is Err(reason), never a raise."""')
+            out.add(0, "    if b == 0:")
+            out.add(0, f"        return Err({_DIV_ZERO_MSG!r})")
+            value = {
+                "checked_div_trunc":
+                    "abs(a) // abs(b) if (a < 0) == (b < 0) else -(abs(a) // abs(b))",
+                "checked_div_floor": "a // b",
+                "checked_div_euclid": "a // b if b > 0 else -(a // -b)",
+                "checked_mod": "a % abs(b)",
+            }[checked]
+        else:
+            out.add(0, f'    """Total `{checked[len("checked_"):]}`: an overflow '
+                       'is Err(reason), never a raise."""')
+            value = {"checked_add": "a + b", "checked_sub": "a - b",
+                     "checked_mul": "a * b"}[checked]
+        out.add(0, f"    v = {value}")
         if checked == "checked_mod":
             # a remainder cannot leave the range its operands are already in
-            out.add(0, "    return Ok(q)")
+            out.add(0, "    return Ok(v)")
         else:
-            # a quotient of 2^63 (Int.MIN/-1) does not fit i64 -> Err, not a value
-            out.add(0, "    if -(2**63) <= q <= 2**63 - 1:")
-            out.add(0, "        return Ok(q)")
-            out.add(0, "    return Err('revl: Int overflow')")
+            # an Int result that leaves i64 (an overflowing product, or the one
+            # overflowing quotient Int.MIN/-1) does not fit -> Err, not a value
+            out.add(0, "    if -(2**63) <= v <= 2**63 - 1:")
+            out.add(0, "        return Ok(v)")
+            out.add(0, f"    return Err({_INT_OVERFLOW_MSG!r})")
         out.add(0)
     if _scan.float_interp:
         # Canonical Float -> Str (docs/strings.md): the ECMAScript

@@ -302,9 +302,12 @@ _BUILTIN_METHODS = {
     # The reverse of `codepoint_at` (issue #2285, docs/stdlib-2.0.md
     # §Int.to_char): Int receiver, no argument, a one-code-point Str or "".
     "to_char": 0,
-    # The total forms (docs/arithmetic.md): a zero divisor is the *point*
-    # here, so these are deliberately absent from _DIVIDES_BY below — a
-    # literal zero argument is refused for the faulting operations only.
+    # The total forms (docs/arithmetic.md): same operands as their faulting
+    # counterparts, `Result[Int, Str]` instead of a fault. A zero divisor is
+    # the *point* of the checked division forms, so those four are
+    # deliberately absent from _DIVIDES_BY below — a literal zero argument is
+    # refused for the faulting operations only.
+    "checked_add": 1, "checked_sub": 1, "checked_mul": 1,
     "checked_div_trunc": 1, "checked_div_floor": 1,
     "checked_div_euclid": 1, "checked_mod": 1,
     # The Map value type (docs/stdlib-2.0.md §Map). Names disjoint from the

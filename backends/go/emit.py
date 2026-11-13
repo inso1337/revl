@@ -1298,9 +1298,9 @@ def _go_comp_match_tuple(node, env: _Env, expected, st, is_opt, is_result,
     err_arm = next((a for a in arms if a.get("pattern") in ("None", "Err")), None)
     wild = next((a for a in arms if a.get("pattern") == "_"), None)
     if scrut_node.get("kind") == "builtin" \
-            and scrut_node.get("method") in _GO_CHECKED_DIV:
-        # the total division forms: the stc-go Result tuple, multi-value
-        scrutinee = _comp_checked_div_expr(scrut_node, env)
+            and scrut_node.get("method") in _GO_CHECKED_FORMS:
+        # the total forms: the stc-go Result tuple, multi-value
+        scrutinee = _comp_checked_expr(scrut_node, env)
     else:
         scrutinee = _expr(scrut_node, env, st)
     saved_types = dict(env.var_types)
@@ -1870,13 +1870,13 @@ def _comp_builtin(method, recv_surface, target, args):
     if method == "remove":
         _COMP_NEEDS_MAP = True
         return "revlMapRemove(%s, %s)" % (target, args[0])
-    if method in _GO_CHECKED_DIV:
-        # The total division forms answer a Result, which the stc-go world
-        # carries as a (T, E, bool) tuple — only valid in the two positions
-        # that accept a multi-value expression: a `match` scrutinee and a
-        # `return` against a Result-typed method. A bare value use would
-        # emit Go that cannot compile, so it is refused here with the way
-        # out named (mirrors the Opt tuple convention on this tier).
+    if method in _GO_CHECKED_FORMS:
+        # The total forms answer a Result, which the stc-go world carries as a
+        # (T, E, bool) tuple — only valid in the two positions that accept a
+        # multi-value expression: a `match` scrutinee and a `return` against a
+        # Result-typed method. A bare value use would emit Go that cannot
+        # compile, so it is refused here with the way out named (mirrors the
+        # Opt tuple convention on this tier).
         raise EmitError(
             f"{method} is only lowerable on the cordis-go tier as a `match` "
             f"scrutinee or in a Result-returning `return` (Result is a "
@@ -1884,18 +1884,20 @@ def _comp_builtin(method, recv_surface, target, args):
     raise EmitError("unknown stdlib method: %r" % (method,))
 
 
-def _comp_checked_div_expr(node, env: _Env) -> str:
-    """The total division forms (docs/arithmetic.md) as the stc-go tier's
-    Result tuple `(T, E, bool)`: an immediately-applied func literal that
-    evaluates each operand once, returns `(0, reason, false)` on a zero
-    divisor (and on the Int.MIN / -1 overflow for the truncating form), else
-    the quotient. Only valid where a multi-value expression is: a `match`
-    scrutinee or a Result-returning `return`."""
+def _comp_checked_expr(node, env: _Env) -> str:
+    """The total forms (docs/arithmetic.md) as the stc-go tier's Result tuple
+    `(T, E, bool)`: an immediately-applied func literal that evaluates each
+    operand once, returns `(0, reason, false)` on the fault (an overflow for
+    `checked_add/sub/mul`, a zero divisor or the one overflowing quotient for
+    the division forms), else the value. Only valid where a multi-value
+    expression is: a `match` scrutinee or a Result-returning `return`."""
     method = node.get("method")
     target = _expr(node.get("target"), env)
     args = [_expr(a, env) for a in node.get("args") or []]
     if len(args) != 1:
-        raise EmitError(f"{method} takes exactly one divisor")
+        raise EmitError(f"{method} takes exactly one argument")
+    if method in _GO_CHECKED_ARITH:
+        return _comp_checked_arith_expr(method, target, args[0])
     if method != "checked_div_trunc":
         # revlDivFloor / revlDivEuclid / revlMod live in the pure-tier
         # int-arith preamble, which the stc-go component path does not emit —
@@ -1910,8 +1912,42 @@ def _comp_checked_div_expr(node, env: _Env) -> str:
         f"var _a, _b int64; _a, _b = {target}, {args[0]}; "
         f'if _b == 0 {{ return 0, "{_GO_DIV_ZERO_MSG}", false }}; '
         "if _a == (-9223372036854775807 - 1) && _b == -1 "
-        '{ return 0, "revl: Int overflow", false }; '
+        f'{{ return 0, "{_GO_INT_OVERFLOW_MSG}", false }}; '
         f"return ({quotient}), \"\", true }}()"
+    )
+
+
+def _comp_checked_arith_expr(method: str, target: str, arg: str) -> str:
+    """The total arithmetic forms as the stc-go tier's `(T, E, bool)` tuple.
+    The overflow tests are the ones the trapping `revlAdd/revlSub/revlMul`
+    helpers use, with the fault carried out as the third tuple value instead
+    of a panic. `checked_mul` names `Int.MIN * -1` explicitly: Go defines
+    `Int.MIN / -1` as `Int.MIN`, so the readback check cannot see that
+    product (docs/arithmetic.md)."""
+    if method == "checked_add":
+        body = ("_r := _a + _b; "
+                "if (_a > 0 && _b > 0 && _r < 0) || "
+                "(_a < 0 && _b < 0 && _r >= 0) "
+                '{ return 0, "revl: Int overflow", false }; '
+                'return _r, "", true')
+    elif method == "checked_sub":
+        body = ("_r := _a - _b; "
+                "if (_b < 0 && _r < _a) || (_b > 0 && _r > _a) "
+                '{ return 0, "revl: Int overflow", false }; '
+                'return _r, "", true')
+    else:
+        body = ('if _a == 0 || _b == 0 { return 0, "", true }; '
+                "if (_a == (-9223372036854775807 - 1) && _b == -1) || "
+                "(_a == -1 && _b == (-9223372036854775807 - 1)) "
+                '{ return 0, "revl: Int overflow", false }; '
+                "_r := _a * _b; "
+                "if _r/_b != _a "
+                '{ return 0, "revl: Int overflow", false }; '
+                'return _r, "", true')
+    return (
+        "func() (int64, string, bool) { "
+        f"var _a, _b int64; _a, _b = {target}, {arg}; "
+        f"{body} }}()"
     )
 
 
@@ -2564,11 +2600,11 @@ def _emit_return(expr, ret_surface, env: _Env, out, pad):
         return
     if rs.startswith("Result[") and isinstance(expr, dict) \
             and expr.get("kind") == "builtin" \
-            and expr.get("method") in _GO_CHECKED_DIV:
-        # The total division forms answer a Result, carried on this tier as
-        # the (T, E, bool) tuple: the multi-value IIFE returns straight into
-        # the method's tuple signature.
-        out.append("%sreturn %s" % (pad, _comp_checked_div_expr(expr, env)))
+            and expr.get("method") in _GO_CHECKED_FORMS:
+        # The total forms answer a Result, carried on this tier as the
+        # (T, E, bool) tuple: the multi-value IIFE returns straight into the
+        # method's tuple signature.
+        out.append("%sreturn %s" % (pad, _comp_checked_expr(expr, env)))
         return
     out.append("%sreturn %s" % (pad, _expr(expr, env, ret_surface)))
 
@@ -6859,11 +6895,16 @@ class _V3GoCtx:
         return _v3_ident(name, "type name")
 
 
-# The total, value-returning division forms (docs/arithmetic.md): same
-# rounding as the faulting operations, Err(reason) at a zero divisor.
+# The total, value-returning forms (docs/arithmetic.md): same value as the
+# faulting operations where it fits, Err(reason) instead of the fault
+# otherwise. `checked_add/sub/mul` answer the overflow; the division forms
+# answer a zero divisor too.
+_GO_CHECKED_ARITH = ("checked_add", "checked_sub", "checked_mul")
 _GO_CHECKED_DIV = ("checked_div_trunc", "checked_div_floor",
                    "checked_div_euclid", "checked_mod")
+_GO_CHECKED_FORMS = _GO_CHECKED_ARITH + _GO_CHECKED_DIV
 _GO_DIV_ZERO_MSG = "revl: division by zero"
+_GO_INT_OVERFLOW_MSG = "revl: Int overflow"
 
 
 # Int.to_char (issue #2285, docs/stdlib-2.0.md §Int.to_char) as a closure
@@ -6892,8 +6933,7 @@ def _v3_builtin_ret_type(method, recv_type):
     if method in ("startsWith", "endsWith"):
         return "Bool"
     # The total forms (docs/arithmetic.md) produce a Result value.
-    if method in ("checked_div_trunc", "checked_div_floor",
-                  "checked_div_euclid", "checked_mod"):
+    if method in _GO_CHECKED_FORMS:
         return "Result[Int, Str]"
     if method in ("charAt", "repeat", "join"):
         return "Str"
@@ -8202,11 +8242,41 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
         helper = {"div_floor": "revlDivFloor", "div_euclid": "revlDivEuclid",
                   "mod": "revlMod"}[method]
         return f"{helper}({target}, {args[0]})"
-    # The total forms (docs/arithmetic.md): same quotient as the faulting
-    # operation, but a zero divisor yields Err(reason) instead of panicking —
-    # `fail` is refused in a pure fn, so the error travels as a value. An
-    # immediately-applied func literal evaluates each operand exactly once;
-    # the Ok/Err arms are the two-value RevlResult struct (item 434 (d)).
+    # The total arithmetic forms (docs/arithmetic.md): the overflow tests the
+    # trapping `revlAdd/revlSub/revlMul` helpers use, with the fault carried
+    # out as an Err arm instead of a panic. An immediately-applied func
+    # literal evaluates each operand exactly once; the Ok/Err arms are the
+    # two-value RevlResult struct (item 434 (d)).
+    if method in _GO_CHECKED_ARITH:
+        if method == "checked_add":
+            body = ("_r := _a + _b; "
+                    "if (_a > 0 && _b > 0 && _r < 0) || "
+                    "(_a < 0 && _b < 0 && _r >= 0) { "
+                    'return RevlResult[int64, string]{ErrV: "revl: Int overflow"} }; '
+                    "return RevlResult[int64, string]{OkV: _r, Ok: true}")
+        elif method == "checked_sub":
+            body = ("_r := _a - _b; "
+                    "if (_b < 0 && _r < _a) || (_b > 0 && _r > _a) { "
+                    'return RevlResult[int64, string]{ErrV: "revl: Int overflow"} }; '
+                    "return RevlResult[int64, string]{OkV: _r, Ok: true}")
+        else:
+            body = ('if _a == 0 || _b == 0 { '
+                    "return RevlResult[int64, string]{OkV: 0, Ok: true} }; "
+                    "if (_a == (-9223372036854775807 - 1) && _b == -1) || "
+                    "(_a == -1 && _b == (-9223372036854775807 - 1)) { "
+                    'return RevlResult[int64, string]{ErrV: "revl: Int overflow"} }; '
+                    "_r := _a * _b; "
+                    "if _r/_b != _a { "
+                    'return RevlResult[int64, string]{ErrV: "revl: Int overflow"} }; '
+                    "return RevlResult[int64, string]{OkV: _r, Ok: true}")
+        return (f'func(_a, _b int64) RevlResult[int64, string] {{ {body} }}'
+                f'({target}, {args[0]})')
+    # The total division forms (docs/arithmetic.md): same quotient as the
+    # faulting operation, but a zero divisor yields Err(reason) instead of
+    # panicking — `fail` is refused in a pure fn, so the error travels as a
+    # value. An immediately-applied func literal evaluates each operand
+    # exactly once; the Ok/Err arms are the two-value RevlResult struct
+    # (item 434 (d)).
     if method in _GO_CHECKED_DIV:
         if method != "checked_div_trunc":
             ctx.needs_int_arith = True
@@ -12301,9 +12371,10 @@ def _emit_v3_go(ir: dict, package: str) -> str:
                                              "size", "keys", "remove"))
     if used_map:
         used_opt = True
-    # The total division forms produce a Result value without the source ever
+    # The total forms produce a Result value without the source ever
     # spelling `Result[` — their method names put Result in the module too.
-    used_result = ("Result[" in blob) or ("checked_div_" in blob) or ("checked_mod" in blob)
+    used_result = ("Result[" in blob) or any(
+        f'"method": "{m}"' in blob for m in _GO_CHECKED_FORMS)
     # A `Some(literal)` / `None` / `Ok`/`Err` with no `Opt[`/`Result[` spelled
     # in the IR (element type recovered from the argument, item 280) still
     # emits the sealed types — scan the rendered body so the matching preamble
@@ -13752,7 +13823,8 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
                                              "size", "keys", "remove"))
     if used_map:
         used_opt = True
-    used_result = ("Result[" in blob) or ("checked_div_" in blob) or ("checked_mod" in blob)
+    used_result = ("Result[" in blob) or any(
+        f'"method": "{m}"' in blob for m in _GO_CHECKED_FORMS)
     # the Map SUBSCRIPT helper (issue #957), gated on its own like above
     body_blob = "\n".join(body)
     used_map_index = "revlMapIndex(" in body_blob

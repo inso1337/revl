@@ -3679,6 +3679,8 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx",
         return f"{_TS_INT_ARITH[method]}({target}, {args[0]})"
     if method in _TS_CHECKED_DIV:
         return f"{_TS_CHECKED_DIV[method]}({target}, {args[0]})"
+    if method in _TS_CHECKED_ARITH:
+        return f"{_TS_CHECKED_ARITH[method]}({target}, {args[0]})"
     # Int/Int32 width conversions (docs/arithmetic.md). Int is a bigint and
     # Int32 a number: widening is `BigInt(...)`, narrowing goes through
     # `revlI32(Number(...))`, which re-imposes the 32-bit bound and traps.
@@ -4430,6 +4432,15 @@ _TS_CHECKED_DIV = {
     "checked_mod": "revlCheckedMod",
 }
 
+# The total arithmetic forms (docs/arithmetic.md): BigInt is arbitrary
+# precision, so the value is exact and only the i64 bound check decides
+# between Ok and Err("revl: Int overflow").
+_TS_CHECKED_ARITH = {
+    "checked_add": "revlCheckedAdd",
+    "checked_sub": "revlCheckedSub",
+    "checked_mul": "revlCheckedMul",
+}
+
 # The receiver type a builtin reached through `?.` has: an `optcall` IR node
 # carries no `recv` tag (unlike a `builtin` node, which lowering annotates for
 # exactly this reason), so the one lowering that dispatches on it — `to_int`,
@@ -4577,17 +4588,47 @@ function revlCheckedMod(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | {
   return { kind: "Ok", value: ((a % m) + m) % m }
 }"""
 
+# The total arithmetic forms (docs/arithmetic.md): BigInt computes the exact
+# value, so an i64 bound check on the result is the whole overflow test.
+_REVL_CHECKED_ARITH_HELPER = """function revlCheckedAdd(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | { kind: "Err"; value: string } {
+  const r = a + b
+  if (r < REVL_I64_MIN || r > REVL_I64_MAX) return { kind: "Err", value: 'revl: Int overflow' }
+  return { kind: "Ok", value: r }
+}
+function revlCheckedSub(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | { kind: "Err"; value: string } {
+  const r = a - b
+  if (r < REVL_I64_MIN || r > REVL_I64_MAX) return { kind: "Err", value: 'revl: Int overflow' }
+  return { kind: "Ok", value: r }
+}
+function revlCheckedMul(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | { kind: "Err"; value: string } {
+  const r = a * b
+  if (r < REVL_I64_MIN || r > REVL_I64_MAX) return { kind: "Err", value: 'revl: Int overflow' }
+  return { kind: "Ok", value: r }
+}"""
+
 
 def _uses_int_arith(node) -> bool:
     """Does anything in this IR call a named integer division or modulo?
-    The total (`checked_*`) forms count too: they route through the same
-    helpers' tier (and need `revlI64` for the one overflowing quotient)."""
+    The total division (`checked_*`) forms count too: they route through the
+    same helpers' tier (and need `revlI64` for the one overflowing quotient)."""
     if isinstance(node, dict):
         if node.get("method") in _TS_INT_ARITH or node.get("method") in _TS_CHECKED_DIV:
             return True
         return any(_uses_int_arith(v) for v in node.values())
     if isinstance(node, (list, tuple)):
         return any(_uses_int_arith(v) for v in node)
+    return False
+
+
+def _uses_checked_arith(node) -> bool:
+    """Does this IR call one of the total `+`/`-`/`*` forms? They need only
+    the i64 bound constants (`_REVL_I64_HELPER`), not the division helpers."""
+    if isinstance(node, dict):
+        if node.get("method") in _TS_CHECKED_ARITH:
+            return True
+        return any(_uses_checked_arith(v) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_uses_checked_arith(v) for v in node)
     return False
 
 
@@ -4763,7 +4804,7 @@ def _revl_helpers(ir: dict) -> list[str]:
         out.extend([_REVL_EQ_HELPER, ""])
     if _uses_assert(ir):
         out.extend([_REVL_SHOW_HELPER, ""])
-    if _uses_bounded_int(ir) or _uses_int_arith(ir):
+    if _uses_bounded_int(ir) or _uses_int_arith(ir) or _uses_checked_arith(ir):
         out.extend([_REVL_I64_HELPER, ""])
     # issue #2147: the result-side coercion of a verbatim `@ts` body declared
     # `Int`. Gated by the same predicate the wrapper itself uses.
@@ -4773,6 +4814,8 @@ def _revl_helpers(ir: dict) -> list[str]:
         out.extend([_REVL_I32_HELPER, ""])
     if _uses_int_arith(ir):
         out.extend([_REVL_INT_ARITH_HELPER, ""])
+    if _uses_checked_arith(ir):
+        out.extend([_REVL_CHECKED_ARITH_HELPER, ""])
     if _uses_str_methods(ir):
         out.extend([_REVL_STR_HELPER, ""])
     if _uses_split(ir):

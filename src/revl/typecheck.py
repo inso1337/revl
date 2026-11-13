@@ -1758,12 +1758,16 @@ _BUILTIN_SIG = {
     # source reader folds a CR byte to LF and `"..."` carries no escapes, so a
     # carriage return or a NUL has no other spelling in pure revl.
     "to_char": ("Int", [], "Str"),
-    # The total, value-returning forms (docs/arithmetic.md, "Still open"):
-    # same rounding convention as their faulting counterparts, but a zero
-    # divisor yields `Err(reason)` instead of faulting — `fail` cannot serve
-    # here (it is a component construct, refused in a pure fn), so the error
-    # travels as a value. The Err payload is `Str` because it is the one
-    # type every tier can hold in a Result without new representation.
+    # The total, value-returning forms (docs/arithmetic.md, "The total
+    # arithmetic forms"): same value as their faulting counterparts where
+    # that value fits, `Err(reason)` instead of the fault otherwise — `fail`
+    # cannot serve here (it is a component construct, refused in a pure fn),
+    # so the error travels as a value. The Err payload is `Str` because it is
+    # the one type every tier can hold in a Result without new
+    # representation.
+    "checked_add": ("Int", ["Int"], "Result[Int, Str]"),
+    "checked_sub": ("Int", ["Int"], "Result[Int, Str]"),
+    "checked_mul": ("Int", ["Int"], "Result[Int, Str]"),
     "checked_div_trunc": ("Int", ["Int"], "Result[Int, Str]"),
     "checked_div_floor": ("Int", ["Int"], "Result[Int, Str]"),
     "checked_div_euclid": ("Int", ["Int"], "Result[Int, Str]"),

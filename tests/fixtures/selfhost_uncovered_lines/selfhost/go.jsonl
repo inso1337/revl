@@ -20,6 +20,8 @@
 
 ["function", "generated-python-inlines-these-tiny-rvl-helpers-into", "is_builtin_ctor", 1, 1]
 
+["function", "generated-python-inlines-these-tiny-rvl-helpers-into", "is_checked_arith", 1, 1]
+
 ["function", "generated-python-inlines-these-tiny-rvl-helpers-into", "is_checked_div", 3, 3]
 
 ["function", "generated-python-inlines-these-tiny-rvl-helpers-into", "is_eq_op", 1, 1]
@@ -33,6 +35,10 @@
 ["reason", "has-any-word-tests-the-neighbours-of-an", "`has_any_word` tests the neighbours of an `any` only when the left one is not a word character; an erased `any` is always inside brackets and a user type name that contains the letters starts with a capital, so the empty neighbour and a digit right after a non-word left neighbour do not occur."]
 
 ["function", "has-any-word-tests-the-neighbours-of-an", "is_word_char", 1, 1]
+
+["reason", "ir-text-has-key-arm-no-ir-key-spells-a-probe", "`ir_text_has`'s key arm: the reference probes `json.dumps` of the IR, keys included, so a key that contains a probe (`Opt[`, `Result[`) has to count. No IR key spells one: they are field names and declared identifiers, which hold no `[`. The arm is kept for agreement with the reference's blob probe. It used to be reached by the `checked_div_` / `checked_mod` probes, which matched the record field `checked_mod` as a key under `types` (emit_go_corpus/blob_probes.rvl) where the reference matches only `\"method\": \"<form>\"`; those probes moved to `ir_has_method`."]
+
+["function", "ir-text-has-key-arm-no-ir-key-spells-a-probe", "ir_text_has", 1, 1]
 
 ["reason", "issue-106-go-combined-path", "Issue #106, the v3 combined path (`_emit_v3_combined`), first five slices, and the issue #1834 match inference (the first typed arm, with its binding in scope, and an interface-typed temp for a scrutinee that is not a bare name). The decline checks (`combined_ok`, `component_ok`, `provide_method_ok`, `comp_expr_ok`, `comp_match_ok`) are written as one boolean per arm, so a declined document costs no branch of its own. What no carried document reaches: in `comp_expr_ok` and `comp_expr_bare`, a `var` reference (a v3 provide body spells a name as `name`); in `comp_expr_bare`, a callee-field method call and the Int negation through `revlSub` (the frontend sets no `operands` on a provide body's `-`); in `emit_module`, the fall-back to the pure path for an aliased `strings` import, a `//revl:import` or the sealed Result form; in `call_head_ok`, a method call whose callee is a field; in `comp_name_ref`, a required key referenced as a bare name; in `meta_literal`, a null in an intercept's metadata. A declined document is one the port answers with `<<UNSUPPORTED-COMPONENT:..>>` while the reference carries it, so it cannot be a byte-agreement corpus document; the decline is pinned by tests/test_selfhost_emit_go.py (the component beside a lifecycle test in test_an_observable_component_on_the_pure_path_is_named_by_the_port and test_a_witness_token_both_sides_emit_is_rejected). Issue #2494 adds the named refusal return in `comp_expr_bare` for an unpinned generic-variant construction; a provide-method document that spells one is refused by the reference, so it cannot be a byte-agreement corpus document, and the pure-tier refusal fixture reaches the pure-path twin only."]
 

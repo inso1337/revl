@@ -125,3 +125,15 @@
 ["reason", "the-remaining-loop-strips-trailing-whitespace-canonical-asse", "The remaining loop strips trailing whitespace. Canonical assembled function output ends at its last instruction; the covered empty Unit case emits nop, not trailing whitespace."]
 
 ["function", "the-remaining-loop-strips-trailing-whitespace-canonical-asse", "rstrip", 1, 1]
+
+["reason", "wasm-total-form-placement-guards", "The placement guards of the total-form port (checked_add/sub/mul). Every render narrows the scope to the field or list element it descends into, so a call's scope starts at its own pre-order position and `cdiv_id` reads its `_cdiv` id from there. The unexecuted statements are the guards for a render path that did not narrow: `cdiv_id`'s 0 and the `-unplaced` marker `render_checked_arith` names it with, `scope_at`'s and `scope_rec_field`'s answer for a key the node does not have, and `node_sig`'s `null` arm (no checked call's subtree carries a null). emit_py_corpus/checked_arith.rvl places checked calls under `return`, direct-call arguments (two identical calls in one expression), `bin` operands, a list literal, a `Some` payload and an `if` statement; the wasm reference refuses one under a `let` or a record field (its `_builtin_type` has no total-form row), so those narrowed paths run in the corpus only without a checked call beneath them."]
+
+["function", "wasm-total-form-placement-guards", "cdiv_id", 1, 1]
+
+["function", "wasm-total-form-placement-guards", "node_sig", 1, 1]
+
+["function", "wasm-total-form-placement-guards", "render_checked_arith", 1, 1]
+
+["function", "wasm-total-form-placement-guards", "scope_at", 1, 1]
+
+["function", "wasm-total-form-placement-guards", "scope_rec_field", 1, 1]
