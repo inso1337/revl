@@ -764,6 +764,34 @@ def _require_pin(truc: str, root: str, doc: str, line: int) -> None:
                  "`sourceHash` is no pin.")
 
 
+def _stdlib_row_source(path: str) -> str | None:
+    """The file a `stdlib/...` row `from` path names in the stdlib this
+    compiler ships, or `None` (issue #3483). The same search path `use` falls
+    back to, after the composition-relative file: `REVL_IMPORT_PATH` entries,
+    then the shipped stdlib's parent. Only a `stdlib/` spelling is tried, and
+    a path that climbs out of its base is not."""
+    from .compiler import _default_search_path  # noqa: PLC0415 - import cycle
+
+    if not path.startswith("stdlib/"):
+        return None
+    for base in _default_search_path():
+        candidate = os.path.abspath(os.path.join(base, path))
+        real_base = os.path.realpath(base)
+        if os.path.isfile(candidate) and os.path.commonpath(
+                [os.path.realpath(candidate), real_base]) == real_base:
+            return candidate
+    return None
+
+
+def _at(root: str, rel: str) -> str:
+    """The file a recorded row source names: under `root`, or, when no such
+    file is there, the shipped stdlib file a `stdlib/...` source stands for."""
+    path = os.path.join(root, rel)
+    if not os.path.isfile(path):
+        return _stdlib_row_source(rel) or path
+    return path
+
+
 def _resolve_row(row: RowDecl, origin: str, doc: str, base: str,
                  root: str) -> tuple[Row, _Header]:
     """One `row` declaration into one resolved `Row`, header-only.
@@ -774,7 +802,11 @@ def _resolve_row(row: RowDecl, origin: str, doc: str, base: str,
     `_check_disjoint`, and it runs ONCE, over the folded result.
     """
     source = os.path.abspath(os.path.join(base, row.path))
+    shipped = False
     if not os.path.isfile(source):
+        source = _stdlib_row_source(row.path)
+        shipped = source is not None
+    if source is None:
         raise RevlError(
             doc, row.line,
             f"row `@{row.label}` reads `{row.path}`, which does not exist",
@@ -786,7 +818,7 @@ def _resolve_row(row: RowDecl, origin: str, doc: str, base: str,
     # vendored directory is refused, so it cannot read another truc's bytes or
     # the project's own sources and launder them as its own row. Project-local
     # documents (origin `.`) are the operator's and are not jailed.
-    if origin != PROJECT_ORIGIN:
+    if origin != PROJECT_ORIGIN and not shipped:
         jail = os.path.abspath(os.path.join(root, _VENDOR_DIR, origin))
         if os.path.commonpath([source, jail]) != jail:
             raise RevlError(
@@ -802,11 +834,13 @@ def _resolve_row(row: RowDecl, origin: str, doc: str, base: str,
     # `trucs/<T>/`, that truc must carry a non-blank lock pin. A truc's own
     # internal reference (its composition reading its sibling component) needs
     # no project lock — the pin is the CONSUMING project's integrity proof (§7).
-    vendored = _vendor_truc_of(source, root)
+    vendored = None if shipped else _vendor_truc_of(source, root)
     if vendored is not None and _vendor_truc_of(base, root) != vendored:
         _require_pin(vendored, root, doc, row.line)
 
-    rel = _relative(source, root)
+    # A shipped-stdlib row records the path as written (like `use`), so the IR
+    # stays machine-independent; the compile resolves it the same way.
+    rel = row.path if shipped else _relative(source, root)
     header = _pick_component(row, _headers(source), doc, rel)
     claims, extra = _check_claims(row, header, doc, rel)
     config = _check_config(row, header, doc, rel)
@@ -897,7 +931,7 @@ def _service_catalog(paths: list[str], root: str) -> dict:
     declaration is read out of the parse tree and no body is lowered."""
     catalog: dict = {}
     for rel in dict.fromkeys(paths):
-        program = parse_file(os.path.join(root, rel))
+        program = parse_file(_at(root, rel))
         for svc in program.services:
             catalog.setdefault(svc.name, (svc, rel))
     return catalog
@@ -1114,7 +1148,7 @@ def _edge_provider(rows: list["Row"], root: str, key: str,
     `(None, None)`. Header-only, and synthesized rows (no file on disk) are
     skipped: a seam wraps a placed provider, not another synthesized one."""
     for row in rows:
-        source = os.path.join(root, row.source)
+        source = _at(root, row.source)
         if not os.path.isfile(source):
             continue
         for header in _headers(source):
@@ -1133,7 +1167,7 @@ def _observer_provision(rows: list["Row"], root: str,
     for row in rows:
         if row.label != label:
             continue
-        source = os.path.join(root, row.source)
+        source = _at(root, row.source)
         if not os.path.isfile(source):
             return None, None
         for header in _headers(source):
@@ -1223,7 +1257,7 @@ def _resolve_seams(decl: CompositionDecl, doc: str, origin: str, root: str,
     if not decl.seams:
         return sources
     file_paths = [*uses, *(r.source for r in rows
-                           if os.path.isfile(os.path.join(root, r.source)))]
+                           if os.path.isfile(_at(root, r.source)))]
     catalog = _service_catalog(file_paths, root)
     for seam in decl.seams:
         rows.append(_resolve_seam(seam, catalog, rows, decl, doc, origin, root,
@@ -1396,7 +1430,7 @@ def _slo_ceilings(rows: list["Row"], uses: list[str], sources: dict,
         text = sources.get(rel)
         try:
             program = (Parser(text, rel).parse() if text is not None
-                       else parse_file(os.path.join(root, rel)))
+                       else parse_file(_at(root, rel)))
         except RevlError:
             continue
         for svc in program.services:
@@ -2504,7 +2538,7 @@ def _row_profiles(table: RowTable, root: str,
             continue
         if _trusts(trust_host_code, row.qualified):
             continue
-        services, pairs = reach.setdefault(os.path.join(root, row.source),
+        services, pairs = reach.setdefault(_at(root, row.source),
                                            (set(), set()))
         services.update(_granted_services(row))
         pairs.update(_granted_requires(row))
@@ -2560,7 +2594,7 @@ def _admit_full(table: RowTable, root: str, **kwargs) -> dict:
     sources = dict(kwargs.pop("sources", None) or {})
     for rel, text in table.sources.items():
         sources[os.path.join(root, rel)] = text
-    document = compile_files([os.path.join(root, p) for p in table.paths()],
+    document = compile_files([_at(root, p) for p in table.paths()],
                              sources=sources or None, **kwargs)
     return _carry_rows(document, table)
 
@@ -2610,7 +2644,7 @@ def _delta_sources(rows: list[Row], final: RowTable,
             paths.append(row.source)
         text = final.sources.get(row.source)
         if text is not None:
-            synth[os.path.join(root, row.source)] = text
+            synth[_at(root, row.source)] = text
     return paths, synth
 
 
@@ -2693,7 +2727,7 @@ def admit_composition(path: str, root: str | None = None,
     if profiles is None and confine:
         profiles = _row_profiles(final, root, trust_host_code)
     document = compile_files(
-        [os.path.join(root, p) for p in paths],
+        [_at(root, p) for p in paths],
         manifest=base_doc, replacing=replacing,
         sources=extra or None, profiles=profiles, **kwargs)
     return _carry_rows(document, final)

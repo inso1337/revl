@@ -618,3 +618,60 @@ def test_the_formatter_keeps_a_row_label_tight(tmp_path):
     doc.write_text(formatted)
     assert resolve_file(str(doc), str(tmp_path)).to_ir() == before
     assert format_source(formatted, str(doc)) == formatted, "idempotent"
+
+
+# ------------------------------------------- a row `from` names a shipped stdlib
+
+STDLIB_SOCKET = """
+composition Web {
+  row @wire from "stdlib/socket.rvl" provides wire
+    config { address: "127.0.0.1", port: 8080, origins: ["http://localhost"] }
+}
+"""
+
+
+def test_row_from_stdlib_resolves_against_the_shipped_stdlib(tmp_path):
+    """Issue #3483: `row ... from "stdlib/socket.rvl"` resolves the way
+    `use "stdlib/..."` does, against the stdlib the compiler ships."""
+    doc = tmp_path / "web.rvl"
+    doc.write_text(STDLIB_SOCKET)
+    table = resolve_file(str(doc), str(tmp_path))
+    (row,) = table.rows
+    assert row.component == "SocketWire"
+    assert row.config["port"] == 8080
+    # the recorded source is the path as written, not a machine path
+    assert row.source == "stdlib/socket.rvl"
+
+
+def test_row_from_stdlib_composition_compiles(tmp_path):
+    doc = tmp_path / "web.rvl"
+    doc.write_text(STDLIB_SOCKET)
+    document = compile_composition(str(doc), str(tmp_path))
+    assert document is not None
+
+
+def test_row_from_a_missing_stdlib_path_keeps_the_old_refusal(tmp_path):
+    doc = tmp_path / "web.rvl"
+    doc.write_text(STDLIB_SOCKET.replace("socket.rvl", "nope.rvl"))
+    with pytest.raises(RevlError) as caught:
+        resolve_file(str(doc), str(tmp_path))
+    assert "row `@wire` reads `stdlib/nope.rvl`, which does not exist" \
+        in str(caught.value)
+
+
+def test_row_from_a_local_file_named_like_a_stdlib_path_wins(tmp_path):
+    """Same precedence as `use`: the importer-relative file wins over the
+    shipped stdlib."""
+    (tmp_path / "stdlib").mkdir()
+    (tmp_path / "stdlib" / "socket.rvl").write_text(DB)
+    (tmp_path / "services.rvl").write_text(SERVICES)
+    doc = tmp_path / "web.rvl"
+    doc.write_text("""
+composition Web {
+  use "services.rvl"
+  row @db from "stdlib/socket.rvl" provides db
+    config { url: "x" }
+}
+""")
+    table = resolve_file(str(doc), str(tmp_path))
+    assert table.rows[0].component == "PgDatabase"
