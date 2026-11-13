@@ -360,6 +360,60 @@ A diagnostic is itself a deliverable ([DESIGN.md](DESIGN.md) §9): it must name
 its guarantee and state the fix, and it is written for the model that will read
 it. A rejection whose message is a bare "error" is not done.
 
+## Behaviour claims
+
+A comment or doc sentence that states what the code DOES ("this path reads no
+bytes after the first digest", "state crosses only through the handoff") can
+outlive the code it describes, because nothing connects the sentence to the
+artifact that makes it true. When the sentence is worth keeping honest, name
+the claim in a comment at the sentence:
+
+```text
+// revl:claim <id>              a .rvl line comment
+<!-- revl:claim <id> -->        a Markdown HTML comment
+```
+
+and register the id in `claims.toml` at the repository root:
+
+```toml
+[claims]
+json-canonical-bytes = "test:tests/test_json_cross_tier_bytes.py"
+```
+
+A witness is one of `test:<path>` (a test file), `test:<path>::<test>` (one
+pytest function, or one parameter by its real pytest id, such as
+`test_rejection[g4_emission_widens_declared_capability.rvl]`), `docgen:<block>`
+(a generated block in `tools/docgen.py`) or `claim:<id>` (another claim, which
+is how a doc can rest on the same evidence as the code). `python3
+tools/check_claims.py --check` reports a named failure for an annotation with
+no id, an unknown id, a witness that was deleted or renamed, and a `.rvl` claim
+whose test witness the affected selection would not run when that file changes.
+`--list` prints every annotation beside its witness, and `--self-test` plants
+each failure in a synthetic tree. Claims are optional: a comment without an
+annotation is unaffected.
+
+The check reads the test file instead of collecting it, so the lint job needs
+no pytest, and it fails closed: every decorator on the witness test and its
+class, and every `pytestmark`, must be a mark spelled literally
+`pytest.mark.<name>`, and any other spelling (an alias, a mark stored in a
+variable) refuses the witness. A witness in a file pytest does not collect (not
+`test_*.py` or `*_test.py`), a test marked `pytest.mark.skip` or
+`pytest.mark.xfail(run=False)`, and a parameter id the function's own
+`@pytest.mark.parametrize` does not produce are refused. Parameter
+ids are read from the call, so give it `ids=` when the default ids are long or
+not plain text; a shape whose ids cannot be read exactly is refused, and naming
+the function without the parameter always works. A `skipif` is not decided
+(its condition runs only under pytest). Not detected either: a `pytest.skip()`
+call in the test body, a skip from a fixture (through `usefixtures` or an
+autouse fixture), and a conftest `pytest_collection_modifyitems` that adds a
+skip. A witness class must inherit from nothing, `object` or
+`unittest.TestCase`, since a base class can carry marks. A `.rvl` claim under `examples/` gets a
+FULL affected selection, so the selection half is satisfied by the full run.
+
+The gate can prove the witness exists and runs. It cannot prove the sentence
+states what the code does: a passing test can be weaker than the comment. Keep
+the witness beside the sentence and review the sentence itself.
+
 ## Pull request descriptions
 
 Describe validation precisely:

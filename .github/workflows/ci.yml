@@ -634,6 +634,19 @@ jobs:
       # make a red line pass: fix the document, or soften the claim.
       - run: python3 tools/check_vision_claims.py --self-test
       - run: python3 tools/check_vision_claims.py --check
+      # issue #2846: a behaviour claim in a `.rvl` comment or a Markdown doc is
+      # tied to a witness in `claims.toml` (a test, a generated docgen block or
+      # another claim). An unknown id, a deleted or renamed witness and a
+      # `.rvl` claim whose test witness the affected selection would not run
+      # are named failures. The selection half imports `tools/affected_tests.py`
+      # but no `revl` install: this job has neither a compiler nor a toolchain,
+      # and the parser it reads is loaded from `src/revl/claims.py` by path.
+      #
+      # The self-test runs FIRST and plants each named failure in a synthetic
+      # tree, so a check that stopped firing is a red here rather than a green
+      # line that judged nothing. Never add `|| true`.
+      - run: python3 tools/check_claims.py --self-test
+      - run: python3 tools/check_claims.py --check
 
   # issue #2333: the guards below need no `revl` install, toolchain or
   # network: they read tracked repository text (the workflow, tests/ and

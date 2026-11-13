@@ -48,6 +48,7 @@
 //
 // ── CANONICAL FORM: json_stringify is byte-identical across tiers (item 385) ──
 //
+// revl:claim json-canonical-bytes
 // json_stringify is a `pure` fn, so revl's cross-tier determinism guarantee
 // (docs/syntax-2.0.md §3.4: "no backend can diverge") requires the SAME BYTES
 // on every tier for the same value. It once did not: py emitted

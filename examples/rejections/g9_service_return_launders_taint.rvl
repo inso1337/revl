@@ -1,4 +1,5 @@
 // REJECTED — G9: a declared `Untrusted[T]` return carries taint across a
+// revl:claim g9-service-return-launders-refused
 // component boundary even when the unit that provides the operation is not
 // present.
 //
