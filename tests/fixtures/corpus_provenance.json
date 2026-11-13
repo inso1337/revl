@@ -1305,6 +1305,8 @@
    "admission:near_miss_dunder_implemented_method",
    "admission:near_miss_dunder_service_method",
    "backends/wasm/host/demo.rvl",
+   "demo/injection/pay_from_book.rvl",
+   "demo/injection/pay_from_mail.rvl",
    "examples/app/private_notes.rvl",
    "examples/rejections/a5_compensatable_without_compensate.rvl",
    "examples/rejections/a5_no_inverse_declares_compensate.rvl",
