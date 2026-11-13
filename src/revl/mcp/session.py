@@ -855,9 +855,16 @@ def _activation_error():
 def _component_config(ir: dict, config: dict, name: str) -> dict:
     """`run.component_config`: a component's composition row config under the
     host-supplied table (issue #3484)."""
-    from ..run import component_config  # noqa: PLC0415 — lazy: run imports cordis
+    from ..run import component_config  # noqa: PLC0415 (lazy: run imports cordis)
 
     return component_config(ir or {}, config, name)
+
+
+def _configure_rows_from_host(ir: dict, config: dict | None) -> dict:
+    """`composition.configure_rows_from_host` (issue #3484)."""
+    from ..composition import configure_rows_from_host  # noqa: PLC0415
+
+    return configure_rows_from_host(ir, config)
 
 
 def _capturing_driver_class():
@@ -1638,6 +1645,10 @@ class Session:
                 f"implementation, so it may never enter a running composition; "
                 f"`revl_check` lists them (docs/holes.md)")
         self._enforce_environment_contract(ir, config)
+        # issue #3484: a host table for a row's component is a value change to
+        # that row (426 §3.1 level 3), typed and recorded in the rows IR, so
+        # what the manifest and the audit report is what runs
+        ir = _configure_rows_from_host(ir, config)
         self._enforce_sandbox(ir)
         self._enforce_evidence(ir)
         # item 246, Slice 2: the policy-owned `requires approval` gate. A component
@@ -2258,6 +2269,7 @@ class Session:
         self._refuse_if_halted("swap")   # item 443
         checkpoint = _LoadCheckpoint(self)
         try:
+            ir = _configure_rows_from_host(ir, self.config)
             plan = self._plan_swap(driver, ir, migrate, agent_authored)
         except BaseException as exc:
             checkpoint.restore(self)

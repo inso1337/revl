@@ -208,10 +208,20 @@ def component_config(ir: dict, config: dict, name: str) -> dict:
     row's, field by field. An IR with no rows carries no row config, so a plain
     module compile starts exactly as before."""
     supplied = config.get(name) or {}
-    seeded: dict = {}
-    for row in (ir.get("rows") or {}).get("rows") or []:
-        if row.get("component") == name and row.get("config"):
-            seeded.update(row["config"])
+    rows = [row for row in (ir.get("rows") or {}).get("rows") or []
+            if row.get("component") == name]
+    if len(rows) > 1:
+        # the runtime keys a component by name, so two rows placing one
+        # component cannot each start with their own values; never blend them
+        labels = ", ".join(f"`{row.get('qualified') or row.get('label')}`"
+                           for row in rows)
+        raise RevlError(
+            "<composition>", 0,
+            f"component `{name}` is placed by {len(rows)} rows ({labels}), so "
+            "it has no one row config to start with",
+            hint="place a component by one row; the runtime starts one "
+                 "instance per component name")
+    seeded = (rows[0].get("config") or {}) if rows else {}
     if not seeded:
         return supplied
     return {**seeded, **supplied}
