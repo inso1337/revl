@@ -75,15 +75,15 @@ layer Tune for Demo { configure @db with { pool: 32 } }
 
 
 def _project(tmp_path: Path, stack: bool = False) -> Path:
-    (tmp_path / "services.rvl").write_text(SERVICES)
-    (tmp_path / "sqlite.rvl").write_text(SQLITE)
+    (tmp_path / "services.rvl").write_text(SERVICES, encoding="utf-8")
+    (tmp_path / "sqlite.rvl").write_text(SQLITE, encoding="utf-8")
     clauses = ""
     if stack:
         (tmp_path / "layers").mkdir()
-        (tmp_path / "layers" / "tune.rvl").write_text(TUNE)
+        (tmp_path / "layers" / "tune.rvl").write_text(TUNE, encoding="utf-8")
         clauses = '  stack "layers/tune.rvl"\n'
     doc = tmp_path / "base.rvl"
-    doc.write_text(BASE % clauses)
+    doc.write_text(BASE % clauses, encoding="utf-8")
     return doc
 
 
@@ -171,7 +171,7 @@ def test_an_applied_plan_reloads_the_component_with_its_row_config(tmp_path):
     from revl.plan import plan
     session = _started(tmp_path)
     try:
-        (tmp_path / "sqlite_v2.rvl").write_text(SQLITE_V2)
+        (tmp_path / "sqlite_v2.rvl").write_text(SQLITE_V2, encoding="utf-8")
         result = plan(files=[str(tmp_path / "sqlite_v2.rvl")],
                       manifest=session.ir, include_ir=True)
         report = session.apply(build_artifact(result, session.ir))
@@ -186,7 +186,7 @@ def _swap_to_second(session, tmp_path: Path) -> None:
     second = tmp_path / "second"
     second.mkdir()
     doc = _project(second)
-    doc.write_text(doc.read_text().replace("sqlite://row", "sqlite://two"))
+    doc.write_text(doc.read_text(encoding="utf-8").replace("sqlite://row", "sqlite://two"))
     session.swap(admit_composition(str(doc), str(second)), agent_authored=False)
 
 
