@@ -4,7 +4,7 @@ title: "Branching Agent Sessions With Rewound Side Effects: Scope-Gated Rewind a
 theme: effects-replay
 kind: full
 maturity: partial
-status: A serial, single-workspace fork with offline lineage tooling is shipped on the Python runtime with unit and integration tests; parallel copy-on-write branches, live branch re-execution and the language fork form are not built, and no evaluation exists yet.
+status: A serial, single-workspace fork with offline lineage tooling is shipped on the Python runtime with unit and integration tests; parallel copy-on-write branches, live branch re-execution and the language fork form are not built, and no fork evaluation exists; the committed AgentDojo pilot exercises the admitted-turn path, not branching.
 fused_with: P18, P19, P20
 ---
 
@@ -72,7 +72,7 @@ We do not claim a general time machine. The shipped primitive is serial (one liv
 - 17 tests in `tests/test_session_fork.py`, 32 in `tests/test_250_branch_slice2.py`, 17 in `tests/test_250_model_decision_wal.py`, 13 in `tests/test_250_replay_modes.py` (counted by `rg -c "^def test"` on the tree; not run for this draft).
 - Seven logged step kinds in the partition (`docs/design/250-session-branching.md:275-282`).
 - Four findings from the adversarial review of the first draft: one critical, two high, one medium (`docs/design/250-session-branching.md:14-17`).
-- No latency, size or fork-cost numbers exist. No user study. No agent-benchmark result using forks.
+- No latency, size or fork-cost numbers exist. No user study. No agent-benchmark result using forks. The AgentDojo pilot in `bench/results/agentdojo/pilot-banking/` exercises admission only, not branching.
 
 ## Paper outline
 
