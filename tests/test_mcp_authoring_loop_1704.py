@@ -29,7 +29,7 @@ from revl.mcp import authoring_loop  # noqa: E402
 from revl.mcp import server as server_mod  # noqa: E402
 from revl.mcp.server import handle  # noqa: E402
 
-LOOP_VERBS = ["revl_resolve", "revl_scaffold", "revl_edit",
+LOOP_VERBS = ["revl_resolve", "revl_context", "revl_scaffold", "revl_edit",
               "revl_query_withdraw", "revl_check", "revl_admit"]
 
 #: Mem provides `store`; Web injects it and provides `front`; Client injects
@@ -73,7 +73,8 @@ def _call(tool: str, arguments: dict) -> dict:
 def test_the_instructions_name_the_loop_in_order():
     text = handle({"jsonrpc": "2.0", "id": 1,
                    "method": "initialize"})["result"]["instructions"]
-    steps = ["reuse", "scaffold", "fill", "preflight", "check", "commit"]
+    steps = ["reuse", "ground", "scaffold", "fill", "preflight", "check",
+             "commit"]
     positions = [text.index(f"{i}. {step} with {verb}")
                  for i, (step, verb) in enumerate(zip(steps, LOOP_VERBS), 1)]
     assert positions == sorted(positions), text

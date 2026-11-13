@@ -17,26 +17,30 @@ verbs and `tools/call` invokes one.
 
 The server's `initialize` instructions name the loop an agent should take, in
 order, and each verb on it opens its description with "Authoring loop step N of
-6" (issue #1704; the text lives in `src/revl/mcp/authoring_loop.py`):
+7" (issue #1704; the text lives in `src/revl/mcp/authoring_loop.py`):
 
 1. **reuse:** `revl_resolve` returns an existing component with its source and
    manifest, so nothing is generated.
-2. **scaffold:** `revl_scaffold` returns a typed skeleton whose unknowns are
+2. **ground:** `revl_context` returns the declarations the new component
+   compiles against, ending with a compiled illustration of how a provider
+   body is written, instead of the whole composition. Promoted on a
+   rounds-to-green run ([context.md](context.md)).
+3. **scaffold:** `revl_scaffold` returns a typed skeleton whose unknowns are
    `hole[T]`, each with a fillSpec.
-3. **fill:** one hole at a time from its fillSpec. Write the expression into the
+4. **fill:** one hole at a time from its fillSpec. Write the expression into the
    draft and re-run `revl_check`, or send `revl_edit {hole, expr}` once the
    composition is running.
-4. **preflight:** `revl_query_withdraw` gives the exact blast radius of replacing
+5. **preflight:** `revl_query_withdraw` gives the exact blast radius of replacing
    or removing a component. `revl_edit`, `revl_swap` and `revl_change` return
    it in `blastRadius` for the components they touch, and `revl_plan` shows
    what a swap would do. For the test impact of changed repository files, pass
    their paths to `revl_affected_tests`; it returns the same selection as the
    pre-merge selector, including `FULL` and a reason when it cannot narrow.
-5. **check:** `revl_check` returns `selfCheck`, every guarantee G1-G9 as pass or
+6. **check:** `revl_check` returns `selfCheck`, every guarantee G1-G9 as pass or
    fail with the code and the fix. Called with no candidate it checks the
-   composition the session holds, so the loop can verify what steps 1-4 built
+   composition the session holds, so the loop can verify what steps 1-5 built
    without re-sending it.
-6. **commit:** `revl_admit` against the running manifest, then `revl_swap`.
+7. **commit:** `revl_admit` against the running manifest, then `revl_swap`.
    `revl_edit` re-admits and swaps on its own. On a cold start, use `revl_load`.
 
 Between steps, `revl_brief` answers where the loop stands and what to call next
@@ -433,7 +437,7 @@ or not an approval policy is on.
 ## Find a verb
 
 `tools/list` advertises the core tier by default (issue #1697): the authoring
-loop `initialize` describes (`revl_resolve`, `revl_scaffold`, `revl_edit`,
+loop `initialize` describes (`revl_resolve`, `revl_context`, `revl_scaffold`, `revl_edit`,
 `revl_query_withdraw`, `revl_check`, `revl_admit`, `revl_plan` before a swap,
 and `revl_explain` for a diagnostic code), the verbs that run it (`revl_load`, `revl_call`, `revl_swap`),
 `revl_export` (the verb that writes the held source out, promoted on measurement
@@ -595,8 +599,8 @@ answer is the same substance the supplied form returns, plus
 `checked: "session"`: `selfCheck`, `holes` (with their fillSpecs), `boundary`,
 `admissible`, `effectClasses`. Nothing is replaced, and no `canonicalSource` is
 reported: nothing was sent, so `returnCanonical` has nothing to return, exactly
-as for the bare `revl_swap {}`. This is what step 5 of the
-authoring loop calls: the loop's steps 1-4 mutate the held set, so checking a
+as for the bare `revl_swap {}`. This is what step 6 of the
+authoring loop calls: the loop's steps 1-5 mutate the held set, so checking a
 supplied source would mean re-sending the whole file, which the scaffold tells
 you not to do. `modules` alone is not a candidate: they are a `source`/`files`
 candidate's `use` imports.
@@ -900,11 +904,13 @@ component whose body does not check yet still grounds; a parse error is the
 usual structured refusal.
 
 - Inputs: `source` / `files` / `modules`; `component` (default: every declared
-  service); `budget` (a token ceiling: docs off, then collapse, from the last
-  service backwards, and never a dropped name). With neither `source` nor
+  service); `idioms` (default true with a `component`: the pack ends with a
+  compiled illustration of how a provider body is written; `false` leaves it
+  out); `budget` (a token ceiling: docs off, then the illustration, then
+  collapse, from the last service backwards, and never a dropped name). With neither `source` nor
   `files` it reads the session's held working set and answers
   `grounded: "session"`.
-- Answer: `{ok, component, header, services, pack, tokens, budget}`. Each
+- Answer: `{ok, component, header, services, pack, tokens, budget, idioms}`. Each
   `services` row carries `role` (`provides`, `requires` or `declared`),
   `key`, `service`, `providers`, `module`, `line`, `hash`, `clause`, `use`,
   `operations` and `text`. `hash` is over the lexed tokens, so it ignores

@@ -134,6 +134,9 @@ BENCH_DEPENDENT_TESTS = (
     # Issue #1462: runs `bench/structured_output_bench.py` against a fake
     # server.
     "tests/test_constrained_decoding_1462.py",
+    # docs/context.md: loads `bench/context_arm.py` by path and grades its
+    # task set, `bench/context_tasks.json`, against the compiler.
+    "tests/test_context_arm.py",
     # Issue #2709, second slice: loads `bench/cross_tier_kernels/harness.py`,
     # emits its kernels and pins the checksums the cross-tier table gates on.
     "tests/test_cross_tier_kernels_2709.py",

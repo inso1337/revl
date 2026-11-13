@@ -25,8 +25,12 @@ LOOP = (
     ("reuse", "revl_resolve",
      "ask for an existing component that already provides the service; it "
      "returns source and manifest, so nothing is generated"),
+    ("ground", "revl_context",
+     "otherwise read the declarations the new component compiles against, "
+     "with an illustration of how a provider body is written, instead of the "
+     "whole composition"),
     ("scaffold", "revl_scaffold",
-     "otherwise start from a typed skeleton whose unknowns are hole[T], each "
+     "then start from a typed skeleton whose unknowns are hole[T], each "
      "with a fillSpec"),
     ("fill", "revl_edit",
      "fill one hole at a time from its fillSpec: write the expression into "

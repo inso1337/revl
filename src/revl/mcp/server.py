@@ -4495,8 +4495,8 @@ def _tool_check(arguments: dict) -> dict:
 
     With no candidate of its own — the bare `revl_check {}`, or the explicit
     `{"session": true}` — it checks the composition the SESSION holds instead
-    (issue #2117). Steps 1-4 of the authoring loop mutate that working set, so
-    step 5 of 6 can verify the loop's own artifact without re-sending it: the
+    (issue #2117). The authoring loop's earlier steps build that working set, so
+    step 6 of 7 can verify the loop's own artifact without re-sending it: the
     name and the loop position already imply the bare call, and `revl_swap {}`
     and `revl_source {}` read the same set.
 

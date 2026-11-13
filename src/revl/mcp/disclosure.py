@@ -24,7 +24,9 @@ belongs: a model reaches a verb it is shown without being told the hatch, and
 the prompt that taught the hatch cost more than the schema it saved. Issue #2625
 measured that for `revl_export`: one extra tool is about 235 schema tokens and
 14,946 fewer input tokens per task over eight reps, so the verb is a `CORE`
-member. `CORE` is fifteen verbs because of it.
+member. `revl_context` joined on a measurement too: the rounds-to-green run in
+docs/context.md, where the pack as shipped lost no rounds and read about half
+the input tokens. `CORE` is sixteen verbs because of the two.
 
 A client that wants the whole list says so when the server starts:
 `revl mcp serve --all-tools`, or `REVL_MCP_ALL_TOOLS=1` in its environment.
@@ -44,8 +46,10 @@ DISCOVERY = "revl_verbs"
 #: here (tests/test_mcp_tiered_tools_1697.py holds the two together):
 #:
 #: * the authoring loop `initialize` names (#1704), in its order: reuse
-#:   (resolve), scaffold, fill (edit), withdraw-safety (query_withdraw), check,
-#:   admit, plan before a swap, and explain a diagnostic code;
+#:   (resolve), ground (context, promoted on the rounds-to-green run in
+#:   docs/context.md), scaffold, fill (edit), withdraw-safety
+#:   (query_withdraw), check, admit, plan before a swap, and explain a
+#:   diagnostic code;
 #: * running it: load, call, swap;
 #: * `revl_source` and `revl_change`, listed once they exist (#1741's stack);
 #:   a name with no verb behind it is skipped, not listed;
@@ -58,7 +62,7 @@ DISCOVERY = "revl_verbs"
 #: tier is capped, and the refusal that mints a repair names the call in `next`
 #: (`{"tool": "revl_apply_repair", "arguments": {"repairId": ...}}`), so the
 #: caller that needs it is the one that was told it exists.
-CORE = ("revl_resolve", "revl_scaffold", "revl_edit", "revl_query_withdraw",
+CORE = ("revl_resolve", "revl_context", "revl_scaffold", "revl_edit", "revl_query_withdraw",
         "revl_check", "revl_admit", "revl_plan", "revl_explain",
         "revl_load", "revl_call", "revl_swap",
         "revl_source", "revl_change", "revl_export",
@@ -163,8 +167,8 @@ def listed(advertised: list) -> list:
     The tiered list is exactly `CORE`, and stays exactly `CORE`: the hatch
     (#2073) is a second form of `revl_verbs`, which is already in the tier, so
     every verb outside it is one listed tool away. A verb joins `CORE` only on a
-    measured product decision, as `revl_export` did (#2625); a convenience is
-    the hatch's job."""
+    measured product decision, as `revl_export` (#2625) and `revl_context`
+    (docs/context.md) did; a convenience is the hatch's job."""
     return list(advertised) if _ALL_TOOLS else core(advertised)
 
 
