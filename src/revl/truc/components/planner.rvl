@@ -13,13 +13,25 @@ use "../externs.rvl" { json_parse, json_stringify, sha256_hex, host_wiring }
 
 // ---- shapes crossing in ----
 
-type Truc      = { name: Str, registry: Str }
+// `grant` is the `requires` keys the row's `[trucs]` entry allows, the same
+// vocabulary `apply`'s grant uses. A missing entry or a missing key parses as
+// [] — fail-closed: a vendored row's reach is bounded to what the operator
+// granted it, and an entry that grants nothing admits nothing that requires a
+// service (issue #2635).
+type Truc      = { name: Str, registry: Str, grant: List[Str] }
 type Manifest  = { name: Str, registry: Str, entry: List[Str], trucs: List[Truc] }
-type Spec      = { entry: List[Str], trucs: List[Str] }
+// `skip_missing` lets `add` gather the rows that are actually vendored: an
+// operator declares the `[trucs]` entry (with its grant) before the first add,
+// so at add time a declared sibling may have no vendored file yet. Every other
+// verb reads every declared row and refuses a missing one by name.
+type Spec      = { entry: List[Str], trucs: List[Str], skip_missing: Bool }
 type EntryFile = { path: Str, source: Str }
 type Vendored  = { name: Str, path: Str, source: Str }
 type Gathered  = { entry: List[EntryFile], vendored: List[Vendored] }
-type Ordered   = { path: Str, source: Str, name: Str }
+// `grant` rides the ordered row so the admission gate bounds THIS row: the
+// rows of one assembly carry different grants, so one shared allowlist would
+// let one row borrow another's reach.
+type Ordered   = { path: Str, source: Str, name: Str, grant: List[Str] }
 type LockRow   = { name: Str, sourceHash: Str }
 type LockFile  = { trucs: List[LockRow] }
 // `dossier` is absent (None) when the entry does not ship one. The commit plan
@@ -51,12 +63,15 @@ type Wiring  = { provided: List[Str], needs: List[Need] }
 type Report   = { code: Int, message: Str, sources: Str, commit: Str }
 // `admission` is how the gate admitted the row: "profiled", or
 // "trusted-host-code" when only --trust-host-code admitted its host code.
+// `grant` is the reach bound the row was admitted under: the `requires` keys
+// its `[trucs]` entry declared, recorded in truc.lock so the bound `add`
+// applied is reviewable and `assemble` re-applies the same one (issue #2635).
 // The three hashes are the hashes of the entry text `truc add` read and checked,
 // the bytes `commit_add` must find when it vendors them. `component.rvl` is
 // also the text the gate admits; `manifest.json`/`dossier.json` are pinned but
 // never enter the gate. A file the entry does not ship is carried as "" and
 // asserted absent.
-type LockAdd  = { name: Str, registry: Str, admission: Str,
+type LockAdd  = { name: Str, registry: Str, admission: Str, grant: List[Str],
                   sourceHash: Str, manifestHash: Str, dossierHash: Str }
 type Commit   = { lockAdd: LockAdd }
 type RmCommit = { name: Str }
@@ -79,7 +94,28 @@ fn plan_assemble_spec(mj: Str) -> Str {
     names = names.push(t.name)
   }
   let fixed = names
-  let s: Spec = { entry: m.entry, trucs: fixed }
+  let s: Spec = { entry: m.entry, trucs: fixed, skip_missing: false }
+  return json_stringify(s)
+}
+
+// What `read_sources` must gather for an `add`: every vendored truc EXCEPT the
+// candidate. The candidate is admitted from the fetched entry appended by
+// `ordered_with_candidate`, and its `[trucs]` entry may already be declared
+// (that is where its grant lives) while nothing is vendored under `trucs/`
+// yet — so including it here would ask for a file the add has not written.
+// Siblings declared ahead of their own add are skipped for the same reason
+// (`skip_missing`): without that, declaring two grants before adding either
+// would make each add refuse the other and no order would work.
+fn plan_add_spec(mj: Str, name: Str) -> Str {
+  let m: Manifest = json_parse(mj)
+  var names: List[Str] = []
+  for (t of m.trucs) {
+    if (t.name != name) {
+      names = names.push(t.name)
+    }
+  }
+  let fixed = names
+  let s: Spec = { entry: m.entry, trucs: fixed, skip_missing: true }
   return json_stringify(s)
 }
 
@@ -96,7 +132,7 @@ fn plan_rm_spec(mj: Str, name: Str) -> Str {
     }
   }
   let fixed = names
-  let s: Spec = { entry: m.entry, trucs: fixed }
+  let s: Spec = { entry: m.entry, trucs: fixed, skip_missing: false }
   return json_stringify(s)
 }
 
@@ -112,18 +148,33 @@ fn manifest_has(mj: Str, name: Str) -> Bool {
   return false
 }
 
-// The ordered [{path, source, name}] the gate admits incrementally: the
+// The `requires` keys a `[trucs]` entry grants one row. A truc the table does
+// not name, or names without a `grant`, grants nothing: the bound is
+// fail-closed, so a requiring row that arrives without a declaration is
+// refused rather than admitted unbounded (issue #2635).
+fn grant_of(m: Manifest, name: Str) -> List[Str] {
+  for (t of m.trucs) {
+    if (t.name == name) {
+      return t.grant
+    }
+  }
+  return []
+}
+
+// The ordered [{path, source, name, grant}] the gate admits incrementally: the
 // project's own entry files first (they set the running composition), then
-// every vendored truc in truc.toml order. A refusal names the first candidate
-// that would not join (G2/G3/G4).
-fn plan_ordered_sources(gj: Str) -> Str {
+// every vendored truc in truc.toml order, each carrying its own reach grant. A
+// refusal names the first candidate that would not join (G2/G3/G4).
+fn plan_ordered_sources(gj: Str, mj: Str) -> Str {
   let g: Gathered = json_parse(gj)
+  let m: Manifest = json_parse(mj)
   var out: List[Ordered] = []
   for (e of g.entry) {
-    out = out.push({ path: e.path, source: e.source, name: "" })
+    out = out.push({ path: e.path, source: e.source, name: "", grant: [] })
   }
   for (v of g.vendored) {
-    out = out.push({ path: v.path, source: v.source, name: v.name })
+    out = out.push({ path: v.path, source: v.source, name: v.name,
+                     grant: grant_of(m, v.name) })
   }
   let fixed = out
   return json_stringify(fixed)
@@ -131,19 +182,23 @@ fn plan_ordered_sources(gj: Str) -> Str {
 
 // Same, plus the fetched candidate appended last (a virtual path — it is not
 // on disk yet): `add` admits the candidate against the current assembly
-// *before* anything is vendored (§8.1).
-fn plan_ordered_with_candidate(gj: Str, name: Str, entryJson: Str) -> Str {
+// *before* anything is vendored (§8.1). The candidate's grant comes from the
+// `[trucs]` entry the operator declared for it; without one it grants nothing.
+fn plan_ordered_with_candidate(gj: Str, mj: Str, name: Str, entryJson: Str) -> Str {
   let g: Gathered = json_parse(gj)
+  let m: Manifest = json_parse(mj)
   let e: Entry = json_parse(entryJson)
   var out: List[Ordered] = []
   for (ef of g.entry) {
-    out = out.push({ path: ef.path, source: ef.source, name: "" })
+    out = out.push({ path: ef.path, source: ef.source, name: "", grant: [] })
   }
   for (v of g.vendored) {
-    out = out.push({ path: v.path, source: v.source, name: v.name })
+    out = out.push({ path: v.path, source: v.source, name: v.name,
+                     grant: grant_of(m, v.name) })
   }
   let candPath = "/__truc_candidate__/".concat(name).concat("/component.rvl")
-  out = out.push({ path: candPath, source: e.source, name: name })
+  out = out.push({ path: candPath, source: e.source, name: name,
+                   grant: grant_of(m, name) })
   let fixed = out
   return json_stringify(fixed)
 }
@@ -247,21 +302,25 @@ fn plan_assemble_report(dj: Str, vj: Str, gj: Str) -> Str {
 // `entryJson` the planner checked against the index and read for admission (its
 // `component.rvl` is the gate's candidate), so `commit_add` can refuse any
 // registry read that no longer matches what was checked, including an entry
-// and its index row replaced together.
-fn build_commit(name: Str, admission: Str, sourceHash: Str, manifestHash: Str,
-                dossierHash: Str) -> Str {
+// and its index row replaced together. `grant` is the reach the gate admitted
+// this candidate under, recorded so the lock shows the bound.
+fn build_commit(name: Str, admission: Str, grant: List[Str], sourceHash: Str,
+                manifestHash: Str, dossierHash: Str) -> Str {
   let c: Commit = { lockAdd: { name: name, registry: "local", admission: admission,
-                               sourceHash: sourceHash, manifestHash: manifestHash,
+                               grant: grant, sourceHash: sourceHash,
+                               manifestHash: manifestHash,
                                dossierHash: dossierHash } }
   return json_stringify(c)
 }
 
 // add: unknown-name / hash-mismatch / admission are all refusals *before*
 // anything is vendored (commit "" = nothing written).
-fn plan_add_report(rowJson: Str, name: Str, entryJson: Str, vj: Str) -> Str {
+fn plan_add_report(mj: Str, rowJson: Str, name: Str, entryJson: Str, vj: Str) -> Str {
   if (rowJson == "") {
     return report(1, `truc: refused — unknown component "${name}" (not in the registry index)`, "", "")
   }
+  let m: Manifest = json_parse(mj)
+  let granted = grant_of(m, name)
   let row: IndexRow = json_parse(rowJson)
   let e: Entry = json_parse(entryJson)
   let actual = sha256_hex(e.source)
@@ -279,9 +338,9 @@ fn plan_add_report(rowJson: Str, name: Str, entryJson: Str, vj: Str) -> Str {
 `.concat(v.diagnostic), "", "")
   }
   if (list_has(v.trusted, name)) {
-    return report(0, `truc: added "${name}" — admitted with its host code trusted by --trust-host-code, vendored into trucs/, pinned in truc.lock (which records the trust)`, "", build_commit(name, "trusted-host-code", actual, manifestHash, dossierHash))
+    return report(0, `truc: added "${name}" — admitted with its host code trusted by --trust-host-code, reach bounded by its [trucs] grant, vendored into trucs/, pinned in truc.lock (which records the trust)`, "", build_commit(name, "trusted-host-code", granted, actual, manifestHash, dossierHash))
   }
-  return report(0, `truc: added "${name}" — admitted as an untrusted author, vendored into trucs/, pinned in truc.lock`, "", build_commit(name, "profiled", actual, manifestHash, dossierHash))
+  return report(0, `truc: added "${name}" — admitted as an untrusted author, reach bounded by its [trucs] grant, vendored into trucs/, pinned in truc.lock`, "", build_commit(name, "profiled", granted, actual, manifestHash, dossierHash))
 }
 
 // ---- rm: does the remainder still satisfy every requirement? (§8.1) ----
@@ -397,14 +456,15 @@ fn plan_report_commit(rj: Str) -> Str {
 pub service Plan {
   fn registry_of(mj: Str) -> Str
   fn assemble_spec(mj: Str) -> Str
+  fn add_spec(mj: Str, name: Str) -> Str
   fn rm_spec(mj: Str, name: Str) -> Str
-  fn ordered_sources(gj: Str) -> Str
-  fn ordered_with_candidate(gj: Str, name: Str, entryJson: Str) -> Str
+  fn ordered_sources(gj: Str, mj: Str) -> Str
+  fn ordered_with_candidate(gj: Str, mj: Str, name: Str, entryJson: Str) -> Str
   fn drift(lockJson: Str, gj: Str) -> Str
   fn assemble_report(dj: Str, vj: Str, gj: Str) -> Str
   fn check_report(dj: Str, vdj: Str, vj: Str, gj: Str) -> Str
   fn rm_report(mj: Str, name: Str, vj: Str) -> Str
-  fn add_report(rowJson: Str, name: Str, entryJson: Str, vj: Str) -> Str
+  fn add_report(mj: Str, rowJson: Str, name: Str, entryJson: Str, vj: Str) -> Str
   fn report_code(rj: Str) -> Int
   fn report_msg(rj: Str) -> Str
   fn report_sources(rj: Str) -> Str
@@ -415,14 +475,15 @@ component Planner provides plan: Plan {
   provide plan {
     fn registry_of(mj) = plan_registry_of(mj)
     fn assemble_spec(mj) = plan_assemble_spec(mj)
+    fn add_spec(mj, name) = plan_add_spec(mj, name)
     fn rm_spec(mj, name) = plan_rm_spec(mj, name)
-    fn ordered_sources(gj) = plan_ordered_sources(gj)
-    fn ordered_with_candidate(gj, name, entryJson) = plan_ordered_with_candidate(gj, name, entryJson)
+    fn ordered_sources(gj, mj) = plan_ordered_sources(gj, mj)
+    fn ordered_with_candidate(gj, mj, name, entryJson) = plan_ordered_with_candidate(gj, mj, name, entryJson)
     fn drift(lockJson, gj) = plan_drift(lockJson, gj)
     fn assemble_report(dj, vj, gj) = plan_assemble_report(dj, vj, gj)
     fn check_report(dj, vdj, vj, gj) = plan_check_report(dj, vdj, vj, gj)
     fn rm_report(mj, name, vj) = plan_rm_report(mj, name, vj)
-    fn add_report(rowJson, name, entryJson, vj) = plan_add_report(rowJson, name, entryJson, vj)
+    fn add_report(mj, rowJson, name, entryJson, vj) = plan_add_report(mj, rowJson, name, entryJson, vj)
     fn report_code(rj) = plan_report_code(rj)
     fn report_msg(rj) = plan_report_msg(rj)
     fn report_sources(rj) = plan_report_sources(rj)

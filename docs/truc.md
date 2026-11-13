@@ -78,6 +78,21 @@ $ truc rm audited_database
 `add` fetches and records. It does not, by itself, promise the composition
 still holds - that is `assemble`'s job, and it is a separate, honest step.
 
+A vendored row's reach is bounded to what its `[trucs]` entry grants. `grant`
+names the row's own `requires` keys, so a petit bout that requires `db` is
+admitted only when its entry says so:
+
+```toml
+[trucs]
+user_cache = { registry = "local", grant = ["db"] }
+```
+
+Declare the entry (and its grant) before the first `add`: admission runs
+before anything is vendored, so `truc add` refuses an ungranted requiring row
+with the missing key named, and writes nothing. The bound is fail-closed: an
+entry with no `grant` key, or `grant = []`, reaches nothing that requires a
+service. A row that requires nothing needs no grant.
+
 ### `truc assemble`
 
 The flagship verb. Assemble does three things in order:
@@ -102,17 +117,18 @@ composition and a runtime surprise. You get a refusal and a reason.
 Vendored text is admitted as an untrusted author. A truc is registry text, not
 your own source, so `add`, `assemble`, `assemble --check` and the remainder
 `rm` re-admits compile every vendored row under the untrusted-author profile
-the MCP server applies to an author by default. A row that ships a host body
-(`@py` and the like) is refused, and the refusal names it. This profile does
-not bound a row's reach to a granted service set at add time; `truc apply`
-bounds reach when it confines a stack layer, as it does today.
-`truc add NAME --trust-host-code`, `truc assemble --trust-host-code` or
+the MCP server applies to an author by default, with its reach bounded to the
+`requires` keys its `[trucs]` entry grants. A row that ships a host body
+(`@py` and the like) is refused, and the refusal names it. `truc add NAME
+--trust-host-code`, `truc assemble --trust-host-code` or
 `truc rm NAME --trust-host-code` admits
 a host body for that one command and names on stderr each row the flag
-unlocked. The flag is read from the command line
+unlocked; it trusts that row's code, not a wider reach, so the grant still
+applies. The flag is read from the command line
 only, never from the environment or `truc.toml`. `add` records how the row was
 admitted in its `truc.lock` entry, `admitted.admission`: `profiled`, or
-`trusted-host-code` when only the flag admitted it. That record is bound to the
+`trusted-host-code` when only the flag admitted it, plus `granted`: the
+`requires` keys the entry allowed. That record is bound to the
 row's pinned `sourceHash`, so a later `assemble` admits exactly those bytes
 without the flag. A lock row with no record (written before this rule) is
 admitted under the current rule; if it needs host code, re-add it with the
@@ -339,7 +355,8 @@ carries, because it is the same engine.
 ### Files and layout
 
 - **`truc.toml`** - the manifest. What your composition is, which petits bouts
-  it depends on, what it provides and requires. Hand-edited or written by `add`.
+  it depends on, what it provides and requires, and the reach each vendored row
+  is granted (`grant`). Hand-edited or written by `add`.
 - **`truc.lock`** - the resolved lock. The exact versions `assemble` picked,
   pinned so the assembly is reproducible.
 - **`trucs/`** - where vendored petits bouts live, in the tree, readable.

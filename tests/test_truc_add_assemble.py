@@ -86,10 +86,24 @@ def _hand_vendor(proj: Path, name: str) -> None:
     (proj / "truc.lock").write_text(json.dumps(lock, indent=2))
 
 
+def _grant(proj: Path, name: str, granted: list[str]) -> None:
+    """Declare a row's reach grant in `[trucs]` BEFORE adding it.
+
+    `truc add` is fail-closed (issue #2635): a vendored row that requires a
+    service must have that `requires` key granted by its `[trucs]` entry, so a
+    test that adds `user_cache` (which requires `db`) declares it first.
+    """
+    line = f'{name} = {{ registry = "local", grant = {json.dumps(granted)} }}'
+    path = proj / "truc.toml"
+    path.write_text(path.read_text(encoding="utf-8").rstrip("\n") + "\n"
+                    + line + "\n")
+
+
 # ---------------------------------------------------------------- add + assemble
 
 def test_add_then_assemble_is_admitted_and_composed(tmp_path):
     proj = _new_project(tmp_path)
+    _grant(proj, "user_cache", ["db"])
 
     r = _truc(proj, "add", "user_cache")
     assert r.returncode == 0, r.stderr
@@ -102,7 +116,8 @@ def test_add_then_assemble_is_admitted_and_composed(tmp_path):
     assert (proj / "trucs" / "user_cache" / "component.rvl").read_text(encoding="utf-8") == \
         (REGISTRY / "components" / "user_cache" / "component.rvl").read_text(encoding="utf-8")
     assert set(_lock_names(proj)) == {"user_cache", "pg_database"}
-    assert "user_cache = { registry = \"local\" }" in (proj / "truc.toml").read_text(encoding="utf-8")
+    assert 'user_cache = { registry = "local", grant = ["db"] }' in \
+        (proj / "truc.toml").read_text(encoding="utf-8")
 
     r = _truc(proj, "assemble")
     assert r.returncode == 0, r.stderr
@@ -117,6 +132,7 @@ def test_add_then_assemble_is_admitted_and_composed(tmp_path):
 
 def test_add_second_provider_of_a_key_is_refused_g2(tmp_path):
     proj = _new_project(tmp_path)
+    _grant(proj, "user_cache", ["db"])
     assert _truc(proj, "add", "user_cache").returncode == 0
     assert _truc(proj, "add", "pg_database").returncode == 0
 
@@ -135,6 +151,7 @@ def test_add_second_provider_of_a_key_is_refused_g2(tmp_path):
 
 def test_assemble_refuses_when_two_providers_of_a_key_join_g2(tmp_path):
     proj = _new_project(tmp_path)
+    _grant(proj, "user_cache", ["db"])
     assert _truc(proj, "add", "user_cache").returncode == 0
     assert _truc(proj, "add", "pg_database").returncode == 0
 
@@ -153,6 +170,7 @@ def test_assemble_refuses_when_two_providers_of_a_key_join_g2(tmp_path):
 
 def test_assemble_refuses_on_vendor_hash_drift(tmp_path):
     proj = _new_project(tmp_path)
+    _grant(proj, "user_cache", ["db"])
     assert _truc(proj, "add", "user_cache").returncode == 0
     assert _truc(proj, "add", "pg_database").returncode == 0
 
