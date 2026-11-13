@@ -546,6 +546,23 @@ _EMITTER_RESERVED = {
     "RevlFrame", "RevlSpawnHandle",
 }
 
+# Issue #3160 / #3171: the `Components` class declares its own helpers as
+# private static methods (`revlEq`, `revlConcat`, `revlHash`, `revlLength`,
+# `revlMarkSecret`, `revlSecretResult`, ...), and it emits every top-level user
+# `fn` and extern as a `public static` method of the SAME class under the source
+# name. java resolves an unqualified call among all overloads and picks the most
+# specific, so a user `revlEq(String, String)` beats the helper's
+# `revlEq(Object, Object)` for every Str `==`/`!=` in the module, and a user
+# `revlMarkSecret(String)` beats the varargs secret registration. The whole
+# helper namespace is therefore unspellable from a user name at every position
+# whose spelling is internal (a binding, a top-level fn/extern): names whose
+# root starts `revl` followed by an upper-case letter are escaped by one rung of
+# the same injective ladder. A `record field` / `config field` is a member or
+# wire name and keeps its spelling. This mirrors the ts tier's
+# `_TS_HELPER_PREFIX_RE` (issue #3179) and go's `_REVL_HELPER_PREFIX_RE`
+# (issue #3168).
+_REVL_NAMESPACE_RE = re.compile(r"^(?:revl[A-Z]|REVL_|_revl|_REVL)")
+
 # Host-runtime classes the emitter injects *and* names as bare tokens at host
 # call sites (`Map.new(..)`, `Pool.open(..)`, `Job.run(..)`), so they cannot go
 # into `_EMITTER_RESERVED`: refusing them would make a program that uses the
@@ -576,6 +593,27 @@ _JAVA_TYPE_RESERVED = frozenset({
 
 class EmitError(ValueError):
     """The IR document violates the backend contract."""
+
+
+def _host_body_scanner():
+    """The shared host-body scanner (`src/revl/host_body.py`).
+
+    Imported lazily so a standalone `python3 emit.py <ir.json>` keeps working:
+    when the emitter runs through the compiler `revl` is importable, and a bare
+    script run falls back to the source tree beside this file. The scanner is
+    the one place every tier splits an extern body and checks that it cannot
+    leave the function it is spliced into (#3130, #3131, #3162, #3164, #3166).
+    """
+    try:
+        from revl.host_body import body_lines, check_host_body
+    except ModuleNotFoundError:  # standalone `python3 emit.py`: put src/ on the path
+        import pathlib
+        import sys as _sys
+        src = pathlib.Path(__file__).resolve().parents[2] / "src"
+        if src.is_dir() and str(src) not in _sys.path:
+            _sys.path.insert(0, str(src))
+        from revl.host_body import body_lines, check_host_body
+    return body_lines, check_host_body
 
 
 def _finite_float(value):
@@ -785,7 +823,8 @@ def _split_generic(inner: str) -> list[str]:
     return parts
 
 
-def _mangle(name: str, extra: "frozenset[str]" = frozenset()) -> str:
+def _mangle(name: str, extra: "frozenset[str]" = frozenset(), *,
+            helper_namespace: bool = False) -> str:
     """Rename a syntactically-valid identifier that collides with a *Java*
     reserved word (`class`, `new`, `int`, `default`, …) so a valid revl
     identifier that happens to be a Java keyword emits and RUNS instead of
@@ -831,10 +870,19 @@ def _mangle(name: str, extra: "frozenset[str]" = frozenset()) -> str:
     same injective ladder: a type name passes `_JAVA_TYPE_RESERVED` so the
     host-runtime `Map`/`Pool`/`Job` classes cannot be shadowed by a user type of
     the same simple name (`Map` -> `Map_`, `Map_` -> `Map__` stay distinct),
-    while every other position passes the empty set and is unchanged."""
+    while every other position passes the empty set and is unchanged.
+
+    `helper_namespace=True` adds the `revl*` helper namespace (issue #3160): the
+    `Components` class also declares `revlEq`, `revlConcat`, `revlMarkSecret`
+    and the rest, and java overload resolution prefers a user `revlEq(String,
+    String)` over the helper's `revlEq(Object, Object)`. It is opt-in so a
+    `record field` / `config field` (a member or wire name) keeps its spelling;
+    the binding and top-level-callable positions pass it."""
     root = name
     while root:
-        if root in _JAVA_RESERVED or root in extra:
+        if (root in _JAVA_RESERVED or root in extra
+                or (helper_namespace
+                    and _REVL_NAMESPACE_RE.match(root) is not None)):
             return name + "_"
         if not root.endswith("_"):
             break
@@ -956,7 +1004,7 @@ def _ident(name: object, role: str) -> str:
         raise EmitError(f"invalid {role} identifier: {name!r}")
     extra = _JAVA_TYPE_RESERVED if role == "type name" else frozenset()
     if role in _JAVA_SCAFFOLDING_RENAMABLE_ROLES:
-        return _mangle(name, extra | _EMITTER_RESERVED)
+        return _mangle(name, extra | _EMITTER_RESERVED, helper_namespace=True)
     if role in ("record field", "field"):
         # A record COMPONENT is a member name, not a module-scope binding, so
         # it is a different namespace from the `ctx`/`root`/`frame` tokens the
@@ -1023,7 +1071,8 @@ def _fn_name(name: object) -> str:
         raise EmitError(f"invalid function identifier: {name!r}")
     root = name
     while root:
-        if root in _JAVA_RESERVED or root in _EMITTER_RESERVED:
+        if (root in _JAVA_RESERVED or root in _EMITTER_RESERVED
+                or _REVL_NAMESPACE_RE.match(root) is not None):
             return name + "_"
         if not root.endswith("_"):
             break
@@ -4286,7 +4335,12 @@ def _emit_v3_externs(externs: list, journal: bool = False) -> list[str]:
             lines.append("    " + config_bind)
         body = bodies["java"].strip()
         if body:
-            for line in body.splitlines() or [""]:
+            # #3162/#3166: refuse a body Java reads as unbalanced, and split on
+            # newlines only so a comment cannot become a statement.
+            body_lines, check_host_body = _host_body_scanner()
+            check_host_body("java", body,
+                            where=f"extern `{ext.get('name')}`", error=EmitError)
+            for line in body_lines(body):
                 lines.append("    " + line)
         else:
             lines.append("    // (empty @java body)")

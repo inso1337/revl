@@ -27,8 +27,13 @@ EMITTABLE_SECTIONS = ("components", "functions", "tests", "externs")
 def collect(ir: dict) -> list[dict]:
     """Every hole in an IR document, as {file, line, type, message}."""
     found: list[dict] = []
-
-    def walk(node) -> None:
+    # Iterative, in the same pre-order the recursive walk had (issue #3399):
+    # an accepted expression is one IR level per operator, so a recursive walk
+    # met python's stack on a text the bare compile accepts, and only on the
+    # admission path. Children are pushed reversed so they pop in order.
+    stack = [ir.get(section) for section in reversed(EMITTABLE_SECTIONS)]
+    while stack:
+        node = stack.pop()
         if isinstance(node, dict):
             if node.get("kind") == "hole":
                 found.append({
@@ -37,14 +42,9 @@ def collect(ir: dict) -> list[dict]:
                     "type": node.get("type"),
                     "message": node.get("message"),
                 })
-            for value in node.values():
-                walk(value)
+            stack.extend(reversed(list(node.values())))
         elif isinstance(node, list):
-            for value in node:
-                walk(value)
-
-    for section in EMITTABLE_SECTIONS:
-        walk(ir.get(section))
+            stack.extend(reversed(node))
     return sorted(found, key=lambda h: (str(h["file"]), h["line"] or 0))
 
 

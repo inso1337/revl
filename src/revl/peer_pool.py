@@ -1026,6 +1026,126 @@ class Roster:
 
 
 # ---------------------------------------------------------------------------
+# violations recorded against a member
+# ---------------------------------------------------------------------------
+
+#: The record kind of one violation. A violation is a ROSTER EVENT, not a
+#: member field: the member row says what a peer holds now, and the append-only
+#: ledger says what it was observed doing. Deriving the per-member view from the
+#: events is the item-546 rule applied to a smaller fact: a withdrawal cannot
+#: erase the record, and recording one cannot move a grant, because nothing in
+#: this section reaches :func:`_issue_membership`.
+VIOLATION_KIND = "revl.pool-violation"
+VIOLATION_VERSION = "1.0"
+
+#: A receipt named an artifact digest other than the one the member was
+#: admitted for. :func:`pool_receipt.check_receipt` already refuses that receipt
+#: on ``receipt-artifact``; this is the record the refusal leaves behind.
+VIOLATION_RECEIPT_ARTIFACT = "receipt-artifact-mismatch"
+#: An attestation presented with a receipt carried a verdict other than
+#: ``admitted``, so the result it covered was rejected rather than counted.
+VIOLATION_ATTESTATION_REJECTED = "attestation-rejected"
+#: An offer whose attested facets differ from the ones the member was admitted
+#: on (trust, region, hardware, resource need or grant ceiling).
+VIOLATION_OFFER_DRIFT = "offer-drift"
+#: Repeated failure to answer an operator probe. ``pool_health`` already counts
+#: the consecutive failures per member; turning that count into this record is
+#: a policy step, deliberately not done by a probe itself, because a probe
+#: changing the roster would be a second authority beside the charter's.
+VIOLATION_PROBE_UNANSWERED = "probe-unanswered"
+
+#: CLOSED. :func:`record_violation` refuses a kind outside this tuple, so a
+#: caller cannot invent a category outside the design and have a later policy
+#: count it. A static test pins the tuple.
+VIOLATION_KINDS = (
+    VIOLATION_RECEIPT_ARTIFACT,
+    VIOLATION_ATTESTATION_REJECTED,
+    VIOLATION_OFFER_DRIFT,
+    VIOLATION_PROBE_UNANSWERED,
+)
+
+
+def record_violation(roster: "Roster", peer_id: str, kind: str, *,
+                     detail: str = "", link: str = "",
+                     now: Optional[datetime] = None) -> dict:
+    """Append one violation against a member. RECORD ONLY.
+
+    It moves no tier, changes no grant and removes nobody: the member row is
+    untouched and the only write is an appended roster event. Turning a
+    violation into an action is a charter policy decision (step 2 of issue
+    #2722), and it is deliberately not made here, because the action that
+    removes authority has to be signed by the operator's revoke key or by an
+    explicit operator signature.
+
+    ``kind`` must be one of :data:`VIOLATION_KINDS`, and ``peer_id`` must be a
+    current member: a violation is observed against somebody the pool admitted,
+    and a record that cannot name that member is not a violation of its terms.
+    """
+    if kind not in VIOLATION_KINDS:
+        raise PoolError(
+            f"unknown violation kind {kind!r}; the list is closed to "
+            f"{', '.join(VIOLATION_KINDS)}")
+    if not isinstance(peer_id, str) or peer_id not in roster.members:
+        raise PoolError(
+            f"peer {peer_id!r} is not a member of pool {roster.pool_id!r}; a "
+            f"violation is recorded against an admitted member")
+    record = {"kind": VIOLATION_KIND, "version": VIOLATION_VERSION,
+              "pool_id": roster.pool_id, "peer_id": peer_id,
+              "violation": kind, "detail": detail,
+              "at": _iso(now or _utc_now())}
+    if link:
+        record["link"] = link
+    roster.append(record)
+    return record
+
+
+def violation_events(roster: "Roster") -> tuple[dict, ...]:
+    """Every violation the roster's ledger holds, in the order it recorded
+    them. A withdrawn member's events are still here."""
+    return tuple(event for event in roster.events
+                 if event.get("kind") == VIOLATION_KIND)
+
+
+def violations_of(roster: "Roster", peer_id: str) -> tuple[dict, ...]:
+    """The violations recorded against one member, in the order recorded."""
+    return tuple(event for event in violation_events(roster)
+                 if event.get("peer_id") == peer_id)
+
+
+def violation_census(roster: "Roster") -> dict[str, dict[str, int]]:
+    """peer_id -> {violation kind: how many were recorded}."""
+    tally: dict[str, dict[str, int]] = {}
+    for event in violation_events(roster):
+        peer = str(event.get("peer_id", ""))
+        kind = str(event.get("violation", ""))
+        tally.setdefault(peer, {})
+        tally[peer][kind] = tally[peer].get(kind, 0) + 1
+    return tally
+
+
+def _terminal_safe(text: str) -> str:
+    """``text`` with every non-printable character written as its Python
+    escape (``\\x1b``, ``\\n``, ``\\u2028``) and backslashes doubled, so a
+    stored field cannot move the cursor, recolour the operator's terminal or
+    forge a second status line. For the rendered view only: the stored record
+    keeps the bytes it was given."""
+    out = []
+    for ch in text:
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch.isprintable():
+            out.append(ch)
+        else:
+            out.append(ch.encode("unicode_escape").decode("ascii"))
+    return "".join(out)
+
+
+def _violation_note(roster: "Roster", peer_id: str) -> str:
+    recorded = violations_of(roster, peer_id)
+    return f" violations={len(recorded)}" if recorded else ""
+
+
+# ---------------------------------------------------------------------------
 # the gate
 # ---------------------------------------------------------------------------
 
@@ -1887,8 +2007,21 @@ def render_status(charter_record: Mapping[str, Any], roster: Roster,
             f"identity={member.identity}"
             f"{'/' + member.key_id if member.key_id else ''} "
             f"caps={', '.join(sorted(member.caps)) or '(none)'}"
+            f"{_violation_note(roster, peer_id)}"
             f"{_outstanding_note(roster, peer_id)}"
             f"{(health or {}).get(peer_id, '')}")
+    recorded = violation_events(roster)
+    if recorded:
+        lines.append(f"  violations {len(recorded)}")
+        for event in recorded:
+            # Every field is escaped: ``detail`` carries part of the peer's own
+            # signed ``artifact_digest``, which nothing checks is hex.
+            detail = _terminal_safe(str(event.get("detail", "")))
+            lines.append(
+                f"    {_terminal_safe(str(event.get('peer_id', '')))}  "
+                f"{_terminal_safe(str(event.get('violation', '')))}  "
+                f"at {_terminal_safe(str(event.get('at', '')))}"
+                + (f"  {detail}" if detail else ""))
     if roster.revoked:
         lines.append(f"  withdrawn {', '.join(sorted(roster.revoked))}")
     if directory is not None and directory.keys:
@@ -1925,6 +2058,7 @@ def _status_command(args) -> int:
                           "roster": roster.as_dict(),
                           "identities": identities.as_dict(),
                           "identity_census": identity_census(roster),
+                          "violations": violation_census(roster),
                           "health": health.as_dict()},
                          indent=2, sort_keys=True))
     else:

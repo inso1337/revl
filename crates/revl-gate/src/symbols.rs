@@ -29,10 +29,11 @@
 //! # What it covers
 //!
 //! The self-host front end (`selfhost/lower.rvl::parse_prog`) recognises
-//! top-level `fn`, `extern ... fn`, `service` and `component` declarations. It
-//! does not model `pub`, `verified`, `type` declarations, fn type parameters,
-//! parameters or `let` bindings, so those are NOT in the table, and a document
-//! using the ones it cannot parse at all yields [`Symbols::Undecided`].
+//! top-level `fn`, `extern ... fn`, `service` and `component` declarations,
+//! with the `pub` and `verified` prefixes the reference reads before `fn`. It
+//! does not model `type` declarations, fn type parameters, parameters or `let`
+//! bindings, so those are NOT in the table, and a document using the ones it
+//! cannot parse at all yields [`Symbols::Undecided`].
 //!
 //! # How the lines are recovered
 //!
@@ -437,10 +438,22 @@ fn signature(tokens: &[Tok], raw: &[selfhost::Token], decl: &Decl) -> Option<Str
         SymbolKind::Service => Some(format!("service {}", decl.name)),
         SymbolKind::Component => Some(format!("component {}", decl.name)),
         SymbolKind::Fn => {
-            let public = decl.fn_at.checked_sub(1)
-                .and_then(|index| tokens.get(index))
-                .is_some_and(|token| token.kind == "kw" && token.text == "pub");
-            let prefix = if public { "pub " } else { "" };
+            // `pub fn`, `verified fn` and `pub verified fn` are the reference's
+            // spellings (`analysis.py`'s `prefix = "pub " + "verified "`), and
+            // the `verified` prefix sits between `pub` and `fn`.
+            let before = decl.fn_at.checked_sub(1)
+                .and_then(|index| tokens.get(index));
+            let verified = before.is_some_and(|token| token.kind == "kw" && token.text == "verified");
+            let public = before.is_some_and(|token| token.kind == "kw" && token.text == "pub")
+                || (verified
+                    && decl.fn_at.checked_sub(2)
+                        .and_then(|index| tokens.get(index))
+                        .is_some_and(|token| token.kind == "kw" && token.text == "pub"));
+            let prefix = format!(
+                "{}{}",
+                if public { "pub " } else { "" },
+                if verified { "verified " } else { "" }
+            );
             Some(format!("{prefix}fn {}", callable_tail(tokens, raw, decl)?))
         }
         SymbolKind::Extern => {

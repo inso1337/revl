@@ -12,6 +12,20 @@ fn divmod(a: Int, b: Int) -> Int {
   return q + f + e + m + r
 }
 fn realdiv(a: Float, b: Float) -> Float { return a / b }
+// every shape of the inline Float `/` (issue #3408): nonzero and zero literal
+// divisor, literal and bound dividend, a name and an evaluated divisor, a chain
+// whose dividend is itself a division, and a divisor that binds the same temps
+fn divshapes(a: Float, b: Float, c: Float, d: Float) -> Float {
+  let lit = a / 2.0
+  let zero = a / 0.0
+  let inv = 1.0 / b
+  let cn = a * b / c
+  let nc = a / (b * c)
+  let cc = (a - b) / (c - d)
+  let chain = a / b / c
+  let nested = a * b / ((c - d) / (a - d))
+  return lit + zero + inv + cn + nc + cc + chain + nested
+}
 fn cmps(a: Int, b: Int) -> Bool { return a < b && a <= b || a > b }
 fn eqs(a: Int, b: Int) -> Bool { return a == b && a != b }
 fn boolnot(a: Bool) -> Bool { return !a }

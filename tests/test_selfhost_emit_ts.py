@@ -122,6 +122,7 @@ CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_ts_corpus"
 # other fixture — no `xfail` remains.
 CORPUS = [
     "arith.rvl",       # bounded int/int32, division/modulo, comparisons, unary
+    "int_inline_2904.rvl",  # inline Int bound test in fn/test bodies, call in arrows and arms (issue #2904)
     "bitwise.rvl",  # Int32 bitwise & | ^ << >> and unary ~ (item 366, item 391 self-host port)
     "strings.rvl",     # the stdlib string builtins and `${…}` interpolation
     "control.rvl",     # while/for/if, match (Some/None/wildcard), sync arrow
@@ -332,6 +333,10 @@ CORPUS = [
     # both emitters wrap as `;({...})`. Outside the census walk only to keep
     # the census baseline still (the document's own header).
     "../../noncensus_corpus/emit_ts_ternary_effect_asi.rvl",
+    # Issue #3127: module fns and an extern spelled like a JS global, an
+    # imported name, a helper or the scaffolding, renamed one rung up at the
+    # declaration and at every read (`mangle_module`).
+    "module_name_family.rvl",
 ]
 
 def _load_reference_emit():
@@ -807,6 +812,15 @@ NAMED_REFUSALS = [
       for t in ("go", "java", "py", "rust", "ts")],
     ("emit_rust_refusals/required_stream_coeffect.rvl",
      "a required `Stream\\[T\\]` coeffect", "<<UNSUPPORTED-REQUIRED-STREAM:Fulfiller.feed>>"),
+    # issue #3127: a host-visible name in the module family is refused, not
+    # renamed (a `pub fn` is called by its source name, a component is named
+    # by the placement spec).
+    ("emit_ts_refusals/pub_fn_module_name.rvl",
+     "pub fn 'BigInt_' is spelled like a JS global",
+     "<<UNSUPPORTED-PUB-FN-MODULE-NAME:BigInt_>>"),
+    ("emit_ts_refusals/component_module_name.rvl",
+     "component 'Promise' is spelled like a JS global",
+     "<<UNSUPPORTED-COMPONENT-MODULE-NAME:Promise>>"),
 ]
 
 

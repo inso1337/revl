@@ -2293,7 +2293,17 @@ fn ad_module_refusal(source: Str) -> Str {
   }
   // the whole parse stage `admit_src` runs, as its message (issue #2359)
   let why = parse_refusal(program)
-  if (why == "") { return "" }
+  if (why == "") {
+    // Issue #3107: the gate reads `fn f(...) = expr` as the reference does, so
+    // the front end no longer refuses it here. The self-host COMPILER still does
+    // not emit it, and a used module declaring one is named as unsupported
+    // rather than read as malformed.
+    let f0 = ad_bodiless_fn(ts)
+    if ((f0 >= 0) && ad_kind(ts, ad_fn_header_end(ts, f0), "=")) {
+      return "line ".concat(ts[f0].line.to_str()).concat(": an expression-bodied fn (`fn f(...) = expr`) is not supported by the self-host compiler")
+    }
+    return ""
+  }
   let bar = why.indexOf("|")
   let msg = bar < 0 ? why : why.slice(bar + 1, why.length())
   let bad = parse_prog(program).bad

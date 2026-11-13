@@ -41,8 +41,10 @@ Deliberately OUT (excluded from the corpus, deferred to wasm Path B slice 2+):
 any value that touches linear memory (Str, List, records, tagged Opt/Result/user
 variants — string literals pool into ``data`` and move ``heap_start``, and each
 value threads ``$alloc``/``_str_ptr``/the nested scratch-pointer stack); Float
-end to end (``/`` yields Float, so it is refused by name wherever it appears: issue #2201, including the scalar binding the port used to lower to
-``i64.div_s``; a ``${aFloat}`` part pulls in ``$f64_to_str``); every
+end to end (the REFERENCE lowers it as a native f64 since issue #3295, but this
+port's scalar slice still names ``/`` as ``<<UNSUPPORTED-TRUE-DIVISION:Float>>``
+and carries no ``f64`` lowerings: a named port gap, not a reference refusal; a
+``${aFloat}`` part also pulls in ``$f64_to_str``); every
 ``builtin``/``len`` node
 (``.to_int()`` widening is a ``builtin``, not a bare ``widen`` marker) and the
 ``for`` loop (a memory walk); components/services entirely; ``match``/``adt`` over
@@ -94,7 +96,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from revl import compile_files  # noqa: E402
+from revl import compile_files, compile_source  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "tests"))
 
@@ -492,59 +494,43 @@ def test_a_ui_transaction_unit_is_refused_by_name_on_both_sides(emitted, referen
     ], "the port names what it cannot lower rather than answering with a module"
 
 
-TRUE_DIVISION = (
-    ROOT / "tests" / "fixtures" / "emit_wasm_refusals" / "true_division.rvl")
+TRUE_DIVISION = ROOT / "tests" / "fixtures" / "wasm_true_division_port_gap.rvl"
 
 
-def test_a_true_division_the_reference_refuses_is_refused_by_name_here_too(
+def test_true_division_lowers_on_the_reference_but_is_a_named_port_gap(
         emitted, reference):
-    """issue #2201: `/` yields `Float`, and BOTH sides have to say so.
+    """`/` yields `Float`; the reference lowers it, the port has not caught up.
 
-    The language types `Int / Int` as `Float` -- `7 / 2` is 3.5, not 3 -- and
-    this tier lowers neither `Float` nor any floating-point instruction: its
-    contract, stated in docs/arithmetic.md and pinned by
-    `tests/test_458_float_division_and_remainder.py::
-    test_wasm_refuses_float_by_name`, is to REFUSE `Float` by name. Both halves
-    used to lower this node to `i64.div_s` instead, which is not a refusal and
-    not a Float either: it is the silent wrong value 3, in the one position the
-    tier DOES admit a `Float` (a `${...}` interpolation) and in the scalar
-    binding below it.
+    The language types `Int / Int` as `Float` -- `7 / 2` is 3.5, not 3. The
+    REFERENCE emitter lowers `/` to `f64.div` over converted operands since
+    Float became a native f64 value (issue #3295, docs/wasm-capabilities.md).
+    The revl port in `selfhost/emit_wasm.rvl` still carries only the scalar
+    Int/Bool subset and names `/` as `<<UNSUPPORTED-TRUE-DIVISION:Float>>`, so
+    this document is a named PORT gap (issue #3425), not a reference refusal; it is not a
+    byte-agreement case and stays out of CORPUS.
 
-    Why REFUSE rather than lower as `f64.div`: this tier's `$f64_to_str`
-    renders only the integer-valued finite floats and TRAPS on every other one
-    (docs/strings.md, "Remaining wasm WAT work"), so `f64.div` would turn
-    `${7 / 2}` into a runtime trap in a language that documents `/` as total.
-
-    `%` over two `Int`s is untouched: it is `i64.rem_s`, and it keeps trapping
-    at a zero divisor. Only `/` moved.
-
-    Why the case lives in `emit_wasm_refusals/` rather than `CORPUS`: a document
-    the reference REFUSES has no bytes for the byte-agreement oracle to agree
-    with, so no corpus entry can reach this path at all. `ratio` is also the one
-    document in the tree that reaches the port's `render_bin` refusal.
+    The pinned reference facts are the ones that keep the fix honest: `/` is
+    `f64.div`, never `i64.div_s` (the pre-#2201 silent `3`), and an integer
+    `%` still lowers to `i64.rem_s`.
     """
     ir = compile_files([str(TRUE_DIVISION)])
-    with pytest.raises(reference.EmitError) as exc:
-        reference.emit(ir)
-    message = str(exc.value)
-    assert message.startswith("ratio: "), message
-    assert "Float" in message, (
-        "the refusal names the type it will not lower: this case no longer "
-        "exercises it"
-    )
-    assert "only lowerable for Int/Int32" not in message, (
-        "that is the message for an operand the tier cannot type at all, not "
-        "for `Int / Int`, whose type is `Float` and is refused as such"
-    )
+    modules = reference.emit(ir)
+    joined = "\n".join(v for v in modules.values() if isinstance(v, str))
+    assert "(f64.div)" in joined, joined
+    assert "(i64.div_s" not in joined, (
+        "`/` went back to the silent integer quotient: it must be f64 division")
+    remainder = reference.emit(compile_source(
+        "fn rem(a: Int, b: Int) -> Int { return a % b }"))["functions"]
+    assert "(i64.rem_s)" in remainder, (
+        "integer `%` must stay the trapping i64.rem_s, not move to f64 with `/`")
     got = emitted["emit_wasm_src"](ir)
     assert [line.strip() for line in got.splitlines() if "<<" in line] == [
         "<<UNSUPPORTED-TRUE-DIVISION:Float>>",
         "<<UNSUPPORTED-EXPR:interp>>",
-    ], "the port names the refusal rather than answering with a module"
+    ], "the port names the gap rather than answering with a wrong module"
 
 
 @pytest.mark.parametrize("source, reason", [
-    ("fn f(x: Float) -> Float { return x }", "Float"),
     ("fn f(x: Map[Str, Int]) -> Map[Str, Int] { return x }", "Map"),
 ])
 def test_reference_abi_refusals(reference, tmp_path, source, reason):

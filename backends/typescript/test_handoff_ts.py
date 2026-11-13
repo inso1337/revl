@@ -1,6 +1,6 @@
 """State hand-off on the TypeScript tier (item 53, docs/state-handoff.md).
 
-The runtime half — capture, restore, rollback — is executed on real cordis in
+The runtime half, capture, restore, rollback, is executed on real cordis in
 `tests/handoff_swap.test.ts`. These toolchain-free checks pin the emitter and
 the gate side of the same contract:
 
@@ -10,7 +10,7 @@ the gate side of the same contract:
   * a composition with no `handoff` emits neither, so the pre-item-53 output is
     unchanged;
   * the SAME admission gate the py tier uses refuses a successor whose declared
-    state shape cannot hold the predecessor's — the refuse-don't-drop rule — so
+    state shape cannot hold the predecessor's, the refuse-don't-drop rule, so
     a refused shape never reaches the runtime at all.
 
 Run with:

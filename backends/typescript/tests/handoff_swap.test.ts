@@ -1,5 +1,5 @@
 // Verified provider state hand-off on hot-swap, executed on the real cordis v4
-// runtime (item 53, docs/state-handoff.md) — the ts peer of py's
+// runtime (item 53, docs/state-handoff.md), the ts peer of py's
 // tests/test_state_handoff_exec.py.
 //
 // This tier has no MCP session engine: a host swaps a provider by replacing its
@@ -7,7 +7,7 @@
 // the same exit criterion the py tier does, through that primitive:
 //
 //   * a stateful provider (a cache holding entries) is swapped to a compatible
-//     successor and its entries SURVIVE — a warm start, not a cold restart —
+//     successor and its entries SURVIVE, a warm start, not a cold restart,
 //     while a live `version()` proves the successor's code is running;
 //   * a successor that declares no hand-off opts out: it starts cold, no
 //     refusal (a valid, if lossy, author choice);
@@ -30,6 +30,7 @@ import { Context } from 'cordis'
 import { Cache, CacheV2 } from './generated/handoff_swap.ts'
 import {
   captureProviderState,
+  fiberStateName,
   Frame,
   liveResources,
   MapHandle,
@@ -37,6 +38,7 @@ import {
   resetHost,
   StateIncompatible,
   SwapRejected,
+  SwapRollbackFailed,
   swapProvider,
   type HandoffComponent,
 } from '../runtime.ts'
@@ -144,7 +146,7 @@ describe('state hand-off on a ts provider swap', () => {
       to: ZeroStateCache,
     })).rejects.toBeInstanceOf(StateIncompatible)
 
-    // the predecessor is serving again, on its own code, state intact —
+    // the predecessor is serving again, on its own code, state intact,
     // nothing dropped, nothing half-migrated
     expect(ctx.cache.version()).toBe(1n)
     expect(ctx.cache.get('alice')).toBe('42')
@@ -222,7 +224,16 @@ describe('state hand-off and realm placement', () => {
       to: moved,
     })
 
-    expect(handoff).toBeUndefined()
+    // reported cold with the reason py gives, not silently omitted
+    expect(handoff).toEqual({
+      cache: {
+        component: 'TenantB',
+        migrated: false,
+        resources: 0,
+        reason: 'realm',
+        note: expect.stringContaining('another realm'),
+      },
+    })
     expect(successor.ctx.cache.version()).toBe(2n)
     expect(successor.ctx.cache.get('alice')).toBeUndefined()
 
@@ -272,23 +283,50 @@ describe('the swap gate refuses a successor that cannot hold the vector', () => 
     },
   }
 
-  it('refuses a successor that invents state when the predecessor held none', async () => {
+  it('refuses a declared hand-off over an empty vector before any teardown', async () => {
     const ctx = new Context()
     const fiber = await plug(ctx, EmptyStateCache)
     await flush()
     expect(liveResources.size).toBe(0)
 
-    const inventing = placedCache('Inventing', undefined, 2n)
+    const successor = placedCache('Inventing', undefined, 2n)
     await expect(swapProvider(ctx, {
       from: EmptyStateCache,
       fiber,
-      to: inventing,
+      to: successor,
     })).rejects.toBeInstanceOf(StateIncompatible)
 
-    // the predecessor is serving again, and the rejected successor's Map was
-    // dropped by the rollback (no leaked half-swap)
+    // nothing was torn down: the very same predecessor fiber is still active,
+    // and the rejected successor never loaded a Map
+    expect(fiberStateName(fiber.state)).toBe('ACTIVE')
     expect(ctx.cache.version()).toBe(1n)
     expect(liveResources.size).toBe(0)
+  })
+
+  it('refuses a successor whose declared hand-off type differs, before teardown', async () => {
+    const ctx = new Context()
+    const running = placedCache('Original', undefined, 1n)
+    const fiber = await plug(ctx, running)
+    await flush()
+    fiber.ctx.cache.put('alice', '42')
+
+    // same host class and vector length, a different DECLARED shape: only the
+    // declared type distinguishes it from a compatible successor
+    const retypedDecl: HandoffComponent = {
+      ...placedCache('IntCache', undefined, 2n),
+      handoff: { key: 'cache', type: 'Map[Str, Int]' },
+    }
+
+    await expect(swapProvider(ctx, {
+      from: running,
+      fiber,
+      to: retypedDecl,
+    })).rejects.toBeInstanceOf(StateIncompatible)
+
+    expect(fiberStateName(fiber.state)).toBe('ACTIVE')
+    expect(ctx.cache.version()).toBe(1n)
+    expect(ctx.cache.get('alice')).toBe('42')
+    expect(liveResources.size).toBe(1)
   })
 
   it('refuses a successor whose vector holds a retyped resource', async () => {
@@ -354,5 +392,71 @@ describe('the swap gate refuses a successor that cannot hold the vector', () => 
     expect(ctx.cache.version()).toBe(1n)
     expect(ctx.cache.get('alice')).toBe('42')
     expect(liveResources.size).toBe(1)
+  })
+
+  it('rolls back when the predecessor teardown itself throws', async () => {
+    const ctx = new Context()
+    const running = placedCache('Serving', undefined, 1n)
+    const fiber = await plug(ctx, running)
+    await flush()
+    fiber.ctx.cache.put('alice', '42')
+
+    // a teardown that fails after it ran: the swap must not escape as a raw
+    // error with the provider gone
+    const flaky = Object.create(fiber, {
+      dispose: {
+        value: async () => {
+          await fiber.dispose()
+          throw new Error('teardown fault')
+        },
+      },
+    })
+
+    await expect(swapProvider(ctx, {
+      from: running,
+      fiber: flaky,
+      to: placedCache('Next', undefined, 2n),
+    })).rejects.toBeInstanceOf(SwapRejected)
+
+    // the predecessor was reloaded and its captured state re-seated
+    expect(ctx.cache.version()).toBe(1n)
+    expect(ctx.cache.get('alice')).toBe('42')
+  })
+
+  it('reports a failed rollback and leaves nothing half plugged', async () => {
+    const ctx = new Context()
+    let loads = 0
+    const base = placedCache('Fragile', undefined, 1n)
+    const fragile: HandoffComponent = {
+      ...base,
+      apply(c: Context) {
+        loads += 1
+        // the first load is the running provider; a reload cannot come up
+        if (loads > 1) throw new Error('reload fault')
+        return base.apply(c)
+      },
+    }
+    const fiber = await plug(ctx, fragile)
+    await flush()
+    fiber.ctx.cache.put('alice', '42')
+
+    const exploding: HandoffComponent = {
+      name: 'Exploding',
+      inject: [],
+      provide: ['cache'],
+      handoff: { key: 'cache', type: 'Map[Str, Str]' },
+      apply(_ctx: Context) {
+        throw new Error('successor activation failed')
+      },
+    }
+
+    await expect(swapProvider(ctx, {
+      from: fragile,
+      fiber,
+      to: exploding,
+    })).rejects.toBeInstanceOf(SwapRollbackFailed)
+
+    // nothing serves the key: no half-restored predecessor stays plugged
+    expect((ctx as any).cache).toBeUndefined()
   })
 })

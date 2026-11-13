@@ -558,6 +558,40 @@ def _shape_ok(record: Any, kind: str) -> str:
     return ""
 
 
+def _predates_membership(issued: datetime,
+                         admitted: Optional[datetime]) -> bool:
+    """True when a receipt issued at ``issued`` was issued before the
+    membership that began at ``admitted``: the :data:`LINK_STALE_RECEIPT`
+    test, shared by :func:`check_receipt` and :func:`answers_membership_task`."""
+    return admitted is not None and issued < admitted
+
+
+def answers_membership_task(record: Mapping[str, Any], *, admitted_at: str,
+                            task: Optional[Mapping[str, Any]]) -> bool:
+    """Whether ``record`` is a receipt of THIS membership for THIS task.
+
+    True only when its ``issued_at`` reads as a timestamp that does not predate
+    ``admitted_at`` (the stale-receipt test of :func:`check_receipt`) and its
+    ``task_digest`` is the digest of ``task``. It is not a verdict and refuses
+    nothing: :func:`check_receipt` stays the one decision on a receipt, in its
+    own order. A caller that records something AGAINST a member reads it, so a
+    receipt the member signed for another membership or another task, which
+    the check refuses on whatever link it reaches first, is not attributed to
+    the membership that happened to be handed it."""
+    if not isinstance(record, Mapping):
+        return False
+    issued = _parse_iso(record.get("issued_at"))
+    if issued is None or _predates_membership(issued, _parse_iso(admitted_at)):
+        return False
+    if not isinstance(task, Mapping):
+        return False
+    try:
+        expected_task = receipt_digest(task)
+    except (NotCanonicalizable, TypeError, ValueError):
+        return False
+    return record.get("task_digest") == expected_task
+
+
 def check_receipt(record: Any, attestation: Any, *, pool_id: str,
                   peer_id: str, artifact_digest: str, admitted_at: str,
                   attest_key_ids: Iterable[str],
@@ -662,7 +696,7 @@ def check_receipt(record: Any, attestation: Any, *, pool_id: str,
     if issued is None:
         return refuse(LINK_RECEIPT_SHAPE,
                       f"issued_at {record['issued_at']!r} is not a timestamp")
-    if admitted is not None and issued < admitted:
+    if _predates_membership(issued, admitted):
         return refuse(LINK_STALE_RECEIPT,
                       f"the receipt was issued at {record['issued_at']} and "
                       f"this membership began at {admitted_at}; evidence does "

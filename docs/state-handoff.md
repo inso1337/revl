@@ -147,37 +147,78 @@ the running composition is left exactly as if the swap had never been attempted.
 
 The ts tier has no MCP session engine: a host replaces a provider by disposing
 its fiber and plugging the successor (`backends/typescript/demo.ts`), so the
-swap primitive lives in the tier's runtime instead —
-`backends/typescript/runtime.ts`'s `swapProvider` — and carries the same
+swap primitive lives in the tier's runtime instead,
+`backends/typescript/runtime.ts`'s `swapProvider`, and carries the same
 contract:
 
 * **The declaration is emitted.** A component that declares a `handoff` carries
   `handoff: {key, type}` on its emitted component object, and the emitter
   records each bound `Map`/`Pool` acquisition of that component (`Map.new`,
-  `Pool.open`) on its activation `Frame` in acquisition order — the ts analog
+  `Pool.open`) on its activation `Frame` in acquisition order, the ts analog
   of py's `frame._resources`. Both are additive: a component with no `handoff`
   emits byte-identically to before.
+* **Refusals before any teardown.** When both sides declare a `handoff` on the
+  same key, `swapProvider` refuses, with the predecessor still serving, a
+  successor whose declared type is not identical to the running one, and a
+  predecessor whose declared hand-off holds no tracked resource (the state
+  lives where the emitter did not record it, so a swap would drop it while
+  reporting a migration). It also refuses when the predecessor's state cannot
+  be captured.
 * **Capture before teardown, check the whole vector, then apply.**
   `swapProvider` snapshots the live predecessor's vector, disposes it, loads
-  the successor, checks the successor's fresh vector (same length, same type at
-  each position) and only then seats each snapshot through the resource's
-  `__revl_state__`/`__revl_restore__` protocol (a `Pool` carries no state; its
-  type alone is pinned).
-* **A rejected hand-off rolls the whole swap back.** The half-loaded successor
-  is disposed, the predecessor reloaded and its captured state re-seated, so
-  the composition keeps serving and nothing is dropped. A successor that
-  declares no hand-off still opts out and starts cold, a successor placed in
-  another realm starts cold (its store is a different provider there), and a
-  component with no hand-off emits and swaps exactly as before.
+  the successor, requires it to be ACTIVE, checks its fresh vector (same length,
+  same type at each position) and only then seats each snapshot through the
+  resource's `__revl_state__`/`__revl_restore__` protocol (a `Pool` carries no
+  state; its type alone is pinned).
+* **A rejected hand-off rolls the whole swap back.** A teardown that throws,
+  a successor that fails to activate or a vector that cannot be seated: the
+  half-loaded successor is disposed, the predecessor reloaded and its captured
+  state re-seated, so the composition keeps serving and nothing is dropped. A
+  rollback that itself fails (`SwapRollbackFailed`) disposes any half-restored
+  predecessor, so nothing is left plugged and the key has no provider.
+* **Cold starts.** A successor that declares no hand-off opts out and starts
+  cold with no report. A successor that declares the key but is placed in
+  another realm, or whose other placed keys differ, starts cold and the report
+  says so (`migrated: false` with `reason: "realm"` or `"placement"`, as py
+  does). A component with no hand-off emits and swaps exactly as before.
 
-Admission is the same compiler-side gate
-(`admission._handoff_compatible`), run on the candidate against the running
-manifest. The ts tier has no MCP session engine and no trusted-proposal path,
-so the caller contract is that the successor was admitted against the running
-manifest, as for any emitted module. The runtime check is structural (vector
-length and each resource's host class), the same defence in depth py's session
-performs, but it does not re-prove the declared §5 type relation: a same-class
-retype is admission's to refuse.
+Admission is the same compiler-side gate (`admission._handoff_compatible`), run
+on the candidate against the running manifest. The runtime check is stricter
+and narrower than py's: the ts runtime cannot re-run the compiler's `compatible`
+relation, so it requires the two declared types to be identical, and a widened
+acceptor that admission would allow is refused at runtime. Below the declared
+type it checks the vector structurally (length and each resource's host class),
+the same defence in depth py's session performs. State a component keeps
+outside a bound `Map.new`/`Pool.open` acquisition (a helper call, an extern, an
+unbound `effect Map.new()`) is not tracked, and a swap over such a declared
+hand-off is refused rather than started cold.
+
+## Undo (the restore direction)
+
+An undo is a generation move too, and it runs this exchange in reverse: the
+generation being left **exports**, the restored generation **accepts** (issue
+#3293). `revl_undo` captures the running hand-off providers before teardown
+exactly as a swap does, then keeps only the captures whose restored provider
+declares a `handoff` on the same key and placement whose shape accepts the
+running one, the same `compatible(accepted, exported)` relation, now pointed
+restore-ward. Those providers start warm on the restored generation. Every
+other one still starts cold, with the `stateDropped` report naming it (and the
+swap report's `handoff` entry carrying `migrated: false, reason:
+"incompatible"` when a restored hand-off exists but does not accept the running
+state). The restored code's authorship counts as it was recorded when that
+generation was admitted (by its load, swap or rollback; an unrecorded one
+counts as agent-authored): an undo to an agent-authored generation applies
+the multi-realm rule above, so a frame spanning realms starts cold with
+`reason: "multi-realm"`.
+The resource-vector check of step 2 does not refuse an undo: a carried
+provider whose runtime resources differ in count or type starts cold with
+`reason: "resources"` and the undo completes, where a forward swap is rolled
+back whole. The instance layer is deliberately not carried by an undo: the
+`handoff_back` policy leaves it at `respawn` semantics. `revl_rollback` stays
+cold-start: it re-admits through `respawn`, which captures no provider state
+at all, so a rollback never carries the generation it leaves into the one it
+returns to (the `respawn` rule `Session.swap` documents). Only `revl_undo`
+runs the reverse hand-off.
 
 ## Files
 
@@ -189,12 +230,13 @@ retype is admission's to refuse.
   `src/revl/lower.py::check_and_lower`; the running provider's exported shape is
   threaded into the ambient by `src/revl/compiler.py::_running_handoffs`;
 * the warm-start threading — `src/revl/mcp/session.py` (`_capture_provider_state`,
-  `_restore_provider_state`, and the extended `_abort_swap`);
-* the ts warm-start — `backends/typescript/emit.py` (the emitted `handoff`
+  `_restore_provider_state`, and the extended `_abort_swap`), and the undo's
+  restore-direction filter (`_handoff_back_pairs`, the `handoff_back` policy);
+* the ts warm-start: `backends/typescript/emit.py` (the emitted `handoff`
   declaration and `$revl_frame.track(...)`), `backends/typescript/runtime.ts`
   (`swapProvider`, `StateIncompatible`, `Frame.resources`/`track`, and
   `MapHandle.__revl_state__`/`__revl_restore__`);
-* tests — `tests/test_state_handoff.py` (grammar, lowering, the gate; no runtime),
+* tests: `tests/test_state_handoff.py` (grammar, lowering, the gate; no runtime),
   `tests/test_state_handoff_exec.py` (the warm start and the rollback, on
   cordis-py), `backends/typescript/tests/handoff_swap.test.ts` (the warm
   start, the opt-out, the realm cases and the rollback, executed on cordis-ts)

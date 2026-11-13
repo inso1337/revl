@@ -156,6 +156,7 @@ _STDLIB_BACKEND_DOORS: dict[str, str] = {
     "revl_fs_workspace": 'use "stdlib/fs.rvl" { resolve_within, lexists, is_dir }',
     "revl_fs_ts": 'use "stdlib/fs.rvl" { resolve_within, lexists, is_dir }',
     "revl_net": 'use "stdlib/net.rvl" { get, post_json, post_form }',
+    "revl_socket": 'row @wire from "stdlib/socket.rvl" provides wire',
 }
 
 
@@ -2290,6 +2291,13 @@ def _rewrite_module(program: Program, val_renames: dict[str, str],
                 _rewrite_expr(p.default, val_renames, type_renames, set())
         _rewrite_body(fn.body, val_renames, type_renames,
                       {p.name for p in fn.params})
+        # issue #2705: a fn's `ensures` clause is lowered into a `prop test`
+        # body that calls the fn, so its value and type references move with
+        # the module exactly as the fn body's do. `result` is the generated
+        # property's binding, never a module value to rename.
+        if getattr(fn, "ensures", None) is not None:
+            _rewrite_expr(fn.ensures.expr, val_renames, type_renames,
+                          {"result"} | {p.name for p in fn.params})
     for test in program.tests:
         _rewrite_body(test.body, val_renames, type_renames, set())
     for ptest in program.prop_tests:
