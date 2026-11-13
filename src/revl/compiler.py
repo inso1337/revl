@@ -335,13 +335,17 @@ class _ModuleLoader:
                  profile: AdmissionProfile | None = None,
                  profiles: dict[str, AdmissionProfile | None] | None = None,
                  operator_sources: dict[str, str] | None = None,
-                 *, disk_relative_use: bool = True) -> None:
+                 *, disk_relative_use: bool = True,
+                 unit_cache=None) -> None:
         # issue #3152: whether a `use` in an in-memory module may resolve
         # relative to that module's own (caller-named) directory on disk. True
         # is the historical behaviour and every operator door keeps it; the
         # bridge gate sets it False (see `resolve_use`).
         self._disk_relative_use = disk_relative_use
         self._cache: dict[str, _LoadedModule] = {}
+        # issue #3429: the opt-in on-disk compiled units (`revl.unit_cache`);
+        # None parses every module as before.
+        self.unit_cache = unit_cache
         # issue #1715: the operator's own text of the files an in-memory source
         # stands in for. `None` keeps every in-memory source wholly the author's
         # (the pre-#1715 behaviour); a dict, even empty, turns the diff rule on:
@@ -710,6 +714,13 @@ class _ModuleLoader:
         if entry not in self.stdlib_shadow:
             self.stdlib_shadow.append(entry)
 
+    def _parse(self, text: str, abs_path: str) -> Program:
+        """`parse_text`, through the compiled-unit cache when there is one
+        (issue #3429)."""
+        if self.unit_cache is None:
+            return parse_text(text, abs_path)
+        return self.unit_cache.parse(text, abs_path)
+
     def load(self, path: str) -> _LoadedModule:
         abs_path = os.path.abspath(path)
         if abs_path in self._stack:
@@ -733,7 +744,7 @@ class _ModuleLoader:
                 # issue #2513: through `parse_text`, so an in-memory module
                 # carries the same per-declaration provenance as a disk read;
                 # without it every component fell back to `paths[0]`
-                program = parse_text(virtual, abs_path)
+                program = self._parse(virtual, abs_path)
             else:
                 # issue #1779: read ONCE and parse that text, so the report
                 # below is the text that was compiled rather than a later
@@ -741,7 +752,7 @@ class _ModuleLoader:
                 # the named `_read_module_text` seam so a confined compile can
                 # still be proved to touch nothing on disk.
                 read = _read_module_text(abs_path)
-                program = parse_text(read, abs_path)
+                program = self._parse(read, abs_path)
                 self.disk_reads[abs_path] = read
                 self._note_dependency(abs_path, read)
             self._check_generated(abs_path, virtual)
@@ -1310,7 +1321,8 @@ def compile_files(paths: list[str], manifest: dict | None = None,
                   profiles: dict[str, AdmissionProfile | None] | None = None,
                   operator_sources: dict[str, str] | None = None,
                   report: dict | None = None,
-                  *, disk_relative_use: bool = True) -> dict:
+                  *, disk_relative_use: bool = True,
+                  cache_dir: str | None = None) -> dict:
     """Compile a composition: all services and components across the files
     are checked and linked together (the composition manifest, DESIGN §4).
 
@@ -1371,11 +1383,22 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     server turned it off, an operator compile that names or reaches a file
     under `.revl/export/` compiles that file as author-written, under the
     authoring profile.
+
+    `cache_dir` (issue #3429) opts in to per-file compiled units kept in that
+    directory between compiles (`revl.unit_cache`): a file whose unit is there
+    under the same key is not parsed again. The document and every refusal are
+    the ones a compile without it gives. `None`, the default, reads and writes
+    nothing. With a `report`, `report["unit_cache"]` lists the files whose
+    unit this compile rebuilt and reused. The directory must be private to
+    the user who compiles: a unit is trusted like the compiler's own files,
+    since anyone who can write the directory can plant a parse tree under a
+    key computed from public source. It is created with mode 0o700.
     """
     rule = _export_rule()
     if rule is not None and rule.applies(profile):
         def once(**kwargs) -> dict:
-            return _compile_files(paths, manifest, replacing, **kwargs)
+            return _compile_files(paths, manifest, replacing,
+                                  cache_dir=cache_dir, **kwargs)
 
         return rule.compile_files(once, paths, sources, profile, profiles,
                                   operator_sources, report,
@@ -1383,7 +1406,8 @@ def compile_files(paths: list[str], manifest: dict | None = None,
                                   disk_relative_use=disk_relative_use)
     return _compile_files(paths, manifest, replacing, sources, profile,
                           profiles, operator_sources, report,
-                          disk_relative_use=disk_relative_use)
+                          disk_relative_use=disk_relative_use,
+                          cache_dir=cache_dir)
 
 
 def _compile_files(paths: list[str], manifest: dict | None = None,
@@ -1393,7 +1417,8 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
                    profiles: dict[str, AdmissionProfile | None] | None = None,
                    operator_sources: dict[str, str] | None = None,
                    report: dict | None = None,
-                   *, disk_relative_use: bool = True) -> dict:
+                   *, disk_relative_use: bool = True,
+                   cache_dir: str | None = None) -> dict:
     """One compile, exactly as the caller asked: `compile_files` above."""
     # item 426 S4: resolve the per-root profile map keyed by abspath. Every root
     # in `paths` gets an entry: its own profile from `profiles` (looked up by the
@@ -1418,7 +1443,8 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
     # byte-identical for the default and single-profile paths.
     loader = _ModuleLoader(sources, profile, profiles=per_root_profiles,
                            operator_sources=operator_sources,
-                           disk_relative_use=disk_relative_use)
+                           disk_relative_use=disk_relative_use,
+                           unit_cache=_unit_cache_for(cache_dir))
     # item 396: mark every root abspath before loading, so the root-scoped
     # no-extern check and body-file resolution skip apply even to a root that is
     # reached as another root's `use` dependency.
@@ -1887,7 +1913,18 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
         report["host_extern_sources"] = {
             path: sorted(names) for path, names in host_extern_sources.items()
         }
+        if loader.unit_cache is not None:
+            report["unit_cache"] = loader.unit_cache.summary()
     return document
+
+
+def _unit_cache_for(cache_dir: str | None):
+    """The compiled-unit cache over `cache_dir` (issue #3429), or None when
+    the caller did not opt in. Imported only on opt-in."""
+    if cache_dir is None:
+        return None
+    from .unit_cache import UnitCache  # noqa: PLC0415
+    return UnitCache(cache_dir)
 
 
 def _extern_signature(ext) -> str:

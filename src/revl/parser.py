@@ -10333,6 +10333,17 @@ def parse_text(text: str, path: str) -> Program:
     reports the text it compiled, and the session anchors knowledge records to
     it). `parse_file` is this, one read earlier, and is byte-identical."""
     program = Parser(text, path).parse()
+    record_provenance(program, path)
+    return program
+
+
+def record_provenance(program: Program, path: str) -> None:
+    """Stamp a freshly parsed `program` with the file it was parsed as.
+
+    The second half of `parse_text`, split out so a parse read back from a
+    compiled-unit cache (issue #3429, `revl.unit_cache`) is stamped by the same
+    code as a fresh one: `decl_files` is keyed by `id(decl)`, an identity that
+    only the process holding the declarations can record."""
     # provenance is recorded relative to the invocation cwd so IR documents
     # stay machine-independent when compiled from the project root; a file on
     # another Windows drive has no relative path and keeps its absolute one
@@ -10363,4 +10374,3 @@ def parse_text(text: str, path: str) -> Program:
         program.decl_files[id(decl)] = source
     for fn in program.fn_decls:
         fn.source = source
-    return program
