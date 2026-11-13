@@ -84,7 +84,7 @@ def bind_for_run(ir, files, config_path, environ=None) -> dict:
 
 
 #: The longest the plan waits when asking a server what it holds, in seconds.
-#: It is the deadline for the whole exchange (`request_json`'s `timeout`), so a
+#: It is the deadline for the connected exchange (`request_json`'s `timeout`), so a
 #: server that keeps sending a byte at a time cannot hold the plan longer. A
 #: completion timeout (default 120s) is sized for generating text; this
 #: question is a listing, and a plan that waits on it blocks every host.

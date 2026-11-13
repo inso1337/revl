@@ -120,7 +120,7 @@ Fields every provider accepts:
 | `api_key_env` | the NAME of the environment variable holding the credential | none (required for `anthropic` and `gemini`) |
 | `max_tokens` | output token cap | 1024 |
 | `temperature` | sampling temperature | 0 |
-| `timeout` | seconds for one request, the whole exchange included: a reply still arriving after this is cut off | 120 |
+| `timeout` | seconds for one request: a reply still arriving this long after the connection is up is cut off | 120 |
 | `max_reply_bytes` | the most bytes of a reply that are read; a larger reply is refused | 8388608 (8 MiB) |
 | `residence` | `off_device` to narrow a loopback endpoint (see below) | derived from the endpoint |
 | `reaches` | capability tokens the endpoint's model can reach on its own | `[]` |
@@ -186,8 +186,9 @@ A reply is bounded in size and in time (issue #3111), because the endpoint may
 be a shared server or a compromised proxy. At most `max_reply_bytes` of a reply
 are read; a larger one, declared by `Content-Length` or counted as it arrives,
 is refused without being held in memory. `timeout` is the deadline for the
-whole exchange, so a server that answers a byte at a time is cut off when it
-passes. A reply that is not usable (undecodable JSON, an integer of thousands
+request and reply once connected, so a server that answers a byte at a time is
+cut off when it passes (name lookup, connect and the TLS handshake are each
+limited by `timeout`). A reply that is not usable (undecodable JSON, an integer of thousands
 of digits, nesting too deep, or a `message` of the wrong type) is a
 `ProviderError` naming the role, never a raw exception.
 

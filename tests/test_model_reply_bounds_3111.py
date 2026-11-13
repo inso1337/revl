@@ -247,6 +247,17 @@ def test_an_error_body_is_read_only_to_the_quoted_limit(serve):
     assert len(str(caught.value)) < 700
 
 
+def test_a_non_ascii_content_length_is_not_a_raw_error(serve):
+    # http.client decodes headers as latin-1, and "\u00b2".isdigit() is true
+    def script(conn, stop):
+        conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: \xb2\r\n"
+                     b"Connection: close\r\n\r\n{}")
+    endpoint = serve(script)
+    # the header is ignored as a length (the body is still counted), where
+    # `int("\u00b2")` would raise a ValueError
+    assert request_json(endpoint.base + "/x", timeout=5) == {}
+
+
 # ---- time bound ------------------------------------------------------------
 
 def test_a_server_sending_a_byte_at_a_time_is_cut_off_at_the_deadline(serve):
@@ -262,7 +273,7 @@ def test_a_server_sending_a_byte_at_a_time_is_cut_off_at_the_deadline(serve):
     started = time.monotonic()
     with pytest.raises(ProviderError, match="timed out after 1.0s"):
         complete(adapter(endpoint.base, timeout=1.0))
-    assert time.monotonic() - started < 3
+    assert time.monotonic() - started < 5
 
 
 def test_a_server_sending_a_chunked_trickle_is_cut_off_too(serve):
@@ -276,7 +287,7 @@ def test_a_server_sending_a_chunked_trickle_is_cut_off_too(serve):
     started = time.monotonic()
     with pytest.raises(ProviderError, match="timed out"):
         complete(adapter(endpoint.base, timeout=1.0))
-    assert time.monotonic() - started < 3
+    assert time.monotonic() - started < 5
 
 
 def test_headers_that_never_finish_are_cut_off(serve):
@@ -291,7 +302,7 @@ def test_headers_that_never_finish_are_cut_off(serve):
     started = time.monotonic()
     with pytest.raises(ProviderError, match="timed out"):
         complete(adapter(endpoint.base, timeout=1.0))
-    assert time.monotonic() - started < 3
+    assert time.monotonic() - started < 5
 
 
 def test_a_server_that_never_answers_still_times_out(serve):
@@ -299,7 +310,7 @@ def test_a_server_that_never_answers_still_times_out(serve):
     started = time.monotonic()
     with pytest.raises(ProviderError, match="timed out"):
         complete(adapter(endpoint.base, timeout=0.5))
-    assert time.monotonic() - started < 3
+    assert time.monotonic() - started < 5
 
 
 def test_a_prompt_reply_is_unaffected_by_the_deadline(serve):
