@@ -1,25 +1,24 @@
 # A formalism for parallel fan-out (issue 2741)
 
-**Status: decision note and the first theorem; the differential row and the
-refinement of the trace theorem to `ParSteps` follow.**
+**Status: decision note and the first theorems over the chosen relation. The
+differential row, and the forward-idempotence and compensation half of the gate,
+are open.**
 
 Parallel fan-out is checked by the compiler (`src/revl/parallel.py`) and run by
-the Python runtime (`backends/python/runtime.py`, `_revl_parallel`), but the Lean
-model does not say what a fan-out means. The model is a sequential small-step
-relation (`RevL.Lemmas.SemStep` / `SemSteps`, `formal/RevL/Lemmas/WalLemmas.lean:737`),
-chosen for the WAL guarantees, and nothing in `formal/` or `docs/design/` names a
+the Python runtime (`backends/python/runtime.py`, `_revl_parallel`, with the join
+emitted by `backends/python/emit.py`), but the Lean model does not say what a
+fan-out means. The model is a sequential small-step relation
+(`RevL.Lemmas.SemStep` / `SemSteps`, `formal/RevL/Lemmas/WalLemmas.lean`), chosen
+for the WAL guarantees, and nothing in `formal/` or `docs/design/` named a
 concurrency formalism. The one related fact,
-`RevL.A8.declared_idempotent_replay_free` (`formal/RevL/Theorems/A8_WalDischarge.lean:295`),
-is about replaying a declared-idempotent inverse over a durable log after a crash.
-It supplies the idempotence instance; it says nothing about interleaving.
+`RevL.A8.declared_idempotent_replay_free` (`formal/RevL/Theorems/A8_WalDischarge.lean`),
+is about replaying a declared-idempotent inverse over a durable log after a
+crash. It says nothing about interleaving.
 
 This note compares the candidate formalisms against the three questions in the
-issue, names the one chosen, records what was tried, and fixes the shape of the
-first theorem so that switching the choice costs one new theorem file and one
-oracle row, not a rewrite of G7 or A8. The theorem itself is in
-`formal/RevL/Theorems/G10_ParallelEmissions.lean`. It is a trace-level
-statement: `ParStep`/`ParSteps` states the interleaving the note chooses, and the
-refinement from that relation to the trace is a follow-up.
+issue, names the one chosen, records what was tried, and says what the first
+theorems do and do not cover. They are in
+`formal/RevL/Theorems/ParallelFanout.lean`.
 
 ## What the choice must be able to say
 
@@ -33,209 +32,170 @@ The three questions a candidate must answer:
 
 - **Q1, the group fault case.** `docs/research/papers/P09-checked-parallel-emissions.md`
   withdraws byte-identical `accumulated` for any group that can fault or be
-  diverted: a fault changes which members fired and therefore which
-  compensations the join registers. Can the candidate state the fired set and
-  the compensation set of a group with a failed member?
+  diverted: a fault changes which members fired and so which compensations the
+  join registers. Can the candidate state what fired and what the abort leaves
+  when a member fails?
 - **Q2, reuse without moving G7 and A8.** Can it be built on the existing
-  `SemStep` without editing `SemStep`, the L0 teardown stack that G7 is stated
-  over (`formal/RevL/Semantics.lean`), or the WAL run that A8 is stated over
-  (`formal/RevL/Lemmas/WalLemmas.lean`)?
+  `SemStep` without editing `SemStep`, the L0 teardown stack G7 is stated over
+  (`formal/RevL/Semantics.lean`), or the WAL run A8 is stated over?
 - **Q3, an oracle that can drive the Python fan-out.** Can a differential row
   drive `backends/python` over an enumerated schedule the way the G7 row drives
-  `runtime.py` over a teardown scenario (`formal/harness/diff_corpus.py`,
-  `teardown_observation`)?
+  `runtime.py` over a teardown scenario (`formal/harness/diff_corpus.py`)?
 
-A candidate that cannot answer Q2 is a second semantics, and one that cannot
-answer Q3 is a paper model with no row. The issue's warning is that a wrong
-choice wastes a long proof effort, so the first theorem must be small.
+A candidate that cannot answer Q2 is a second semantics. One that cannot answer
+Q3 is a paper model with no row. A wrong choice wastes a long proof effort, so
+the first theorems are over the smallest group.
 
 ## Candidates
 
 ### A. A process algebra with effects and compensation
 
-A labelled transition system in the style of CCS or CSP: parallel composition
-with an interleaving rule, a fault label, and bisimulation as the equivalence.
-It is the standard tool for exactly this shape, and it can express the fault
-case (Q1): a group is a term, a fault is a label, and the fired set is read off
-the trace.
+A labelled transition system in the style of CCS or CSP: parallel composition,
+a fault label, bisimulation as the equivalence. It can express the fault case
+(Q1).
 
-It fails Q2. `SemStep` is not a labelled transition system: it has no labels, no
-observability relation, and no behavioural equivalence. Reusing it means
-defining a translation from configurations to terms, then relating the two step
-relations, and bisimulation would replace the statements G7 and A8 already make
-about single runs. It also fails Q3 without a third translation from terms to
-runtime events. The strong equivalence (bisimulation) proves more than the two
-required statements, so the first slice would pay for theory it does not need.
-
-**Rejected:** a second semantics, no reuse, no direct oracle.
+It fails Q2. `SemStep` has no labels and no behavioural equivalence, so reusing
+it means a translation from configurations to terms, and bisimulation would
+replace what G7 and A8 already state about single runs. It fails Q3 without a
+second translation from terms to runtime events. **Rejected:** a second
+semantics with an unproved projection.
 
 ### B. An interleaving extension of the small-step relation
 
-Define an additive relation over a group of member configurations: a group step
-is one member taking a `SemStep`, a failed member takes no step, and a join
-settles the group once no member can step. The fired set is the set of members
-whose forward step was taken; the compensation set is read off the branch
-results at the join, exactly as `_revl_parallel` captures them and
-`_revl_raise_first` re-raises the first failure after the successful branches'
-compensations are registered.
+`ParStep` runs two member bodies against one shared world and one shared log. A
+step is either member taking a `SemStep` on that shared state; a member that
+cannot step (`Body.done`, `Body.fail`) does not stop the other.
 
-Q1: yes. A member that faults is a configuration whose body is `Body.fail`, which
-is stuck. The other member can still step, so the fired set is not a prefix of
-the plan order; it is exactly the set of members that stepped. The join is a
-function of the branch results in the runtime and in the trace model below; the
-`ParStep`/`ParSteps` relation states the interleaving itself, and the refinement
-from that relation to the trace is a follow-up. The compensation set is stated
-over the fired set.
+Q1: yes. A failing member is `Body.fail`, which is stuck, and the other member
+still fires. `par_run_is_a_sequential_run` says every interleaving that runs
+both members to completion ends in the world and log of a sequential run, in
+the order that puts the failing member last. The abort that follows is R4's
+equation on that sequential run (`group_abort_leaves_exactly_the_emissions`).
 
-Q2: yes. `SemStep` is untouched. The new relation is defined as `SemStep` on one
-coordinate of a product of `Config`s, so the existing five forms, G7's teardown
-stack and A8's WAL run keep their statements. The theorem file is L2 and imports
-the WAL farm (L1) and L0; no L1 farm is added, because an L1 farm may not import
-another L1 farm, and the layering gate enforces that.
+Q2: partly. `SemStep`, the G7 stack and the A8 WAL run are untouched, and the
+group is stated over `Body.witnessed` and `Body.emit` members. But the member
+the gate is about is an emission that carries a compensation and a forward
+idempotence declaration, and `Body` has no form for either: `Body.emit` has no
+inverse, `Body.witnessed` carries only `undoIdem` (item 309), and `SemStep` has
+no Phase-2 compensation drain (`WalLemmas.lean`, "Fidelity"). Stating the
+idempotence conjuncts of `_group_eligible` needs a new `Body` form, which would
+change `WalLemmas.lean` and every match over `Body`. The first theorems therefore
+cover the inverse-bearing half of the gate only.
 
-Q3: yes. The steps are the same forward effect steps the runtime performs, and
-the join is the same settle the runtime's emitted join performs. A row can
-enumerate the schedules and drive `_revl_parallel` with thunks that record their
-own forward and compensation events, then diff the observed trace against the
-model's predicted trace. No translation layer is needed.
-
-Cost: the first theorem is over the smallest group, two members with one effect
-step each. The interleaving of two one-step members is exactly the two orders,
-so the proof is a two-case argument plus the idempotence collapse. It is small
-enough that switching formalism costs little.
+Q3: yes, with a caveat. The steps are the same forward effect steps the runtime
+performs. The join and the compensation registration are emitted code
+(`backends/python/emit.py`, the group emitter), not part of `_revl_parallel`, so
+an oracle that drove thunks would re-implement the join instead of testing it.
+The row must compile and run an emitted module whose body has a group, and
+observe the world after the fire and after the abort. It enumerates which
+members fault, not the schedule: the runtime picks the interleaving. It maps a
+member with a `compensate` clause to a witnessed member and one without to an
+emission, and that mapping is exactly what the row tests; the theorems do not
+prove it.
 
 **Chosen.**
 
 ### C. Graph rewriting of effect and compensation pairs
 
-A rewriting relation over a multiset of `(effect, compensation)` pairs: firing
-adds a pair, compensating rewrites it, and a fault removes the pairs it
-invalidates. Q1: yes, the set is the state. Q2: no, it replaces the small-step
-relation rather than extending it; the group is two effects, so the machinery is
-disproportionate. Q3: a rewrite trace needs a projection to runtime events, and
-the projection is a new unproved mapping. **Rejected:** expressive but not
-reusable, and not oracle-shaped.
+A rewriting relation over a multiset of `(effect, compensation)` pairs. Q1: yes,
+the set is the state. Q2: no, it replaces the small-step relation. Q3: a
+rewriting trace needs a projection to runtime events that is an unproved
+mapping. **Rejected:** a second semantics with an unproved projection.
 
-### D. A hybrid process-algebra surface over an interleaving core
+### D. A hybrid: a term language over a small-step core
 
-Two formalisms to keep in sync: a term language for composition and a
-small-step core underneath. Q1: only through the process-algebra surface, which
-repeats A's translation. Q2: no, it keeps a second semantics to sync. Q3: no,
-the surface adds a translation with no row. It doubles the proof surface and the
-review surface for no statement the two required ones need. **Rejected.**
+Q1: only through the term surface, which repeats A's translation. Q2: no, a
+second semantics stays to be synchronised. Q3: no, the surface adds a
+translation with no row. It doubles the proof and review surface for no
+statement the two required ones need. **Rejected.**
 
-## The chosen statements
+## What the theorems say
 
-The first theorem is about the smallest group: two members, each with one
-forward effect step and an optional compensation, admitted by the gate.
+- **`par_run_is_a_sequential_run`.** For two single-effect members (fail, a
+  witnessed mutation, or an emission), every `ParSteps` run to completion ends in
+  the world and log of a `SemSteps` run of the two bodies in sequence, in plan
+  order or reverse, and that run fails exactly when a member failed. It carries
+  no idempotence hypothesis, and says so: single delivery of each effect makes
+  the sequential witness exist whatever the gate. Where the gate matters is
+  below.
+- **`group_abort_leaves_exactly_the_emissions`,
+  `group_abort_reverts_when_nothing_crossed`.** The abort after a group replays
+  every witnessed inverse and nothing else, so the world it leaves is exactly the
+  members that crossed the boundary; with no crossing it is the empty world, in
+  every interleaving.
+- **`over_fired_witnessed_member_is_undone`, `over_fired_emission_is_residue`.**
+  The reason the gate exists. When member 1 fails, the plan-order run never
+  reaches member 2, so its world is empty. The parallel run fires member 2
+  anyway. If member 2 made a witnessed mutation, the abort undoes it and the two
+  worlds agree; if it is a one-way emission, it stays out and the worlds differ.
+  An emission with no compensation therefore leaves bounded over-delivery after a
+  fault, which is the residual `P09` records (its limits section), and the gate's
+  "compensation absent" half admits exactly that.
+- **`both_interleavings_are_taken`.** Two witnessed members reach two different
+  final worlds through two runs, so the order in the first theorem is a real
+  choice.
 
-- A member is `fire(seq, forwardIdem, compensation?)` or `fail`. `forwardIdem`
-  is the declaration the gate reads; a compensation is present or absent, and
-  `compIdem` is present only when the compensation is declared idempotent.
-- The gate's two idempotence conjuncts admit a member when its forward delivery
-  is declared idempotent and its compensation is idempotent or absent. This is
-  the idempotence half of `_group_eligible`
-  (`backends/python/emit.py:2193`, `_compensation_idempotent_or_absent`,
-  `:2174`) stated as a predicate, not a new rule. The async, shape and
-  on-task-record conjuncts are not modelled.
-- Observable effects are a trace of tokens: a forward token or a compensation
-  token. The model takes duplicate delivery as the worst case the gate exists
-  for: a fan-out may attempt a member's forward more than once (a retry after a
-  fault or a divert), and an external dispose mid-group may run a present
-  compensation more than once. An idempotent forward or compensation collapses
-  the duplicate token; a non-idempotent one does not.
-- The parallel trace is the join-driven one: every non-failed member's forward
-  token, then, if a member failed, every fired member's compensation token in
-  plan order. The sequential trace in an order is the same forward tokens for
-  the prefix before the first failed member, then the fired prefix's
-  compensation tokens.
-- **Theorem 1, compensation only when allowed.** Every compensation token in a
-  run names a member that fired, and under the gate every compensated member's
-  compensation is declared idempotent. A member with an absent compensation
-  never produces a token.
-- **Theorem 2, two-effect group effect equivalence.** For every admitted
-  two-member group there is an order whose sequential trace equals the parallel
-  trace. The order moves the failed member to the end, so a member that fired
-  concurrently with the failure is not lost. When no member fails, either order
-  works, because the idempotent forward tokens collapse to the same set.
-
-The equivalence is a trace equality, not byte-identity of the audit surface.
-P09's retraction stands: the registered set can differ from a sequential early
-exit, and the theorem is about the effect trace and the compensation set, not
-about `accumulated`.
-
-The non-vacuity evidence is part of the theorem's slice, in the same shape as
-`RevL.A5.a5_not_vacuous` and `RevL.G8Classified.g8_row_not_vacuous`:
-
-- an admitted clean group, where both orders agree;
-- an admitted fault group, where plan order gives a different trace and the
-  order with the failed member last matches, so "some order" is load-bearing;
-- a necessity witness for each gate conjunct: a non-idempotent duplicate
-  forward, and a non-idempotent duplicate compensation, each make the parallel
-  trace unequal to every sequential order.
+"Compensation runs only when allowed" is not stated. An earlier draft had a
+theorem of that name that was the definition of the trace it spoke about, with no
+G7 verdict involved, and it was removed. Stating it against the G7 verdict needs
+the compensation `Body` form above and is open.
 
 ## What was tried
 
+- A first draft stated the theorem over an abstract effect trace (a member record
+  with idempotence flags, a plan-order parallel trace and a sequential trace). It
+  did not use `ParSteps`, so the interleaving was not quantified over. Its gate
+  hypotheses carried weight only because the parallel side delivered every effect
+  twice and the sequential side once, a duplication the runtime does not do: each
+  thunk runs once, and retry is per emission, grouped or not. It also made "either
+  order works" with no fault, which is false for the trace it defined. It was
+  replaced by the `ParSteps` development above.
 - `declared_idempotent_replay_free` was checked for direct reuse. It is a replay
-  fixpoint over a durable log, not a concurrent schedule; it supplies the
-  idempotence identity the trace model uses, but it cannot say which members
+  fixpoint over a durable log, not a schedule, so it cannot say which members
   fired before a fault.
 - The G7 teardown model was checked for direct reuse. G7 says which registered
-  entries replay under a verdict. It says nothing about when a group member's
-  forward step happens, and its stack is per activation, not per group member.
-  The fan-out needs a per-member step relation, which is why the new theorem file
-  is additive.
-- A process algebra was drafted as the natural first choice and rejected on Q2:
-  it is a second semantics with no bridge to `SemStep`, and bisimulation proves
-  more than the required statements.
-- Graph rewriting was rejected on Q2 and Q3. A rewriting trace needs a
-  projection to runtime events, and that projection is an unproved mapping, not
-  an oracle row.
-- The smallest group was chosen for the first theorem, so a rejection of this
-  note discards only the new theorem file and the new row.
+  entries replay under a verdict, not when a group member's forward step happens,
+  and its stack is per activation, not per member.
+- A process algebra was drafted as the natural first choice and rejected on Q2.
+- The smallest group was chosen, so a rejection of this note discards one theorem
+  file and one row.
 
 ## The oracle row this decision implies
 
-The differential row, built in the follow-up slice, has the same shape as G7's:
+The row, built in a follow-up slice, has the shape of G7's:
 
-- the fact rows enumerate `(member mode, gate flag, plan order)` over a small
-  finite set, so the corpus is enumerated rather than hand-picked;
-- the Lean side prints the predicted trace from the new model;
-- the reference side drives `_revl_parallel` with thunks that append a forward
-  event when they run and a compensation event when the join registers them.
-  Unlike G7, the trace is observed off the runtime's own branch results and join
-  registration, not recomputed from the source;
-- the mutation that must make the row fail is built into the corpus: a
-  non-idempotent forward member and a present non-idempotent compensation
-  member must produce a reference trace the model admits only when its gate
-  conjunct is dropped. That is the same mutation-sensitivity bar as
-  `g5_row_not_vacuous` and `g8_row_not_vacuous`.
+- the facts enumerate which members of a small group fault and whether each has a
+  compensation, so the corpus is enumerated rather than hand-picked;
+- the Lean side prints the predicted world after the run and after the abort,
+  from `group_abort_leaves_exactly_the_emissions`;
+- the reference side compiles and runs an emitted module with that group and
+  reads the world off the runtime, so the emitted join and compensation
+  registration are under test;
+- the mutation that must make it fail drops a compensation from a member that
+  fired and the plan-order run skipped: the model predicts residue, so a runtime
+  that undoes it, or a model that does not predict it, disagrees.
 
 ## What this decision does not claim
 
+- No forward idempotence and no compensation (item 247): `Body` has no form for
+  them. The idempotence conjuncts of `_group_eligible`, and the async, shape and
+  on-task-record conjuncts, are not modelled.
 - No true parallelism. The runtime is one cordis event loop with cooperative
-  `await` interleavings (`backends/python/runtime.py`, the pool-job-semantics
-  block); the model is a trace over interleaved member effects, not a preemptive
-  schedule.
-- No divert-aware cancellation. P09's open question 3 is untouched: a mid-group
-  divert is not modelled, only a failed member at the join.
-- No general n-member theorem. The first theorem is the two-effect group; the
-  n-member case is an induction that is only worth stating after the two-member
-  shape has been reviewed.
-- No byte-identical `accumulated`. The theorem is effect-equivalence and the
-  P09 retraction is unchanged.
-- No claim that the Python fan-out and the model agree yet. That is the
-  differential row; until it exists the decision and the Lean theorem are not an
-  agreement claim about the runtime.
-- No refinement from the `ParStep`/`ParSteps` relation to the effect trace. The
-  relation is stated, and the theorem is over the trace abstraction; the bridge
-  is a follow-up.
+  `await` interleavings; the relation is an interleaving of steps, not a
+  preemptive schedule.
+- No member that lands and then faults, no divert (P09's open question 3), no
+  nested groups, no group of more than two members.
+- No registration order. The join registers compensations in plan order and the
+  teardown replays them last-in first-out (`emit.py`, the group emitter; G7);
+  with two members and an abort that replays a set, the model cannot see the
+  difference.
+- No byte-identical `accumulated`. P09's retraction stands.
+- No claim that the Python fan-out and the model agree. That is the differential
+  row.
 
 ## Follow-up slices
 
-1. The differential row and its mutation, driving `_revl_parallel`.
-2. The refinement from the `ParStep`/`ParSteps` relation to the effect trace,
-   which is what would connect the theorem to a `SemStep` run.
-
-The theorem, its non-vacuity witnesses and the P09 update are in this slice.
-The ten `RevL.Fanout.*` claims are registered in the formal gate.
+1. The differential row and its mutation, over an emitted module.
+2. A compensation `Body` form and a Phase-2 drain in `SemStep`, which would let
+   the gate's idempotence conjuncts and "compensation runs only when allowed" be
+   stated. It touches `WalLemmas.lean`, so it is the owner's call.

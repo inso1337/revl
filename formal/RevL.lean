@@ -44,4 +44,4 @@ import RevL.Theorems.GRetain
 import RevL.Theorems.G4Inverse
 import RevL.Theorems.G4_WitnessedSiteUndo
 import RevL.Theorems.A5_CompensationAccompaniesEmission
-import RevL.Theorems.G10_ParallelEmissions
+import RevL.Theorems.ParallelFanout

@@ -2476,26 +2476,28 @@ on the standard three.
 
 ## Parallel fan-out (issue 2741)
 
-The two-effect fan-out group is stated in
-`RevL/Theorems/G10_ParallelEmissions.lean` over an interleaving extension of
-`SemStep` (`ParStep`/`ParSteps`), so G7 and A8 do not move. The design decision
-is `docs/design/2741-parallel-fanout-formalism.md`.
+A two-member parallel fan-out group is stated in
+`RevL/Theorems/ParallelFanout.lean`. `ParStep`/`ParSteps` run both members
+against one shared world and log, each step being a `SemStep` of one member, so
+`SemStep`, G7 and A8 do not move. The design decision is
+`docs/design/2741-parallel-fanout-formalism.md`. No guarantee number is
+assigned to it yet.
 
-- `RevL.Fanout.two_effect_group_effect_equiv`: under the gate's two idempotence
-  conjuncts, the parallel trace equals a sequential order; the fault case's
-  witness is the order with the failed member last.
-- `RevL.Fanout.compensation_only_when_allowed`: a parallel compensation token
-  names a member that fired, and under the gate's two idempotence conjuncts its
-  compensation is idempotent.
-- The non-vacuity evidence: `RevL.Fanout.clean_members_admitted`,
-  `RevL.Fanout.fault_members_admitted`,
-  `RevL.Fanout.fault_group_registers_the_fired_compensation`,
-  `RevL.Fanout.fault_group_plan_order_is_not_the_witness`,
-  `RevL.Fanout.fault_group_reverse_order_is_the_witness`,
-  `RevL.Fanout.clean_group_plan_order_is_the_witness`,
-  `RevL.Fanout.non_idempotent_forward_breaks_the_gate`,
-  `RevL.Fanout.non_idempotent_compensation_breaks_the_gate`.
+- `RevL.Fanout.par_run_is_a_sequential_run`: every interleaving that runs both
+  members to completion ends in the world and log of a `SemSteps` run of the two
+  bodies in sequence, in one order or the other; a failing member goes last.
+- `RevL.Fanout.group_abort_leaves_exactly_the_emissions`: the abort after a group
+  leaves exactly the members that crossed the boundary (R4's equation on that
+  sequential run).
+- `RevL.Fanout.group_abort_reverts_when_nothing_crossed`: with no crossing the
+  abort restores the empty world in every interleaving.
+- Witnesses: `RevL.Fanout.both_interleavings_are_taken`,
+  `RevL.Fanout.over_fired_witnessed_member_is_undone` (a member the plan-order run
+  skips fires and its inverse undoes it) and
+  `RevL.Fanout.over_fired_emission_is_residue` (the same member as a one-way
+  emission stays out, so the inverse is what makes the over-firing harmless).
 
-The differential row over the Python fan-out's fault schedules and the
-refinement from the effect trace to `ParStep`/`ParSteps` are follow-ups; the P09
-update is in this slice.
+Not covered: forward idempotence and compensation (item 247), which `Body` has no
+form for, so the idempotence conjuncts of `_group_eligible` are not modelled; a
+member that lands and then faults; divert; nested groups; more than two members.
+The differential row over the Python fan-out's fault schedules is open.
