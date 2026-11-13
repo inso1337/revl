@@ -2483,12 +2483,14 @@ against one shared world and log, each step being a `SemStep` of one member, so
 `docs/design/2741-parallel-fanout-formalism.md`. No guarantee number is
 assigned to it yet.
 
-- `RevL.Fanout.par_run_is_a_sequential_run`: every interleaving that runs both
-  members to completion ends in the world and log of a `SemSteps` run of the two
-  bodies in sequence, in one order or the other; a failing member goes last.
+- `RevL.Fanout.par_run_is_a_sequential_run`: for members with at most one effect
+  step (a failure, a witnessed mutation or an emission), every interleaving that
+  runs both to completion ends in the world and log of a `SemSteps` run of the
+  two bodies in sequence, in one order or the other; a failing member goes last.
 - `RevL.Fanout.group_abort_leaves_exactly_the_emissions`: the abort after a group
   leaves exactly the members that crossed the boundary (R4's equation on that
-  sequential run).
+  sequential run), given R4's hypothesis that no referent is both a witnessed
+  mutation and a crossing.
 - `RevL.Fanout.group_abort_reverts_when_nothing_crossed`: with no crossing the
   abort restores the empty world in every interleaving.
 - Witnesses: `RevL.Fanout.both_interleavings_are_taken`,

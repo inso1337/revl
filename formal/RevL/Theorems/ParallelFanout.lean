@@ -366,28 +366,45 @@ theorem both_interleavings_are_taken :
 /-- **A member the plan-order run skips fires in the parallel run, and its
 inverse undoes it.** Member 1 fails. Plan order never reaches member 2, so
 that run ends in the empty world. The parallel run fires member 2 anyway, so
-world 2 is out before the abort. Member 2 made a witnessed mutation, so the
-abort replays its inverse and the two worlds agree. -/
-theorem over_fired_witnessed_member_is_undone :
-    ParSteps ⟨.fail, .witnessed 2 true .done, [], []⟩
-      ⟨.fail, .done, [2], [d 2]⟩ ∧
-    SemSteps ⟨seqBody .fail (.witnessed 2 true .done), [], []⟩ ⟨.fail, [], []⟩ ∧
-    (2 : Seq) ∈ ([2] : World) ∧
-    replay [2] (rollbackReplay [d 2]) = replay [] (rollbackReplay []) := by
-  refine ⟨.step (.right .witnessed) .refl, .refl, List.mem_cons_self .., ?_⟩
-  decide
+its referent is out before the abort. Member 2 made a witnessed mutation, so the
+abort, by `group_abort_reverts_when_nothing_crossed`, replays its inverse and
+the two worlds agree. Stated for every referent and every idempotence flag. -/
+theorem over_fired_witnessed_member_is_undone (s : Seq) (i : Bool) :
+    ParSteps ⟨.fail, .witnessed s i .done, [], []⟩
+      ⟨.fail, .done, [s], [.descriptor s .transactional i]⟩ ∧
+    SemSteps ⟨seqBody .fail (.witnessed s i .done), [], []⟩ ⟨.fail, [], []⟩ ∧
+    replay [s] (rollbackReplay [.descriptor s .transactional i]) =
+      replay [] (rollbackReplay []) := by
+  have hrun : ParSteps ⟨.fail, .witnessed s i .done, [], []⟩
+      ⟨.fail, .done, [s], [.descriptor s .transactional i]⟩ :=
+    .step (.right .witnessed) .refl
+  refine ⟨hrun, .refl, ?_⟩
+  exact group_abort_reverts_when_nothing_crossed .fail (.witnessed s i) hrun
+    (Or.inr rfl) (Or.inl rfl) rfl
 
 /-- **The same, with a one-way emission, leaves residue.** Member 2 is an
 emission. It fired in the parallel run and has no inverse, so the abort cannot
-undo it: world 2 stays out, while the plan-order run's world is empty. The
-two worlds differ. -/
-theorem over_fired_emission_is_residue :
-    ParSteps ⟨.fail, .emit 2 .done, [], []⟩
-      ⟨.fail, .done, [2], [.effect 2 true false false]⟩ ∧
-    SemSteps ⟨seqBody .fail (.emit 2 .done), [], []⟩ ⟨.fail, [], []⟩ ∧
-    replay [2] (rollbackReplay [.effect 2 true false false]) = [2] ∧
-    replay [2] (rollbackReplay [.effect 2 true false false]) ≠
+undo it: its referent stays out, by `group_abort_leaves_exactly_the_emissions`,
+while the plan-order run's world is empty. The two worlds differ, for every
+referent. -/
+theorem over_fired_emission_is_residue (s : Seq) :
+    ParSteps ⟨.fail, .emit s .done, [], []⟩
+      ⟨.fail, .done, [s], [.effect s true false false]⟩ ∧
+    SemSteps ⟨seqBody .fail (.emit s .done), [], []⟩ ⟨.fail, [], []⟩ ∧
+    replay [s] (rollbackReplay [.effect s true false false]) = [s] ∧
+    replay [s] (rollbackReplay [.effect s true false false]) ≠
       replay [] (rollbackReplay []) := by
-  refine ⟨.step (.right .emit) .refl, .refl, ?_, ?_⟩ <;> decide
+  have hrun : ParSteps ⟨.fail, .emit s .done, [], []⟩
+      ⟨.fail, .done, [s], [.effect s true false false]⟩ :=
+    .step (.right .emit) .refl
+  have hres : replay [s] (rollbackReplay [.effect s true false false]) = [s] := by
+    have h := group_abort_leaves_exactly_the_emissions .fail (.emit s) hrun
+      (Or.inr rfl) (Or.inl rfl) (by simp [emittedSeqs, witnessedSeqs])
+    simpa [emittedSeqs] using h
+  refine ⟨hrun, .refl, hres, ?_⟩
+  rw [hres]
+  intro h
+  have : ([s] : World) = [] := h
+  cases this
 
 end RevL.Fanout

@@ -58,7 +58,7 @@ It fails Q2. `SemStep` has no labels and no behavioural equivalence, so reusing
 it means a translation from configurations to terms, and bisimulation would
 replace what G7 and A8 already state about single runs. It fails Q3 without a
 second translation from terms to runtime events. **Rejected:** a second
-semantics with an unproved projection.
+semantics with an unproved projection that nothing tests.
 
 ### B. An interleaving extension of the small-step relation
 
@@ -66,21 +66,26 @@ semantics with an unproved projection.
 step is either member taking a `SemStep` on that shared state; a member that
 cannot step (`Body.done`, `Body.fail`) does not stop the other.
 
-Q1: yes. A failing member is `Body.fail`, which is stuck, and the other member
-still fires. `par_run_is_a_sequential_run` says every interleaving that runs
-both members to completion ends in the world and log of a sequential run, in
-the order that puts the failing member last. The abort that follows is R4's
-equation on that sequential run (`group_abort_leaves_exactly_the_emissions`).
+Q1: partly. A failing member is `Body.fail`, which is stuck, and the other
+member still fires. `par_run_is_a_sequential_run` says every interleaving that
+runs both single-effect members to completion ends in the world and log of a
+sequential run, in the order that puts the failing member last. The abort that
+follows is R4's equation on that sequential run
+(`group_abort_leaves_exactly_the_emissions`). What the join registers is not
+modelled: compensation registration needs the compensation form below, so the
+fired set and the abort's residue are stated, the compensation set is not.
 
-Q2: partly. `SemStep`, the G7 stack and the A8 WAL run are untouched, and the
-group is stated over `Body.witnessed` and `Body.emit` members. But the member
-the gate is about is an emission that carries a compensation and a forward
-idempotence declaration, and `Body` has no form for either: `Body.emit` has no
-inverse, `Body.witnessed` carries only `undoIdem` (item 309), and `SemStep` has
-no Phase-2 compensation drain (`WalLemmas.lean`, "Fidelity"). Stating the
-idempotence conjuncts of `_group_eligible` needs a new `Body` form, which would
-change `WalLemmas.lean` and every match over `Body`. The first theorems therefore
-cover the inverse-bearing half of the gate only.
+Q2: no for the member the gate is about, yes for the inverse-bearing half.
+`SemStep`, the G7 stack and the A8 WAL run are untouched, and the group is stated
+over `Body.witnessed` and `Body.emit` members. But the member the gate is about
+is an emission that carries a compensation and a forward idempotence
+declaration, and `Body` has no form for either: `Body.emit` has no inverse,
+`Body.witnessed` carries only `undoIdem` (item 309), and `SemStep` has no Phase-2
+compensation drain (`WalLemmas.lean`, "Fidelity"). Stating the idempotence
+conjuncts of `_group_eligible` needs a new `Body` form, which would change
+`WalLemmas.lean` and every match over `Body`. B is chosen despite that: it is the
+only candidate that reuses `SemStep` at all, and the theorems cover the
+inverse-bearing half of the gate only.
 
 Q3: yes, with a caveat. The steps are the same forward effect steps the runtime
 performs. The join and the compensation registration are emitted code
@@ -90,8 +95,9 @@ The row must compile and run an emitted module whose body has a group, and
 observe the world after the fire and after the abort. It enumerates which
 members fault, not the schedule: the runtime picks the interleaving. It maps a
 member with a `compensate` clause to a witnessed member and one without to an
-emission, and that mapping is exactly what the row tests; the theorems do not
-prove it.
+emission. That mapping is a gap B shares with A and C: the theorems do not prove
+it. What differs is that here the row tests it against the runtime, where A and C
+leave it as a stipulation.
 
 **Chosen.**
 
@@ -100,7 +106,8 @@ prove it.
 A rewriting relation over a multiset of `(effect, compensation)` pairs. Q1: yes,
 the set is the state. Q2: no, it replaces the small-step relation. Q3: a
 rewriting trace needs a projection to runtime events that is an unproved
-mapping. **Rejected:** a second semantics with an unproved projection.
+mapping. **Rejected:** a second semantics with an unproved projection that
+nothing tests.
 
 ### D. A hybrid: a term language over a small-step core
 
@@ -122,15 +129,22 @@ statement the two required ones need. **Rejected.**
   `group_abort_reverts_when_nothing_crossed`.** The abort after a group replays
   every witnessed inverse and nothing else, so the world it leaves is exactly the
   members that crossed the boundary; with no crossing it is the empty world, in
-  every interleaving.
+  every interleaving. They carry R4's own hypothesis, stated on the produced log:
+  no referent is both a witnessed mutation and a crossing.
 - **`over_fired_witnessed_member_is_undone`, `over_fired_emission_is_residue`.**
   The reason the gate exists. When member 1 fails, the plan-order run never
   reaches member 2, so its world is empty. The parallel run fires member 2
   anyway. If member 2 made a witnessed mutation, the abort undoes it and the two
   worlds agree; if it is a one-way emission, it stays out and the worlds differ.
-  An emission with no compensation therefore leaves bounded over-delivery after a
-  fault, which is the residual `P09` records (its limits section), and the gate's
-  "compensation absent" half admits exactly that.
+  Both are stated for every referent. This is a finding, not a restatement of the
+  residual `P09` records for an external dispose: the runtime comment on teardown
+  (`backends/python/runtime.py`, the item 259 block) says over-firing a member and
+  then compensating it leaves the same world as skipping it, and the model says
+  that holds when the member has an inverse and fails when it is an emission with
+  none. Whether the gate's "compensation absent" half admits such a member in
+  practice depends on the compensation form the model does not have, so the
+  statement is about a one-way emission, not yet about an idempotent forward
+  delivery without a `compensate`.
 - **`both_interleavings_are_taken`.** Two witnessed members reach two different
   final worlds through two runs, so the order in the first theorem is a real
   choice.
@@ -142,6 +156,10 @@ the compensation `Body` form above and is open.
 
 ## What was tried
 
+- The group emitter yields each member's compensation once, and nothing in the
+  group path runs it a second time (`backends/python/emit.py`, the group
+  emitter), so no theorem needs a duplicate-compensation case. An earlier draft
+  assumed one.
 - A first draft stated the theorem over an abstract effect trace (a member record
   with idempotence flags, a plan-order parallel trace and a sequential trace). It
   did not use `ParSteps`, so the interleaving was not quantified over. Its gate
