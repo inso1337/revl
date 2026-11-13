@@ -418,6 +418,29 @@ def _check_claims(row: RowDecl, header: _Header, doc: str,
     return claims, extra
 
 
+def _row_value_type(value: object, declared: str | None) -> str | None:
+    """Surface type of a row config value, for the check against `declared`.
+
+    A scalar is typed as a config default is. A list (issue #3357) is typed
+    `List[T]`: `T` is the declared element type when every element fits it, and
+    otherwise the first element type that does not, so the refusal names it. An
+    empty list takes the declared element type. On a non-list field a list is
+    typed by its first element (`List[?]` when empty), so it never fits a
+    scalar type."""
+    if not isinstance(value, list):
+        return _config_default_type(value)
+    elem, inner = None, declared or ""
+    if inner.startswith("Opt[") and inner.endswith("]"):
+        inner = inner[len("Opt["):-1]
+    if inner.startswith("List[") and inner.endswith("]"):
+        elem = inner[len("List["):-1]
+    for item in value:
+        got = _config_default_type(item)
+        if got is not None and (elem is None or not compatible(elem, got)):
+            return f"List[{got}]"
+    return f"List[{elem or '?'}]"
+
+
 def _check_config(row: RowDecl, header: _Header, doc: str,
                   rel: str) -> dict[str, object]:
     """A config value that does not fit the declared type does not admit, and
@@ -433,7 +456,7 @@ def _check_config(row: RowDecl, header: _Header, doc: str,
                 f"`{name}` is not a config field of `{header.name}` "
                 f"(row `@{row.label}`)",
                 hint=f"config fields of `{header.name}` in `{rel}`: {known}")
-        actual = _config_default_type(value)
+        actual = _row_value_type(value, cfg.type)
         if actual is not None and not compatible(cfg.type, actual):
             raise RevlError(
                 doc, line,

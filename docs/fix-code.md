@@ -12,13 +12,17 @@ the next step: turning that sentence into a **concrete, applyable edit** — a
 text range and its replacement — for the diagnostics whose rewrite is
 unambiguous.
 
-One engine produces the edit; two front doors expose it:
+One engine produces the edit; three front doors expose it:
 
 - the LSP quick fix (`textDocument/codeAction`), for a person in an editor;
-- the agent payload (`fix_code`), for a tool acting on a structured rejection.
+- the agent payload (`fix_code`), for a tool acting on a structured rejection;
+- the MCP verb `revl_apply_repair` (issue #2855), which applies the verified
+  edit a refusal carries and returns the repaired candidate with its re-check.
 
-Both are in `src/revl/lsp/fixgen.py`. The LSP wiring is `compute_code_actions`
-in `src/revl/lsp/analysis.py`; the agent entry point is `fixgen.fix_code`.
+All three are in `src/revl/lsp/fixgen.py`. The LSP wiring is
+`compute_code_actions` in `src/revl/lsp/analysis.py`; the agent entry point is
+`fixgen.fix_code`; the MCP store and apply path is
+`src/revl/mcp/refusal_repair.py`.
 
 ## The stance: verified or nothing
 
@@ -175,13 +179,16 @@ nothing verified, which is different from a record produced without the text
 
 Each check is a full compile, so one `report` call spends at most
 `diagnostics.REPAIR_COMPILE_BUDGET` (8) verification compiles across all its
-records, the G4 `site-undo` check (one compile per record) included. A record
+records, the single-edit checks included: the G4 `site-undo` check and the
+T2, A9 and REVL `fix_code` check (issue #2855) each spend one compile per
+record. A record
 is checked whole or not at all: its candidates are reserved from the budget
 together, narrowing ones checked first, and a record whose candidates do not
 all fit is not checked. That first record closes the budget, so every later
 record is unchecked too, even a smaller one. An unchecked G1/G2/R2 record keeps
 no list, as if the text were absent; an unchecked G4 record keeps its prose
-repairs with no `fix_code`, as when the verifier cannot check the patch.
+repairs with no `fix_code`, as when the verifier cannot check the patch; and an
+unchecked T2, A9 or REVL record gets no `fix_code`, so no `repairId` either.
 
 The authority rule is the safety half. A candidate that enlarges the reach the
 source *declares* is marked `widens_authority: true`, omitted unless the
@@ -230,13 +237,29 @@ When no safe mechanical fix exists it answers `{"ok": false, "code", "reason"}`;
 the prose `fix` from the rejection is still the guidance. The rejection carries
 a code and a line but no span, so the ranged diagnostic is recomputed from the
 source and matched to the rejection, then run through the one shared engine —
-the LSP code action and the agent payload carry byte-identical edits. (An MCP
-verb over `fix_code` is left for later; this item ships the engine.)
+the LSP code action and the agent payload carry byte-identical edits.
 
 The same engine backs the G4 `site-undo` repair above, so the edit a G4 record
 carries in `repairs[i].fix_code` is byte-identical to the one
 `fix_code(rejection, source)` returns for that refusal, and to the LSP quick
 fix.
+
+## The MCP front door: `revl_apply_repair` (issue #2855)
+
+An MCP `revl_check` refusal carries the verified edit too: the record's
+`fix_code` (or, for G4, the repair entry's) is the closed-loop result of the
+same engine, and the refusal also returns `repairId`, a session-scoped name for
+that edit. `revl_apply_repair {"repairId": ...}` applies it to the very text
+the check compiled and returns the repaired candidate with its re-check, so a
+client turn is not spent reconstructing the edit or re-sending the text. It is
+explicit and read-only: the candidate comes back as `repaired` (the text the
+check compiled, so with any terse punctuation the check completed), the
+re-check as `check` (`revl_check`'s own answer to it: a pass, or the next
+refusal, which mints its own id when that class is mechanical), and nothing is
+installed. An id the session never minted is
+`UNKNOWN_REPAIR`; one minted before a load, swap, rollback or undo moved the
+unit of work is `STALE_REPAIR`. See
+[mcp-reference.md](mcp-reference.md#revl_apply_repair).
 
 ## Adding a code
 

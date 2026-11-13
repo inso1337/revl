@@ -983,6 +983,10 @@ class Decision:
       into the causal trace on an authorized management action.
     * ``why`` — the policy-style refusal trace, when refused.
     * ``message`` — the human refusal line.
+    * ``disk_reads``: for an authorized `restore`, the modules the gate's
+      compile read from disk (path -> sha256, ``{}`` when it read none or did
+      not compile). The handler refuses a boot compile that reads otherwise
+      (issue #3197).
     """
 
     gated: bool
@@ -992,6 +996,7 @@ class Decision:
     subjects: tuple[str, ...] = ()
     why: WhyTrace | None = None
     message: str | None = None
+    disk_reads: dict | None = None
 
 
 def _labels_for(ir: dict, name: str, realms) -> frozenset[str]:
@@ -1100,19 +1105,61 @@ def _changed_targets(old_ir: dict, new_ir: dict) \
 
 
 def _snapshot_targets(snap: dict | None) \
-        -> list[tuple[str, frozenset[str]]]:
-    """A restore's targets, read from the snapshot manifest without compiling
-    (a snapshot is re-admitted by the handler; gating only needs the names)."""
-    if not isinstance(snap, dict):
-        return [("*", frozenset({WHOLE}))]
-    manifest = (snap.get("manifest") or {})
-    from ..policy import component_realms  # noqa: PLC0415 — read-only reuse of item 33
+        -> list[tuple[str, frozenset[str]]] | None:
+    """A restore's targets (see :func:`_restore_targets`)."""
+    return _restore_targets(snap)[0]
 
-    targets = []
-    for entry in manifest.get("components") or []:
-        name = entry.get("name")
-        targets.append((name, frozenset({name}) | component_realms(manifest, name)))
-    return targets or [("*", frozenset({WHOLE}))]
+
+def _restore_targets(snap: dict | None, profile=None) \
+        -> tuple[list[tuple[str, frozenset[str]]] | None, dict[str, str]]:
+    """A restore's targets, derived from the composition its `sources` compile
+    to, never from the `manifest` the caller writes; and what that compile
+    read from disk.
+
+    A snapshot document is caller-supplied JSON, so its `manifest` and `meta`
+    are claims, not evidence. Reading them scoped the gate to a composition the
+    caller described rather than the one that boots: an operator granted
+    `restore` on one subject could name that subject there while its sources
+    compiled and loaded anything (issue #3197). This compiles the same sources
+    the handler re-admits, as `_targets` does for a `load` candidate.
+
+    The disk reads: a snapshot may leave a module out of its in-memory
+    sources, and the compile then reads it from disk. The handler compiles
+    again to boot, so a write between the two reads would boot a composition
+    the gate never decided on. The modules this compile read are returned as
+    path -> sha256 (:func:`persist.read_digests`), and the handler refuses a
+    boot compile whose reads differ. The texts are not copied into the
+    snapshot: a module read from disk keeps resolving its `asset`, `ref` and
+    body files beside it.
+
+    Two compiles stay (this one, and the handler's under the authoring
+    profile) and they cannot disagree on the component set: they read the
+    same texts (checked by digest), and `profile` here carries the boot
+    compile's operator realm bindings and nothing else, so a `realm(?NAME)`
+    placeholder binds to the same realm in both. Every other profile field
+    may only REFUSE a compile, never reshape the composition a successful one
+    produces. Without the bindings an unbound placeholder failed this compile
+    alone, the target set became undecidable, and a `may restore on *`
+    holder's `may not restore on <name>` deny never met the component the
+    boot then bound and loaded. Otherwise unprofiled by the same rule as
+    :func:`_compile_candidate`: it derives names and realms, lowers no host
+    body and boots nothing, and accepts everything the profiled one does.
+
+    The targets are ``None`` when the document names no sources or does not
+    compile: an *undecidable* target set, which :func:`decide` fails closed
+    on, with no disk reads, so the boot may read nothing from disk either. An
+    empty composition compiles to no targets and is scoped to the whole
+    composition too (:func:`_live_targets`)."""
+    if not isinstance(snap, dict):
+        return [("*", frozenset({WHOLE}))], {}
+    from .persist import read_digests, recompile_snapshot  # noqa: PLC0415 - lazy, no cycle
+
+    report: dict = {}
+    try:
+        ir = recompile_snapshot(snap, profile=profile, report=report)
+    except Exception:  # noqa: BLE001 - a failed derivation must not widen
+        return None, {}
+    return _live_targets(ir), read_digests(report.get("disk_reads"))
 
 
 def _compile_candidate(arguments: dict, manifest: dict | None = None,
@@ -1265,8 +1312,7 @@ def _targets(verb: str, session, arguments: dict) \
 def _approve_targets(session, arguments: dict) \
         -> list[tuple[str, frozenset[str]]] | None:
     """A `revl_approve`'s target: the crossing component the approval names,
-    resolved WITHOUT running anything (the same resolve-without-running pattern
-    `_snapshot_targets` uses for `restore`). A ticket `hash` resolves against the
+    resolved WITHOUT running anything. A ticket `hash` resolves against the
     session's outstanding-ticket table; a proactive item-344 `capability` grant
     resolves against the live class map. Either way the target scopes to the
     crossing component and its realms, so a subject-scoped `may approve on
@@ -1551,7 +1597,8 @@ def mint_refusal(operator: Operator | None, *, capability: str,
             f"470 stage 3). Widen the `may mint` line, or mint within it")
 
 
-def decide(session, tool_name: str, arguments: dict) -> Decision:
+def decide(session, tool_name: str, arguments: dict, *,
+           restore_profile=None) -> Decision:
     """Gate one MCP verb dispatch against the session's bound operator.
 
     Returns a :class:`Decision`. When no operator is bound (no profile) or the
@@ -1578,7 +1625,11 @@ def decide(session, tool_name: str, arguments: dict) -> Decision:
     running composition is refused by the handler outright (`load` never
     replaces or activates a live composition). The gate is kept for that
     already-live case, and for every state-changing verb (swap/edit/unload/
-    restore/undo)."""
+    restore/undo).
+
+    `restore_profile` is the profile a `restore`'s target derivation compiles
+    under: the boot compile's operator realm bindings only (issue #3197, see
+    :func:`_restore_targets`)."""
     verb = TOOL_VERB.get(tool_name)
     if verb is None and tool_name in COMPOSED_TOOL_VERB:
         # a composed verb: gated as the operation it performs underneath, and
@@ -1601,8 +1652,15 @@ def decide(session, tool_name: str, arguments: dict) -> Decision:
         return Decision(gated=False)  # cold load: not yet a privileged mutation
 
     approvals = tool_name == "revl_approvals"
-    targets = (_approvals_targets(session, arguments) if approvals
-               else _targets(verb, session, arguments))
+    disk_reads = None
+    if approvals:
+        targets = _approvals_targets(session, arguments)
+    elif verb == "restore":
+        # issue #3197: the handler boots only what this compile read
+        targets, disk_reads = _restore_targets(arguments.get("snapshot"),
+                                               restore_profile)
+    else:
+        targets = _targets(verb, session, arguments)
     if targets is None:
         # UNDECIDABLE — fail closed. The gate cannot work out which components
         # this action touches, so it scopes the action to the unnameable whole
@@ -1627,4 +1685,4 @@ def decide(session, tool_name: str, arguments: dict) -> Decision:
 
     subjects = tuple(sorted(name for name, _ in targets))
     return Decision(gated=True, allowed=True, operator=operator.token,
-                    verb=verb, subjects=subjects)
+                    verb=verb, subjects=subjects, disk_reads=disk_reads)

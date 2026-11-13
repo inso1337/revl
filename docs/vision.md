@@ -48,7 +48,7 @@ with `make docs-gen`; never edit the block by hand.
 | cordis (TypeScript, v4) | portability | 61 ok / 0 limit / 0 gap | the same IR runs unchanged on a second host |
 | cordis-rs (Rust) | spike | 61 ok / 0 limit / 0 gap | the backend contract is small enough to target any Cordis runtime |
 | cordis4j (Java) | spike | 60 ok / 1 limit / 0 gap | the same contract, on a second spike nobody optimised for |
-| cordis-wasm | performance + enforcement | 51 ok / 10 limit / 0 gap | confinement becomes physical (sandbox), instances drop cleanly |
+| cordis-wasm | performance + enforcement | 54 ok / 7 limit / 0 gap | confinement becomes physical (sandbox), instances drop cleanly |
 | cordis-go (Go) | third-party runtime | 60 ok / 1 limit / 0 gap | the same contract holds for a Cordis runtime nobody on the project wrote ([stc-go](https://github.com/0xdenny218/stc-go)) |
 <!-- docgen:vision-tiers end -->
 
