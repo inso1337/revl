@@ -4945,14 +4945,21 @@ class Frame:
         return {"capability": capability, "requestId": entry.get("requestId"),
                 "passthrough": False}
 
-    def acquire_lease(self, capability: str, ttl_ms: Any, uses: Any) -> Any:
+    def acquire_lease(self, capability: str, ttl_ms: Any, uses: Any,
+                      key: "str | None" = None, provider: Any = None) -> Any:
         """`let l = effect lease <cap> …` at runtime (item 294 Slice 2). The
         standing grant was already minted from the operator's approved ticket by
         the load-time lease gate; this resolves the live lease grant for THIS
         component and capability cone and returns the handle whose `.revoke()`
         retires it on teardown. Fails closed when no session owner backs the lease
         (an ungated raw run) — the load gate refuses that upstream, and this is the
-        defensive twin so no self-mint ever happens with no ticket behind it."""
+        defensive twin so no self-mint ever happens with no ticket behind it.
+
+        Item 442 (issue #2693): a lease over a wiring key registers the key and
+        the provider it resolves to with the SESSION, not on the handle. The
+        handle is a value a delegatee may read fields of, so it carries no
+        authority: `delegate_call` asks the session's ledger for the provider by
+        request id, after the grant has been checked and spent."""
         owner = self._owner
         acquire = getattr(owner, "lease_acquire", None) if owner is not None \
             else None
@@ -4963,14 +4970,82 @@ class Frame:
                 "lease is not a lease (item 294, honest sentence 2). A lease "
                 "must be acquired under an approval policy that raised and "
                 "approved its ticket")
-        request_id = acquire(self.name, capability, ttl_ms, uses)
+        request_id = acquire(self.name, capability, ttl_ms, uses, key, provider)
         if request_id is None:
             raise LeaseRefused(
                 capability,
                 "no live standing grant was minted for this lease — the "
                 "operator ticket for the lease was not approved (fail-closed: "
                 "a lease never self-mints)")
-        return LeaseHandle(capability, request_id, owner.lease_revoke)
+        return LeaseHandle(capability, request_id, owner.lease_revoke,
+                           key=key, holder=self.name)
+
+    def delegate_call(self, handle: Any, service: str, method: str,
+                      args: list) -> Any:
+        """The delegatee's crossing through a received delegated reference
+        (item 442, issue #2693): decide the crossing (which spends the grant and
+        any other authority the provider method's reach needs), attribute the use
+        to THIS component, then fire the provider.
+
+        The handle is a lookup key, never a bearer token. The provider object
+        lives in the session (`lease_provider`), so reading fields off the handle
+        yields no authority; the session checks that the handle's key really
+        exposes `service` before anything is spent, resolves the bound method
+        before anything is spent, then runs the ordinary class-(c) decision for
+        the provider operation. That decision is what keeps a provider method
+        reaching a SECOND class-(c) capability from firing it under the lease's
+        consent: it prompts for the uncovered capability instead.
+
+        The E-Stop is checked before the spend, exactly as `approval_crossing`
+        does, so a halted session leaves no consumed-but-unfired use."""
+        owner = self._owner
+        begin = getattr(owner, "delegate_begin", None) if owner is not None \
+            else None
+        lookup = getattr(owner, "lease_provider", None) if owner is not None \
+            else None
+        if begin is None or lookup is None:
+            raise LeaseRefused(
+                f"{service}.{method}",
+                "no session grant ledger backs this delegated reference — a "
+                "delegation is enforced by the receiver's own ledger and is "
+                "never a bearer token (item 442, issue #2693)")
+        request_id = getattr(handle, "request_id", None)
+        key = getattr(handle, "key", None)
+        if request_id is None or key is None:
+            raise LeaseRefused(
+                f"{service}.{method}",
+                "this value is not a delegatable lease: it names no grant or "
+                "wiring key, so there is nothing to look up and nothing to "
+                "fire (item 442, issue #2693)")
+        bound = lookup(request_id)
+        if bound is None:
+            raise LeaseRefused(
+                f"{key}.{method}",
+                "this lease registered no provider with the session, so it "
+                "cannot be delegated (a lease over a bare capability has no "
+                "provider; item 442, issue #2693)")
+        provider, provider_service = bound
+        if provider_service != service:
+            raise LeaseRefused(
+                f"{key}.{method}",
+                f"the delegated reference exposes `{provider_service}`, not "
+                f"the `{service}` the call was typed against — the handle and "
+                f"the parameter disagree (item 442, issue #2693)")
+        fn = getattr(provider, method, None)
+        if not callable(fn):
+            raise LeaseRefused(
+                f"{key}.{method}",
+                f"the provider behind this delegated reference has no "
+                f"`{method}` to fire (item 442, issue #2693)")
+        # item 443: before the spend, exactly as the approval crossing does.
+        _estop_check(f"{key}.{method}")
+        spends = begin(request_id, self.name, key, method, list(args),
+                       getattr(handle, "holder", None))
+        result = fn(*args)
+        fired = getattr(owner, "delegate_fired", None)
+        if spends and fired is not None:
+            fired(spends)
+        return result
 
     def approval_crossing(self, handle: Any, capability: str,
                           fire: Callable[[], Any]) -> Any:
@@ -5601,15 +5676,26 @@ class LeaseHandle:
     the session minted from the approved ticket (by `requestId`) and carries the
     single scoped revoke exemption: `l.revoke()` retires THAT grant (its own,
     always-safe: revoking your own authority only narrows), riding the LIFO
-    teardown. It names no other grant."""
+    teardown. It names no other grant.
 
-    __slots__ = ("capability", "request_id", "_revoke_cb")
+    Item 442 (issue #2693): a lease minted on a WIRING KEY also carries that key
+    and the component that acquired it, so the same value is a delegated
+    reference when it is handed to another component. It deliberately carries NO
+    provider object: a delegatee may read fields off a value, so the thing that
+    can fire the host body lives in the session's ledger, looked up by request id
+    only AFTER the grant has been checked and spent. The handle is a lookup key,
+    never a bearer token."""
+
+    __slots__ = ("capability", "request_id", "_revoke_cb", "key", "holder")
 
     def __init__(self, capability: str, request_id: str,
-                 revoke_cb: "Callable[[str], Any]") -> None:
+                 revoke_cb: "Callable[[str], Any]", key: "str | None" = None,
+                 holder: "str | None" = None) -> None:
         self.capability = capability
         self.request_id = request_id
         self._revoke_cb = revoke_cb
+        self.key = key
+        self.holder = holder
 
     def revoke(self) -> Any:
         return self._revoke_cb(self.request_id)
@@ -5908,6 +5994,17 @@ class SessionOwner:
         # holds for every existing composition.
         self.lease_acquire: Optional[Callable[..., Any]] = None
         self.lease_revoke: Optional[Callable[[str], Any]] = None
+        # item 442 (issue #2693): the delegated-crossing seam. `lease_provider`
+        # resolves the provider a lease registered (by grant request id), never
+        # from the handle; `delegate_begin` validates and decides the crossing,
+        # spending the lease grant and any other authority the provider method's
+        # reach needs, and attributes the use to the subject; `delegate_fired`
+        # pairs the spends with their emission records after the provider
+        # returns. All three are None (and inert) unless the session installs
+        # them.
+        self.lease_provider: Optional[Callable[[str], Any]] = None
+        self.delegate_begin: Optional[Callable[..., Any]] = None
+        self.delegate_fired: Optional[Callable[[list], Any]] = None
 
     def _wal(self) -> Optional[Any]:
         return self._wal_getter() if self._wal_getter is not None else None

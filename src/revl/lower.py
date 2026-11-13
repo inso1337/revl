@@ -13512,6 +13512,98 @@ def _d4_delegate_no_recrossing(node, env: "Env", filename: str, line: int) -> No
             )
 
 
+def _mark_delegate_calls(node, env: "Env", filename: str, line: int) -> None:
+    """Mark every call on a received `Delegate[S]` parameter with the service it
+    exposes (item 442, issue #2693; design §4.3 C2).
+
+    The delegatee's own use of the authority is an ordinary method call on the
+    borrowed parameter, so the IR keeps the call shape and adds `delegate: S`.
+    Emitters route that node through the delegation seam (check the grant,
+    attribute and spend it, then fire the provider) instead of calling the
+    handle object directly.
+
+    A method `S` does not declare is refused here, naming the delegated surface;
+    the call would otherwise fall through to plain name resolution with a
+    misleading diagnostic. An `async` operation is refused too: this slice emits
+    the delegated crossing synchronously, and silently dropping its coroutine
+    would be worse than not admitting it.
+    """
+    tenv = getattr(env, "type_env", None) or {}
+
+    def delegate_root(n):
+        """The name at the root of a field chain (`d`, in `d.provider.x`), or
+        None when the chain does not start at a plain name."""
+        target = n.get("target")
+        while isinstance(target, dict) and target.get("kind") == "field":
+            target = target.get("target")
+        return target if isinstance(target, dict) \
+            and target.get("kind") == "name" else None
+
+    def walk(n) -> None:
+        if isinstance(n, dict):
+            if n.get("kind") == "field":
+                # item 442 (issue #2693): a delegated reference exposes S's
+                # OPERATIONS and nothing else. Field reads on it would reach
+                # whatever the runtime value happens to carry (the field reader
+                # falls through to `getattr` for a non-record type), which is
+                # the escape that must not exist: the handle's backing state is
+                # the session's, not the delegatee's.
+                root = delegate_root(n)
+                if root is not None:
+                    head, _ = parse_type(tenv.get(root.get("id")) or "")
+                    if head == DELEGATE_HEAD:
+                        raise RevlError(
+                            filename, n.get("line") or line,
+                            f"`{root.get('id')}.{n.get('name')}` reads a field "
+                            f"of a delegated reference; a `{DELEGATE_HEAD}[S]` "
+                            f"exposes S's operations and nothing else",
+                            hint="call the delegated reference's own methods "
+                                 "(they are checked against the session's "
+                                 "ledger); it is a lookup key, not a record "
+                                 "(item 442, issue #2693)",
+                            code="G1", category="delegation")
+            if n.get("kind") == "call":
+                target = n.get("target")
+                method = n.get("method")
+                if isinstance(target, dict) and target.get("kind") == "name" \
+                        and isinstance(method, str):
+                    head, args = parse_type(tenv.get(target.get("id")) or "")
+                    svc = (env.services.get(args[0])
+                           if head == DELEGATE_HEAD and len(args) == 1 else None)
+                    if svc is not None:
+                        named = target.get("id")
+                        decl = svc.methods.get(method)
+                        if decl is None:
+                            raise RevlError(
+                                filename, line,
+                                f"`{named}.{method}` is not an operation of "
+                                f"service `{svc.name}`, the surface the "
+                                f"delegated reference exposes",
+                                hint=f"a `{DELEGATE_HEAD}[S]` value authorizes "
+                                     f"only S's own methods (item 442, "
+                                     f"issue #2693)",
+                                code="G1", category="delegation")
+                        if getattr(decl, "async_", False):
+                            raise RevlError(
+                                filename, line,
+                                f"`{named}.{method}` is an async operation of "
+                                f"`{svc.name}`; a delegated reference cannot "
+                                f"cross to an async operation yet",
+                                hint="delegated calls are emitted synchronously "
+                                     "in this slice, so an async operation "
+                                     "would be awaited nowhere (item 442, "
+                                     "issue #2693)",
+                                code="A1", category="delegation")
+                        n["delegate"] = svc.name
+            for v in n.values():
+                walk(v)
+        elif isinstance(n, list):
+            for v in n:
+                walk(v)
+
+    walk(node)
+
+
 def _ownership_check_expr(node, env: "Env", filename: str, line: int,
                           *, seam: bool = False) -> None:
     """Run the body-position ownership checks over one lowered expression: O1
@@ -16032,6 +16124,13 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         # borrow) is typed and detectable. An acquire bound in the method is
         # method-owned (its own `undo` is exempt).
         _ownership_walk_method(mbody, env, comp.source or filename, method.line)
+        # item 442 (issue #2693): a method called on a received `Delegate[S]`
+        # parameter is the delegatee's OWN crossing through the handed authority
+        # (design §4.3 C2). Mark it in the IR while the method's parameter types
+        # are still in scope, so the emitters route it through the delegation
+        # seam instead of treating the handle as a plain object, and refuse a
+        # method the delegated surface does not declare.
+        _mark_delegate_calls(mbody, env, comp.source or filename, method.line)
         # item 470: the declaration bounds the OPERATION, not the `emit` steps
         # written in it. Run after the body is fully lowered, while the
         # declaration is still the one in scope.
@@ -17476,7 +17575,11 @@ def _service_receiver_decl(node: dict, env: Env):
         return None
     ty = infer_ir(recv, getattr(env, "type_env", None) or {}, env.types,
                   env.services)
-    head, _ = parse_type(ty or "")
+    head, targs = parse_type(ty or "")
+    # item 442 (issue #2693): a received `Delegate[S]` exposes S's operations,
+    # so the receiver resolves to the delegated service, not to "Delegate".
+    if head == DELEGATE_HEAD and len(targs) == 1:
+        head = targs[0]
     svc = env.services.get(head)
     return svc.methods.get(method) if svc is not None else None
 
@@ -17720,7 +17823,12 @@ def _is_emission_call(node: dict, env: Env) -> bool:
         # demand is raised where the provision flows into the parameter (the
         # application, `_check_arrow_param_crossings`); this predicate only
         # decides emission-ness (GHSA-wg4v-r47x-52p2 residual).
-        head, _ = parse_type((getattr(env, "type_env", None) or {}).get(target.get("id")) or "")
+        head, targs = parse_type((getattr(env, "type_env", None) or {}).get(target.get("id")) or "")
+        # item 442 (issue #2693): a call on a `Delegate[S]` parameter reaches
+        # S's declared operations, so emission-ness is read from the delegated
+        # service rather than from a service literally named "Delegate".
+        if head == DELEGATE_HEAD and len(targs) == 1:
+            head = targs[0]
         svc = env.services.get(head)
         decl = svc.methods.get(node.get("method")) if svc is not None else None
         return decl is not None and decl.emission
@@ -17763,13 +17871,23 @@ def _lower_lease_step(stmt: "LetEffect", env: Env, filename: str) -> dict:
                  "revoke gate (item 379), which no source form reaches",
             code="G4", category="capability")
     safe = env.bind_local(stmt.bind, stmt.line)
+    # item 442 (issue #2693): a lease minted on a WIRING KEY is the delegation
+    # mint of the design's §5.1. When the capability's root names a `requires`
+    # key, record that key so the runtime acquisition can bind the handle to the
+    # provider the delegator actually holds; the handle then exposes that key's
+    # service to a delegatee. A lease over a bare capability (an extern's
+    # declared scope) has no key and stays an ordinary 294 lease, unchanged.
+    key = acq.capability.split("(", 1)[0].split(".", 1)[0]
+    binds_key = key if key in env.requires else None
     step = {
         "step": "let-effect",
         "bind": safe,
         "lease": {"capability": acq.capability,
-                  "ttlMs": acq.ttl_ms, "uses": acq.uses},
+                  "ttlMs": acq.ttl_ms, "uses": acq.uses,
+                  **({"key": binds_key} if binds_key else {})},
         "acquire": {"kind": "lease-acquire", "capability": acq.capability,
-                    "ttlMs": acq.ttl_ms, "uses": acq.uses, "line": acq.line},
+                    "ttlMs": acq.ttl_ms, "uses": acq.uses, "line": acq.line,
+                    **({"key": binds_key} if binds_key else {})},
         "undo": {"kind": "lease-revoke", "handle": safe, "line": acq.line},
     }
     return step

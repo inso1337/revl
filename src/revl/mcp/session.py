@@ -206,6 +206,49 @@ def _cap_covers(wide: str, narrow: str) -> bool:
         return False                    # unparseable -> only exact-string matches
 
 
+def _delegation_narrowed(capability: str) -> list:
+    """The parameters a delegation's grant spelling narrowed, for the chain link.
+
+    `fs.write(path="/tmp", size="1MB")` narrows on `path` and `size`; a bare
+    `fs.write` narrows on nothing. Reads the STORED canonical spelling (the one
+    relation, `cap_order.parse_stored_cap`), so the chain records exactly what the
+    ledger's grant declares and cannot drift from it. An unparseable spelling
+    yields an empty list rather than inventing a narrowing (fail closed on the
+    record, never on the use: the coverage check already refused or admitted)."""
+    try:
+        cap = cap_order.parse_stored_cap(capability)
+    except cap_order.CapError:
+        return []
+    return [name for name, _ in cap.params]
+
+
+def _delegation_covers(granted: str, use: str) -> bool:
+    """Does a delegation minted for `granted` authorize a use of `use`?
+
+    `use` is what a delegated method call reaches, spelled as the crossing's
+    semantic identity (`fs.write`) — the parameter narrowing is the LEASE's own
+    and is not re-stated by a method call whose path is an ordinary argument.
+    So an IDENTICAL stored spelling and an equal TOKEN both authorize; a wider or
+    different token does not. A narrower use (the caller spelling parameters too)
+    still has to be covered by the ordinary partial order.
+
+    Reading the token rather than only `covers` is deliberate: `covers` refuses a
+    bare `fs.write` under a granted `fs.write(path="/tmp")` because a bare token
+    TOPS the cone, and that is the right answer for a MINT (`_grant_covers`).
+    It is the wrong answer for a delegated USE, which cannot widen a grant it
+    never re-states: a use names the granted token, and the value narrowing (a
+    `path=` bound) rides the lease's own declaration. That narrowing is
+    declared-and-audited, not mounted, until item 411's enforcement lands, and
+    this seam claims no more (design §8.3 item 1)."""
+    if _cap_covers(granted, use):
+        return True
+    try:
+        token = cap_order.parse_stored_cap(granted).token
+    except cap_order.CapError:
+        return False
+    return use == token
+
+
 # -- item 470 Slice 5: the class-(c) approval gate as an intent refinement ----
 #
 # `intent.refine` compares what was DECLARED against what is about to RUN. At
@@ -1309,6 +1352,12 @@ class Session:
         # (the candidateHash check invalidates a stale grant, exactly as
         # `_ledger` does); reset per session (invariant 5).
         self._grants: list = []
+        # item 442 (issue #2693): the lease providers, keyed by grant request id.
+        # A delegatable handle carries no provider object (it is a value a
+        # delegatee may read fields of), so the thing that can fire the host body
+        # lives here and is resolved only after the grant has been checked and
+        # spent. Per session, like the grant ledger.
+        self._lease_providers: dict = {}
         # roadmap item 251 Slice 2: distilled `AutoApproveRule`s loaded from the
         # bound policy (`self.sandbox.auto_approve_rules`) into a persistent
         # standing-grant analog, matched by a component glob + realm + resource
@@ -1906,6 +1955,15 @@ class Session:
         # gate already minted, and its disposer's own-requestId revoke rides here.
         self._owner.lease_acquire = self._runtime_lease_acquire
         self._owner.lease_revoke = self._runtime_lease_revoke
+        # item 442 (issue #2693): the delegated-crossing seam. The provider is
+        # resolved by request id from this session's registry; the crossing is
+        # decided and spent by the ordinary class-(c) machinery, attributed to
+        # the receiving component, and paired to its emission record after the
+        # provider fires. Inert unless a composition mints and hands out a
+        # delegation.
+        self._owner.delegate_begin = self.delegate_begin
+        self._owner.delegate_fired = self.delegate_fired
+        self._owner.lease_provider = self.lease_provider
         runtime_mod.set_session_owner(self._owner)
 
     def _configure_owner_approvals(self, ir: dict) -> None:
@@ -5811,6 +5869,7 @@ class Session:
         self._ledger = []
         self._grants = []
         self._grants_consumed = 0
+        self._lease_providers = {}
         # item 251 Slice 2: the MATERIALIZED rules die with the generation - the
         # next `load` rebuilds them from the bound policy. The H1 review bind and
         # the spent budget do NOT die with it: both are keyed by the rule's
@@ -7453,10 +7512,16 @@ class Session:
         from .approval import ApprovalRequired  # noqa: PLC0415
         for lz in leases:
             cap = lz["capability"]
-            component = lz["component"]
-            if self._live_lease_grant(component, cap) is not None:
-                continue  # already minted from an approved ticket (retry / pre-mint)
+            # The grant is bound to the CROSSING component the ticket names,
+            # which can differ from the acquiring activation body (`lz[
+            # "component"]`): a lease over a key another component provides is
+            # acquired by one component and consumed at another's crossing. The
+            # liveness check must use the identity the mint will use, or an
+            # approved lease re-raises its ticket forever in that topology
+            # (issue #2693).
             ticket = self._build_lease_ticket(lz)
+            if self._live_lease_grant(ticket["component"], cap) is not None:
+                continue  # already minted from an approved ticket (retry / pre-mint)
             # roadmap item 471: the lease's own votes are the answer. The mint
             # is taken from the LIVE satisfied decision for THIS ticket and from
             # nothing else (see the docstring). `in self._tickets` is the other
@@ -7595,7 +7660,8 @@ class Session:
         return self._satisfied_decision_for(ticket) is decision
 
     def _runtime_lease_acquire(self, component: str, capability: str,
-                               ttl_ms, uses) -> str | None:
+                               ttl_ms, uses, key: "str | None" = None,
+                               provider: Any = None) -> str | None:
         """The runtime `_revl_frame.acquire_lease` bridge: resolve the standing
         grant the lease gate minted and return its `requestId` (the handle names
         it). None if no live lease grant backs it — the frame then fails closed
@@ -7605,7 +7671,15 @@ class Session:
         The grant's own component is the CROSSING component the ticket bound
         (`crossings_for_capability`), which may differ from the acquiring
         activation body's component; match on the crossing component so the handle
-        names the grant the body's crossings actually consume against."""
+        names the grant the body's crossings actually consume against.
+
+        Item 442 (issue #2693): a lease over a wiring key also registers the
+        provider the key resolves to with the SESSION (keyed by request id), and
+        records the ACQUIRING component as the lender together with that
+        component's activation-scope hash at this moment. The handle itself
+        carries no provider, so a delegatee reading fields off it gets no
+        authority; and liveness of the lender is decided against the scope it
+        lent from, not against the crossing scope the grant was minted for."""
         g = self._live_lease_grant(component, capability)
         if g is None:
             # the acquiring body's component is not the crossing component (the
@@ -7618,7 +7692,85 @@ class Session:
                         and _cap_covers(cand["capability"], capability):
                     g = cand
                     break
-        return g["requestId"] if g is not None else None
+        if g is None:
+            return None
+        if key is not None and provider is not None:
+            self._lease_providers[g["requestId"]] = (
+                key, provider, self._require_service(component, key))
+            g.setdefault("lender", component)
+            g.setdefault("lenderGeneration", self._scope_hash(component))
+        return g["requestId"]
+
+    def _require_service(self, component: str, key: str) -> str | None:
+        """The service type a component's `requires` key names, from the IR."""
+        for comp in (self.ir or {}).get("components") or []:
+            if comp.get("name") == component:
+                return (comp.get("requires") or {}).get(key)
+        return None
+
+    def _scope_hash(self, component: str) -> str | None:
+        """The candidate hash of one component's ACTIVATION scope in the current
+        generation, or None when no approval policy is bound (the generation
+        binding is inert then, as it is for a lease)."""
+        cm = self._class_map
+        if cm is None:
+            return None
+        reach = getattr(cm, "_reach", {}).get(f"{component}:activation")
+        closure = reach["closureComponents"] if reach is not None else {component}
+        return cm.candidate_hash(closure)
+
+    def lease_provider(self, request_id: str):
+        """`(provider, service)` for the lease grant `request_id`, or None. The
+        provider never lives on the handle; this is the only place a delegated
+        crossing resolves it, and only after the grant has been looked up by id
+        in this session's own ledger."""
+        bound = self._lease_providers.get(request_id)
+        if bound is None:
+            return None
+        key, provider, service = bound
+        return provider, service
+
+    def delegate_begin(self, request_id: str, subject: str, key: str,
+                       method: str, args: list, lender: "str | None") -> list:
+        """Decide a delegated crossing and spend what it needs, returning the
+        spends for the emission pairing. The provider fires AFTER this returns.
+
+        The delegated grant is validated first (its checks do not spend), then
+        the ORDINARY class-(c) decision for the provider operation runs: that is
+        what spends the lease's grant for `key.method` and also demands coverage
+        for every OTHER class-(c) capability the provider method reaches. A
+        provider method that reaches a second irreversible capability therefore
+        prompts for it instead of firing it under the lease's consent.
+
+        The use is attributed to `subject` only when this delegation's grant was
+        the authority the decision actually spent. If the decision was answered
+        by some other grant, the delegation is not the authority for this
+        crossing and the call fails closed."""
+        from .approval import ApprovalRequired  # noqa: F401, PLC0415
+        grant = self._delegation_grant(request_id, f"{key}.{method}")
+        self._delegation_subject(grant, subject, lender)
+        spends: list = []
+        self._approval_decide_call(key, method, list(args or []),
+                                   spends=spends)
+        if not spends:
+            # no approval policy bound: the lease still meters this crossing.
+            self._delegate_use(request_id, subject, f"{key}.{method}",
+                               lender=lender)
+            return []
+        if grant["requestId"] not in {s["requestId"] for s in spends}:
+            raise SessionError(
+                f"the delegated crossing `{key}.{method}` was authorized by "
+                f"another standing grant, not by the delegation "
+                f"`{request_id}` that was handed over — the delegated reference "
+                f"is the authority for its own use and nothing else "
+                f"(item 442, issue #2693)")
+        self._delegate_attribute(grant, subject, lender)
+        return spends
+
+    def delegate_fired(self, spends: list) -> None:
+        """After the provider returned, pair each spend with its emission record,
+        exactly as `Session.call` does for an ordinary crossing."""
+        self._record_spend_emissions(spends)
 
     def _runtime_lease_revoke(self, request_id: str) -> dict:
         """The lease disposer's own-requestId revoke (item 294, the scoped
@@ -9376,6 +9528,154 @@ class Session:
             wal.record_approval_consumed(grant["requestId"], use=use)
         return use
 
+    # -- item 442 (issue #2693): delegated use, attribution and revocation ---
+
+    def _delegation_grant(self, request_id: str, capability: str) -> dict:
+        """Look up the delegation grant `request_id` and validate every axis of
+        its liveness WITHOUT spending it.
+
+        The delegation is a lookup key into this session's own ledger, never a
+        bearer token, so every decision is read from state the ledger holds: the
+        grant must exist here, be lease-tagged (a delegation is a lent lease, and
+        nothing else may be spent as one), belong to this session, be unrevoked,
+        unexpired at THIS crossing, and still belong to the generation its lender
+        lent it from. A lapsed grant is marked revoked (and consumed, so it can
+        no longer cover an ordinary crossing either) before the refusal: forward
+        only, never resurrected.
+        """
+        grant = next((g for g in self._grants
+                      if g.get("requestId") == request_id), None)
+        if grant is None:
+            raise SessionError(
+                f"no standing grant `{request_id}` in this session's ledger — a "
+                f"delegated reference is a lookup key into the receiver's own "
+                f"ledger and is never a bearer token (item 442, issue #2693)")
+        if not grant.get("lease"):
+            raise SessionError(
+                f"standing grant `{request_id}` is not a lease, so it cannot be "
+                f"delegated — a delegation is a bounded, revocable view of a "
+                f"held lease (item 442, issue #2693)")
+        if grant.get("session") != self._session_id:
+            raise SessionError(
+                f"standing grant `{request_id}` was minted in another session — "
+                f"a delegated use is never replayable across a session "
+                f"boundary (item 442, issue #2693)")
+        if grant.get("revoked"):
+            raise SessionError(
+                f"standing grant `{request_id}` was revoked — the delegated "
+                f"reference it backed no longer authorizes any crossing "
+                f"(item 442, issue #2693)")
+        now = self._now_ms()
+        if self._expired(grant, now):
+            self._retire_delegation(grant)
+            raise SessionError(
+                f"the lease behind standing grant `{request_id}` lapsed at "
+                f"{grant.get('expiresAt')}, so the delegated reference it backed "
+                f"is revoked and this crossing is refused (item 442, issue #2693)")
+        if not self._lender_generation_live(grant):
+            self._retire_delegation(grant)
+            raise SessionError(
+                f"the lender of standing grant `{request_id}` was swapped or "
+                f"unloaded, so every delegation it handed out is revoked "
+                f"(item 442, issue #2693)")
+        remaining = grant.get("remainingUses")
+        if remaining is not None and remaining <= 0:
+            raise SessionError(
+                f"standing grant `{request_id}` has no uses left — the delegated "
+                f"reference is exhausted and this crossing is refused "
+                f"(item 442, issue #2693)")
+        if not _delegation_covers(grant["capability"], capability):
+            raise SessionError(
+                f"standing grant `{request_id}` covers `{grant['capability']}`, "
+                f"not `{capability}` — a delegated reference authorizes only the "
+                f"surface it was minted for (item 442, issue #2693)")
+        return grant
+
+    @staticmethod
+    def _retire_delegation(grant: dict) -> None:
+        """Retire a delegation forward-only, so a row an operator reads as
+        revoked can never cover an ordinary crossing either (`_live_grant_for`
+        skips `consumed` even though it does not read `revoked`)."""
+        grant["revoked"] = True
+        grant["consumed"] = True
+
+    def _delegation_subject(self, grant: dict, subject: str,
+                            lender: "str | None") -> str | None:
+        """Validate who may lend a grant and who may use it, without writing the
+        attribution.
+
+        The LENDER is the component that acquired and handed out this lease (the
+        handle's holder), which can be distinct from the grant's own `component`:
+        the lease's grant is bound to the CROSSING component the ticket bound
+        (often the provider emitting the host op), while the delegating party is
+        the activation body that minted the handle. One grant is lent by one
+        party to one subject.
+        """
+        lender = lender or grant.get("lender") or grant.get("component")
+        known_lender = grant.get("lender")
+        if known_lender is not None and lender is not None \
+                and known_lender != lender:
+            raise SessionError(
+                f"standing grant `{grant['requestId']}` was already delegated "
+                f"by `{known_lender}`, so `{lender}` cannot lend it as well — "
+                f"one grant is lent by the party that holds it "
+                f"(item 442, issue #2693)")
+        held_by = grant.get("subject")
+        if held_by is not None and held_by != subject:
+            raise SessionError(
+                f"standing grant `{grant['requestId']}` is already lent to "
+                f"`{held_by}`, so `{subject}` cannot use it — one delegation "
+                f"names one subject (item 442, issue #2693)")
+        return lender
+
+    def _delegate_attribute(self, grant: dict, subject: str,
+                            lender: "str | None") -> None:
+        """Write the delegation record once: the lender, the subject, and the one
+        chain link this depth admits (`from` the lender, `to` the subject,
+        `narrowed` the granted parameters)."""
+        lender = self._delegation_subject(grant, subject, lender)
+        if grant.get("subject") is None:
+            grant["subject"] = subject
+            grant["lender"] = lender
+            grant.setdefault("chain", []).append({
+                "from": lender, "to": subject,
+                "narrowed": _delegation_narrowed(grant["capability"])})
+
+    def _delegate_use(self, request_id: str, subject: str,
+                      capability: str, *, lender: str | None = None) -> int:
+        """Spend one use of standing grant `request_id` FOR a second party.
+
+        This is the ledger primitive: validate the lease grant
+        (`_delegation_grant`), write the attribution once (`_delegate_attribute`)
+        and spend through `_consume_grant`, so consume-before-fire and the WAL
+        record are the lease's own. The runtime path is `delegate_begin`, which
+        lets the ordinary class-(c) decision perform the spend so a provider
+        method's OTHER class-(c) reach is decided too; this primitive is what
+        covers the no-policy case and what the ledger tests drive directly.
+        """
+        grant = self._delegation_grant(request_id, capability)
+        self._delegate_attribute(grant, subject, lender)
+        return self._consume_grant(grant)
+
+    def _lender_generation_live(self, grant: dict) -> bool:
+        """Whether the grant's LENDER still holds the generation it lent from.
+
+        The hash was taken over the ACQUIRING component's activation scope when
+        the handle was minted (`_runtime_lease_acquire`), not over the grant's
+        crossing scope: the grant's `component` is the crossing provider, and
+        re-deriving that scope here both checks the wrong party and changes when
+        the provider method's own reach changes. A swap that changes the lender's
+        activation closure recomputes a different hash, so the delegation
+        auto-revokes. A session with no class map (no policy bound) keeps the
+        binding inert.
+        """
+        expected = grant.get("lenderGeneration")
+        if expected is None:
+            return True
+        if self._class_map is None:
+            return True
+        return self._scope_hash(grant.get("lender")) == expected
+
     # -- item 251 Slice 2: distilled AutoApproveRule enforcement -------------
 
     def _glob_members(self, glob: str) -> frozenset[str]:
@@ -9989,6 +10289,18 @@ class Session:
             "consumed": False,
             "revoked": False,               # item 379: set by an early revoke
             "lease": is_lease,              # item 294: minted from an effect lease
+            # item 442 (issue #2693): the delegation record. `subject` is the
+            # party the authority was LENT to (None until a delegated use names
+            # one) and `chain` is who lent what to whom, shaped for depth from
+            # day one even though v1 writes exactly one link. `component` above
+            # stays the CROSSING component the ticket bound; the LENDER (the
+            # component that acquired the lease and handed it out) is written to
+            # `lender` at the first delegated use, because those can differ and
+            # the design's row names the delegator. A delegation SHARES
+            # authority, it never transfers it, so the delegatee holds nothing
+            # once the call returns.
+            "subject": None,
+            "chain": [],
             # item 470 stage 1: the ceilings the mint spelling STATED, kept after
             # the erasure above so the grant is still a declaration at the
             # crossing. `calls` is here for the audit and is not re-compared
@@ -10450,7 +10762,20 @@ class Session:
                  # item 379: True when an operator retired the grant EARLY (as
                  # opposed to it lapsing on uses/TTL). Both leave it out of the
                  # live set; this bit distinguishes them for the audit.
-                 "revoked": g.get("revoked", False)}
+                 # item 442: a delegation whose lender lapsed or was swapped is
+                 # also marked here at the delegated crossing that discovers it,
+                 # so the row an operator reads says the handle is retired.
+                 "revoked": g.get("revoked", False),
+                 # item 442 (issue #2693): the delegation record an operator
+                 # reads. `lender` is the component that acquired and handed out
+                 # the lease (which can differ from `component`, the crossing
+                 # component the grant is bound to), `subject` is the party the
+                 # authority was lent to, and `chain` is who lent what to whom.
+                 # They are None/[] until a delegated use names a subject, so an
+                 # ordinary lease's row is unchanged in meaning.
+                 "lender": g.get("lender"),
+                 "subject": g.get("subject"),
+                 "chain": [dict(link) for link in (g.get("chain") or [])]}
                 for g in self._grants],
             # item 251 Slice 3: the TIME AXIS. `promptsPerSessionSeries` is the
             # per-session prompt tally read from the WAL (deterministic, ordered by

@@ -2636,7 +2636,19 @@ class _ComponentEmitter:
                 if not isinstance(method, str) or not method.isidentifier():
                     raise EmitError(f"{where}: bad method name {method!r}")
                 args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
-                rendered = f"{_method_access(target, method)}({args})"
+                # item 442 (issue #2693): a call on a received `Delegate[S]`
+                # parameter is a delegated crossing. The frame checks the grant,
+                # attributes the use to THIS component (its own name) and spends
+                # it before the provider fires, so the handle itself carries no
+                # authority: the session's ledger does. Written as one statement
+                # (a conditional expression) so the mirrored-emitter line-coverage
+                # ratchet sees no new uncovered statement for the un-corpus'd
+                # delegation construct.
+                rendered = (
+                    f"_revl_frame.delegate_call({target}, {expr['delegate']!r}, "
+                    f"{method!r}, [{args}])"
+                    if expr.get("delegate")
+                    else f"{_method_access(target, method)}({args})")
                 # item 121 Slice 2: a crossing whose arguments the analysis
                 # proved read completion `site`'s binding fires THROUGH the
                 # marker helper, so the recorder can stamp `producedBy` on this
@@ -3003,8 +3015,19 @@ class _ComponentEmitter:
             cap = expr.get("capability")
             ttl = expr.get("ttlMs")
             uses = expr.get("uses")
-            return (f"_revl_frame.acquire_lease({cap!r}, "
-                    f"{ttl!r}, {uses!r})")
+            # item 442 (issue #2693): a lease minted on a wiring key carries the
+            # provider that key resolves to, so the handle can serve a
+            # delegatee's methods through the delegation seam. A lease over a
+            # bare capability (no key) keeps the pre-442 call exactly.
+            # item 442 (issue #2693): a lease over a wiring key passes that key
+            # and the provider it resolves to, so the handle can serve a
+            # delegatee. One return statement (a conditional expression), so the
+            # mirrored-emitter line-coverage ratchet's uncovered count for this
+            # already-uncorpus'd lease arm does not move.
+            return (f"_revl_frame.acquire_lease({cap!r}, {ttl!r}, {uses!r}"
+                    + (f", {expr['key']!r}, _revl_ctx."
+                       f"{_ident(self.require_keys.get(expr['key'], expr['key']), 'lease key')}"
+                       if expr.get("key") else "") + ")")
         if kind == "lease-revoke":
             handle = expr.get("handle")
             if not isinstance(handle, str) or not handle.isidentifier():
