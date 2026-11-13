@@ -799,11 +799,27 @@ def _stdlib_row_source(path: str) -> tuple[str, bool] | None:
     return None
 
 
-def _at(root: str, rel: str) -> str:
-    """The file a recorded row source names: the shipped stdlib file for a
-    `_SHIPPED` record, otherwise under `root`."""
+def _refuse_shipped_look_alike(rel: str, written: str, doc: str, line: int,
+                               what: str) -> None:
+    """A project path that records as `_SHIPPED...` would be read as the shipped
+    stdlib: refuse it, so no spelling of a path can claim the shipped record."""
     if rel.startswith(_SHIPPED):
-        return os.path.join(str(stdlib_root().parent), rel[len(_SHIPPED):])
+        raise RevlError(
+            doc, line, f"{what} `{written}` resolves to `{rel}`, which is "
+            f"the reserved form of a shipped-stdlib source",
+            hint=f"a path may not begin with `{_SHIPPED}`; rename the file or "
+                 "its directory")
+
+
+def _at(root: str, rel: str) -> str:
+    """The file a recorded source names: the shipped stdlib file for a
+    `_SHIPPED` record whose remainder is a canonical relative `stdlib/...`
+    path, otherwise under `root`."""
+    if rel.startswith(_SHIPPED):
+        rest = rel[len(_SHIPPED):]
+        if (rest.startswith("stdlib/") and ".." not in rest.split("/")
+                and posixpath.normpath(rest) == rest):
+            return os.path.join(str(stdlib_root().parent), rest)
     return os.path.join(root, rel)
 
 
@@ -858,6 +874,8 @@ def _resolve_row(row: RowDecl, origin: str, doc: str, base: str,
     # behind `_SHIPPED`, so the IR stays machine-independent and `_at` follows
     # the record. A `REVL_IMPORT_PATH` hit is an ordinary file.
     rel = _SHIPPED + row.path if shipped else _relative(source, root)
+    if not shipped:
+        _refuse_shipped_look_alike(rel, row.path, doc, row.line, "row source")
     header = _pick_component(row, _headers(source), doc, rel)
     claims, extra = _check_claims(row, header, doc, rel)
     config = _check_config(row, header, doc, rel)
@@ -919,7 +937,9 @@ def _resolve_uses(decl: CompositionDecl, doc: str, base: str,
                 doc, line,
                 f"composition {decl.name} uses `{path}`, which does not exist",
                 hint=f"resolved against `{_relative(base, root)}`")
-        uses.append(_relative(target, root))
+        rel = _relative(target, root)
+        _refuse_shipped_look_alike(rel, path, doc, line, "`use`")
+        uses.append(rel)
     return uses
 
 

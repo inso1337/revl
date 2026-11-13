@@ -35,6 +35,7 @@ import sys
 from pathlib import Path
 
 import os
+import pathlib
 
 import pytest
 
@@ -746,3 +747,53 @@ composition Web {
     table = resolve_file(str(doc), str(proj))
     assert table.rows[0].component == "PgDatabase"
     assert not table.rows[0].source.startswith("stdlib:")
+
+
+def test_a_project_path_cannot_claim_the_shipped_record(tmp_path):
+    """A project file `<root>/stdlib:stdlib/socket.rvl` records as the shipped
+    form, so the header would be checked on it while the compile read the
+    shipped file. Refused instead."""
+    (tmp_path / "services.rvl").write_text(SERVICES)
+    d = tmp_path / "stdlib:stdlib"
+    d.mkdir()
+    (d / "socket.rvl").write_text('use "../services.rvl" { }\n'
+                                  + DB.split("\n", 2)[2])
+    doc = tmp_path / "web.rvl"
+    doc.write_text("""
+composition W {
+  row @db from "stdlib:stdlib/socket.rvl" provides db config { url: "x" }
+}
+""")
+    with pytest.raises(RevlError) as caught:
+        resolve_file(str(doc), str(tmp_path))
+    assert "reserved form" in str(caught.value)
+
+
+def test_a_stdlib_colon_directory_cannot_redirect_to_an_absolute_file(tmp_path):
+    """A directory named `stdlib:` recorded `stdlib:/abs/path`, and joining that
+    remainder dropped the stdlib parent: the compile opened an arbitrary file."""
+    (tmp_path / "services.rvl").write_text(SERVICES)
+    target = tmp_path / "elsewhere" / "other.rvl"
+    target.parent.mkdir()
+    target.write_text("this is not rvl\n")
+    mirror = pathlib.Path(str(tmp_path / "stdlib:") + str(target))
+    mirror.parent.mkdir(parents=True)
+    mirror.write_text(f'use "{os.path.relpath(tmp_path / "services.rvl", mirror.parent)}" {{ }}\n'
+                      + DB.split("\n", 2)[2])
+    rel = os.path.relpath(mirror, tmp_path)
+    doc = tmp_path / "web.rvl"
+    doc.write_text(f"""
+composition W {{
+  row @db from "{rel}" provides db config {{ url: "x" }}
+}}
+""")
+    with pytest.raises(RevlError) as caught:
+        compile_composition(str(doc), str(tmp_path))
+    assert "reserved form" in str(caught.value)
+
+
+def test_at_reads_only_a_canonical_shipped_remainder(tmp_path):
+    from revl.composition import _at
+    for rest in ("/etc/passwd", "stdlib/../x.rvl", "other/x.rvl"):
+        assert _at(str(tmp_path), "stdlib:" + rest) == os.path.join(
+            str(tmp_path), "stdlib:" + rest)
