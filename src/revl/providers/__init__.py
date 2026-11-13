@@ -83,10 +83,9 @@ def bind_for_run(ir, files, config_path, environ=None) -> dict:
     return hosts
 
 
-#: The longest the plan waits on any one network operation (the connect, or
-#: one read of the answer) when asking a server what it holds, in seconds.
-#: It is a per-read socket timeout, not a deadline for the whole answer: a
-#: server that keeps sending a byte at a time can hold the plan longer. A
+#: The longest the plan waits when asking a server what it holds, in seconds.
+#: It is the deadline for the whole exchange (`request_json`'s `timeout`), so a
+#: server that keeps sending a byte at a time cannot hold the plan longer. A
 #: completion timeout (default 120s) is sized for generating text; this
 #: question is a listing, and a plan that waits on it blocks every host.
 PLAN_PROBE_TIMEOUT = 10.0

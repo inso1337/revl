@@ -9,7 +9,7 @@ message.
 Standard library only. revl has no required runtime dependency, and a model
 call is a POST with a JSON body, which `urllib` does without help.
 
-THE FOUR RULES THIS FILE ENFORCES
+THE FIVE RULES THIS FILE ENFORCES
 ---------------------------------
 1. **No redirect is followed.** urllib follows a 301/302/303 by default and
    re-issues the POST as a GET, body dropped, at whatever host `Location`
@@ -33,13 +33,25 @@ THE FOUR RULES THIS FILE ENFORCES
    in a 401. The urllib exception is not chained (`from None`), so a traceback
    does not carry the request object either.
 4. **Only a JSON object is a response.** Anything else is a named error rather
-   than a value the caller has to guess about.
+   than a value the caller has to guess about. That includes JSON the decoder
+   itself refuses (an integer of thousands of digits, nesting deeper than the
+   interpreter's stack): each is a `ProviderError`, never the raw exception.
+5. **A reply is bounded in size and in time** (issue #3111). The endpoint is
+   whatever the operator bound the role to, and it may be a shared server or a
+   compromised proxy. At most `max_bytes` of the reply are read; a larger one,
+   declared by `Content-Length` or found by counting, is refused without being
+   held in memory. `timeout` is also the deadline for the whole exchange, not
+   only for each socket operation, so a server that sends a byte at a time
+   cannot hold the call open: when it passes, the connection is shut down and
+   the call fails with a timeout.
 """
 
 from __future__ import annotations
 
 import http.client
 import json
+import socket
+import threading
 import urllib.error
 import urllib.request
 
@@ -49,6 +61,14 @@ REDACTED = "[redacted]"
 #: How much of a provider's error body a message quotes. Enough to read the
 #: provider's reason, not so much that a message becomes a dump of the reply.
 ERROR_BODY_LIMIT = 400
+
+#: The most bytes of one reply that are read, unless the caller names another
+#: limit (a binding's `max_reply_bytes`). A completion is a few kilobytes; this
+#: leaves room for a long one while keeping a hostile reply from holding more
+#: than this in memory.
+DEFAULT_MAX_REPLY_BYTES = 8 * 1024 * 1024
+
+_READ_CHUNK = 64 * 1024
 
 
 class ProviderError(RuntimeError):
@@ -75,6 +95,105 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         raise _RedirectRefused(code)
 
 
+class _TooLarge(Exception):
+    pass
+
+
+def _shutdown(sock) -> None:
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+
+
+class _Deadline:
+    """An overall time limit on one request.
+
+    urllib's `timeout` bounds each socket operation, so a server that answers
+    a byte at a time never trips it. This arms a timer for the whole exchange;
+    when it fires it shuts down the request's sockets, which wakes any blocked
+    read, and `expired` tells the caller why the read failed.
+    """
+
+    def __init__(self, seconds: float) -> None:
+        self.expired = False
+        self._lock = threading.Lock()
+        self._socks: list = []
+        self._timer = threading.Timer(seconds, self._fire)
+        self._timer.daemon = True
+
+    def start(self) -> None:
+        self._timer.start()
+
+    def cancel(self) -> None:
+        self._timer.cancel()
+
+    def watch(self, sock) -> None:
+        with self._lock:
+            self._socks.append(sock)
+            late = self.expired
+        if late:
+            _shutdown(sock)
+
+    def _fire(self) -> None:
+        with self._lock:
+            self.expired = True
+            socks = list(self._socks)
+        for sock in socks:
+            _shutdown(sock)
+
+
+def _watched(base, deadline: _Deadline):
+    class Watched(base):
+        def connect(self):
+            super().connect()
+            deadline.watch(self.sock)
+    return Watched
+
+
+class _HTTPHandler(urllib.request.HTTPHandler):
+    def __init__(self, deadline: _Deadline) -> None:
+        super().__init__()
+        self._connection = _watched(http.client.HTTPConnection, deadline)
+
+    def http_open(self, req):
+        return self.do_open(self._connection, req)
+
+
+class _HTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, deadline: _Deadline) -> None:
+        super().__init__()
+        self._connection = _watched(http.client.HTTPSConnection, deadline)
+
+    def https_open(self, req):
+        return self.do_open(self._connection, req,
+                            context=getattr(self, "_context", None))
+
+
+def _read_capped(response, limit: int) -> bytes:
+    """The body of `response`, or `_TooLarge` as soon as it exceeds `limit`
+    bytes. A declared `Content-Length` over the limit is refused unread."""
+    declared = response.headers.get("Content-Length")
+    length = (int(declared) if declared is not None
+              and declared.strip().isdigit() else None)
+    if length is not None and length > limit:
+        raise _TooLarge
+    chunks: list = []
+    total = 0
+    while True:
+        chunk = response.read(min(_READ_CHUNK, limit + 1 - total))
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise _TooLarge
+        chunks.append(chunk)
+    if length is not None and total < length:
+        # `read(amt)` ends quietly at EOF; a whole-body read would have raised
+        raise http.client.IncompleteRead(b"".join(chunks), length - total)
+    return b"".join(chunks)
+
+
 def redact(text: str, secrets=()) -> str:
     """`text` with every non-empty secret in `secrets` replaced by `[redacted]`.
 
@@ -91,9 +210,14 @@ def redact(text: str, secrets=()) -> str:
 
 def request_json(url: str, *, body: dict | None = None,
                  headers: dict | None = None, timeout: float = 120.0,
-                 secrets=(), label: str = "model endpoint") -> dict:
+                 secrets=(), label: str = "model endpoint",
+                 max_bytes: int = DEFAULT_MAX_REPLY_BYTES) -> dict:
     """POST `body` as JSON to `url` (GET when `body` is None) and return the
     decoded JSON object.
+
+    `timeout` is the deadline for the whole exchange in seconds, and also the
+    limit on each socket operation. `max_bytes` is the most of the reply that
+    is read; a larger reply is a `ProviderError`.
 
     `secrets` are the credential values placed in `headers`; they are redacted
     from every error this raises. `label` names the caller in those errors
@@ -111,39 +235,58 @@ def request_json(url: str, *, body: dict | None = None,
     # environment's http_proxy/https_proxy/all_proxy cannot route this request
     # through a proxy (issue #3109). The endpoint the placement check judged is
     # the only host contacted.
+    # The two handlers carry the request's deadline (rule 5) into the sockets.
+    deadline = _Deadline(timeout)
     opener = urllib.request.build_opener(
-        urllib.request.ProxyHandler({}), _NoRedirect)
+        urllib.request.ProxyHandler({}), _NoRedirect,
+        _HTTPHandler(deadline), _HTTPSHandler(deadline))
 
     def fail(message: str, status: int | None = None) -> ProviderError:
         return ProviderError(redact(f"{label}: {message}", secrets),
                              status=status)
 
+    def timed_out() -> ProviderError:
+        return fail(f"timed out after {timeout}s waiting for {url}")
+
+    deadline.start()
     try:
         with opener.open(request, timeout=timeout) as response:
             status = response.status
-            raw = response.read()
+            raw = _read_capped(response, max_bytes)
     except _RedirectRefused as exc:
         raise fail(f"HTTP {exc.code} redirect refused: {url} is the endpoint "
                    f"this role is bound to, and a redirect would send the "
                    f"prompt to a host the placement check never judged",
                    exc.code) from None
+    except _TooLarge:
+        raise fail(f"the reply from {url} is larger than {max_bytes} bytes and "
+                   f"was refused; raise `max_reply_bytes` on the role's "
+                   f"binding if a reply this large is expected") from None
     except urllib.error.HTTPError as exc:
         try:
-            detail = exc.read()[:ERROR_BODY_LIMIT].decode("utf-8", "replace")
+            detail = exc.read(ERROR_BODY_LIMIT).decode("utf-8", "replace")
         except Exception:  # noqa: BLE001 - the body is best-effort context
             detail = ""
         raise fail(f"HTTP {exc.code} from {url}: {detail}", exc.code) from None
     except urllib.error.URLError as exc:
-        raise fail(f"cannot reach {url}: {exc.reason}") from None
+        raise (timed_out() if deadline.expired else
+               fail(f"cannot reach {url}: {exc.reason}")) from None
     except TimeoutError:
-        raise fail(f"timed out after {timeout}s waiting for {url}") from None
+        raise timed_out() from None
     except OSError as exc:
-        raise fail(f"connection to {url} failed: {exc}") from None
+        raise (timed_out() if deadline.expired else
+               fail(f"connection to {url} failed: {exc}")) from None
     except http.client.HTTPException as exc:
         # not an OSError: a body shorter than its Content-Length
         # (IncompleteRead), a status line that is not HTTP (BadStatusLine)
-        raise fail(f"malformed HTTP response from {url}: "
-                   f"{type(exc).__name__}") from None
+        raise (timed_out() if deadline.expired else
+               fail(f"malformed HTTP response from {url}: "
+                    f"{type(exc).__name__}")) from None
+    finally:
+        deadline.cancel()
+    if deadline.expired:
+        # the connection was shut mid-body and the read ended early, quietly
+        raise timed_out()
 
     if status != 200:
         raise fail(f"HTTP {status} from {url}: "
@@ -151,8 +294,11 @@ def request_json(url: str, *, body: dict | None = None,
                    status)
     try:
         parsed = json.loads(raw.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise fail(f"unparseable JSON from {url}: {exc}") from None
+    except Exception as exc:  # noqa: BLE001 - see rule 4
+        # not only JSONDecodeError: an integer of thousands of digits is a
+        # ValueError and deep nesting a RecursionError
+        raise fail(f"unparseable JSON from {url}: {type(exc).__name__}: "
+                   f"{exc}") from None
     if not isinstance(parsed, dict):
         raise fail(f"{url} answered with a JSON {type(parsed).__name__}, "
                    f"not an object")
