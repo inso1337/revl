@@ -254,7 +254,7 @@ not set in `after-agent.sh`.
 To execute reconstructible inverses against the real system, `revl recover
 --composition FILE` binds the real world: the composition's own host bodies and
 providers, checked against the WAL header's digest (issue #1477;
-[../../docs/crash-recovery.md](../../docs/crash-recovery.md) §5c), and a host
+[../../docs/crash-recovery.md](../../docs/crash-recovery.md) §5c). A host
 embedding revl passes its own `World` adapter to
 `revl.recovery.recover(path, world=...)`. For route one's bare emission there is
 nothing to execute: the verdict tells an operator exactly what to reconcile by
