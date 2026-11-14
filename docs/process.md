@@ -619,6 +619,53 @@ The orchestrator merges when CI is green. A branch is never merged on a local
 green alone, because a local green certifies only what actually ran on that
 machine at that moment.
 
+**A merge is refused while any check on the pull request is red** (issue
+#2861). Seven contexts are required (`lint` and the six `backend-*` jobs); the
+four `root-suite-affected` shards, the largest test surface on a pull request,
+and every other job are advisory, so a green required rollup says nothing about
+them. #2620 merged with `root-suite-affected (4)` red, a real regression that
+#2840 fixed after the merge. The shards stay advisory, which keeps the required
+rollup fast, and the rule is enforced at the merge boundary instead, for every
+non-required job rather than by name:
+
+    python3 tools/merge_gate.py merge <pr> --merge     # or --squash / --rebase
+    python3 tools/merge_gate.py check <pr>             # verdict only
+
+The gate reads every check on the pull request and refuses while any context's
+newest run is red, cancelled (not green, and not absent), unfinished, or was
+built on a base commit that is no longer the tip of the base branch (a green on
+an old base certifies a tree that no longer lands). A skipped job is not a check
+that ran and is ignored; a re-run supersedes the run it repeats; a pull request
+with no check at all is refused, since nothing certifies it. The refusal names
+each offending context and why. Every landing on `main` therefore makes the
+greens of every other open pull request stale until its checks are re-run, which
+is the 20 to 45 minutes of the longest job again; that is the price of the rule
+and the reason a merge queue, which builds each candidate on the queue tip, is
+the better long-term home for it. Only when nothing is refused does it call
+`gh pr merge <pr> --match-head-commit <the head it judged>`; `REVL_MERGE_GH`
+selects the `gh` binary, which is how the merge account's wrapper is used. Only
+the merge-method and message flags pass through to `gh pr merge` (`--merge`,
+`--squash`, `--rebase`, `--delete-branch`, `--subject`, `--body`,
+`--body-file`); anything else, `--repo` included, is refused.
+
+- **Do not use `--auto`.** GitHub's auto-merge fires as soon as the required
+  contexts are green, before the advisory shards finish, so it cannot honour
+  the rule; the tool refuses it, as it refuses `--admin`. Wait for the checks
+  to finish, then merge through the tool.
+- **A red that is not the pull request's** (see "A red check is not always
+  yours" in `.github/github-app.yml`) is waived by name, with a reason, for one
+  invocation. The name is written as the verdict prints it, workflow then job:
+  `--waive 'ci / census-artifact=stale ref, green on main'`. The waiver is
+  printed with the verdict. Re-running the job is preferred.
+- **This is a tool, not branch protection.** A hand-typed `gh pr merge` or the
+  web button still bypasses it; the only server-side enforcement is promoting
+  the contexts to required checks, which makes every merge wait for the
+  20 to 45 minutes of the longest job and, if done by name, leaves the next
+  advisory job in the same gap. If the merge tool cannot be relied on, promote
+  by class (a single required rollup job that needs every other job), not by
+  name. `tests/test_merge_gate_2861.py` drives the tool against a simulated
+  pull request with a red shard and green required contexts.
+
 The site wheel is not a merge-time chore. It is not committed: the pages
 workflow (`.github/workflows/pages.yml`) builds it from the sha being deployed
 on every push to main, so it cannot be stale and nobody regenerates it by hand.
