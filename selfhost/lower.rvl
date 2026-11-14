@@ -4066,7 +4066,10 @@ fn p_route_stmt(ts: List[Token], i: Int, end: Int, provh: List[Bind],
                        setup, iso, rts, icept, hoff, action)
   }
   if (rc.strat != "" && !contains(known_strategies(), rc.strat)) {
-    return mk_refuse(provs, setup, iso, rts,
+    // issue #3360: the route is kept, as lower.py's header stub keeps it, so
+    // the refused router is still a router and draws no G3 self-cycle
+    return mk_refuse(provs, setup, iso,
+      rts.push({ key: key, rlms: rc.rlms, strat: "" }),
       tagged("ROUTE", route_strategy_msg(rc.strat, key, cname)), ts, i)
   }
   return p_comp_body(ts, rc.i, end, provh, reqh, cname, provs, setup, iso,
@@ -7717,32 +7720,34 @@ fn dfr_callee_name(e: Expr) -> Str {
 // The first refusal one expression holds, or "". `calls` is false in a
 // component, whose calls carry the `emit` marker and are enqueued.
 fn dfr_expr(e: Expr, dn: List[Str], emissionValues: Map[Str, Str], where: Str,
-            inArrow: Bool, calls: Bool) -> Str {
+            inArrow: Bool, calls: Bool, bound: List[Str]) -> Str {
   return match e {
+    // issue #3354: a local in scope (`bound`) shadows an emission extern
     Var(n) => contains(dn, n) ? dfr_value_msg(n, where)
-      : (mget_str(emissionValues, n) != ""
+      : (mget_str(emissionValues, n) != "" && !contains(bound, n)
          ? emission_value_msg(n, mget_str(emissionValues, n)) : ""),
-    Call(c) => dfr_call(c.target, c.args, dn, emissionValues, where, inArrow, calls),
-    OptCall(c) => dfr_call(c.target, c.args, dn, emissionValues, where, inArrow, calls),
-    Field(f) => dfr_expr(f.target, dn, emissionValues, where, inArrow, calls),
-    OptField(f) => dfr_expr(f.target, dn, emissionValues, where, inArrow, calls),
-    Bin(b) => dfr_first(dfr_expr(b.l, dn, emissionValues, where, inArrow, calls),
-                        dfr_expr(b.r, dn, emissionValues, where, inArrow, calls)),
-    Un(u) => dfr_expr(u.e, dn, emissionValues, where, inArrow, calls),
-    Emit(u) => dfr_expr(u.e, dn, emissionValues, where, inArrow, calls),
-    Index(x) => dfr_first(dfr_expr(x.target, dn, emissionValues, where, inArrow, calls),
-                          dfr_expr(x.idx, dn, emissionValues, where, inArrow, calls)),
-    If(x) => dfr_first(dfr_expr(x.cond, dn, emissionValues, where, inArrow, calls),
-                       dfr_first(dfr_expr(x.then_, dn, emissionValues, where, inArrow, calls),
-                                 dfr_expr(x.els, dn, emissionValues, where, inArrow, calls))),
-    Lst(l) => dfr_list(l.items, 0, dn, emissionValues, where, inArrow, calls),
-    Rec(r) => dfr_inits(r.fields, 0, dn, emissionValues, where, inArrow, calls),
-    Arrow(ar) => dfr_arrow(ar.body, dn, emissionValues, where, calls),
-    Match(m) => dfr_first(dfr_expr(m.scrut, dn, emissionValues, where, inArrow, calls),
-                          dfr_arms(m.arms, 0, dn, emissionValues, where, inArrow, calls)),
-    Templ(t) => dfr_parts(t.parts, 0, dn, emissionValues, where, inArrow, calls),
-    RecUpd(r) => dfr_first(dfr_expr(r.base, dn, emissionValues, where, inArrow, calls),
-                           dfr_inits(r.upds, 0, dn, emissionValues, where, inArrow, calls)),
+    Call(c) => dfr_call(c.target, c.args, dn, emissionValues, where, inArrow, calls, bound),
+    OptCall(c) => dfr_call(c.target, c.args, dn, emissionValues, where, inArrow, calls, bound),
+    Field(f) => dfr_expr(f.target, dn, emissionValues, where, inArrow, calls, bound),
+    OptField(f) => dfr_expr(f.target, dn, emissionValues, where, inArrow, calls, bound),
+    Bin(b) => dfr_first(dfr_expr(b.l, dn, emissionValues, where, inArrow, calls, bound),
+                        dfr_expr(b.r, dn, emissionValues, where, inArrow, calls, bound)),
+    Un(u) => dfr_expr(u.e, dn, emissionValues, where, inArrow, calls, bound),
+    Emit(u) => dfr_expr(u.e, dn, emissionValues, where, inArrow, calls, bound),
+    Index(x) => dfr_first(dfr_expr(x.target, dn, emissionValues, where, inArrow, calls, bound),
+                          dfr_expr(x.idx, dn, emissionValues, where, inArrow, calls, bound)),
+    If(x) => dfr_first(dfr_expr(x.cond, dn, emissionValues, where, inArrow, calls, bound),
+                       dfr_first(dfr_expr(x.then_, dn, emissionValues, where, inArrow, calls, bound),
+                                 dfr_expr(x.els, dn, emissionValues, where, inArrow, calls, bound))),
+    Lst(l) => dfr_list(l.items, 0, dn, emissionValues, where, inArrow, calls, bound),
+    Rec(r) => dfr_inits(r.fields, 0, dn, emissionValues, where, inArrow, calls, bound),
+    Arrow(ar) => dfr_arrow(ar.body, dn, emissionValues, where, calls,
+                           union_into(bound, param_names(ar.params))),
+    Match(m) => dfr_first(dfr_expr(m.scrut, dn, emissionValues, where, inArrow, calls, bound),
+                          dfr_arms(m.arms, 0, dn, emissionValues, where, inArrow, calls, bound)),
+    Templ(t) => dfr_parts(t.parts, 0, dn, emissionValues, where, inArrow, calls, bound),
+    RecUpd(r) => dfr_first(dfr_expr(r.base, dn, emissionValues, where, inArrow, calls, bound),
+                           dfr_inits(r.upds, 0, dn, emissionValues, where, inArrow, calls, bound)),
     _ => "",
   }
 }
@@ -7751,11 +7756,14 @@ fn dfr_first(a: Str, b: Str) -> Str { return a != "" ? a : b }
 
 // An arrow whose body calls an emission callable (issue #2842) is refused at
 // the arrow, naming the first such callee by name; otherwise its body is walked.
+// `bound` already holds the arrow's own parameters. A CALL head is judged by
+// name, as the reference judges it: a body that binds a name and calls it is
+// refused by the G6 shadowing rule anyway.
 fn dfr_arrow(body: Expr, dn: List[Str], emissionValues: Map[Str, Str],
-             where: Str, calls: Bool) -> Str {
+             where: Str, calls: Bool, bound: List[Str]) -> Str {
   let hit = first_mapped(sort_strs(calls_in(body, [])), emissionValues, 0)
   if (hit != "") { return emission_arrow_msg(hit, mget_str(emissionValues, hit)) }
-  return dfr_expr(body, dn, emissionValues, where, true, calls)
+  return dfr_expr(body, dn, emissionValues, where, true, calls, bound)
 }
 
 fn first_mapped(xs: List[Str], m: Map[Str, Str], i: Int) -> Str {
@@ -7766,61 +7774,85 @@ fn first_mapped(xs: List[Str], m: Map[Str, Str], i: Int) -> Str {
 
 fn dfr_call(target: Expr, args: List[Expr], dn: List[Str],
             emissionValues: Map[Str, Str], where: Str,
-            inArrow: Bool, calls: Bool) -> Str {
+            inArrow: Bool, calls: Bool, bound: List[Str]) -> Str {
   let head = dfr_callee_name(target)
   if (head != "" && contains(dn, head)) {
     // the CALL position: refused in a fn/test body, enqueued in a component
     if (calls) { return dfr_call_msg(head, where, inArrow) }
-    return dfr_list(args, 0, dn, emissionValues, where, inArrow, calls)
+    return dfr_list(args, 0, dn, emissionValues, where, inArrow, calls, bound)
   }
-  let t = head != "" ? "" : dfr_expr(target, dn, emissionValues, where, inArrow, calls)
+  let t = head != "" ? "" : dfr_expr(target, dn, emissionValues, where, inArrow, calls, bound)
   if (t != "") { return t }
-  return dfr_list(args, 0, dn, emissionValues, where, inArrow, calls)
+  return dfr_list(args, 0, dn, emissionValues, where, inArrow, calls, bound)
 }
 
 fn dfr_list(xs: List[Expr], i: Int, dn: List[Str], emissionValues: Map[Str, Str],
             where: Str, inArrow: Bool,
-            calls: Bool) -> Str {
+            calls: Bool, bound: List[Str]) -> Str {
   if (i >= xs.length()) { return "" }
-  let r = dfr_expr(xs[i], dn, emissionValues, where, inArrow, calls)
+  let r = dfr_expr(xs[i], dn, emissionValues, where, inArrow, calls, bound)
   if (r != "") { return r }
-  return dfr_list(xs, i + 1, dn, emissionValues, where, inArrow, calls)
+  return dfr_list(xs, i + 1, dn, emissionValues, where, inArrow, calls, bound)
 }
 
 fn dfr_inits(xs: List[InitN], i: Int, dn: List[Str], emissionValues: Map[Str, Str],
              where: Str, inArrow: Bool,
-             calls: Bool) -> Str {
+             calls: Bool, bound: List[Str]) -> Str {
   if (i >= xs.length()) { return "" }
-  let r = dfr_expr(xs[i].value, dn, emissionValues, where, inArrow, calls)
+  let r = dfr_expr(xs[i].value, dn, emissionValues, where, inArrow, calls, bound)
   if (r != "") { return r }
-  return dfr_inits(xs, i + 1, dn, emissionValues, where, inArrow, calls)
+  return dfr_inits(xs, i + 1, dn, emissionValues, where, inArrow, calls, bound)
 }
 
 fn dfr_arms(xs: List[ArmN], i: Int, dn: List[Str], emissionValues: Map[Str, Str],
             where: Str, inArrow: Bool,
-            calls: Bool) -> Str {
+            calls: Bool, bound: List[Str]) -> Str {
   if (i >= xs.length()) { return "" }
-  let r = dfr_expr(xs[i].body, dn, emissionValues, where, inArrow, calls)
+  let ab = xs[i].bind == "" ? bound : bound.push(xs[i].bind)
+  let r = dfr_expr(xs[i].body, dn, emissionValues, where, inArrow, calls, ab)
   if (r != "") { return r }
-  return dfr_arms(xs, i + 1, dn, emissionValues, where, inArrow, calls)
+  return dfr_arms(xs, i + 1, dn, emissionValues, where, inArrow, calls, bound)
 }
 
 fn dfr_parts(xs: List[PartN], i: Int, dn: List[Str], emissionValues: Map[Str, Str],
              where: Str, inArrow: Bool,
-             calls: Bool) -> Str {
+             calls: Bool, bound: List[Str]) -> Str {
   if (i >= xs.length()) { return "" }
-  let r = dfr_expr(xs[i].e, dn, emissionValues, where, inArrow, calls)
+  let r = dfr_expr(xs[i].e, dn, emissionValues, where, inArrow, calls, bound)
   if (r != "") { return r }
-  return dfr_parts(xs, i + 1, dn, emissionValues, where, inArrow, calls)
+  return dfr_parts(xs, i + 1, dn, emissionValues, where, inArrow, calls, bound)
 }
 
 fn dfr_stmts(ss: List[Stmt], i: Int, dn: List[Str],
              emissionValues: Map[Str, Str], where: Str,
              calls: Bool) -> Verd {
+  return dfr_scoped(ss, i, dn, emissionValues, where, calls, [], [])
+}
+
+// `dfr_stmts` with the names in scope (issue #3354), kept as `evl_stmts` keeps
+// them: a binding statement binds from the next statement to the end of its
+// block, and `marks` holds the scope's length at each open block. Only the
+// emission-value check reads `bound`; the deferred checks stay by name, as the
+// reference's are.
+fn dfr_scoped(ss: List[Stmt], i: Int, dn: List[Str],
+              emissionValues: Map[Str, Str], where: Str,
+              calls: Bool, bound: List[Str], marks: List[Int]) -> Verd {
   if (i >= ss.length()) { return no_verd() }
-  let r = dfr_expr(ss[i].e, dn, emissionValues, where, false, calls)
-  if (r != "") { return mk_verd(tagged("G4", r), ss[i].line) }
-  return dfr_stmts(ss, i + 1, dn, emissionValues, where, calls)
+  let s = ss[i]
+  let k = s.kind
+  if (k == "scope_open" || k == "arm_open") {
+    return dfr_scoped(ss, i + 1, dn, emissionValues, where, calls, bound,
+                      marks.push(bound.length()))
+  }
+  let r = dfr_expr(s.e, dn, emissionValues, where, false, calls, bound)
+  if (r != "") { return mk_verd(tagged("G4", r), s.line) }
+  if ((k == "scope_close" || k == "arm_close") && marks.length() > 0) {
+    let m = marks[marks.length() - 1]
+    return dfr_scoped(ss, i + 1, dn, emissionValues, where, calls,
+                      bound.slice(0, m), marks.slice(0, marks.length() - 1))
+  }
+  return dfr_scoped(ss, i + 1, dn, emissionValues, where, calls,
+                    s.bind == "" ? bound : bound.push(s.bind), marks)
 }
 
 // The `test` blocks, in source order, as (name, body) pairs.
@@ -7900,8 +7932,10 @@ fn emission_value_reach_refusal(ts: List[Token], pg: Prog) -> Verd {
   while (i < pg.fns.length()) {
     let f = pg.fns[i]
     if (!f.isEmExtern && !f.isAsyncExtern) {
-      let v = dfr_stmts(f.body, 0, [], emissionValues,
-                        "the body of fn `".concat(f.name).concat("`"), false)
+      // its parameters shadow a same-named extern (issue #3354)
+      let v = dfr_scoped(f.body, 0, [], emissionValues,
+                         "the body of fn `".concat(f.name).concat("`"), false,
+                         param_names(f.params), [])
       if (v.v != "") { return v }
     }
     i += 1
