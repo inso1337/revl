@@ -836,6 +836,13 @@ jobs:
       # the matrix gate rather than in a new job.
       - run: python3 tools/docgen.py --check
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+      # issue #2856: a behavior comment block is derived from the IR and
+      # carries that IR's digest, so the block adopted in the corpus is a
+      # generated artifact like any docgen block. A change to
+      # examples/user_cache.rvl's components that leaves the block behind reds
+      # this line; regenerate it with `revl docs gen examples/user_cache.rvl`.
+      - run: revl docs check examples/user_cache.rvl
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
       # roadmap 110c: the playground/site wheel freshness is NOT checked here,
       # and must not be. The wheel vendors the whole of src/revl, so a per-push
       # gate reddened CI on every source change to a bundled module (an outage

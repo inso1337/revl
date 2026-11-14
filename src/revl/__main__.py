@@ -1713,6 +1713,9 @@ def _dispatch(args) -> int:
         return _run_import(args)
     if args.command == "gen-types":
         return _run_gen_types(args)
+    if args.command == "docs":
+        from .cli.docs import _run_docs  # noqa: PLC0415 — lazy
+        return _run_docs(args)
     if args.command == "export":
         return _run_export(args)
     if args.command == "sourcemap":
