@@ -80,12 +80,21 @@ These are **excluded and named in diagnostics** ([syntax-2.0.md](syntax-2.0.md)
   name is refused, so this is safe.)
 - **Statements are separated by newlines; `;` is not a separator.** One
   statement per line is the whole rule.
-- **Strings have no escape sequences.** `"a\nb"` is four characters,
-  backslash, `n` and all. Build multi-line output by concatenation and
-  `` `${…}` `` templates.
+- **A plain string has exactly two escapes, `\"` and `\\`.** Every other
+  backslash sequence stays verbatim: `"a\nb"` is four characters, backslash
+  and `n` included. Build multi-line output by concatenation, `` `${…}` ``
+  templates, or a `"""..."""` verbatim block (no escapes at all). See
+  [strings.md](strings.md).
 - **A component activation body records effects only** (`let x = effect …
   undo …`, `emit`, `fail`, `if`, `return`), plain computation does not belong
   there. Put helper functions at top level and delegate from `provide { }`.
+
+## What differs from Python and JavaScript
+
+- Timers (`every`, `after`) fire only when the host calls `Clock.advance(ms)`; time does not pass on its own: [time-coeffect.md](time-coeffect.md).
+- `%` is the truncated remainder (sign of the dividend, so `-3 % 4 == -3`); `a.mod(b)` is the Euclidean one, always in `[0, |b|)`: [arithmetic.md](arithmetic.md).
+- `Map.keys()` comes in ascending string order of the keys (`"1"`, `"10"`, `"100"`), not insertion order: [collections.md](collections.md).
+- A plain string has only the escapes `\"` and `\\`; `"a\nb"` is a backslash and an `n`, not a newline: [strings.md](strings.md).
 
 ## Null safety (read this twice)
 
