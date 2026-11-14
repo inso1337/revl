@@ -1,0 +1,9 @@
+# Branch protection on main requires code-owner review. Without this file that
+# rule requires nothing, so these paths (CI, release tooling, packaging, the
+# truc supply-chain lock and the self-update path) have a named owner.
+/.github/              @inso1337
+/tools/                @inso1337
+/pyproject.toml        @inso1337
+/hatch_build.py        @inso1337
+/src/revl/truc/        @inso1337
+/src/revl/update/      @inso1337
