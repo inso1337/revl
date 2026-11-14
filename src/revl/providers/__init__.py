@@ -78,8 +78,9 @@ def bind_for_run(ir, files, config_path, environ=None) -> dict:
     if missing:
         raise ProviderError(
             "the provider configuration names credential variable(s) that are "
-            "not set: " + ", ".join(f"`{env}` (role `{role}`)"
-                                    for role, env in missing))
+            "not set: " + ", ".join(
+                f"the one named in `api_key_env` (role `{role}`)"
+                for role, _ in missing))
     return hosts
 
 
@@ -220,8 +221,13 @@ def describe_hosts(hosts) -> list:
     for key, host in sorted(hosts.items()):
         for method, (op, adapter) in sorted(host._revl_routes.items()):
             b = adapter.binding
-            cred = (f", credential from ${b.api_key_env}" if b.api_key_env
-                    else "")
+            # the name only once it is known to be set: an unset one may be a
+            # pasted key
+            cred = ""
+            if b.api_key_env:
+                cred = (f", credential from ${b.api_key_env}"
+                        if adapter._lookup(b.api_key_env)
+                        else ", credential variable not set")
             load = (f", loaded by revl on the scheduled device of "
                     f"{', '.join(b.device_names())}" if b.managed else "")
             lines.append(f"  {key}.{method} -> role {op.role}: {b.provider} "
