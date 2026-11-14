@@ -20,7 +20,7 @@
 // `@py`), every function here is PURE revl built on the base List/Str surface
 // (`for … of`, `.push`, `.length()`, `.charCodeAt`). There is no `@py` block,
 // so — unlike value.rvl / str.rvl — there is NOTHING to defer per tier: the
-// first-order kit (`str_lt`/`list_contains`/`list_sort`/`list_dedup`) compiles
+// first-order kit (`str_lt`/`list_contains`/`list_sort`/`list_dedup`/`list_reverse`) compiles
 // and runs identically on EVERY backend (py/ts/rs/go/java/wasm) the moment they
 // emit the base List/Str builtins. The py tier is executed by the test suite
 // (tests/test_list_stdlib.py); the other tiers inherit for free.
@@ -51,6 +51,9 @@
 // drop-in replacement for the emitters' `str_in(List[Str], Str)` and
 // `sorted(List[Str])` needs — one type surface, no mixed generality. A `Set[T]`
 // TYPE is out of scope (a language feature, not stdlib); see docs/stdlib-list.md.
+//
+// The one exception is `list_reverse[T]`: it needs no ordering or `==`, so it is
+// generic over the element type.
 //
 // Import with a named `use`:
 //
@@ -113,6 +116,21 @@ pub fn list_dedup(xs: List[Str]) -> List[Str] {
   var out = []
   for (x of xs) {
     if (!list_contains(out, x)) { out = out.push(x) }
+  }
+  return out
+}
+
+// ---------------------------------------------------------------- reverse
+// The elements of `xs` in reverse order, as a NEW list (`xs` is untouched).
+// First-order and generic over the element type (the `==`-free shape needs no
+// bound, unlike `list_sort`), so it runs wherever the other first-order helpers
+// do. Total: an empty list answers `[]`. Replaces a hand-written index loop.
+pub fn list_reverse[T](xs: List[T]) -> List[T] {
+  var out = []
+  var i = xs.length() - 1
+  while (i >= 0) {
+    out = out.push(xs[i])
+    i -= 1
   }
   return out
 }

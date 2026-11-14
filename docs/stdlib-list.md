@@ -42,6 +42,7 @@ one `pub fn` per operation.
 | `list_contains(xs, x)` | `(List[Str], Str) -> Bool` | membership; empty list → `false` (the `str_in` replacement) |
 | `list_sort(xs)` | `List[Str] -> List[Str]` | ascending lexicographic by **Unicode code point**; stable; total (the `sorted(uses)` replacement) |
 | `list_dedup(xs)` | `List[Str] -> List[Str]` | drop later duplicates, keep **first-occurrence** order; total (set-from-list) |
+| `list_reverse(xs)` | `List[T] -> List[T]` | the elements in reverse order as a new list; generic (needs no ordering or `==`); total, `[]` → `[]` |
 | `str_lt(a, b)` | `(Str, Str) -> Bool` | the codepoint comparator `list_sort` is built on; matches Python's `<` on `str` |
 
 The emitter's `sorted(set(xs))` is `list_sort(list_dedup(xs))`.
@@ -132,6 +133,9 @@ keeps it a coherent, single-type-surface **drop-in** for the emitters'
 reason about. Generalising `contains`/`dedup` to `[T]` is a clean future
 extension; a generic `sort` would need an ordered-type bound the language does
 not yet express.
+
+The one exception is `list_reverse[T]`: it needs neither ordering nor `==`, so it
+is generic over the element type.
 
 **A `Set[T]` type is explicitly out of scope.** A set is a language feature — a
 type with its own literal, membership operator, and checker support — not a
