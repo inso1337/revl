@@ -2,11 +2,12 @@
 
 Item: roadmap 439. Issue: #118. Status: BINDING, landed, last revised 2026-09-15
 (`revl audit` resolves a composition document, so the CLI reaches the same G8
-surface the property is pinned over; slice G8c). Status note, 2026-11-07: neither
-T2 (the `Stream[T]` sugar) nor T3 (push notifications) landed in this binding;
-the re-verified paragraph under "What is NOT decided" records that T2 is a 130
-decision about the provider side and that T3 is an inbound PROVISION rather than
-a client-side crossing.
+surface the property is pinned over; slice G8c). Status note, 2026-11-09: T3
+(push notifications) LANDED as the synthesized `/a2a/notify/{task}` receiver
+feeding a bounded inbox that `_poll` drains, with a pushed terminal confirmed by
+one `tasks/get` (`docs/design/439-a2a-task-lifecycle.md` decision 5). T2 (the
+`Stream[T]` sugar) is still not this binding's: the re-verified paragraph under
+"What is NOT decided" records that it is a 130 decision about the provider side.
 The semantics are item 424 gap (c)'s and are not reopened here; the Task
 lifecycle is `docs/design/439-a2a-task-lifecycle.md`'s and is not re-decided
 here. This note records what the binding IS, where every guarantee still applies
@@ -660,13 +661,16 @@ question.
    element `Untrusted[T]`, with the teardown the handle form already has.
    Negative exit test: a stream element that is not `Untrusted`, or a teardown
    that leaves the peer's Task running with no local record of it.
-2. **Push notifications (slice T3).** NOT decided, because an inbound callback is
-   a PROVISION, not a client call, so it lands through item 457 slice S1's routed
-   endpoint rather than through this binding
-   (`docs/design/439-a2a-task-lifecycle.md`, decision 5). Exit test: a routed
-   endpoint that receives a peer's notification and wakes the waiting operation,
-   with the payload `Untrusted` and the endpoint's reach declared. Negative exit
-   test: a notification path that admits, or re-admits, anything about the sender.
+2. **Push notifications (slice T3).** LANDED: a `long_running` row synthesizes
+   the routed receiver (`route post "/a2a/notify/{task}"`), `_start` rides a
+   locally minted `pushNotificationConfig` on the `message/send` it already
+   makes, and `_poll` drains a bounded inbox before crossing, confirming a
+   pushed terminal with one `tasks/get`
+   (`docs/design/439-a2a-task-lifecycle.md`, decision 5). The exit test is met:
+   the receiver checks the minted token exact-match and the payload's
+   `StreamResponse` arm, deposits nothing on a refusal, and every pushed value
+   is `Untrusted`. Negative exit test: a notification path that admits, or
+   re-admits, anything about the sender.
 3. **`tasks/resubscribe` and `tasks/get` after our own crash.** NOT decided, and
    the missing piece is not the HTTP call: it is a task id that survives us.
    `TaskRef` is a value the consumer threads through `poll` / `reply` / `cancel`
@@ -769,11 +773,11 @@ rather than a 439 slice. Item 3 (`tasks/resubscribe` after our own crash) is
 scoped INSIDE T2 and moves with it: T1 registers no listener at all (the
 consumer drives `_poll`), and §4.5's durable cursor must be a string LITERAL
 while an A2A task id is minted by the peer at run time, which is 130's question
-before it is this item's. Items 2 (push, an inbound PROVISION routed through
-item 457), 4 (`DataPart`, the tagged encoding of item 424 slice C1), 5 (a file
-`Part` on the coloured `@ts` tier, the async crossing) and 6 (gRPC, refused
-under any `a2a` label and owed its own `through` name) each remain owned
-elsewhere, exactly as written above.
+before it is this item's. Item 2 (push) is no longer open: T3 landed as the synthesized routed receiver
+(decision 5, item 2 above). Items 4 (`DataPart`, the tagged encoding of item
+424 slice C1), 5 (a file `Part` on the coloured `@ts` tier, the async crossing)
+and 6 (gRPC, refused under any `a2a` label and owed its own `through` name)
+each remain owned elsewhere, exactly as written above.
 
 What is left in THIS note is therefore a record of decisions, not a backlog:
 every open item names the other item that owns it, and none of the six waits on

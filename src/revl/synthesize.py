@@ -897,6 +897,44 @@ def _task_ops(service, host: str, capability: str, redirect: str, *,
     return externs, provides
 
 
+def _a2a_push_receiver_source(label: str) -> str:
+    """The receiver half of item 439 T3: a routed endpoint the peer's push
+    notification POSTs to, and a provider for it.
+
+    The receiver is a SERVICE of its own, not an operation added to the user's
+    service: a remote row must not recolour or extend a service it did not
+    write, and a `route` clause lives on a service operation. The provider is
+    an ordinary component with no consumer, which is admissible (G2/G3 do not
+    require a consumer) and keeps the endpoint on the served surface, because
+    the route table is built from every component's provides.
+
+    The route is keyed by the LOCALLY minted push correlation id (`{task}`),
+    not the peer's task id: the peer posts to the exact URL it was configured
+    with before it has told the row the task id.
+    """
+    pascal = _pascal(label)
+    key = f"a2a_push_{label}"
+    service = f"A2APush{pascal}"
+    extern = f"a2a_push_{label}_notify"
+    body = a2a_task.push_notify_body()
+    return (
+        f"// The A2A push receiver (item 439 T3). The peer POSTs the A2A\n"
+        f"// `StreamResponse` payload here; the bearer token is the one the\n"
+        f"// row's `_start` minted, checked exact-match before anything is kept.\n"
+        f"service {service} {{\n"
+        f"  route post \"{a2a_task.PUSH_ROUTE}/{{task}}\"\n"
+        f"  emission fn notify(task: Str, auth: Bearer, req: Request) -> Response\n"
+        f"}}\n\n"
+        f"extern emission fn {extern}(task: Str, auth: Bearer, req: Request) -> Response\n"
+        f"  = @py {{\n    _args = [task, auth, req]\n{body}}}\n\n"
+        f"component Remote{pascal}PushReceiver provides {key}: {service} {{\n"
+        f"  provide {key} {{\n"
+        f"    fn notify(task, auth, req) = emit {extern}(task, auth, req)\n"
+        f"  }}\n"
+        f"}}"
+    )
+
+
 def _remote_source(service, params: dict) -> tuple[str, str]:
     label = params["label"]
     key = params["key"]
@@ -1035,7 +1073,14 @@ def _remote_source(service, params: dict) -> tuple[str, str]:
                             long_running=long_running, pin=pin)
     body = (f"component {component} provides {key}: {service.name} {{\n"
             f"{isolate}  provide {key} {{\n" + "\n".join(provides) + "\n  }\n}")
-    return component, "\n\n".join([header, *externs, body]) + "\n"
+    parts = [header, *externs, body]
+    if long_running and is_a2a:
+        parts = [
+            'use "stdlib/http.rvl" { Request, Response }\n'
+            'use "stdlib/auth.rvl" { Bearer }',
+            header, *externs, _a2a_push_receiver_source(label), body,
+        ]
+    return component, "\n\n".join(parts) + "\n"
 
 
 def _a2a_task_scope_lines(rest: bool = False) -> list[str]:
