@@ -1772,6 +1772,13 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
             return ("(lambda _revl_m, _revl_k: {kk: vv for kk, vv in "
                     "_revl_m.items() if kk != _revl_k})"
                     f"({target}, {args[0]})")
+        if not _py_plain_key(args[0]):
+            # The key sits in the comprehension's condition, which Python
+            # evaluates once per entry: a call key ran len(m) times (issue
+            # #3344). Pass it as an argument, evaluated once per remove call.
+            return ("(lambda _revl_m, _revl_k: {kk: vv for kk, vv in "
+                    "_revl_m.items() if kk != _revl_k})"
+                    f"({target}, {args[0]})")
         return ("{" + f"kk: vv for kk, vv in {target}.items() "
                 f"if kk != {args[0]}" + "}")
     # Integer division and modulo (docs/arithmetic.md). Python's `//` floors
@@ -5516,6 +5523,16 @@ def _py_inplace_write(node: dict) -> dict | None:
     if value.get("kind") == "record_update":
         return value
     return value if value.get("method") in _PY_INPLACE_METHODS else None
+
+
+def _py_plain_key(key: str) -> bool:
+    """A rendered key that is a bare name or a number: re-evaluating it per
+    comprehension entry costs nothing and has no effect (issue #3344). The
+    comprehension's own loop variables `kk` and `vv` are not plain: a user name
+    spelled that way would be captured by them."""
+    return key not in ("", "kk", "vv") and all(
+        c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
+        for c in key)
 
 
 # The persistent methods with an in-place equivalent, and their arity, kept
