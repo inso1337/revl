@@ -2473,3 +2473,33 @@ on the standard three.
   (checker side) → the `tests/` file that currently witnesses the
   guarantee by execution. The test is the *example suite* for the formal
   model, not a substitute for it.
+
+## Parallel fan-out (issue 2741)
+
+A two-member parallel fan-out group is stated in
+`RevL/Theorems/ParallelFanout.lean`. `ParStep`/`ParSteps` run both members
+against one shared world and log, each step being a `SemStep` of one member, so
+`SemStep`, G7 and A8 do not move. The design decision is
+`docs/design/2741-parallel-fanout-formalism.md`. No guarantee number is
+assigned to it yet.
+
+- `RevL.Fanout.par_run_is_a_sequential_run`: for members with at most one effect
+  step (a failure, a witnessed mutation or an emission), every interleaving that
+  runs both to completion ends in the world and log of a `SemSteps` run of the
+  two bodies in sequence, in one order or the other; a failing member goes last.
+- `RevL.Fanout.group_abort_leaves_exactly_the_emissions`: the abort after a group
+  leaves exactly the members that crossed the boundary (R4's equation on that
+  sequential run), given R4's hypothesis that no referent is both a witnessed
+  mutation and a crossing.
+- `RevL.Fanout.group_abort_reverts_when_nothing_crossed`: with no crossing the
+  abort restores the empty world in every interleaving.
+- Witnesses: `RevL.Fanout.both_interleavings_are_taken`,
+  `RevL.Fanout.over_fired_witnessed_member_is_undone` (a member the plan-order run
+  skips fires and its inverse undoes it) and
+  `RevL.Fanout.over_fired_emission_is_residue` (the same member as a one-way
+  emission stays out, so the inverse is what makes the over-firing harmless).
+
+Not covered: forward idempotence and compensation (item 247), which `Body` has no
+form for, so the idempotence conjuncts of `_group_eligible` are not modelled; a
+member that lands and then faults; divert; nested groups; more than two members.
+The differential row over the Python fan-out's fault schedules is open.

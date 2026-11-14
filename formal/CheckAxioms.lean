@@ -597,3 +597,16 @@ import RevL
 #print axioms RevL.A5.fixtures_decided
 #print axioms RevL.A5.a5_not_vacuous
 #print axioms RevL.A5.witness_bites
+
+-- Issue #2741: a two-member parallel fan-out group over the shipped `SemStep`.
+-- `ParStep`/`ParSteps` run both members against one shared world and log, so
+-- G7 and A8 do not move. The theorems say every interleaving is a sequential
+-- run, what the abort that follows leaves (R4's equation), and why a member
+-- the plan-order run skips must have an inverse; see
+-- RevL/Theorems/ParallelFanout.lean.
+#print axioms RevL.Fanout.par_run_is_a_sequential_run
+#print axioms RevL.Fanout.group_abort_leaves_exactly_the_emissions
+#print axioms RevL.Fanout.group_abort_reverts_when_nothing_crossed
+#print axioms RevL.Fanout.both_interleavings_are_taken
+#print axioms RevL.Fanout.over_fired_witnessed_member_is_undone
+#print axioms RevL.Fanout.over_fired_emission_is_residue

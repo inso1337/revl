@@ -446,6 +446,12 @@ python3 scripts/axioms_gate.py \
   RevL.A5.outside_the_family_is_out_of_the_row \
   RevL.A5.fixtures_decided \
   RevL.A5.a5_not_vacuous \
+  RevL.Fanout.par_run_is_a_sequential_run \
+  RevL.Fanout.group_abort_leaves_exactly_the_emissions \
+  RevL.Fanout.group_abort_reverts_when_nothing_crossed \
+  RevL.Fanout.both_interleavings_are_taken \
+  RevL.Fanout.over_fired_witnessed_member_is_undone \
+  RevL.Fanout.over_fired_emission_is_residue \
   RevL.A5.witness_bites < .axioms.out
 
 # The oracle's bridge theorems (harness/Oracle.lean) are outside the RevL
