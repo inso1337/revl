@@ -457,6 +457,14 @@ empty, a fifth check, `compensations`, is now present and false, and
 the four checks as before. `aclose`'s `settled` stays physical settlement and
 reads the four R4 checks only.
 
+A frame disposed at a swap is no longer in the owner's registry, so its
+`NotReversed` records (below) are held by the driver until an answer reports
+them. The next answer that carries `compensationResidue` reports them and
+drains them: a swap that lands (with any a rolled-back swap left before it), or
+the boundary report, where `noResidue` is false with them. A caller that does
+not return a swap answer to its client hands the records back
+(`Session.rehold_compensation_residue`), so none is lost (issue #3381).
+
 ## An inverse that ran is not an inverse that reverted (issue #1945)
 
 The four R4 counters see a disposer RUN, and the host-resource pairing (#1859)

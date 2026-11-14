@@ -278,8 +278,12 @@ def _run_undo(args) -> int:
             if i == 0:
                 session.load(ir, config, origin=origin)
             else:
-                session.swap(ir, origin=origin, agent_authored=False)
+                # replay answers are not printed: their residue stays held
+                # for the unload below (issue #3381)
+                session.rehold_compensation_residue(
+                    session.swap(ir, origin=origin, agent_authored=False))
         result = session.undo(to_session)
+        session.rehold_compensation_residue(result)
     except (SessionError, RevlError) as error:
         print(f"refused: {error}", file=sys.stderr)
         if session.loaded:

@@ -89,6 +89,18 @@ def _raiser_list(tokens) -> str:
     return ", ".join(_raiser_name(t) for t in sorted(tokens))
 
 
+def _drain_driver_residue(driver) -> list:
+    """Take the driver's unreported compensation residue (`NotReversed`
+    records of disposed frames, `_Driver._compensation_residue`) and empty
+    it, so a long-lived session does not keep every record (issue #3381)."""
+    held = getattr(driver, "_compensation_residue", None)
+    if not held:
+        return []
+    taken = list(held)
+    held.clear()
+    return taken
+
+
 class SessionError(RuntimeError):
     """The session cannot do what was asked (no runtime, nothing loaded…).
 
@@ -2276,10 +2288,17 @@ class Session:
             _name_the_candidate(exc, ir)
             raise
         try:
-            return self._cut_over(driver, ir, origin, plan)
+            said = self._cut_over(driver, ir, origin, plan)
         except ApprovalRequired as exc:
             _name_the_candidate(exc, ir)
             raise
+        # Issue #3381: the frames disposed at this swap may have left
+        # `NotReversed` records (an `undo` that did not put a key back). The
+        # answer names them, in `unload`'s `compensationResidue` shape, and
+        # the driver's list is drained: a reported record is not kept, and one
+        # that no answer read is what `unload` reports.
+        said["compensationResidue"] = _drain_driver_residue(driver)
+        return said
 
     def _plan_swap(self, driver, ir: dict, migrate: str,
                    agent_authored: bool) -> "_SwapPlan":
@@ -4246,6 +4265,19 @@ class Session:
         return _restore(self, snap, profile=profile, report=report,
                         gate_reads=gate_reads, agent_supplied=agent_supplied)
 
+    def rehold_compensation_residue(self, *answers) -> None:
+        """Put back the `compensationResidue` of answers a caller does not
+        return to its client (issue #3381). A swap or rollback answer drains
+        the driver's records into itself; a caller that discards that answer
+        hands its records back here, so the next answer or the boundary report
+        names them and none is lost."""
+        held = getattr(self._driver, "_compensation_residue", None)
+        if held is None:
+            return
+        for answer in answers:
+            if isinstance(answer, dict):
+                held.extend(answer.get("compensationResidue") or ())
+
     def unload(self) -> dict:
         """Tear down and report the residue checks — R4 from inside the
         protocol, so an agent can prove its component leaves nothing.
@@ -5675,10 +5707,16 @@ class Session:
 
         Called BEFORE the `prompts` snapshot and `_reset`, once the frames'
         Phase-2 drain and the owner's `finalize_abort` have run."""
-        if owner is None:
-            return []
-        residue = owner.collect_compensation_residue()
-        owner.prompts["residue"] += len(residue)
+        residue = ([] if owner is None
+                   else owner.collect_compensation_residue())
+        # Issue #3381: records left by frames disposed at an earlier swap are
+        # no longer in the owner's registry; the driver holds them until an
+        # answer reports them. Merged by identity, then drained.
+        seen = {id(rec) for rec in residue}
+        residue += [rec for rec in _drain_driver_residue(self._driver)
+                    if id(rec) not in seen]
+        if owner is not None:
+            owner.prompts["residue"] += len(residue)
         return residue
 
     def _teardown_report(self, driver, residue=()) -> dict:
