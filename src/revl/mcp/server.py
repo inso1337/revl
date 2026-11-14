@@ -115,6 +115,7 @@ from .. import query as Q
 from ..plan import _merge_resulting_ir
 from .. import deploy as _deploy
 from .. import shared_parse as _shared_parse
+from .context_tool import CONTEXT_TOOL
 from .query_tools import HISTORY_QUERY_TOOLS, LIVE_QUERY_TOOLS, QUERY_TOOLS
 from . import authoring_loop as _authoring_loop
 from .schema import tools_from_ir
@@ -7927,6 +7928,12 @@ for _query in QUERY_TOOLS:
     _query["handler"] = _with_held_candidate(_query["handler"], "queried")
     _query["description"] += _HELD_DOC
 TOOLS.extend(QUERY_TOOLS)
+
+# the declarations-only grounding pack (docs/context.md), on the held set too
+TOOLS.append({**CONTEXT_TOOL,
+              "handler": _with_held_candidate(CONTEXT_TOOL["handler"], "grounded"),
+              "description": CONTEXT_TOOL["description"] + _HELD_DOC.replace(
+                  "queried", "grounded")})
 
 # the two session-bound query modes (live / historical) carry their schema
 # next door and their handler here, because only this module holds the session

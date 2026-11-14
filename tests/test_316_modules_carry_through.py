@@ -312,6 +312,10 @@ MODULES_VERBS = {
     # inline `source`; a symbol the module declares proves they are read
     "revl_source": (lambda ir: {"symbol": "helper"},
                     lambda p: _ok(p) and p.get("symbol") == "helper"),
+    # without the call's `modules` the candidate's `use` is a usage refusal
+    "revl_context": (lambda ir: {"component": "T"},
+                     lambda p: _ok(p)
+                     and [s["service"] for s in p["services"]] == ["Tool"]),
     # the candidate rides inside `candidate`, not at the top level
     "revl_repair": (_repair_arguments, _repair_planned),
     # need a booted composition

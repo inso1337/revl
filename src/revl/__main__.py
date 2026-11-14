@@ -78,6 +78,7 @@ _run_attest = _deferred(".cli.observe", "_run_attest")
 _run_changelog = _deferred(".cli.observe", "_run_changelog")
 _run_dash = _deferred(".cli.observe", "_run_dash")
 _run_diff = _deferred(".cli.observe", "_run_diff")
+_run_context = _deferred(".cli.observe", "_run_context")
 _run_explain = _deferred(".cli.observe", "_run_explain")
 _run_history_query = _deferred(".cli.observe", "_run_history_query")
 _run_metrics = _deferred(".cli.observe", "_run_metrics")
@@ -1639,6 +1640,8 @@ def _dispatch(args) -> int:
         return _run_emit(args)
     if args.command == "explain":
         return _run_explain(args)
+    if args.command == "context":
+        return _run_context(args)
     if args.command == "grammar":
         return _run_grammar(args)
     if args.command == "idiom":

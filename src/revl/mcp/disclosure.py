@@ -71,8 +71,8 @@ TOPICS: dict[str, tuple[str, tuple[str, ...]]] = {
                "grammar, scaffold, format and explain", (
         "revl_brief", "revl_check", "revl_apply_repair", "revl_admit",
         "revl_plan", "revl_affected_tests", "revl_ship", "revl_deploy",
-        "revl_audit", "revl_tools", "revl_grammar", "revl_scaffold",
-        "revl_fmt", "revl_explain", "revl_idiom")),
+        "revl_audit", "revl_tools", "revl_grammar", "revl_context",
+        "revl_scaffold", "revl_fmt", "revl_explain", "revl_idiom")),
     "update": ("check the operator's release feed and apply a verified release "
                "to the running composition through the admission gate", (
         "revl_update_check", "revl_update_apply", "revl_update_status",
