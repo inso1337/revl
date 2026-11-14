@@ -48,6 +48,14 @@ def read_credential(env_var: str, environ=None) -> str:
     return value
 
 
+def _snippet(raw) -> str:
+    """The start of an unusable reply, for an error message."""
+    try:
+        return str(raw)[:400]
+    except Exception:  # noqa: BLE001 - a reply that cannot be shown is not shown
+        return "<unprintable>"
+
+
 class Adapter:
     """One configured role's client."""
 
@@ -109,7 +117,8 @@ class Adapter:
         started = time.monotonic()
         raw = request_json(url, body=body, headers=headers,
                            timeout=self.binding.timeout, secrets=secrets,
-                           label=self.label)
+                           label=self.label,
+                           max_bytes=self.binding.max_reply_bytes)
         self._device, self._device_options = device, options
         return {**raw, "revl_load_seconds": time.monotonic() - started}
 
@@ -121,7 +130,8 @@ class Adapter:
         self._device, self._device_options = None, {}
         return request_json(url, body=body, headers=headers,
                             timeout=self.binding.timeout, secrets=secrets,
-                            label=self.label)
+                            label=self.label,
+                            max_bytes=self.binding.max_reply_bytes)
 
     def residency(self) -> dict | None:
         """What the server reports holding for this model, or None when it
@@ -137,7 +147,8 @@ class Adapter:
         return request_json(
             url, headers=headers,
             timeout=self.binding.timeout if timeout is None else timeout,
-            secrets=secrets, label=self.label)
+            secrets=secrets, label=self.label,
+            max_bytes=self.binding.max_reply_bytes)
 
     def resident_in(self, raw: dict) -> dict | None:
         """This binding's model's entry in a `residency_report()`, or None."""
@@ -159,11 +170,17 @@ class Adapter:
             url, headers, body = self._wire.build(b, request, credential)
         started = time.monotonic()
         raw = request_json(url, body=body, headers=headers, timeout=b.timeout,
-                           secrets=secrets, label=self.label)
+                           secrets=secrets, label=self.label,
+                           max_bytes=b.max_reply_bytes)
         try:
             completion = self._wire.parse(raw, request)
-        except (KeyError, IndexError, TypeError, ValueError) as exc:
-            snippet = redact(str(raw)[:400], secrets)
+        except ProviderError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - the reply is untrusted
+            # not only the lookup errors: a reply whose `message` is a list
+            # makes `.get` an AttributeError, and none of it may escape as
+            # anything but a ProviderError naming the role (issue #3111)
+            snippet = redact(_snippet(raw), secrets)
             raise ProviderError(
                 redact(f"{self.label}: unexpected response shape from {url} "
                        f"({type(exc).__name__}: {exc}); body={snippet}",

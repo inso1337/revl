@@ -65,6 +65,7 @@ from urllib.parse import urlsplit
 
 from . import wire_anthropic, wire_gemini, wire_ollama, wire_openai
 from .structured import MODES as STRUCTURED_MODES
+from .transport import DEFAULT_MAX_REPLY_BYTES
 
 #: `{provider: wire module}`, in the order a refusal lists them. Each wire
 #: module names its own `PROVIDER` and `FIELDS`, so this is the one place the
@@ -86,7 +87,8 @@ RESIDENCES = ("on_device", "off_device")
 
 _COMMON_FIELDS = frozenset({
     "provider", "model", "base_url", "api_key_env", "max_tokens",
-    "temperature", "timeout", "residence", "reaches", "structured_output",
+    "temperature", "timeout", "max_reply_bytes", "residence", "reaches",
+    "structured_output",
 })
 _PROVIDER_FIELDS = {provider: wire.FIELDS for provider, wire in WIRES.items()}
 
@@ -128,6 +130,9 @@ class Binding:
     max_tokens: int = DEFAULT_MAX_TOKENS
     temperature: float = 0.0
     timeout: float = DEFAULT_TIMEOUT
+    #: the most bytes of an endpoint's reply that are read before the call is
+    #: refused (`revl.providers.transport`).
+    max_reply_bytes: int = DEFAULT_MAX_REPLY_BYTES
     #: the EFFECTIVE residence: derived from the endpoint, or the operator's
     #: downgrade of it. Never wider than what the endpoint allows.
     residence: str = "off_device"
@@ -352,6 +357,9 @@ def _binding(role: str, entry, source: str) -> Binding:
                             entry.get("temperature", 0.0), float, 0.0),
         timeout=_number(where, "timeout",
                         entry.get("timeout", DEFAULT_TIMEOUT), float, 0.001),
+        max_reply_bytes=_number(
+            where, "max_reply_bytes",
+            entry.get("max_reply_bytes", DEFAULT_MAX_REPLY_BYTES), int, 1024),
         residence=residence, reaches=tuple(reaches), api=api,
         project=project, location=location,
         anthropic_version=entry.get("anthropic_version",

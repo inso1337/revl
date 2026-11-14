@@ -158,11 +158,10 @@ nothing" and drop the clause silently. The configuration is checked against
 the placement first (the same check `revl run --providers` makes), so a
 binding the plan would refuse is never sent a request or a credential. Each
 server is asked once per plan, so every host ranks against the same snapshot,
-and each network read of the question (the connect, or one read of the
-answer) waits at most 10 seconds (or the binding's own `timeout`, if shorter),
-not a completion timeout per host and role. The bound is per read, not a
-deadline for the whole answer: a server that keeps sending a byte at a time
-can hold the plan longer.
+and the exchange with the server (request and answer, once connected) lasts
+at most 10 seconds (or the binding's own `timeout`, if shorter), not a
+completion timeout per host and role. A server that keeps sending a byte at a
+time is cut off at that deadline.
 
 Two limits are worth stating plainly. The read is a report about a moment, and
 revl cannot tell who loaded what, so a model another client loaded is
