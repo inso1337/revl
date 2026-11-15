@@ -10104,6 +10104,10 @@ def _lower_component_block_arm(expr, env: Env, scope: dict[str, str],
             inner[st.name] = safe
             if st.type is not None:
                 check_type_wellformed(filename, st.line, st.type)
+                # issue #3212: the declared type is checked, not trusted
+                check_ir(value, st.type, env.type_env, env.types,
+                         env.services, filename, st.line,
+                         f"`let {st.name}: {render_type(st.type)}`")
                 env.type_env[safe] = st.type
                 _pin_record_expected(st.type, value, env.types)
             else:
@@ -15585,6 +15589,14 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 env.local_arrows[ms.name] = ms.value
             if ms.type is not None:
                 check_type_wellformed(filename, ms.line, ms.type)
+                # issue #3212: the annotation is a declared type, so the value
+                # is checked against it exactly as a `fn` body's annotated
+                # `let` is (`_lower_pure_stmt`) and as this method's `return`
+                # is. Trusting it let an `Opt[Str]` or an `Int` reach a `Str`
+                # parameter with no refusal.
+                check_ir(value, ms.type, env.type_env, env.types, env.services,
+                         filename, ms.line,
+                         f"`let {ms.name}: {render_type(ms.type)}`")
                 env.type_env[safe] = ms.type
                 _pin_empty_literal(ms.type, value)
                 _pin_record_expected(ms.type, value, env.types)
