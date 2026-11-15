@@ -98,14 +98,15 @@ A composition loaded from `files` is edited and swapped by name directly, and
 the server holds its text from the load on (issue #1842), so neither needs a
 load remedy.
 
-**The answer envelope (revl_check, revl_test_run).** The two verbs converted by
-issue #2858 answer in one envelope, additive to every key they returned before:
+**The answer envelope (revl_check, revl_apply_repair, revl_test_run).** The
+verbs converted by issue #2858 answer in one envelope, additive to every key
+they returned before:
 
 | field | meaning |
 | ----- | ------- |
 | `ok` | did the call answer at all (this one is on every verb) |
 | `verdict` | `passed`, `failed` or `refused` |
-| `payloadKey` | the key in the same answer that carries the verb's substance: `selfCheck` for `revl_check`, `tests` for `revl_test_run` |
+| `payloadKey` | the key in the same answer that carries the verb's substance: `selfCheck` for `revl_check`, `repaired` for `revl_apply_repair`, `tests` for `revl_test_run` |
 | `refusal` | present when `verdict` is `refused`: `code`, `category`, `message`, `location`, `repair` |
 
 `failed` is a verdict about what was checked: the call ran, and the composition
@@ -146,8 +147,10 @@ emit.
 | `RUNTIME_REFUSED` | runtime | the verb's runtime could not do what the call asked |
 | `SESSION_REFUSED` | session | the call did not fit the state the session held |
 | `SESSION_TAKES_NO_CANDIDATE` | usage | `session: true` asks to check the composition the session holds, so the call may not carry a `source`/`files` candidate of its own |
+| `STALE_REPAIR` | session | `repairId` was minted before a load, swap, rollback or undo moved the session's unit of work, so the candidate it repairs no longer belongs to this unit |
 | `TEST_RUN_FAILED` | runtime | the test runner could not be started by this server's interpreter |
 | `TIMEOUT` | runtime | the selected tests did not finish inside the timeout |
+| `UNKNOWN_REPAIR` | usage | `repairId` names no repair this session minted: no refusing `revl_check` issued it, or it has been dropped to keep the store bounded |
 | `USAGE` | usage | the call's arguments did not satisfy the verb's input contract |
 <!-- docgen:mcp-refusal-codes end -->
 
@@ -320,6 +323,7 @@ answering compiler's identity beside it. Under `revl mcp proxy` the `initialize`
 | verb | read-only | destructive | required inputs |
 |---|---|---|---|
 | `revl_check` | yes | no | - (source) |
+| `revl_apply_repair` | yes | no | `repairId` |
 | `revl_admit` | yes | no | `manifest` (source) |
 | `revl_plan` | yes | no | - (source) |
 | `revl_ship` | no | yes | - (source) |
@@ -653,6 +657,43 @@ refusal codes are:
 last five rows are the shared fallbacks a refusal made before or around the
 handler carries; the generated table above gives every code's category and
 meaning.
+
+### `revl_apply_repair`
+
+Apply the verified repair a refusal carries and return the repaired candidate
+with its re-check (issue #2855). A refusing `revl_check` answers with `repairId`
+when the refusal's class has a mechanical repair the fixgen engine verified
+([fix-code.md](fix-code.md), issue #2684): a T2 `null`, an A9 provide key, a G4
+missing undo, a REVL sized receiver. The record's `fix_code` carries the title
+and the verified edits, and `repairId` names the same edit in the session's
+store.
+
+- Input: `repairId` (required), the id the refusal returned. Nothing else: the
+  session still holds the candidate the check compiled and the verified edit,
+  so the text is not re-sent and the edit is not re-derived.
+- Output: `repaired` (the candidate in the shape it was sent: `source`, or
+  `files` with the patched file as a `modules` overlay), `applied` (the code,
+  title, target and verified edits), and `check`: the answer `revl_check`
+  itself gives the repaired candidate (the same authoring door, the same
+  `canonicalSource` report), so a passing candidate, or the next refusal,
+  which mints its own `repairId` when that class is mechanical too.
+- The stored candidate is the text the check compiled, not the text as sent:
+  when `revl_check` completed terse punctuation (`canonicalSource.completed`,
+  for instance the parentheses of an `if`), `repaired` carries that completion
+  as well as the repair, because the verified edits are ranges into the
+  compiled text.
+- While a draft is held, applying is refused as `DRAFT_HELD`, exactly as a
+  `revl_check` of the repaired candidate would be: it is not the composition
+  the loop is filling.
+- Opt-in and read-only: applying installs nothing and writes nothing. The
+  repaired candidate enters the composition through `revl_swap`/`revl_load` as
+  usual.
+- A repair id the session never minted is refused as `UNKNOWN_REPAIR`; one
+  minted before a load, swap, rollback or undo moved the unit of work is
+  `STALE_REPAIR`. A refusal whose class has no mechanical repair mints no id;
+  its prose repair says `known: false`.
+
+`payloadKey` is `repaired`.
 
 ### `revl_admit`
 

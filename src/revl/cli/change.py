@@ -1042,10 +1042,17 @@ def _run_repair(args) -> int:
     if args.predicate:
         arguments["predicate"] = args.predicate
     if args.candidate:
+        # The candidate files ride as FILES, never joined into one inline
+        # source: a joined text compiles under a label that names no file, so
+        # the export rule (`export_area.CliRule`) could not see that one of
+        # them lies under `.revl/export/` and the agent's text would compile
+        # with the operator's trust (issue #2563). Read each one first so an
+        # unreadable path is still reported here.
         try:
+            for p in args.candidate:
+                Path(p).read_text(encoding="utf-8")
             arguments["candidate"] = {
-                "source": "\n".join(Path(p).read_text(encoding="utf-8")
-                                    for p in args.candidate)}
+                "files": [os.path.abspath(p) for p in args.candidate]}
         except OSError as error:
             print(f"error: cannot read candidate: {error}", file=sys.stderr)
             return 1

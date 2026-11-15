@@ -291,6 +291,8 @@ def test_initialize_and_tools_list(all_mcp_tools):
                           "revl_test_run",
                           # the compact next-step answer (issue #2854)
                           "revl_brief",
+                          # apply a refusal's repair (issue #2855)
+                          "revl_apply_repair",
                           # the operator update surface (docs/updates.md)
                           "revl_update_check", "revl_update_apply",
                           "revl_update_status", "revl_update_rollback"}

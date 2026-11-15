@@ -96,10 +96,11 @@ _BUILTIN_CASES = {"Ok", "Err", "Some", "None"}
 #: (`backends/wasm/emit.py`, `_V3Emitter._check_type`) and it is copied forward
 #: into every artifact this importer produces, so it is checked against that
 #: emitter by `tests/test_importer_wasm_tier_claims.py` rather than pinned as a
-#: string. What the tier *does* carry: `Int` is an i64 value, and `Str`,
+#: string. What the tier *does* carry: `Int` is an i64 value, `Float` an f64
+#: value, and `Str`,
 #: `Bytes`, lists, records, variants, `Opt` and `Result` cross the service
 #: boundary as canonical-ABI pointers into linear memory.
-_WASM_REFUSED_TYPES = ("Float", "Map", "function types")
+_WASM_REFUSED_TYPES = ("Map", "function types")
 
 #: constructs that are refused by name, with the way forward
 _REFUSED_TYPES = {
@@ -1025,11 +1026,12 @@ class _Generator:
                 "//",
                 "// The extern bodies are tagged `@wasm` because that is where a WIT",
                 "// world lives, and the tier carries the shapes above: `Int` is an",
-                "// i64 there, and `Str`, `Bytes`, lists, records and variants cross",
-                "// the service boundary as canonical-ABI pointers into linear memory.",
+                "// i64 there, `Float` (WIT `f32`/`f64`) an f64, and `Str`, `Bytes`,",
+                "// lists, records and variants cross the service boundary as",
+                "// canonical-ABI pointers into linear memory.",
                 f"// What that tier refuses is {refused}.",
-                "// (WIT `f32`/`f64` map to `Float`.) Re-import with",
-                "// `--backend ts|py|rust` for a world that reaches for one of those.",
+                "// Re-import with `--backend ts|py|rust` for a world that reaches",
+                "// for one of those.",
             ]
         for note in self.notes + self.names.renames:
             lines.append(f"// note: {note}")
