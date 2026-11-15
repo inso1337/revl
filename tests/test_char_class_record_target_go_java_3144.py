@@ -213,11 +213,20 @@ def test_each_classifier_is_emitted(tier):
     assert '"a"' in src and '"Z"' in src, src
 
 
-@pytest.mark.parametrize("tier", ["go", "java"])
-def test_a_shared_field_set_takes_its_declared_target(tier):
+@pytest.mark.parametrize("tier,built", [
+    ("go", ("PR{", "AtExpr{", "Bind{", "Param{", "Field{")),
+    ("java", ("new PR(", "new AtExpr(", "new Bind(", "new Param(", "new Field(")),
+])
+def test_a_shared_field_set_takes_its_declared_target(tier, built):
     src = EMITTERS[tier].emit(compile_source(RECORDS, "records_3144.rvl"))
-    for built in ("PR", "AtExpr", "Bind", "Param", "Field", "Env"):
-        assert built in src, (built, src)
+    # the literals in `bad`, `at_e`, `binds`, `params` and `field_of` each
+    # build the record their target names
+    for literal in built:
+        assert literal in src, (literal, src)
+    # a returned `{ i, e }` is a PR in `bad` and an AtExpr in `at_e`
+    body = src[src.index("bad("):]
+    assert built[0] in body[:body.index("at_e(")], src
+    assert built[1] in body[body.index("at_e("):], src
 
 
 @pytest.mark.parametrize("tier", ["go", "java"])

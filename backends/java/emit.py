@@ -4448,7 +4448,10 @@ def _pin_record_targets(body: object, params: object, ret_type: object,
 
     def handed(node: object, declared: object) -> None:
         """`node` flows into a slot declared `declared`."""
-        if not isinstance(node, dict) or not isinstance(declared, str):
+        if not isinstance(node, dict):
+            return
+        if not isinstance(declared, str):
+            expr(node)  # still walked: its binders are numbered in order
             return
         if node.get("kind") == "var":
             ident = bound.get(node.get("name"))
@@ -4551,14 +4554,17 @@ def _pin_record_targets(body: object, params: object, ret_type: object,
             source = (bound.get(value.get("name"))
                       if isinstance(value, dict) and value.get("kind") == "var"
                       else None)
-            # the new binding comes into scope after its value is read
-            ident = bind(name)
+            # the new binding is numbered now but comes into scope after its
+            # value is read (`let x = f(x)` reads the outer `x`)
+            counter[0] += 1
+            ident = counter[0]
             if source is not None:
                 alias[ident] = source
             # the type the local is handed on as stands for a literal or an
             # empty list nothing else types
             declared = handed_as.get(ident)
             expr(value, declared)
+            bound[name] = ident
             found = infer(value)
             if found is None and isinstance(value, dict):
                 if value.get("kind") == "list" and not value.get("items"):
@@ -4590,9 +4596,10 @@ def _pin_record_targets(body: object, params: object, ret_type: object,
             bound.update(saved_bound)
         elif kind == "let_pattern":
             expr(step.get("value"))
-            for name in step.get("names") or []:
-                scope[name] = None
-                bind(name)
+            for name in [*(step.get("names") or []), step.get("rest")]:
+                if isinstance(name, str):
+                    scope[name] = None
+                    bind(name)
         else:
             for value in step.values():
                 expr(value)
