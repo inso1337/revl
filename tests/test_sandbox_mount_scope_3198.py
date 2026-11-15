@@ -202,3 +202,115 @@ def test_a_compile_reports_the_host_files_a_recompile_must_read(tmp_path):
     assert str(files["ref"]) in report["host_file_reads"]
     assert str(files["body"]) in report["host_file_reads"]
     assert str(files["asset"]) in report["host_file_reads"]
+
+
+def test_a_generated_types_file_reports_its_model_document(tmp_path):
+    """A `revl gen-types` file's model document is read from disk to check its
+    digest, so the in-boundary recompile needs it mounted too."""
+    from revl.gen_types import gen_types_file
+    fixture = ROOT / "tests" / "fixtures" / "gen_types" / "rentals.model.json"
+    model = tmp_path / "rentals.model.json"
+    model.write_text(fixture.read_text(encoding="utf-8"), encoding="utf-8")
+    types = tmp_path / "types.rvl"
+    types.write_text(gen_types_file(str(model), str(types)), encoding="utf-8")
+    report: dict = {}
+
+    compile_files([str(types)], report=report)
+
+    assert str(model.resolve()) in report["host_file_reads"]
+
+
+def test_a_symlinked_input_is_mounted_under_the_spelling_the_compile_opens(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "f.rvl").write_text(_APP, encoding="utf-8")
+    (tmp_path / "lnk").symlink_to(real, target_is_directory=True)
+    spelled = tmp_path / "lnk" / "f.rvl"
+
+    mounts = _sb.source_mounts([str(spelled)])
+
+    # the in-boundary compile opens the spelling it was handed
+    assert (str(spelled), "ro") in mounts
+
+
+def test_the_recompile_reads_only_files_the_driver_would_mount(tmp_path):
+    """End to end: compile once the way the conductor does, then re-compile from
+    ONLY the mounted file set (the confined process sees nothing else) and
+    require that no read falls outside it. Catches a read the report misses."""
+    import builtins
+    import os
+
+    files = _compile_fixture(tmp_path)
+    report: dict = {}
+    compile_files([str(files["app"])], report=report)
+    mounted = {str(files["app"]), *report["disk_reads"],
+               *report["host_file_reads"]}
+    seen: set[str] = set()
+    real_open = builtins.open
+    real_os_open = os.open
+
+    def spy_open(path, *a, **k):
+        if isinstance(path, (str, os.PathLike)):
+            seen.add(os.path.abspath(os.fspath(path)))
+        return real_open(path, *a, **k)
+
+    def spy_os_open(path, *a, **k):
+        seen.add(os.path.abspath(os.fspath(path)))
+        return real_os_open(path, *a, **k)
+
+    builtins.open, os.open = spy_open, spy_os_open
+    try:
+        compile_files([str(files["app"])])
+    finally:
+        builtins.open, os.open = real_open, real_os_open
+
+    under_project = {p for p in seen if p.startswith(str(tmp_path))}
+    assert under_project, "the spy saw no project read at all"
+    assert under_project <= mounted, sorted(under_project - mounted)
+
+
+# ==========================================================================
+# 4. the guard is wired into the driver's own preflight
+# ==========================================================================
+
+
+def _preflight_with(tmp_path, monkeypatch, files, env=None):
+    """`ContainerDriver.preflight` with the daemon stubbed out: it reaches the
+    point where the driver-added host mounts are judged."""
+    driver = _sb.ContainerDriver(docker="/usr/bin/docker")
+    monkeypatch.setattr(_sb, "_run", lambda *a, **k: (0, "24.0", ""))
+    monkeypatch.setattr(driver, "_ensure_image", lambda *a: None)
+    probe = {"RUNTIME": "image", "PY": "yes", "MOUNTS": {}}
+    monkeypatch.setattr(driver, "_probe", lambda *a, **k: (probe, None))
+    monkeypatch.setattr(driver, "_evaluate", lambda *a, **k: (["ok"], None))
+    seam = tmp_path / "seam"
+    seam.mkdir(exist_ok=True)
+    spec = seam / "p.spec.json"
+    spec.write_text("{}", encoding="utf-8")
+    ctx = {"backend": "py", "seam_dir": str(seam), "spec_path": str(spec),
+           "files": [str(f) for f in files]}
+    return driver.preflight("p", env or _ENV, ctx)
+
+
+def test_preflight_records_file_mounts_and_no_workdir(tmp_path, monkeypatch):
+    app = tmp_path / "app.rvl"
+    app.write_text(_APP, encoding="utf-8")
+
+    achieved, err = _preflight_with(tmp_path, monkeypatch, [app])
+
+    assert err is None, err
+    assert achieved["host_mounts"] == [(str(app), "ro")]
+    assert "workdir" not in achieved
+
+
+def test_preflight_refuses_a_directory_mount_over_the_home(tmp_path, monkeypatch):
+    monkeypatch.setattr(_sb.Path, "home", classmethod(lambda cls: tmp_path / "h"))
+    (tmp_path / "h").mkdir()
+    # a driver-added DIRECTORY that is an ancestor of home (the old cwd mount)
+    monkeypatch.setattr(_sb, "source_mounts",
+                        lambda files: [(str(tmp_path), "ro")])
+
+    achieved, err = _preflight_with(tmp_path, monkeypatch, [tmp_path])
+
+    assert achieved is None
+    assert err and "operator's home" in err

@@ -507,7 +507,10 @@ def source_mounts(files) -> list[tuple[str, str]]:
     function the compile's exact input set (its roots, every `use` dependency,
     and every host file a ref, asset or body read).
     """
-    return [(path, "ro") for path in sorted({str(Path(f).resolve()) for f in files})]
+    # abspath, not resolve: the compile collects BOTH the symlink spelling it
+    # opens and the real path, and the in-boundary compile opens the spelling it
+    # was handed, so the spelling has to be a mount too.
+    return [(path, "ro") for path in sorted({os.path.abspath(str(f)) for f in files})]
 
 
 def _within(parent: Path, child: Path) -> bool:

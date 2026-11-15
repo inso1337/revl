@@ -504,7 +504,8 @@ class _ModuleLoader:
             except OSError:
                 return
         row = _gen_types.check_generated_header(head, abs_path, self._sources,
-                                                virtual is not None)
+                                                virtual is not None,
+                                                reads=self.host_file_reads)
         if row is not None and row not in self.generated_from:
             self.generated_from.append(row)
 

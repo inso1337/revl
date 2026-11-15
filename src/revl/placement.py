@@ -4341,7 +4341,7 @@ def run_placement(files, placement_path: str, once: bool = False,
     # boundary, and the driver mounts the files themselves rather than the
     # directories that hold them; absolute roots are what let that compile
     # resolve with the conductor's working directory unmounted.
-    files = [str(Path(f).resolve()) for f in files]
+    files = [os.path.abspath(str(f)) for f in files]
     compile_report: dict = {}
     try:
         ir = compile_files(files, report=compile_report)
