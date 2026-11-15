@@ -1,0 +1,191 @@
+{
+  "about": "Seeded-defect saga corpus (issue #2736, first slice). One row per defect: a small saga with a known saga defect, the defect written down before any version of the saga, and the catch point the corpus expects. The revl verdict is measured by `python3 bench/saga_defects/run.py`; the Temporal port and independently written sagas are the second slice and are not scored here.",
+  "issue": 2736,
+  "slice": "revl corpus and verdict runner",
+  "systems": {
+    "revl": "measured here",
+    "temporal": "not scored in this slice; the hand port and its score are the second slice of issue #2736"
+  },
+  "failureModel": "One failure is injected after a top-level step of the saga component completes, in program order (the `revl test --sweep` model; docs/fault-tests.md section 9). The sequential, single-fault model does not cover concurrency, clock or random coeffects.",
+  "verdicts": {
+    "compile": "the checker refused the saga; the defect cannot reach a run",
+    "fault-test": "the saga compiled and `revl test --sweep` failed at a seeded fault",
+    "missed": "the saga compiled and every sweep unit passed"
+  },
+  "groups": {
+    "project": "written by the people who built the checker",
+    "outside": "a saga whose shape was not written by the checker's authors (none in this slice)"
+  },
+  "defects": [
+    {
+      "id": "missing-undo-hold",
+      "group": "project",
+      "kind": "missing-undo",
+      "saga": "checkout",
+      "file": "sagas/missing_undo_hold.rvl",
+      "description": "The inventory hold carries no undo, so a failed checkout would leave the reservation standing. Same defect kind as `missing-undo-auth` (an `effect` with no `undo`), seeded at the other call site of the same saga: the two rows are one defect kind at two call sites, not two defects.",
+      "expected": "compile",
+      "expectedCode": "G4",
+      "expectedLine": 38
+    },
+    {
+      "id": "missing-undo-auth",
+      "group": "project",
+      "kind": "missing-undo",
+      "saga": "checkout",
+      "file": "sagas/missing_undo_auth.rvl",
+      "description": "The payment authorization carries no undo, so a failed checkout would keep the charge. Same defect kind as `missing-undo-hold` (an `effect` with no `undo`), seeded at the other call site of the same saga: the two rows are one defect kind at two call sites, not two defects.",
+      "expected": "compile",
+      "expectedCode": "G4",
+      "expectedLine": 39
+    },
+    {
+      "id": "unmarked-settle",
+      "group": "project",
+      "kind": "unmarked-emission",
+      "saga": "checkout",
+      "file": "sagas/unmarked_settle.rvl",
+      "description": "The irreversible settlement is written as `effect ... undo`; an emission must be marked `emit` with a `compensate` slot.",
+      "expected": "compile",
+      "expectedCode": "G4",
+      "expectedLine": 39
+    },
+    {
+      "id": "emit-plain-method",
+      "group": "project",
+      "kind": "emit-plain-method",
+      "saga": "checkout",
+      "file": "sagas/emit_plain_method.rvl",
+      "description": "A reversible operation is marked `emit`, claiming an irreversibility it does not have.",
+      "expected": "compile",
+      "expectedCode": "G4",
+      "expectedLine": 38
+    },
+    {
+      "id": "undo-not-release",
+      "group": "project",
+      "kind": "undo-not-release",
+      "saga": "checkout",
+      "file": "sagas/undo_not_release.rvl",
+      "description": "A host acquisition is undone on a sibling handle, so its own resource would stay open while the teardown reports a clean release.",
+      "expected": "compile",
+      "expectedCode": "G4",
+      "expectedLine": 21
+    },
+    {
+      "id": "manual-teardown",
+      "group": "project",
+      "kind": "manual-teardown",
+      "saga": "checkout",
+      "file": "sagas/manual_teardown.rvl",
+      "description": "The author writes the teardown order by hand in a provide-method undo; the inverse reaches an emission, which a bracket inverse may not cross.",
+      "expected": "compile",
+      "expectedCode": "G5",
+      "expectedLine": 35
+    },
+    {
+      "id": "emission-with-undo",
+      "group": "project",
+      "kind": "emission-with-undo",
+      "saga": "checkout",
+      "file": "sagas/emission_with_undo.rvl",
+      "description": "The call site gives an irreversible settlement an `undo` instead of a `compensate`; the parser refuses the `undo` keyword there, so this is a parse refusal, not a G6 reversibility check. The `G6` in `expectedCode` is only the hint tag the parser attaches to its generic statement error, so `expectedLine` pins the seeded line as well. Its message is the parser's generic `expected a statement` error, which any typo would also earn, so it is counted as a parse refusal apart from the checker refusals.",
+      "expected": "compile",
+      "expectedCode": "G6",
+      "expectedLine": 38,
+      "refusal": "parse"
+    },
+    {
+      "id": "dependency-cycle",
+      "group": "project",
+      "kind": "dependency-cycle",
+      "saga": "orders-invoices",
+      "file": "sagas/dependency_cycle.rvl",
+      "description": "Two saga components require each other's provision, so neither can ever activate (G3 is link-time acyclicity of component dependencies, not step order).",
+      "expected": "compile",
+      "expectedCode": "G3",
+      "expectedLine": 10
+    },
+    {
+      "id": "failing-inverse",
+      "group": "project",
+      "kind": "failing-inverse",
+      "saga": "checkout",
+      "file": "sagas/failing_inverse.rvl",
+      "description": "The charge's inverse is present and well-shaped but calls a host helper that raises during the unwind.",
+      "expected": "fault-test",
+      "component": "Checkout"
+    },
+    {
+      "id": "failing-compensation",
+      "group": "project",
+      "kind": "failing-compensation",
+      "saga": "checkout",
+      "file": "sagas/failing_compensation.rvl",
+      "description": "The settlement's compensation is present but calls a host helper that raises during phase two.",
+      "expected": "fault-test",
+      "component": "Checkout"
+    },
+    {
+      "id": "missing-compensate",
+      "group": "project",
+      "kind": "missing-compensate",
+      "saga": "checkout",
+      "file": "sagas/missing_compensate.rvl",
+      "description": "The irreversible settlement declares no compensation, so a later failure has no recorded follow-up action.",
+      "expected": "missed",
+      "component": "Checkout"
+    },
+    {
+      "id": "wrong-refund-order",
+      "group": "project",
+      "kind": "wrong-inverse-target",
+      "saga": "checkout",
+      "file": "sagas/wrong_refund_order.rvl",
+      "description": "The charge for one order is undone by a refund for a different order. The payment store is an opaque host boundary in this saga, so the fault sweep cannot see which order was refunded.",
+      "expected": "missed",
+      "component": "Checkout"
+    },
+    {
+      "id": "wrong-release-sku",
+      "group": "project",
+      "kind": "wrong-inverse-target",
+      "saga": "checkout",
+      "file": "sagas/wrong_release_sku.rvl",
+      "description": "The two inventory holds release each other's sku: the first hold's undo releases the second hold's key and the second's releases the first's. The derived order is mechanically LIFO, but the hand-written inverse targets are swapped, so the first hold's own key survives its step. The provider is Map-backed, so the sweep's host-residue check sees the un-reversed write.",
+      "expected": "fault-test",
+      "component": "Checkout"
+    },
+    {
+      "id": "partial-refund",
+      "group": "project",
+      "kind": "partial-inverse",
+      "saga": "checkout",
+      "file": "sagas/partial_refund.rvl",
+      "description": "The charge is undone by a refund of half the amount: the inverse is present and well-shaped but reverts only part of the effect. The ledger provider keeps the charged amount in a `Map` and a refund subtracts from it, so half a refund leaves the other half behind; the sweep's host-residue check sees that residue (with a full refund the same saga passes every sweep unit).",
+      "changedAfterMeasurement": "The first version's provider removed the whole row on any refund, so the defect could not show and the row was measured as `missed`. After that measurement the provider was changed to keep the amount, and the description and the expected verdict (now `fault-test`) were rewritten.",
+      "expected": "fault-test",
+      "component": "Checkout"
+    },
+    {
+      "id": "noop-compensation",
+      "group": "project",
+      "kind": "noop-compensation",
+      "saga": "checkout",
+      "file": "sagas/noop_compensation.rvl",
+      "description": "The compensation calls a helper that returns success without reversing anything.",
+      "expected": "missed",
+      "component": "Checkout"
+    },
+    {
+      "id": "double-release",
+      "group": "project",
+      "kind": "double-release",
+      "saga": "checkout",
+      "file": "sagas/double_release.rvl",
+      "description": "The compensation and the hold's own inverse release the same hold; the second release is a silent no-op in this provider.",
+      "expected": "missed",
+      "component": "Checkout"
+    }
+  ]
+}

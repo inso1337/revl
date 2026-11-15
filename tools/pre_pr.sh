@@ -78,7 +78,7 @@ python3 tools/check_vocabulary_mirrors.py --check || fail=1
 # silently when the cited file moves or shortens; nothing else checks them.
 # Advisory for now: tools/doc_refs_ledger.json records the findings the tree
 # already has, so this is green on adoption and reports only a finding that is
-# not recorded. It does not set fail=1 and CI does not run it yet. Repair an
+# not recorded. It does not set fail=1, and CI runs it advisory too. Repair an
 # anchor, then rerun `--write-ledger` and the ledger shrinks.
 echo "== doc refs (advisory) =="
 if ! python3 tools/check_doc_refs.py --check; then

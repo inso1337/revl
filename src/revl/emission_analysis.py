@@ -617,7 +617,15 @@ def _method_emissions(body: list, env: "Env",
     # labelled `<Service>.<op>`. Not a host emission.
     resolved_crossings = getattr(env, "resolved_crossings", None) or {}
 
-    def walk(node):
+    # Issue #3457: the call/value names of a node are collected ONCE, at each
+    # outermost dict (`top`), not again at every node below it. The answer is
+    # unchanged: a descendant's calls and values are a subset of its outermost
+    # ancestor's, so their `note`s were no-ops, with one exception the walk
+    # keeps: a `var` that is the immediate callee of a call is barred from the
+    # value channel at every ancestor (`_callee_pos`), but collecting from the
+    # var itself recorded it as a value, so a non-top `var` still contributes
+    # its own name, at the same point of the walk as before.
+    def walk(node, top: bool = True):
         if isinstance(node, dict):
             crossing = resolved_crossings.get(id(node))
             if crossing is not None:
@@ -682,7 +690,10 @@ def _method_emissions(body: list, env: "Env",
                                                   node.get("method")))
             calls: set = set()
             values: set = set()
-            _calls_in(node, calls, values=values)
+            if top:
+                _calls_in(node, calls, values=values)
+            elif node.get("kind") == "var" and isinstance(node.get("name"), str):
+                values.add(node["name"])
             for name in sorted(calls & reaching):
                 evidence = getattr(env, "emission_evidence", None)
                 note(f"{name}()",
@@ -699,10 +710,10 @@ def _method_emissions(body: list, env: "Env",
                 caps.update(env.emitting_caps.get(name) or set())
                 caps.add("*")
             for value in node.values():
-                walk(value)
+                walk(value, False)
         elif isinstance(node, list):
             for value in node:
-                walk(value)
+                walk(value, top)
 
     walk(body)
     return found, caps

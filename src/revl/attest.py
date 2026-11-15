@@ -511,6 +511,11 @@ NOT_A_RULE = {
                   "rather than refused at admission.",
     "peer_offer": "the federation offer surface, reached from `placement`.",
     "sandbox_runtime": "the child-process sandbox `placement` launches.",
+    "_childproc": "the one decoding rule (UTF-8, undecodable bytes replaced) "
+                  "for the output of every child process revl runs, reached "
+                  "from `placement`'s conductor and the per-tier runners "
+                  "(issue #3108). It wraps `subprocess`, raises no "
+                  "refusal, and no check reads the text it decodes.",
     "synthesize": "`revl synthesize`, a generator rather than a checker.",
     "tls_pin": "the pinned TLS leaf SPKI check a synthesized `remote` row's "
                "emitted body installs (issue #2719). It admits no program: the "

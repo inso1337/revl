@@ -129,6 +129,16 @@ def _redact(text: str) -> str:
     return out if isinstance(out, str) else text
 
 
+def redact_text(text: str) -> str:
+    """The same scrub, for free-form text another module hands back to a
+    caller. `mcp.session._fiber_activation_error` reads the exception cordis
+    recorded on a FAILED fiber with it (issue #3142): that text came from a
+    host body rather than from revl, so it can quote a registered `Secret[T]`
+    value, and `revl_load` / `revl_state` return it. One registry, one funnel,
+    one more sink."""
+    return _redact(text)
+
+
 def _redact_call(text: str, args) -> str:
     """The two-stage funnel (item 421 F5) for a failure text this process
     prints on its OWN behalf: the call's own argument values first, then the
