@@ -36,6 +36,7 @@ so writing one is a parse error naming the clauses that do exist.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import posixpath
 from urllib.parse import urlsplit
@@ -748,6 +749,12 @@ def _require_pin(truc: str, root: str, doc: str, line: int) -> None:
     enforces for the vendor step — "the lock does not define a row and cannot
     add one; what the lock does is refuse" (§7). A missing lock, a missing row
     or a blank `sourceHash` are all "no pin"; a blank pin is no pin.
+
+    A pin is also checked, not only present: `sourceHash` must equal the sha256
+    of the vendored `component.rvl` as it is now, the check `truc assemble`
+    makes (`plan_drift`). Otherwise a vendored component changed after `truc
+    add` would resolve, and `truc apply` would write an assembly for it, under a
+    lock that still shows the old pin.
     """
     lock = _load_lock(root)
     pin = None if lock is None else lock.get(truc)
@@ -763,6 +770,20 @@ def _require_pin(truc: str, root: str, doc: str, line: int) -> None:
             hint="run `truc assemble` to pin the vendored trucs, and commit "
                  "`truc.lock` (426 §7 / exit test 17, the 428 F3 gate). A blank "
                  "`sourceHash` is no pin.")
+    path = os.path.join(root, _VENDOR_DIR, truc, "component.rvl")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            actual = hashlib.sha256(fh.read().encode()).hexdigest()
+    except (OSError, ValueError):
+        actual = "missing or unreadable"
+    if actual != pin:
+        raise RevlError(
+            doc, line,
+            f"hash drift: vendored {_VENDOR_DIR}/{truc}/component.rvl "
+            f"({actual}) does not match its truc.lock pin ({pin})",
+            hint="the vendored component changed after it was pinned; review "
+                 "the change, then re-run `truc add` to vendor and pin the "
+                 "bytes again, or restore the pinned bytes")
 
 
 #: The recorded-source prefix of a row that resolved to the stdlib this
@@ -1692,6 +1713,13 @@ def _load_layer(path: str, target: CompositionDecl, doc: str, line: int,
             "not exist",
             hint=f"resolved against `{_relative(base, root)}`. A missing layer is "
                  "a refusal, never a silently skipped one (426 §2.4)")
+    # The same MANDATORY PIN as a row (426 §7): a layer the project (or another
+    # truc) names under `trucs/<T>/` is reached through that truc's lock pin,
+    # and the pin is checked against the vendored bytes, so a vendored truc
+    # whose component a layer's rows read cannot change under an old pin.
+    vendored = _vendor_truc_of(os.path.abspath(resolved), root)
+    if vendored is not None and _vendor_truc_of(base, root) != vendored:
+        _require_pin(vendored, root, doc, line)
     program = parse_file(resolved)
     rel = _relative(resolved, root)
     foreign = [
