@@ -569,7 +569,7 @@ def test_the_process_group_is_killed_on_timeout(tmp_path):
     with pytest.raises(subprocess.TimeoutExpired):
         _run_in_group(["sh", "-c", f"sleep 300 >/dev/null 2>&1 & echo $! > {pidfile}; wait"],
                       cwd=tmp_path, timeout=2)
-    helper = int(pidfile.read_text())
+    helper = int(pidfile.read_text(encoding="utf-8"))
 
     def alive():
         # `ps` reports a zombie as `Z`: dead, only waiting to be reaped.
