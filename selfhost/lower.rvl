@@ -18175,7 +18175,7 @@ fn tk_low_method(c: CallN, env: List[Bind]) -> Str {
 // A `use` declaration no longer switches the rule off (issues #3004 / #3023):
 // the document this gate admits is a ROOT module, so its bare value namespace is
 // exactly its own `fn`/`extern` declarations plus the names its `use` lists
-// spell. `nr_use_names` reads those names from the text, which is enough — an
+// spell. `nr_use_names` reads those names from the text, which is enough: an
 // un-imported `pub` name of a used module is "not declared" here as it is in the
 // reference, and a bare private one is refused by the same rule (the reference
 // words that one as module-private, which needs the used module's declarations
