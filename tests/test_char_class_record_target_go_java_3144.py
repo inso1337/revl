@@ -16,8 +16,10 @@ fn's parameter, an element of a `push` receiver, a field of a resolved record,
 or a `let` the local is handed on from. A literal with no such target is still
 refused by name.
 
-The run tests execute the program's `test` blocks on py and on the tier and
-need its toolchain; a skip is not a pass.
+The go run tests execute the program's `test` blocks on py and on go and need
+the go toolchain; a skip is not a pass. The java run tests live in
+backends/java/test_char_class_record_target_java_3144.py, which the
+`backend-java` job runs with the JDK required.
 """
 
 from __future__ import annotations
@@ -243,13 +245,3 @@ def test_go_runs_the_classifiers_like_py():
 @pytest.mark.skipif(shutil.which("go") is None, reason="go is not installed")
 def test_go_runs_the_record_targets_like_py():
     _run("go", RECORDS, "records_3144.rvl", 3)
-
-
-@pytest.mark.skipif(shutil.which("javac") is None, reason="javac is not installed")
-def test_java_runs_the_classifiers_like_py():
-    _run("java", CLASSES, "classes_3144.rvl", 6)
-
-
-@pytest.mark.skipif(shutil.which("javac") is None, reason="javac is not installed")
-def test_java_runs_the_record_targets_like_py():
-    _run("java", RECORDS, "records_3144.rvl", 3)
