@@ -24,7 +24,7 @@ REQUIRED = [
 
 def _rules():
     rules = {}
-    for line in CODEOWNERS.read_text().splitlines():
+    for line in CODEOWNERS.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if line and not line.startswith("#"):
             pattern, *owners = line.split()
