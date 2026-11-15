@@ -1053,14 +1053,16 @@ def test_selfhost_stages_cargo_build_and_run(tmp_path):
         # status=="ok" means it emitted, cargo-built, ran, and printed a median.
         assert res.build_ms is not None and res.run_ms is not None, stage.name
 
-    # emit_py is deliberately non-portable to rust (its CPython-only `py_repr`
-    # extern has no @rs body). Pin that it is an HONEST skip, not a silent build
-    # regression, so this stays a documented boundary rather than rot.
+    # emit_py does not emit to rust yet. Its host externs carry @rs bodies since
+    # #3143, so it no longer stops at `py_repr`; it stops at a record literal the
+    # rust tier cannot type (#2899). Pin that it is an HONEST skip, not a silent
+    # build regression, so this stays a documented boundary rather than rot.
     emit_py = next((s for s in stages if s.name == "emit_py"), None)
     assert emit_py is not None
     res = bench._build_stage(emit_py, tmp_path)
     assert res.status == "unmeasured"
-    assert "py_repr" in res.reason or "IR" in res.reason, res.reason
+    assert "has no @rs body" not in res.reason, res.reason
+    assert "cannot emit to rust" in res.reason or "IR" in res.reason, res.reason
 
 
 # --------------------------------------------------------------------------
