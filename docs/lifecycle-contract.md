@@ -116,6 +116,17 @@ is disposed and the successor loaded atomically. A call cannot observe a
 half-swapped composition; the new class map and cache index go live in the same
 step as the composition (session.py `swap`).
 
+`Session.call` checks `args` against the parameter types the service declares
+before the method runs, and refuses a value of the wrong shape with a
+`SessionError` (code `ARGS`) that names the method, the parameter and the path of
+the first mismatch (`shapes.keep: b.h is missing`). A record must hold every
+declared field, each of the declared type; an `Int` refuses a `bool` and a
+`float`; a variant must be one of its declared cases. A type the
+declaration does not describe (a type parameter, an extern or opaque host type)
+is not checked. An embedder in a tight loop whose arguments are values the
+session returned passes `check=False`, and checks only the calls that take data
+from outside with `Session.check_args(key, method, args)`.
+
 ## 2. Cancellation: requested versus completed
 
 Cancellation is two events, not one. Requesting a teardown and completing it are

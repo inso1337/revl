@@ -281,6 +281,13 @@ also folds in the full agent story and the standing correctness debt.
   running composition has a name that the held proposal removed, the message
   lists what the proposal removed and how to proceed, and every such refusal
   carries the `proposal` block (#2428, closes #2230).
+- `Session.call` checks its arguments against the parameter types the service
+  declares and refuses a mismatch at the call, naming the method, the parameter
+  and the path (`shapes.keep: b.h is missing`), instead of handing an ill-shaped
+  record to the method. A call that passed such a value before is now refused
+  with a `SessionError` (code `ARGS`). `call(..., check=False)` skips the check
+  for arguments the session returned, and `Session.check_args(key, method, args)`
+  checks without calling (#3345).
 
 ### Placement and interop
 

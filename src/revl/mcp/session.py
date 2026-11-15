@@ -40,6 +40,7 @@ from ..holes import summarize as summarize_holes
 from ..refusal import refusals
 from ..taint import REDACTED_SECRET
 from ..typecheck import compatible
+from . import arg_check as _arg_check
 from . import operator as _operator
 from . import quorum as _quorum
 from . import identity as _identity
@@ -6697,10 +6698,27 @@ class Session:
     # -- interaction -------------------------------------------------------
 
     @_one_turn
+    def check_args(self, key: str, method: str, args: list | None = None) -> None:
+        """Refuse `args` that do not have the parameter types the service
+        declares for `key.method`, naming the method, the parameter and the path
+        of the first mismatch (`shapes.keep: b.h is missing`). Returns nothing
+        when they conform. `call` runs this on every call by default; an
+        embedder whose arguments are values the session returned can pass
+        `check=False` there and check only the calls that take data from outside
+        with this method (issue #3345)."""
+        self._require()
+        err = _arg_check.args_error(self.ir, key, method, args)
+        if err is not None:
+            raise SessionError(err, code="ARGS")
+
     def call(self, key: str, method: str, args: list | None = None,
-             *, raw: bool = False) -> dict:
+             *, raw: bool = False, check: bool = True) -> dict:
         """Invoke a provided service operation on the running composition —
         how an agent actually *tests* what it just loaded.
+
+        `check` (default on) refuses, before the method runs, arguments that do
+        not have the declared parameter types (`check_args`); `check=False` hands
+        them over as they are.
 
         `result` is rendered for JSON by `_plain` (best-effort, lossy for an ADT
         / `Result` case, which becomes its `repr`) — the shape the MCP wire and
@@ -6722,6 +6740,8 @@ class Session:
         target = getattr(service, method, None)
         if target is None or not callable(target):
             raise SessionError(f"`{key}.{method}` is not callable on the provided value")
+        if check:
+            self.check_args(key, method, args)
 
         # item 310: the seam-method cache gate. Active only for a `cache
         # capability`/`external` method under a policy with a ledger — a no-policy
