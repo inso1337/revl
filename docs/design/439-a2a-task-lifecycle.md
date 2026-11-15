@@ -210,26 +210,38 @@ terminal and the task forms need it.
 A push notification is inbound: the peer calls us. That is a provision, not a
 client call, and the primitive is the item 457 `route` clause. **T3 LANDED**: a
 `long_running` `through a2a` / `through a2a_rest` row synthesizes a receiver
-service with `route post "/a2a/notify/{task}"`. `_start` mints a local push id
-and a token and rides an A2A `pushNotificationConfig` on the `message/send` it
-already makes: the URL is the receiver route under `REVL_A2A_PUSH_BASE` (unset
-means push off), the token is the minted one, and the authentication is a
-Bearer scheme carrying it. The receiver checks the token exact-match (`401`
-feeds nothing), shape-checks the A2A `StreamResponse` arm (`400` feeds
-nothing), checks the payload's task id against the push id's entry, and
-deposits `Untrusted` into a bounded per-task inbox (`429` when full, never a
-silent drop). `_poll` drains the inbox before crossing; a pushed terminal is
-confirmed by one `tasks/get`, and only the confirmed event is returned.
-Polling stays the canonical feed; push is an optimisation that must not change
-what the consumer sees, and no exactly-once delivery is promised. The receiver
-is one route in the row's module: a composition with more than one long-running
-A2A row shares the fixed path, so only the first is reached and polling stays
-canonical for the rest. The inbox and the token registry are in-process: the
-receiver and the poll must be served by the same composition process
-(`revl serve --http`), and a restart drops the registered entries, so polling
-is the recovery path. `revl import a2a` still records
-`capabilities.pushNotifications` as NOT projected, because the importer writes
-its own module and does not yet synthesize the receiver.
+service with `route post "/a2a/notify/<label>/{task}"`, keyed by the row label
+so two long-running A2A rows in one composition serve two distinct templates.
+`_start` mints a local push id and a token and rides an A2A
+`pushNotificationConfig` on the `message/send` it already makes: the URL is
+that route under `REVL_A2A_PUSH_BASE` (unset means push off), the token is the
+minted one, and the authentication is a Bearer scheme carrying it. The receiver
+checks the token exact-match and in constant time (`401` feeds nothing),
+shape-checks the A2A `StreamResponse` arm (`400` feeds nothing), checks the
+payload's task id against the push id's entry, and deposits `Untrusted` into a
+bounded per-task inbox (`429` when full, never a silent drop). `_poll` drains
+the inbox before crossing; a pushed terminal is confirmed by one `tasks/get`,
+and only the confirmed event is returned. Polling stays the canonical feed;
+push is an optimisation that must not change what the consumer sees.
+
+Delivery is at-least-once and no exactly-once promise is made. A replayed
+`message` (same `messageId`) is acknowledged and delivered once; a status or
+artifact repeat is idempotent for the consumer, and a `message` with no
+`messageId` cannot be told from a new one. A push that lands before the
+`_start` reply binds the entry to the task id it carried; if the reply names
+another task, those events are discarded rather than drained as this task's.
+
+The registry entry lives from `_start` to the task's confirmed terminal (the
+peer's own answer, never the push), the consumer's `_cancel`, or a `_start`
+that faults, including on the shape gates after the reply; after that the token
+no longer verifies and the inbox is freed. The inbox and the token registry are
+in-process: the receiver and the poll must be served by the same composition
+process (`revl serve --http`), and a restart drops the registered entries, so
+polling is the recovery path. A consumer that abandons a task without a
+terminal, a cancel or a fault keeps its entry until the process ends. `revl
+import a2a` still records `capabilities.pushNotifications` as NOT projected,
+because the importer writes its own module and does not yet synthesize the
+receiver.
 
 ## Decision 6: an E-Stop leaves the remote task running, and says so
 

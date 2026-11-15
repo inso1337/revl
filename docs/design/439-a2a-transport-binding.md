@@ -3,7 +3,7 @@
 Item: roadmap 439. Issue: #118. Status: BINDING, landed, last revised 2026-09-15
 (`revl audit` resolves a composition document, so the CLI reaches the same G8
 surface the property is pinned over; slice G8c). Status note, 2026-11-09: T3
-(push notifications) LANDED as the synthesized `/a2a/notify/{task}` receiver
+(push notifications) LANDED as the synthesized `/a2a/notify/<label>/{task}` receiver
 feeding a bounded inbox that `_poll` drains, with a pushed terminal confirmed by
 one `tasks/get` (`docs/design/439-a2a-task-lifecycle.md` decision 5). T2 (the
 `Stream[T]` sugar) is still not this binding's: the re-verified paragraph under
@@ -662,7 +662,7 @@ question.
    Negative exit test: a stream element that is not `Untrusted`, or a teardown
    that leaves the peer's Task running with no local record of it.
 2. **Push notifications (slice T3).** LANDED: a `long_running` row synthesizes
-   the routed receiver (`route post "/a2a/notify/{task}"`), `_start` rides a
+   the routed receiver (`route post "/a2a/notify/<label>/{task}"`), `_start` rides a
    locally minted `pushNotificationConfig` on the `message/send` it already
    makes, and `_poll` drains a bounded inbox before crossing, confirming a
    pushed terminal with one `tasks/get`

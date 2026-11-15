@@ -2386,7 +2386,7 @@ PUSH_REPLY = {"jsonrpc": "2.0", "result": {
 
 
 @contextlib.contextmanager
-def _push_module(replies=None, env="https://receiver.example"):
+def _push_module(replies=None, env="https://receiver.example", on_first=None):
     """Execute `_start`, `_poll` and the receiver body in ONE module namespace,
     the way the synthesized row's module carries them, against a stubbed peer.
 
@@ -2397,6 +2397,10 @@ def _push_module(replies=None, env="https://receiver.example"):
                           label="researcher")
     poll_src = task_body("poll", "https://agent.example:8443", "research",
                          label="researcher")
+    reply_src = task_body("reply", "https://agent.example:8443", "research",
+                          label="researcher")
+    cancel_src = task_body("cancel", "https://agent.example:8443", "research",
+                           label="researcher")
     notify_src = push_notify_body()
     queue = list(replies if replies is not None else [PUSH_REPLY])
 
@@ -2413,6 +2417,8 @@ def _push_module(replies=None, env="https://receiver.example"):
     class _Opener:
         def open(self, request, *a, **k):
             calls.append(json.loads(request.data))
+            if on_first is not None and len(calls) == 1:
+                on_first(ns, calls[0])  # a push that lands BEFORE the reply
             reply = queue.pop(0) if queue else {
                 "jsonrpc": "2.0", "result": {"kind": "task",
                                              "status": {"state": "working"}}}
@@ -2448,6 +2454,8 @@ def _push_module(replies=None, env="https://receiver.example"):
     exec(compile("\n".join([
         fn("_start", "a", start_src),
         fn("_poll", "a", poll_src),
+        fn("_reply", "a, b", reply_src),
+        fn("_cancel", "a", cancel_src),
         fn("_notify", "pid, auth, req", notify_src),
     ]), "<push-module>", "exec"), ns)
 
@@ -2492,7 +2500,7 @@ def test_the_push_receiver_is_a_routed_endpoint(tmp_path):
     _write_lr(tmp_path)
     table = resolve(tmp_path)
     text = table.sources[table.rows[0].source]
-    assert 'route post "/a2a/notify/{task}"' in text
+    assert 'route post "/a2a/notify/researcher/{task}"' in text
     assert "service A2APushResearcher" in text
     assert ("component RemoteResearcherPushReceiver provides "
             "a2a_push_researcher: A2APushResearcher") in text
@@ -2519,7 +2527,7 @@ def test_the_push_receiver_route_is_served(tmp_path):
 
     face = HttpComposedServer(_Stub(ir), composition="revl")
     routes = [(r.method, r.template, r.key, r.op) for r in face._routes_457]
-    assert ("POST", "/a2a/notify/{task}", "a2a_push_researcher",
+    assert ("POST", "/a2a/notify/researcher/{task}", "a2a_push_researcher",
             "notify") in routes
 
 
@@ -2531,7 +2539,7 @@ def test_start_sends_the_push_config():
         out = ns["_start"]("survey the field")
     assert out == {"id": "t-42", "context": "c-1"}
     cfg = _push_cfg(calls)
-    assert cfg["url"].startswith("https://receiver.example/a2a/notify/")
+    assert cfg["url"].startswith("https://receiver.example/a2a/notify/researcher/")
     assert len(_push_id(cfg)) == 32
     assert cfg["token"] and cfg["token"] != _push_id(cfg)
     assert cfg["authentication"] == {"schemes": ["Bearer"],
@@ -2573,7 +2581,7 @@ def test_the_rest_start_sends_the_push_config(monkeypatch):
         urllib.request.build_opener = original
     assert out == {"id": "t-42", "context": None}
     cfg = calls[0]["configuration"]["pushNotificationConfig"]
-    assert cfg["url"].startswith("https://receiver.example/a2a/notify/")
+    assert cfg["url"].startswith("https://receiver.example/a2a/notify/researcher/")
     assert cfg["token"]
 
 
@@ -2724,7 +2732,7 @@ def test_the_receiver_response_is_the_http_status(tmp_path):
         "status": 401, "status_text": "Unauthorized", "headers": [],
         "body": {"$kind": "Json", "$value": '{"code":"a2a-push"}'},
     }), composition="revl")
-    reply = face.dispatch_http("POST", "/a2a/notify/p1", b"{}",
+    reply = face.dispatch_http("POST", "/a2a/notify/researcher/p1", b"{}",
                                {"Authorization": "Bearer wrong"})
     assert reply.status == 401
     assert b"a2a-push" in reply.body
@@ -2732,6 +2740,367 @@ def test_the_receiver_response_is_the_http_status(tmp_path):
     face = HttpComposedServer(_Stub(ir, {
         "status": 204, "headers": [], "body": {"$kind": "Empty"},
     }), composition="revl")
-    reply = face.dispatch_http("POST", "/a2a/notify/p1", b"{}",
+    reply = face.dispatch_http("POST", "/a2a/notify/researcher/p1", b"{}",
                                {"Authorization": "Bearer right"})
     assert reply.status == 204
+
+
+# ----------------------------------------- the registry's lifetime and the nits
+# Review of the first T3 cut: the registry only ever grew, so a finished task kept
+# a live token and an inbox for the life of the process.
+
+def _registry(ns):
+    state = ns.get("_A2A_PUSH_STATE") or {"push": {}, "tasks": {}}
+    return state["push"], state["tasks"]
+
+
+def _completed(text="the answer"):
+    return {"jsonrpc": "2.0", "result": {
+        "kind": "task", "status": {"state": "completed"},
+        "artifacts": [{"parts": [{"kind": "text", "text": text}]}]}}
+
+
+def test_a_confirmed_terminal_drops_the_registry_entry():
+    """The entry lives until the peer's OWN answer is terminal: after the
+    confirming `tasks/get` the token no longer verifies and nothing is held."""
+    with _push_module(replies=[PUSH_REPLY, _completed()]) as (ns, calls, Ev):
+        ns["_start"]("survey the field")
+        cfg = _push_cfg(calls)
+        assert _notify(ns, cfg, _status_push("t-42", "completed"))["status"] == 204
+        assert ns["_poll"]({"id": "t-42", "context": "c-1"}) == Ev("Done", "the answer")
+        assert _registry(ns) == ({}, {})
+        # the old token is dead: a late push is refused and deposits nothing
+        assert _notify(ns, cfg, _status_push("t-42", "working"))["status"] == 401
+
+
+def test_a_terminal_status_drops_the_registry_entry():
+    """`failed` / `canceled` / `rejected` arrive as a `Status`, not a `Done`;
+    they end the task too."""
+    failed = {"jsonrpc": "2.0", "result": {
+        "kind": "task", "status": {"state": "failed"}}}
+    with _push_module(replies=[PUSH_REPLY, failed]) as (ns, calls, Ev):
+        ns["_start"]("survey the field")
+        assert ns["_poll"]({"id": "t-42", "context": "c-1"}) == Ev("Status", "failed")
+        assert _registry(ns) == ({}, {})
+
+
+def test_an_unconfirmed_pushed_terminal_keeps_the_entry():
+    """The drop follows the peer's confirmation, never the push: a peer that
+    pushes `completed` but answers `working` has not ended the task."""
+    working = {"jsonrpc": "2.0", "result": {
+        "kind": "task", "status": {"state": "working"}}}
+    with _push_module(replies=[PUSH_REPLY, working]) as (ns, calls, Ev):
+        ns["_start"]("survey the field")
+        cfg = _push_cfg(calls)
+        assert _notify(ns, cfg, _status_push("t-42", "completed"))["status"] == 204
+        assert ns["_poll"]({"id": "t-42", "context": "c-1"}) == Ev("Status", "working")
+        push, tasks = _registry(ns)
+        assert list(push) == [_push_id(cfg)] and tasks == {"t-42": _push_id(cfg)}
+        assert _notify(ns, cfg, _status_push("t-42", "working"))["status"] == 204
+
+
+def test_a_terminal_reply_drops_the_registry_entry():
+    with _push_module(replies=[PUSH_REPLY, _completed()]) as (ns, calls, Ev):
+        ns["_start"]("survey the field")
+        out = ns["_reply"]({"id": "t-42", "context": "c-1"}, "my input")
+        assert out == Ev("Done", "the answer")
+        assert _registry(ns) == ({}, {})
+
+
+def test_cancel_drops_the_registry_entry():
+    """The consumer is done with the task whatever the peer answers."""
+    canceled = {"jsonrpc": "2.0", "result": {
+        "kind": "task", "status": {"state": "canceled"}}}
+    with _push_module(replies=[PUSH_REPLY, canceled]) as (ns, calls, Ev):
+        ns["_start"]("survey the field")
+        cfg = _push_cfg(calls)
+        assert ns["_cancel"]({"id": "t-42", "context": "c-1"}) is None
+        assert _registry(ns) == ({}, {})
+        assert _notify(ns, cfg, _status_push("t-42", "working"))["status"] == 401
+
+
+@pytest.mark.parametrize("reply", [
+    # the shape gates that sit AFTER the transport `try`
+    {"jsonrpc": "2.0", "result": {"kind": "task",
+                                  "status": {"state": "working"}}},   # no id
+    {"jsonrpc": "2.0", "result": {"kind": "message", "messageId": "m",
+                                  "parts": []}},                       # not a Task
+    {"jsonrpc": "2.0", "result": {"kind": "task", "id": "t-42",
+                                  "contextId": 7,
+                                  "status": {"state": "working"}}},    # bad context
+])
+def test_a_start_that_faults_after_the_reply_leaves_no_entry(reply):
+    """The cleanup used to sit only in the transport `except`; a reply that
+    parsed but failed a gate left a live token behind. A fault is a fault the
+    consumer never gets a handle from, so nothing may outlive it."""
+    with _push_module(replies=[reply]) as (ns, calls, Ev):
+        with pytest.raises(RuntimeError) as excinfo:
+            ns["_start"]("survey the field")
+        assert getattr(excinfo.value, "_revl_transport_fault", False)
+        assert _registry(ns) == ({}, {})
+
+
+def test_a_start_that_never_reaches_the_peer_leaves_no_entry():
+    """The transport-failure branch of the same rule."""
+    class _Down:
+        def open(self, request, *a, **k):
+            raise OSError("peer down")
+
+    with _push_module() as (ns, calls, Ev):
+        urllib.request.build_opener = lambda *h: _Down()
+        with pytest.raises(RuntimeError) as excinfo:
+            ns["_start"]("survey the field")
+        assert getattr(excinfo.value, "_revl_transport_fault", False)
+        assert _registry(ns) == ({}, {})
+
+
+def test_a_push_before_the_reply_for_another_task_is_discarded():
+    """A push accepted before the `_start` reply binds the entry to the id IT
+    carried. If the reply names another task, those events belong to no task
+    this handle owns and must not be drained as its own."""
+    def early(ns, first):
+        cfg = first["params"]["configuration"]["pushNotificationConfig"]
+        assert _notify(ns, cfg, _status_push("some-other-task", "completed"))[
+            "status"] == 204
+
+    with _push_module(on_first=early) as (ns, calls, Ev):
+        out = ns["_start"]("survey the field")
+        assert out == {"id": "t-42", "context": "c-1"}
+        entry, = _registry(ns)[0].values()
+        assert entry["task"] == "t-42" and entry["inbox"] == []
+        # nothing was drained as t-42's: the poll crosses and the peer answers
+        assert ns["_poll"](out) == Ev("Status", "working")
+        assert len(calls) == 2
+
+
+def _message_push(message_id, text="hi"):
+    msg = {"role": "agent", "parts": [{"kind": "text", "text": text}],
+           "taskId": "t-42"}
+    if message_id is not None:
+        msg["messageId"] = message_id
+    return json.dumps({"message": msg})
+
+
+def test_a_replayed_message_is_deposited_once():
+    """A2A delivery is at-least-once. The same `messageId` pushed twice is
+    acknowledged both times and delivered once; the poll then crosses."""
+    with _push_module() as (ns, calls, Ev):
+        ns["_start"]("survey the field")
+        cfg = _push_cfg(calls)
+        assert _notify(ns, cfg, _message_push("m-1"))["status"] == 204
+        assert _notify(ns, cfg, _message_push("m-1"))["status"] == 204
+        entry, = _registry(ns)[0].values()
+        assert len(entry["inbox"]) == 1
+        assert ns["_poll"]({"id": "t-42", "context": "c-1"}) == Ev("Message", "hi")
+        assert ns["_poll"]({"id": "t-42", "context": "c-1"}) == Ev("Status", "working")
+        assert len(calls) == 2
+        # a different id is a new message
+        assert _notify(ns, cfg, _message_push("m-2"))["status"] == 204
+        assert len(entry["inbox"]) == 1
+
+
+def test_a_message_that_was_refused_may_be_retried():
+    """A 429 is not recorded as seen: the peer's retry of the same message is
+    accepted once there is room."""
+    with _push_module() as (ns, calls, Ev):
+        ns["_start"]("survey the field")
+        cfg = _push_cfg(calls)
+        for _ in range(PUSH_INBOX_LIMIT):
+            assert _notify(ns, cfg, _status_push("t-42", "working"))["status"] == 204
+        assert _notify(ns, cfg, _message_push("m-1"))["status"] == 429
+        ns["_poll"]({"id": "t-42", "context": "c-1"})  # drain one
+        assert _notify(ns, cfg, _message_push("m-1"))["status"] == 204
+
+
+def test_the_token_is_compared_in_constant_time_and_a_non_ascii_one_is_401():
+    assert "compare_digest" in push_notify_body()
+    assert "_tok != " not in push_notify_body()
+    with _push_module() as (ns, calls, Ev):
+        ns["_start"]("survey the field")
+        cfg = _push_cfg(calls)
+        for tok in ("\u00e9\u00e9", "", None, cfg["token"] + "x", cfg["token"][:-1]):
+            resp = ns["_notify"](_push_id(cfg), {"token": tok},
+                                 {"body": {"$kind": "Text",
+                                           "$value": _status_push("t-42", "working")}})
+            assert resp["status"] == 401, tok
+
+
+# ------------------------------------- two rows, and the compiled composition
+
+TWO_SERVICES = RESEARCHER + """
+service Scout {
+  emission fn scout_start(message: Str) -> TaskRef
+  emission fn scout_poll(task: TaskRef) -> TaskEvent
+  emission fn scout_reply(task: TaskRef, message: Str) -> TaskEvent
+  emission fn scout_cancel(task: TaskRef) -> Unit
+}
+"""
+
+TWO_ROWS = """
+composition Net {
+  use "services.rvl"
+  remote @researcher provides researcher: Researcher
+    at host("agent.example:8443")
+    through a2a
+    long_running
+  remote @scout provides scout: Scout
+    at host("scout.example:8443")
+    through a2a
+    long_running
+}
+"""
+
+
+class _RecordingSession:
+    """A runtime-free session that records which provision a push reached."""
+
+    def __init__(self, ir, result=None):
+        self.ir = ir
+        self.calls = []
+        self._result = result
+
+    def call(self, key, method, args, *, raw=False):
+        self.calls.append((key, method, args))
+        return {"result": self._result, "trace": []}
+
+    def state(self, drain=False):
+        return {}
+
+
+def test_two_long_running_rows_serve_two_distinct_receiver_routes(tmp_path):
+    """The route is keyed by the row label, so two rows never share a template:
+    a push for the second row reaches the second row's receiver, not the first's
+    (before this, the face matched the first and the second's pushes were
+    refused with no sign of why)."""
+    _write_lr(tmp_path, base=TWO_ROWS, services=TWO_SERVICES)
+    ir = compile_composition(str(tmp_path / "base.rvl"), str(tmp_path))
+    session = _RecordingSession(ir, {"status": 204, "headers": [],
+                                     "body": {"$kind": "Empty"}})
+    face = HttpComposedServer(session, composition="revl")
+    routes = {(r.template, r.key) for r in face._routes_457}
+    assert routes == {
+        ("/a2a/notify/researcher/{task}", "a2a_push_researcher"),
+        ("/a2a/notify/scout/{task}", "a2a_push_scout"),
+    }
+    assert len({t for t, _ in routes}) == 2
+    for label in ("researcher", "scout"):
+        reply = face.dispatch_http("POST", f"/a2a/notify/{label}/pid", b"{}",
+                                   {"Authorization": "Bearer t"})
+        assert reply.status == 204
+        assert session.calls[-1][:2] == (f"a2a_push_{label}", "notify")
+        assert session.calls[-1][2][0] == "pid"
+
+
+def _compiled_namespace(ir):
+    """Emit the compiled composition to Python and execute it, the technique
+    `test_439_a2a_task._exec_py` uses: the module's own externs, case classes
+    and pure gates are the REAL ones; only the cordis-backed runtime import is
+    stubbed (an identity `estop_gated`)."""
+    import importlib.util
+    import types
+
+    spec = importlib.util.spec_from_file_location(
+        "pyemit_t3", ROOT / "backends" / "python" / "emit.py")
+    emitter = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(emitter)
+    stub = types.ModuleType("runtime")
+    stub.__getattr__ = lambda name: (
+        (lambda *a, **k: (lambda f: f)) if name == "estop_gated"
+        else (lambda *a, **k: None))
+    previous = sys.modules.get("runtime")
+    sys.modules["runtime"] = stub
+    try:
+        ns: dict = {"__name__": "emitted_t3"}
+        exec(compile(emitter.emit(ir), "emitted_t3.py", "exec"), ns)
+    finally:
+        if previous is not None:
+            sys.modules["runtime"] = previous
+        else:
+            del sys.modules["runtime"]
+    return ns
+
+
+class _CompiledSession:
+    """Serves the composition's OWN compiled externs: `call` runs the emitted
+    receiver, and `_module` lets the face's live decoder rebuild native case
+    instances (the `Text` body of a routed `Request`) exactly as a live session
+    does."""
+
+    def __init__(self, ir, ns):
+        import types
+        self.ir = ir
+        self.ns = ns
+        self._module = types.SimpleNamespace(**ns)
+
+    def call(self, key, method, args, *, raw=False):
+        return {"result": self.ns[f"{key}_{method}"](*args), "trace": []}
+
+    def state(self, drain=False):
+        return {}
+
+
+def test_a_push_through_the_compiled_composition_reaches_poll(tmp_path, monkeypatch):
+    """The whole path on the COMPILED module: the real `_start` mints the token,
+    a POST through `dispatch_http` runs the real compiled receiver with the live
+    value shapes (a decoded `Text` case instance and the `{"token": ...}`
+    bearer dict), and the real `_poll` drains the real `Status` case. The
+    other tests exec the body with stubs; this one cannot be satisfied by a
+    harness-only shape."""
+    from revl.mcp.http_face import _live_decoder
+
+    _write_lr(tmp_path)
+    ir = compile_composition(str(tmp_path / "base.rvl"), str(tmp_path))
+    ns = _compiled_namespace(ir)
+    session = _CompiledSession(ir, ns)
+    face = HttpComposedServer(session, composition="revl",
+                              decode=_live_decoder(session))
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.close()
+            return False
+
+    answers = [PUSH_REPLY, _completed("the answer")]
+    calls = []
+
+    class _Opener:
+        def open(self, request, *a, **k):
+            calls.append(json.loads(request.data))
+            return _Resp(json.dumps(_answer(request.data, answers.pop(0))).encode())
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *h: _Opener())
+    monkeypatch.setenv(PUSH_BASE_ENV, "https://receiver.example")
+
+    handle = ns["remote_researcher_research_start"]("survey the field")
+    assert handle == {"id": "t-42", "context": "c-1"}
+    cfg = calls[0]["params"]["configuration"]["pushNotificationConfig"]
+    assert cfg["url"].startswith("https://receiver.example/a2a/notify/researcher/")
+    path = cfg["url"].split("https://receiver.example", 1)[1]
+    auth = {"Authorization": f"Bearer {cfg['token']}"}
+
+    # a wrong token is a 401 from the compiled handler, and deposits nothing
+    refused = face.dispatch_http("POST", path, b"{}", {"Authorization": "Bearer no"})
+    assert refused.status == 401
+    # a malformed body is a 400
+    assert face.dispatch_http("POST", path, b"not json", auth).status == 400
+
+    accepted = face.dispatch_http("POST", path,
+                                  _status_push("t-42", "working").encode(), auth)
+    assert accepted.status == 204
+
+    drained = ns["remote_researcher_research_poll"](handle)
+    assert type(drained).__name__ == "Status"
+    assert type(drained.value).__name__ == "Working"
+    assert len(calls) == 1  # the drain did not cross
+
+    # a pushed terminal is confirmed by the peer, then the entry is gone
+    assert face.dispatch_http("POST", path,
+                              _status_push("t-42", "completed").encode(),
+                              auth).status == 204
+    done = ns["remote_researcher_research_poll"](handle)
+    assert type(done).__name__ == "Done" and done.value == "the answer"
+    assert len(calls) == 2 and calls[1]["method"] == "tasks/get"
+    assert face.dispatch_http("POST", path, b"{}", auth).status == 401

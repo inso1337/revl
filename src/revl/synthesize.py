@@ -908,9 +908,12 @@ def _a2a_push_receiver_source(label: str) -> str:
     require a consumer) and keeps the endpoint on the served surface, because
     the route table is built from every component's provides.
 
-    The route is keyed by the LOCALLY minted push correlation id (`{task}`),
-    not the peer's task id: the peer posts to the exact URL it was configured
-    with before it has told the row the task id.
+    The route is `/a2a/notify/<label>/{task}`: the row label is baked into the
+    template so two long-running A2A rows in one composition never serve one
+    template (the face matches the first and the second's pushes would be
+    refused), and `{task}` is the LOCALLY minted push correlation id, not the
+    peer's task id: the peer posts to the exact URL it was configured with
+    before it has told the row the task id.
     """
     pascal = _pascal(label)
     key = f"a2a_push_{label}"
@@ -922,7 +925,7 @@ def _a2a_push_receiver_source(label: str) -> str:
         f"// `StreamResponse` payload here; the bearer token is the one the\n"
         f"// row's `_start` minted, checked exact-match before anything is kept.\n"
         f"service {service} {{\n"
-        f"  route post \"{a2a_task.PUSH_ROUTE}/{{task}}\"\n"
+        f"  route post \"{a2a_task.push_route(label)}/{{task}}\"\n"
         f"  emission fn notify(task: Str, auth: Bearer, req: Request) -> Response\n"
         f"}}\n\n"
         f"extern emission fn {extern}(task: Str, auth: Bearer, req: Request) -> Response\n"
