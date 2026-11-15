@@ -127,6 +127,10 @@ def _step_carries_approval(nodes) -> bool:
     return False
 
 
+_NO_CROSSING_EXTERN_CLASSES = ("pure", "local")
+_EXTERN_CLASSES = ("pure", "local", "acquire", "emission", "witnessed")
+
+
 def _extern_class(decl: dict, *, deferred: bool,
                   registered: bool) -> str | None:
     """One reached extern's participant class, from its DECLARED facts.
@@ -138,11 +142,16 @@ def _extern_class(decl: dict, *, deferred: bool,
     actually registered; reached any other way it fires and registers nothing,
     so it is irreversible (issue #1707).
 
-    `None` means the extern is not a boundary crossing (a `pure` read or a
-    `local` write).
+    `None` means the extern is declared a `pure` read or a `local` write, so
+    it is not a boundary crossing. A missing declaration (``decl`` empty) or an
+    unknown ``class`` fails closed to irreversible.
     """
     if decl.get("requires_approval"):
         return IRREVERSIBLE_NEEDS_APPROVAL
+    if decl.get("class") not in _EXTERN_CLASSES:
+        # Checked before `undo`/`compensate`: a declaration whose class is
+        # missing or unknown is not trusted to carry a reversal either.
+        return IRREVERSIBLE
     if deferred:
         return (RECOVERABLE_FORWARD if decl.get("register")
                 else DEFERRED_IRREVERSIBLE)
@@ -152,9 +161,12 @@ def _extern_class(decl: dict, *, deferred: bool,
         return RECOVERABLE_FORWARD if registered else IRREVERSIBLE
     if decl.get("undo") is not None:
         return PREPARE_REVERSIBLE
-    if decl.get("class") == "emission":
-        return IRREVERSIBLE
-    return None
+    if decl.get("class") in _NO_CROSSING_EXTERN_CLASSES:
+        return None
+    # An emission, or an acquire with no `undo`: reached, so a crossing, and
+    # only a declared `pure` read or `local` write is known not to cross the
+    # boundary (issue #3351).
+    return IRREVERSIBLE
 
 
 def _crossing(component: str, scope: str, kind: str, cls: str, *,
