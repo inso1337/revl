@@ -1,0 +1,301 @@
+{
+  "ir_version": 1,
+  "services": {
+    "Store": {
+      "methods": {
+        "get": {
+          "params": [
+            {
+              "name": "k",
+              "type": "Str"
+            }
+          ],
+          "returns": "Opt[Str]",
+          "emission": false
+        },
+        "put": {
+          "params": [
+            {
+              "name": "k",
+              "type": "Str"
+            },
+            {
+              "name": "v",
+              "type": "Str"
+            }
+          ],
+          "returns": null,
+          "emission": false
+        },
+        "version": {
+          "params": [],
+          "returns": "Int",
+          "emission": false
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "Cache",
+      "source": "handoff_swap.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "cache": "Store"
+      },
+      "body": [
+        {
+          "step": "let-effect",
+          "acquire": {
+            "kind": "host",
+            "fn": "Map.new",
+            "args": []
+          },
+          "undo": {
+            "kind": "call",
+            "target": {
+              "kind": "name",
+              "id": "m"
+            },
+            "method": "drop",
+            "args": []
+          },
+          "bind": "m"
+        },
+        {
+          "step": "provide",
+          "name": "cache",
+          "service": "Store",
+          "methods": [
+            {
+              "name": "get",
+              "params": [
+                "k"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "name",
+                      "id": "m"
+                    },
+                    "method": "get",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "k"
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "put",
+              "params": [
+                "k",
+                "v"
+              ],
+              "body": [
+                {
+                  "step": "effect",
+                  "acquire": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "name",
+                      "id": "m"
+                    },
+                    "method": "insert",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "k"
+                      },
+                      {
+                        "kind": "name",
+                        "id": "v"
+                      }
+                    ]
+                  },
+                  "undo": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "name",
+                      "id": "m"
+                    },
+                    "method": "remove",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "k"
+                      }
+                    ]
+                  },
+                  "inverse": "table"
+                }
+              ]
+            },
+            {
+              "name": "version",
+              "params": [],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "lit",
+                    "value": 1
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "handoff": {
+        "key": "cache",
+        "type": "Map[Str, Str]"
+      }
+    },
+    {
+      "name": "CacheV2",
+      "source": "handoff_swap_v2.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "cache": "Store"
+      },
+      "body": [
+        {
+          "step": "let-effect",
+          "acquire": {
+            "kind": "host",
+            "fn": "Map.new",
+            "args": []
+          },
+          "undo": {
+            "kind": "call",
+            "target": {
+              "kind": "name",
+              "id": "m"
+            },
+            "method": "drop",
+            "args": []
+          },
+          "bind": "m"
+        },
+        {
+          "step": "provide",
+          "name": "cache",
+          "service": "Store",
+          "methods": [
+            {
+              "name": "get",
+              "params": [
+                "k"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "name",
+                      "id": "m"
+                    },
+                    "method": "get",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "k"
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "put",
+              "params": [
+                "k",
+                "v"
+              ],
+              "body": [
+                {
+                  "step": "effect",
+                  "acquire": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "name",
+                      "id": "m"
+                    },
+                    "method": "insert",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "k"
+                      },
+                      {
+                        "kind": "name",
+                        "id": "v"
+                      }
+                    ]
+                  },
+                  "undo": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "name",
+                      "id": "m"
+                    },
+                    "method": "remove",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "k"
+                      }
+                    ]
+                  },
+                  "inverse": "table"
+                }
+              ]
+            },
+            {
+              "name": "version",
+              "params": [],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "lit",
+                    "value": 2
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "handoff": {
+        "key": "cache",
+        "type": "Map[Str, Str]"
+      }
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "Cache",
+        "file": "handoff_swap.rvl",
+        "inject": [],
+        "provides": [
+          "cache"
+        ]
+      }
+    ],
+    "loadOrder": [
+      "Cache"
+    ]
+  }
+}

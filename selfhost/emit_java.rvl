@@ -97,7 +97,7 @@
 //     a `Pool` acquisition surfaces a loud `<<UNSUPPORTED-host-stub:Pool>>`;
 //   * the built-in Result surface — `Ok`/`Err` construction (a `match` over a
 //     Result and the sealed `RevlResult` are ported), and `_emit_checked_div_helpers`,
-//     so the `checked_*` builtin methods stay behind a loud
+//     so the `checked_*` division methods stay behind a loud
 //     `<<UNSUPPORTED-checked-div:..>>`; and the `revlDivFloor`/`revlDivEuclid`/`revlMod`
 //     int-arith block, so `div_floor`/`div_euclid`/`mod` stay behind a loud
 //     `<<UNSUPPORTED-int-arith:..>>` (`div_trunc` is the `revlDivTrunc` stdlib group and IS
@@ -550,7 +550,7 @@ fn signature_types(ir: Any) -> List[Any] {
 }
 
 // `_uses_builtin_result`: an `adt` typed Result, a match arm on `Ok`/`Err`, a
-// total division form, a witnessed extern, or a signature naming `Result[..]`
+// total form, a witnessed extern, or a signature naming `Result[..]`
 // pulls in the sealed `RevlResult`.
 fn uses_builtin_result(ir: Any) -> Bool {
   for (ext of value_list(value_field(ir, "externs"))) {
@@ -571,10 +571,47 @@ fn uses_builtin_result(ir: Any) -> Bool {
         let m = value_str(value_field(n, "method"))
         if (m == "checked_div_trunc" || m == "checked_div_floor"
             || m == "checked_div_euclid" || m == "checked_mod") { return true }
+        if (is_checked_arith(m)) { return true }
       }
     }
   }
   return false
+}
+
+// The total arithmetic forms (docs/arithmetic.md): `+ - *` with the overflow
+// answered as a value.
+fn is_checked_arith(m: Str) -> Bool {
+  return m == "checked_add" || m == "checked_sub" || m == "checked_mul"
+}
+
+// `_uses_checked_arith`: the IR calls one of the total arithmetic forms, which
+// gates the static helpers those calls lower to.
+fn uses_checked_arith(ir: Any) -> Bool {
+  for (key of ["functions", "tests", "components"]) {
+    for (n of java_ir_nodes(value_field(ir, key))) {
+      if (value_kind(n) == "record" && is_checked_arith(value_str(value_field(n, "method")))) {
+        return true
+      }
+    }
+  }
+  return false
+}
+
+// `_emit_checked_arith_helpers`: the static helpers behind the total
+// arithmetic forms. `Math.*Exact` throws the overflow, which each helper
+// carries out as `Err` with revl's own text.
+fn checked_arith_helpers() -> List[Str] {
+  var o = [
+    "// total arithmetic forms (docs/arithmetic.md): an overflow yields",
+    "// Err(reason) instead of the fault the unchecked operations raise."
+  ]
+  for (pair of [["Add", "addExact"], ["Sub", "subtractExact"], ["Mul", "multiplyExact"]]) {
+    o = o.push(`private static RevlResult<Long, String> revlChecked${pair[0]}(long a, long b) {`)
+    o = o.push(`    try { return new RevlResult.Ok<>(Math.${pair[1]}(a, b)); }`)
+    o = o.push("    catch (ArithmeticException e) { return new RevlResult.Err<>(\"revl: Int overflow\"); }")
+    o = o.push("}")
+  }
+  return o.push("")
 }
 
 // `_lit`: a v3 literal.
@@ -737,6 +774,12 @@ fn v3_len(target: Str) -> Str { return `revlLength(${target})` }
 //     `revlMod` helpers live in the separate int-arith block;
 //   * a Float `to_str`, which routes through the canonical `revlFtoa`.
 fn v3_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
+  // The total arithmetic forms: the static helpers emitted by
+  // `checked_arith_helpers` evaluate each operand once and return a typed
+  // RevlResult.
+  if (method == "checked_add") { return `revlCheckedAdd(${target}, ${args[0]})` }
+  if (method == "checked_sub") { return `revlCheckedSub(${target}, ${args[0]})` }
+  if (method == "checked_mul") { return `revlCheckedMul(${target}, ${args[0]})` }
   if (method == "checked_div_trunc" || method == "checked_div_floor"
       || method == "checked_div_euclid" || method == "checked_mod") {
     return `<<UNSUPPORTED-checked-div:${method}>>`
@@ -4238,6 +4281,14 @@ pub fn emit_java_src(ir: Any) -> Str {
   // than with any one helper, so it leads and the selected groups follow it
   // verbatim, in the block's own declaration order.
   let stdlib_at = out.length()
+  // The total arithmetic helpers follow the slot, where `_emit_v3` puts them
+  // (after the deferred ftoa and int-arith blocks, which this port does not
+  // carry).
+  if (uses_checked_arith(ir)) {
+    for (l of checked_arith_helpers()) {
+      if (l == "") { out = out.push("") } else { out = out.push("    ".concat(l)) }
+    }
+  }
   if (functions.length() > 0) {
     for (l of emit_v3_functions(functions, ctx)) {
       if (l == "") { out = out.push("") } else { out = out.push("    ".concat(l)) }

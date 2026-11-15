@@ -2719,6 +2719,9 @@ fn builtin_return_type(node: Value, ctx_: Ctx__m1) -> String {
     if (m == "list") {
         return String::from("List[Any]");
     }
+    if (((m == "checked_add") || (m == "checked_sub")) || (m == "checked_mul")) {
+        return String::from("Result[Int, Str]");
+    }
     if ((((m == "checked_div_trunc") || (m == "checked_div_floor")) || (m == "checked_div_euclid")) || (m == "checked_mod")) {
         return String::from("Result[Int, Str]");
     }
@@ -4001,6 +4004,10 @@ fn checked_div_expr(method: &str, target: &str, arg: &str) -> String {
     return format!("{{ let a = ({}); let b = ({}); if b == 0 {{ Err::<i64, String>(\"revl: division by zero\".to_string()) }} {}else {{ Ok::<i64, String>({}) }} }}", target, arg, overflow, ok);
 }
 
+fn checked_arith_expr(method: &str, target: &str, arg: &str) -> String {
+    return format!("{{ let a = ({}); let b = ({}); match a.{}(b) {{ Some(v) => Ok::<i64, String>(v), None => Err::<i64, String>(\"revl: Int overflow\".to_string()) }} }}", target, arg, method);
+}
+
 fn render_builtin(node: Value, ctx_: Ctx__m1) -> String {
     let method = value_str(value_field(node.clone(), String::from("method")));
     let target_node = value_field(node.clone(), String::from("target"));
@@ -4051,6 +4058,9 @@ fn render_builtin(node: Value, ctx_: Ctx__m1) -> String {
             r = by_value_reuse(a.clone(), r.clone(), ctx_.clone());
         }
         rendered.push(r.clone());
+    }
+    if (((method == "checked_add") || (method == "checked_sub")) || (method == "checked_mul")) {
+        return checked_arith_expr(&method, &target, &(rendered)[(0i64) as usize]);
     }
     if ((((method == "checked_div_trunc") || (method == "checked_div_floor")) || (method == "checked_div_euclid")) || (method == "checked_mod")) {
         return checked_div_expr(&method, &target, &(rendered)[(0i64) as usize]);
@@ -12200,7 +12210,7 @@ fn p_route_stmt(ts: Vec<Token>, i: i64, end: i64, provh: &[Bind], reqh: &[Bind],
         return p_comp_body(ts.clone(), skip_line(&ts, i), end, provh, reqh, cname, provs, setup, iso, rts, icept, hoff, action);
     }
     if ((rc.strat != "") && (!contains__m2(&known_strategies(), &rc.strat))) {
-        return mk_refuse(provs, setup, iso, rts, tagged("ROUTE", &route_strategy_msg(&rc.strat, &key, cname)), &ts, i);
+        return mk_refuse(provs, setup, iso, rts.revl_push(Route { key: key.clone(), rlms: rc.rlms.clone(), strat: String::from("") }), tagged("ROUTE", &route_strategy_msg(&rc.strat, &key, cname)), &ts, i);
     }
     return p_comp_body(ts, rc.i, end, provh, reqh, cname, provs, setup, iso, rts.revl_push(Route { key: key, rlms: rc.rlms.clone(), strat: rc.strat.clone() }), icept, hoff, action);
 }
@@ -14984,24 +14994,24 @@ fn dfr_callee_name(e: Expr) -> String {
 };
 }
 
-fn dfr_expr(e: Expr, dn: &[String], emissionValues: std::collections::HashMap<String, String>, where_: &str, inArrow: bool, calls: bool) -> String {
+fn dfr_expr(e: Expr, dn: &[String], emissionValues: std::collections::HashMap<String, String>, where_: &str, inArrow: bool, calls: bool, bound: Vec<String>) -> String {
     return match e {
-    Expr::Var(n) => if contains__m2(dn, &n) { dfr_value_msg(&n, where_) } else { if (mget_str(emissionValues.clone(), n.clone()) != "") { emission_value_msg(&n, &mget_str(emissionValues.clone(), n.clone())) } else { String::from("") } },
-    Expr::Call(c) => { let c = *c; dfr_call(c.target.clone(), &c.args, dn, emissionValues.clone(), where_, inArrow, calls) },
-    Expr::OptCall(c) => { let c = *c; dfr_call(c.target.clone(), &c.args, dn, emissionValues.clone(), where_, inArrow, calls) },
-    Expr::Field(f) => { let f = *f; dfr_expr(f.target.clone(), dn, emissionValues.clone(), where_, inArrow, calls) },
-    Expr::OptField(f) => { let f = *f; dfr_expr(f.target.clone(), dn, emissionValues.clone(), where_, inArrow, calls) },
-    Expr::Bin(b) => { let b = *b; dfr_first(dfr_expr(b.l.clone(), dn, emissionValues.clone(), where_, inArrow, calls), dfr_expr(b.r.clone(), dn, emissionValues.clone(), where_, inArrow, calls)) },
-    Expr::Un(u) => { let u = *u; dfr_expr(u.e.clone(), dn, emissionValues.clone(), where_, inArrow, calls) },
-    Expr::Emit(u) => { let u = *u; dfr_expr(u.e.clone(), dn, emissionValues.clone(), where_, inArrow, calls) },
-    Expr::Index(x) => { let x = *x; dfr_first(dfr_expr(x.target.clone(), dn, emissionValues.clone(), where_, inArrow, calls), dfr_expr(x.idx.clone(), dn, emissionValues.clone(), where_, inArrow, calls)) },
-    Expr::If(x) => { let x = *x; dfr_first(dfr_expr(x.cond.clone(), dn, emissionValues.clone(), where_, inArrow, calls), dfr_first(dfr_expr(x.then_.clone(), dn, emissionValues.clone(), where_, inArrow, calls), dfr_expr(x.els.clone(), dn, emissionValues.clone(), where_, inArrow, calls))) },
-    Expr::Lst(l) => dfr_list(&l.items, 0i64, dn, emissionValues.clone(), where_, inArrow, calls),
-    Expr::Rec(r) => dfr_inits(&r.fields, 0i64, dn, emissionValues.clone(), where_, inArrow, calls),
-    Expr::Arrow(ar) => { let ar = *ar; dfr_arrow(ar.body, dn, emissionValues.clone(), where_, calls) },
-    Expr::Match(m) => { let m = *m; dfr_first(dfr_expr(m.scrut.clone(), dn, emissionValues.clone(), where_, inArrow, calls), dfr_arms(&m.arms, 0i64, dn, emissionValues.clone(), where_, inArrow, calls)) },
-    Expr::Templ(t) => dfr_parts(&t.parts, 0i64, dn, emissionValues.clone(), where_, inArrow, calls),
-    Expr::RecUpd(r) => { let r = *r; dfr_first(dfr_expr(r.base.clone(), dn, emissionValues.clone(), where_, inArrow, calls), dfr_inits(&r.upds, 0i64, dn, emissionValues.clone(), where_, inArrow, calls)) },
+    Expr::Var(n) => if contains__m2(dn, &n) { dfr_value_msg(&n, where_) } else { if ((mget_str(emissionValues.clone(), n.clone()) != "") && (!contains__m2(&bound, &n))) { emission_value_msg(&n, &mget_str(emissionValues.clone(), n.clone())) } else { String::from("") } },
+    Expr::Call(c) => { let c = *c; dfr_call(c.target.clone(), &c.args, dn, emissionValues.clone(), where_, inArrow, calls, bound.clone()) },
+    Expr::OptCall(c) => { let c = *c; dfr_call(c.target.clone(), &c.args, dn, emissionValues.clone(), where_, inArrow, calls, bound.clone()) },
+    Expr::Field(f) => { let f = *f; dfr_expr(f.target.clone(), dn, emissionValues.clone(), where_, inArrow, calls, bound.clone()) },
+    Expr::OptField(f) => { let f = *f; dfr_expr(f.target.clone(), dn, emissionValues.clone(), where_, inArrow, calls, bound.clone()) },
+    Expr::Bin(b) => { let b = *b; dfr_first(dfr_expr(b.l.clone(), dn, emissionValues.clone(), where_, inArrow, calls, bound.clone()), dfr_expr(b.r.clone(), dn, emissionValues.clone(), where_, inArrow, calls, bound.clone())) },
+    Expr::Un(u) => { let u = *u; dfr_expr(u.e.clone(), dn, emissionValues.clone(), where_, inArrow, calls, bound.clone()) },
+    Expr::Emit(u) => { let u = *u; dfr_expr(u.e.clone(), dn, emissionValues.clone(), where_, inArrow, calls, bound.clone()) },
+    Expr::Index(x) => { let x = *x; dfr_first(dfr_expr(x.target.clone(), dn, emissionValues.clone(), where_, inArrow, calls, bound.clone()), dfr_expr(x.idx.clone(), dn, emissionValues.clone(), where_, inArrow, calls, bound.clone())) },
+    Expr::If(x) => { let x = *x; dfr_first(dfr_expr(x.cond.clone(), dn, emissionValues.clone(), where_, inArrow, calls, bound.clone()), dfr_first(dfr_expr(x.then_.clone(), dn, emissionValues.clone(), where_, inArrow, calls, bound.clone()), dfr_expr(x.els.clone(), dn, emissionValues.clone(), where_, inArrow, calls, bound.clone()))) },
+    Expr::Lst(l) => dfr_list(&l.items, 0i64, dn, emissionValues.clone(), where_, inArrow, calls, bound.clone()),
+    Expr::Rec(r) => dfr_inits(&r.fields, 0i64, dn, emissionValues.clone(), where_, inArrow, calls, bound.clone()),
+    Expr::Arrow(ar) => { let ar = *ar; dfr_arrow(ar.body.clone(), dn, emissionValues.clone(), where_, calls, union_into(bound.clone(), &param_names(&ar.params))) },
+    Expr::Match(m) => { let m = *m; dfr_first(dfr_expr(m.scrut.clone(), dn, emissionValues.clone(), where_, inArrow, calls, bound.clone()), dfr_arms(&m.arms, 0i64, dn, emissionValues.clone(), where_, inArrow, calls, bound.clone())) },
+    Expr::Templ(t) => dfr_parts(&t.parts, 0i64, dn, emissionValues.clone(), where_, inArrow, calls, bound.clone()),
+    Expr::RecUpd(r) => { let r = *r; dfr_first(dfr_expr(r.base.clone(), dn, emissionValues.clone(), where_, inArrow, calls, bound.clone()), dfr_inits(&r.upds, 0i64, dn, emissionValues.clone(), where_, inArrow, calls, bound.clone())) },
     _ => String::from(""),
 };
 }
@@ -15010,12 +15020,12 @@ fn dfr_first(a: String, b: String) -> String {
     return if (a != "") { a.clone() } else { b };
 }
 
-fn dfr_arrow(body: Expr, dn: &[String], emissionValues: std::collections::HashMap<String, String>, where_: &str, calls: bool) -> String {
+fn dfr_arrow(body: Expr, dn: &[String], emissionValues: std::collections::HashMap<String, String>, where_: &str, calls: bool, bound: Vec<String>) -> String {
     let hit = first_mapped(&sort_strs(&calls_in(body.clone(), vec![])), emissionValues.clone(), 0i64);
     if (hit != "") {
         return emission_arrow_msg(&hit, &mget_str(emissionValues, hit.clone()));
     }
-    return dfr_expr(body, dn, emissionValues, where_, true, calls);
+    return dfr_expr(body, dn, emissionValues, where_, true, calls, bound);
 }
 
 fn first_mapped(xs: &[String], m: std::collections::HashMap<String, String>, i: i64) -> String {
@@ -15028,74 +15038,88 @@ fn first_mapped(xs: &[String], m: std::collections::HashMap<String, String>, i: 
     return first_mapped(xs, m, (i).checked_add(1i64).expect("revl: Int overflow"));
 }
 
-fn dfr_call(target: Expr, args: &[Expr], dn: &[String], emissionValues: std::collections::HashMap<String, String>, where_: &str, inArrow: bool, calls: bool) -> String {
+fn dfr_call(target: Expr, args: &[Expr], dn: &[String], emissionValues: std::collections::HashMap<String, String>, where_: &str, inArrow: bool, calls: bool, bound: Vec<String>) -> String {
     let head = dfr_callee_name(target.clone());
     if ((head != "") && contains__m2(dn, &head)) {
         if calls {
             return dfr_call_msg(&head, where_, inArrow);
         }
-        return dfr_list(args, 0i64, dn, emissionValues, where_, inArrow, calls);
+        return dfr_list(args, 0i64, dn, emissionValues, where_, inArrow, calls, bound);
     }
-    let t = if (head != "") { String::from("") } else { dfr_expr(target.clone(), dn, emissionValues.clone(), where_, inArrow, calls) };
+    let t = if (head != "") { String::from("") } else { dfr_expr(target.clone(), dn, emissionValues.clone(), where_, inArrow, calls, bound.clone()) };
     if (t != "") {
         return t;
     }
-    return dfr_list(args, 0i64, dn, emissionValues, where_, inArrow, calls);
+    return dfr_list(args, 0i64, dn, emissionValues, where_, inArrow, calls, bound);
 }
 
-fn dfr_list(xs: &[Expr], i: i64, dn: &[String], emissionValues: std::collections::HashMap<String, String>, where_: &str, inArrow: bool, calls: bool) -> String {
+fn dfr_list(xs: &[Expr], i: i64, dn: &[String], emissionValues: std::collections::HashMap<String, String>, where_: &str, inArrow: bool, calls: bool, bound: Vec<String>) -> String {
     if (i >= xs.revl_length()) {
         return String::from("");
     }
-    let r = dfr_expr((xs)[(i) as usize].clone(), dn, emissionValues.clone(), where_, inArrow, calls);
+    let r = dfr_expr((xs)[(i) as usize].clone(), dn, emissionValues.clone(), where_, inArrow, calls, bound.clone());
     if (r != "") {
         return r;
     }
-    return dfr_list(xs, (i).checked_add(1i64).expect("revl: Int overflow"), dn, emissionValues, where_, inArrow, calls);
+    return dfr_list(xs, (i).checked_add(1i64).expect("revl: Int overflow"), dn, emissionValues, where_, inArrow, calls, bound);
 }
 
-fn dfr_inits(xs: &[InitN], i: i64, dn: &[String], emissionValues: std::collections::HashMap<String, String>, where_: &str, inArrow: bool, calls: bool) -> String {
+fn dfr_inits(xs: &[InitN], i: i64, dn: &[String], emissionValues: std::collections::HashMap<String, String>, where_: &str, inArrow: bool, calls: bool, bound: Vec<String>) -> String {
     if (i >= xs.revl_length()) {
         return String::from("");
     }
-    let r = dfr_expr((xs)[(i) as usize].value.clone(), dn, emissionValues.clone(), where_, inArrow, calls);
+    let r = dfr_expr((xs)[(i) as usize].value.clone(), dn, emissionValues.clone(), where_, inArrow, calls, bound.clone());
     if (r != "") {
         return r;
     }
-    return dfr_inits(xs, (i).checked_add(1i64).expect("revl: Int overflow"), dn, emissionValues, where_, inArrow, calls);
+    return dfr_inits(xs, (i).checked_add(1i64).expect("revl: Int overflow"), dn, emissionValues, where_, inArrow, calls, bound);
 }
 
-fn dfr_arms(xs: &[ArmN], i: i64, dn: &[String], emissionValues: std::collections::HashMap<String, String>, where_: &str, inArrow: bool, calls: bool) -> String {
+fn dfr_arms(xs: &[ArmN], i: i64, dn: &[String], emissionValues: std::collections::HashMap<String, String>, where_: &str, inArrow: bool, calls: bool, bound: Vec<String>) -> String {
     if (i >= xs.revl_length()) {
         return String::from("");
     }
-    let r = dfr_expr((xs)[(i) as usize].body.clone(), dn, emissionValues.clone(), where_, inArrow, calls);
+    let ab = if ((xs)[(i) as usize].bind == "") { bound.clone() } else { bound.revl_push((xs)[(i) as usize].bind.clone()) };
+    let r = dfr_expr((xs)[(i) as usize].body.clone(), dn, emissionValues.clone(), where_, inArrow, calls, ab);
     if (r != "") {
         return r;
     }
-    return dfr_arms(xs, (i).checked_add(1i64).expect("revl: Int overflow"), dn, emissionValues, where_, inArrow, calls);
+    return dfr_arms(xs, (i).checked_add(1i64).expect("revl: Int overflow"), dn, emissionValues, where_, inArrow, calls, bound);
 }
 
-fn dfr_parts(xs: &[PartN], i: i64, dn: &[String], emissionValues: std::collections::HashMap<String, String>, where_: &str, inArrow: bool, calls: bool) -> String {
+fn dfr_parts(xs: &[PartN], i: i64, dn: &[String], emissionValues: std::collections::HashMap<String, String>, where_: &str, inArrow: bool, calls: bool, bound: Vec<String>) -> String {
     if (i >= xs.revl_length()) {
         return String::from("");
     }
-    let r = dfr_expr((xs)[(i) as usize].e.clone(), dn, emissionValues.clone(), where_, inArrow, calls);
+    let r = dfr_expr((xs)[(i) as usize].e.clone(), dn, emissionValues.clone(), where_, inArrow, calls, bound.clone());
     if (r != "") {
         return r;
     }
-    return dfr_parts(xs, (i).checked_add(1i64).expect("revl: Int overflow"), dn, emissionValues, where_, inArrow, calls);
+    return dfr_parts(xs, (i).checked_add(1i64).expect("revl: Int overflow"), dn, emissionValues, where_, inArrow, calls, bound);
 }
 
 fn dfr_stmts(ss: &[Stmt], i: i64, dn: &[String], emissionValues: std::collections::HashMap<String, String>, where_: &str, calls: bool) -> Verd {
+    return dfr_scoped(ss, i, dn, emissionValues, where_, calls, vec![], &(vec![]));
+}
+
+fn dfr_scoped(ss: &[Stmt], i: i64, dn: &[String], emissionValues: std::collections::HashMap<String, String>, where_: &str, calls: bool, bound: Vec<String>, marks: &[i64]) -> Verd {
     if (i >= ss.revl_length()) {
         return no_verd();
     }
-    let r = dfr_expr((ss)[(i) as usize].e.clone(), dn, emissionValues.clone(), where_, false, calls);
-    if (r != "") {
-        return mk_verd(tagged("G4", &r), (ss)[(i) as usize].line.clone());
+    let s = (ss)[(i) as usize].clone();
+    let k = s.kind;
+    if ((k == "scope_open") || (k == "arm_open")) {
+        return dfr_scoped(ss, (i).checked_add(1i64).expect("revl: Int overflow"), dn, emissionValues, where_, calls, bound.clone(), &(marks.revl_push(bound.revl_length())));
     }
-    return dfr_stmts(ss, (i).checked_add(1i64).expect("revl: Int overflow"), dn, emissionValues, where_, calls);
+    let r = dfr_expr(s.e.clone(), dn, emissionValues.clone(), where_, false, calls, bound.clone());
+    if (r != "") {
+        return mk_verd(tagged("G4", &r), s.line);
+    }
+    if (((k == "scope_close") || (k == "arm_close")) && (marks.revl_length() > 0i64)) {
+        let m = (marks)[((marks.revl_length()).checked_sub(1i64).expect("revl: Int overflow")) as usize].clone();
+        return dfr_scoped(ss, (i).checked_add(1i64).expect("revl: Int overflow"), dn, emissionValues, where_, calls, bound.revl_slice(0i64, m), &(marks.revl_slice(0i64, (marks.revl_length()).checked_sub(1i64).expect("revl: Int overflow"))));
+    }
+    return dfr_scoped(ss, (i).checked_add(1i64).expect("revl: Int overflow"), dn, emissionValues, where_, calls, if (s.bind == "") { bound.clone() } else { bound.revl_push(s.bind.clone()) }, marks);
 }
 
 fn dfr_tests(ts: Vec<Token>) -> Vec<DfTest> {
@@ -15183,7 +15207,7 @@ fn emission_value_reach_refusal(ts: &[Token], pg: Prog) -> Verd {
     while (i < pg.fns.revl_length()) {
         let f = (pg.fns)[(i) as usize].clone();
         if ((!f.isEmExtern) && (!f.isAsyncExtern)) {
-            let v = dfr_stmts(&f.body, 0i64, &(vec![]), emissionValues.clone(), &((String::from("the body of fn `").revl_concat(&f.name)).revl_concat("`")), false);
+            let v = dfr_scoped(&f.body, 0i64, &(vec![]), emissionValues.clone(), &((String::from("the body of fn `").revl_concat(&f.name)).revl_concat("`")), false, param_names(&f.params), &(vec![]));
             if (v.v != "") {
                 return v;
             }
@@ -23070,7 +23094,7 @@ fn tk_bsig_family(m: &str, th: String) -> String {
     if (((((((((((m == "charAt") || (m == "charCodeAt")) || (m == "codepoint_at")) || (m == "split")) || (m == "repeat")) || (m == "startsWith")) || (m == "endsWith")) || (m == "is_alnum")) || (m == "is_digit")) || (m == "is_alpha")) || (m == "is_space")) {
         return String::from("Str");
     }
-    if ((((((((((m == "div_trunc") || (m == "div_floor")) || (m == "div_euclid")) || (m == "mod")) || (m == "to_int32")) || (m == "to_char")) || (m == "checked_div_trunc")) || (m == "checked_div_floor")) || (m == "checked_div_euclid")) || (m == "checked_mod")) {
+    if (((((((((((((m == "div_trunc") || (m == "div_floor")) || (m == "div_euclid")) || (m == "mod")) || (m == "to_int32")) || (m == "to_char")) || (m == "checked_add")) || (m == "checked_sub")) || (m == "checked_mul")) || (m == "checked_div_trunc")) || (m == "checked_div_floor")) || (m == "checked_div_euclid")) || (m == "checked_mod")) {
         return String::from("Int");
     }
     if (((((m == "set") || (m == "lookup")) || (m == "has")) || (m == "size")) || (m == "remove")) {
@@ -23101,7 +23125,7 @@ fn tk_bsig_params(m: &str) -> Vec<String> {
     if ((((m == "split") || (m == "join")) || (m == "startsWith")) || (m == "endsWith")) {
         return vec![String::from("Str")];
     }
-    if ((((((((m == "div_trunc") || (m == "div_floor")) || (m == "div_euclid")) || (m == "mod")) || (m == "checked_div_trunc")) || (m == "checked_div_floor")) || (m == "checked_div_euclid")) || (m == "checked_mod")) {
+    if (((((((((((m == "div_trunc") || (m == "div_floor")) || (m == "div_euclid")) || (m == "mod")) || (m == "checked_add")) || (m == "checked_sub")) || (m == "checked_mul")) || (m == "checked_div_trunc")) || (m == "checked_div_floor")) || (m == "checked_div_euclid")) || (m == "checked_mod")) {
         return vec![String::from("Int")];
     }
     if (m == "set") {
@@ -23645,7 +23669,7 @@ fn tk_no_call() -> CallN {
 }
 
 fn tk_stdlib_surface() -> String {
-    return ((((String::from("charAt, charCodeAt, checked_div_euclid, checked_div_floor, ").revl_concat("checked_div_trunc, checked_mod, codepoint_at, concat, div_euclid, ")).revl_concat("div_floor, div_trunc, endsWith, field, has, indexOf, is_alnum, ")).revl_concat("is_alpha, is_digit, is_space, join, keys, length, list, lookup, ")).revl_concat("mod, push, remove, repeat, set, size, slice, split, startsWith, ")).revl_concat("str, to_char, to_int, to_int32, to_str");
+    return (((((String::from("charAt, charCodeAt, checked_add, checked_div_euclid, ").revl_concat("checked_div_floor, checked_div_trunc, checked_mod, checked_mul, ")).revl_concat("checked_sub, codepoint_at, concat, div_euclid, div_floor, ")).revl_concat("div_trunc, endsWith, field, has, indexOf, is_alnum, is_alpha, ")).revl_concat("is_digit, is_space, join, keys, length, list, lookup, mod, push, ")).revl_concat("remove, repeat, set, size, slice, split, startsWith, str, ")).revl_concat("to_char, to_int, to_int32, to_str");
 }
 
 fn tk_divides_by(m: &str) -> bool {
@@ -35169,7 +35193,7 @@ fn struct_field(t: &str, name: &str) -> String {
 }
 
 fn is_builtin_method(m: &str) -> bool {
-    return ((((((((((((((((((((((((((((((((((((((m == "length") || (m == "push")) || (m == "slice")) || (m == "charAt")) || (m == "charCodeAt")) || (m == "codepoint_at")) || (m == "indexOf")) || (m == "concat")) || (m == "split")) || (m == "join")) || (m == "repeat")) || (m == "startsWith")) || (m == "endsWith")) || (m == "is_alnum")) || (m == "is_digit")) || (m == "is_alpha")) || (m == "is_space")) || (m == "div_trunc")) || (m == "div_floor")) || (m == "div_euclid")) || (m == "mod")) || (m == "to_int")) || (m == "to_int32")) || (m == "checked_div_trunc")) || (m == "checked_div_floor")) || (m == "checked_div_euclid")) || (m == "checked_mod")) || (m == "set")) || (m == "lookup")) || (m == "has")) || (m == "size")) || (m == "keys")) || (m == "remove")) || (m == "to_str")) || (m == "to_char")) || (m == "field")) || (m == "str")) || (m == "list"));
+    return (((((((((((((((((((((((((((((((((((((((((m == "length") || (m == "push")) || (m == "slice")) || (m == "charAt")) || (m == "charCodeAt")) || (m == "codepoint_at")) || (m == "indexOf")) || (m == "concat")) || (m == "split")) || (m == "join")) || (m == "repeat")) || (m == "startsWith")) || (m == "endsWith")) || (m == "is_alnum")) || (m == "is_digit")) || (m == "is_alpha")) || (m == "is_space")) || (m == "div_trunc")) || (m == "div_floor")) || (m == "div_euclid")) || (m == "mod")) || (m == "to_int")) || (m == "to_int32")) || (m == "checked_add")) || (m == "checked_sub")) || (m == "checked_mul")) || (m == "checked_div_trunc")) || (m == "checked_div_floor")) || (m == "checked_div_euclid")) || (m == "checked_mod")) || (m == "set")) || (m == "lookup")) || (m == "has")) || (m == "size")) || (m == "keys")) || (m == "remove")) || (m == "to_str")) || (m == "to_char")) || (m == "field")) || (m == "str")) || (m == "list"));
 }
 
 fn is_host_root(n: &str) -> bool {
@@ -35253,7 +35277,7 @@ fn builtin_ret(method: &str, recvTy: String) -> String {
     if (method == "list") {
         return String::from("List[Value]");
     }
-    if ((((method == "checked_div_trunc") || (method == "checked_div_floor")) || (method == "checked_div_euclid")) || (method == "checked_mod")) {
+    if (((((((method == "checked_add") || (method == "checked_sub")) || (method == "checked_mul")) || (method == "checked_div_trunc")) || (method == "checked_div_floor")) || (method == "checked_div_euclid")) || (method == "checked_mod")) {
         return String::from("Result[Int, Str]");
     }
     return String::from("");
@@ -40631,6 +40655,16 @@ pub fn list_dedup(xs: Vec<String>) -> Vec<String> {
         if (!list_contains(out.clone(), x.clone())) {
             out.push(x.clone());
         }
+    }
+    return out;
+}
+
+pub fn list_reverse<T: Clone>(xs: Vec<T>) -> Vec<T> {
+    let mut out: Vec<T> = vec![];
+    let mut i = (xs.revl_length()).checked_sub(1i64).expect("revl: Int overflow");
+    while (i >= 0i64) {
+        out.push((xs)[(i) as usize].clone());
+        i = (i).checked_sub(1i64).expect("revl: Int overflow");
     }
     return out;
 }

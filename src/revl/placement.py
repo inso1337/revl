@@ -2995,6 +2995,27 @@ def placement_slice(ir: dict, kept) -> dict:
     if kept >= all_names:
         return ir  # hosts everything -> the whole document, byte-identical
     components = [c for c in ir.get("components") or [] if c.get("name") in kept]
+    kept_functions, kept_externs = reached_declarations(ir, components)
+    out = dict(ir)
+    out["components"] = components
+    out["functions"] = kept_functions
+    out["externs"] = kept_externs
+    return out
+
+
+def reached_declarations(ir: dict, components) -> tuple[list, list]:
+    """The top-level fns and externs the given `components` REACH, as
+    `(functions, externs)` in the document's own order.
+
+    This is the one definition of "reached" for a placement slice and for
+    anything else that must ask the same question of a composition (the
+    behavior-block digest, `revl.behavior_blocks`): the over-inclusive
+    `_names_in` name walk, taken to a fixpoint through the fns it reaches, so a
+    shared helper chain is followed and an extern a component still reaches is
+    never dropped. `components` is a subset of `ir["components"]`; the whole
+    document is not required, so a one-component file asks the same question as a
+    multi-component one and gets only what that component reaches.
+    """
     functions = ir.get("functions") or []
     externs = ir.get("externs") or []
     reachable: set = set()
@@ -3009,11 +3030,8 @@ def placement_slice(ir: dict, kept) -> dict:
                 before = len(reachable)
                 _names_in(fn, reachable)
                 changed = changed or len(reachable) != before
-    out = dict(ir)
-    out["components"] = components
-    out["functions"] = [f for f in functions if f.get("name") in reachable]
-    out["externs"] = [e for e in externs if e.get("name") in reachable]
-    return out
+    return ([f for f in functions if f.get("name") in reachable],
+            [e for e in externs if e.get("name") in reachable])
 
 
 def seam_typing(ir: dict, key_services: dict) -> dict:

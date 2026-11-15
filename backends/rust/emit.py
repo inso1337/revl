@@ -7159,6 +7159,9 @@ _BUILTIN_RESULT = {
     "split": "List[Str]", "keys": "List[Str]",
     "to_int32": "Int32",
     "field": "Any", "list": "List[Any]",
+    "checked_add": "Result[Int, Str]",
+    "checked_sub": "Result[Int, Str]",
+    "checked_mul": "Result[Int, Str]",
     "checked_div_trunc": "Result[Int, Str]",
     "checked_div_floor": "Result[Int, Str]",
     "checked_div_euclid": "Result[Int, Str]",
@@ -8377,10 +8380,26 @@ def _v3_instance_get(node: dict, ctx: _V3Ctx, rename: dict[str, str]) -> str:
 # rounding as the faulting operations, Err(reason) at a zero divisor.
 _CHECKED_DIVS = ("checked_div_trunc", "checked_div_floor",
                  "checked_div_euclid", "checked_mod")
+# The total arithmetic forms (docs/arithmetic.md): same value as `+ - *`
+# where it fits, Err("revl: Int overflow") instead of panicking. Rust's own
+# `i64::checked_*` family is exactly this operation, so it is the lowering.
+_CHECKED_ARITH = ("checked_add", "checked_sub", "checked_mul")
 _DIV_ZERO_MSG = "revl: division by zero"
+_INT_OVERFLOW_MSG = "revl: Int overflow"
 # The reason a `Map` subscript miss faults (issue #957), spelled identically on
 # every tier so one guarantee does not read as five different bugs.
 _MAP_MISS_MSG = "revl: map index: no entry for key"
+
+
+def _v3_checked_arith(method: str, target: str, arg: str) -> str:
+    """The total arithmetic forms (docs/arithmetic.md): `i64::checked_add` and
+    friends answer `Option<i64>`, so the lowering is that native operation
+    with `None` carried out as `Err`. The turbofish pins
+    `Result<i64, String>` so the expression is context-free; the operands are
+    bound once, since a block evaluates them exactly once."""
+    return (f"{{ let a = ({target}); let b = ({arg}); "
+            f'match a.{method}(b) {{ Some(v) => Ok::<i64, String>(v), '
+            f'None => Err::<i64, String>("{_INT_OVERFLOW_MSG}".to_string()) }} }}')
 
 
 def _v3_checked_div(method: str, target: str, arg: str) -> str:
@@ -8560,11 +8579,16 @@ def _v3_builtin(method: str, target: str, args: list[str],
         # Name that divisor rather than letting the intermediate decide.
         return (f"{{ let (a, b) = (({target}), ({args[0]})); "
                 f"if b == -1 {{ 0 }} else {{ a.rem_euclid(b).abs() }} }}")
-    # The total forms (docs/arithmetic.md): same quotient as the faulting
-    # operation, but a zero divisor yields Err(reason) instead of panicking —
-    # `fail` is refused in a pure fn, so the error travels as a value. The
-    # turbofish pins Result<i64, String> so the expression is context-free;
-    # operands are bound once, since a block evaluates them exactly once.
+    # The total arithmetic forms (docs/arithmetic.md): the native
+    # `i64::checked_*` operation with the fault carried out as Err.
+    if method in _CHECKED_ARITH:
+        return _v3_checked_arith(method, target, args[0])
+    # The total division forms (docs/arithmetic.md): same quotient as the
+    # faulting operation, but a zero divisor yields Err(reason) instead of
+    # panicking — `fail` is refused in a pure fn, so the error travels as a
+    # value. The turbofish pins Result<i64, String> so the expression is
+    # context-free; operands are bound once, since a block evaluates them
+    # exactly once.
     if method in _CHECKED_DIVS:
         return _v3_checked_div(method, target, args[0])
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): i64::to_string

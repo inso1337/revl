@@ -47,6 +47,13 @@ The experiment prescribed by [docs/syntax-2.0.md §10](../docs/syntax-2.0.md):
   measured answer puts into the agent's context, in the same proxy tokens as
   `tokens.py`, per call and per verb. Pinned by
   `tests/test_mcp_response_size.py`. Free, no model, no transport.
+- `../tools/shape_ab.py`: the A/B of the token-shaped MCP answers (#2847).
+  Replays every admitted component of the corpus `tokens.py` scores through
+  the current shape and the shaped one (check, admit, plan versus
+  `revl_ship`; `revl_fmt` then `revl_check` with and without a content
+  handle) and reports turns, emitted tokens and received tokens for both.
+  Committed table: `results/shape-ab.md`, reproduced by
+  `tests/test_shape_ab_2847.py`. Free, no model, no transport.
 - `framework_unload_survey.py`: the third host's selection evidence. Named,
   falsifiable claims about each candidate framework's published API, checked
   against the artifact the package index serves at a pinned version.

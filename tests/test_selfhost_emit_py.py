@@ -405,6 +405,11 @@ CORPUS = [
     # lowered these as `builtin` nodes — the gap was emission-only, and invisible
     # for the same reason: nothing in the corpus divided totally.
     "checked_div.rvl",
+    # docs/arithmetic.md's total checked_add/sub/mul: the per-form helper
+    # and the Result they build, on every tier that holds this document.
+    "checked_arith.rvl",
+    # The same forms bound by a `let` and matched, with no `Result` in a signature.
+    "checked_arith_read.rvl",
     # item 189: the Value dot-accessors. Byte-identical BY CONSTRUCTION on this
     # tier (the redirect happens in the frontend, so the emitter sees a plain
     # call) — the document is here so the emit oracle pins that property, while
