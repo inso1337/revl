@@ -683,12 +683,25 @@ jobs:
     # Heavy job: never on a pull request (issue #1678). It runs on the merge queue
     # (merge_group), on push to main, nightly, on dispatch and from the tag
     # build (workflow_call). On a PR the root suite is still collected, by the
-    # ungated `root-suite-affected` job. `conformance` and `formal` need this
-    # job and carry the same `if:` of their own.
+    # ungated `root-suite-affected` job. `conformance` and `formal` no longer
+    # wait on this job (issue #3353); each carries the same `if:` of its own.
     if: ${{ github.event_name != 'pull_request' }}
+    # Issue #3353: the root suite ran whole, once per Python version, about 100
+    # minutes, and main's full run was bounded by it. It is now split four ways
+    # per version with the mechanism `root-suite-affected` already uses
+    # (`REVL_TEST_SHARD=k/4`, tests/_shard.py, issue #1774), so each leg runs
+    # about a quarter of it. The legs of one Python version together run every
+    # test of `tests/` exactly once, and every version runs all four: three
+    # versions times four shards is 12 jobs where there were 3
+    # (tests/test_root_suite_shards_1774.py pins this for `frontend` and
+    # `frontend-cordis`). The five gate steps are not per shard: they run once
+    # per Python version, in shard 1. `fail-fast` is off so a red shard does not
+    # hide what the others find.
     strategy:
+      fail-fast: false
       matrix:
         python: ["3.11", "3.12", "3.13"]
+        shard: [1, 2, 3, 4]
     # Issue #2264: this job installs go (setup-go below), so a go test that
     # finds no go toolchain HERE is a broken setup step, not an environment
     # fact. REVL_REQUIRE_TIERS naming go turns that skip into a failure, for
@@ -788,6 +801,10 @@ jobs:
       # first only moves the silence, and would have moved it onto these five
       # gates, since the root suite is the step that is currently red.
       #
+      # Issue #3353 split the root suite over four shard legs per Python version,
+      # and the five gates below run in shard 1 only (`matrix.shard == 1`), so
+      # each is still run once per Python version, not once per shard.
+      #
       # The job still FAILS when any step fails -- nothing here is softened,
       # branch protection is unaffected. What changes is that each step now
       # reports its own verdict instead of the first failure speaking for six.
@@ -807,14 +824,14 @@ jobs:
       # arrives with no row on some tier — the case a hand-written support
       # table renders blank and nobody notices.
       - run: python3 tools/conformance.py --check-readme
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && matrix.shard == 1 }}
       - run: python3 tools/selfhost_coverage.py --check
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && matrix.shard == 1 }}
       # Issue #301: differential oracles only prove the constructs their corpus
       # spells. Keep a named reach report for every oracle, including lower_ir and
       # compile, so a new reference construct cannot hide behind a green oracle.
       - run: python3 tools/oracle_construct_reach.py --check
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && matrix.shard == 1 }}
       # Roadmap item 542 / issue #1221: the census corpus and the emit corpora
       # are globbed, so a generated document enters them with no list to edit
       # and reads as evidence indistinguishable from a hand-written one. This
@@ -823,7 +840,7 @@ jobs:
       # hand-written), on a manifest line that outlived its document, and on a
       # scoring corpus below its declared independence floor.
       - run: python3 tools/corpus_provenance.py --check
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && matrix.shard == 1 }}
       # issue #255: five docs carried source-derived content (the MCP verb
       # table, the CLI subcommand list, the guarantee tables, the DOC-STATUS
       # inventory, a test count) with nothing to keep them honest, and the one
@@ -835,7 +852,7 @@ jobs:
       # the check. Pure Python over the installed package, so it belongs beside
       # the matrix gate rather than in a new job.
       - run: python3 tools/docgen.py --check
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && matrix.shard == 1 }}
       # roadmap 110c: the playground/site wheel freshness is NOT checked here,
       # and must not be. The wheel vendors the whole of src/revl, so a per-push
       # gate reddened CI on every source change to a bundled module (an outage
@@ -855,7 +872,13 @@ jobs:
       # backends (emitter goldens, IR contract, manifest/admission, audit);
       # runtime-integration tests skip cleanly when their host runtime is
       # absent (cordis-py fork, node/cordis, wasmtime, cordisc)
+      # Issue #3353: this leg's share of the whole suite. Every leg collects the
+      # same `tests/` and so computes the same assignment; together the four
+      # run each test once. There is no `-k`, no file list and no skip switch:
+      # a leg that collects nothing exits 5 and fails the job.
       - run: pytest tests/ -q
+        env:
+          REVL_TEST_SHARD: ${{ matrix.shard }}/4
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
 
   backend-python:
@@ -978,6 +1001,13 @@ jobs:
     # Heavy job, same rule as `frontend`: never on a pull request, always on
     # merge_group, push, schedule, dispatch and workflow_call (issue #1678).
     if: ${{ github.event_name != 'pull_request' }}
+    # Issue #3353: one pytest step of about 100 minutes, split four ways like
+    # the `frontend` matrix (`REVL_TEST_SHARD=k/4`, tests/_shard.py). The four
+    # legs run every test of `tests/` exactly once.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     # Issue #2264: this job installs go, so go is required on every pytest
     # step (see the `frontend` job for why).
     env:
@@ -1028,6 +1058,8 @@ jobs:
       # future failure needs excluding, enumerate it here with a reason and add
       # it to 430 rather than narrowing the path above.
       - run: backends/python/.venv/bin/python -m pytest tests/ -q
+        env:
+          REVL_TEST_SHARD: ${{ matrix.shard }}/4
 
   # Issue #854. The root `tests/` suite ran in exactly two jobs, `frontend` and
   # `frontend-cordis`, and BOTH gated on `changes.outputs.frontend`, which was
@@ -2635,13 +2667,15 @@ jobs:
   conformance:
     runs-on: ubuntu-latest
     timeout-minutes: 180
-    # Fail fast: this job provisions six toolchains and runs for minutes, so
-    # skip it entirely when `lint` or `frontend` is red (see backend-python for
-    # the rationale; required context unchanged). Heavy job: never on a pull
-    # request, always on merge_group, push, schedule, dispatch and
-    # workflow_call (issue #1678). `frontend` is skipped on a PR too, so this
-    # `if:` states what the `needs:` would already imply.
-    needs: [lint, frontend]
+    # Fail fast on `lint` only: this job provisions six toolchains, so skip it
+    # when the cheap gate is red (see backend-python for the rationale; required
+    # context unchanged). It no longer waits for `frontend` (issue #3353): that
+    # ordering put this whole job after the whole of `frontend` on main, which
+    # was the critical path of a full run. The cost, stated: it now runs when
+    # `frontend` is red, spending its runner minutes on a commit already known
+    # to be broken. Heavy job: never on a pull request, always on merge_group,
+    # push, schedule, dispatch and workflow_call (issue #1678).
+    needs: [lint]
     if: ${{ github.event_name != 'pull_request' }}
     # Issue #2264: this job installs go, so go is required on every pytest
     # step (see the `frontend` job for why).
@@ -3063,11 +3097,13 @@ jobs:
   formal:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    # Fail fast: the Lean `lake build` is heavy, so skip it when `lint` or
-    # `frontend` is red (see backend-python for the rationale; required context
-    # unchanged). Heavy job: never on a pull request, always on merge_group,
-    # push, schedule, dispatch and workflow_call (issue #1678).
-    needs: [lint, frontend]
+    # Fail fast on `lint` only: the Lean `lake build` is heavy, so skip it when
+    # the cheap gate is red (see backend-python for the rationale; required
+    # context unchanged). It no longer waits for `frontend` (issue #3353), and
+    # the cost, stated: it now runs when `frontend` is red. Heavy job: never on
+    # a pull request, always on merge_group, push, schedule, dispatch and
+    # workflow_call (issue #1678).
+    needs: [lint]
     if: ${{ github.event_name != 'pull_request' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
