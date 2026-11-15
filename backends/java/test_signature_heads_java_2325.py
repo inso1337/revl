@@ -258,7 +258,39 @@ pub fn arm_bind(b: Box[Box[Int]]) -> Int {
 }
 """
 
+#: A generic top-level fn declares its type parameters (issue #2325). It used
+#: to emit `Optional<U> wrap(U x)` with no `<U>`, so javac could not resolve
+#: `U`, and a call to one kept every record literal around it raw. The checker
+#: marks a type parameter inside its own fn `?T` in an arm's payload type, which
+#: the Java method spells `T`.
+GENERIC_FN_PROGRAM = """\
+type Bx[T] = { v: T }
+type Box[T] = Full(T) | Empty
+fn wrap[U](x: U) -> Opt[U] { return Some(x) }
+fn id[T](x: T) -> T { return x }
+fn first[Elem](xs: List[Elem], d: Elem) -> Elem { return xs.length() == 0 ? d : xs[0] }
+fn open[T](b: Box[T], d: T) -> T {
+  return match b { Full(v) => v, Empty => d }
+}
+fn settle[T, E](r: Result[T, E], d: T) -> T {
+  return match r { Ok(v) => v, Err(_) => d }
+}
+fn nothing[T]() -> List[T] { return [] }
+pub fn calls(n: Int, b: Box[Int], r: Result[Int, Str]) -> Int {
+  return id(n) + first([n], 0) + open(b, 0) + settle(r, 0)
+}
+pub fn bound(n: Int) -> Int {
+  let w = { v: wrap(n) }
+  return match w.v { Some(x) => x + 1, None => 0 }
+}
+pub fn untouched() -> Int {
+  let w = { v: nothing() }
+  return 1
+}
+"""
+
 PROGRAMS = {
+    "generic_fn": GENERIC_FN_PROGRAM,
     "variant": VARIANT_PROGRAM,
     "match": MATCH_PROGRAM,
     "raw_match": RAW_MATCH_PROGRAM,
@@ -419,14 +451,41 @@ def test_loosely_inferred_record_literal_stays_raw():
 
 
 def test_annotated_generic_fn_call_names_the_local_type():
-    # Text only: a generic top-level fn still does not compile on this tier
-    # (its method declares no `<U>`), but the annotated local pins the literal,
-    # so once that gap closes the field is an `Opt<Long>`, not an `Object`.
+    # A call whose type parameter only the return mentions infers `Object`, so
+    # the annotated local pins the literal and its field is a `List<Long>`.
     java = _java_source(
-        "type Bx[T] = { v: T }\nfn wrap[U](x: U) -> Opt[U] { return Some(x) }\n"
-        "pub fn g(n: Int) -> Bx[Opt[Int]] {\n  let b: Bx[Opt[Int]] = { v: wrap(n) }\n"
+        "type Bx[T] = { v: T }\nfn nothing[T]() -> List[T] { return [] }\n"
+        "pub fn g() -> Bx[List[Int]] {\n  let b: Bx[List[Int]] = { v: nothing() }\n"
         "  return b\n}\n")
-    assert "final var b = new Bx<java.util.Optional<java.lang.Long>>(wrap(n));" in java
+    assert ("final var b = new Bx<java.util.List<java.lang.Long>>(nothing());"
+            in java)
+
+
+def test_generic_fn_declares_its_type_parameters():
+    java = _java_source(GENERIC_FN_PROGRAM)
+    assert "public static <U> java.util.Optional<U> wrap(U x) {" in java
+    assert "public static <T> T id(T x) {" in java
+    assert "public static <Elem> Elem first(java.util.List<Elem> xs, Elem d) {" in java
+    assert "public static <T> T open(Box<T> b, T d) {" in java
+    assert "public static <T, E> T settle(RevlResult<T, E> r, T d) {" in java
+    assert "public static <T> java.util.List<T> nothing() {" in java
+
+
+def test_generic_fn_call_in_a_record_literal_is_exact_when_its_arguments_are():
+    java = _java_source(GENERIC_FN_PROGRAM)
+    # every type parameter is bound by an exact argument, so the diamond is safe
+    assert "final var w = new Bx<>(wrap(n));" in java
+    # a type parameter only the return mentions infers `Object`: stays raw
+    assert "final var w = new Bx(nothing());" in java
+
+
+def test_implicit_type_parameter_is_declared_and_a_declared_type_is_not():
+    java = _java_source(
+        "type T = A | B\nfn same(x: T) -> T { return x }\n"
+        "fn keep[U](x: U) -> U { return x }\n"
+        "pub fn f(x: T) -> T { return keep(same(x)) }\n")
+    assert "public static T same(T x) {" in java
+    assert "public static <U> U keep(U x) {" in java
 
 
 @needs_jdk

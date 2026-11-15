@@ -120,3 +120,39 @@ fn annotated_nested() -> Bx[Bx[List[Int]]] {
   let b: Bx[Bx[List[Int]]] = { v: { v: [] } }
   return b
 }
+// issue #2325: a generic fn declares its type parameters on the Java method,
+// and a record literal around a call to one stays exact when a parameter binds
+// every type parameter and every argument infers exactly. A type parameter only
+// the return mentions infers `Object`, so that literal stays raw.
+fn id[T](x: T) -> T { return x }
+fn nothing[T]() -> List[T] { return [] }
+fn bound_call(n: Int) -> Int {
+  let b = { v: wrap(n) }
+  return 1
+}
+fn bound_identity(n: Int) -> Int {
+  let b = { v: id(n) }
+  return 1
+}
+fn return_only_call() -> Int {
+  let b = { v: nothing() }
+  return 1
+}
+// An implicit type parameter (a single-uppercase name no `type` declares) is
+// declared too, and a listed name no parameter or return mentions is dropped.
+fn implicit_id(x: T) -> T { return x }
+fn listed_unused[A, B](x: A) -> A { return x }
+// The checker's `?T` marker inside a generic fn's arm payload is spelled `T`.
+fn settle_generic[T, E](r: Result[T, E], d: T) -> T {
+  return match r {
+    Ok(v) => v,
+    Err(_) => d,
+  }
+}
+// A generic call whose argument is a local (its Java type may be looser than
+// its revl one) is not exact, so the literal around it stays raw.
+fn local_argument(n: Int) -> Int {
+  let m = [n]
+  let b = { v: id(m) }
+  return 1
+}
