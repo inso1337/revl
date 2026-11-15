@@ -164,6 +164,7 @@ from revl.promotion_barrier import AUTHORITY_AXES  # noqa: E402
 # Item 536's verdict, IMPORTED (issue #1336). The stage verdict below EXTENDS
 # it; it does not restate it. See `Verdict`.
 from evolution_reward import Verdict as ComponentVerdict  # noqa: E402
+from evolution_progress import changed_paths  # noqa: E402
 
 # Exit statuses. REFUSE is distinct from ROLL_BACK for the same reason
 # `tools/heldout_scoring.py` separates REFUSED from DIVERGENT: a reader has to
@@ -465,21 +466,20 @@ def measured_diff(proposal: Proposal):
     """`(ok, paths_or_error)`: the candidate's changed-file set, from git.
 
     Committed and uncommitted changes both count, because a proposal is judged
-    on the tree it produced and not on how tidily it was committed. This is the
-    same read `tools/evolution_reward.py` performs for its `scope` component.
+    on the tree it produced and not on how tidily it was committed. The read is
+    `tools/evolution_progress.py::changed_paths`, imported rather than restated:
+    it already disables rename detection, which the approval classifier needs
+    (a renamed policy must show its OLD path as a deletion, or its dropped rules
+    are never read) and which a second copy of the git invocation here had
+    already drifted away from.
     """
     tree = proposal.tree
     if not (tree / ".git").exists():
         return False, f"{tree} is not a git tree, so its diff cannot be measured"
-    ok, out = _git(tree, ["diff", "--name-only", "--no-renames",
-                          proposal.base])
-    if not ok:
-        return False, out
-    paths = {line.strip() for line in out.splitlines() if line.strip()}
-    ok, out = _git(tree, ["ls-files", "--others", "--exclude-standard"])
-    if not ok:
-        return False, out
-    paths |= {line.strip() for line in out.splitlines() if line.strip()}
+    paths = changed_paths(tree, proposal.base)
+    if paths is None:
+        return False, (f"git could not read the diff of {tree} against "
+                       f"{proposal.base}")
     return True, sorted(paths)
 
 

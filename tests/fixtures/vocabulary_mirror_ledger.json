@@ -754,20 +754,6 @@
     },
     {
       "sites": [
-        "tools/evolution_controller.py::measured_diff",
-        "tools/evolution_reward.py::changed_files"
-      ],
-      "tokens": [
-        "--exclude-standard",
-        "--name-only",
-        "--others",
-        "diff",
-        "ls-files"
-      ],
-      "note": "Two copies of the changed-files listing, one in the controller and one in the reward. Near-clones down to the git argument vector; a flag added to one changes what one half of the loop measures."
-    },
-    {
-      "sites": [
         "tools/selfhost_coverage.py::_GENERIC_REASONS",
         "tools/selfhost_line_coverage.py::_GENERIC_REASONS"
       ],
