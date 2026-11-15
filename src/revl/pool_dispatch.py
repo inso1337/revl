@@ -67,9 +67,19 @@ link                         what it means
                              Refused rather than defaulted, so adding a runner
                              on one side and not the other leaves it
                              inadmissible everywhere
+``stale-task``               the task's signed ``issued_at`` is further from
+                             the peer's clock than the charter's window
+                             (``join_window_s``, either side). A task captured
+                             long ago is not fresh because its signature still
+                             verifies
 ``replayed-task``            this peer already ran that task id. One result per
                              task on the peer side too, so a captured task
-                             cannot be re-run for a second receipt
+                             cannot be re-run for a second receipt. With
+                             ``--workdir`` the ids are kept in a file beside
+                             the workspace, so a restart does not forget them
+``peer-state``               the peer could not record the task id before
+                             running it, so it ran nothing: a run it cannot
+                             remember is a run it could repeat
 ``bundle-path``              a multi-file task names a file by a path that
                              would leave the workspace, collide with another,
                              or read as a flag (`pool_bundle`). Named
@@ -156,6 +166,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -257,6 +268,10 @@ LINK_PEER_IDENTITY = "peer-identity"
 LINK_ARTIFACT_DIGEST = "artifact-digest"
 LINK_UNKNOWN_RUNNER = "unknown-runner"
 LINK_REPLAYED_TASK = "replayed-task"
+#: The task's signed ``issued_at`` is outside the charter's freshness window.
+LINK_STALE_TASK = "stale-task"
+#: The peer could not write the task id down before running it.
+LINK_PEER_STATE = "peer-state"
 LINK_NOT_A_MEMBER = "not-a-member"
 LINK_EFFECT_CLASS_UNPROVEN = "effect-class-unproven"
 LINK_WORK_INADMISSIBLE = "work-inadmissible"
@@ -287,6 +302,8 @@ REFUSAL_LINKS: tuple[str, ...] = (
     LINK_ARTIFACT_DIGEST,
     LINK_UNKNOWN_RUNNER,
     LINK_REPLAYED_TASK,
+    LINK_STALE_TASK,
+    LINK_PEER_STATE,
     LINK_NOT_A_MEMBER,
     LINK_EFFECT_CLASS_UNPROVEN,
     LINK_WORK_INADMISSIBLE,
@@ -344,6 +361,15 @@ LOCAL_ONLY_RUN_FLAGS: tuple[tuple[str, str, Any], ...] = (
     # rather than dropped.
     ("trust_exported", "--trust-exported", False),
 )
+
+#: The file, inside the peer's ``--workdir``, that holds the task ids the peer
+#: has run. The name carries an ``@``, which a task id may not contain, so no
+#: task's workspace directory can be this file.
+SEEN_FILE = "seen@tasks.jsonl"
+
+#: The freshness window a charter that carries none is read with; the same
+#: default `peer_pool.PoolCharter` gives ``join_window_s``.
+DEFAULT_TASK_WINDOW_S = 300
 
 # ---------------------------------------------------------------------------
 # ledger states
@@ -1069,6 +1095,60 @@ def _outcome_of(result: Mapping[str, Any]) -> str:
             else pool_receipt.FAILED)
 
 
+def _task_window(charter_record: Mapping[str, Any]) -> int:
+    """The charter's freshness window in seconds, for a task as for a join.
+
+    The peer holds the charter as handed to it, not through `verify_charter`,
+    so a value that is not a positive integer is read as the default rather
+    than as no window: a missing or mangled window must not turn the check
+    off."""
+    window = charter_record.get("join_window_s")
+    if isinstance(window, int) and not isinstance(window, bool) and window > 0:
+        return window
+    return DEFAULT_TASK_WINDOW_S
+
+
+def _load_seen(path: Path) -> dict[str, str]:
+    """The task ids a previous run of this peer wrote down.
+
+    A line is one JSON object with a ``task_id``. A last line with no newline
+    is a write the process died in the middle of; the run it announced never
+    started, because the id is written and synced BEFORE the run, so the
+    fragment is cut off rather than read. Any other line that is not a record
+    is a ``DispatchError``: a peer that cannot tell what it already ran must
+    not start and guess."""
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return {}
+    except OSError as error:
+        raise DispatchError(f"cannot read the peer's run record {path}: "
+                            f"{error}") from None
+    complete, newline, fragment = raw.rpartition(b"\n")
+    if fragment:
+        try:
+            with open(path, "r+b") as handle:
+                handle.truncate(len(complete) + len(newline))
+        except OSError as error:
+            raise DispatchError(f"cannot repair the peer's run record "
+                                f"{path}: {error}") from None
+    seen: dict[str, str] = {}
+    for number, line in enumerate(complete.split(b"\n"), 1):
+        if not line:
+            continue
+        try:
+            entry = json.loads(line.decode("utf-8"))
+            task_id = entry["task_id"]
+        except (ValueError, KeyError, TypeError):
+            raise DispatchError(
+                f"{path} line {number} is not a run record; the peer will "
+                f"not start on a record it cannot read") from None
+        if not isinstance(task_id, str) or not task_id:
+            raise DispatchError(f"{path} line {number} names no task id")
+        seen[task_id] = ""
+    return seen
+
+
 class PeerRunner:
     """The peer side of the channel, with no socket in it.
 
@@ -1080,7 +1160,8 @@ class PeerRunner:
                  identity: peer_identity.PeerIdentity,
                  operator_public: peer_identity.PublicIdentity,
                  workspace: Path, timeout: float = 300.0,
-                 network_exposed: bool = False):
+                 network_exposed: bool = False,
+                 seen_path: Optional[Path] = None):
         #: Whether a remote party can time this runner's receipt signatures.
         #: Checked here, so a runner that would have to refuse at its first
         #: receipt refuses at construction instead, before it runs any work.
@@ -1099,7 +1180,54 @@ class PeerRunner:
         self._handle_lock = threading.Lock()
         #: Task ids this peer has already run. One result per task on the peer
         #: side too, so a captured task cannot be re-run for a second receipt.
-        self.seen: dict[str, str] = {}
+        #: With ``seen_path`` the ids come back from that file at construction
+        #: and every new one is appended to it before its run starts, so a
+        #: restarted peer remembers; without it the record lives and dies with
+        #: this object. The value is the receipt digest once there is one.
+        self.seen_path = Path(seen_path) if seen_path is not None else None
+        self.seen: dict[str, str] = (_load_seen(self.seen_path)
+                                     if self.seen_path is not None else {})
+
+    def _record_seen(self, task_id: str, at: datetime) -> str:
+        """Write ``task_id`` down, synced, before the task runs. Returns a
+        reason when it could not, ``""`` otherwise.
+
+        Before, not after: a peer that died mid-run and wrote nothing would
+        run the same task again on restart, which is the replay this is for.
+        The operator's ledger never reuses a task id either, so a task that
+        was started and lost is re-issued under a new id, not re-run."""
+        self.seen[task_id] = ""
+        if self.seen_path is None:
+            return ""
+        line = json.dumps({"task_id": task_id, "at": _iso(at)},
+                          sort_keys=True) + "\n"
+        data = line.encode("utf-8")
+        try:
+            self.seen_path.parent.mkdir(parents=True, exist_ok=True)
+            created = not self.seen_path.exists()
+            fd = os.open(self.seen_path,
+                         os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            try:
+                # `os.write` may write less than asked (a full disk does not
+                # raise). A fragment would be cut off at the next start and
+                # the id forgotten, so a short write is a failure to record.
+                written = os.write(fd, data)
+                if written != len(data):
+                    raise OSError(f"wrote {written} of {len(data)} bytes")
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            if created:
+                # A new file is only durable once its directory entry is.
+                dir_fd = os.open(self.seen_path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+        except OSError as error:
+            del self.seen[task_id]
+            return f"{type(error).__name__}: {error}"
+        return ""
 
     def mark_network_exposed(self, purpose: str) -> None:
         """Sign every later receipt as network-exposed, after checking that the
@@ -1126,15 +1254,19 @@ class PeerRunner:
         give, naming the extra, rather than raising (issue #1460). The
         construction and `serve` checks make that unreachable in practice;
         the contract holds without them."""
+        # Read the clock BEFORE waiting for the lock: a task queued behind a
+        # long run is judged by when it arrived, not by how long the one in
+        # front of it took.
+        received = _utc_now()
         with self._handle_lock:
             try:
-                return self._handle(record)
+                return self._handle(record, received)
             except SigningBackendUnavailable as error:
                 return _refusal(LINK_TASK_SHAPE,
                                 f"the frame could not be processed: "
                                 f"{type(error).__name__}: {error}")
 
-    def _handle(self, record: Any) -> dict:
+    def _handle(self, record: Any, received: datetime) -> dict:
         if pool_health.is_probe(record):
             return pool_health.answer_probe(
                 record, charter_record=self.charter_record,
@@ -1176,6 +1308,16 @@ class PeerRunner:
                             f"the task is addressed to "
                             f"{record['peer_id']!r} and this peer is "
                             f"{self.identity.peer_id!r}", task_id=task_id)
+        window = _task_window(self.charter_record)
+        issued = peer_pool._parse_iso(record["issued_at"])
+        if issued is None \
+                or abs((received - issued).total_seconds()) > window:
+            return _refusal(
+                LINK_STALE_TASK,
+                f"the task was issued at {record['issued_at']} and this peer "
+                f"read the clock at {_iso(received)}; the charter's window is "
+                f"{window}s, so a captured task does not stay fresh",
+                task_id=task_id)
         if "bundle" in record:
             source, refused = _receive_bundle(record, task_id)
             if refused is not None:
@@ -1208,6 +1350,12 @@ class PeerRunner:
                 f"this peer already ran task {task_id!r}; a task is run once, "
                 f"so a captured task cannot be replayed for a second receipt",
                 task_id=task_id)
+        failure = self._record_seen(task_id, received)
+        if failure:
+            return _refusal(
+                LINK_PEER_STATE,
+                f"the peer could not record task {task_id!r} before running "
+                f"it ({failure}), so it ran nothing", task_id=task_id)
         result, wall_seconds = execute(runner, source,
                                        self.workspace / task_id,
                                        timeout=self.timeout)
@@ -1870,10 +2018,24 @@ def serve_command(args) -> int:
     import tempfile  # noqa: PLC0415
 
     with tempfile.TemporaryDirectory(prefix="revl-pool-peer-") as scratch:
-        runner = PeerRunner(charter_record=charter_record, identity=identity,
-                            operator_public=operator_public,
-                            workspace=workspace or Path(scratch),
-                            timeout=args.timeout)
+        # The run record lives beside the workspace, so it is only as lasting
+        # as the workspace: the default scratch directory is removed on exit
+        # and a peer started without --workdir forgets what it ran when it
+        # stops. The freshness window still bounds a replay after a restart.
+        try:
+            runner = PeerRunner(
+                charter_record=charter_record, identity=identity,
+                operator_public=operator_public,
+                workspace=workspace or Path(scratch), timeout=args.timeout,
+                seen_path=(workspace / SEEN_FILE if workspace else None))
+        except DispatchError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+        if workspace is None:
+            print("note: no --workdir, so the tasks this peer runs are not "
+                  "remembered across a restart; a task is still refused when "
+                  "its issued_at is outside the charter's window",
+                  file=sys.stderr, flush=True)
 
         def announce(host, port):
             print(f"peer {identity.peer_id} listening on {host}:{port} "

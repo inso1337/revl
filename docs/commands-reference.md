@@ -2063,8 +2063,8 @@ for the key lifecycle and what the signature binds.
   private identity and the operator's PUBLIC one, so there is no secret here
   that could admit anybody, which is what makes running it on a machine the
   operator does not trust coherent. Every refusal names a link
-  (`task-signature`, `charter-identity`, `artifact-digest`, `replayed-task`,
-  ...) and is answered on the connection rather than dropped. It also answers
+  (`task-signature`, `charter-identity`, `artifact-digest`, `stale-task`,
+  `replayed-task`, ...) and is answered on the connection rather than dropped. It also answers
   `pool probe` with a signed heartbeat, after checking the probe against the
   same pinned operator key; a probe runs nothing.
   - `--charter PATH` - the charter this peer joined. A task must pin its
@@ -2089,7 +2089,14 @@ for the key lifecycle and what the signature binds.
     the pure-Python signer's timing leaks its key (issue #1460; see
     [tee-attestation-root.md](tee-attestation-root.md)).
   - `--workdir DIR` - where artifacts are written and run (default: a fresh
-    temporary directory removed on exit).
+    temporary directory removed on exit). The ids of the tasks this peer has run
+    are also kept here, in `seen@tasks.jsonl`, written before each run, so a
+    restarted peer refuses a task it already ran (`replayed-task`). Without it
+    nothing survives a restart; the freshness check below still applies. A task
+    whose signed `issued_at` is further from the peer's clock than the charter's
+    `join_window_s` (300 seconds by default), in either direction, is refused
+    on `stale-task` before it runs; a peer that cannot write the id down refuses
+    on `peer-state`.
   - `--timeout SECONDS` - how long one artifact may run (default 300).
   - `--once` - serve one task and exit.
 - `ledger` - the delivery ledger: every task dispatched, its state
