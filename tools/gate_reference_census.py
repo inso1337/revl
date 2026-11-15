@@ -476,6 +476,13 @@ def make_admission_certify(tables):
                 and all(ch == "_" or ch.isascii() and ch.isalnum()
                         for ch in middle))
 
+    def is_mangled_name(name: str) -> bool:
+        """The reference's name-mangling test (`revl.lower._is_mangled_name`,
+        issue #3135): a name that starts with `__` and does not end with `__`.
+        Refused in the same positions as a dunder, so the service method is the
+        one this surface decides."""
+        return name.startswith("__") and not name.endswith("__")
+
     def is_declarable(token: str) -> bool:
         return is_name(token) and token not in reserved
 
@@ -575,7 +582,8 @@ def make_admission_certify(tables):
                 # declaration, so the method position is the only one it can
                 # decide.
                 if (toks[i] != "fn" or i + 1 >= n or not is_name(toks[i + 1])
-                        or is_dunder_name(toks[i + 1])):
+                        or is_dunder_name(toks[i + 1])
+                        or is_mangled_name(toks[i + 1])):
                     return None
                 mname = toks[i + 1]
                 i += 2

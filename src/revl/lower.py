@@ -820,12 +820,39 @@ def _is_dunder_name(name: str) -> bool:
     return bool(re.match(r"^__\w+__$", name))
 
 
+def _is_mangled_name(name: str) -> bool:
+    """True if a Python class body would rewrite `name` (issue #3135).
+
+    Python mangles every identifier that starts with two underscores and does not
+    end with two (`__a` becomes `_Class__a`), for a `def`, an attribute read, a
+    keyword argument or a dataclass field written inside a class body. A service
+    method, record field or config field named that way is emitted unchanged, so
+    the emitted name stops being the contract name and a call written as
+    `r.__a()` can reach a different method (`_S__a`) of the same service. A name
+    that ends with two underscores is left alone by Python; the ones with a
+    middle are the dunders `_is_dunder_name` refuses already. Only the member
+    positions are decided here; a top-level `fn` with such a name is a separate
+    case (issue #3582)."""
+    return name.startswith("__") and not name.endswith("__")
+
+
 def _reject_dunder_name(name: str, kind: str, owner: str,
                         filename: str, line: int) -> None:
     """Refuse a dunder / prototype name in a `kind` (`field`/`method`/`config
     field`) position, naming its `owner` (a record, service or component, or
     a record literal or update). A no-op for every ordinary name, so nothing
+    """Refuse a dunder / prototype name, or a name Python would mangle, in a
+    `kind` (`field`/`method`/`config field`) position, naming its `owner`
+    (record / service / component). A no-op for every ordinary name, so nothing
     that compiled before is affected."""
+    if _is_mangled_name(name):
+        raise RevlError(
+            filename, line,
+            f"{kind} `{name}` in {owner} is not allowed: a name that starts "
+            f"with two underscores and does not end with two is rewritten by "
+            f"Python's private name mangling inside a class body, so the "
+            f"emitted code would reach a different member than the source "
+            f"names — rename it (issue #3135)")
     if _is_dunder_name(name):
         raise RevlError(
             filename, line,
