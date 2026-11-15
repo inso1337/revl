@@ -324,6 +324,23 @@ python3 scripts/axioms_gate.py \
   RevL.G1Access.declaring_admits \
   RevL.G1Access.fixtures_decided \
   RevL.G1Access.g1_access_not_vacuous \
+  RevL.G1Coverage.coversAccessB_iff \
+  RevL.G1Coverage.scopeParamNames_eq \
+  RevL.G1Coverage.coversAccessBodyB_iff \
+  RevL.G1Coverage.coversAccessB_self \
+  RevL.G1Coverage.walk_covers \
+  RevL.G1Coverage.reachIn_callSvc \
+  RevL.G1Coverage.scope_param_names_keep_every_qualifier \
+  RevL.G1Coverage.witnessBody_scopes \
+  RevL.G1Coverage.witnessBody_is_admitted \
+  RevL.G1Coverage.walkOf_is_the_walk \
+  RevL.G1Coverage.coversAccessB_admits_the_full_walk \
+  RevL.G1Coverage.coversAccessB_refuses_a_walk_that_drops_the_activation_scope \
+  RevL.G1Coverage.coversAccessB_refuses_a_shortened_walk \
+  RevL.G1Coverage.coversAccessB_refuses_a_walk_that_strips_a_param \
+  RevL.G1Coverage.coversAccessB_refuses_a_walk_that_seeds_an_extra_param \
+  RevL.G1Coverage.coversAccessB_refuses_a_scope_the_body_does_not_have \
+  RevL.G1Coverage.g1Coverage_not_vacuous \
   RevL.A1Async.reachB_iff \
   RevL.A1Async.reach_mono \
   RevL.A1Async.reaches_iff \
@@ -488,6 +505,7 @@ python3 scripts/axioms_gate.py \
   RevLOracle.councilRowB_iff \
   RevLOracle.g9RowB_iff \
   RevLOracle.gcRowB_iff \
+  RevLOracle.accessCoverageRowB_iff \
   RevLOracle.retainRowB_iff RevLOracle.gretainRowB_iff \
   RevLOracle.g4InvRowB_iff RevLOracle.g4invRowB_iff \
   RevLOracle.swRowB_iff RevLOracle.swRowBAll_iff \

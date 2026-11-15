@@ -596,6 +596,11 @@ def _classify(e: RevlError) -> str:
             or "record literal for `" in m
             or "but the record has " in m):
         return "TYPE"
+    # issue #3107: `verified fn` totality (`lower.py::_check_verified_totality`),
+    # which `revl.diagnostics.classify` names G7. The gate spells the reference's
+    # sentence byte for byte, so this is a claim of agreement.
+    if m.startswith("verified fn `") and " is not total: it participates in " in m:
+        return "G7"
     return "OUT:" + m
 
 
@@ -4322,27 +4327,21 @@ fn f(m: Mb[Int]) -> Int {{
         _agree(admit, src)
 
 
-def test_provided_variant_exhaustiveness_matches_reference(admit):
-    """Issue #2981: a provided variant resolves through its provided case row.
-
-    The reference seeds `model_answer.ANSWER_TYPES` into its type table when the
-    program names one of the provided types, so the general exhaustiveness check
-    reaches `Aggregate[Str]` through the applied head (PR #2934). The gate's
-    table carried rows only for `type` declarations, and a provided type is
-    never declared there, so it found nothing and stayed silent. Seeding the two
-    provided variant rows under the same condition closes it.
-    """
+# Issue #2981's gate regression cases, in the long `{ ... }` body. The
+# issue #3107 section below holds the same cases in the shorthand `= expr`
+# and the `verified fn` spellings.
+PROVIDED_VARIANT_CASES_2981: list[tuple[str, str]] = [
     # the issue's reproducer: the applied head is a module `fn` parameter
-    _agree(admit, """fn settle(a: Aggregate[Str]) -> Str {
+    ("fn_parameter", """fn settle(a: Aggregate[Str]) -> Str {
   return match a {
     Split(d) => "no",
     Inquorate(d) => "no",
   }
 }
-""")
+"""),
     # the other declared positions the reference seeds from, and a transparent
     # alias, which `_resolve_type_aliases` erases into its target first
-    _agree(admit, """type Box = { a: Aggregate[Str] }
+    ("record_field", """type Box = { a: Aggregate[Str] }
 
 fn settle(b: Box) -> Str {
   return match b.a {
@@ -4350,8 +4349,8 @@ fn settle(b: Box) -> Str {
     Inquorate(d) => "no",
   }
 }
-""")
-    _agree(admit, """service Review { fn settle(answer: Aggregate[Str]) -> Str }
+"""),
+    ("provide_block", """service Review { fn settle(answer: Aggregate[Str]) -> Str }
 
 component Reviewer provides out: Review {
   provide out {
@@ -4361,8 +4360,8 @@ component Reviewer provides out: Review {
     }
   }
 }
-""")
-    _agree(admit, """type Agg = Aggregate[Str]
+"""),
+    ("transparent_alias", """type Agg = Aggregate[Str]
 
 fn settle(a: Agg) -> Str {
   return match a {
@@ -4370,17 +4369,17 @@ fn settle(a: Agg) -> Str {
     Inquorate(d) => "no",
   }
 }
-""")
-    _agree(admit, """fn settle(a: Answer[Str]) -> Str {
+"""),
+    ("answer_complete", """fn settle(a: Answer[Str]) -> Str {
   return match a {
     Says(v) => v,
     Abstains => "no",
   }
 }
-""")
+"""),
     # the provided entries seed together, so a BARE head is checked only when
     # the program names one of them applied somewhere, exactly as `seeded` does
-    _agree(admit, """fn other(a: Aggregate[Str]) -> Str {
+    ("bare_head_beside_applied", """fn other(a: Aggregate[Str]) -> Str {
   return match a {
     Agreed(v) => v,
     Split(d) => "no",
@@ -4394,19 +4393,19 @@ fn settle(a: Aggregate) -> Str {
     Inquorate(d) => "no",
   }
 }
-""")
+"""),
     # a bare head alone names nothing applied, and a complete match stays
     # admitted: both are programs the reference lets through
-    _agree(admit, """fn settle(a: Aggregate) -> Str {
+    ("bare_head_alone", """fn settle(a: Aggregate) -> Str {
   return match a {
     Split(d) => "no",
     Inquorate(d) => "no",
   }
 }
-""")
+"""),
     # a BODY annotation is not one of the declared positions `seeded` reads, so
     # the bare-head match above stays admitted beside one
-    _agree(admit, """fn settle(a: Aggregate) -> Str {
+    ("body_annotation", """fn settle(a: Aggregate) -> Str {
   return match a {
     Split(d) => "no",
     Inquorate(d) => "no",
@@ -4417,15 +4416,51 @@ fn helper() -> Str {
   let xs: List[Aggregate[Str]] = []
   return "no"
 }
-""")
-    _agree(admit, """fn settle(a: Aggregate[Str]) -> Str {
+"""),
+    ("aggregate_complete", """fn settle(a: Aggregate[Str]) -> Str {
   return match a {
     Agreed(v) => v,
     Split(d) => "no",
     Inquorate(d) => "no",
   }
 }
-""")
+"""),
+]
+
+
+@pytest.mark.parametrize("name,src", PROVIDED_VARIANT_CASES_2981,
+                         ids=[n for n, _ in PROVIDED_VARIANT_CASES_2981])
+def test_provided_variant_exhaustiveness_matches_reference(admit, name, src):
+    """Issue #2981: a provided variant resolves through its provided case row.
+
+    The reference seeds `model_answer.ANSWER_TYPES` into its type table when the
+    program names one of the provided types, so the general exhaustiveness check
+    reaches `Aggregate[Str]` through the applied head (PR #2934). The gate's
+    table carried rows only for `type` declarations, and a provided type is
+    never declared there, so it found nothing and stayed silent. Seeding the two
+    provided variant rows under the same condition closes it.
+    """
+    _agree(admit, src)
+
+
+# Issue #2981: the `event` field case, whose two refusals differ in tag (see
+# the test below), so it is held to both pinned verdicts instead of `_agree`.
+PROVIDED_VARIANT_EVENT_FIELD_2981 = """event Voted(key: id) { id: Str, a: Aggregate[Str] }
+
+fn settle(v: Voted) -> Str {
+  return match v.a {
+    Split(d) => "no",
+    Inquorate(d) => "no",
+  }
+}
+"""
+
+
+def _assert_event_field_verdicts_2981(admit, src):
+    assert _ref(src) == ("G4", "`event Voted` reaches `Aggregate[Str]`, which "
+                         "has no JSON-Schema derivation, so its delivered "
+                         "items cannot be checked against a schema")
+    assert admit(src) == "T1|non-exhaustive match: missing case `Agreed`"
 
 
 def test_provided_variant_event_field_seeds_the_gate_fail_closed(admit):
@@ -4437,20 +4472,8 @@ def test_provided_variant_event_field_seeds_the_gate_fail_closed(admit):
     the missing `Agreed` case only because its provided-type walk reads event
     fields. Without that arm the gate admits a program the reference refuses.
     """
-    src = """event Voted(key: id) { id: Str, a: Aggregate[Str] }
-
-fn settle(v: Voted) -> Str {
-  return match v.a {
-    Split(d) => "no",
-    Inquorate(d) => "no",
-  }
-}
-"""
     # `_agree` cannot hold: both refuse, under different tags (G4 vs T1).
-    assert _ref(src) == ("G4", "`event Voted` reaches `Aggregate[Str]`, which "
-                         "has no JSON-Schema derivation, so its delivered "
-                         "items cannot be checked against a schema")
-    assert admit(src) == "T1|non-exhaustive match: missing case `Agreed`"
+    _assert_event_field_verdicts_2981(admit, PROVIDED_VARIANT_EVENT_FIELD_2981)
 
 
 def test_issue_2842_scope_and_non_emission_controls_stay_admitted(admit):
@@ -8784,3 +8807,312 @@ component D provides r: R {
     rows = [r.split("|", 2) for r in admit_all(src).split("\\n")]
     assert rows[0][:2] == ["6", "T1"], rows
     assert [r[1] for r in rows] == ["T1", "G1"], rows
+
+
+# ================================================================ issue #3107
+#
+# Two spellings the reference parser admits and the gate's declaration reader
+# used to refuse at a parse stage: a shorthand module `fn` body
+# (`fn f(x: Int) -> Int = x + 1`) at `expected { after fn signature`, and a
+# `verified fn` at `unexpected declaration`. A gate test could be written in
+# neither form, because the parse stopped before every later stage, the match
+# totality check included. Both are read now, and the verdict comes from the
+# stage the reference reaches.
+
+GATE_3107_ADMITTED = [
+    ("shorthand", "fn twice(x: Int) -> Int = x * 2\n"),
+    ("shorthand_cache_pure", "fn sq(x: Int) -> Int cache pure = x * x\n"),
+    ("verified", "verified fn twice(x: Int) -> Int { return x * 2 }\n"),
+    ("verified_shorthand", "verified fn twice(x: Int) -> Int = x * 2\n"),
+    ("pub_verified", "pub verified fn twice(x: Int) -> Int = x * 2\n"),
+    ("verified_after_a_type", "type Row = { id: Int }\n"
+                              "verified fn id_of(r: Row) -> Int { return r.id }\n"),
+    ("verified_before_an_ordinary_fn",
+     "verified fn one() -> Int { return 1 }\n"
+     "fn two() -> Int { return 2 }\n"),
+]
+
+
+@pytest.mark.parametrize("name,src", GATE_3107_ADMITTED,
+                         ids=[n for n, _ in GATE_3107_ADMITTED])
+def test_the_two_reference_spellings_are_admitted(admit, name, src):
+    assert _ref(src) == ("", ""), name
+    assert admit(src) == "", name
+
+
+def test_a_shorthand_fn_body_reaches_the_match_totality_check(admit):
+    # The issue's motivating shape: the parse no longer stands where the
+    # missing-case verdict belongs.
+    src = ("type Color = Red | Green\n"
+           "fn pick(c: Color) -> Int = match c { Red => 1 }\n")
+    assert _ref(src)[0] == "T1"
+    _agree(admit, src)
+
+
+def test_a_verified_fn_reaches_the_match_totality_check(admit):
+    src = ("type Color = Red | Green\n"
+           "verified fn pick(c: Color) -> Int {\n"
+           "  return match c { Red => 1 }\n}\n")
+    assert _ref(src)[0] == "T1"
+    _agree(admit, src)
+
+
+def test_a_shorthand_fn_body_is_checked_at_the_return_position(admit):
+    # the desugared `return` is the body's one check position: the reference
+    # holds it to the declared return, and the gate must reach the same T1.
+    src = 'fn f(x: Int) -> Int = "s"\n'
+    assert _ref(src)[0] == "T1"
+    _agree(admit, src)
+
+
+# Issue #2981's gate regression cases (`PROVIDED_VARIANT_CASES_2981` and the
+# `event` field case) were written with the long `{ ... }` body because the
+# gate's parser refused both spellings above. That pin (#3063's
+# `GATE_PARSER_REFUSALS_ISSUE_3107`) is deleted now that both are read, and the
+# cases are held to the reference in each spelling they can express:
+#   * `verified`: every module `fn` of the long case, marked `verified`.
+#   * `shorthand`: every module `fn` whose body is one `return match`, as
+#     `= match ...`. `body_annotation`'s `helper` keeps its `{ ... }` body: the
+#     `let` with the annotation is the point of the case, and a shorthand body
+#     is one expression, so it cannot hold one.
+#   * `provide_block` is in neither: its `fn settle(answer) = match ...` is
+#     already the shorthand spelling, and the reference's parser refuses
+#     `verified` on a `provide` block method (`expected fn, found 'verified'`).
+GATE_2981_SHORTHAND: dict[str, str] = {
+    "fn_parameter": """fn settle(a: Aggregate[Str]) -> Str = match a {
+  Split(d) => "no",
+  Inquorate(d) => "no",
+}
+""",
+    "record_field": """type Box = { a: Aggregate[Str] }
+
+fn settle(b: Box) -> Str = match b.a {
+  Split(d) => "no",
+  Inquorate(d) => "no",
+}
+""",
+    "transparent_alias": """type Agg = Aggregate[Str]
+
+fn settle(a: Agg) -> Str = match a {
+  Split(d) => "no",
+  Inquorate(d) => "no",
+}
+""",
+    "answer_complete": """fn settle(a: Answer[Str]) -> Str = match a {
+  Says(v) => v,
+  Abstains => "no",
+}
+""",
+    "bare_head_beside_applied": """fn other(a: Aggregate[Str]) -> Str = match a {
+  Agreed(v) => v,
+  Split(d) => "no",
+  Inquorate(d) => "no",
+}
+
+fn settle(a: Aggregate) -> Str = match a {
+  Split(d) => "no",
+  Inquorate(d) => "no",
+}
+""",
+    "bare_head_alone": """fn settle(a: Aggregate) -> Str = match a {
+  Split(d) => "no",
+  Inquorate(d) => "no",
+}
+""",
+    "body_annotation": """fn settle(a: Aggregate) -> Str = match a {
+  Split(d) => "no",
+  Inquorate(d) => "no",
+}
+
+fn helper() -> Str {
+  let xs: List[Aggregate[Str]] = []
+  return "no"
+}
+""",
+    "aggregate_complete": """fn settle(a: Aggregate[Str]) -> Str = match a {
+  Agreed(v) => v,
+  Split(d) => "no",
+  Inquorate(d) => "no",
+}
+""",
+}
+
+GATE_2981_EVENT_FIELD_SHORTHAND = """event Voted(key: id) { id: Str, a: Aggregate[Str] }
+
+fn settle(v: Voted) -> Str = match v.a {
+  Split(d) => "no",
+  Inquorate(d) => "no",
+}
+"""
+
+
+def _verified_2981(src: str) -> str:
+    return re.sub(r"^fn ", "verified fn ", src, flags=re.M)
+
+
+GATE_2981_IN_3107_SPELLINGS = (
+    [(f"shorthand-{n}", s) for n, s in GATE_2981_SHORTHAND.items()]
+    + [(f"verified-{n}", _verified_2981(s))
+       for n, s in PROVIDED_VARIANT_CASES_2981 if n != "provide_block"])
+
+
+@pytest.mark.parametrize("name,src", GATE_2981_IN_3107_SPELLINGS,
+                         ids=[n for n, _ in GATE_2981_IN_3107_SPELLINGS])
+def test_provided_variant_exhaustiveness_in_the_3107_spellings(admit, name, src):
+    # the spelling is really there, so a case cannot fall back to the long body
+    spelled = "verified fn settle(" if name.startswith("verified-") else ") -> Str = match "
+    assert spelled in src, name
+    _agree(admit, src)
+
+
+@pytest.mark.parametrize("src", [
+    GATE_2981_EVENT_FIELD_SHORTHAND,
+    _verified_2981(PROVIDED_VARIANT_EVENT_FIELD_2981),
+], ids=["shorthand", "verified"])
+def test_provided_variant_event_field_in_the_3107_spellings(admit, src):
+    # `_agree` cannot hold: both refuse, under different tags (G4 vs T1).
+    _assert_event_field_verdicts_2981(admit, src)
+
+
+def test_verified_totality_matches_the_reference(admit):
+    # `_check_verified_totality` refuses any `verified fn` in a direct or mutual
+    # recursion cycle, at the declaration line, with its own sentence and G7.
+    # The shorthand spelling rides the SAME graph: its desugared return is what
+    # records the edge, so the cycle is seen there too.
+    direct = ("verified fn recurse(n: Int) -> Int {\n"
+              "  return recurse(n - 1)\n}\n")
+    mutual = ("verified fn a(n: Int) -> Int {\n  return b(n)\n}\n"
+              "fn b(n: Int) -> Int {\n  return a(n)\n}\n")
+    direct_short = "verified fn recurse(n: Int) -> Int = recurse(n - 1)\n"
+    mutual_short = ("verified fn a(n: Int) -> Int = b(n)\n"
+                    "fn b(n: Int) -> Int = a(n)\n")
+    plain = "fn recurse(n: Int) -> Int {\n  return recurse(n - 1)\n}\n"
+    # `_fn_call_graph` walks an `assert` and a pattern `let` too, which the
+    # statement reader behind `FnD.callees` skips: each of these was admitted
+    # by the gate until the edges came from a reader of every statement kind.
+    in_assert = ("verified fn f(n: Int) -> Int {\n"
+                 "  assert f(n) > 0\n  return 0\n}\n")
+    assert_in_if = ("verified fn f(n: Int) -> Int {\n"
+                    "  if (n > 0) { assert f(n) > 0 }\n  return 0\n}\n")
+    mutual_assert = ("verified fn a(n: Int) -> Int {\n"
+                     "  assert b(n) > 0\n  return 0\n}\n"
+                     "fn b(n: Int) -> Int { return a(n) }\n")
+    pattern_let = ("type P = { a: Int }\n"
+                   "verified fn f(n: Int) -> P {\n"
+                   "  let { a } = f(n)\n  return { a: a }\n}\n")
+    for src in (direct, mutual, direct_short, mutual_short, in_assert,
+                assert_in_if, mutual_assert, pattern_let):
+        ref_tag, ref_msg = _ref(src)
+        assert ref_tag == "G7", (ref_tag, ref_msg)
+        assert admit(src) == "G7|" + ref_msg, src
+    assert _ref(plain) == ("", "")
+    assert admit(plain) == ""
+
+
+@pytest.mark.parametrize("src", [
+    "verified fn f(g: (Int) -> Async[Int]) -> Int { return 1 }\n",
+    "pub verified fn f(g: (Int) -> Async[Int]) -> Int = 1\n",
+], ids=["verified", "pub_verified_shorthand"])
+def test_a_verified_fn_takes_no_async_function_parameter(admit, src):
+    # `_validate_declared_types` passes `allow_async_param=not fn.verified`: the
+    # one position that admits an async function type is closed to a verified
+    # fn, under A1 and the type-wellformedness sentence.
+    assert _ref(src)[0] == "A1"
+    _agree(admit, src)
+    plain = src.replace("pub verified ", "").replace("verified ", "")
+    assert _ref(plain) == ("", "")
+    assert admit(plain) == ""
+
+
+# The parse-stage refusals around the two spellings, in the reference's words.
+# Like `PARSE_REFUSED_PROGRAMS` they classify as "OUT:" in the oracle and BAD
+# in the gate, so only the message is compared. `= emit x` is refused by
+# `_lower_pure_expr` rather than the parser, with the same shape.
+GATE_3107_SPELLED = [
+    ("eq_nothing", "fn f(x: Int) -> Int =\n"),
+    ("eq_block", "fn f(x: Int) -> Int = { let y = x\n return y }\n"),
+    ("eq_await", "fn f(x: Int) -> Int = await x\n"),
+    ("eq_emit", "fn f(x: Int) -> Int = emit x\n"),
+    ("eq_nested_emit", "fn f(x: Int) -> Int = 1 + emit x\n"),
+    ("cache_unknown_class", "fn f(x: Int) -> Int cache forever = x\n"),
+    ("cache_number", "fn f(x: Int) -> Int cache 5 = x\n"),
+    ("verified_type", "verified type T = { a: Int }\n"),
+    ("verified_alone", "verified\n"),
+    ("verified_number", "verified 5\n"),
+]
+
+
+@pytest.mark.parametrize("name,src", GATE_3107_SPELLED,
+                         ids=[n for n, _ in GATE_3107_SPELLED])
+def test_the_spellings_around_3107_are_refused_in_the_reference_words(
+        admit, name, src):
+    ref_tag, ref_msg = _ref(src)
+    assert ref_tag == "OUT:" + ref_msg, (name, ref_tag)
+    assert admit(src) == "BAD|" + ref_msg, name
+
+
+# Programs the reference ADMITS and the gate refuses, named so the difference
+# cannot read as agreement. The convention is `NATIVE_GATE_GAPS` and
+# `GENERIC_VARIANT_LOUD_REFUSALS` in tests/test_selfhost_compile.py: each entry
+# is pinned to the gate's exact verdict, fails the day either side changes, and
+# is DELETED rather than reworded when the gate follows the reference.
+#   * `match_arm_recursion`: `_fn_call_graph` does not enter a `match`, so the
+#     reference sees no edge there; the gate's edge walk (`calls_in`) does.
+#   * `templ_recursion`: the same for an interpolation: `collect_expr` does not
+#     enter a template's parts, `calls_in` does.
+#   * `optchain_recursion`: the same for a `?.` chain: `collect_expr` does not
+#     enter its receiver, `calls_in` does.
+#   * `endorse_before_verified`, `verified_before_endorse`: the gate does not
+#     read the `endorse[...]` declaration slot in either position.
+#   * `endorse_expression_in_verified`: the gate's expression reader cannot read
+#     an `endorse[...](...)` expression, so the verified fn's edge set may be
+#     short and the totality question is left open, loudly.
+#   * `endorse_expression_in_callee`: the same, in a callee of the verified fn:
+#     the gate's expression reader cannot read an `endorse[...](...)` expression
+#     there either, so the verified fn's edge set may be short.
+GATE_3107_LOUD_REFUSALS: dict[str, tuple[str, str]] = {
+    "match_arm_recursion": (
+        "type C = Red | Green\n"
+        "verified fn f(c: C) -> Int = match c { Red => f(Green), Green => 0 }\n",
+        "G7|verified fn `f` is not total: it participates in direct or mutual "
+        "recursion (verified totality, syntax-2.0 §7)"),
+    "templ_recursion": (
+        "verified fn f(n: Int) -> Str = `${f(n)}`\n",
+        "G7|verified fn `f` is not total: it participates in direct or mutual "
+        "recursion (verified totality, syntax-2.0 §7)"),
+    "optchain_recursion": (
+        "type R = { a: R? }\n"
+        "verified fn f(r: R?) -> R? = f(r)?.a\n",
+        "G7|verified fn `f` is not total: it participates in direct or mutual "
+        "recursion (verified totality, syntax-2.0 §7)"),
+    "endorse_before_verified": (
+        "endorse[web] verified fn f(n: Int) -> Int = n\n",
+        "BAD|unexpected token at top level"),
+    "verified_before_endorse": (
+        "verified endorse[web] fn f(n: Int) -> Int = n\n",
+        "BAD|unexpected declaration"),
+    "endorse_expression_in_verified": (
+        "verified fn f(n: Int) -> Int {\n"
+        "  let s = endorse[web](n, reason = \"ok\")\n  return n\n}\n",
+        "UNSUPPORTED|the totality of verified fn `f` is not checked by the "
+        "self-host gate: a statement of fn `f` is one its call-graph reader "
+        "does not read"),
+    "endorse_expression_in_callee": (
+        "verified fn f(n: Int) -> Int { return g(n) }\n"
+        "fn g(n: Int) -> Int {\n"
+        "  let s = endorse[web](n, reason = \"ok\")\n  return n\n}\n",
+        "UNSUPPORTED|the totality of verified fn `f` is not checked by the "
+        "self-host gate: a statement of fn `g` is one its call-graph reader "
+        "does not read"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(GATE_3107_LOUD_REFUSALS))
+def test_a_known_3107_loud_refusal_is_still_open(admit, name):
+    src, pinned = GATE_3107_LOUD_REFUSALS[name]
+    assert _ref(src) == ("", ""), f"{name}: the reference no longer admits it"
+    got = admit(src)
+    assert got == pinned, (
+        f"{name}: recorded as {pinned!r}, now {got!r}. If the gate now admits "
+        f"it, DELETE the entry; if the refusal merely changed shape, read it "
+        f"before rewriting it.")

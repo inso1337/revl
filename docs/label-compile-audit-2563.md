@@ -67,11 +67,10 @@ grade and verify), and a regression test for the stored path being absolute
 (a relative `--registry` plus a later chdir must not hide the export area).
 Red before: 5 failed, 4 passed. Green after: 9 passed.
 
-The in-memory case is unchanged and deliberate: `registry._compile_source`
-with no path still compiles under the virtual label
-(`/__revl_registry__/<name>/component.rvl`), as slice 1 (#2615) left it. The
-inversion for text from no file is the central rule's slice; every production
-caller on this path holds a file.
+The in-memory case now fails closed: `registry._compile_source` with no path
+compiles under the virtual label (`/__revl_registry__/<name>/component.rvl`)
+and the authoring profile, because text with no file cannot be shown to be the
+operator's. Every production caller on this path holds a file.
 
 ## The 14 label-only sites that remain
 
@@ -105,13 +104,10 @@ central rule's slice, which is why it is not changed here.
 One site loses a path without calling the compiler itself, so the AST pass
 cannot see it:
 
-* `src/revl/cli/change.py:927` joins `repair --candidate` files into
-  `{"source": "\n".join(...)}`. The join loses every path, and the repair door
-  compiles the result as `<candidate>.rvl`. It needs a decision the join cannot
-  express (profile the whole candidate if any named file is under the export
-  area, or give the door a files form) and it boots a runtime to test, so it is
-  left for the central-rule slice. It is the only known remaining site of this
-  class.
+* `src/revl/cli/change.py` used to join `repair --candidate` files into
+  `{"source": "\n".join(...)}`. The join lost every path, and the repair door
+  compiled the result as `<candidate>.rvl`. It now passes the files, so each
+  candidate is judged by its path (`tests/test_repair_candidate_export_2563.py`).
 
 The other payload sites are covered: `policy evaluate --registry --recompute`
 and `truc ship` now send `files`; `registry._compiled_entry_ir` and
@@ -197,7 +193,7 @@ why a label cannot be export text there.
 | src/revl/recover_binding.py:361 | `compile_composition` | `list(files)` | real | already correct | real path argument |
 | src/revl/registry.py:836 | `build_index` | `[str(source_path)]` | real | already correct | real path argument |
 | src/revl/registry.py:962 | `verify` | `[str(source_path)]` | real | already correct | real path argument |
-| src/revl/registry.py:1069 | `_compile_source` | `[path]` | real | already correct | the helper resolves the real path; its no-path branch is the deferred label fallback |
+| src/revl/registry.py:1069 | `_compile_source` | `[path]` | real | already correct | the helper resolves the real path; its no-path branch compiles under the authoring profile (fails closed) |
 | src/revl/registry.py:1085 | `_compile_stored` | `[path]` | real | already correct | publish dry run of text already compiled from its origin; the name is the destination path |
 | src/revl/registry.py:1199 | `release_facts` | `source_path` | real | already correct | `_compile_source` is handed the real `source_path` |
 | src/revl/registry.py:1269 | `release_facts` | `entry_dir / 'component.rvl'` | real | already correct | the entry's real `component.rvl` inside the registry |
