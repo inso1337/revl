@@ -18,6 +18,7 @@ python mirror on the same schema and items.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
@@ -42,6 +43,17 @@ SCHEMA_PROTO = {"type": "object",
                 "properties": {"id": {"type": "string"}, "__proto__": {"type": "string"}},
                 "required": ["id", "__proto__"], "additionalProperties": False}
 
+SCHEMA_NESTED = {"type": "object",
+                 "properties": {"inner": SCHEMA}, "required": ["inner"],
+                 "additionalProperties": False}
+SCHEMA_OPEN = {"type": "object", "properties": {"id": {"type": "string"}},
+               "required": ["id", "constructor"]}
+SCHEMA_EXTRA_SCHEMA = {"type": "object", "properties": {"id": {"type": "string"}},
+                       "required": ["id"], "additionalProperties": {"type": "integer"}}
+SCHEMA_CONST_ENUM = {"type": "object",
+                     "properties": {"k": {"const": "a"}, "e": {"enum": ["x", "y"]}},
+                     "required": ["k", "e"], "additionalProperties": False}
+
 #: name -> (schema, raw JSON text of the item, admitted)
 CASES = {
     "valid": (SCHEMA, '{"id": "a", "amount": 1}', True),
@@ -57,6 +69,31 @@ CASES = {
     "required___proto___missing": (SCHEMA_PROTO, '{"id": "a"}', False),
     "required___proto___present": (SCHEMA_PROTO, '{"id": "a", "__proto__": "s"}', True),
     "required___proto___wrong_type": (SCHEMA_PROTO, '{"id": "a", "__proto__": 1}', False),
+    "nested_extra_constructor": (
+        SCHEMA_NESTED, '{"inner": {"id": "a", "amount": 1, "constructor": 1}}', False),
+    "nested_valid": (SCHEMA_NESTED, '{"inner": {"id": "a", "amount": 1}}', True),
+    "open_required_constructor_missing": (SCHEMA_OPEN, '{"id": "a"}', False),
+    "open_required_constructor_present": (SCHEMA_OPEN, '{"id": "a", "constructor": 1}', True),
+    "extra_schema_accepts_integer_extra": (
+        SCHEMA_EXTRA_SCHEMA, '{"id": "a", "other": 1}', True),
+    "extra_schema_checks_inherited_name": (
+        SCHEMA_EXTRA_SCHEMA, '{"id": "a", "constructor": "s"}', False),
+    "const_enum_valid": (SCHEMA_CONST_ENUM, '{"k": "a", "e": "x"}', True),
+    "const_enum_bad_const": (SCHEMA_CONST_ENUM, '{"k": "b", "e": "x"}', False),
+    "const_enum_bad_enum": (SCHEMA_CONST_ENUM, '{"k": "a", "e": "z"}', False),
+}
+
+#: the reason each refused case must give, so a wrong rejection cannot pass
+REASON = "unexpected property"
+REASONS = {
+    "required_toString_missing": "missing required property",
+    "required___proto___missing": "missing required property",
+    "open_required_constructor_missing": "missing required property",
+    "required_toString_wrong_type": "expected type",
+    "required___proto___wrong_type": "expected type",
+    "extra_schema_checks_inherited_name": "expected type",
+    "const_enum_bad_const": "expected const",
+    "const_enum_bad_enum": "is not one of",
 }
 
 
@@ -109,15 +146,16 @@ def test_ts_admits_exactly_what_the_schema_declares(ts_results, name):
     assert got["admitted"] is expected, (name, got)
     if not expected:
         assert "failed its schema" in got["error"], (name, got)
+        assert REASONS.get(name, REASON) in got["error"], (name, got)
 
 
 @pytest.mark.parametrize("name", sorted(CASES))
 def test_python_mirror_agrees_with_the_ts_verdict(ts_results, name):
-    sys.path.insert(0, str(ROOT / "backends" / "python"))
-    try:
-        import runtime as py_runtime   # backends/python/runtime.py
-    finally:
-        sys.path.remove(str(ROOT / "backends" / "python"))
+    spec = importlib.util.spec_from_file_location(
+        "py_runtime_3210", ROOT / "backends" / "python" / "runtime.py")
+    py_runtime = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = py_runtime
+    spec.loader.exec_module(py_runtime)
 
     schema, raw, expected = CASES[name]
     err = py_runtime._json_schema_error(json.loads(raw), schema)
