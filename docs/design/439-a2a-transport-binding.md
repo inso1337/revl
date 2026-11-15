@@ -2,7 +2,11 @@
 
 Item: roadmap 439. Issue: #118. Status: BINDING, landed, last revised 2026-09-15
 (`revl audit` resolves a composition document, so the CLI reaches the same G8
-surface the property is pinned over; slice G8c).
+surface the property is pinned over; slice G8c). Status note, 2026-11-07: neither
+T2 (the `Stream[T]` sugar) nor T3 (push notifications) landed in this binding;
+the re-verified paragraph under "What is NOT decided" records that T2 is a 130
+decision about the provider side and that T3 is an inbound PROVISION rather than
+a client-side crossing.
 The semantics are item 424 gap (c)'s and are not reopened here; the Task
 lifecycle is `docs/design/439-a2a-task-lifecycle.md`'s and is not re-decided
 here. This note records what the binding IS, where every guarantee still applies

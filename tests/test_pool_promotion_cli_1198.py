@@ -78,6 +78,9 @@ ATTESTOR = "pool-attestor"
 WORKER_ID = pi.identity_from_seed(WORKER, b"seed/worker/1198-promotion")
 OTHER_ID = pi.identity_from_seed(OTHER, b"seed/other/1198-promotion")
 ATTESTOR_ID = pi.identity_from_seed(ATTESTOR, b"seed/attestor/1198-promotion")
+#: The operator that signs a task (issue #2720). The charter is a symmetric
+#: record signed with ``OP_KEY``; a task is an asymmetric one.
+OPERATOR_ID = pi.identity_from_seed("operator", b"seed/operator/1198-promotion")
 #: A well-formed key pair nobody pinned. That is what makes it an intruder.
 INTRUDER_ID = pi.identity_from_seed("intruder", b"seed/intruder/1198-prom")
 
@@ -117,6 +120,24 @@ WAIT = 240
 # ---------------------------------------------------------------------------
 
 
+def signed_task(record, *, task_id, artifact=ARTIFACT, peer_id=WORKER,
+                grant=None, policy_digest=None):
+    """The operator-signed task a bound receipt answers (issue #2720)."""
+    grant = grant if grant is not None else {
+        "caps": sorted(ENTRY_CAPS), "budgets": {}}
+    policy = (policy_digest if policy_digest is not None
+              else pp.canonical_digest(record))
+    return pd.sign_task(
+        {"kind": pd.TASK_KIND, "version": pd.TASK_VERSION,
+         "pool_id": record["pool_id"],
+         "charter_digest": pp.canonical_digest(record),
+         "peer_id": peer_id, "task_id": task_id,
+         "artifact_digest": artifact, "artifact": "", "runner": "run",
+         "effect_class": "pure", "issued_at": pp._iso(pp._utc_now()),
+         "grant": grant, "policy_digest": policy},
+        OPERATOR_ID)
+
+
 class Pool:
     """A pool directory, its key files and the arguments a CLI call needs."""
 
@@ -146,21 +167,36 @@ class Pool:
 
     def deliver(self, ledger, *, task_id: str, receipt_identity=WORKER_ID,
                 attestor=ATTESTOR_ID, counts=False, peer_id=WORKER,
-                artifact=None):
+                artifact=None, grant=None, policy_digest=None):
         """One task out, one signed `(receipt, attestation)` pair back.
 
         ``counts`` defaults to FALSE on purpose. That flag is the
         dispatcher's verdict at dispatch time, and none of these tests want
         the promotion to be able to lean on it -- F1b is the pin that it
-        cannot."""
+        cannot.
+
+        The task and the receipt are the 1.1 shape (issue #2720): a promotion
+        requires the authority binding, so a fixture that produced a 1.0
+        receipt would measure the version rule instead of the ladder."""
         artifact = artifact or ARTIFACT
+        grant = grant if grant is not None else {
+            "caps": sorted(ENTRY_CAPS), "budgets": {}}
+        policy = (policy_digest if policy_digest is not None
+                  else pp.canonical_digest(self.record))
+        task = signed_task(self.record, task_id=task_id, artifact=artifact,
+                           peer_id=peer_id, grant=grant,
+                           policy_digest=policy)
         ledger.dispatch(task_id=task_id, peer_id=peer_id,
                         artifact_digest=artifact, runner="run",
-                        effect_class="pure")
+                        effect_class="pure", task=task)
         receipt = pr.issue_receipt(pool_id=self.record["pool_id"],
                                    task_id=task_id, artifact_digest=artifact,
                                    result={"rows": 1},
-                                   identity=receipt_identity)
+                                   identity=receipt_identity,
+                                   task_digest=pr.receipt_digest(task),
+                                   grant=grant, policy_digest=policy,
+                                   outcome=pr.COMPLETED,
+                                   budget_consumed={})
         attestation = pr.attest_receipt(receipt, identity=attestor)
         return ledger.deliver(task_id=task_id, peer_id=peer_id,
                               result_digest="r" * 64, receipt_digest="c" * 64,
@@ -504,21 +540,32 @@ def test_two_receipts_sharing_a_task_id_count_once(tmp_path):
     rung above entry would be reachable from one delivery."""
     pool = pool_on_disk(tmp_path, tiers=rung(evidence=2))
     ledger = pool.ledger()
+    first_task = signed_task(pool.record, task_id="task-1")
     ledger.dispatch(task_id="task-1", peer_id=WORKER, artifact_digest=ARTIFACT,
-                    runner="run", effect_class="pure")
+                    runner="run", effect_class="pure", task=first_task)
     first = pr.issue_receipt(pool_id=pool.record["pool_id"], task_id="task-1",
                              artifact_digest=ARTIFACT, result={"rows": 1},
-                             identity=WORKER_ID)
+                             identity=WORKER_ID,
+                             task_digest=pr.receipt_digest(first_task),
+                             grant=first_task["grant"],
+                             policy_digest=first_task["policy_digest"],
+                             outcome=pr.COMPLETED, budget_consumed={})
     ledger.deliver(task_id="task-1", peer_id=WORKER, result_digest="r" * 64,
                    receipt_digest="c" * 64, counts=False, receipt=first,
                    attestation=pr.attest_receipt(first, identity=ATTESTOR_ID))
+    # A second ledger slot, but the SAME `task_id` inside both the receipt and
+    # the task it answers: the work being claimed does not change because the
+    # slot did. Only the dedup can refuse it.
+    again_task = signed_task(pool.record, task_id="task-1")
     again = pr.issue_receipt(pool_id=pool.record["pool_id"], task_id="task-1",
                              artifact_digest=ARTIFACT, result={"rows": 2},
-                             identity=WORKER_ID)
-    # A second task id, but the SAME `task_id` inside the receipt: the ledger
-    # slot differs while the work being claimed does not.
+                             identity=WORKER_ID,
+                             task_digest=pr.receipt_digest(again_task),
+                             grant=again_task["grant"],
+                             policy_digest=again_task["policy_digest"],
+                             outcome=pr.COMPLETED, budget_consumed={})
     ledger.dispatch(task_id="task-2", peer_id=WORKER, artifact_digest=ARTIFACT,
-                    runner="run", effect_class="pure")
+                    runner="run", effect_class="pure", task=again_task)
     ledger.deliver(task_id="task-2", peer_id=WORKER, result_digest="r" * 64,
                    receipt_digest="c" * 64, counts=False, receipt=again,
                    attestation=pr.attest_receipt(again, identity=ATTESTOR_ID))
@@ -887,8 +934,10 @@ def test_evidence_pairs_is_a_read_accessor_not_a_judge():
 
 
 def test_evidence_pairs_returns_only_pairs_and_only_for_one_peer(tmp_path):
-    """The accessor's contract, spelled out: entries without BOTH halves are
-    not pairs, and another peer's work is not this peer's evidence."""
+    """The accessor's contract, spelled out: entries without BOTH signed halves
+    are not pairs, and another peer's work is not this peer's evidence. The
+    third member is the operator-signed task a bound receipt answers (issue
+    #2720), carried when the ledger has one and ``None`` when it does not."""
     pool = pool_on_disk(tmp_path, members=(WORKER, OTHER), tiers=rung())
     ledger = pool.ledger()
     pool.deliver(ledger, task_id="task-1")
@@ -902,8 +951,10 @@ def test_evidence_pairs_returns_only_pairs_and_only_for_one_peer(tmp_path):
 
     pairs = pd.evidence_pairs(ledger, peer_id=WORKER)
     assert len(pairs) == 1, pairs
-    assert all(isinstance(r, dict) and isinstance(a, dict) for r, a in pairs)
+    assert all(isinstance(r, dict) and isinstance(a, dict)
+               and isinstance(t, dict) for r, a, t in pairs)
     assert pairs[0][0]["task_id"] == "task-1"
+    assert pairs[0][2]["task_id"] == "task-1"
     assert pd.evidence_pairs(ledger, peer_id="nobody") == []
 
 
@@ -999,15 +1050,22 @@ def test_the_whole_flow_through_the_real_cli(tmp_path):
     assert code == 1
     assert json.loads(out)["link"] == pp.LINK_PROMOTION_EVIDENCE
 
-    # Two real deliveries, through the ledger the dispatcher writes.
+    # Two real deliveries, through the ledger the dispatcher writes. Each is
+    # bound to an operator-signed task, which is what a promotion requires
+    # (issue #2720).
+    record, _roster = pp.load_pool(pool_dir)
     ledger = pd.load_ledger(pool_dir)
     for n in (1, 2):
+        task = signed_task(record, task_id=f"task-{n}")
         receipt = pr.issue_receipt(
             pool_id="demo", task_id=f"task-{n}", artifact_digest=ARTIFACT,
-            result={"rows": n}, identity=pi.load_private_identity(worker_key))
+            result={"rows": n}, identity=pi.load_private_identity(worker_key),
+            task_digest=pr.receipt_digest(task), grant=task["grant"],
+            policy_digest=task["policy_digest"], outcome=pr.COMPLETED,
+            budget_consumed={})
         ledger.dispatch(task_id=f"task-{n}", peer_id=WORKER,
                         artifact_digest=ARTIFACT, runner="run",
-                        effect_class="pure")
+                        effect_class="pure", task=task)
         ledger.deliver(task_id=f"task-{n}", peer_id=WORKER,
                        result_digest="r" * 64, receipt_digest="c" * 64,
                        counts=False, receipt=receipt,

@@ -8,7 +8,9 @@ Implementation: `src/revl/attest.py` (the pure attestation model, signing,
 verification, the loaders and renders), `src/revl/cert.py` (the component
 certificate of section 7), `src/revl/__main__.py` (`revl attest`),
 `tests/test_attest.py`. Roadmap item 127; the certificate envelope is roadmap
-item 474 (issue #826) and is documented in section 7.
+item 474 (issue #826) and is documented in section 7. A chain-neutral anchor
+over a set of existing digests is a separate record, documented in
+[revl-anchor.md](revl-anchor.md).
 
 ---
 

@@ -138,8 +138,8 @@ def test_the_admitted_provider_is_not_reported_as_an_irreversible_crossing():
     # the crossing is still enumerated — as the reversible class it is, on the
     # host-code surface where the extern it really reaches is named.
     assert [ext for ext in boundary["externs"] if ext["name"] == "write_val"] == [
-        {"name": "write_val", "class": "witnessed", "backends": ["py", "ts"],
-         "capabilities": ["store"]}]
+        {"name": "write_val", "class": "witnessed", "inverse": "declared",
+         "backends": ["py", "ts"], "capabilities": ["store"]}]
 
 
 # ------------------------------------------------------ the purity direction

@@ -138,7 +138,6 @@
     "step=approval"
   ],
   "emit_rust": [
-    "bind=_",
     "class=emission",
     "class=witnessed",
     "interp_type=Float",
@@ -237,6 +236,7 @@
     "step=let-effect",
     "step=provide",
     "subscribe=<true>",
+    "widen=Float",
     "witness=Str"
   ],
   "gate_census": [

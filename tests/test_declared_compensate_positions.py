@@ -221,7 +221,8 @@ def test_a_non_ui_extern_registers_at_its_site_with_its_named_call():
     assert "call_scope(" not in code
     assert "_revl_declared_crossing" not in code
     assert ("_revl_frame.compensation_method(lambda: undo_let(), "
-            "call={'receiver': None, 'method': 'undo_let', 'args': []})") in code
+            "call={'receiver': None, 'method': 'undo_let', 'args': []}, "
+            "crossing='put_let')") in code
 
 
 # ------------------------------------ the shape the examples/ax lane reported

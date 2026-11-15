@@ -194,7 +194,9 @@ def seal(*, step_index, role, placement, answer, prompt, recorded_at=None):
         placement_digest=placement,
         prompt_binding={"mode": "content-addressed",
                         "value": me.digest(prompt), "reason": None},
-        origins=["input"], candidates=[answer], chosen=0,
+        template_digest=me.digest("agent prompt {input}"),
+        origins=["input"], reasoning=me.reasoning_span(),
+        candidates=[answer], chosen=0,
         outcome="validated", sampling=dict(SAMPLING), policy_digest=POLICY,
         fallback_depth=0, recorded_at=recorded_at)
 

@@ -838,13 +838,16 @@ _TS_RENAMABLE_ROLES = (
     "binding", "loop binding", "match bind", "capture", "inverse capture",
     "arrow parameter", "parameter", "parameter name", "extern parameter name",
     "lifecycle binding", "name", "function", "function name",
+    # issue #3127: an extern is bound inside the emitted module (nothing on
+    # the host resolves it by name, unlike a component), so it is renamed.
+    "extern name",
 )
 _TS_VERBATIM_KEY_ROLES = (
     "record field", "field", "optional field", "binding field", "method",
 )
 _TS_REFUSED_ROLES = (
     "config field", "requirement", "provision key", "type name", "service",
-    "component", "extern name", "secret name", "ref symbol", "case name",
+    "component", "secret name", "ref symbol", "case name",
 )
 _JAVA_RENAMABLE_ROLES = (
     "binding", "loop binding", "match bind", "name", "parameter",
@@ -993,9 +996,11 @@ lifecycle test "u" { load C let z = call echo.echo("z") assert z == "z" }
 _A3_PLAIN_DIGEST = {
     # issue #2975 moved the typescript lifecycle driver's own locals to the
     # `$revl_` sigil (the fixture below carries a `lifecycle test`, so its
-    # emitted bytes move with every such document). A program with no
-    # lifecycle test, or a binding outside that driver, is unchanged.
-    "typescript": "07b0bf8ace729df3cfde2b5974209e58c22aeab182ef8a3993819e9e4bceed29",
+    # emitted bytes move with every such document). issue #3053 then moved the
+    # driver's runtime-helper imports to the same sigil and its load handle to
+    # `$revl_f`. A program with no lifecycle test, or a binding outside that
+    # driver, is unchanged.
+    "typescript": "ed679cf45dd83655fa7d7a8935ef7e63a53cf8d8033f502e5364a5edf9a95f77",
     "java": "954352a27d29f3ce72adbad77ae1ff2921899db6c2255d91a4f454c165149310",
 }
 

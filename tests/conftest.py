@@ -176,8 +176,36 @@ _SHARD_WEIGHTS = os.environ.pop("REVL_SHARD_WEIGHTS", "") or None
 # The files this run split into test families, timed per family below.
 _SHARD_SPLIT: set = set()
 
+# Issue #2216: the marked slow lane. A test that is slow by NATURE (a fuzz
+# grown to a size bound, a wall-clock comparison) carries `@pytest.mark.slow`.
+# The fast lanes -- the pre-commit hook, `pre-merge --affected`, and CI's
+# pull-request `root-suite-affected` job -- set REVL_SKIP_SLOW=1 and this run
+# deselects those tests; the full gate (plain `make pre-merge`) and the
+# merge-queue `frontend` matrix do not, so the slow lane still runs before land.
+# Read once and removed from the environment for the same reason as
+# REVL_TEST_SHARD: a pytest that a test starts runs the whole suite it asks
+# for, not the parent run's fast lane.
+@functools.cache
+def _slow_lane_module():
+    spec = importlib.util.spec_from_file_location(
+        "revl_tests_slow_lane", Path(__file__).with_name("_slow_lane.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_SKIP_SLOW = _slow_lane_module().enabled(os.environ)
+os.environ.pop(_slow_lane_module().ENV, None)
+
 
 def pytest_collection_modifyitems(config, items):
+    if _SKIP_SLOW:
+        keep, slow = _slow_lane_module().split(items)
+        if slow:
+            items[:] = keep
+            config.hook.pytest_deselected(items=slow)
+            print(f"\nREVL_SKIP_SLOW: deselected {len(slow)} marked slow "
+                  "test(s); the slow lane runs in the full gate")
     spec = _SHARD_SPEC
     if not spec:
         return
@@ -550,6 +578,25 @@ def _isolate_import_state():
         sys.path[:] = path_before
         for name in _generation_modules() - generations_before:
             del sys.modules[name]
+
+
+@pytest.fixture(scope="session")
+def cargo_target_dir(tmp_path_factory) -> Path:
+    """One `CARGO_TARGET_DIR` shared by the fixtures that build cargo crates.
+
+    Issue #2216: each cargo-building module fixture used to make its own target
+    directory, so the standalone consumer, the crate's own `cargo test` and the
+    committed consumer example each compiled the same dependency graph
+    (cordis-rs, serde, serde_json, `revl-gate`) from scratch. They pass this
+    directory with `--target-dir`, so whichever build runs second reuses the
+    first one's artifacts. Cargo keeps the debug and release profiles in
+    separate subdirectories, so the release harness build still gets its own
+    profile while sharing the directory.
+
+    It is outside the checkout: a test run leaves no untracked `target/` in the
+    tree, which the release-profile fixture already required.
+    """
+    return tmp_path_factory.mktemp("cargo-target")
 
 
 @pytest.fixture

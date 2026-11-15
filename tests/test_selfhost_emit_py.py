@@ -123,6 +123,7 @@ CORPUS = [
     "strings.rvl",     # the stdlib string builtins and `${…}` interpolation
     "control.rvl",     # while/for/if, match (Some/None/wildcard), sync arrow
     "records.rvl",     # record literal, functional record update, list literal
+    "direct_reads.rvl",  # issue #3407: direct reads of records built here, dispatch kept elsewhere
     "optionals.rvl",   # optional-call chaining (opt receiver)
     "mixed.rvl",       # a cross-section of the above in three functions
     "user_names_like_temps.rvl",  # user locals spelled like emitter temporaries (issue #2913)
@@ -367,6 +368,7 @@ CORPUS = [
     # which is what the line-coverage ledger reported.
     "keyword_config_value_field.rvl",
     "services_method_effects.rvl",  # method-body `effect` + saga `emit ... compensate`: the `_revl_frame.adopt` accumulator + `_label`/`_effect_N`/`_emit_N` counter
+    "method_effect_coalesce.rvl",  # issue #3304: `adopt_bracket` for an absolute table inverse, `adopt` for a computed key
     # item 383 / 391 (self-host port) — the `.map`/`.filter`/`.reduce` transforms
     # desugar (frontend) to `list_map`/`list_filter`/`list_reduce` free calls; the
     # py tier lowers the function-value params, arrow args, and `f(x)` calls.
@@ -403,6 +405,11 @@ CORPUS = [
     # lowered these as `builtin` nodes — the gap was emission-only, and invisible
     # for the same reason: nothing in the corpus divided totally.
     "checked_div.rvl",
+    # docs/arithmetic.md's total checked_add/sub/mul: the per-form helper
+    # and the Result they build, on every tier that holds this document.
+    "checked_arith.rvl",
+    # The same forms bound by a `let` and matched, with no `Result` in a signature.
+    "checked_arith_read.rvl",
     # item 189: the Value dot-accessors. Byte-identical BY CONSTRUCTION on this
     # tier (the redirect happens in the frontend, so the emitter sees a plain
     # call) — the document is here so the emit oracle pins that property, while
@@ -598,10 +605,10 @@ def test_inline_templates_preserve_argument_evaluation(emitted):
     assert ns["run_inline"](4, next_value) == 23
     assert calls == [1, 2, 3, 4]
     assert ns["pure_arguments"]([1, 2]) == 7
-    assert "a = next()" in source
-    assert "b = twice_inline(next())" in source
-    assert "c = ignores(next())" in source
-    assert "d = conditional_only(next())" in source
+    assert "a = next_()" in source
+    assert "b = twice_inline(next_())" in source
+    assert "c = ignores(next_())" in source
+    assert "d = conditional_only(next_())" in source
     assert "return recursive_inline(x)" in source
     assert ns["guarded"](-1) == 0
     assert ns["guarded"](99) == 10
@@ -1044,4 +1051,32 @@ def test_a_pub_fn_spelled_like_an_emitter_temporary_is_refused_by_name(reference
     with pytest.raises(reference.EmitError,
                        match="pub fn '_run' is spelled like the python emitter "
                              "temporary '_run'"):
+        reference.emit(ir)
+
+
+# issue #2688: a declared ceiling is enforced or refused, never silently
+# promised. A local wrapper the runtime meter cannot attribute exactly is
+# refused at emit time by name. The two fixtures below are what
+# `tools/selfhost_line_coverage.py` drives the refusal arms over, so they are
+# not corpus documents (the reference REFUSES them, so there is no reference
+# byte text to agree with) and their refusal text is pinned here.
+
+def test_a_ceiling_wrapper_shape_is_refused_by_name(reference):
+    """A payload-transforming, multi-call, looped, conditional or recursive
+    wrapper would leave `net(calls=1)` under- or over-charged, so the reference
+    refuses the document and names the capability and the shape."""
+    ir = compile_files([str(REFUSALS_DIR / "ceiling_wrapper_shapes.rvl")])
+    with pytest.raises(reference.CeilingUnattributable,
+                       match=r"declared ceiling on `net\(calls=1\)`[^`]*"
+                             r"payload-transforming call"):
+        reference.emit(ir)
+
+
+def test_a_value_position_ceiling_wrapper_is_refused_by_name(reference):
+    """`let a = emit go("a")` never reaches `extern_emit`, so the meter cannot
+    see it at all; the reference refuses the value-position wrapper by name."""
+    ir = compile_files([str(REFUSALS_DIR / "ceiling_value_position_wrapper.rvl")])
+    with pytest.raises(reference.CeilingUnattributable,
+                       match=r"declared ceiling on `net\(calls=1\)`[^`]*"
+                             r"value-position emission"):
         reference.emit(ir)

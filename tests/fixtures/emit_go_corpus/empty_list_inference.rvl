@@ -1,0 +1,199 @@
+// An untyped `[]` takes the element type of where its binding flows, or of
+// what is pushed into it, or else the slice the tier gave it when the binding
+// is only sized (issues #2898, #2915, #2918). The reference Go emitter and its
+// self-host port must agree byte for byte on every shape here.
+//
+// This document is the port's witness for the inference in
+// `selfhost/emit_go.rvl`: see `tests/fixtures/emit_go_refusals/` for the two
+// shapes the reference refuses.
+
+pub fn dup(xs: List[Str]) -> List[Str] {
+  var out = []
+  for (x of xs) { out = out.push(x) }
+  return out
+}
+
+type Bag = { items: List[Str], n: Int }
+
+// `items` flows only into a record field
+pub fn bag(xs: List[Str]) -> Bag {
+  var items = []
+  for (x of xs) { items = items.push(x) }
+  return { items: items, n: items.length() }
+}
+
+// `row` flows only as an element of `out`, and `out` flows to the return
+pub fn windows(n: Int) -> List[List[Int]] {
+  var out = []
+  var row = []
+  var i = 0
+  while (i < n) {
+    row = row.push(i)
+    out = out.push(row)
+    i = i + 1
+  }
+  return out
+}
+
+// `seen` flows nowhere typed: what is pushed into it decides
+pub fn count(xs: List[Str]) -> Int {
+  var seen = []
+  for (x of xs) { seen = seen.push(x) }
+  return seen.length()
+}
+
+// only sized, or never read at all: any element type builds
+pub fn sized() -> Int {
+  var out = []
+  return out.length()
+}
+pub fn unused() -> Int {
+  let values = []
+  return 1
+}
+pub fn rebound() -> Int {
+  var out = []
+  out = []
+  return out.length()
+}
+
+// assigned another list, then only sized: the assignment fixes the type
+pub fn assigned() -> Int {
+  var out = []
+  let xs = ["a"]
+  out = xs
+  return out.length()
+}
+
+// untyped empty lists assigned to one another share one type, and a concat on
+// the list itself types it from the argument
+pub fn alias() -> Int {
+  var a = []
+  var out = []
+  out = a
+  a = out
+  return out.length()
+}
+pub fn alias_pushed(xs: List[Str]) -> Int {
+  var a = []
+  for (x of xs) { a = a.push(x) }
+  var out = []
+  out = a
+  return out.length()
+}
+pub fn grow() -> Int {
+  var out = []
+  out = out.concat(["a"])
+  return out.length()
+}
+
+// two bindings of one name in disjoint blocks are two bindings, each typed on
+// its own
+pub fn pick(xs: List[Str], b: Bool) -> List[Int] {
+  if (b) {
+    var out = []
+    for (x of xs) { out = out.push(x) }
+    return [out.join("|").length()]
+  } else {
+    var out = []
+    return out
+  }
+}
+pub fn both(xs: List[Str], ns: List[Int]) -> Int {
+  var a = []
+  for (x of xs) { a = a.push(x) }
+  var b = []
+  for (x of ns) { b = b.push(x) }
+  return a.length() + b.length()
+}
+
+// a THIRD binding of one name takes the `#3` key
+pub fn third(b: Bool) -> Int {
+  if (b) {
+    let n = 1
+    return n
+  }
+  if (b) {
+    let n = 2
+    return n
+  }
+  let n = 3
+  return n
+}
+
+// a push receiver that already flows into a non-List target hands no element
+// type on; what is pushed decides the list instead
+fn takes_any(v: Any) -> Int { return 1 }
+pub fn mixed(x: Int) -> Int {
+  var acc = []
+  acc = acc.push(x)
+  takes_any(acc)
+  return acc.length()
+}
+
+// a push whose element type is erased carries no evidence: the list keeps the
+// slice main gave it
+pub fn pushed_any() -> Int {
+  var out = []
+  out = out.push(Ok(1))
+  return out.length()
+}
+
+// a concat of another untyped empty list hands no type on either
+pub fn joined() -> Int {
+  var a = []
+  var out = []
+  out = out.concat(a)
+  return out.length()
+}
+
+// an arrow parameter shadows the outer binding inside the arrow only
+pub fn arrow_shadow() -> Int {
+  var out = []
+  let f = (out: Int) => out + 1
+  return out.length() + f(1)
+}
+
+// an assignment whose value is a push on ANOTHER list still types the target
+pub fn pushed_from(xs: List[Int]) -> Int {
+  var out = []
+  out = xs.push(1)
+  return out.length()
+}
+
+// a match arm binder shadows the outer list: the match is typed from the arm
+// bodies with the binder in scope, the Int payload (issue #3075)
+pub fn binder_shadow(o: Opt[Int]) -> Int {
+  var out = []
+  let n = match o { Some(out) => out, None => 0 }
+  return out.length() + n
+}
+
+// a `let _` binds nothing and consumes no key; the blank identifier is never
+// an unused local, so no `_ = _` follows it (issue #3074)
+pub fn blank(s: Str) -> Int {
+  var out = []
+  let _ = s
+  return out.length() + s.length()
+}
+
+test "the untyped empty lists build and run" {
+  assert dup(["b", "a"]).join("|") == "b|a"
+  assert bag(["x"]).items.join("|") == "x"
+  assert windows(2)[1].length() == 2
+  assert count(["p", "q"]) == 2
+  assert sized() == 0 && unused() == 1 && rebound() == 0
+  assert assigned() == 1
+  assert alias() == 0 && alias_pushed(["p"]) == 1 && grow() == 1
+  assert pick(["ab", "c"], true)[0] == 4
+  assert pick(["ab"], false).length() == 0
+  assert both(["a"], [1]) == 2
+  assert third(false) == 3
+  assert mixed(1) == 1
+  assert pushed_any() == 1
+  assert joined() == 0
+  assert arrow_shadow() == 1
+  assert pushed_from([1]) == 2
+  assert binder_shadow(Some(4)) == 4 && binder_shadow(None) == 0
+  assert blank("ab") == 2
+}

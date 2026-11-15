@@ -124,6 +124,62 @@ def test_every_layer_carries_a_reason():
 
 
 # ---------------------------------------------------------------------------
+# a change of model is a layer-state event
+# ---------------------------------------------------------------------------
+
+def test_the_four_learned_layers_depend_on_the_model_and_three_do_not():
+    """The registry's model-dependence column, pinned by name. The four
+    stateful layers are the four whose state is a statistic over a model's
+    choices; the three declaration layers are restored by re-declaring them
+    whatever model wrote the declaration."""
+    assert [x.name for x in LAYERS if x.model_bound] == [
+        "routing", "workflows", "memory", "device-placement"]
+    assert [x.name for x in LAYERS if not x.model_bound] == [
+        "policies", "components", "runtime"]
+
+
+def test_a_change_of_model_stales_every_learned_layer():
+    """A model change is an event over the learned state, in registry order,
+    and the safe answer is that none of it transfers until it is re-validated
+    under the new model."""
+    assert ls.stale_after_model_change("backbone-a", "backbone-b") == (
+        "routing", "workflows", "memory", "device-placement")
+
+
+def test_the_same_model_stales_nothing():
+    assert ls.stale_after_model_change("backbone-a", "backbone-a") == ()
+
+
+def test_an_unnamed_model_is_a_change_rather_than_a_match():
+    """An identity that is empty or not a string cannot be shown to be the
+    same model, so the learned state is stale rather than read as fresh."""
+    assert ls.stale_after_model_change("", "") == (
+        "routing", "workflows", "memory", "device-placement")
+    assert ls.stale_after_model_change("backbone-a", "") == (
+        "routing", "workflows", "memory", "device-placement")
+    assert ls.stale_after_model_change(None, None) == (
+        "routing", "workflows", "memory", "device-placement")
+
+
+def test_revalidating_under_the_new_model_clears_only_the_named_layer():
+    assert ls.stale_after_model_change(
+        "backbone-a", "backbone-b", revalidated=["memory"]) == (
+            "routing", "workflows", "device-placement")
+
+
+def test_a_revalidation_name_the_registry_does_not_know_stales_the_real_layer():
+    """The safe direction for a typo: naming `memroy` revalidates nothing, so
+    `memory` stays stale. Naming a layer that was never stale is harmless for
+    the same reason: it cannot become fresh when it was never staled."""
+    assert ls.stale_after_model_change(
+        "backbone-a", "backbone-b", revalidated=["memroy"]) == (
+            "routing", "workflows", "memory", "device-placement")
+    assert ls.stale_after_model_change(
+        "backbone-a", "backbone-b", revalidated=["policies"]) == (
+            "routing", "workflows", "memory", "device-placement")
+
+
+# ---------------------------------------------------------------------------
 # the failure direction: absence is not a class
 # ---------------------------------------------------------------------------
 

@@ -22,7 +22,9 @@ type Gathered  = { entry: List[EntryFile], vendored: List[Vendored] }
 type Ordered   = { path: Str, source: Str, name: Str }
 type LockRow   = { name: Str, sourceHash: Str }
 type LockFile  = { trucs: List[LockRow] }
-type Entry     = { name: Str, source: Str, manifest: Str }
+// `dossier` is absent (None) when the entry does not ship one. The commit plan
+// carries its hash either way, so an absent dossier is asserted as absent.
+type Entry     = { name: Str, source: Str, manifest: Str, dossier: Opt[Str] }
 type IndexRow  = { name: Str, sourceHash: Str }
 // `manifest` is the gate's composition manifest, carried on a successful
 // verdict. It is modelled here (item 380) so it can be read as a typed record
@@ -49,7 +51,13 @@ type Wiring  = { provided: List[Str], needs: List[Need] }
 type Report   = { code: Int, message: Str, sources: Str, commit: Str }
 // `admission` is how the gate admitted the row: "profiled", or
 // "trusted-host-code" when only --trust-host-code admitted its host code.
-type LockAdd  = { name: Str, registry: Str, admission: Str }
+// The three hashes are the hashes of the entry text `truc add` read and checked,
+// the bytes `commit_add` must find when it vendors them. `component.rvl` is
+// also the text the gate admits; `manifest.json`/`dossier.json` are pinned but
+// never enter the gate. A file the entry does not ship is carried as "" and
+// asserted absent.
+type LockAdd  = { name: Str, registry: Str, admission: Str,
+                  sourceHash: Str, manifestHash: Str, dossierHash: Str }
 type Commit   = { lockAdd: LockAdd }
 type RmCommit = { name: Str }
 
@@ -235,8 +243,16 @@ fn plan_assemble_report(dj: Str, vj: Str, gj: Str) -> Str {
   return report(0, msg, manifestStr, "")
 }
 
-fn build_commit(name: Str, admission: Str) -> Str {
-  let c: Commit = { lockAdd: { name: name, registry: "local", admission: admission } }
+// The plan the commit executes. The three hashes are computed from the SAME
+// `entryJson` the planner checked against the index and read for admission (its
+// `component.rvl` is the gate's candidate), so `commit_add` can refuse any
+// registry read that no longer matches what was checked, including an entry
+// and its index row replaced together.
+fn build_commit(name: Str, admission: Str, sourceHash: Str, manifestHash: Str,
+                dossierHash: Str) -> Str {
+  let c: Commit = { lockAdd: { name: name, registry: "local", admission: admission,
+                               sourceHash: sourceHash, manifestHash: manifestHash,
+                               dossierHash: dossierHash } }
   return json_stringify(c)
 }
 
@@ -252,15 +268,20 @@ fn plan_add_report(rowJson: Str, name: Str, entryJson: Str, vj: Str) -> Str {
   if (actual != row.sourceHash) {
     return report(1, "truc: refused — registry entry disagrees with its own index (source-hash mismatch)", "", "")
   }
+  let manifestHash = sha256_hex(e.manifest)
+  let dossierHash = match e.dossier {
+    None => "",
+    Some(text) => sha256_hex(text)
+  }
   let v: Verdict = json_parse(vj)
   if (!v.ok) {
     return report(1, `truc: refused — "${name}" would not join the assembly:
 `.concat(v.diagnostic), "", "")
   }
   if (list_has(v.trusted, name)) {
-    return report(0, `truc: added "${name}" — admitted with its host code trusted by --trust-host-code, vendored into trucs/, pinned in truc.lock (which records the trust)`, "", build_commit(name, "trusted-host-code"))
+    return report(0, `truc: added "${name}" — admitted with its host code trusted by --trust-host-code, vendored into trucs/, pinned in truc.lock (which records the trust)`, "", build_commit(name, "trusted-host-code", actual, manifestHash, dossierHash))
   }
-  return report(0, `truc: added "${name}" — admitted as an untrusted author, vendored into trucs/, pinned in truc.lock`, "", build_commit(name, "profiled"))
+  return report(0, `truc: added "${name}" — admitted as an untrusted author, vendored into trucs/, pinned in truc.lock`, "", build_commit(name, "profiled", actual, manifestHash, dossierHash))
 }
 
 // ---- rm: does the remainder still satisfy every requirement? (§8.1) ----
@@ -329,10 +350,17 @@ fn plan_rm_report(mj: Str, name: Str, vj: Str) -> Str {
 // assemble --check: the same resolve → hash-verify → admit chain as assemble,
 // reporting valid/invalid with the why-trace on invalid, but with `sources`
 // forced to "" so `write_assembly` is a no-op — a dry-run writes NOTHING.
-fn plan_check_report(dj: Str, vj: Str, gj: Str) -> Str {
+// `vdj` is the host's manifest/dossier half of the drift check (the same list
+// `write_assembly` refuses on), reported here because a dry run never reaches
+// `write_assembly` to be refused by it.
+fn plan_check_report(dj: Str, vdj: Str, vj: Str, gj: Str) -> Str {
   let d: Drift = json_parse(dj)
   if (!d.ok) {
     return report(1, "truc: invalid — ".concat(d.message), "", "")
+  }
+  let vd: Drift = json_parse(vdj)
+  if (!vd.ok) {
+    return report(1, "truc: invalid — ".concat(vd.message), "", "")
   }
   let v: Verdict = json_parse(vj)
   if (!v.ok) {
@@ -374,7 +402,7 @@ pub service Plan {
   fn ordered_with_candidate(gj: Str, name: Str, entryJson: Str) -> Str
   fn drift(lockJson: Str, gj: Str) -> Str
   fn assemble_report(dj: Str, vj: Str, gj: Str) -> Str
-  fn check_report(dj: Str, vj: Str, gj: Str) -> Str
+  fn check_report(dj: Str, vdj: Str, vj: Str, gj: Str) -> Str
   fn rm_report(mj: Str, name: Str, vj: Str) -> Str
   fn add_report(rowJson: Str, name: Str, entryJson: Str, vj: Str) -> Str
   fn report_code(rj: Str) -> Int
@@ -392,7 +420,7 @@ component Planner provides plan: Plan {
     fn ordered_with_candidate(gj, name, entryJson) = plan_ordered_with_candidate(gj, name, entryJson)
     fn drift(lockJson, gj) = plan_drift(lockJson, gj)
     fn assemble_report(dj, vj, gj) = plan_assemble_report(dj, vj, gj)
-    fn check_report(dj, vj, gj) = plan_check_report(dj, vj, gj)
+    fn check_report(dj, vdj, vj, gj) = plan_check_report(dj, vdj, vj, gj)
     fn rm_report(mj, name, vj) = plan_rm_report(mj, name, vj)
     fn add_report(rowJson, name, entryJson, vj) = plan_add_report(rowJson, name, entryJson, vj)
     fn report_code(rj) = plan_report_code(rj)

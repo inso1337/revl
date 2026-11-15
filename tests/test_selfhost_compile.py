@@ -784,6 +784,13 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # is the only corpus document that reaches `journalBegin()`/`guard()` —
         # its `provide`-method bracket is the one shape where no activation-body
         # bracket ever created the `Frame`.)
+        # issue #2904: `later(cb: () -> Async[Int], k: Int)` returns
+        # `cb() + k`. The reference IR stamps that `+` `operands: "Int"`, so
+        # it renders through the i64 bound test; the native lower.rvl IR does
+        # not, and the native chain renders a bare `((await cb()) + k)`, an
+        # UNCHECKED add. The emitter half is byte-exact on the reference IR
+        # (asserted above). A lower.rvl gap, not an emitter one.
+        "int_inline_2904.rvl",
     ),
     "go": (
         # (issue #2088: in-file `test` blocks. selfhost/emit_go.rvl already
@@ -795,7 +802,7 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # Opt-gap document, the issue #1631 erased-Result document, and the
         # combined path's `comp_provide_pure.rvl`.)
         # no other residual: the fully-native chain reproduces the rest of the
-        # go corpus.
+        # go corpus, except the entries below.
         # issue #2495: the generic-function document. Emitter-exact from the
         # reference IR (selfhost/emit_go.rvl mirrors the type-parameter list
         # and the call binding); the native IR producer reads a call to a
@@ -805,6 +812,20 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # `xs[0] + id(-1)`) is written without the reference's
         # `"operands": "Int"` annotation.
         "generic_fn.rvl",
+        # issue #2472: the native chain still refuses a user generic variant,
+        # so both emitter corpus documents that declare one diverge through
+        # the fully-native chain. The emitter half is byte-exact on the
+        # reference IR (tests/test_selfhost_emit_go.py).
+        "../emit_rust_corpus/generic_variant.rvl",
+        "../emit_rust_corpus/comp_provide_generic_variant.rvl",
+        # issue #2898: a provide-method `let pinned: List[Str] = []` in the
+        # combined document. The emitter half is byte-exact from the reference
+        # IR; the native IR producer drops the annotation's `expected` on a
+        # component-body literal, so the port falls back to `_comp_infer`'s
+        # `List[Int]` guess (`pinned := []int64{}` instead of `[]string{}`).
+        # That is a selfhost/lower.rvl gap, not an emitter one: the reference
+        # frontend threads the declared type onto the itemless node.
+        "comp_provide_empty_list.rvl",
     ),
     "java": (
         # (async coloring left this list entirely. `comp_await.rvl` and the two
@@ -819,7 +840,14 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # `stdlib_builtins.rvl` and the borrowed
         # `../emit_ts_corpus/property_edges.rvl` — left it with the
         # `sized_length` property form.)
-        # no residual: the fully-native chain reproduces the whole java corpus.
+        # issue #3095: the native producer leaves the component's `let-effect`
+        # binder raw (`ctx` stays `ctx` in its IR), so the native emitter's
+        # binding ladder lands on `ctx_` while the reference frontend escaped
+        # the binder to `ctx_` and the ladder reaches `ctx__`. The java byte
+        # oracle in tests/test_selfhost_emit_java.py holds this document
+        # byte-exact on the REFERENCE IR, so the residual is the producer's
+        # `_safe_name` handling, not the emitter.
+        "comp_provide_ctx_bind.rvl",
     ),
     "rust": (
         # (`component_edges.rvl` left this list with issue #1818: its provide
@@ -879,6 +907,12 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # Both now read through `fn_params_i` and this document reproduces
         # byte-exactly, so the ledger no longer carries it. A non-generic
         # control of the same shape was already byte-exact.
+        # issue #2472: the native chain still refuses a user generic variant,
+        # so both emitter corpus documents that declare one diverge through
+        # the fully-native chain. The emitter half is byte-exact on the
+        # reference IR (tests/test_selfhost_emit_rust.py).
+        "generic_variant.rvl",
+        "comp_provide_generic_variant.rvl",
     ),
     # no residual: the fully-native chain reproduces the whole wasm corpus.
     "wasm": (),
@@ -2415,9 +2449,13 @@ def test_native_cache_reach_preserves_non_emitting_and_uncached_functions(admit,
     # — the gate admits it, and its `lower_to_ir` externs section was already
     # byte-exact (tests/test_selfhost_lower_ir.py's EXTERN_DECL_GAP is empty).
     #
-    # The table is EMPTY, and that is the ratchet having worked rather than a
-    # list nobody maintained: both entries it ever held closed by returning "",
-    # and a closed entry is DELETED rather than reworded.
+    # The table holds the two generic-variant documents in the Rust emit
+    # corpus (issue #2472). The reference admits them while selfhost/lower.rvl
+    # still constructs a nullary case as a bare `Mb`, so the native gate
+    # refuses them by name; they are a self-host FRONTEND gap, not an emitter
+    # one, since selfhost/emit_rust.rvl is byte-exact on the reference IR, and
+    # their residual is also named in LOWER_GAP_DOCS above. Every earlier entry
+    # closed by returning "" and was DELETED rather than reworded.
     #
     # The stream entry (`emit_rust_corpus/comp_stream.rvl`, pinned to
     # `G1|`sub` is not a declared requirement of Parked`) was the second of the
@@ -2435,7 +2473,15 @@ def test_native_cache_reach_preserves_non_emitting_and_uncached_functions(admit,
     # returns "" here, and the document's residual moved to the byte comparison
     # `LOWER_GAP_DOCS` above rather than leaving the corpus: the rust emit
     # oracle holds it byte-exact against the reference, stream runtime and all.
-NATIVE_GATE_GAPS: dict[str, str] = {}
+NATIVE_GATE_GAPS: dict[str, str] = {
+    # issue #2472: the native gate still refuses a user generic variant, so the
+    # two generic-variant documents in the Rust emitter corpus are a named
+    # false refusal until selfhost/lower.rvl follows the reference.
+    "emit_rust_corpus/comp_provide_generic_variant.rvl":
+        "T1|`bump` returns expects `Mb[Int]`, got `Mb`",
+    "emit_rust_corpus/generic_variant.rvl":
+        "T1|this function's return expects `Mb[Int]`, got `Mb`",
+}
 
 
 def test_native_gate_admits_the_whole_emit_surface(admit):
@@ -2494,31 +2540,10 @@ GENERIC_VARIANT_LOUD_REFUSALS: dict[str, str] = {
 # them: silent verdict differences, recorded so they cannot read as agreement.
 # The `arm_binds_*` pair (issue #2402) is refused on payload typing (an arm
 # over `Mb[Int]` binds `Int`, so returning it as `Str` is a mismatch); both
-# were admitted by the reference too before the fix. `aggregate_missing_agreed`
-# is issue #2981: the reference refuses the program (a match over a provided
-# `Aggregate[Str]` that leaves out `Agreed`, PR #2934's
-# `test_aggregate_missing_agreed_is_refused`) while the self-host gate admits
-# it. Each entry fails in either direction, on the reference or on the gate.
-GENERIC_VARIANT_SILENT_ADMITS = ("aggregate_missing_agreed",
-                                 "arm_binds_second_parameter",
+# were admitted by the reference too before the fix. Each entry fails in either
+# direction, on the reference or on the gate.
+GENERIC_VARIANT_SILENT_ADMITS = ("arm_binds_second_parameter",
                                  "arm_binds_substituted_payload")
-
-# The reference's program for a difference the docs table does not carry:
-# tests/test_generic_variant_construction.py spells the exhaustiveness case
-# inline in `test_aggregate_missing_agreed_is_refused` rather than in
-# `REFUSED`, so its source and message are recorded here beside the registry.
-GENERIC_VARIANT_INLINE_REFUSED = {
-    "aggregate_missing_agreed": (
-        """fn settle(a: Aggregate[Str]) -> Str {
-  return match a {
-    Split(d) => "no",
-    Inquorate(d) => "no",
-  }
-}
-""",
-        "non-exhaustive match: missing case `Agreed`",
-    ),
-}
 
 
 def _generic_variant_docs():
@@ -2528,10 +2553,7 @@ def _generic_variant_docs():
 
 
 def _generic_variant_silent_admit_doc(name):
-    docs = _generic_variant_docs()
-    if name in docs.REFUSED:
-        return docs.REFUSED[name]
-    return GENERIC_VARIANT_INLINE_REFUSED[name]
+    return _generic_variant_docs().REFUSED[name]
 
 
 @pytest.mark.parametrize("name", sorted(GENERIC_VARIANT_LOUD_REFUSALS))
@@ -2550,8 +2572,8 @@ def test_generic_variant_program_is_refused_loudly_by_the_native_chain(
 
 @pytest.mark.parametrize("name", GENERIC_VARIANT_SILENT_ADMITS)
 def test_generic_variant_difference_is_a_known_silent_admit(compile_to, name):
-    """Issues #2402 and #2981: the reference refuses it, the native chain still
-    emits. Fails the day the native chain refuses too, so the entry is removed."""
+    """Issue #2402: the reference refuses it, the native chain still emits.
+    Fails the day the native chain refuses too, so the entry is removed."""
     source, message = _generic_variant_silent_admit_doc(name)
     with pytest.raises(RevlError) as refused:
         compile_source(source)
@@ -4337,13 +4359,20 @@ def test_case_arity_refusal_is_a_recorded_native_difference(compile_to, name):
 # Issue #2483: the reference checks an effect call's arguments against the
 # effect's declared parameter types, a case payload nested in them included.
 # The documents are tests/test_423_component_body_call_checking.py's
-# `EFFECT_ARG_REFUSED`. The self-host already gives the reference's refusal for
-# a wrong-typed service argument; the rest it admits, so each is recorded as
-# the native verdict on py ("EMITS" is a silent admit). The day the self-host
-# gives the reference's refusal, the entry fails and is DELETED. A wrong
-# payload type is issue #2448; a wrong payload count and a wrong-typed built-in
-# case in an effect argument are issue #2489.
-EFFECT_ARG_NATIVE_AGREES = ("service_argument_type",)
+# `EFFECT_ARG_REFUSED`. The self-host now gives the reference's refusal for a
+# wrong-typed service argument and for a wrong-typed case payload nested in an
+# effect argument (issue #2448); the rest it admits, so each is recorded as the
+# native verdict on py ("EMITS" is a silent admit). The day the self-host gives
+# the reference's refusal, the entry fails and is DELETED. The remaining ones
+# are a wrong payload count, a payload on a nullary case, and the acquire
+# argument shapes (issue #2489).
+EFFECT_ARG_NATIVE_AGREES = (
+    "service_argument_type",
+    # issue #2448
+    "service_payload_in_provide_method",
+    "service_payload_type",
+    "service_some_payload_type",
+)
 EFFECT_ARG_NATIVE_VERDICTS: dict[str, str] = {
     # issue #2489
     "acquire_err_payload_type": "EMITS",
@@ -4352,10 +4381,6 @@ EFFECT_ARG_NATIVE_VERDICTS: dict[str, str] = {
     "service_argument_to_nullary": "EMITS",
     "service_payload_extra": "EMITS",
     "service_payload_missing": "EMITS",
-    # issue #2448
-    "service_payload_in_provide_method": "EMITS",
-    "service_payload_type": "EMITS",
-    "service_some_payload_type": "EMITS",
 }
 
 
@@ -4582,6 +4607,54 @@ def test_native_gate_checks_a_verb_on_a_host_local_as_the_reference(
         assert got == "REFUSED|" + want, got[:200]
     else:
         assert got == reference_emit["py"](compile_source(source, "doc.rvl")), got[:200]
+
+
+# The requirement-call argument walk descends into an arrow body and a match
+# arm, which are new scopes. An arrow parameter is untyped in the reference's
+# component lowering (`env.type_env.pop(param, None)`), so it shadows a
+# same-named typed local; a match binder is the scrutinee's payload
+# (`Opt[Int]` -> `Int`). Reading the enclosing local's `Str` instead refused
+# `emit k.put(n)` with the reference's message against a call the reference
+# admits. These documents are otherwise clean, so the only verdict is the gate's.
+_SCOPED_ARG_HEAD = (
+    "type Shape = Dot | Box(Int)\n"
+    "service Sink { emission fn put(x: Int) }\n"
+    "service R { emission fn run(n: Str) -> Int }\n"
+    "fn apply(cb: (Int) -> Unit) -> Int { return 1 }\n"
+    "component C requires k: Sink provides r: R {\n"
+    "  provide r { fn run(n) {\n"
+)
+_SCOPED_ARG_TAIL = "  } }\n}\n"
+
+
+def _scoped_arg(body: str, setup: str = "") -> str:
+    return _SCOPED_ARG_HEAD + setup + "    return " + body + "\n" + _SCOPED_ARG_TAIL
+
+
+_SCOPED_ARG_BINDERS = {
+    # an arrow parameter, untyped, shadowing the method parameter `n: Str`
+    "arrow_bare": _scoped_arg("apply((n) => emit k.put(n))"),
+    "arrow_arithmetic": _scoped_arg("apply((n) => emit k.put(n + 1))"),
+    # an arm binder shadows the method parameter `n: Str`; its payload is `Int`
+    "match_arm": _scoped_arg(
+        "apply((x) => match o { Some(n) => emit k.put(n),"
+        " None => emit k.put(0) })",
+        "    let o: Opt[Int] = Some(1)\n"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_SCOPED_ARG_BINDERS))
+def test_a_binder_shadows_a_typed_local_in_a_requirement_argument(
+        admit, compile_to, reference_emit, name):
+    source = _SCOPED_ARG_BINDERS[name]
+    reference_emit["py"](compile_source(source, "doc.rvl"))  # the reference admits it
+    assert admit(source) == ""
+    # the native producer drops this match expression beside an emit, so only
+    # the gate's verdict is pinned for the arm document
+    if name == "match_arm":
+        return
+    got = compile_to(source, "py")
+    assert got == reference_emit["py"](compile_source(source, "doc.rvl")), got[:200]
 
 
 # Issue #2569, continued. A timer body (`every 30s { … }`) records emissions

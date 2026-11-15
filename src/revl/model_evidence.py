@@ -30,14 +30,24 @@ Every member of :data:`BODY_MEMBERS` is REQUIRED and covered by the MAC.
 * ``role`` / ``residence`` — the placement (item 512, `docs/design/531-model-
   placement.md` §9). Both are DECLARED, so the object binds them by value and
   asks no host. ``residence`` is the closed vocabulary :data:`RESIDENCES`.
-* ``model_digest`` — the identity of the weights that answered.
+* ``model_digest`` and ``model_digest_basis``: the identity of the weights that
+  answered, and whether that digest was checked against the bytes actually
+  loaded or is only the provider's declaration.
 * ``placement_digest`` — the provider's own digest over its profile (see
   "Reproducibility" below). Opaque here on purpose.
 * ``prompt_binding`` — the binding to the input, as a MODE and a value, never
   raw text by default. See "The prompt binding" below.
+* ``template_digest`` / ``template_absence_reason``: the identity of the
+  template that produced the prompt, with its placeholders unfilled, or an
+  explicit reason the identity is absent. See "The template, the fallback, and
+  the digest's basis" below.
 * ``origins`` — the item 249 origin classes the input carried, drawn from
   :data:`ORIGIN_CLASSES`, which is :mod:`revl.taint`'s own lattice and not a
   second copy of it.
+* ``reasoning``: how much of the model's reasoning span the host returned
+  (``full``, ``summary``, ``hidden`` or ``none-reported``), the span's size as
+  the host reported it, and a digest of the returned reasoning text only when
+  the input's origins permit it. Version 3.0; see "The reasoning span" below.
 * ``candidates`` / ``chosen`` / ``outcome`` — the candidate set as digests in
   the order offered, and which one was taken. A decision with one candidate is
   a different claim from a decision with five, and only the record can say so.
@@ -47,7 +57,8 @@ Every member of :data:`BODY_MEMBERS` is REQUIRED and covered by the MAC.
 * ``fallback_depth`` — how far down the ladder this answer came from. Zero is
   the first choice; a non-zero depth means something earlier refused or was
   unavailable, which a record that omits it cannot distinguish from a clean
-  first hit.
+  first hit. ``fallback_reason`` names which of the ladder's three reasons it
+  was.
 * ``retained`` — ``None``, or the explicit, taint-carrying retention decision.
 
 The prompt binding, and why it is a mode rather than a digest
@@ -81,6 +92,69 @@ So ``prompt_binding`` is ``{"mode": ..., "value": ..., "reason": ...}`` with
 The fail-closed shape is that the MEMBER is mandatory while the VALUE may be an
 explicit absence. A record cannot omit the prompt binding; it must state that
 the binding was suppressed and why, and that statement is inside the MAC.
+
+The template, the fallback, and the digest's basis (version 2.0)
+----------------------------------------------------------------
+Envelope version ``1.0`` bound the prompt but not the template that produced
+it, and it bound the fallback DEPTH but not the reason. Two runs that differed
+only in template compared equal, and a depth of 2 could not say whether the
+rung above was unavailable, declined or refused. Version ``2.0`` adds three
+claims, and the version is bumped rather than the members added to ``1.0`` so
+that an old record still verifies under the body it was sealed with and a new
+record cannot be presented as an old one.
+
+* ``template_digest`` is the SHA-256 of the template TEXT with its
+  placeholders UNFILLED, never the filled prompt. ``template_absence_reason``
+  is the explicit other arm: ``no-template`` when the prompt was not built from
+  a template, ``unpublished`` when it was but its identity is not available.
+  Exactly one arm is set. Both unset is the silence this member exists to
+  refuse, and both set is a record that says two things about one template.
+* ``fallback_reason`` is the descent reason, from :data:`FALLBACK_REASONS`. Its
+  values are the ladder's three kinds, the words a provider spells before the
+  detail: ``unavailable``, ``declined`` and ``refused``. The detail after the
+  kind stays in the provider's own log and is deliberately not bound, because
+  it is free text and a closed vocabulary is what makes the member comparable
+  across records. ``None`` is required at depth zero and refused above it, so
+  depth and reason are one claim rather than a number with an optional
+  annotation.
+* ``model_digest_basis`` says whether ``model_digest`` was checked against the
+  bytes that were actually loaded (``loaded-bytes``) or is only the provider's
+  declaration (``declared``). revl cannot see a host's load, so this is a
+  DECLARATION, like ``role`` and ``residence``: the verifier checks that it is
+  one of the two words, not that the bytes were checked.
+
+Version ``1.0`` records still verify, under the ``1.0`` body and the ``1.0``
+MAC domain, and ``2.0`` records under theirs; they simply do not carry the
+claims their successors added. :func:`reconstruct` reports ``None`` for a
+member a record's own version does not define rather than inventing a value,
+and reports the record's own ``version`` so a reader can tell why.
+
+The reasoning span (version 3.0, issue #2808)
+--------------------------------------------
+A model decision said what was asked and what was chosen, but nothing about
+whether the model also reasoned in a span the host did not return. Silence
+there reads like a run that had nothing to hide. Version ``3.0`` adds one
+required member, ``reasoning``, with three parts:
+
+* ``visibility``: ``full`` or ``summary`` when the host returned the span or a
+  summary of it, ``hidden`` when it reported a span without the text, and
+  ``none-reported`` when it reported no span at all;
+* ``tokens``: ``{"value": <non-negative int or None>, "provenance":
+  "host-reported"}``. revl cannot measure the reasoning channel, so the tag is
+  the host's own report and not a measurement;
+* ``digest``: the SHA-256 of the returned reasoning text, and ONLY that. The
+  text itself is never written. Over an input whose ``origins`` carry
+  ``secret`` or ``confidential`` the digest is refused, because a digest of
+  reasoning derived from such a prompt is the same cross-run confirmation
+  oracle that suppresses ``prompt_binding``; the visibility and the size are
+  still recorded. A ``hidden`` span has no returned text, so it cannot carry a
+  digest either, and ``none-reported`` carries neither a size nor a digest.
+
+The member records that an opaque span EXISTED and its reported size, and
+makes no claim about what it contained. A per-entry replay status
+(``revl.replay_modes``) turns it into ``rederivable``: a ``hidden`` or
+``summary`` span means the answer cannot be reproduced from the prompt, while
+a retained answer can still be served from the record.
 
 Reproducibility: what is here, and what is deliberately not
 ------------------------------------------------------------
@@ -183,6 +257,7 @@ Public surface
 ``CrossingSealer(key, route_table)`` — Slice 2: seal at the crossing
 ``reconstruct(record, key)``  — Slice 3: the decision, from the artifact alone
 ``from_wal_record(decision)`` — the evidence riding on a WAL record
+``reasoning_span(**host)``    - the 3.0 ``reasoning`` member from what the host returned
 ``digest(text)`` / ``key_id(key)``
 """
 
@@ -208,7 +283,20 @@ EVIDENCE_KIND = "revl.model-decision"
 
 #: MAJOR.MINOR, additive within a MAJOR. `verify` refuses any other value
 #: rather than reading a future body as if members were merely missing.
-EVIDENCE_VERSION = "1.0"
+#: Version 2.0 adds ``fallback_reason``, ``template_digest`` /
+#: ``template_absence_reason`` and ``model_digest_basis``; version 3.0 adds
+#: ``reasoning``, the closed description of the span the host did not return.
+#: :func:`verify` accepts a 1.0 or 2.0 record under its own body, so old
+#: artifacts keep checking out.
+EVIDENCE_VERSION = "3.0"
+
+#: Every envelope version this build can verify, newest first. A record's own
+#: version selects its body member set and its MAC domain, so neither a 1.0
+#: record relabelled 2.0 nor a 2.0 record relabelled 1.0 can verify: the first
+#: loses its MAC and lacks members, the second has members 1.0 does not define.
+#: The same rule keeps a 2.0 record from passing as 3.0 without a reasoning
+#: member, and a 3.0 record from shedding it as an older one.
+EVIDENCE_VERSIONS = ("3.0", "2.0", "1.0")
 
 #: One value today. It is VALIDATED and not merely recorded: :func:`_sign` is
 #: unconditionally HMAC-SHA256, so a record claiming another algorithm is a
@@ -219,12 +307,26 @@ SIGN_ALG = "hmac-sha256"
 #: The digest algorithm every 64-hex member in the body is produced by.
 HASH_ALG = "sha256"
 
-#: The domain-separation prefix. `revl.attest`, `revl.deploy` and this module
-#: MAC canonical JSON with the same construction and may share key material, so
-#: without a per-protocol tag an attestation verifies as a decision record and
-#: back. The tag carries the version, so a v1 record cannot be replayed as a
-#: later one even by a key holder.
-SIGN_DOMAIN = b"revl.model-decision/v1\x00"
+#: The domain-separation prefix for each accepted envelope version.
+#: `revl.attest`, `revl.deploy` and this module MAC canonical JSON with the
+#: same construction and may share key material, so without a per-protocol tag
+#: an attestation verifies as a decision record and back. The tag carries the
+#: version, so a record sealed under one version cannot verify as another even
+#: when a key holder rewrites the covered ``version`` member. :func:`_sign`
+#: selects the domain from the record's own version, but only from this closed
+#: map; an unknown version is signed under :data:`SIGN_DOMAIN` and then refused
+#: by :func:`_check_body`, so reading the version off the record never selects
+#: an algorithm this build does not implement.
+SIGN_DOMAINS = {
+    "1.0": b"revl.model-decision/v1\x00",
+    "2.0": b"revl.model-decision/v2\x00",
+    "3.0": b"revl.model-decision/v3\x00",
+}
+
+#: The domain :func:`seal` writes and the fallback for an unknown version. It
+#: is the CURRENT version's tag, not a stable 1.0 tag: out-of-tree code that
+#: MACs a 1.0 record must use :data:`SIGN_DOMAINS` rather than this constant.
+SIGN_DOMAIN = SIGN_DOMAINS[EVIDENCE_VERSION]
 
 #: The one member of a sealed record that the MAC does not cover: itself.
 SIGNATURE_FIELD = "signature"
@@ -262,6 +364,43 @@ PROMPT_MODES = ("content-addressed", "salted-within-run", "suppressed")
 SUPPRESSION_REASONS = ("analysis-disengaged", "confidential-origin",
                        "secret-origin")
 
+#: Why a decision left the first rung of the ladder, closed. These are the
+#: three KINDS the provider spells before its detail (`unavailable:<detail>`,
+#: `declined:<detail>`, `refused:<detail>`); the detail is free text and stays
+#: in the provider's log, while the kind is comparable across records.
+FALLBACK_REASONS = ("declined", "refused", "unavailable")
+
+#: Why a record has no `template_digest`. `no-template` says the prompt was
+#: built without one; `unpublished` says a template was used but its identity
+#: was not available to the provider. Both are explicit, which is the point:
+#: a silent absence is what this member pair exists to refuse.
+TEMPLATE_ABSENCE_REASONS = ("no-template", "unpublished")
+
+#: What `model_digest` is a claim ABOUT. `loaded-bytes` says the provider
+#: recomputed the digest over the bytes it loaded, after checking them against
+#: the pinned artifact; `declared` says the digest is only the provider's
+#: declaration. revl cannot check the claim either way (item 538 owns the
+#: load), so the closed word is what the record can honestly carry: the
+#: assertion that was made, not a proof that it was made.
+MODEL_DIGEST_BASES = ("declared", "loaded-bytes")
+
+#: How much of the reasoning the model did is on the record (issue #2808). The
+#: host, not revl, knows whether it returned the span in full, returned a
+#: summary of it, kept it and reported only that it existed, or reported
+#: nothing. `full` and `summary` say reasoning TEXT was returned (only its
+#: digest is ever written); `hidden` says the host reported a span without its
+#: text; `none-reported` says the host reported no span at all.
+REASONING_VISIBILITIES = ("full", "summary", "hidden", "none-reported")
+
+#: The provenance tag a reasoning token count carries. revl cannot measure the
+#: reasoning channel, so the only honest tag is the host's own report.
+REASONING_TOKEN_PROVENANCE = "host-reported"
+
+#: The members of a `reasoning` block. All three are mandatory; `None` is a
+#: legal VALUE for `digest` (suppressed or absent) and for `tokens.value` (a
+#: host that reported a span but not its size).
+REASONING_MEMBERS = ("visibility", "tokens", "digest")
+
 #: What the crossing produced. `validated` and `exhausted` are item 257's two
 #: readings and the two values the WAL record already writes; `refused` is the
 #: third the fallback ladder needs (item 538: an unavailable member returns a
@@ -275,8 +414,10 @@ OUTCOMES = ("exhausted", "refused", "validated")
 SAMPLING_MEMBERS = ("max_tokens", "seed", "stop_digest", "temperature",
                     "top_k", "top_p")
 
-#: The signed body, in full. Every one of these is required and covered.
-BODY_MEMBERS = (
+#: The 1.0 body, kept because an old sealed record must still verify under the
+#: body it was sealed with. This is a frozen list: a member added to a later
+#: version goes into that version's tuple, never into this one.
+BODY_MEMBERS_V1 = (
     # envelope
     "kind", "version", "sign_alg", "hash_alg", "key_id", "recorded_at",
     # the crossing (revl.wal.model_decisions' key)
@@ -296,6 +437,42 @@ BODY_MEMBERS = (
     # the explicit, taint-carrying retention decision
     "retained",
 )
+
+#: The signed 2.0 body, in full. Every one of these is required and covered.
+#: Frozen: a member added to a later version goes into that version's tuple,
+#: never into this one, so a 2.0 record keeps verifying under the body it was
+#: sealed with.
+BODY_MEMBERS_V2 = (
+    # envelope
+    "kind", "version", "sign_alg", "hash_alg", "key_id", "recorded_at",
+    # the crossing (revl.wal.model_decisions' key)
+    "component", "step_index",
+    # the placement (item 512), declared and bound by value
+    "role", "residence",
+    # what answered, on what host profile, and what the digest is a claim about
+    "model_digest", "model_digest_basis", "placement_digest",
+    # what it was given: the input's binding, and the template behind it
+    "prompt_binding", "template_digest", "template_absence_reason", "origins",
+    # what it could have said, and what it said
+    "candidates", "chosen", "outcome",
+    # how it was asked
+    "sampling",
+    # under what rule, how far down the ladder, and why it left the rung above
+    "policy_digest", "fallback_depth", "fallback_reason",
+    # the explicit, taint-carrying retention decision
+    "retained",
+)
+
+#: The signed 3.0 body, in full. Adds the closed description of the model's
+#: reasoning span (issue #2808) to the frozen 2.0 set. Required, not optional:
+#: a new record that omits it would read exactly like a run that had nothing
+#: to hide, which is the silence the member exists to break.
+BODY_MEMBERS = BODY_MEMBERS_V2 + ("reasoning",)
+
+#: version -> the body that version defines. A record's own ``version`` selects
+#: its member set, so an unknown member is refused rather than read as 1.0.
+BODY_MEMBERS_BY_VERSION = {"1.0": BODY_MEMBERS_V1, "2.0": BODY_MEMBERS_V2,
+                           "3.0": BODY_MEMBERS}
 
 #: The members of a `retained` block when one is present.
 RETAINED_MEMBERS = ("completion", "origins", "prompt")
@@ -412,18 +589,96 @@ def key_id(key: bytes) -> str:
                           + bytes(key)).hexdigest()[:16]
 
 
+def _reports_no_span(tokens: Any) -> bool:
+    """True when a host's reasoning token count says no span existed: no count
+    at all, or a count of exactly zero. A bool is not a count, so ``False``
+    is left for :func:`reasoning_span` to refuse."""
+    if tokens is None:
+        return True
+    return isinstance(tokens, int) and not isinstance(tokens, bool) \
+        and tokens == 0
+
+
+def reasoning_span(*, tokens: Optional[int] = None,
+                   text: Optional[str] = None,
+                   visibility: Optional[str] = None,
+                   origins: Sequence[str] = ()) -> dict:
+    """Build the ``reasoning`` member from what the host returned (issue #2808).
+
+    ``visibility`` omitted is derived from the observed fields, which is the
+    common case a host body has: returned reasoning text is ``full``, a
+    reported token count above zero with no text is ``hidden``, and neither
+    is ``none-reported``. A reported count of zero with no text is also
+    ``none-reported``: a model that did not reason reports 0, and that is a
+    report of no span, not of a hidden one. The member then carries no count,
+    because ``none-reported`` carries neither a size nor a digest. A host that returned a SUMMARY says so by passing
+    ``visibility="summary"`` because only it knows the text was a summary, not
+    the span.
+
+    ``tokens`` is the host's reasoning token count, tagged in the member with
+    :data:`REASONING_TOKEN_PROVENANCE`. ``text`` is used ONLY to compute the
+    digest; the text itself is never a member, and the digest is suppressed
+    when ``origins`` names a ``secret`` or ``confidential`` input, because a
+    digest of reasoning derived from such a prompt is a confirmation oracle
+    (the rule :func:`revl_prompt_digest` already applies to the prompt)."""
+    origin_list = list(origins)
+    returned = text if isinstance(text, str) else ""
+    if visibility is None:
+        if returned:
+            visibility = "full"
+        elif _reports_no_span(tokens):
+            visibility = "none-reported"
+            tokens = None
+        else:
+            visibility = "hidden"
+    if visibility not in REASONING_VISIBILITIES:
+        raise ValueError(
+            f"reasoning visibility {visibility!r} is outside "
+            f"{list(REASONING_VISIBILITIES)}")
+    if tokens is not None and (isinstance(tokens, bool)
+                               or not isinstance(tokens, int) or tokens < 0):
+        raise ValueError(
+            f"a reasoning token count is a non-negative integer or None "
+            f"({tokens!r})")
+    if visibility in ("hidden", "none-reported") and returned:
+        raise ValueError(
+            f"visibility {visibility!r} says no reasoning text was returned, "
+            "and a text was given")
+    if visibility == "none-reported" and tokens is not None:
+        raise ValueError(
+            "visibility 'none-reported' says the host reported no span, and "
+            f"a token count was given ({tokens!r})")
+    discloses = bool(set(origin_list) & set(DISCLOSURE_ORIGINS))
+    return {
+        "visibility": visibility,
+        "tokens": {"value": tokens,
+                   "provenance": REASONING_TOKEN_PROVENANCE},
+        "digest": digest(returned) if returned and not discloses else None,
+    }
+
+
 def _sign(body: Mapping[str, Any], key: bytes) -> str:
-    """HMAC-SHA256 over :data:`SIGN_DOMAIN` ++ the canonical bytes of every
-    member of ``body`` EXCEPT ``signature``.
+    """HMAC-SHA256 over the body's version domain ++ the canonical bytes of
+    every member of ``body`` EXCEPT ``signature``.
 
     The set of covered members is DERIVED FROM THE RECORD. That is the whole
     defence against the failure this module was written not to repeat: a signed
     receipt in this tree once had `key_id` appended to its body after the MAC
     was taken over a hand-written field list, so the member every reader used
     to choose a key was the one member nothing covered. There is no field list
-    here to fall out of date with the body."""
+    here to fall out of date with the body.
+
+    The DOMAIN is the one the record's own version names, but only from the
+    closed :data:`SIGN_DOMAINS` map. An unknown or malformed version uses
+    :data:`SIGN_DOMAIN`, so a rewritten version lands on the MAC first; a key
+    holder who re-MACs the unknown version is refused by :func:`_check_body`.
+    The version is covered by the MAC either way, so it cannot be rewritten
+    without changing the tag."""
     covered = {k: v for k, v in body.items() if k != SIGNATURE_FIELD}
-    return hmac.new(bytes(key), SIGN_DOMAIN + _canonical_bytes(covered),
+    version = body.get("version")
+    domain = SIGN_DOMAINS.get(version, SIGN_DOMAIN) \
+        if isinstance(version, str) else SIGN_DOMAIN
+    return hmac.new(bytes(key), domain + _canonical_bytes(covered),
                     hashlib.sha256).hexdigest()
 
 
@@ -442,21 +697,30 @@ def _check_body(body: Mapping[str, Any]) -> Optional[Verdict]:
     sealer that can mint a record its own verifier refuses is a gate that fires
     only on other people's records, and a verifier that is laxer than its
     sealer is the fail-open half of the same split."""
-    missing = [m for m in BODY_MEMBERS if m not in body]
+    version = body.get("version")
+    members = BODY_MEMBERS_BY_VERSION.get(version, BODY_MEMBERS) \
+        if isinstance(version, str) else BODY_MEMBERS
+    missing = [m for m in members if m not in body]
     if missing:
         return Verdict(False, EVIDENCE_INCOMPLETE,
                        "required members absent from the body: "
                        + ", ".join(missing))
-    extra = [m for m in body if m not in BODY_MEMBERS
-             and m != SIGNATURE_FIELD]
+    extra = [m for m in body if m not in members and m != SIGNATURE_FIELD]
     if extra:
         return Verdict(False, EVIDENCE_VOCABULARY,
-                       "members this envelope does not define: "
+                       f"members this version ({version!r}) does not define: "
                        + ", ".join(sorted(extra)))
 
     # -- envelope -----------------------------------------------------------
+    # The version's VALIDITY is checked after the member sets, so a record
+    # missing a member reports as incomplete rather than as an envelope refusal
+    # it happened to trigger; the version has already selected which member set
+    # is required above, from a closed map and never from free text.
+    if version not in EVIDENCE_VERSIONS:
+        return Verdict(False, EVIDENCE_ENVELOPE,
+                       f"version is {version!r}, not one of "
+                       f"{list(EVIDENCE_VERSIONS)}")
     for member, expected in (("kind", EVIDENCE_KIND),
-                             ("version", EVIDENCE_VERSION),
                              ("sign_alg", SIGN_ALG),
                              ("hash_alg", HASH_ALG)):
         if body[member] != expected:
@@ -542,7 +806,182 @@ def _check_body(body: Mapping[str, Any]) -> Optional[Verdict]:
         return Verdict(False, EVIDENCE_VOCABULARY,
                        f"fallback_depth is not a ladder depth ({depth!r})")
 
+    if version in ("2.0", "3.0"):
+        verdict = _check_fallback_reason(body["fallback_reason"], depth)
+        if verdict is not None:
+            return verdict
+        verdict = _check_template(body["template_digest"],
+                                 body["template_absence_reason"])
+        if verdict is not None:
+            return verdict
+        basis = body["model_digest_basis"]
+        if basis not in MODEL_DIGEST_BASES:
+            return Verdict(False, EVIDENCE_VOCABULARY,
+                           f"model_digest_basis {basis!r} is outside the "
+                           f"closed vocabulary {list(MODEL_DIGEST_BASES)}")
+
+    if version == "3.0":
+        verdict = _check_reasoning(body["reasoning"], discloses)
+        if verdict is not None:
+            return verdict
+
     return _check_retained(body["retained"], origins, discloses)
+
+
+def _check_fallback_reason(reason: Any, depth: int) -> Optional[Verdict]:
+    """The descent reason, as one claim WITH the depth it explains.
+
+    A non-zero depth is the record saying the ladder moved; a reason is the
+    record saying why. Neither may appear without the other: a depth with no
+    reason cannot tell an audit whether the rung was unavailable, declined or
+    refused, and a reason at depth zero claims a descent that did not happen.
+    """
+    if depth == 0:
+        if reason is not None:
+            return Verdict(False, EVIDENCE_VOCABULARY,
+                           f"a first-choice decision (fallback_depth 0) names "
+                           f"fallback_reason {reason!r}; a reason is a claim "
+                           "the ladder descended, and the depth says it did "
+                           "not")
+        return None
+    if reason is None:
+        return Verdict(False, EVIDENCE_VOCABULARY,
+                       f"fallback_depth is {depth} and fallback_reason is "
+                       "absent; a depth without a reason cannot say whether "
+                       "the rung above was unavailable, declined or refused")
+    if reason not in FALLBACK_REASONS:
+        return Verdict(False, EVIDENCE_VOCABULARY,
+                       f"fallback_reason {reason!r} is outside the closed "
+                       f"vocabulary {list(FALLBACK_REASONS)}")
+    return None
+
+
+def _check_template(template_digest: Any,
+                    absence_reason: Any) -> Optional[Verdict]:
+    """A template identity, or an explicit reason there is none.
+
+    Exactly one arm is set. The digest is over the template text with its
+    placeholders UNFILLED, so it identifies the template and not the prompt; a
+    filled prompt is what ``prompt_binding`` already covers, and binding it
+    twice would make the two members disagree about what each is for.
+    """
+    if absence_reason is not None and template_digest is not None:
+        return Verdict(False, EVIDENCE_VOCABULARY,
+                       "the record carries both a template_digest and a "
+                       "template_absence_reason, so it says two things about "
+                       "one template")
+    if absence_reason is not None:
+        if absence_reason not in TEMPLATE_ABSENCE_REASONS:
+            return Verdict(False, EVIDENCE_VOCABULARY,
+                           f"template_absence_reason {absence_reason!r} is "
+                           f"outside the closed vocabulary "
+                           f"{list(TEMPLATE_ABSENCE_REASONS)}")
+        return None
+    if template_digest is None:
+        return Verdict(False, EVIDENCE_VOCABULARY,
+                       "the record names neither a template_digest nor a "
+                       "template_absence_reason, so which template produced "
+                       "the prompt is silent; an absent identity must be "
+                       "explicit and named")
+    if not isinstance(template_digest, str) \
+            or not _HEX64.match(template_digest):
+        return Verdict(False, EVIDENCE_VOCABULARY,
+                       f"template_digest is not a {HASH_ALG} digest of the "
+                       f"unfilled template text ({template_digest!r})")
+    return None
+
+
+def _check_reasoning(reasoning: Any, discloses: bool) -> Optional[Verdict]:
+    """The reasoning span as one closed claim (version 3.0, issue #2808).
+
+    The member says how much of the span the host returned, how many tokens it
+    reported, and a digest of the returned text when the input's origins permit
+    one. It never carries the text. The coherence rules are what keep the three
+    facts from contradicting one another:
+
+    * ``none-reported`` cannot carry a token count or a digest: nothing was
+      reported, so neither exists;
+    * ``hidden`` cannot carry a digest: there was no returned text to digest;
+    * ``full`` and ``summary`` DID return text, so over a non-disclosing input
+      the digest is required rather than optional; otherwise the record is
+      silent about the one thing it could bind;
+    * over a ``secret`` or ``confidential`` input the digest is REFUSED, for the
+      same reason a content-addressed ``prompt_binding`` is: a digest of
+      reasoning derived from such a prompt is a cross-run confirmation oracle.
+    """
+    if not isinstance(reasoning, Mapping):
+        return Verdict(False, EVIDENCE_VOCABULARY,
+                       f"reasoning is not a reasoning span ({reasoning!r})")
+    if set(reasoning) != set(REASONING_MEMBERS):
+        return Verdict(False, EVIDENCE_VOCABULARY,
+                       "reasoning names "
+                       f"{sorted(reasoning)}, not {list(REASONING_MEMBERS)}")
+    visibility = reasoning["visibility"]
+    if visibility not in REASONING_VISIBILITIES:
+        return Verdict(False, EVIDENCE_VOCABULARY,
+                       f"reasoning visibility {visibility!r} is outside the "
+                       f"closed vocabulary {list(REASONING_VISIBILITIES)}")
+    tokens = reasoning["tokens"]
+    if not isinstance(tokens, Mapping) or \
+            set(tokens) != {"value", "provenance"}:
+        named = sorted(tokens) if isinstance(tokens, Mapping) else tokens
+        return Verdict(False, EVIDENCE_VOCABULARY,
+                       f"reasoning.tokens names {named!r}, "
+                       "not ['provenance', 'value']")
+    if tokens["provenance"] != REASONING_TOKEN_PROVENANCE:
+        return Verdict(False, EVIDENCE_VOCABULARY,
+                       "reasoning token provenance is "
+                       f"{tokens['provenance']!r}; revl cannot measure the "
+                       "reasoning channel, so the only honest tag is "
+                       f"{REASONING_TOKEN_PROVENANCE!r}")
+    count = tokens["value"]
+    if count is not None and (isinstance(count, bool)
+                              or not isinstance(count, int) or count < 0):
+        return Verdict(False, EVIDENCE_VOCABULARY,
+                       "reasoning.tokens.value is neither absent nor a "
+                       f"non-negative integer ({count!r})")
+    digest_value = reasoning["digest"]
+    if digest_value is not None and not _HEX64.match(str(digest_value)):
+        return Verdict(False, EVIDENCE_VOCABULARY,
+                       f"reasoning.digest is neither absent nor a {HASH_ALG} "
+                       f"digest ({digest_value!r})")
+    if visibility == "none-reported":
+        if count is not None:
+            return Verdict(False, EVIDENCE_VOCABULARY,
+                           "reasoning visibility is 'none-reported' and the "
+                           f"member carries a token count ({count!r}); a host "
+                           "that reported no span reported no size either")
+        if digest_value is not None:
+            return Verdict(False, EVIDENCE_VOCABULARY,
+                           "reasoning visibility is 'none-reported' and the "
+                           "member carries a digest; there was no returned "
+                           "text to digest")
+        return None
+    if visibility == "hidden":
+        if digest_value is not None:
+            return Verdict(False, EVIDENCE_VOCABULARY,
+                           "reasoning visibility is 'hidden' and the member "
+                           "carries a digest; a hidden span has no returned "
+                           "text to digest, and drawing a digest of it would "
+                           "claim the text was in hand")
+        return None
+    # full or summary: a text was returned
+    if discloses:
+        if digest_value is not None:
+            return Verdict(False, EVIDENCE_DISCLOSURE,
+                           f"a reasoning digest over an input carrying "
+                           f"{sorted(set(DISCLOSURE_ORIGINS))} origins is a "
+                           "cross-run confirmation oracle for the reasoning "
+                           "text; the permission rule that governs "
+                           "prompt_binding suppresses it")
+        return None
+    if digest_value is None:
+        return Verdict(False, EVIDENCE_VOCABULARY,
+                       f"a {visibility!r} reasoning span over a "
+                       "non-disclosing input carries no digest; the host "
+                       "returned text and the record can bind it, so a silent "
+                       "absence is the hole this member exists to close")
+    return None
 
 
 def _check_prompt_binding(binding: Any, discloses: bool) -> Optional[Verdict]:
@@ -738,11 +1177,18 @@ def _check_retained(retained: Any, origins: Sequence[str],
 # ---------------------------------------------------------------------------
 
 def seal(key: bytes, *, component: str, step_index: int, role: str,
-         residence: str, model_digest: str, placement_digest: Optional[str],
-         prompt_binding: Mapping[str, Any], origins: Sequence[str],
-         candidates: Sequence[str], chosen: Optional[int], outcome: str,
+         residence: str, model_digest: str,
+         model_digest_basis: str = "declared",
+         placement_digest: Optional[str],
+         prompt_binding: Mapping[str, Any],
+         template_digest: Optional[str] = None,
+         template_absence_reason: Optional[str] = None,
+         origins: Sequence[str], reasoning: Mapping[str, Any],
+         candidates: Sequence[str],
+         chosen: Optional[int], outcome: str,
          sampling: Mapping[str, Any], policy_digest: str,
-         fallback_depth: int, retained: Optional[Mapping[str, Any]] = None,
+         fallback_depth: int, fallback_reason: Optional[str] = None,
+         retained: Optional[Mapping[str, Any]] = None,
          retain_content: bool = False,
          recorded_at: Optional[str] = None) -> dict:
     """Build and sign one model-decision evidence record.
@@ -756,6 +1202,22 @@ def seal(key: bytes, *, component: str, step_index: int, role: str,
     explicit decision that carries the taint; a keyword the caller has to write
     is what makes it explicit rather than a default that a caller falls into by
     filling in a field.
+
+    The 2.0 members follow that same rule where silence would be a hole.
+    ``template_digest`` and ``template_absence_reason`` have no working
+    default: a caller that names neither is refused, because "the provider did
+    not say which template produced the prompt" must be spelled ``no-template``
+    or ``unpublished`` rather than inferred. ``fallback_reason`` defaults to
+    ``None`` because depth zero is the common, valid case, and a non-zero depth
+    with no reason is refused. ``model_digest_basis`` defaults to ``declared``,
+    the honest floor: a caller that recomputed the digest over the loaded bytes
+    says so, and one that only holds a digest does not claim more by silence.
+
+    ``reasoning`` (version 3.0) has no default either, and for the same reason:
+    a record that omits it reads exactly like a run that had nothing to hide.
+    A host that reported no span says ``none-reported``, which
+    :func:`reasoning_span` builds when given no text and no token count, or a
+    count of zero.
     """
     if retained is not None and not retain_content:
         raise EvidenceRefused(
@@ -784,11 +1246,16 @@ def seal(key: bytes, *, component: str, step_index: int, role: str,
         "role": role,
         "residence": residence,
         "model_digest": model_digest,
+        "model_digest_basis": model_digest_basis,
         "placement_digest": placement_digest,
         "prompt_binding": dict(prompt_binding)
         if isinstance(prompt_binding, Mapping) else prompt_binding,
+        "template_digest": template_digest,
+        "template_absence_reason": template_absence_reason,
         "origins": list(origins) if isinstance(origins, (list, tuple))
         else origins,
+        "reasoning": dict(reasoning) if isinstance(reasoning, Mapping)
+        else reasoning,
         "candidates": list(candidates) if isinstance(candidates, (list, tuple))
         else candidates,
         "chosen": chosen,
@@ -797,6 +1264,7 @@ def seal(key: bytes, *, component: str, step_index: int, role: str,
         else sampling,
         "policy_digest": policy_digest,
         "fallback_depth": fallback_depth,
+        "fallback_reason": fallback_reason,
         "retained": dict(retained) if isinstance(retained, Mapping)
         else retained,
     }
@@ -819,10 +1287,13 @@ def verify(record: Any, key: bytes) -> Verdict:
 
     1. the record is a mapping with a ``signature`` — nothing else can be said
        about a value that is not a record;
-    2. **the MAC**, recomputed over every member except ``signature``. This
-       runs before any member is interpreted, so a tampered record is refused
-       as tampered rather than as malformed, and — because the covered set is
-       read off the record — an ADDED, REMOVED or EDITED member all land here;
+    2. **the MAC**, recomputed over every member except ``signature``, under
+       the one domain :data:`SIGN_DOMAINS` assigns to the record's version.
+       The version is read here only to select from that closed map, never to
+       select an algorithm. This runs before any member is interpreted, so a
+       tampered record is refused as tampered rather than as malformed, and
+       because the covered set is read off the record an ADDED, REMOVED or
+       EDITED member all land here;
     3. the key identity: a record whose ``key_id`` is not this key's
        fingerprint is about a different signer even when its MAC is right
        (the reading `revl.cert.affirm_key_id` already ships);
@@ -1237,20 +1708,29 @@ def reconstruct(record: Any, key: bytes, *, roles: Any = None,
         "reason": "",
         "crossing": list(crossing_key(record)),
         "decision": {
+            # the envelope version the record was sealed under: a 1.0 record is
+            # readable, and the members it does not carry read as None below
+            "version": record["version"],
             # the crossing, which is the WAL index key
             "component": record["component"],
             "stepIndex": record["step_index"],
             # where it ran
             "role": record["role"],
             "residence": record["residence"],
-            # what answered, and on what host profile
+            # what answered, on what host profile, and what the digest claims
             "modelDigest": record["model_digest"],
+            "modelDigestBasis": record.get("model_digest_basis"),
             "placementDigest": record["placement_digest"],
             # what it was given
             "promptBindingMode": binding["mode"],
             "promptBinding": binding["value"],
             "promptSuppressionReason": binding["reason"],
+            "templateDigest": record.get("template_digest"),
+            "templateAbsenceReason": record.get("template_absence_reason"),
             "origins": list(record["origins"]),
+            # the span the host did or did not return (3.0); None on an older
+            # record, which is the honest answer rather than an empty span
+            "reasoning": record.get("reasoning"),
             # what it could have said, and what it said
             "candidates": candidates,
             "chosen": chosen,
@@ -1259,11 +1739,16 @@ def reconstruct(record: Any, key: bytes, *, roles: Any = None,
             "outcome": record["outcome"],
             # how it was asked
             "sampling": sampling,
-            # under what rule, and how far down the ladder
+            # under what rule, how far down the ladder, and why it descended
             "policyDigest": record["policy_digest"],
             "fallbackDepth": record["fallback_depth"],
-            # what it kept
+            "fallbackReason": record.get("fallback_reason"),
+            # what it kept, and whether the ANSWER itself was kept (the one
+            # thing a replay can serve without calling the model)
             "retained": record["retained"] is not None,
+            "retainedCompletion": bool(
+                isinstance(record["retained"], Mapping)
+                and record["retained"].get("completion") is not None),
             # who sealed it, and when
             "keyId": record["key_id"],
             "recordedAt": record["recorded_at"],

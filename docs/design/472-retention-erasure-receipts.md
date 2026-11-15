@@ -385,14 +385,18 @@ is never a row, and no signature can name it. That is the same limit item 472's
 own wording draws when it says the scope cannot attest to copies made outside
 its boundary.
 
-On derivatives: the report has no derivative concept, and the receipt does not
-invent one. What it can say is the closest honest thing, which is that an index
-write or a summary write that crossed the boundary is a row like any other.
-`emit:<component>:<key>.<method>` rows are where a derivative would appear if a
-component wrote one through a service, and `host:` rows are where it would
-appear through a host extern. Naming a derivative the way the item asks would
-need a way to declare that a crossing *is* derived from a named value, which is
-the same missing vocabulary as residence and legal hold.
+On derivatives: the MEASUREMENT has no derivative concept, and its receipt does
+not invent one. What it can say is the closest honest thing, which is that an
+index write or a summary write that crossed the boundary is a row like any
+other. `emit:<component>:<key>.<method>` rows are where a derivative would
+appear if a component wrote one through a service, and `host:` rows are where it
+would appear through a host extern. Naming a derivative the way the item asks
+needs a way to declare that a crossing *is* derived from a named value; that
+vocabulary now exists for the RETENTION receipt (`derives <class> of <param>`,
+`retention.declared_derivatives`, issue #2695), but it is deliberately not
+folded into the erase report's rows: a measurement of crossings and a
+declaration of derivations are two different enumerations, and the erase report
+keeps reporting only what it measured.
 
 ## The retention half: the prerequisites as they were measured
 
@@ -469,16 +473,51 @@ erasable. The residence is checked against the replica rows a caller supplies
 (`residence-mismatch`) and nothing more: no placement fact is derived, and
 nothing here can stop a host from writing bytes to a region it did not declare.
 
-**Prerequisite 4, the derivative relation: NOT supplied, and reported as
-declared rather than inferred.** The note is still correct that the taint
-machinery tracks where a value came from and not what was made from it. A policy
-therefore declares which CLASSES of derivative it covers, out of a CLOSED
-vocabulary (`summary`, `index`, `embedding`, `backup`, `export`, `cache`), and
-the receipt reports each derivative a caller enumerates against that
-declaration. Nothing proves that a particular crossing wrote a summary of a
-particular retained value. The vocabulary is closed on purpose: an open one would
-let a policy "cover" a class no erasure path can enumerate, which reads as a
-guarantee without being one.
+**Prerequisite 4, the derivative relation: SUPPLIED as a DECLARATION, never
+inferred (issue #2695).** The note is right that the taint machinery tracks
+where a value came from and not what was made from it, and no body walk can
+recover what an opaque host body computed. What the follow-up slice adds is a
+way to WRITE the relation down. A `fn` or an `extern` takes a trailing
+`derives <class> of <param>` clause after its return type:
+
+```
+fn summarize(text: Retained[Str, customer_pii]) -> Str
+    derives summary of text { ... }
+
+extern pure fn embed(text: Retained[Str, customer_pii]) -> List[Float]
+    derives embedding of text = @py { ... }
+```
+
+The named parameter must be declared `Retained[T, <policy>]`, the class must be
+one of the CLOSED vocabulary (`summary`, `index`, `embedding`, `backup`,
+`export`, `cache`), and the policy must COVER that class. Each failure is a
+`G-RETAIN` refusal at the DECLARATION, so a derivative of a class the policy
+does not cover is refused there rather than reported as `not-covered` when a
+receipt is issued (the second acceptance criterion of #2695). On success the
+result is a derivative under the SAME policy: the checker mints a declaration
+origin for it and ADDS it to whatever provenance or confidentiality the result
+already carries (retention is orthogonal to the 249 provenance dimension, so a
+declared derivative that is also `Untrusted` is still refused by G9, and a
+`Secret` one still refuses disclosure); the flow walk carries the added origin
+to every durable-storage sink, and the persistence refusal names the sink AND
+the declaration (`the value is a declared embedding derivative of text, made by
+embed`). `retention.declared_derivatives` enumerates the clauses, so a receipt
+can list the declared derivative as a row. A callable whose return already
+carries `Retained[T, <policy>]` may not also declare a derivation; the two would
+be two different policies claimed about one result.
+
+What the clause does NOT do is infer, measure or prove. It describes a relation
+the author asserts at a crossing revl can see; a derivative computed inside a
+host body without the clause, or made somewhere revl never observes, remains
+invisible, which is what the receipt's own signed scope says. It does not prove
+the body actually computed the declared class, and it does not make the
+declaration a row in any store: the receipt is still an enumeration plus a
+signature. A service OPERATION is not a declaration site in this slice: it
+carries no body, and the provider body implementing it is checked by the flow
+walk as before, so a derivative made there needs the clause on the `fn` or
+`extern` that actually makes it. The vocabulary stays closed for the reason the
+last paragraph gives: an open one would let a policy "cover" a class no erasure
+path can enumerate, which reads as a guarantee without being one.
 
 ### The two refusals, and why there are two
 
@@ -527,7 +566,10 @@ member, so an over-claim is refused even with an intact MAC.
 
   * No per-value age, so no refusal on an individual record's own lifetime
     (prerequisite 2, in the weaker form above).
-  * No inferred derivative relation (prerequisite 4).
+  * No INFERRED derivative relation: the relation is declared on a `fn` or an
+    `extern` (`derives <class> of <param>`, issue #2695), so a derivative made
+    inside a host body without a declaration, or outside a declared crossing,
+    is invisible (prerequisite 4, supplied in the declared form).
   * No derived residence: a replica's region is what the caller says it is.
   * The persistence refusal covers a crossing declared through an `extern` with
     a durable-storage capability, and, after the seam-reach correction above,
@@ -566,3 +608,16 @@ passed compiles, and so does the same expired program with a `hold` declared.
 added in `taint.py` and `parser.py` and touches neither `typecheck.py` nor
 `lexer.py`, so no crate digest input moved and the emitted IR for a program
 using `Retained[T, P]` is byte-identical to the same program without it.
+
+The declared-derivation slice (issue #2695) is pinned in the same test file,
+section 1c: a declared embedding written past the deadline refuses with
+`G-RETAIN` naming the sink and the declaration; the same program under a policy
+that does not cover embeddings refuses AT THE DERIVATION; a covered class with a
+future deadline compiles; each malformed clause (unknown class, missing
+parameter, a source that is not `Retained`, a `Retained` return plus a clause)
+is refused by name; the receipt built from `retention.declared_derivatives`
+lists the row; and a program with and without the clause lowers to the same IR
+except the component's `taint.reaches` list, which gains exactly the one
+derivation origin (the clause changes no emitted code).
+The tests are written before the parser accepts the clause, so they fail on the
+previous revision with a parse error, not a weak assertion.

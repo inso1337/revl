@@ -34,7 +34,9 @@ resolves to `undeclared`, which is ordered below `neither` and which no
 compensation lifts. The rollback report then carries four lists rather than one
 word, and the outcome vocabulary is deliberately not the class vocabulary,
 because a `compensatable` part whose compensation did not run is
-`uncompensated`.
+`uncompensated`. A change of the model a layer depends on is a layer-state
+event: learned state recorded under the old model is marked stale until
+re-validated under the new one.
 
 ---
 
@@ -112,6 +114,32 @@ item is about, because routing then resolves to `revertible` and the rollback
 report says the layer was restored while the accumulated preference goes
 unmentioned. The ceiling catches it and the refusal names the layer's reason
 rather than a rule number.
+
+### 2.1 A change of the model is a layer-state event
+
+A change of the model a layer depends on is a layer-state event: learned state
+recorded under the old model is marked stale until re-validated under the new
+one. The registry records the dependence as `Layer.model_bound`, derived from
+`accumulates` for the same reason the ceiling is: a layer whose state is a
+statistic over the model's choices has that statistic tied to the model that
+made them, while the three declaration layers are restored by re-declaring them
+whatever model wrote the declaration.
+
+Staleness is NOT a fourth state class. The class says what a rollback can do
+with a part, and a stale layer's class is unchanged. What staleness suspends is
+whether the state may be read as a measurement under the current model at all,
+and the only way back is a re-validation the caller records.
+`stale_after_model_change(previous, current, revalidated=...)` returns the
+model-bound layers in registry order minus the layers the caller says were
+re-validated under the new model. Two equal non-empty identities stale nothing,
+and an identity that is empty or not a string is treated as a change rather
+than a match.
+
+The evidence is cross-backbone rather than a property of this tree: EvoOntology
+(arXiv:2609.15779) reports term overlap below 0.62 between stores evolved on
+different models and drops of 6.6 points or more when one model's store is used
+with another. Reading the old statistic as fresh would be drift presented as
+measurement, which is the failure direction section 1 names.
 
 ---
 
@@ -308,6 +336,8 @@ which check ran.
 | `compensatable` carries the same compensation requirement as `neither` | closed | item 518's reason: a compensation is the only thing that makes the two different, so one without it is `neither` with a nicer word on it |
 | `confirm-required` is refused rather than folded | closed | an authority class silently entering a state vocabulary is a fourth meaning nothing reads |
 | a compensation on a revertible part refuses | closed | a path nothing runs reads as cover |
+| a change of model stales learned state | open until slice 4 | the helper stales every unnamed identity, but no promote stage consumes the event yet (section 10) |
+| an unnamed model identity is a change, not a match | closed | "unknown to unknown" read as the same model would read stale state as fresh |
 | `untouched` is believed | open, deliberately | section 10 |
 
 ---
@@ -363,8 +393,15 @@ every oracle green.
 **Slice 1, landed with this note.** `src/revl/layer_state.py` and
 `tests/test_layer_state_546.py`: the registry, the ceiling and claim rule, the
 aggregate, `undeclared`, the ten refusals, the four-outcome report, the folds
-for both sibling vocabularies and the adapter for item 518's maps. 59 tests with
-both sibling modules present, 57 with 2 skipped on a tree that has neither.
+for both sibling vocabularies and the adapter for item 518's maps. The file now
+carries 66 tests on this tree, all passing; six of them are the model-change
+addendum below.
+
+**Slice 1, addendum (issue #2401): a change of model is a layer-state event.**
+`Layer.model_bound` and `stale_after_model_change()` mark the learned layers
+stale when the model behind them changes, until the caller records a
+re-validation under the new one. Section 2.1 states the rule; the wiring into
+item 520's promote stage is slice 4 with the rest of the precondition.
 
 **Slice 2: `untouched` becomes a measurement.** Today a plan claiming a layer is
 untouched is believed. The check is a WAL question rather than a declaration
@@ -413,11 +450,23 @@ Written down so a reader does not infer more than was measured.
   the whole of its state. A deployment whose policy engine keeps a tuning history
   has a policies layer that accumulates, and the registry would be wrong for it.
   Nothing in the tree can tell the difference today.
-- **Both sibling vocabularies were read at their branch heads, not at main.**
-  The reconciliation tests import `revl.shadow_promotion` and `revl.ui_family`
-  when they are importable and skip otherwise, so they are green on this tree
-  with 2 skips and were run once with both modules copied in, where all 59 pass.
-  If either pull request changes its vocabulary before it merges, those two
-  tests are what will say so.
+- **Model dependence is derived from `accumulates`, an architecture judgement.**
+  The four stateful layers are the four whose state is a statistic over a
+  model's choices in the item's table. Nothing in the tree has switched a model
+  and measured a store, and the cross-backbone figures in section 2.1 are cited,
+  not reproduced here.
+- **Re-validation is a claim the caller writes.** `stale_after_model_change()`
+  removes a layer named in `revalidated`; nothing proves a re-validation ran
+  under the new model, and no layer store exists in the tree to hold the mark or
+  its clearing. The tightening that slice 3 gives `tested` applies here too.
+- **One model identity per event, not one per layer.** The registry records
+  whether a layer's state is model-bound, not which model recorded it, so a
+  change stales every learned layer. A deployment that evolves different layers
+  against different models would need a per-layer binding, which no store in the
+  tree carries today.
+- **Both sibling vocabularies are now on this tree.** The reconciliation tests
+  import `revl.shadow_promotion` and `revl.ui_family`; both modules are tracked
+  here, so the tests run against them rather than skipping. If either
+  vocabulary changes, those tests are what will say so.
 - **Nothing here has run against a real promotion.** Every plan in the test file
   is constructed. The gate is a pure function and is tested as one.

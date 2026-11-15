@@ -69,7 +69,10 @@ fn lookup_at(env: List[Bind], n: Str, i: Int) -> Str {
 // `opt` and `xs` are slice T2a's additions: the optional-escape refusals
 // (a field read and an index THROUGH an `Opt`, examples/rejections/t11) and
 // the `??` rule need an optional in scope, and the index rules need a `List`.
-// Neither name is drawn by the fuzz generators, whose unknown stays `q`.
+// `mf`/`mi` are issue #2949's Map value reads: a `Map[Str, V]` subscript must
+// answer `V` in both checkers, which is what lets the equality marker see a
+// map read's width. Neither name is drawn by the fuzz generators, whose
+// unknown stays `q`.
 pub fn base_env() -> List[Bind] {
   return [
     { name: "x", ty: "Int" },
@@ -80,6 +83,8 @@ pub fn base_env() -> List[Bind] {
     { name: "m", ty: "Int32" },
     { name: "opt", ty: "Opt[Str]" },
     { name: "xs", ty: "List[Int]" },
+    { name: "mf", ty: "Map[Str, Float]" },
+    { name: "mi", ty: "Map[Str, Int]" },
   ]
 }
 
@@ -836,6 +841,12 @@ fn infer_index_t(target: Expr, index: Expr, env: List[Bind], tt: Tt,
   }
   if (tp.head == "List") {
     return ok_ty(tp.args.length() > 0 ? tp.args[0] : "")
+  }
+  // issue #2949: a `Map[K, V]` subscript yields `V`; the lowering's equality
+  // marker reads that type, so the checker's inference must answer it here
+  // exactly as `infer_ast` does for a `List` element.
+  if (tp.head == "Map") {
+    return ok_ty(tp.args.length() > 1 ? tp.args[1] : "")
   }
   return ok_ty("")
 }
@@ -3987,10 +3998,13 @@ fn is_space_ch(c: Str) -> Bool {
 
 // Port of typecheck.check_type_wellformed: a builtin generic head used with
 // the wrong arity (bare `Opt`, `List[]`, `Map[Str]`) is not a type spelling;
-// recurses into arguments. User/nominal heads are not arity-checked.
+// recurses into arguments. A builtin scalar takes no type arguments (issue
+// #2963). User/nominal heads are not arity-checked.
 fn generic_arity(h: Str) -> Int {
   if (h == "Opt" || h == "List") { return 1 }
   if (h == "Map" || h == "Result") { return 2 }
+  if (h == "Int" || h == "Int32" || h == "Float" || h == "Str"
+      || h == "Bool" || h == "Bytes" || h == "Unit") { return 0 }
   return 0 - 1
 }
 

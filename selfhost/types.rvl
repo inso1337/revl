@@ -369,10 +369,19 @@ pub fn validate_explicit_tparams(names: List[Str],
 
 // ---------------------------------------------------------------- wellformed
 
-// typecheck._GENERIC_ARITY.
+// typecheck._CONFIG_DATA_SCALARS: the builtin scalar heads. A scalar takes NO
+// type arguments, so `Int[Str]` is refused exactly as a wrong `List` arity is
+// (issue #2963).
+fn is_scalar_head(h: Str) -> Bool {
+  return h == "Int" || h == "Int32" || h == "Float" || h == "Str"
+      || h == "Bool" || h == "Bytes" || h == "Unit"
+}
+
+// typecheck._GENERIC_ARITY, plus the scalars' zero arity above.
 fn generic_arity(h: Str) -> Int {
   if (h == "Opt" || h == "List") { return 1 }
   if (h == "Map" || h == "Result") { return 2 }
+  if (is_scalar_head(h)) { return 0 }
   return 0 - 1
 }
 

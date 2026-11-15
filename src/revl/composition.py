@@ -37,8 +37,10 @@ so writing one is a parse error naming the clauses that do exist.
 from __future__ import annotations
 
 import os
+import posixpath
+from urllib.parse import urlsplit
 
-from ._paths import relpath_or_abs
+from ._paths import relpath_or_abs, stdlib_root
 from .admit_profile import AdmissionProfile
 from .errors import RevlError
 from .lower import _config_default_type
@@ -48,6 +50,7 @@ from .parser import (SLO_IR_KEYS, Address, CompositionDecl, GrantDecl,
 from .synthesize import (
     HOST_SHIMS, OBSERVER_METHOD, cap_token, check_address, check_remotable,
     synthesize_provider)
+from .tls_pin import check_pin
 from .typecheck import compatible
 
 # The project's own origin. Reserved and unmintable by anyone else: a third
@@ -416,6 +419,29 @@ def _check_claims(row: RowDecl, header: _Header, doc: str,
     return claims, extra
 
 
+def _row_value_type(value: object, declared: str | None) -> str | None:
+    """Surface type of a row config value, for the check against `declared`.
+
+    A scalar is typed as a config default is. A list (issue #3357) is typed
+    `List[T]`: `T` is the declared element type when every element fits it, and
+    otherwise the first element type that does not, so the refusal names it. An
+    empty list takes the declared element type. On a non-list field a list is
+    typed by its first element (`List[?]` when empty), so it never fits a
+    scalar type."""
+    if not isinstance(value, list):
+        return _config_default_type(value)
+    elem, inner = None, declared or ""
+    if inner.startswith("Opt[") and inner.endswith("]"):
+        inner = inner[len("Opt["):-1]
+    if inner.startswith("List[") and inner.endswith("]"):
+        elem = inner[len("List["):-1]
+    for item in value:
+        got = _config_default_type(item)
+        if got is not None and (elem is None or not compatible(elem, got)):
+            return f"List[{got}]"
+    return f"List[{elem or '?'}]"
+
+
 def _check_config(row: RowDecl, header: _Header, doc: str,
                   rel: str) -> dict[str, object]:
     """A config value that does not fit the declared type does not admit, and
@@ -431,7 +457,7 @@ def _check_config(row: RowDecl, header: _Header, doc: str,
                 f"`{name}` is not a config field of `{header.name}` "
                 f"(row `@{row.label}`)",
                 hint=f"config fields of `{header.name}` in `{rel}`: {known}")
-        actual = _config_default_type(value)
+        actual = _row_value_type(value, cfg.type)
         if actual is not None and not compatible(cfg.type, actual):
             raise RevlError(
                 doc, line,
@@ -543,22 +569,29 @@ def _host_of(value: object) -> str | None:
 
     A `host("h:port")` bound and a config value like
     `"postgres://primary:5432/app"` are compared on this normalized authority
-    (host, and port when present). The extraction is deliberately syntactic and
-    conservative: anything it cannot parse to a host returns `None` and is
-    treated by the caller as UNCLASSIFIABLE, which is the fail-closed direction
-    §8.5 conjunct 5 requires — never silence.
+    (host, and port when present). The value is read with the same URL parser a
+    client uses (`urllib.parse.urlsplit`), so a fragment, query or path that
+    holds an `@` or a `:` cannot pose as the authority. The extraction is
+    conservative: a value with a backslash, whitespace or a control character,
+    an empty host, or a port that does not parse returns `None`, which the
+    caller treats as UNCLASSIFIABLE and refuses on a bounded field, the
+    fail-closed direction §8.5 conjunct 5 requires, never silence.
     """
     if not isinstance(value, str) or not value:
         return None
-    text = value.strip()
-    if "://" in text:
-        text = text.split("://", 1)[1]
-    # drop any path/query and any userinfo
-    text = text.split("/", 1)[0].split("?", 1)[0]
-    if "@" in text:
-        text = text.rsplit("@", 1)[1]
-    text = text.strip()
-    return text or None
+    if any(ch == "\\" or ord(ch) <= 0x20 or ord(ch) == 0x7F for ch in value):
+        return None
+    # a bare `h:port` (the bound's own spelling) is an authority, not a scheme
+    try:
+        parts = urlsplit(value if "://" in value else "//" + value)
+        host, port = parts.hostname, parts.port
+    except ValueError:
+        return None
+    if not host:
+        return None
+    if ":" in host:
+        host = f"[{host}]"
+    return host if port is None else f"{host}:{port}"
 
 
 def _check_reach_bounds(label: str, config: dict, reach: dict[str, str] | None,
@@ -576,7 +609,18 @@ def _check_reach_bounds(label: str, config: dict, reach: dict[str, str] | None,
             continue
         got = _host_of(config[field])
         want = _host_of(bound) or bound
-        if got is not None and got != want:
+        if got is None:
+            raise RevlError(
+                doc, line,
+                f"row `@{label}` configures `{field}` ({where}) to a value "
+                f"whose host cannot be read, so it cannot be checked against "
+                f"the reach declared for it in the composition",
+                hint=f"declared:  host(\"{want}\")\n"
+                     f"requested: {config[field]!r}\n"
+                     "a bounded field takes a value with one plain host "
+                     "authority (no backslash, empty host or bad port); fix "
+                     "the value or refuse the layer (426 §8.3)")
+        if got != want:
             raise RevlError(
                 doc, line,
                 f"row `@{label}` configures `{field}` ({where}) to a value "
@@ -721,6 +765,64 @@ def _require_pin(truc: str, root: str, doc: str, line: int) -> None:
                  "`sourceHash` is no pin.")
 
 
+#: The recorded-source prefix of a row that resolved to the stdlib this
+#: compiler ships (issue #3483). The IR stays machine-independent (the path as
+#: written follows the prefix), and `_at` follows the record instead of
+#: guessing, so a project file at `<root>/stdlib/...` never stands in for it.
+_SHIPPED = "stdlib:"
+
+
+def _stdlib_row_source(path: str) -> tuple[str, bool] | None:
+    """The file a `stdlib/...` row `from` path names, and whether it is in the
+    stdlib this compiler ships, or `None` (issue #3483).
+
+    Tried after the composition-relative file, over the same search path `use`
+    falls back to: `REVL_IMPORT_PATH` entries, then the shipped stdlib's parent.
+    Only a canonical `stdlib/...` spelling is tried: a path with a `..` or `.`
+    part, or any other non-normal form, is refused here so it cannot climb out
+    of the stdlib directory into the project and borrow the shipped verdict.
+    A hit outside the shipped stdlib (a `REVL_IMPORT_PATH` entry) is an ordinary
+    file: the caller keeps the vendored-dir jail and the lock pin for it."""
+    from .compiler import _default_search_path  # noqa: PLC0415 - import cycle
+
+    if (not path.startswith("stdlib/") or ".." in path.split("/")
+            or posixpath.normpath(path) != path):
+        return None
+    shipped_root = os.path.realpath(str(stdlib_root()))
+    for base in _default_search_path():
+        candidate = os.path.abspath(os.path.join(base, path))
+        real = os.path.realpath(candidate)
+        real_base = os.path.realpath(base)
+        if os.path.isfile(candidate) and os.path.commonpath(
+                [real, real_base]) == real_base:
+            return candidate, os.path.commonpath([real, shipped_root]) == shipped_root
+    return None
+
+
+def _refuse_shipped_look_alike(rel: str, written: str, doc: str, line: int,
+                               what: str) -> None:
+    """A project path that records as `_SHIPPED...` would be read as the shipped
+    stdlib: refuse it, so no spelling of a path can claim the shipped record."""
+    if rel.startswith(_SHIPPED):
+        raise RevlError(
+            doc, line, f"{what} `{written}` resolves to `{rel}`, which is "
+            f"the reserved form of a shipped-stdlib source",
+            hint=f"a path may not begin with `{_SHIPPED}`; rename the file or "
+                 "its directory")
+
+
+def _at(root: str, rel: str) -> str:
+    """The file a recorded source names: the shipped stdlib file for a
+    `_SHIPPED` record whose remainder is a canonical relative `stdlib/...`
+    path, otherwise under `root`."""
+    if rel.startswith(_SHIPPED):
+        rest = rel[len(_SHIPPED):]
+        if (rest.startswith("stdlib/") and ".." not in rest.split("/")
+                and posixpath.normpath(rest) == rest):
+            return os.path.join(str(stdlib_root().parent), rest)
+    return os.path.join(root, rel)
+
+
 def _resolve_row(row: RowDecl, origin: str, doc: str, base: str,
                  root: str) -> tuple[Row, _Header]:
     """One `row` declaration into one resolved `Row`, header-only.
@@ -731,6 +833,11 @@ def _resolve_row(row: RowDecl, origin: str, doc: str, base: str,
     `_check_disjoint`, and it runs ONCE, over the folded result.
     """
     source = os.path.abspath(os.path.join(base, row.path))
+    shipped = False
+    if not os.path.isfile(source):
+        found = _stdlib_row_source(row.path)
+        if found is not None:
+            source, shipped = found
     if not os.path.isfile(source):
         raise RevlError(
             doc, row.line,
@@ -743,7 +850,7 @@ def _resolve_row(row: RowDecl, origin: str, doc: str, base: str,
     # vendored directory is refused, so it cannot read another truc's bytes or
     # the project's own sources and launder them as its own row. Project-local
     # documents (origin `.`) are the operator's and are not jailed.
-    if origin != PROJECT_ORIGIN:
+    if origin != PROJECT_ORIGIN and not shipped:
         jail = os.path.abspath(os.path.join(root, _VENDOR_DIR, origin))
         if os.path.commonpath([source, jail]) != jail:
             raise RevlError(
@@ -759,11 +866,16 @@ def _resolve_row(row: RowDecl, origin: str, doc: str, base: str,
     # `trucs/<T>/`, that truc must carry a non-blank lock pin. A truc's own
     # internal reference (its composition reading its sibling component) needs
     # no project lock — the pin is the CONSUMING project's integrity proof (§7).
-    vendored = _vendor_truc_of(source, root)
+    vendored = None if shipped else _vendor_truc_of(source, root)
     if vendored is not None and _vendor_truc_of(base, root) != vendored:
         _require_pin(vendored, root, doc, row.line)
 
-    rel = _relative(source, root)
+    # A row that resolved to the shipped stdlib records the path as written
+    # behind `_SHIPPED`, so the IR stays machine-independent and `_at` follows
+    # the record. A `REVL_IMPORT_PATH` hit is an ordinary file.
+    rel = _SHIPPED + row.path if shipped else _relative(source, root)
+    if not shipped:
+        _refuse_shipped_look_alike(rel, row.path, doc, row.line, "row source")
     header = _pick_component(row, _headers(source), doc, rel)
     claims, extra = _check_claims(row, header, doc, rel)
     config = _check_config(row, header, doc, rel)
@@ -825,7 +937,9 @@ def _resolve_uses(decl: CompositionDecl, doc: str, base: str,
                 doc, line,
                 f"composition {decl.name} uses `{path}`, which does not exist",
                 hint=f"resolved against `{_relative(base, root)}`")
-        uses.append(_relative(target, root))
+        rel = _relative(target, root)
+        _refuse_shipped_look_alike(rel, path, doc, line, "`use`")
+        uses.append(rel)
     return uses
 
 
@@ -854,7 +968,7 @@ def _service_catalog(paths: list[str], root: str) -> dict:
     declaration is read out of the parse tree and no body is lowered."""
     catalog: dict = {}
     for rel in dict.fromkeys(paths):
-        program = parse_file(os.path.join(root, rel))
+        program = parse_file(_at(root, rel))
         for svc in program.services:
             catalog.setdefault(svc.name, (svc, rel))
     return catalog
@@ -899,13 +1013,18 @@ def _resolve_remote(remote, catalog: dict, decl: CompositionDecl, doc: str,
     check_remotable(service, doc=doc, line=remote.line, label=remote.label,
                     on_failure=remote.on_failure,
                     on_failure_line=remote.on_failure_line)
+    # Issue #2719: the pin is admitted here, before synthesis, so a malformed
+    # identifier refuses the row at admission rather than failing at run time.
+    pin = check_pin(remote.pin, doc=doc, line=remote.pin_line or remote.line,
+                    label=remote.label)
 
     capability = cap_token(remote.host)
     component, text = synthesize_provider(service, "remote", {
         "label": remote.label, "key": remote.key, "host": remote.host,
         "realm": remote.realm, "capability": capability,
         "on_failure": remote.on_failure, "transport": remote.transport,
-        "redirect": remote.redirect,
+        "redirect": remote.redirect, "pin": pin,
+        "pin_line": remote.pin_line,
         "long_running": remote.long_running,
         "long_running_line": remote.long_running_line,
         "doc": doc, "line": remote.line,
@@ -933,6 +1052,10 @@ def _resolve_remote(remote, catalog: dict, decl: CompositionDecl, doc: str,
             "serviceSource": service_source,
             "capability": capability,
             "onFailure": remote.on_failure,
+            # Issue #2719: the pinned TLS leaf SPKI, on the row table so the
+            # manifest and `revl audit` carry what the crossing will refuse at
+            # run time. It is present only when the row wrote `pinned`.
+            **({"pin": pin} if pin else {}),
             # The row's redirect policy, on the row table so the audit surface
             # and the manifest carry it: "where this crossing may reach" is not
             # readable from the peer address alone if the transport may be
@@ -1062,7 +1185,7 @@ def _edge_provider(rows: list["Row"], root: str, key: str,
     `(None, None)`. Header-only, and synthesized rows (no file on disk) are
     skipped: a seam wraps a placed provider, not another synthesized one."""
     for row in rows:
-        source = os.path.join(root, row.source)
+        source = _at(root, row.source)
         if not os.path.isfile(source):
             continue
         for header in _headers(source):
@@ -1081,7 +1204,7 @@ def _observer_provision(rows: list["Row"], root: str,
     for row in rows:
         if row.label != label:
             continue
-        source = os.path.join(root, row.source)
+        source = _at(root, row.source)
         if not os.path.isfile(source):
             return None, None
         for header in _headers(source):
@@ -1171,7 +1294,7 @@ def _resolve_seams(decl: CompositionDecl, doc: str, origin: str, root: str,
     if not decl.seams:
         return sources
     file_paths = [*uses, *(r.source for r in rows
-                           if os.path.isfile(os.path.join(root, r.source)))]
+                           if os.path.isfile(_at(root, r.source)))]
     catalog = _service_catalog(file_paths, root)
     for seam in decl.seams:
         rows.append(_resolve_seam(seam, catalog, rows, decl, doc, origin, root,
@@ -1344,7 +1467,7 @@ def _slo_ceilings(rows: list["Row"], uses: list[str], sources: dict,
         text = sources.get(rel)
         try:
             program = (Parser(text, rel).parse() if text is not None
-                       else parse_file(os.path.join(root, rel)))
+                       else parse_file(_at(root, rel)))
         except RevlError:
             continue
         for svc in program.services:
@@ -2347,6 +2470,82 @@ def _apply_overlay(overlay: dict, slots, decl, doc) -> None:
                                (3, "<invocation>", "configure")]
 
 
+class _IRConfigField:
+    """One declared config field read back from a compiled component's IR, in
+    the shape `_check_config` reads off a parsed `config` declaration."""
+
+    __slots__ = ("name", "type", "default")
+
+    def __init__(self, field: dict):
+        self.name = field["name"]
+        self.type = field.get("type")
+        self.default = field.get("default")
+
+
+class _IRHeader:
+    """The config half of a component header, built from its IR, so a host
+    table is checked by the same `_check_config` a row's values are."""
+
+    __slots__ = ("name", "config")
+
+    def __init__(self, component: dict):
+        self.name = component["name"]
+        self.config = {f["name"]: _IRConfigField(f)
+                       for f in component.get("config") or []}
+
+
+HOST_LAYER = "<host>"
+
+
+def configure_rows_from_host(document: dict, config: dict | None,
+                             where: str = "<host config>") -> dict:
+    """The admitted `document` with the host-supplied config table folded into
+    its rows, at the invocation overlay's rank (issue #3484, 426 §3.1 level 3).
+
+    A host table for a component a row places is a value change to that row,
+    like `--set`: each field is typed against the component's declared config
+    by `_check_config`, wins over the row's own value, and is recorded in the
+    row's provenance as `(3, "<host>", "configure")`. The rows IR and the
+    manifest's copy of it then say what the component runs with. A table for a
+    component no row places is left to the runtime, as before. Returns
+    `document` itself when nothing changes, otherwise a copy (the caller's
+    document is never mutated)."""
+    table = (document or {}).get("rows") or {}
+    rows = table.get("rows") or []
+    if not config or not rows:
+        return document
+    by_name = {c["name"]: c for c in document.get("components") or []}
+    changed = False
+    out_rows = []
+    for row in rows:
+        supplied = config.get(row.get("component"))
+        component = by_name.get(row.get("component"))
+        if not supplied or component is None:
+            out_rows.append(row)
+            continue
+        merged = {**(row.get("config") or {}), **supplied}
+        decl = RowDecl(label=row.get("label", "?"), path="", claims=[], line=1,
+                       component=row.get("component"),
+                       config=[(n, v, 1) for n, v in merged.items()])
+        checked = _check_config(decl, _IRHeader(component), where,
+                                row.get("source", "?"))
+        new_row = dict(row)
+        new_row["config"] = checked
+        new_row["provenance"] = [
+            *(row.get("provenance")
+              or [{"level": 0, "layer": "<base>", "op": "row"}]),
+            {"level": 3, "layer": HOST_LAYER, "op": "configure"}]
+        out_rows.append(new_row)
+        changed = True
+    if not changed:
+        return document
+    new_table = {**table, "rows": out_rows}
+    out = {**document, "rows": new_table}
+    if isinstance(document.get("manifest"), dict):
+        out["manifest"] = {**document["manifest"], "rows": new_table}
+    return out
+
+
 def sole_composition(program: Program, path: str) -> CompositionDecl:
     """The one composition a document declares, or a refusal naming what it
     found instead."""
@@ -2452,7 +2651,7 @@ def _row_profiles(table: RowTable, root: str,
             continue
         if _trusts(trust_host_code, row.qualified):
             continue
-        services, pairs = reach.setdefault(os.path.join(root, row.source),
+        services, pairs = reach.setdefault(_at(root, row.source),
                                            (set(), set()))
         services.update(_granted_services(row))
         pairs.update(_granted_requires(row))
@@ -2508,7 +2707,7 @@ def _admit_full(table: RowTable, root: str, **kwargs) -> dict:
     sources = dict(kwargs.pop("sources", None) or {})
     for rel, text in table.sources.items():
         sources[os.path.join(root, rel)] = text
-    document = compile_files([os.path.join(root, p) for p in table.paths()],
+    document = compile_files([_at(root, p) for p in table.paths()],
                              sources=sources or None, **kwargs)
     return _carry_rows(document, table)
 
@@ -2558,7 +2757,7 @@ def _delta_sources(rows: list[Row], final: RowTable,
             paths.append(row.source)
         text = final.sources.get(row.source)
         if text is not None:
-            synth[os.path.join(root, row.source)] = text
+            synth[_at(root, row.source)] = text
     return paths, synth
 
 
@@ -2641,7 +2840,7 @@ def admit_composition(path: str, root: str | None = None,
     if profiles is None and confine:
         profiles = _row_profiles(final, root, trust_host_code)
     document = compile_files(
-        [os.path.join(root, p) for p in paths],
+        [_at(root, p) for p in paths],
         manifest=base_doc, replacing=replacing,
         sources=extra or None, profiles=profiles, **kwargs)
     return _carry_rows(document, final)

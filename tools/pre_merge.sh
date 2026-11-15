@@ -441,8 +441,13 @@ if ! want frontend; then
 elif [ -n "$PYTEST" ]; then
     if [ "$RUN_ALL" -eq 1 ]; then flabel="frontend  (pytest tests/)";
     else flabel="frontend  (pytest, $(printf '%s' "$SEL_PYTEST" | wc -w | tr -d ' ') node(s))"; fi
+    # Issue #2216: `--affected` is a fast lane, so tests marked `slow` are
+    # deselected there. The full gate above (RUN_ALL) runs them: the slow lane
+    # is the full run, not a skip whose verification nobody owns.
+    SLOW_ENV=""
+    [ "$AFF" -eq 1 ] && SLOW_ENV="REVL_SKIP_SLOW=1"
     CORDIS_LOG=$(mktemp "${TMPDIR:-/tmp}/revl-premerge-cordis.XXXXXX") || CORDIS_LOG=""
-    step "$flabel" env REVL_CORDIS_SKIP_LOG="$CORDIS_LOG" "$PYTEST" $SEL_PYTEST -q -p no:cacheprovider
+    step "$flabel" env REVL_CORDIS_SKIP_LOG="$CORDIS_LOG" $SLOW_ENV "$PYTEST" $SEL_PYTEST -q -p no:cacheprovider
 else
     skip "frontend  (pytest tests/)" "no pytest that can import the suite's deps"
 fi

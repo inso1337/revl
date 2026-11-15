@@ -74,7 +74,8 @@
         "known",
         "meaning",
         "message",
-        "ok"
+        "ok",
+        "repairs"
       ],
       "note": "The `explain` result envelope, produced by `diagnostics.explain` and re-spelled field by field by the CLI renderer. A field added to the producer and not read by the renderer is invisible."
     },
@@ -439,10 +440,13 @@
       "tokens": [
         "charAt",
         "charCodeAt",
+        "checked_add",
         "checked_div_euclid",
         "checked_div_floor",
         "checked_div_trunc",
         "checked_mod",
+        "checked_mul",
+        "checked_sub",
         "codepoint_at",
         "concat",
         "div_euclid",
@@ -476,7 +480,7 @@
         "to_int32",
         "to_str"
       ],
-      "note": "The thirty-seven builtin method names, declared once in lowering and once in the type checker. The largest vocabulary in the tree by token count: a method in one and not the other either type-checks and fails to lower or lowers and is never checked."
+      "note": "The thirty-seven builtin method names, declared once in lowering and once in the type checker. The largest vocabulary in the tree by token count: a method in one and not the other either type-checks and fails to lower or lowers and is never checked. Re-recorded for `checked_add`, `checked_sub` and `checked_mul` (#3259): BOTH copies gained them in one commit, which is the vocabulary moving and not a drift."
     },
     {
       "sites": [
@@ -506,6 +510,20 @@
         "name"
       ],
       "note": "FALSE POSITIVE. Five unrelated functions that each read the call node's fields out of the IR. Nothing is re-declared, so a function that starts reading a fifth field is a correct one-sided edit and would red this entry with no defect behind it."
+    },
+    {
+      "sites": [
+        "src/revl/lower.py::_is_emission_call",
+        "src/revl/taint.py::_FlowChecker._is_crossing_call"
+      ],
+      "tokens": [
+        "id",
+        "kind",
+        "method",
+        "name",
+        "target"
+      ],
+      "note": "FALSE POSITIVE. Both read the lowered IR call node's fields (kind, name, target, method, id) to decide whether a call crosses the boundary, for different consumers: lower._is_emission_call judges emission-ness for the G4 marker against the lowering Env (spawn handles, service-typed locals), taint._FlowChecker._is_crossing_call picks the nested calls in a compensate slot that get the Secret crossing rule against the TaintModel (issue #3180) and deliberately leaves spawn-handle calls out, as the forward emit path does. Neither declares the vocabulary; it is the IR schema lower.py writes. taint.py cannot import lower.py (lower imports taint), and the answers are not meant to be equal, so a field one of them starts reading is a correct one-sided edit."
     },
     {
       "sites": [
@@ -755,16 +773,18 @@
     {
       "sites": [
         "tools/evolution_controller.py::measured_diff",
+        "tools/evolution_progress.py::changed_paths",
         "tools/evolution_reward.py::changed_files"
       ],
       "tokens": [
         "--exclude-standard",
         "--name-only",
+        "--no-renames",
         "--others",
         "diff",
         "ls-files"
       ],
-      "note": "Two copies of the changed-files listing, one in the controller and one in the reward. Near-clones down to the git argument vector; a flag added to one changes what one half of the loop measures."
+      "note": "Three copies of the changed-files listing: the reward's scope probe, the controller's authority precondition and the progress counter. Each measures the diff inside its own module's error handling, but the git argument vector must stay identical or one part of the loop signs off paths another part never saw. `--no-renames` is the flag all three carry, so a move is judged under both of its paths, and a move out of a domain, a scope or the operator grant is measured."
     },
     {
       "sites": [

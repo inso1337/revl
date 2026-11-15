@@ -27,6 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 
 import contextlib
+import json
 import re
 import sys
 
@@ -1078,12 +1079,12 @@ class RemoteRowDecl:
     `docs/interop-bridge.md` §3 already states for a seam ("manifest data, not
     source text"), applied to a callee that is in no manifest at all.
 
-    `remote`, `at`, `host`, `through`, `on_failure` and `redirect` are
-    CONTEXTUAL keywords,
-    recognised only in this one position inside a `composition` block. The
-    lexer's KEYWORDS set is untouched, so the self-host lexer needs no sync and
-    no program using any of those words as an ordinary name is broken. `in` and
-    `realm` are already keywords and are reused verbatim from `isolate`.
+    `remote`, `at`, `host`, `through`, `on_failure`, `redirect`, `pinned` and
+    `long_running` are CONTEXTUAL keywords, recognised only in this one position
+    inside a `composition` block. The lexer's KEYWORDS set is untouched, so the
+    self-host lexer needs no sync and no program using any of those words as an
+    ordinary name is broken. `in` and `realm` are already keywords and are
+    reused verbatim from `isolate`.
     """
     label: str
     key: str                       # the provision key the row claims
@@ -1118,6 +1119,16 @@ class RemoteRowDecl:
     # The line the address itself is written on, so an address refusal points at
     # the address rather than at the row's first line.
     host_line: int = 0
+    # Issue #2719: `pinned "<sha256-hex>"` — the FULL SHA-256 hex of the peer's
+    # TLS leaf SubjectPublicKeyInfo, the key the wire already presents. The pin
+    # adds no signature to the canonical envelope and no revocation source: a
+    # peer presenting any other key is a transport fault naming both
+    # fingerprints. `None` == the clause was not written, so a row with no pin
+    # behaves exactly as it did before this clause existed. `pinned` is a
+    # CONTEXTUAL keyword read only here, so the lexer's KEYWORDS set is
+    # untouched (docs/composition-rows.md).
+    pin: str | None = None
+    pin_line: int = 0
 
 
 @dataclass
@@ -1620,6 +1631,23 @@ class HostRef:
     root_kind: str | None = None
 
 
+@dataclass(frozen=True)
+class Derivation:
+    """The `derives <class> of <param>` trailing clause (issue #2695).
+
+    It DECLARES that the value a callable produces is a derivative of the named
+    `Retained[T, <policy>]` parameter: a summary, an index entry, an embedding,
+    a backup, an export or a cache entry. Structural only here: the parameter
+    exists and the class is one the named policy covers are checked in
+    `revl.taint`, beside the rest of the retention admission surface, so the
+    rule and the refusal that carries it sit in one file.
+    """
+
+    kind: str
+    source: str
+    line: int
+
+
 @dataclass
 class ExternDecl:
     name: str
@@ -1746,6 +1774,14 @@ class ExternDecl:
     # IR); `retry N` sets it to a positive literal. Legal only alongside
     # `validated`, checked in lower.
     retry: int = 0
+    # issue #2695: the `derives <class> of <param>` trailing clause, after the
+    # return type and before `cache`/`undo`/`compensate`. A DECLARED derivative
+    # relation (never inferred through a host body): the value this crossing
+    # produces is a derivative of the named `Retained[T, <policy>]` parameter,
+    # and carries that same policy. `None` unless written, so every existing
+    # extern is unaffected; the validation and the refusals that carry it live
+    # in `revl.taint` with the rest of the retention admission surface.
+    derivation: "Derivation | None" = None
 
 
 @dataclass
@@ -1782,6 +1818,64 @@ def _idents_between(toks: list, start: int, end: int) -> frozenset:
     return frozenset(names)
 
 
+# Tokens that bind tighter than a space: a spec's display spelling keeps a call
+# with its argument list and a field/index with its target, so `f (a)` and
+# `xs [0]` do not read as two expressions.
+_NO_SPACE_BEFORE = frozenset({")", "]", "}", ",", ".", "(", "["})
+_NO_SPACE_AFTER = frozenset({"(", "[", "{", "."})
+
+
+def _tokens_text(toks: list) -> str:
+    """A compact spelling of a token range, for the audit's `spec` field.
+
+    The lexer keeps a token's line but not its column, so a clause's exact
+    source spelling is not recoverable here. Spacing is rebuilt from the token
+    shapes instead: this is a DISPLAY string that names the claim (`ensures` is
+    printed around it by the audit), never source that is recompiled."""
+    out: list[str] = []
+    prev = None
+    for tok in toks:
+        if tok.kind == "eof":
+            break
+        if tok.kind == "string":
+            piece = json.dumps(tok.value)
+        elif tok.kind == "template":
+            piece = "``"
+        elif tok.value is None:
+            piece = tok.kind
+        else:
+            piece = str(tok.value)
+        if prev is not None:
+            if piece in _NO_SPACE_BEFORE or prev in _NO_SPACE_AFTER:
+                space = ""
+            else:
+                space = " "
+            out.append(space)
+        out.append(piece)
+        prev = piece
+    return "".join(out).strip()
+
+
+@dataclass
+class EnsuresClause:
+    """`ensures <expr>` on a `fn` (issue #2705): the function's spec.
+
+    The clause is a pure boolean expression over the fn's parameters, plus the
+    name `result` for the value the body returns. It is SUGAR: lowering
+    expands it to a `prop test` over the parameter types, whose body binds
+    `result` to one call of the fn and asserts the clause, so the existing
+    type-derived generator, coverage fold, shrinker and runner check it with no
+    new checker (docs/function-specs.md).
+
+    `text` is the display spelling the audit lists; `expr` is the parsed
+    expression lowered as the generated property's assertion.
+    """
+
+    expr: object
+    text: str
+    line: int
+
+
 @dataclass
 class FnDecl:
     name: str
@@ -1807,10 +1901,19 @@ class FnDecl:
     # pointing at the emission that should carry the declaration). `None` unless
     # written, so every existing fn's IR is byte-identical.
     cache: "CacheClause | None" = None
+    # issue #2705: the `ensures` clause, the function's spec. Lowering expands
+    # it to a `prop test` over the parameter types (docs/function-specs.md).
+    # `None` unless written, so every existing fn's AST and IR are unchanged.
+    ensures: "EnsuresClause | None" = None
     # issue #1900: every identifier spelled between `fn` and the end of the
     # body. `try` desugars through fresh locals (`try_<k>`), and a fresh name
     # must be one this fn does not spell anywhere, read, bound or called.
     idents: frozenset = field(default_factory=frozenset)
+    # issue #2695: the `derives <class> of <param>` trailing clause (the
+    # declaration's result is a derivative of the named `Retained[T, <policy>]`
+    # parameter and carries that policy). `None` unless written, so every
+    # existing fn is unaffected. Validated in `revl.taint`.
+    derivation: "Derivation | None" = None
 
 
 # pure-expression AST (§3.2 — the TS-subset stratum)
@@ -2632,8 +2735,9 @@ class Parser:
                             f"expected {wanted}, found {got}", hint)
         return self.next()
 
-    def err(self, line: int, message: str, hint: str | None = None) -> RevlError:
-        return RevlError(self.filename, line, message, hint)
+    def err(self, line: int, message: str, hint: str | None = None,
+            **fields) -> RevlError:
+        return RevlError(self.filename, line, message, hint, **fields)
 
     def _doc_above(self, line: int, floor: int | None = None) -> str | None:
         """The comment block directly above `line` (issue #1952).
@@ -3609,6 +3713,23 @@ class Parser:
         if self.at("arrow"):
             self.next()
             returns = self.type_()
+        # issue #2695: the `derives <class> of <param>` trailing clause, after
+        # the return type and before the teardown clauses. Recognised here on
+        # the IDENT, like `cache`, so no program that used `derives` as an
+        # ordinary name is broken; a second clause is refused by name rather
+        # than left to a confusing "expected {".
+        derivation = None
+        if self.at("ident", "derives"):
+            derivation = self._derives_clause()
+            if self.at("ident", "derives"):
+                raise self.err(
+                    self.peek().line,
+                    f"extern `{name}` declares `derives` twice",
+                    hint="one derivative class per crossing; a crossing that "
+                         "writes two classes is two declarations, so the "
+                         "receipt can name each (issue #2695)")
+        if self.at("ident", "ensures"):
+            raise self._spec_outside_fn("an extern")
         # item 310: the `cache` trailing clause, after the return type and before
         # the teardown clauses (design §Surface: "before `=` or `undo`"). Grammar-
         # legal but admission-refused for externs until the interior-crossing slice
@@ -3743,7 +3864,8 @@ class Parser:
                           undo_idempotent=undo_idempotent, undo_read=undo_read,
                           idempotent=idempotent,
                           idempotency_key=idempotency_key, cache=cache,
-                          validated=validated, retry=retry_budget)
+                          validated=validated, retry=retry_budget,
+                          derivation=derivation)
 
     def _retry_budget(self) -> int:
         """The positive integer literal after a `retry` modifier (item 257 §5.2).
@@ -3764,6 +3886,36 @@ class Parser:
                 hint="`retry N` sets the attempts BEYOND the first; omit the "
                      "clause for no retry (the budget defaults to 0, one attempt)")
         return ntok.value
+
+    def _derives_clause(self) -> Derivation:
+        """`derives <class> of <param>` (issue #2695), a trailing clause after a
+        callable's return type.
+
+        `derives` and `of` are CONTEXTUAL keywords (matched on the ident, the
+        discipline `cache`/`deferred`/`validated` use), so the lexer's KEYWORDS
+        set needs no sync and no program that used either word as an ordinary
+        name is broken. Structural parse only: that the named parameter exists,
+        that it is `Retained[T, <policy>]`, and that the policy covers the class
+        are checked in `revl.taint`, next to the retention refusal they enrich,
+        with honest messages naming the declaration.
+        """
+        line = self.peek().line
+        self.expect("ident", "derives",
+                    what="the `derives <class> of <param>` clause")
+        kind = self.expect(
+            "ident",
+            what="a derivative class after `derives` (summary, index, "
+                 "embedding, backup, export or cache)").value
+        self.expect(
+            "kw", "of",
+            what="`of <param>` after the derivative class — the "
+                 "`Retained[T, <policy>]` parameter the derivative is made "
+                 "from")
+        source = self.expect(
+            "ident",
+            what="the `Retained[T, <policy>]` parameter the derivative is "
+                 "made from").value
+        return Derivation(kind, source, line)
 
     def _reach_clause(self) -> tuple[str, str]:
         """`(confined: <param>)` after an emission classification — item 373.
@@ -4723,6 +4875,8 @@ class Parser:
                     )
                 termination = "criterion" if returns == "Criterion" else "guard"
                 returns = "Opt[Bool]"
+            if self.at("ident", "ensures"):
+                raise self._spec_outside_fn("a service operation")
             # item 310: the `cache` trailing clause, after the return type. `cache`
             # is a contextual keyword recognised only here, so a method with no
             # cache clause is byte-identical and a service using `cache` as a key
@@ -5884,7 +6038,7 @@ class Parser:
                                       f"(layer `{layer}`)")
             seen.add(field_name)
             self.expect(":")
-            out.append((field_name, self.literal(), fline))
+            out.append((field_name, self.row_config_value(), fline))
             if self.at(","):
                 self.next()
         self.expect("}")
@@ -5896,8 +6050,9 @@ class Parser:
         return out
     def remote_row_decl(self, composition: str) -> RemoteRowDecl:
         """`remote @label provides <key>: <Service> [in realm("r")]
-        at host("h:port") [through <ident>] [on_failure(withdraw|result)]
-        [redirect(refuse|same_origin)] [long_running]`
+        at host("h:port") [pinned "<sha256-hex>"] [through <ident>]
+        [on_failure(withdraw|result)] [redirect(refuse|same_origin)]
+        [long_running]`
 
         Item 424 D-424c.1, slice C2. Every word this clause introduces is a
         CONTEXTUAL keyword read only here (`remote`, `at`, `host`, `through`,
@@ -5958,6 +6113,8 @@ class Parser:
         redirect_line = line
         long_running = False
         long_running_line = line
+        pin: str | None = None
+        pin_line = line
         while True:
             if self.at("kw", "in"):
                 iline = self.next().line
@@ -5993,6 +6150,22 @@ class Parser:
                 host = self.next().value
                 host_line = tok.line
                 self.expect(")")
+            elif self.at("ident", "pinned"):
+                pline = self.next().line
+                if pin is not None:
+                    raise self.err(pline, f"duplicate `pinned` clause on "
+                                          f"remote row `@{label}`")
+                tok = self.peek()
+                if tok.kind != "string":
+                    raise self.err(
+                        tok.line,
+                        "a pinned identity is a static string literal",
+                        hint='write `pinned "<64 hex characters>"` — the FULL '
+                             "SHA-256 hex of the peer's TLS leaf "
+                             "SubjectPublicKeyInfo, the key the wire presents "
+                             "(issue #2719)")
+                pin = self.next().value
+                pin_line = tok.line
             elif self.at("ident", "through"):
                 tline = self.next().line
                 if transport is not None:
@@ -6061,7 +6234,7 @@ class Parser:
                              redirect=redirect, redirect_line=redirect_line,
                              long_running=long_running,
                              long_running_line=long_running_line,
-                             host_line=host_line)
+                             host_line=host_line, pin=pin, pin_line=pin_line)
 
     def host_row_decl(self, composition: str) -> HostRowDecl:
         """`host @label provides <key>: <Service> [in realm("r")]`
@@ -6240,7 +6413,7 @@ class Parser:
                 raise self.err(fline, f"duplicate config field `{field_name}` on row `@{label}`")
             seen.add(field_name)
             self.expect(":")
-            out.append((field_name, self.literal(), fline))
+            out.append((field_name, self.row_config_value(), fline))
             if self.at(","):
                 self.next()
         self.expect("}")
@@ -6343,6 +6516,23 @@ class Parser:
             )
         return {"kind": "in", "values": values}
 
+    def row_config_value(self):
+        """A row config value: a literal, or `[literal, ...]` (issue #3357).
+
+        Lists of scalar literals only, no nesting and no expressions; the list
+        is checked element-wise against the field's declared `List[T]` at
+        resolution (`composition._row_value_type`)."""
+        if not self.at("["):
+            return self.literal()
+        self.next()
+        values = []
+        while not self.at("]"):
+            values.append(self.literal())
+            if self.at(","):
+                self.next()
+        self.expect("]")
+        return values
+
     def literal(self):
         tok = self.peek()
         if tok.kind == "-" and self.peek_ahead(1).kind == "int":
@@ -6416,7 +6606,7 @@ class Parser:
                              "src/revl/typecheck.py); drop the annotation",
                     )
                 acquire, undo, line, setup, is_async, mode, replay = \
-                    self.effect_form(tok.line)
+                    self.effect_form(tok.line, bind=bind)
                 return LetEffect(bind, acquire, undo, line, setup, verified_effect,
                                  is_async, mode=mode, replay=replay)
             # item 130: `let sub = subscribe <stream> undo sub.close()` — a
@@ -6860,7 +7050,7 @@ class Parser:
         acting = self._acting_clause() if self._at_acting_clause() else None
         return EmitStmt(expr, line, compensate, approval, is_async, acting)
 
-    def effect_form(self, line: int):
+    def effect_form(self, line: int, bind: str | None = None):
         self.expect("kw", "effect")
         # item 308 (issue #96): the ownership mode a plain acquisition may carry
         # is threaded out as the final tuple element; `owned` for spawn/lease and
@@ -7044,8 +7234,9 @@ class Parser:
                     isinstance(acquire, ExprCall)
                     and isinstance(acquire.callee, ExprVar)):
                 return acquire, None, line, setup, is_async, mode, replay
-            message, hint = missing_undo_refusal(_describe_expr(acquire))
-            raise self.err(line, message, hint=hint)
+            message, hint, fields = missing_undo_refusal(_describe_expr(acquire),
+                                                         bind=bind)
+            raise self.err(line, message, hint=hint, **fields)
         self.next()
         undo = self.pure_expr()
         return acquire, undo, line, setup, is_async, mode, replay
@@ -8072,6 +8263,30 @@ class Parser:
         if self.at("arrow"):
             self.next()
             returns = self.type_()
+        # issue #2695: the `derives <class> of <param>` trailing clause, between
+        # the return type and the body. Recognised on the IDENT, like `cache`,
+        # so an existing fn that used `derives` as an ordinary name is
+        # unaffected. A second clause is refused by name.
+        derivation = None
+        if self.at("ident", "derives"):
+            derivation = self._derives_clause()
+            if self.at("ident", "derives"):
+                raise self.err(
+                    self.peek().line,
+                    f"`{name}` declares `derives` twice",
+                    hint="one derivative class per fn; a fn that makes two "
+                         "classes is two declarations, so the receipt can name "
+                         "each (issue #2695)")
+        # issue #2705: the `ensures` clause, between the signature and the body.
+        # `ensures` is CONTEXTUAL, the `cache`/`fault`/`prop` discipline: it
+        # heads a clause only in this position (a body opens with `{` or `=`,
+        # never `ensures`), so a program that already uses `ensures` as an
+        # ordinary identifier keeps parsing and the self-hosted lexer needs no
+        # new keyword. The clause is sugar over `prop test`
+        # (docs/function-specs.md).
+        ensures = None
+        if self.at("ident", "ensures"):
+            ensures = self._ensures_clause(name, line, params, type_params)
         # item 310: the `cache` trailing clause, between the return type and the
         # body. Only `cache pure` is legal on a plain `fn` (checked in lower); the
         # clause slot is unambiguous (a fn body opens with `{`, never `cache`).
@@ -8098,7 +8313,9 @@ class Parser:
             return FnDecl(name, params, returns, body, public, line, verified,
                           source=self.filename, type_params=type_params,
                           endorse_origins=endorse_origins, cache=cache,
-                          idents=_idents_between(self.toks, start, self.pos))
+                          ensures=ensures,
+                          idents=_idents_between(self.toks, start, self.pos),
+                          derivation=derivation)
         self.expect("{")
         body = []
         while True:
@@ -8110,8 +8327,68 @@ class Parser:
         return FnDecl(name, params, returns, body, public, line, verified,
                       source=self.filename, type_params=type_params,
                       endorse_origins=endorse_origins, cache=cache,
-                      idents=_idents_between(self.toks, start, self.pos))
+                      ensures=ensures,
+                      idents=_idents_between(self.toks, start, self.pos),
+                      derivation=derivation)
 
+
+    def _ensures_clause(self, fn_name: str, fn_line: int, params: list[FnParam],
+                        type_params: list[str]) -> EnsuresClause:
+        """Parse `ensures <expr>` (issue #2705), the fn's spec.
+
+        The expression is a pure property over the fn's parameters and the name
+        `result` (the returned value). It is checked by expanding it to a `prop
+        test` at lowering, so this method only refuses shapes that expansion
+        cannot express and records the display spelling.
+        """
+        line = self.next().line  # `ensures`
+        start = self.pos
+        expr = self.pure_expr()
+        text = _tokens_text(self.toks[start:self.pos])
+        if not text:
+            raise self.err(line, "`ensures` needs an expression",
+                           hint="write the claim the function must satisfy over its "
+                                "parameters, e.g. `ensures result == a + b`")
+        if fn_name == "result":
+            raise self.err(
+                fn_line,
+                "a function with a spec cannot be named `result`",
+                hint="`result` names the value the function returns inside its "
+                     "`ensures` clause; rename the function")
+        for param in params:
+            if param.name == "result":
+                raise self.err(
+                    param.line,
+                    "a parameter cannot be named `result` on a function with a spec",
+                    hint="`result` names the value the function returns inside its "
+                         "`ensures` clause; rename the parameter")
+        if not params:
+            raise self.err(
+                line,
+                "a function spec needs at least one parameter",
+                hint="the clause is checked as a `prop test`, whose generated inputs "
+                     "come from the parameter types; a claim with no generated input "
+                     "is a plain `assert` in a test")
+        if type_params:
+            raise self.err(
+                line,
+                "a function spec needs concrete parameter types",
+                hint=f"`{type_params[0]}` is generated from no type this program "
+                     "fixes; write the spec on a non-generic function whose body "
+                     "calls the generic one")
+        return EnsuresClause(expr, text, line)
+
+
+    def _spec_outside_fn(self, where: str) -> RevlError:
+        """The refusal for `ensures` after a signature that is not a top-level
+        `fn` (issue #2705). A spec is checked as a `prop test` that calls the
+        function with generated inputs, which only a top-level `fn` can be; say
+        so rather than let the clause fall through to a grammar complaint."""
+        return self.err(
+            self.peek().line,
+            f"a spec (`ensures`) is only supported on a top-level `fn`, not on {where}",
+            hint="state the claim on a top-level `fn` and call that from here "
+                 "(docs/function-specs.md)")
 
     def test_decl(self, lifecycle: bool = False) -> TestDecl:
         line = self.expect("kw", "test").line
@@ -9759,6 +10036,8 @@ class Parser:
             if self.at("arrow"):
                 self.next()
                 returns = self.type_()
+            if self.at("ident", "ensures"):
+                raise self._spec_outside_fn("a provided method")
             if self.at("="):
                 eq = self.next()
                 # issue #2187: `fn m(..) = { <statement> … }` is a block body
@@ -9835,9 +10114,68 @@ def _describe_expr(expr) -> str:
     return "the expression"
 
 
+_ACQUIRE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_']*(?:\.[A-Za-z_][A-Za-z0-9_']*)*")
+
+
+def _undo_acquire_fields(spelling: str, declared: str | None, derived: str,
+                         repairs: list[dict]) -> dict:
+    """The structured half of a G4 missing-undo refusal (issue #2684).
+
+    `acquire` names the extern and method; `diagnostics.classify` completes it
+    with the record's own file and line, so a raise site cannot disagree with
+    the position it refused at. `declaredClass` pairs the class an extern
+    declares (or `host` for the host-stub surface, `None` when no declaration
+    resolves) with the class the checker derived for this call. `repairs` is
+    ordered by preference; a repair whose edit is mechanical gains a verified
+    `fix_code` from the fixgen engine when the report holds the source."""
+    extern, method = spelling, None
+    if not _ACQUIRE_NAME.fullmatch(spelling):
+        # a complex acquisition expression has no extern name to report
+        extern = None
+    elif "." in spelling:
+        extern, method = spelling.rsplit(".", 1)
+    return {
+        "acquire": {"extern": extern, "method": method},
+        "declared_class": {"declared": declared, "derived": derived},
+        "repairs": repairs,
+    }
+
+
+def acquire_without_undo_fields(name: str, returns: str | None) -> dict:
+    """The structured half of G4's declaration refusal (issue #2684).
+
+    An `extern acquire fn` with no `undo` has no inverse at all, so the
+    repairs are declaration-level: declare the teardown, or say what this
+    write really is (a `local` write with no crossing, or an irreversible
+    `emission`). Neither is mechanical: the compiler cannot invent the extern
+    that releases the handle, and a reclassification changes every call site."""
+    ret = f" -> {returns}" if returns else ""
+    return {
+        "acquire": {"extern": name, "method": None},
+        "declared_class": {"declared": "acquire", "derived": "mutation"},
+        "repairs": [
+            {"kind": "declare-inverse",
+             "action": f"declare the teardown on the extern: `extern acquire fn "
+                       f"{name}(...){ret} undo <release>(result)`, where "
+                       f"`<release>` is the extern that releases the acquired "
+                       f"handle"},
+            {"kind": "reclassify",
+             "action": "if the write crosses no boundary it is `local`, called "
+                       "plainly with no bracket and no inverse; if it crosses "
+                       "irreversibly it is `emission`, and every call site is "
+                       "marked `emit`"},
+        ],
+    }
+
+
 def missing_undo_refusal(head: str, declared: tuple[str, str] | None = None,
-                         declared_local: bool = False) -> tuple[str, str]:
-    """The ONE rendering of G4's bare-acquisition refusal: `(message, hint)`.
+                         declared_local: bool = False, *,
+                         bind: str | None = None) -> tuple[str, str, dict]:
+    """The ONE rendering of G4's bare-acquisition refusal.
+
+    Returns `(message, hint, fields)`: the prose both positions share, and the
+    structured `acquire` / `declaredClass` / `repairs` a record carries
+    (issue #2684).
 
     Two positions raise it and neither may drift from the other. The parser
     refuses at the point it can prove the acquisition is not a bare name
@@ -9868,8 +10206,12 @@ def missing_undo_refusal(head: str, declared: tuple[str, str] | None = None,
     resolve one file at a time, after parsing, so an imported extern's
     classification is unknown there. Its domain is exactly the shapes that
     can never BE a bare-name extern call, which is why the generic wording
-    is the right one for every refusal it still raises."""
+    is the right one for every refusal it still raises.
+
+    `bind` is the name the acquisition is bound to, where the caller has it
+    (`let pool = effect …`). It only sharpens the `site-undo` repair's text."""
     spelling = head.strip("`")
+    handle = bind or "<name>"
     if declared_local:
         # item 2146: the callee IS a declared extern, and its class is `local`.
         # The generic wording below ("{head} is not pure") is true but useless
@@ -9884,7 +10226,17 @@ def missing_undo_refusal(head: str, declared: tuple[str, str] | None = None,
             f"a `local` extern writes durable local state and crosses no "
             f"boundary, so it is called plainly and takes no bracket or "
             f"inverse: write `{spelling}(...)` as a plain call "
-            f"(docs/syntax-2.0.md §6.1, G4)")
+            f"(docs/syntax-2.0.md §6.1, G4)",
+            _undo_acquire_fields(spelling, "local", "mutation", [
+                {"kind": "plain-call",
+                 "action": f"a `local` extern crosses no boundary, so drop the "
+                           f"bracket and call `{spelling}(...)` plainly"},
+                {"kind": "declare-inverse",
+                 "action": "if the write is a boundary crossing, declare it "
+                           "`extern acquire` with an `undo` (or `witnessed` "
+                           "with a `Result[..., Error]` return) and spell that "
+                           "inverse at the site"},
+            ]))
     if declared is not None:
         classification, inverse = declared
         article = "an" if classification[:1].lower() in "aeiou" else "a"
@@ -9900,7 +10252,18 @@ def missing_undo_refusal(head: str, declared: tuple[str, str] | None = None,
             f"registers it on the `Ok` branch and requires the return be "
             f"`Result[Witness, Error]` "
             f"(docs/design/243-witnessed-externs.md, G4)")
-        return message, hint
+        return (
+            message, hint,
+            _undo_acquire_fields(spelling, classification, "mutation", [
+                {"kind": "site-undo",
+                 "action": f"spell the inverse at the site: `effect "
+                           f"{spelling}(...) undo {inverse}(<the acquired "
+                           f"handle>)`"},
+                {"kind": "witnessed",
+                 "action": f"classify {head} `witnessed` with a "
+                           f"`Result[Witness, Error]` return, so its declared "
+                           f"inverse is registered by the teardown accumulator"},
+            ]))
     from .typecheck import _HOST_ACQUIRE_VERBS  # noqa: PLC0415
     release = _HOST_ACQUIRE_VERBS.get(spelling)
     if release is not None:
@@ -9910,11 +10273,39 @@ def missing_undo_refusal(head: str, declared: tuple[str, str] | None = None,
             f"effect has no `undo` and {head} is not pure",
             f"write `let <name> = effect {spelling}(...) undo "
             f"<name>.{release}()`: a host acquisition's inverse is its "
-            f"family's release on the handle it bound (G4)")
+            f"family's release on the handle it bound (G4)",
+            _undo_acquire_fields(spelling, "host", "mutation", [
+                {"kind": "site-undo",
+                 "action": f"bind the acquisition and spell its one inverse: "
+                           f"`let {handle} = effect {spelling}(...) undo "
+                           f"{handle}.{release}()`"},
+                {"kind": "witnessed",
+                 "action": "declare the acquisition as an `extern witnessed "
+                           "fn` that returns `Result[<handle>, Error]` with a "
+                           "declared `undo`, so the teardown accumulator "
+                           "replays it"},
+                {"kind": "service-emission",
+                 "action": "move the crossing behind a service operation "
+                           "declared `emission`, and mark its call `emit`: an "
+                           "emission is admitted as irreversible"},
+            ]))
     return (
         f"effect has no `undo` and {head} is not pure",
         f"write `effect {spelling}(...) undo <expr>`, or mark the call `emit` "
-        f"if it deliberately crosses the system boundary (G4)")
+        f"if it deliberately crosses the system boundary (G4)",
+        _undo_acquire_fields(spelling, None, "unknown", [
+            {"kind": "site-undo",
+             "action": f"give the call an inverse: `effect {spelling}(...) undo "
+                       f"<inverse>`"},
+            {"kind": "witnessed",
+             "action": f"declare `{spelling}` as an `extern witnessed fn` with "
+                       f"a declared `undo` and a `Result[..., Error]` return, "
+                       f"so the teardown accumulator replays it"},
+            {"kind": "service-emission",
+             "action": "move the crossing behind a service operation declared "
+                       "`emission`, and mark its call `emit`: an emission is "
+                       "admitted as irreversible"},
+        ]))
 
 
 def _dotted_path(expr) -> str | None:

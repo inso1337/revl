@@ -119,9 +119,24 @@ def project(tmp_path, monkeypatch):
         server_mod.AUTHORING = old
 
 
+def _commit_plan(proj: Path, name: str) -> str:
+    """The plan `truc add` builds: the sha256 of the entry text it read and the
+    gate admitted, derived from the registry this project names."""
+    manifest = json.loads(_host.toml_manifest(str(proj)))
+    reg = (manifest.get("registries") or {}).get("local") or manifest["registry"]
+    entry = json.loads(_host.entry_read(reg, name))
+    dossier = entry.get("dossier")
+    return json.dumps({"lockAdd": {
+        "name": name, "registry": "local",
+        "sourceHash": _host.sha256_hex(entry["source"]),
+        "manifestHash": _host.sha256_hex(entry["manifest"]),
+        "dossierHash": _host.sha256_hex(dossier) if dossier is not None else "",
+    }})
+
+
 def _add(proj: Path) -> dict:
-    plan = json.dumps({"lockAdd": {"name": "greeter", "registry": "local"}})
-    assert _host.commit_add(str(proj), plan) == "committed"
+    assert _host.commit_add(
+        str(proj), _commit_plan(proj, "greeter")) == "committed"
     lock = json.loads((proj / "truc.lock").read_text(encoding="utf-8"))
     (row,) = [r for r in lock["trucs"] if r["name"] == "greeter"]
     return row

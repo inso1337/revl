@@ -143,7 +143,11 @@ def test_step_without_a_log_selects_the_files_that_mention_cordis(tmp_path):
 
 def test_frontend_step_writes_the_skip_log():
     text = SCRIPT.read_text(encoding="utf-8")
-    assert 'env REVL_CORDIS_SKIP_LOG="$CORDIS_LOG" "$PYTEST" $SEL_PYTEST' in text
+    # Issue #2216 added `$SLOW_ENV` to this same command: it expands to nothing
+    # on the full gate and to REVL_SKIP_SLOW=1 under `--affected`. The cordis
+    # skip log is still passed on both paths, beside the new word.
+    assert ('env REVL_CORDIS_SKIP_LOG="$CORDIS_LOG" $SLOW_ENV "$PYTEST" '
+            '$SEL_PYTEST') in text
     assert "\n    cordis_step\n" in text
 
 

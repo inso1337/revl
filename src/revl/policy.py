@@ -80,6 +80,18 @@ class InertDenyPolicyWarning(UserWarning):
     reads exactly like a clean pass. This warns loudly rather than passing
     clean."""
 
+
+class InertPairPolicyWarning(UserWarning):
+    """A pair rule (`component X may not reach A together with B`) selected a
+    component in this audit, but no selected component reaches BOTH
+    capabilities, so the rule refuses nothing (issue #2686, the pair form of
+    the fail-open issue #1984 closed for deny-lists).
+
+    Each pattern may match a reach somewhere and the pair may still never occur
+    in ONE component, which is the only thing a per-component pair rule refuses.
+    Enforcing such a rule reads exactly like a clean pass, so this warns loudly
+    rather than passing clean."""
+
 # a reach of `*` is an unbounded emission or a first-class dispatch — a
 # boundary the analysis cannot name (docs/capabilities.md). It is the token no
 # allow-list can bound implicitly, exactly as G4 treats it.
@@ -106,6 +118,46 @@ class Rule:
         if self.scope == "component":
             return fnmatchcase(name, self.selector)
         return self.selector in realms
+
+
+@dataclass(frozen=True)
+class PairRule:
+    """``component <glob> may not reach <cap> together with <cap>`` (issue
+    #2686): the per-component PAIR rule.
+
+    The other reach rules constrain one capability at a time: a deny-list
+    refuses `sendEmail`, an allow-list bounds the union of what a component may
+    reach, and `tenants never reach each other` pairs components. None of them
+    can say "no single component may hold capability X together with capability
+    Y". Each capability is legal alone, and the COMBINATION is what an
+    operator refuses (a private-data read together with an outbound network
+    call). This rule states exactly that: `first` and `second` are capability
+    globs, and a component matched by `selector` is refused iff its reach, the
+    same `Reach` set the allow/deny legs read, contains a token matching each.
+
+    The two must be DISTINCT reached tokens. One token satisfying both patterns
+    is one capability, not the forbidden pair; it is the failure the issue's
+    acceptance calls out, where a component "reaching only one of them is
+    admitted". Overlapping patterns are therefore harmless rather than an
+    accidental deny-list.
+
+    Only the per-component form is part of this slice. A whole-composition
+    pair rule needs a decision on how realms count (two realms holding X and Y
+    separately must not trip the per-component rule and may trip a composition
+    rule), so a realm or composition subject is refused at parse time rather
+    than silently read as per-component."""
+
+    selector: str                    # glob over component names
+    first: str                       # capability glob
+    second: str                      # capability glob
+
+    def selects(self, name: str) -> bool:
+        return fnmatchcase(name, self.selector)
+
+    def to_dsl(self) -> str:
+        """Render the rule back to the line an operator writes."""
+        return (f"component {self.selector} may not reach {self.first} "
+                f"together with {self.second}")
 
 
 # the units a `ttl` duration may name — parsed to milliseconds, the unit the
@@ -621,6 +673,26 @@ _EVIDENCE_STATUS_THRESHOLDS = {
     "capabilities": ("present",),
 }
 
+# issue #2753: the operator-declared SOFT outcomes. A soft rule (`<subject>
+# <outcome> on evidence [...]`) grades exactly the same closed facet vocabulary
+# as a hard rule, but a failing clause NEVER becomes a violation: it maps the
+# candidate to the declared graded outcome. `admit` and `quarantine` are
+# deliberately absent: they are COMPUTED from the hard predicate (every hard
+# clause holds, or one fails), never declared, so an operator cannot weaken the
+# gate by labelling a failing clause with an admission.
+_SOFT_OUTCOMES = ("observe", "canary", "review")
+_COMPUTED_OUTCOMES = ("admit", "quarantine")
+
+# The graded-outcome order: a component's outcome is the STRICTEST failing soft
+# outcome, so one review clause is never hidden behind a canary clause. The
+# computed outcomes are ordered above the soft ones because a hard failure is
+# at least as restrictive as any advisory grade; `refuse` is the gate's own
+# final answer, so it is strictest of all.
+_OUTCOME_RANK = {
+    "admit": 0, "observe": 1, "canary": 2, "review": 3,
+    "quarantine": 4, "refuse": 5,
+}
+
 # The facets whose evidence is author-produced and therefore UNROOTED unless a
 # binding-covering `attestation valid` clause roots them (item 290, §6.2/6.3).
 # `attestation` and `publisher` are checked against operator-held inputs (a key,
@@ -650,12 +722,19 @@ class EvidenceRule:
     clauses (no scores, no partial credit), fail-closed (a missing facet fails),
     refuse-only (it can append a `Violation`, never widen past a deny or waive
     an approval). `origin` is ``"registry"`` for the origin-scoped
-    ``component registry:<glob>`` selector (§3.2), else None."""
+    ``component registry:<glob>`` selector (§3.2), else None.
+
+    Issue #2753 adds the SOFT form ``<subject> <outcome> on evidence [...]``.
+    It evaluates the same closed vocabulary, but its failing clauses are
+    advisory: `outcome` names the operator's graded disposition (`observe`,
+    `canary`, `review`) and the rule never appends a `Violation`. ``outcome is
+    None`` is the shipped hard rule; every existing rule keeps that value."""
     scope: str                        # "component" | "realm" | "mcp" | "capability"
     selector: str                     # glob / realm name ("" for mcp)
     origin: str | None                # "registry" for origin-scoped rules, else None
     require: tuple                    # ((facet, threshold), ...) conjunction
     self_attested: bool = False       # explicit unrooted acknowledgment (§6.3)
+    outcome: str | None = None        # None = hard; else a `_SOFT_OUTCOMES` member
 
     def unrooted_facets(self) -> frozenset:
         """The named facets that are UNROOTED — self-attesting evidence not
@@ -775,6 +854,11 @@ class Policy:
     wasm_fuel: int | None = None
     wasm_memory_bytes: int | None = None
     wasm_wall_seconds: float | None = None
+    # issue #2686: `component <glob> may not reach <cap> together with <cap>`:
+    # the per-component pair rule. Each capability may be legal alone; one
+    # component holding both is refused. Empty by default, so every policy
+    # written before this rule parses and behaves byte-identically.
+    pair_rules: tuple[PairRule, ...] = ()
 
     def is_empty(self) -> bool:
         return not self.rules and not self.tenants_isolated \
@@ -786,6 +870,7 @@ class Policy:
             and not self.reissue_rules \
             and not self.auto_approve_rules \
             and not self.never_standing_rules \
+            and not self.pair_rules \
             and not self.approvals_bounded \
             and not self.wasm_confined \
             and self.wasm_fuel is None and self.wasm_memory_bytes is None \
@@ -902,6 +987,38 @@ def _validate_cap_globs(caps: tuple[str, ...], text: str, source,
             raise PolicyError(source, lineno, _cap_token_error(token, text))
 
 
+def _pair_token_error(token, text: str) -> str:
+    """The diagnostic for a token that cannot be a capability pattern in a pair
+    rule (issue #2686).
+
+    The generic reach-rule message would tell the operator to separate the
+    tokens with commas, which is exactly wrong for the pair form: the two
+    capabilities sit one on each side of `together with`."""
+    if isinstance(token, str) and _EXCEPT_WORD.search(token):
+        return (f"`except` is not part of the pair grammar: {text.strip()!r} "
+                f"names {token!r}, which is prose, not a capability. A pair "
+                f"rule (`component <glob> may not reach <cap> together with "
+                f"<cap>`) carries no carve-out, so an exception cannot be "
+                f"expressed there. Name the components the rule applies to "
+                f"instead, or gate the crossing with `capability <glob> "
+                f"requires approval` (issue #2686)")
+    return (f"{token!r} is not a capability glob: a pair rule is `component "
+            f"<glob> may not reach <cap> together with <cap>`, and "
+            f"{text.strip()!r} names a token that can never match a "
+            f"capability. A capability is a dotted identifier path such as "
+            f"`mail.send`, optionally globbed with `*`, `?` or a character set "
+            f"(docs/capabilities.md §2), and a pair rule names exactly TWO of "
+            f"them, one on each side of `together with`. It is refused at "
+            f"parse time because a pair rule carrying it would silently "
+            f"refuse nothing (the closed vocabulary of §3.3, issue #2686)")
+
+
+def _validate_pair_globs(first, second, text: str, source, lineno) -> None:
+    for token in (first, second):
+        if not _is_cap_glob(token):
+            raise PolicyError(source, lineno, _pair_token_error(token, text))
+
+
 def _json_caps(values, source) -> tuple[str, ...]:
     caps = tuple(values)
     _validate_cap_globs(caps, json.dumps(list(caps)), source, 1)
@@ -982,6 +1099,51 @@ def _parse_require_list(text: str, source, lineno) -> tuple:
         raise PolicyError(source, lineno,
                           "a `requires evidence` rule names no facet")
     return tuple(_parse_facet_clause(c, source, lineno) for c in clauses)
+
+
+def _split_evidence_body(body: str, source, lineno,
+                         rule_name: str) -> tuple[tuple, bool]:
+    """Split an evidence rule's ``[...] [self-attested]`` body into its
+    validated clause conjunction and the unrooted acknowledgment (§6.3)."""
+    self_attested = False
+    close = body.rfind("]")
+    if close != -1:
+        trailer = body[close + 1:].strip().lower()
+        if trailer == "self-attested":
+            self_attested = True
+        elif trailer:
+            raise PolicyError(
+                source, lineno,
+                f"unexpected trailer after `{rule_name} [...]`: "
+                f"{body[close + 1:].strip()!r}: only `self-attested` "
+                f"is allowed (item 290, §6.3)")
+        body = body[:close + 1]
+    return _parse_require_list(body, source, lineno), self_attested
+
+
+def _parse_soft_outcome(outcome: str, source, lineno) -> str:
+    """Validate an operator-declared soft outcome (issue #2753).
+
+    `admit` and `quarantine` are COMPUTED from the hard predicate, so naming
+    one here is a `PolicyError`: a soft rule may never *declare* an admission
+    or a containment, only a review stage. The vocabulary is closed, like every
+    other evidence spelling."""
+    name = outcome.strip().lower()
+    if name in _COMPUTED_OUTCOMES:
+        raise PolicyError(
+            source, lineno,
+            f"`{name}` is a computed graded outcome, not a declarable soft "
+            f"outcome: `admit` means every hard clause held and `quarantine` "
+            f"follows a hard failure under `quarantine required` (issue "
+            f"#2753). A soft rule declares one of "
+            f"[{', '.join(_SOFT_OUTCOMES)}]")
+    if name not in _SOFT_OUTCOMES:
+        raise PolicyError(
+            source, lineno,
+            f"unknown graded outcome {outcome.strip()!r}: a soft evidence "
+            f"rule declares one of [{', '.join(_SOFT_OUTCOMES)}] (issue "
+            f"#2753); `admit` and `quarantine` are computed")
+    return name
 
 
 def _parse_evidence_subject(head: str, source, lineno) -> tuple[str, str, str | None]:
@@ -1216,6 +1378,7 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
     reissue_rules: list[ReissueRule] = []
     auto_approve_rules: list[AutoApproveRule] = []
     never_standing_rules: list[NeverStandingRule] = []
+    pair_rules: list[PairRule] = []
     evidence_root_local = False
     for lineno, raw in enumerate(text.splitlines(), start=1):
         line = raw.split("#", 1)[0].strip()
@@ -1229,6 +1392,37 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
         if low in ("evidence-root: local", "evidence-root local"):
             evidence_root_local = True
             continue
+        # issue #2753: the ADVISORY graded form,
+        # `<subject> <outcome> on evidence [...]`. It evaluates the same closed
+        # clause vocabulary as `requires evidence`, but a failing clause never
+        # appends a violation; the rule names the operator's graded disposition
+        # instead. Checked before the hard form so a typo'd outcome gets a
+        # diagnostic naming the allowed vocabulary rather than falling through
+        # to the reach grammar.
+        phrase = " on evidence"
+        at = low.find(phrase)
+        if at != -1:
+            # Split the ORIGINAL line at the lowercased phrase's offset, so a
+            # mixed-case `ON EVIDENCE` is still read as the soft form.
+            head = line[:at]
+            tail = line[at + len(phrase):]
+            parts = head.split()
+            if len(parts) < 2:
+                raise PolicyError(
+                    source, lineno,
+                    f"a soft evidence rule is `<subject> <outcome> on evidence "
+                    f"[<facet> <threshold>, ...]`, got {raw.strip()!r}; the "
+                    f"outcome is one of [{', '.join(_SOFT_OUTCOMES)}] (issue "
+                    f"#2753)")
+            outcome = _parse_soft_outcome(parts[-1], source, lineno)
+            scope, selector, origin = _parse_evidence_subject(
+                " ".join(parts[:-1]), source, lineno)
+            require, self_attested = _split_evidence_body(
+                tail.strip(), source, lineno, f"{outcome} on evidence")
+            evidence_rules.append(
+                EvidenceRule(scope, selector, origin, require, self_attested,
+                             outcome))
+            continue
         # item 290: `<subject> requires evidence [<facet> <threshold>, ...]
         # [self-attested]`. Checked before the approval/reach loops (it shares
         # neither phrase). A trailing `self-attested` is the per-rule unrooted
@@ -1237,21 +1431,8 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
             head, _, tail = line.partition(" requires evidence")
             scope, selector, origin = _parse_evidence_subject(
                 head.strip(), source, lineno)
-            self_attested = False
-            body = tail.strip()
-            close = body.rfind("]")
-            if close != -1:
-                trailer = body[close + 1:].strip().lower()
-                if trailer == "self-attested":
-                    self_attested = True
-                elif trailer:
-                    raise PolicyError(
-                        source, lineno,
-                        f"unexpected trailer after `requires evidence [...]`: "
-                        f"{body[close + 1:].strip()!r} — only `self-attested` "
-                        f"is allowed (item 290, §6.3)")
-                body = body[:close + 1]
-            require = _parse_require_list(body, source, lineno)
+            require, self_attested = _split_evidence_body(
+                tail.strip(), source, lineno, "requires evidence")
             evidence_rules.append(
                 EvidenceRule(scope, selector, origin, require, self_attested))
             continue
@@ -1456,6 +1637,56 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
             _validate_cap_globs((parts[1],), parts[1], source, lineno)
             never_standing_rules.append(NeverStandingRule(parts[1]))
             continue
+        # issue #2686: `component <glob> may not reach <cap> together with
+        # <cap>`: the per-component PAIR rule. Checked before the generic
+        # reach loop (it CONTAINS `may not reach`) so the two capabilities are
+        # read as a pair rather than as one whitespace-bearing token.
+        if " together with " in low:
+            marker = " may not reach "
+            if marker not in low:
+                raise PolicyError(
+                    source, lineno,
+                    f"a pair rule is `component <glob> may not reach <cap> "
+                    f"together with <cap>`. It refuses a component holding "
+                    f"BOTH capabilities, so it has no allow form and no "
+                    f"`realm` subject in this slice; got {raw.strip()!r}")
+            idx = low.find(marker)
+            head = line[:idx].strip()
+            tail = line[idx + len(marker):]
+            together = low.find(" together with ", idx + len(marker))
+            if together == -1:
+                raise PolicyError(
+                    source, lineno,
+                    f"a pair rule puts one capability on each side of "
+                    f"`together with`: `component <glob> may not reach <cap> "
+                    f"together with <cap>`, got {raw.strip()!r}")
+            first = line[idx + len(marker):together].strip()
+            second = line[together + len(" together with "):].strip()
+            parts = head.split()
+            if len(parts) != 2 or parts[0].lower() != "component":
+                raise PolicyError(
+                    source, lineno,
+                    f"a pair rule selects components with `component <glob> "
+                    f"may not reach <cap> together with <cap>`; a "
+                    f"composition-wide or realm-scoped pair rule is not part "
+                    f"of this slice, got {raw.strip()!r}")
+            if not first or not second:
+                raise PolicyError(
+                    source, lineno,
+                    f"a pair rule names two capabilities, one on each side of "
+                    f"`together with`: `component <glob> may not reach <cap> "
+                    f"together with <cap>`, got {raw.strip()!r}")
+            _validate_pair_globs(first, second, tail, source, lineno)
+            pair_rules.append(PairRule(parts[1], first, second))
+            continue
+        if low.rstrip().endswith(" together with"):
+            # the marker with no second capability is still a pair rule being
+            # written, not a whitespace-bearing capability token.
+            raise PolicyError(
+                source, lineno,
+                f"a pair rule names two capabilities, one on each side of "
+                f"`together with`: `component <glob> may not reach <cap> "
+                f"together with <cap>`, got {raw.strip()!r}")
         # <head> may [not] reach <caps>
         for verb, allow in (("may not reach", False), ("may reach", True)):
             idx = low.find(verb)
@@ -1501,7 +1732,8 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
                   wasm_confined=wasm_confined,
                   wasm_fuel=wasm_fuel,
                   wasm_memory_bytes=wasm_memory_bytes,
-                  wasm_wall_seconds=wasm_wall_seconds)
+                  wasm_wall_seconds=wasm_wall_seconds,
+                  pair_rules=tuple(pair_rules))
 
 
 def _parse_json(text: str, source: str | None) -> Policy:
@@ -1510,6 +1742,8 @@ def _parse_json(text: str, source: str | None) -> Policy:
     { "components": [{"pattern": "Agent*", "allow": [...], "deny": [...]}],
       "realms":     [{"realm": "billing", "allow": [...], "deny": [...]}],
       "tenants":    {"neverReachEachOther": true},
+      "pairs":      [{"component": "Agent*",
+                      "together": ["fs.read", "network.call"]}],
       "mcp":        {"allow": [...]} }
     """
     try:
@@ -1607,6 +1841,9 @@ def _parse_json(text: str, source: str | None) -> Policy:
     for entry in doc.get("evidence") or []:
         self_attested = bool(entry.get("selfAttested")
                              or entry.get("self_attested"))
+        raw_outcome = entry.get("outcome")
+        outcome = (_parse_soft_outcome(str(raw_outcome), source, 1)
+                   if raw_outcome is not None else None)
         require_obj = entry.get("require") or {}
         if not isinstance(require_obj, dict) or not require_obj:
             raise PolicyError(source, 1,
@@ -1617,17 +1854,17 @@ def _parse_json(text: str, source: str | None) -> Policy:
             for facet, threshold in require_obj.items())
         if entry.get("mcp"):
             evidence_rules.append(
-                EvidenceRule("mcp", "", None, require, self_attested))
+                EvidenceRule("mcp", "", None, require, self_attested, outcome))
             continue
         if entry.get("capability"):
             evidence_rules.append(
                 EvidenceRule("capability", entry["capability"], None, require,
-                             self_attested))
+                             self_attested, outcome))
             continue
         if entry.get("realm"):
             evidence_rules.append(
                 EvidenceRule("realm", entry["realm"], None, require,
-                             self_attested))
+                             self_attested, outcome))
             continue
         comp = entry.get("component")
         if not comp:
@@ -1637,7 +1874,8 @@ def _parse_json(text: str, source: str | None) -> Policy:
         scope, selector, origin = _parse_evidence_subject(
             f"component {comp}", source, 1)
         evidence_rules.append(
-            EvidenceRule(scope, selector, origin, require, self_attested))
+            EvidenceRule(scope, selector, origin, require, self_attested,
+                         outcome))
     register_rules: list[RegisterRule] = []
     for entry in doc.get("registers") or []:
         cap = entry.get("capability") or entry.get("pattern")
@@ -1694,6 +1932,23 @@ def _parse_json(text: str, source: str | None) -> Policy:
                               "a never-standing entry needs a `capability` glob")
         _validate_cap_globs((cap,), cap, source, 1)
         never_standing_rules.append(NeverStandingRule(cap))
+    # issue #2686: the `pairs` array, the JSON equivalent of
+    # `component <glob> may not reach <cap> together with <cap>`. Each entry is
+    # {"component": "<glob>", "together": ["<cap>", "<cap>"]}.
+    pair_rules: list[PairRule] = []
+    for entry in doc.get("pairs") or []:
+        component = entry.get("component") if isinstance(entry, dict) else None
+        together = entry.get("together") if isinstance(entry, dict) else None
+        if not component or not isinstance(together, list) \
+                or len(together) != 2:
+            raise PolicyError(
+                source, 1,
+                "a pair rule needs a `component` glob and a `together` list "
+                "of exactly two capability patterns: {\"component\": "
+                "\"Agent*\", \"together\": [\"fs.read\", \"network.call\"]}")
+        first, second = (str(token) for token in together)
+        _validate_pair_globs(first, second, json.dumps(together), source, 1)
+        pair_rules.append(PairRule(str(component), first, second))
     # issue #2729: the `wasm` object, the JSON equivalent of the two DSL
     # clauses. `limits` implies confinement; `confined` without `limits` is
     # parsed (so the policy reads as written) but refused at use.
@@ -1760,7 +2015,8 @@ def _parse_json(text: str, source: str | None) -> Policy:
                   wasm_confined=wasm_confined,
                   wasm_fuel=wasm_fuel,
                   wasm_memory_bytes=wasm_memory_bytes,
-                  wasm_wall_seconds=wasm_wall_seconds)
+                  wasm_wall_seconds=wasm_wall_seconds,
+                  pair_rules=tuple(pair_rules))
 
 
 def parse_policy(text: str, source: str | None = None) -> Policy:
@@ -1826,15 +2082,37 @@ def component_reach(audit: dict, name: str) -> list[Reach]:
     return out
 
 
-def component_realms(manifest: dict, name: str) -> frozenset[str]:
-    """The realms a component is isolated into (its `isolate` map values).
+def _entry_realms(entry: dict) -> frozenset[str]:
+    """Every realm one component entry is placed in: its `isolate` map values
+    and its `routes` realm sets.
 
-    A component with no isolate lives in the shared realm and is *not* a
+    An `isolate` value is a single-realm placement of a provide or require
+    key; a `routes` entry is the item-162 multi-realm placement
+    (`realms(...)`) of a require key, which lowering keeps in its own field.
+    This is the one definition of those placement fields: `component_realms`
+    and the admission realm-removal walk (`admit_profile._realm_sets`) both
+    read it, so the policy selection and the removal check cannot drift
+    (issue #3121)."""
+    realms = set((entry.get("isolate") or {}).values())
+    for route in (entry.get("routes") or {}).values():
+        realms.update(route.get("realms") or ())
+    return frozenset(realms)
+
+
+def component_realms(manifest: dict, name: str) -> frozenset[str]:
+    """The realms a component is placed in (its `isolate` map values and its
+    `routes` realm sets, see `_entry_realms`).
+
+    The policy selects a component by every realm it is placed in, so a routed
+    requirer is selected by every realm it routes across, exactly as a pinned
+    requirer is selected by the one realm it pins (issue #3121).
+
+    A component with no placement lives in the shared realm and is *not* a
     tenant — the tenants rule only pairs components that each name a realm.
     """
     for entry in manifest.get("components") or []:
         if entry.get("name") == name:
-            return frozenset((entry.get("isolate") or {}).values())
+            return _entry_realms(entry)
     return frozenset()
 
 
@@ -1843,11 +2121,12 @@ def component_realms(manifest: dict, name: str) -> frozenset[str]:
 @dataclass(frozen=True)
 class Violation:
     """One way the composition breaches the policy."""
-    kind: str                        # capability | deny | tenant | mcp-sandbox
-                                     #   | approval | declassify | taint-flow
-                                     #   | evidence | register (item 290)
+    kind: str                        # capability | deny | pair | tenant
+                                     #   | mcp-sandbox | approval | declassify
+                                     #   | taint-flow | evidence | register
     component: str
-    token: str
+    token: str                       # for a pair rule, both tokens joined by
+                                     #   ` + `; every other kind reaches one
     message: str
     why: WhyTrace
     # item 274: the navigable-refusal map for this violation, computed from the
@@ -1882,6 +2161,27 @@ def _deny_matches(token: str, patterns: tuple[str, ...]) -> bool:
     diff read one predicate rather than three spellings of it."""
     return _matches_any(token, patterns) or \
         (token == UNBOUNDED and UNBOUNDED in patterns)
+
+
+def _pair_reach(rule: PairRule, reach: list[Reach]) \
+        -> tuple[Reach, Reach] | None:
+    """The two DISTINCT reaches a component holds that make `rule` fire, or
+    None when it does not hold the pair (issue #2686).
+
+    Each side is every reach matching that side's pattern; the first pair of
+    distinct tokens is the violation. A component whose only match for both
+    patterns is ONE token holds one capability, not the forbidden pair, so it
+    is admitted. Gathering both sides first (rather than taking the first
+    match of `first` and then looking for a different second) matters when a
+    token matches both patterns: another token matching `first` alone can still
+    pair with it."""
+    firsts = [r for r in reach if _matches_any(r.token, (rule.first,))]
+    seconds = [r for r in reach if _matches_any(r.token, (rule.second,))]
+    for a in firsts:
+        for b in seconds:
+            if a.token != b.token:
+                return a, b
+    return None
 
 
 def capability_verdict(policy: Policy, name: str, realms: frozenset[str],
@@ -1970,15 +2270,29 @@ class ClauseVerdict:
 @dataclass(frozen=True)
 class RuleReport:
     """One evidence rule's verdict for one component: whether it selected the
-    component, and every clause verdict when it did."""
+    component, and every clause verdict when it did. `outcome` is None for a
+    hard `requires evidence` rule and the operator's soft outcome for a
+    `<outcome> on evidence` rule (issue #2753)."""
     scope: str
     selector: str
     origin: str | None
     self_attested: bool
     selected: bool
     clauses: tuple = ()
+    outcome: str | None = None
 
     def failed(self) -> list:
+        """Failing clauses of a HARD rule. A soft rule's failures are advisory
+        and are read through `soft_failed`, so the gate can never refuse on
+        one (issue #2753)."""
+        if self.outcome is not None:
+            return []
+        return [c for c in self.clauses if not c.passed]
+
+    def soft_failed(self) -> list:
+        """Failing clauses of a SOFT rule (issue #2753); empty for a hard rule."""
+        if self.outcome is None:
+            return []
         return [c for c in self.clauses if not c.passed]
 
 
@@ -2104,10 +2418,12 @@ def _rule_reports(policy: Policy, audit: dict, mcp_components: frozenset,
                   evidence_ir, recompute=False, recompute_ir=None,
                   recompute_gauntlet=None, recompute_producer=None) -> dict:
     """The single comparison site: every evidence rule against every component,
-    every clause verdict (pass and fail). `evaluate` turns failing clauses into
-    violations; `revl policy evaluate` renders the whole thing. Register rules
-    are reported alongside (slice 1: a `declared` floor is met by every selected
-    component; higher floors are parse-rejected until 309's ledger).
+    every clause verdict (pass and fail). `evaluate` turns a HARD rule's failing
+    clauses into violations; a soft rule's failing clauses are advisory and feed
+    the graded outcome instead (issue #2753). `revl policy evaluate` renders the
+    whole thing. Register rules are reported alongside (slice 1: a `declared`
+    floor is met by every selected component; higher floors are parse-rejected
+    until 309's ledger).
 
     Returns {component: {"evidence": [RuleReport], "registers": [RuleReport]}}.
 
@@ -2151,7 +2467,7 @@ def _rule_reports(policy: Policy, audit: dict, mcp_components: frozenset,
             if not selected:
                 ev_reports.append(RuleReport(rule.scope, rule.selector,
                                              rule.origin, rule.self_attested,
-                                             False, ()))
+                                             False, (), rule.outcome))
                 continue
             if assessment is None:
                 b = bundle if bundle is not None else reg.EvidenceBundle()
@@ -2188,7 +2504,8 @@ def _rule_reports(policy: Policy, audit: dict, mcp_components: frozenset,
                     key_present=key_bytes is not None, standing=standing,
                     att_detail=att_detail))
             ev_reports.append(RuleReport(rule.scope, rule.selector, rule.origin,
-                                         rule.self_attested, True, tuple(clauses)))
+                                         rule.self_attested, True,
+                                         tuple(clauses), rule.outcome))
         for rrule in policy.register_rules:
             # item 309 §3.2: read the per-token register off the audit's
             # `capability_registers` map (built from the IR's declared registers,
@@ -2346,13 +2663,17 @@ def unpredicted_rules(policy: Policy) -> list[str]:
     # — the line reads exactly as written in the policy file, facets included.
     out = [_rule_line(RuleReport(
                rule.scope, rule.selector, rule.origin, rule.self_attested, False,
-               tuple(ClauseVerdict(f, t, "", False, "") for f, t in rule.require)))
+               tuple(ClauseVerdict(f, t, "", False, "") for f, t in rule.require),
+               rule.outcome))
            for rule in policy.evidence_rules
-           if rule.scope in _UNPREDICTABLE_SCOPES]
+           if rule.scope in _UNPREDICTABLE_SCOPES and rule.outcome is None]
     out += [f"capability {rule.capability} requires register {rule.at_least}"
             for rule in policy.register_rules]
     out += [f"requires idempotent-teardown(strength: {rule.strength})"
             for rule in policy.teardown_rules]
+    # issue #2686: a pair rule reads the component's whole reach, which a
+    # single candidate standing alone does not carry into `predict_refusals`.
+    out += [rule.to_dsl() for rule in policy.pair_rules]
     return out
 
 
@@ -2399,8 +2720,11 @@ def predict_refusals(policy: Policy, name: str, *,
     from . import registry as reg  # noqa: PLC0415 — lazy, pulls the compiler
 
     unpredicted = unpredicted_rules(policy)
+    # A soft rule never refuses, so it is neither predictable as a refusal nor
+    # an unpredicted refusal (issue #2753). It is graded by `policy evaluate`.
     predictable = [r for r in policy.evidence_rules
-                   if r.scope not in _UNPREDICTABLE_SCOPES]
+                   if r.scope not in _UNPREDICTABLE_SCOPES
+                   and r.outcome is None]
     if not predictable:
         return {"wouldBeRefused": [], "unpredicted": unpredicted}
 
@@ -2497,6 +2821,18 @@ def evaluate(policy: Policy, audit: dict,
                     _allow_violation(manifest, name, r, sandbox, "mcp-sandbox",
                                      profile))
 
+        # issue #2686: the per-component pair rule. Each capability may be
+        # reached alone; a component matched by the selector that reaches BOTH
+        # distinct capabilities the rule names is refused. Read over the same
+        # reach set the allow/deny legs above just used.
+        for rule in policy.pair_rules:
+            if not rule.selects(name):
+                continue
+            pair = _pair_reach(rule, reach)
+            if pair is not None:
+                violations.append(
+                    _pair_violation(manifest, name, rule, pair[0], pair[1]))
+
         # item 249, Slice C: a forbidden taint downgrade. Read the origins this
         # component declassifies off the `declassify:` audit surface and refuse
         # any a matching `may not declassify` rule forbids.
@@ -2575,6 +2911,7 @@ def evaluate(policy: Policy, audit: dict,
     # operator is not lulled by a rule that protects nothing.
     _warn_if_taint_rules_are_inert(policy, audit)
     _warn_if_deny_rules_are_inert(policy, audit)
+    _warn_if_pair_rules_are_inert(policy, audit)
     return violations
 
 
@@ -2634,6 +2971,34 @@ def _warn_if_deny_rules_are_inert(policy: Policy, audit: dict) -> None:
             InertDenyPolicyWarning, stacklevel=2)
 
 
+def _warn_if_pair_rules_are_inert(policy: Policy, audit: dict) -> None:
+    """Issue #2686's half of the issue-#1984 fail-open. A pair rule protects
+    only when ONE component reaches both capabilities. Two well-formed patterns
+    can each match a reach somewhere and still never meet in one component, and
+    such a rule enforces exactly like a clean pass. Warn when a rule selected a
+    component in THIS audit and no selected component holds the pair.
+
+    A rule that selects no component here says nothing. That is a policy
+    written for other compositions, not an inert one."""
+    if not policy.pair_rules:
+        return
+    names = _components(audit)
+    reaches = {name: component_reach(audit, name) for name in names}
+    for rule in policy.pair_rules:
+        selected = [name for name in names if rule.selects(name)]
+        if not selected:
+            continue
+        if any(_pair_reach(rule, reaches[name]) for name in selected):
+            continue
+        warnings.warn(
+            f"`{rule.to_dsl()}` refuses nothing: it selected "
+            f"[{', '.join(selected)}], and no selected component reaches both "
+            f"`{rule.first}` and `{rule.second}`. Check the patterns against "
+            f"the reach surface (`revl audit`). An inert pair rule is not a "
+            f"protecting one (issue #2686).",
+            InertPairPolicyWarning, stacklevel=2)
+
+
 def _allow_violation(manifest: dict, name: str, reach: Reach,
                      allow: tuple[str, ...], kind: str,
                      profile=None) -> Violation:
@@ -2668,6 +3033,26 @@ def _deny_violation(manifest: dict, name: str, reach: Reach,
                    steps=_reach_step(manifest, name, reach))
     nav = _deny_navigate(reach, rule, profile)
     return Violation("deny", name, reach.token, message, why, navigate=nav)
+
+
+def _pair_violation(manifest: dict, name: str, rule: PairRule,
+                    first: Reach, second: Reach) -> Violation:
+    """A component holding both capabilities of a pair rule (issue #2686).
+
+    The message names the rule, the component and both capabilities; the
+    why-trace is the two reach chains as co-equal exhibits (a SET, not a path:
+    neither reach causes the other)."""
+    message = (f"policy violation: components matching `{rule.selector}` may "
+               f"not reach `{rule.first}` together with `{rule.second}`, but "
+               f"`{name}` reaches both `{first.token}` and `{second.token}`: "
+               f"one component holding the pair is forbidden; admission "
+               f"refused (boundary policy, issue #2686)")
+    steps = _reach_step(manifest, name, first) + _reach_step(manifest, name,
+                                                             second)
+    why = WhyTrace(kind="policy-authority", subject=name, shape=SET,
+                   steps=steps)
+    return Violation("pair", name, f"{first.token} + {second.token}",
+                     message, why)
 
 
 # ------------------------------------------------ item 274: navigable refusals
@@ -3061,7 +3446,108 @@ def _rule_line(report: "RuleReport") -> str:
                    else f"component {report.selector}"))
     tail = f" [{facets}]" if facets else ""
     sa = " self-attested" if report.self_attested else ""
-    return f"{prefix} requires evidence{tail}{sa}"
+    # issue #2753: a soft rule reads as written (`review on evidence [...]`),
+    # so the report names the operator's declared disposition, not a refusal.
+    kind = (f"{report.outcome} on evidence" if report.outcome
+            else "requires evidence")
+    return f"{prefix} {kind}{tail}{sa}"
+
+
+def _decided_clause(report: "RuleReport", clause: "ClauseVerdict", *,
+                    register: bool = False) -> dict:
+    """The clause that decided one component's graded outcome (issue #2753).
+
+    `register` selects the `requires register` rule line, because a register
+    report is a hard member of the same admission family but is not an
+    evidence-facet rule (`_rule_line` would spell it as `requires evidence`)."""
+    rule = (f"capability {report.selector} requires register {clause.threshold}"
+            if register else _rule_line(report))
+    return {"rule": rule, "facet": clause.facet,
+            "threshold": clause.threshold, "fact": clause.fact,
+            "standing": clause.standing}
+
+
+def _graded_outcome(policy: Policy, entry: dict) -> dict:
+    """Grade one component's evidence and register clauses into ONE advisory
+    outcome (issue #2753).
+
+    The hard predicate decides first and can never grade `admit`: a failing
+    hard clause maps to `quarantine` when the policy declares `quarantine
+    required` (the operator's containment path) and to the gate's own `refuse`
+    otherwise. `requires register` floors are hard members of the same
+    admission family, so a failing floor decides here too; leaving them
+    ungraded would report `admit` for a component the gate refuses on a
+    register violation. With no hard failure, the STRICTEST failing soft
+    outcome wins (`review` over `canary` over `observe`), so a lenient soft
+    rule can never hide a stricter one. If nothing fails, the outcome is
+    `admit`.
+
+    The result names the clause that decided it; `decidedBy` is None only for
+    `admit`, where no clause decided anything.
+
+    This function grades the evidence and register reports only. The caller
+    MUST override a non-hard result to `refuse` when the component is refused
+    by another rule family (reach, approval, tenant, idempotent-teardown):
+    otherwise the report would pair `refused: true` with `admit`, turning a
+    refusal into an admission for anything reading `outcome.name`.
+    """
+    hard = None
+    soft = None
+    for report in entry["evidence"]:
+        if not report.selected:
+            continue
+        if report.outcome is None:
+            for clause in report.failed():
+                if hard is None:
+                    hard = (report, clause, False)
+                break
+        else:
+            for clause in report.soft_failed():
+                if (soft is None or
+                        _OUTCOME_RANK[report.outcome]
+                        > _OUTCOME_RANK[soft[0].outcome]):
+                    soft = (report, clause)
+                break
+    if hard is None:
+        for report in entry["registers"]:
+            if not report.selected:
+                continue
+            for clause in report.failed():
+                hard = (report, clause, True)
+                break
+            if hard is not None:
+                break
+    if hard is not None:
+        report, clause, register = hard
+        return {"name": "quarantine" if policy.quarantine_required else "refuse",
+                "hard": True,
+                "decidedBy": _decided_clause(report, clause,
+                                             register=register)}
+    if soft is not None:
+        report, clause = soft
+        return {"name": report.outcome, "hard": False,
+                "decidedBy": _decided_clause(report, clause)}
+    return {"name": "admit", "hard": False, "decidedBy": None}
+
+
+def _outcome_text(outcome: dict, component: str | None = None) -> str:
+    """Render one graded outcome for the human `policy evaluate` report."""
+    name = outcome["name"]
+    decided = outcome.get("decidedBy")
+    if not decided:
+        return f"graded outcome: {name} (every selected hard clause holds)"
+    if "kind" in decided:
+        # A refusal from another rule family overrides the evidence grade; its
+        # `decidedBy` names the violation (kind and token) and its subject,
+        # which may be a recovery entry rather than the owning component.
+        subject = decided.get("component")
+        where = f"subject `{subject}`, " if subject else ""
+        return (f"graded outcome: {name} ({where}{decided['kind']} violation "
+                f"on `{decided.get('token') or '-'}`)")
+    who = f"component {component}, " if component else ""
+    return (f"graded outcome: {name} ({who}{decided['facet']} "
+            f"{decided['threshold']} is {decided['fact']}; decided by "
+            f"`{decided['rule']}`)")
 
 
 def explain(policy: Policy, audit: dict,
@@ -3077,6 +3563,12 @@ def explain(policy: Policy, audit: dict,
     refusal set is authoritative), plus the per-clause reports for the explain
     body. Returns a JSON-able dict; `render_explain` prints it. Nothing is
     admitted, refused, or mutated (§7).
+
+    A policy with evidence or register rules also gets a graded `outcome`
+    section (issue #2753), per component and overall: `admit`, a soft
+    `observe`/`canary`/`review`, or the hard `quarantine`/`refuse`. The outcome
+    is ADVISORY and is derived from the same clause verdicts; it never adds a
+    violation, and the gate's `refused` flag remains authoritative.
 
     With `recompute` (slice 3, §4), the same recompute inputs feed BOTH the
     authoritative `evaluate` and the report, so the recomputed facts the report
@@ -3098,15 +3590,20 @@ def explain(policy: Policy, audit: dict,
         recompute_producer=recompute_producer) if (
             policy.evidence_rules or policy.register_rules) else {}
     refused = {v.component for v in violations}
+    violations_by_component: dict[str, list] = {}
+    for violation in violations:
+        violations_by_component.setdefault(violation.component, []).append(violation)
     inert = _inert_evidence_selectors(policy, reports) if reports else []
+    has_graded_rules = bool(policy.evidence_rules or policy.register_rules)
     comps = []
+    all_comps = []
     for name in _components(audit):
-        if component and name != component:
-            continue
         entry = reports.get(name, {"evidence": [], "registers": []})
         rule_objs = []
         n_selected_clauses = 0
         n_selecting = 0
+        n_hard_clauses = 0
+        n_soft_failed = 0
         for r in entry["evidence"]:
             clause_objs = [
                 {"facet": c.facet, "threshold": c.threshold, "fact": c.fact,
@@ -3116,9 +3613,16 @@ def explain(policy: Policy, audit: dict,
             if r.selected:
                 n_selecting += 1
                 n_selected_clauses += len(r.clauses)
-            rule_objs.append({"rule": _rule_line(r), "selected": r.selected,
-                              "selfAttested": r.self_attested,
-                              "clauses": clause_objs})
+                if r.outcome is None:
+                    n_hard_clauses += len(r.clauses)
+                else:
+                    n_soft_failed += len(r.soft_failed())
+            rule_obj = {"rule": _rule_line(r), "selected": r.selected,
+                        "selfAttested": r.self_attested,
+                        "clauses": clause_objs}
+            if r.outcome is not None:
+                rule_obj["outcome"] = r.outcome
+            rule_objs.append(rule_obj)
         for r in entry["registers"]:
             rule_objs.append(
                 {"rule": f"capability {r.selector} requires register "
@@ -3131,20 +3635,79 @@ def explain(policy: Policy, audit: dict,
             verdict = "would be REFUSED"
         elif n_selecting == 0:
             verdict = "admitted: no evidence rule selects this component"
+        elif n_soft_failed:
+            if n_hard_clauses:
+                verdict = (f"admitted: {n_hard_clauses} hard clause(s) hold; "
+                           f"{n_soft_failed} soft clause(s) fail")
+            else:
+                verdict = (f"admitted: no hard clause fails; "
+                           f"{n_soft_failed} soft clause(s) fail")
         else:
             verdict = (f"admitted: all {n_selected_clauses} clause(s) across "
                        f"{n_selecting} selecting rule(s) hold")
-        comps.append({"component": name, "origin": _component_origin(
+        comp_obj = {"component": name, "origin": _component_origin(
             audit, origins, name), "selected": n_selecting > 0,
-            "rules": rule_objs, "refused": refused_here, "verdict": verdict})
-    return {
+            "rules": rule_objs, "refused": refused_here, "verdict": verdict}
+        if has_graded_rules:
+            graded = _graded_outcome(policy, entry)
+            if refused_here and not graded["hard"]:
+                # A refusal from another rule family (reach, approval, tenant,
+                # idempotent-teardown) is a hard refusal too. Never report
+                # `admit` next to `refused: true`: that would turn a refusal
+                # into an admission for anything reading `outcome.name`.
+                violation = violations_by_component[name][0]
+                graded = {
+                    "name": "refuse", "hard": True,
+                    "decidedBy": {"kind": violation.kind,
+                                  "token": violation.token,
+                                  "message": violation.message},
+                }
+            comp_obj["outcome"] = graded
+        all_comps.append(comp_obj)
+        if component and name != component:
+            continue
+        comps.append(comp_obj)
+    outcome = None
+    if has_graded_rules:
+        # The overall outcome is the WHOLE composition's worst, not the
+        # `--component`-filtered report's, so `--component Clean` cannot report
+        # admit while another component fails a hard clause (issue #2753).
+        best = None
+        for comp_obj in all_comps:
+            candidate = comp_obj["outcome"]
+            if (best is None or _OUTCOME_RANK[candidate["name"]]
+                    > _OUTCOME_RANK[best[1]["name"]]):
+                best = (comp_obj["component"], candidate)
+        if best is None:
+            outcome = {"name": "admit", "hard": False, "decidedBy": None}
+        else:
+            name, candidate = best
+            decided = candidate["decidedBy"]
+            outcome = {"name": candidate["name"], "hard": candidate["hard"],
+                       "decidedBy": ({**decided, "component": name}
+                                     if decided else None)}
+        if violations and not outcome["hard"]:
+            # A violation that is not attributed to a reportable component (the
+            # document-global `requires idempotent-teardown` floor names the
+            # recovery entry) must still make the overall outcome hard. The
+            # layer may never report `admit` while `refused` is true.
+            violation = violations[0]
+            outcome = {
+                "name": "refuse", "hard": True,
+                "decidedBy": {"kind": violation.kind,
+                              "token": violation.token,
+                              "message": violation.message,
+                              "component": violation.component},
+            }
+    result = {
         "policy": policy.source,
         "recomputed": bool(recompute),
         "components": comps,
         "inertSelectors": [
             {"kind": kind,
              "rule": (_rule_line(RuleReport(
-                 r.scope, r.selector, r.origin, r.self_attested, False, ()))
+                 r.scope, r.selector, r.origin, r.self_attested, False, (),
+                 r.outcome))
                  if kind == "evidence"
                  else f"capability {r.capability} requires register {r.at_least}")}
             for kind, r in inert],
@@ -3152,6 +3715,9 @@ def explain(policy: Policy, audit: dict,
         "violations": [{"kind": v.kind, "component": v.component,
                         "token": v.token, "message": v.message} for v in violations],
     }
+    if outcome is not None:
+        result["outcome"] = outcome
+    return result
 
 
 def render_explain(result: dict) -> str:
@@ -3181,13 +3747,21 @@ def render_explain(result: dict) -> str:
                     f"    {c['facet']:<18}{c['fact']:<24}"
                     f"required {c['threshold']:<10}({c['standing']}) "
                     f"{glyph}{detail}")
+        if comp.get("outcome"):
+            lines.append("  " + _outcome_text(comp["outcome"]))
         lines.append(f"  verdict: {comp['verdict']}")
         lines.append("")
     for inert in result["inertSelectors"]:
+        demand = ("grades nothing" if " on evidence" in inert["rule"]
+                  else "requires nothing")
         lines.append(f"inert selector ({inert['kind']}): `{inert['rule']}` "
-                     f"selects no component in this composition — it requires "
-                     f"nothing (item 290, §7; item 249 inert-taint precedent)")
+                     f"selects no component in this composition; it {demand} "
+                     f"(item 290, §7; item 249 inert-taint precedent)")
     if result["inertSelectors"]:
+        lines.append("")
+    if result.get("outcome"):
+        decided = result["outcome"].get("decidedBy") or {}
+        lines.append(_outcome_text(result["outcome"], decided.get("component")))
         lines.append("")
     verdict = ("REFUSED — at least one component would be refused"
                if result["refused"]

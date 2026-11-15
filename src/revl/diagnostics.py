@@ -12,6 +12,7 @@ through, and the table below classifies the rest by shape.
 
 from __future__ import annotations
 
+import os
 import re
 
 from .errors import RevlError
@@ -291,6 +292,24 @@ OTHER_CODES = {
         "fix": "re-run the producer (`revl_fmt` with `handle: true`) to mint "
                "one, or pass the text as `source`",
     },
+    "STALE_REPAIR": {
+        "category": "session",
+        "guarantee": "a repair id names a repair minted in the current unit of "
+                     "work",
+        "meaning": "the id was minted before a load, swap, rollback or undo "
+                   "moved the session's unit, so the candidate it repairs no "
+                   "longer belongs to this one",
+        "fix": "re-run `revl_check` to mint a repair for the current unit",
+    },
+    "UNKNOWN_REPAIR": {
+        "category": "usage",
+        "guarantee": "a repair id names a repair the session actually holds",
+        "meaning": "the id names no repair this session minted: no refusing "
+                   "`revl_check` issued it, or it has been dropped to keep the "
+                   "store bounded",
+        "fix": "re-run `revl_check` and pass the `repairId` its refusal "
+               "returns",
+    },
     "MCP-IDENTITY": {
         "category": "identity",
         "guarantee": "every answer comes from the revision the client pinned",
@@ -299,6 +318,21 @@ OTHER_CODES = {
                    "compiler",
         "fix": "point the client at the pinned checkout, or re-pin to the "
                "revision the message names",
+    },
+    "MCP-ATTESTATION": {
+        "category": "identity",
+        "guarantee": "every MCP answer comes from the server identity the "
+                     "client pinned, over the tool manifest that identity "
+                     "signed",
+        "meaning": "the upstream presented no signed record, signed with "
+                   "another key, named another server or session, was outside "
+                   "its validity window, or served a tool list that is not the "
+                   "manifest its record signed, so the proxy cannot tie the "
+                   "answer to the identity the operator pinned",
+        "fix": "pin the server's current public key and tool manifest "
+               "(regenerate the pin with `revl mcp serve "
+               "--attestation-pin-out`), or restart and reconnect the "
+               "upstream so it attests again",
     },
     "REVL": {
         "category": "unclassified",
@@ -489,6 +523,32 @@ FIXES_BY_CATEGORY: dict[tuple[str, str], str] = {
                       "type or a host root",
 }
 
+# The candidate-repair kinds a refusal can carry (issue #2759). The prose `fix`
+# above is one lesson; these are the mechanical ways out the fixgen engine can
+# verify against the source, listed here so `revl explain <code>` can answer
+# with the vocabulary before a caller has a source to repair. Keep in step with
+# `revl.lsp.fixgen._REPAIR_GENERATORS`; a code absent here carries no candidate
+# at all, because no-action beats a wrong edit.
+#
+# R2 is in the evolution curriculum's reserved set (issue #2028), so `revl
+# explain R2` still answers "no diagnostic code" on purpose and cannot list
+# these kinds; the R2 REFUSAL RECORD carries the same `repairs` list every
+# covered record does. A covered code is also only repairable in the modes its
+# generator understands (G1 `requirement`, G2 `linking`), which
+# `fixgen.covers_repairs` decides from the message.
+REPAIR_KINDS: dict[str, tuple[str, ...]] = {
+    "G1": ("add-requires", "remove-call"),
+    "G2": ("rename-key",),
+    "R2": ("route-via-granted-service",),
+}
+
+#: The codes `report` may ask the fixgen engine to repair from source.
+REPAIRABLE_CODES = frozenset(REPAIR_KINDS)
+
+#: The verification compiles one `report` call may spend on candidate repairs,
+#: across all its records.
+REPAIR_COMPILE_BUDGET = 8
+
 # The same split for the guarantee one-liner. `GUARANTEES[code]` is the code's
 # headline — it is what `revl explain`, the LSP hover and three generated docs
 # render — and it is written for the code's commonest mode. A mode whose
@@ -519,6 +579,8 @@ def explain(code: str) -> dict:
         record = {"ok": True, "code": known, "guarantee": GUARANTEES[known]}
         if known in FIXES:
             record["fix"] = FIXES[known]
+        if known in REPAIR_KINDS:
+            record["repairs"] = list(REPAIR_KINDS[known])
         return record
     entry = OTHER_CODES[known]
     record = {"ok": True, "code": known, "category": entry["category"],
@@ -527,6 +589,8 @@ def explain(code: str) -> dict:
         record["guarantee"] = entry["guarantee"]
     if entry["fix"]:
         record["fix"] = entry["fix"]
+    if known in REPAIR_KINDS:
+        record["repairs"] = list(REPAIR_KINDS[known])
     return record
 
 
@@ -630,6 +694,26 @@ def classify(error: RevlError) -> dict:
         # the same remedy `revl explain <code>` gives, for a code the
         # guarantee/fix table never carried (issue #2028)
         record["fix"] = OTHER_CODES[effective]["fix"]
+    # issue #2684: the acquisition a G4 missing-undo refusal names, the class
+    # the checker derived for it, and the ordered repairs. `acquire` is
+    # completed here from the record's own file and line, so a raise site
+    # names only the extern and method and cannot disagree with the position
+    # it refused at. Additive: a rejection that carries none of these
+    # serializes exactly as before.
+    acquire = getattr(error, "acquire", None)
+    if acquire is not None:
+        record["acquire"] = {
+            "file": record["file"],
+            "line": record["line"],
+            "extern": acquire.get("extern"),
+            "method": acquire.get("method"),
+        }
+    declared_class = getattr(error, "declared_class", None)
+    if declared_class is not None:
+        record["declaredClass"] = dict(declared_class)
+    repairs = getattr(error, "repairs", None)
+    if repairs is not None:
+        record["repairs"] = [dict(repair) for repair in repairs]
     # the derivation behind a search-based rejection (why.py): the G4
     # emission chain, the G3 cycle path, the two G2 providers
     why = getattr(error, "why", None)
@@ -671,7 +755,8 @@ def obligations(holes: list[dict]) -> dict:
     }
 
 
-def report(error: RevlError) -> dict:
+def report(error: RevlError, *, sources: dict[str, str] | None = None,
+           verifier=None, widens_authority: bool = False) -> dict:
     """A failed compile as an agent-consumable document.
 
     A multi-refusal compile raises a `RevlErrors` carrier (item 386) whose
@@ -687,15 +772,181 @@ def report(error: RevlError) -> dict:
     False}` from its own constructor rather than omitting the field, so a
     caller can tell "checked, nothing known" from "this server predates the
     field".
+
+    Issue #2684: a G4 missing-undo record's `repairs` list gains a `fix_code`
+    on the repair the fixgen engine can verify. The engine applies a candidate
+    edit and re-checks the patched source ("verified or nothing"), so a repair
+    that does not resolve the refusal is never offered as code. Issue #2855
+    extends the same verified edit to every record whose code has a generator
+    (`fixgen.APPLYABLE`), as `record["fix_code"]`, so the MCP apply-repair verb
+    applies the refusal's own repair rather than synthesizing a second one.
+
+    Issue #2759: a capability or admission refusal (G1's undeclared
+    requirement, G2's provision conflict, R2's ungranted reach) carries a
+    `repairs` list of VERIFIED candidate edits, generated and re-checked by the
+    same fixgen engine. Candidates that widen the source's declared authority
+    are omitted unless `widens_authority` is passed, and a candidate that would
+    introduce another refusal is dropped.
+
+    The check is the caller's, not this module's, and both arguments are
+    required to run it:
+
+    * `sources` maps a compile-level filename to the text that compile actually
+      read for it. It is deliberately not read from `error.filename`: a compile
+      may overlay edited buffers on real paths (`revl_check {files, modules}`),
+      so the file on disk can be pre-edit text that never compiled.
+    * `verifier(patched_text, error)` returns the patched program's diagnostics
+      from the SAME compiler door the check used (same authoring profile, same
+      in-memory modules), as LSP-shaped `{code, range}` records, or None when
+      the patched source could not be checked (the compile stopped before the
+      refusal's line). The fixgen engine carries the profile into the verify
+      compile this way instead of compiling the candidate unprofiled from the
+      editor's analysis path.
+
+    A caller that holds neither, or only the text, gets the prose repairs.
     """
     errors = getattr(error, "errors", None) or [error]
-    payload = {"ok": False, "diagnostics": [classify(e) for e in errors]}
+    records = [classify(e) for e in errors]
+    payload = {"ok": False, "diagnostics": records}
     for one in errors:
         repair = getattr(one, "repair", None)
         if repair is not None:
             payload["repair"] = repair
             break
+    _attach_repair_fixes(records, errors, sources, verifier,
+                         widens_authority=widens_authority)
     return payload
+
+
+def _attach_repair_fixes(records: list[dict], errors: list[RevlError],
+                         sources: dict[str, str] | None, verifier,
+                         *, widens_authority: bool = False) -> None:
+    """Attach the verified candidate edits to the records that can carry them.
+
+    Three populations, one engine:
+
+    * a G4 missing-undo record already lists its repairs (issue #2684); the
+      `site-undo` one is the only mechanical candidate, and it gains a
+      `fix_code` when the engine verifies it. Every other repair there is prose
+      a person or a model enacts, and stays prose rather than being given an
+      edit the engine could not verify.
+    * a record whose code has a generator in `fixgen.APPLYABLE` (T2, A9, REVL,
+      and a G4 with no `site-undo` entry) gets the verified edit as
+      `record["fix_code"]` (issue #2855), so the MCP apply-repair verb applies
+      the refusal's own repair rather than synthesizing a second one. A
+      candidate that does not resolve the refusal is dropped.
+    * a G1/G2/R2 record carries no repairs from its raise site (issue #2759);
+      the engine generates every candidate, applies each to the new refused
+      text, and keeps only the ones that clear the refusal without introducing
+      another. The record's whole classified shape is handed over as the
+      diagnostic, so the R2 generator can read the granted set from the
+      refusal's own `navigate` record.
+
+    The ranged diagnostic is built from the refusal the caller's compile
+    raised, never by compiling the text again: from the record's line, and
+    for an `APPLYABLE` code from the token its message names on that line (the
+    LSP range rule, read from the text). So the candidate is compiled only
+    through the caller's door, and the diagnostic is the refusal that door
+    reported even when the text `use`s a module that exists only as an
+    overlay. `verify` carries the caller's authoring profile and in-memory
+    modules into the patched compile."""
+    if not sources or verifier is None:
+        return
+    baseline = [(record.get("code"), _zero_based_line(record))
+                for record in records]
+    from .lsp import fixgen  # noqa: PLC0415 - analysis imports this module
+    from .lsp.analysis import _range_for  # noqa: PLC0415 - same cycle
+
+    # one compile budget for the whole report, not one per record
+    budget = fixgen.CompileBudget(REPAIR_COMPILE_BUDGET)
+    for record, one in zip(records, errors):
+        repairs = record.get("repairs")
+        text = _compiled_text(one, sources)
+        if text is None:
+            continue
+        line0 = _zero_based_line(record)
+        diagnostic = {
+            **record,
+            "range": {"start": {"line": line0, "character": 0},
+                      "end": {"line": line0, "character": 0}},
+        }
+
+        def verify(patched: str, refusal: RevlError = one):
+            return verifier(patched, refusal)
+
+        if repairs and any(r.get("kind") == "site-undo" for r in repairs):
+            if not budget.reserve(1):
+                continue                 # the prose repairs stay, unverified
+            fix = fixgen.fix_code(record, text, one.filename,
+                                  diagnostic=diagnostic, verify=verify)
+            if not fix.get("ok"):
+                continue
+            for repair in repairs:
+                if repair.get("kind") == "site-undo":
+                    repair["fix_code"] = {"title": fix["title"],
+                                          "edits": fix["edits"]}
+                    break
+            continue
+        if record.get("code") in fixgen.APPLYABLE:
+            if not budget.reserve(1):
+                continue                 # unverified, so no edit is offered
+            # a refusal raised with no line (policy, least authority) has no
+            # token to tighten onto: the record's clamped line stands
+            ranged = {"code": record["code"], "message": record["message"],
+                      "range": (_range_for(text, one)
+                                if isinstance(one.line, int)
+                                else diagnostic["range"])}
+            fix = fixgen.fix_code(record, text, one.filename,
+                                  diagnostic=ranged, verify=verify)
+            if fix.get("ok"):
+                record["fix_code"] = {"title": fix["title"],
+                                      "edits": fix["edits"]}
+            continue
+        if (repairs or record.get("code") not in REPAIRABLE_CODES
+                or not fixgen.covers_repairs(diagnostic)):
+            # a code is repairable in some failure modes and not others (G1
+            # `binding`, G2 `admission`): only the shapes a generator actually
+            # understands get the list, so an unrepairable mode keeps the old
+            # record instead of an empty list that reads as "checked, nothing
+            # found".
+            continue
+        if budget.remaining <= 0:
+            continue                     # unchecked, so no list that reads as checked
+        generated = fixgen.generate_repairs(
+            text, diagnostic, one.filename,
+            widens_authority=widens_authority, verify=verify,
+            baseline=baseline, budget=budget)
+        if generated is None:
+            continue                     # did not fit the budget: unchecked
+        # The list is present even when it is empty: the engine ran and found no
+        # candidate that verifies, which a caller must be able to tell from "no
+        # engine ran" (the same split issue #2845 made for `repair`).
+        record["repairs"] = [repair.as_dict() for repair in generated]
+
+
+def _zero_based_line(record: dict) -> int:
+    """A record's zero-based line, or 0 when it carries no line.
+
+    An ambient manifest entry has no declaration line, so a G2 conflict with it
+    names one provider without a line (issue #2759 review). The range is only a
+    hint for the generators (R2 reads its own message), so 0 is a sound clamp
+    where a subtraction would raise on `None`."""
+    line = record.get("line")
+    return max(line - 1, 0) if isinstance(line, int) else 0
+
+
+def _compiled_text(error: RevlError, sources: dict[str, str]) -> str | None:
+    """The text the compile read for `error`'s file, or None (issue #2684).
+
+    The keys are compared both as the compile spelled the path and as its
+    absolute form, because a `use`-reached module is named by the resolved
+    path while an inline candidate keeps its pseudo-name."""
+    name = error.filename
+    if not isinstance(name, str):
+        return None
+    if name in sources:
+        return sources[name]
+    return sources.get(os.path.abspath(name))
 
 
 def ok(**payload) -> dict:

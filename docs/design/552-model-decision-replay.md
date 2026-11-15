@@ -147,10 +147,20 @@ account together, with no reader change and no second correlation.
 ## 3. Slice 3: reading the decision back
 
 `revl.model_evidence.reconstruct(record, key)` verifies and then returns what
-the decision was: the crossing, the placement, what answered and on what host
-profile, how the prompt was bound, what the candidates were and which was
-taken, how it was asked, under which rule and how far down the ladder, plus
-`reproducible()`.
+the decision was: the crossing, the placement, what answered and on what basis,
+on what host profile, how the prompt was bound and from which template (or why
+no template is named), what the candidates were and which was taken, how it was
+asked, under which rule, and how far down the ladder and why, plus
+`reproducible()`. A `1.0` record is readable too; the members its version does
+not carry read as `None`, alongside the version that explains why.
+
+A version `3.0` record also reports its `reasoning` span (issue #2808): how
+much of it the host returned, its host-reported token count, and a digest of
+returned reasoning text only when the input's origins permit one. The span's
+text is never written. `revl.replay_modes.plan` turns the member into two
+per-entry verdicts: `fromRecord` (a retained answer can be served without
+calling the model) and `rederivable` (the answer can be reproduced from the
+prompt; a hidden or summary span makes it false with the reason named).
 
 **`decision` is `None` whenever `verified` is false.** This is stronger than the
 exit clause's "an edited field fails its digest", and deliberately: a reader

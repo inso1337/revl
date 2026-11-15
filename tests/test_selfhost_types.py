@@ -197,6 +197,10 @@ WF_TYPES = [
     "Int", "Opt[Int]", "List[Str]", "Map[Str, Int]", "Result[Int, Str]",
     "Opt", "List", "Map", "Result", "Map[Str]", "Result[Int]", "Opt[Int, Str]",
     "List[Int, Str]", "Map[Str, Int, Bool]",
+    # a builtin scalar takes no type arguments (issue #2963); the same message
+    # shape as a parametric head's wrong arity
+    "Int[Str]", "Int32[Int]", "Str[Int]", "Bool[Int]", "Bytes[Int]",
+    "Unit[Str]", "Float[Str, Bool]",
     "(Int) -> Str", "(Int) -> Async[Str]", "Async[Str]", "Async[Int, Str]",
     "Async", "Opt[Async[Str]]", "List[Opt[Int]]", "Map[Str, List[Int]]",
     "Approval[C]", "(Str) -> Async[Async[Int]]", "((Int) -> Async[Str]) -> Int",

@@ -145,6 +145,47 @@ _RUST_TYPE_RESERVED = frozenset({
     "RevlPendingCompensation", "RevlWal",
 })
 
+# Issue #3159: the prelude CONSTRUCTORS the emitted body spells as bare tokens
+# (`Ok(..)`, `Err(..)`, the `Some`/`None` of an `Opt`). They are reserved at the
+# VALUE-name positions a user binding can occupy at module scope, where the
+# rename is injective: a module `fn Err` emitted `fn Err(..)` and every
+# `Err("denied")` in the module resolved to that fn instead of the constructor,
+# so a denial returned `Ok`. `_RUST_TYPE_RESERVED` already carries these names
+# for the type-name position (#1920); a fn lives in the value namespace, so it
+# needs the same names at its own position. Locals and parameters of these
+# spellings are already escaped by the frontend's `_predeclared_mangle` (item
+# #320), so only the module-level value positions are added here, and the
+# existing ladder keeps `Err` -> `Err_`, `Err_` -> `Err__` distinct.
+_RUST_VALUE_RESERVED = frozenset({"Ok", "Err", "Some", "None"})
+
+# The rust helper namespace: the emitted module declares `fn revl_concat`,
+# `revl_ftoa`, `REVL_JOURNAL_DEPTH`, ... and a user value of that spelling can
+# shadow a bare helper call inside its function (and a module fn collides at
+# package scope). Keep the namespace unspellable from user names, the same rule
+# the ts, java, go and python emitters apply. An `extern parameter name` is
+# excluded because a verbatim `@rust` body spells the parameter by its source
+# name.
+_REVL_NAMESPACE_RE = re.compile(r"^(?:revl[A-Z_]|REVL_|_revl|_REVL)")
+
+_RUST_VALUE_ROLES = frozenset({
+    "arrow parameter", "bind", "binding", "extern name", "function",
+    "function name", "loop binding", "match bind", "name", "parameter",
+    "parameter name", "setup assign", "setup binding",
+})
+
+
+def _in_revl_namespace(name: str) -> bool:
+    """Whether *name* (or a trailing-underscore root of it) is in the emitted
+    helper namespace, so a user value of that spelling would shadow a helper."""
+    root = name
+    while root:
+        if _REVL_NAMESPACE_RE.match(root) is not None:
+            return True
+        if not root.endswith("_"):
+            break
+        root = root[:-1]
+    return False
+
 # Method names that collide with Rust's `Drop::drop` destructor must be renamed.
 _METHOD_RENAMES = {"drop": "drop_"}
 
@@ -206,6 +247,27 @@ def _method_ident(name: object) -> str:
 
 class EmitError(ValueError):
     """The IR document violates the backend contract."""
+
+
+def _host_body_scanner():
+    """The shared host-body scanner (`src/revl/host_body.py`).
+
+    Imported lazily so a standalone `python3 emit.py <ir.json>` keeps working:
+    when the emitter runs through the compiler `revl` is importable, and a bare
+    script run falls back to the source tree beside this file. The scanner is
+    the one place every tier splits an extern body and checks that it cannot
+    leave the function it is spliced into (#3130, #3131, #3162, #3164, #3166).
+    """
+    try:
+        from revl.host_body import body_lines, check_host_body
+    except ModuleNotFoundError:  # standalone `python3 emit.py`: put src/ on the path
+        import pathlib
+        import sys as _sys
+        src = pathlib.Path(__file__).resolve().parents[2] / "src"
+        if src.is_dir() and str(src) not in _sys.path:
+            _sys.path.insert(0, str(src))
+        from revl.host_body import body_lines, check_host_body
+    return body_lines, check_host_body
 
 
 def _finite_float(value):
@@ -1748,7 +1810,17 @@ def _ident(name: object, role: str) -> str:
     # A user type must not shadow a Rust prelude / cordis name the emitted
     # module spells as a bare token (#552 B2). Only the type-name position
     # reserves them; a field/local/param of the same spelling is left alone.
-    extra = _RUST_TYPE_RESERVED if role == "type name" else frozenset()
+    # A module-level `fn`/extern is a VALUE name, so it takes the prelude
+    # CONSTRUCTOR set instead (issue #3159).
+    if role == "type name":
+        extra = _RUST_TYPE_RESERVED
+    elif role in ("function name", "extern name"):
+        extra = _RUST_VALUE_RESERVED
+    else:
+        extra = frozenset()
+    if role in _RUST_VALUE_ROLES and _in_revl_namespace(name):
+        # the emitter's own `revl_*`/`REVL_*` helpers must stay reachable bare
+        return name + "_"
     return _mangle(name, extra)
 
 
@@ -4994,7 +5066,7 @@ def _rust_render_pure_stmts(steps: list, env: _Env, scope: dict,
                     f"compensate ...` is not lowerable in the Rust backend")
             arg_scope = dict(scope)
             for param in params:
-                arg_scope[param] = f"{param}.clone()"
+                arg_scope[param] = f"{_ident(param, 'parameter')}.clone()"
             parts.append("let _ = %s;" % _journal_service_emit(
                 step.get("expr"), env, _expr(step['expr'], env, arg_scope)))
         elif kind == "break":
@@ -5257,7 +5329,7 @@ def _method_undo_clones(env: _Env, method: dict, out: list[str], indent: int) ->
     for req in env.reqs:
         out.append(f"{pad}let {req}_undo = self.{_req_ident(req, env)}.clone();")
     for param in method.get("params") or []:
-        out.append(f"{pad}let {param}_undo = {param}.clone();")
+        out.append(f"{pad}let {param}_undo = {_ident(param, 'parameter')}.clone();")
 
 
 def _provide_let_type(env: _Env, value: object, ctx: "_V3Ctx") -> str | None:
@@ -5346,7 +5418,7 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             undo_rename = _method_undo_rename(env, method)
             acquire_rename = dict(rename)
             for param in method.get("params") or []:
-                acquire_rename[param] = f"{param}.clone()"
+                acquire_rename[param] = f"{_ident(param, 'parameter')}.clone()"
             label = _string(f"{env.name}.{method.get('name')}.{kind}.{index}")
             undo_node = step.get("undo")
             acquire_node = step.get("acquire") or step.get("expr")
@@ -5383,7 +5455,7 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
         elif kind == "emit":
             acquire_rename = dict(rename)
             for param in method.get("params") or []:
-                acquire_rename[param] = f"{param}.clone()"
+                acquire_rename[param] = f"{_ident(param, 'parameter')}.clone()"
             acquire_node = step.get("expr")
             env.v3_ctx().declared_skip = acquire_node
             acquire = _expr(acquire_node, env, acquire_rename)
@@ -5443,7 +5515,7 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             param = _bare_param(step.get("value"), method)
             if param is not None:
                 value_rename = dict(rename)
-                value_rename[param] = f"{param}.clone()"
+                value_rename[param] = f"{_ident(param, 'parameter')}.clone()"
             value = _expr(step["value"], env, value_rename)
             if kind == "let":
                 out.append(f"{pad}let {'mut ' if step.get('mutable') else ''}"
@@ -5468,7 +5540,7 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             undo_rename = _method_undo_rename(env, method)
             acquire_rename = dict(rename)
             for param in method.get("params") or []:
-                acquire_rename[param] = f"{param}.clone()"
+                acquire_rename[param] = f"{_ident(param, 'parameter')}.clone()"
             label = _string(f"{env.name}.{method.get('name')}.let-effect.{index}")
             undo_node = step.get("undo")
             acquire_node = step.get("acquire")
@@ -5594,7 +5666,7 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
             original_mname = method.get("name")
             mname = _method_ident(original_mname)
             params = ", ".join(
-                f"{p}: {_rust_type(_param_type(env, key, original_mname, p), env.types)}"
+                f"{_ident(p, 'parameter')}: {_rust_type(_param_type(env, key, original_mname, p), env.types)}"
                 for p in method.get("params") or []
             )
             ret = (_rust_type(_method_return(env, key, original_mname), env.types)
@@ -5613,7 +5685,7 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
             # lets every free-form sink scrub it once the body hands it on.
             secret_params = _secret_method_params(
                 env, key, original_mname, method.get("params") or [])
-            mark = "".join(_secret_mark_call(t, p, tail=" ", types=env.types)
+            mark = "".join(_secret_mark_call(t, _ident(p, 'parameter'), tail=" ", types=env.types)
                            for p, t in secret_params)
             if has_effectful:
                 env.v3_ctx().declared_ctx = "self.ctx"
@@ -5984,7 +6056,7 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
             # Rust spelling is for the `fn` alone.
             mname = method.get("name")
             params = ", ".join(
-                f"{p}: {_rust_type(_param_type(env, key, mname, p), env.types)}"
+                f"{_ident(p, 'parameter')}: {_rust_type(_param_type(env, key, mname, p), env.types)}"
                 for p in method.get("params") or []
             )
             ret = (_rust_type(_method_return(env, key, mname), env.types)
@@ -6003,7 +6075,7 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
             # to a free-form sink is scrubbed.
             secret_params = _secret_method_params(
                 env, key, mname, method.get("params") or [])
-            mark = "".join(_secret_mark_call(t, p, tail=" ", types=env.types)
+            mark = "".join(_secret_mark_call(t, _ident(p, 'parameter'), tail=" ", types=env.types)
                            for p, t in secret_params)
             out.append(f"    fn {_method_ident(mname)}(&self, {params}) -> {ret} {{ {mark}{_method_body(env, method)} }}")
         out.append("}")
@@ -7087,6 +7159,9 @@ _BUILTIN_RESULT = {
     "split": "List[Str]", "keys": "List[Str]",
     "to_int32": "Int32",
     "field": "Any", "list": "List[Any]",
+    "checked_add": "Result[Int, Str]",
+    "checked_sub": "Result[Int, Str]",
+    "checked_mul": "Result[Int, Str]",
     "checked_div_trunc": "Result[Int, Str]",
     "checked_div_floor": "Result[Int, Str]",
     "checked_div_euclid": "Result[Int, Str]",
@@ -7266,6 +7341,13 @@ class _V3Ctx:
                  components: list | None = None,
                  analyses: "_V3Analyses | None" = None) -> None:
         self.types = types or {}
+        # The reverse of `_ident` for declaration names, built once: a record
+        # literal carries the EMITTED ident (`Box_`) while `var_types` /
+        # `_v3_infer_type` carry the RAW surface name (`Box`), and both must
+        # reach the same declaration without scanning the whole type table (or
+        # confusing a declared `Box_` with `Box`).
+        self.raw_by_emitted = {_ident(name, "type name"): name
+                               for name in self.types}
         # issue #540: the whole-program scans (`fn_borrow`, `fn_list_borrow`,
         # the char views, the recursive-Box edges) are pure in `functions`/
         # `types`; `_emit_v3` computes them once and passes the bundle in, so
@@ -7477,13 +7559,30 @@ class _V3Ctx:
                       "type name")
 
     def record_field_types(self, type_name: str) -> dict[str, str | None]:
-        """The declared field -> type map of an emitted record type, so a field
-        VALUE can be lowered with its target type as context. Empty for a
-        synthesized/unknown name."""
-        spec = self.types.get(type_name)
-        if spec is None or spec.get("kind") != "record":
-            return {}
-        return dict(spec.get("fields") or {})
+        """The declared field -> type map of a record type, so a field VALUE can
+        be lowered with its target type as context. Empty for a
+        synthesized/unknown name.
+
+        Callers pass either the RAW surface name (a declared type read from
+        `var_types`/`_v3_infer_type`) or the EMITTED ident (a record literal).
+        The raw key wins when it exists, because a declared `Box_` is a
+        different declaration from the `Box` that mangles to `Box_`; otherwise
+        the ident is resolved through the `_ident` reverse map.
+        """
+        raw = (type_name if type_name in self.types
+               else self.raw_by_emitted.get(type_name))
+        spec = self.types.get(raw) if raw is not None else None
+        record = isinstance(spec, dict) and spec.get("kind") == "record"
+        return dict(spec.get("fields") or {}) if record else {}
+
+    def declaration_params(self, type_name: str) -> frozenset:
+        """The type parameters of the record/variant whose RAW or EMITTED ident
+        is `type_name` (empty for a non-generic or unknown declaration). A field
+        typed as one of these is a parameter, not the erased `Value`."""
+        raw = (type_name if type_name in self.types
+               else self.raw_by_emitted.get(type_name))
+        spec = self.types.get(raw) if raw is not None else None
+        return frozenset(spec.get("params") or []) if spec else frozenset()
 
     def record_type_for_names(self, names: list[str],
                               expected: str | None = None) -> str:
@@ -8025,6 +8124,15 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         def _field_value(k, v):
             rendered = _by_value_arg(
                 v, _render_expr(v, ctx, rename, field_types.get(k)), ctx)
+            # A concrete value flowing INTO an erased `Any`/`Value` FIELD is the
+            # same coercion a call argument gets: the field holds `cordis::Value`
+            # and an `i64`/`String` does not implement `Into<Value>`, so
+            # `{ v: 1 }` against a `v: Value` field was E0308 (issue #3019). A
+            # generic record's field typed as its own parameter (`Cell[T].v`) is
+            # a parameter, not the erased value, and must not be boxed.
+            declared = field_types.get(k)
+            if declared not in ctx.declaration_params(type_name):
+                rendered = _coerce_any_arg(v, rendered, declared, ctx)
             if ctx.field_is_boxed(type_name, _ident(k, "record field")):
                 # recursive struct field -> the struct holds `Box<T>` (E0072);
                 # move the field value onto the heap to match.
@@ -8272,10 +8380,26 @@ def _v3_instance_get(node: dict, ctx: _V3Ctx, rename: dict[str, str]) -> str:
 # rounding as the faulting operations, Err(reason) at a zero divisor.
 _CHECKED_DIVS = ("checked_div_trunc", "checked_div_floor",
                  "checked_div_euclid", "checked_mod")
+# The total arithmetic forms (docs/arithmetic.md): same value as `+ - *`
+# where it fits, Err("revl: Int overflow") instead of panicking. Rust's own
+# `i64::checked_*` family is exactly this operation, so it is the lowering.
+_CHECKED_ARITH = ("checked_add", "checked_sub", "checked_mul")
 _DIV_ZERO_MSG = "revl: division by zero"
+_INT_OVERFLOW_MSG = "revl: Int overflow"
 # The reason a `Map` subscript miss faults (issue #957), spelled identically on
 # every tier so one guarantee does not read as five different bugs.
 _MAP_MISS_MSG = "revl: map index: no entry for key"
+
+
+def _v3_checked_arith(method: str, target: str, arg: str) -> str:
+    """The total arithmetic forms (docs/arithmetic.md): `i64::checked_add` and
+    friends answer `Option<i64>`, so the lowering is that native operation
+    with `None` carried out as `Err`. The turbofish pins
+    `Result<i64, String>` so the expression is context-free; the operands are
+    bound once, since a block evaluates them exactly once."""
+    return (f"{{ let a = ({target}); let b = ({arg}); "
+            f'match a.{method}(b) {{ Some(v) => Ok::<i64, String>(v), '
+            f'None => Err::<i64, String>("{_INT_OVERFLOW_MSG}".to_string()) }} }}')
 
 
 def _v3_checked_div(method: str, target: str, arg: str) -> str:
@@ -8455,11 +8579,16 @@ def _v3_builtin(method: str, target: str, args: list[str],
         # Name that divisor rather than letting the intermediate decide.
         return (f"{{ let (a, b) = (({target}), ({args[0]})); "
                 f"if b == -1 {{ 0 }} else {{ a.rem_euclid(b).abs() }} }}")
-    # The total forms (docs/arithmetic.md): same quotient as the faulting
-    # operation, but a zero divisor yields Err(reason) instead of panicking —
-    # `fail` is refused in a pure fn, so the error travels as a value. The
-    # turbofish pins Result<i64, String> so the expression is context-free;
-    # operands are bound once, since a block evaluates them exactly once.
+    # The total arithmetic forms (docs/arithmetic.md): the native
+    # `i64::checked_*` operation with the fault carried out as Err.
+    if method in _CHECKED_ARITH:
+        return _v3_checked_arith(method, target, args[0])
+    # The total division forms (docs/arithmetic.md): same quotient as the
+    # faulting operation, but a zero divisor yields Err(reason) instead of
+    # panicking — `fail` is refused in a pure fn, so the error travels as a
+    # value. The turbofish pins Result<i64, String> so the expression is
+    # context-free; operands are bound once, since a block evaluates them
+    # exactly once.
     if method in _CHECKED_DIVS:
         return _v3_checked_div(method, target, args[0])
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): i64::to_string
@@ -9245,6 +9374,90 @@ def _recursive_boxed_edges(types: dict) -> tuple[set, set]:
     return boxed_cases, boxed_fields
 
 
+# The derive set of a v3 record/variant. `PartialEq` is load-bearing (revl's
+# equality is structural) and the serde pair is what lets a value cross the
+# generated RPC bridge; an item that CONTAINS the opaque erased `Value` cannot
+# derive any of the three (issue #3019).
+_V3_DERIVES = "Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize"
+_V3_ERASED_DERIVES = "Clone, Debug"
+_VALUE_WORD = re.compile(r"\bValue\b")
+# The head of a surface type (`Map[Str, Int]`, `Inner`, `Mb[Int]`) and the
+# bracketed argument list after it. Used to resolve a surface type STRUCTURALLY
+# to the declarations it names.
+_SURFACE_HEAD = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)")
+_SURFACE_ARGS = re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_]*\s*\[(.*)\]\s*$", re.S)
+
+
+def _declaration_surfaces(spec: dict) -> list:
+    """Every surface type a record field or variant payload names."""
+    fields = spec.get("fields") or {}
+    cases = spec.get("cases") or []
+    surfaces = list(fields.values()) if isinstance(fields, dict) else []
+    surfaces += [case["payload"] for case in cases
+                 if isinstance(case, dict) and case.get("payload") is not None]
+    return surfaces
+
+
+def _surface_reaches_carrying(surface: object, carrying: set,
+                              shadowed: frozenset) -> bool:
+    """Whether a surface type NAMES a declaration that carries the erased value.
+
+    Resolved structurally (a declared name, or the arguments of `Head[..]`)
+    rather than by matching a rendered spelling: a user type named `HashMap`
+    emits `HashMap`, and the `std::collections::HashMap<..>` an unrelated `Map`
+    field renders must not be mistaken for it. `shadowed` is the declaration's
+    own type parameters, which name a parameter, not a declaration.
+    """
+    text = surface.strip() if isinstance(surface, str) else ""
+    head = _SURFACE_HEAD.match(text)
+    name = head.group(1) if head else ""
+    args = _SURFACE_ARGS.match(text)
+    inner = _split_generic(args.group(1)) if args else []
+    return ((name not in shadowed and name in carrying)
+            or any(_surface_reaches_carrying(arg, carrying, shadowed)
+                   for arg in inner))
+
+
+def _value_carrying_types(types: dict) -> set:
+    """The declared types whose emitted Rust item CONTAINS the opaque `Value`.
+
+    `Value` (stdlib/value.rvl, docs/stdlib-value.md) and every surface type that
+    erases to it (`Any`, an unknown name, `Row`, `Stream[..]`) is the tier's
+    dynamic value: a `cordis::Value`, which implements `Clone` and `Debug` and
+    nothing else. A record or variant containing one therefore cannot derive
+    `PartialEq` or the serde traits, so `_emit_v3_types` reduces its derive set
+    (#3019).
+
+    Containment is transitive: a record holding a record holding a `Value` needs
+    the same reduction, because the inner item no longer implements what the
+    outer derive would require of it. The surfaces are rendered with the
+    declaration's own type parameters in scope, so a field typed as a parameter
+    (`Cell[T].v`) is not the erased value, even when a DECLARED type shares the
+    parameter's name.
+    """
+    rendered: dict[str, list[str]] = {}
+    shadowed: dict[str, frozenset] = {}
+    for name, spec in types.items():
+        params = spec.get("params") or []
+        scope = (dict(types, **{p: {"kind": "param"} for p in params})
+                 if params else types)
+        rendered[name] = [
+            _rust_type(surface, scope) for surface in _declaration_surfaces(spec)]
+        shadowed[name] = frozenset(params)
+    carrying = {name for name, spellings in rendered.items()
+                if any(_VALUE_WORD.search(spelling) for spelling in spellings)}
+    changed = True
+    while changed:
+        changed = False
+        extra = {name for name, spec in types.items()
+                 if name not in carrying
+                 and any(_surface_reaches_carrying(surface, carrying, shadowed[name])
+                         for surface in _declaration_surfaces(spec))}
+        carrying |= extra
+        changed = bool(extra)
+    return carrying
+
+
 def _emit_v3_types(types: dict) -> list[str]:
     # PartialEq is not decoration: revl has one equality and it is
     # structural (syntax-2.0 §3.4), so `{a: 1} == {a: 1}` must compile and
@@ -9252,6 +9465,11 @@ def _emit_v3_types(types: dict) -> list[str]:
     # the comparison outright (E0369) and legal revl fails on this tier.
     out: list[str] = []
     boxed_cases, boxed_fields = _recursive_boxed_edges(types)
+    # The erased dynamic value is the one exception (see
+    # `_value_carrying_types`): `cordis::Value` has no PartialEq and no serde
+    # impls, so an item containing one derives only what it supports rather than
+    # emitting a crate rustc rejects (#3019).
+    carrying = _value_carrying_types(types)
     # Two records with the IDENTICAL field->type shape are interchangeable in
     # revl (structural equality, item 268), so a value of one is admitted where
     # the other is declared -- `let one = [Bind {..}]` then `ArrowN { params:
@@ -9270,6 +9488,7 @@ def _emit_v3_types(types: dict) -> list[str]:
             canonical[rn] = _by_shape.setdefault(shape, rn)
     for raw_name, spec in types.items():
         name = _ident(raw_name, "type name")
+        derives = _V3_ERASED_DERIVES if raw_name in carrying else _V3_DERIVES
         if spec.get("kind") == "record":
             twin = canonical.get(raw_name)
             if twin is not None and twin != raw_name:
@@ -9277,7 +9496,7 @@ def _emit_v3_types(types: dict) -> list[str]:
                     f"pub type {name} = {_ident(twin, 'type name')};")
                 out.append("")
                 continue
-            out.append("#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]")
+            out.append(f"#[derive({derives})]")
             out.append(f"pub struct {name} {{")
             for field, ftype in (spec.get("fields") or {}).items():
                 rendered = _rust_type(ftype, types)
@@ -9292,12 +9511,17 @@ def _emit_v3_types(types: dict) -> list[str]:
                     # told the real key — without this a record round-trips under
                     # a name no other tier writes, and any `from_value` decode of
                     # the wire object faults on a field the schema just accepted.
-                    out.append(f'    #[serde(rename = "{field}")]')
+                    out.append(
+                        f'    #[serde(rename = "{field}")]'
+                        if raw_name not in carrying
+                        else "    // no serde derive: the item carries the erased `Value`")
                 out.append(f"    {fname}: {rendered},")
             out.append("}")
         elif spec.get("kind") == "variant":
-            out.append("#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]")
-            out.append('#[serde(tag = "$kind", content = "$value")]')
+            out.append(f"#[derive({derives})]")
+            out.append('#[serde(tag = "$kind", content = "$value")]'
+                       if raw_name not in carrying
+                       else "// no serde derive: the variant carries the erased `Value`")
             # issue #2471: a generic variant declares its type parameters, and
             # a payload naming one keeps it (`Jj(T)`), not the `Value` an
             # unknown name falls back to
@@ -9324,7 +9548,9 @@ def _emit_v3_types(types: dict) -> list[str]:
                 # match already ends in `_ => unreachable!()`
                 marker = ", ".join(_ident(p, "type name") for p in phantom)
                 out.append("    #[doc(hidden)]")
-                out.append("    #[serde(skip)]")
+                out.append("    #[serde(skip)]"
+                           if raw_name not in carrying
+                           else "    // no serde derive: the variant carries the erased `Value`")
                 out.append(f"    __RevlPhantom(std::marker::PhantomData<fn() -> ({marker},)>),")
             out.append("}")
         else:
@@ -9815,7 +10041,12 @@ def _emit_v3_externs(externs: list, types: dict, journal: bool = False) -> list[
             out.append("    " + config_bind)
         body = bodies["rs"].strip()
         if body:
-            for line in body.splitlines() or [""]:
+            # #3162/#3166: refuse a body Rust reads as unbalanced, and split on
+            # newlines only so a comment cannot become a statement.
+            body_lines, check_host_body = _host_body_scanner()
+            check_host_body("rs", body,
+                            where=f"extern `{ext.get('name')}`", error=EmitError)
+            for line in body_lines(body):
                 out.append("    " + line)
         else:
             out.append("    // (empty @rs body)")
@@ -11280,13 +11511,41 @@ def _revl_ftoa_helper() -> list[str]:
 # the first cut, so the golden holds). Anything else that is not the opaque
 # cordis `Value` is marshalled generically through serde (records, ADTs, Map,
 # Result, and their Vec/Option nestings, once the emitted types derive
-# Serialize/Deserialize). `Value` alone stays unmarshallable: it is opaque.
+# Serialize/Deserialize). `Value` alone stays unmarshallable: it is opaque, and
+# so is a declared record/variant that CONTAINS one, because `_emit_v3_types`
+# gives it only `Clone, Debug` (#3019).
 _SCALAR_OPTION = ("Option<String>", "Option<i64>", "Option<bool>", "Option<f64>")
+
+# The EMITTED idents of the declarations that carry the erased value, set by
+# `_emit_bridge` for the marshalling predicates below. Empty for a document
+# without one, so every existing bridge emits byte-identically.
+_BRIDGE_OPAQUE_TYPES: frozenset = frozenset()
+
+# A rendered Rust type's BARE identifiers. A user declaration always renders
+# bare (`Blob`, `HashMap`), while a path segment (`std::collections::HashMap`)
+# is preceded by `::` and belongs to the prelude, so only the former can name a
+# declaration. Matching without that rule made a value-carrying user type named
+# `HashMap` mark every unrelated `Map[..]` service parameter as opaque.
+_BARE_TYPE_WORD = re.compile(r"(?<!::)\b[A-Za-z_][A-Za-z0-9_]*\b")
 
 
 def _bridge_serde_ok(rtype: str) -> bool:
-    """True when `rtype` can cross via serde: not the opaque cordis `Value`."""
-    return not re.search(r"\bValue\b", rtype)
+    """True when `rtype` can cross via serde: not the opaque cordis `Value`, nor
+    a declared type that carries one and so does not derive the serde traits."""
+    if re.search(r"\bValue\b", rtype):
+        return False
+    return not any(word in _BRIDGE_OPAQUE_TYPES
+                   for word in _BARE_TYPE_WORD.findall(rtype))
+
+
+def _result_is_opaque(ok_type: str, err_type: str) -> bool:
+    """True when either half of a `Result` cannot cross via serde.
+
+    `_result_to_json`/`_result_ok_err` serde-serialize BOTH halves, so one
+    opaque half (a record carrying the erased `Value`) makes the whole Result
+    unmarshallable; the method is then treated as the opaque `Value` itself.
+    """
+    return not (_bridge_serde_ok(ok_type) and _bridge_serde_ok(err_type))
 
 
 def _split_result(rtype: str):
@@ -11342,7 +11601,8 @@ def _bridge_arg_ser(name: str, rtype: str) -> str:
     """Serialize a proxy method argument to a serde_json::Value."""
     if rtype in ("String", "i64", "f64", "bool"):
         return f"serde_json::json!({name})"
-    if _split_result(rtype):
+    result = _split_result(rtype)
+    if result is not None and not _result_is_opaque(*result):
         return _result_to_json(name)
     if _bridge_serde_ok(rtype):
         return f"serde_json::to_value(&{name}).unwrap_or(serde_json::Value::Null)"
@@ -11360,7 +11620,7 @@ def _bridge_arg_extract(index: int, rtype: str) -> str | None:
     if rtype == "bool":
         return f"args[{index}].as_bool().unwrap_or(false)"
     result = _split_result(rtype)
-    if result:
+    if result is not None and not _result_is_opaque(*result):
         return _result_ok_err(f"args[{index}]", result[0], result[1])
     if _bridge_serde_ok(rtype):
         return f'serde_json::from_value::<{rtype}>(args[{index}].clone()).expect("bridge: decode arg")'
@@ -11384,7 +11644,7 @@ def _bridge_ret_deser(value: str, rtype: str) -> str | None:
     if rtype in table:
         return table[rtype]
     result = _split_result(rtype)
-    if result:
+    if result is not None and not _result_is_opaque(*result):
         return _result_ok_err(value, result[0], result[1])
     if _bridge_serde_ok(rtype):
         return f'serde_json::from_value::<{rtype}>({value}.clone()).expect("bridge: decode return")'
@@ -11401,7 +11661,8 @@ def _bridge_ret_ser(call: str, rtype: str) -> str:
         return (f"{{ let _r = {call}; serde_json::json!(_r.iter().map(|v| "
                 f"v.downcast::<String>().map(|s| (*s).clone()).unwrap_or_default())"
                 f".collect::<Vec<_>>()) }}")
-    if _split_result(rtype):
+    result = _split_result(rtype)
+    if result is not None and not _result_is_opaque(*result):
         # item 421 F5: only a document that declares a `Secret[T]` carries the
         # funnel, so a marking-free unit stays byte-identical (`_SECRET_MODE`).
         return _result_to_json_funneled(call) if _SECRET_MODE else _result_to_json(call)
@@ -11416,6 +11677,9 @@ def _emit_bridge(ir: dict) -> list[str]:
     types = ir.get("types") or {}
     if not services:
         return []
+    global _BRIDGE_OPAQUE_TYPES
+    _BRIDGE_OPAQUE_TYPES = frozenset(
+        _ident(name, "type name") for name in _value_carrying_types(types))
     provided: dict[str, str] = {}
     for component in components:
         for key, service in (component.get("provides") or {}).items():

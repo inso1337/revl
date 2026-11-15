@@ -40,7 +40,7 @@ import threading
 import time
 import types
 import weakref
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from typing import Any, Callable, Optional
 
 # The confidentiality choke point (item 256 Slice 3): `confidential.py`, the
@@ -75,6 +75,7 @@ except ModuleNotFoundError:  # pragma: no cover — path-loaded copy of this mod
 _ENTRY_STAMP = itertools.count()
 
 __all__ = [
+    "CeilingCapsMissing", "CeilingExceeded", "CeilingUnmetered",
     "Clock", "ConfigError", "ConfigSchema", "FaultProbe", "Frame", "Job", "JobCancelled",
     "JobHandle", "LeaseHandle", "LeaseRefused", "Map", "Pool", "PoolError",
     "EstopHalted", "EstopRefused", "fail_error",
@@ -91,6 +92,9 @@ __all__ = [
     # item 443: the operator E-Stop (docs/design/443-estop.md)
     "arm_estop_latch", "clear_estop", "estop", "estop_engaged",
     "estop_from_latch", "estop_latch_path", "estop_residue", "estop_state",
+    # issue #2758: the drift control's read-only actuator
+    "ReadOnlyRefused", "arm_read_only_latch", "read_only_engaged",
+    "read_only_latch_path",
     # issue #1932: the built-in `Result` cases, defined ONCE for every module
     "Ok", "Err",
 ]
@@ -297,6 +301,21 @@ def _json_type_ok(value, json_type: str) -> bool:
     return True
 
 
+def _json_schema_key(key) -> str:
+    """Render one model-chosen object key for a validation fault (issue #3120).
+
+    A JSON object key is untrusted response content just like a value: a model
+    can echo a secret the program's own prompt fed it back out as a key. The
+    key reaches the fault message directly (an unexpected property under a closed
+    object) and, under `additionalProperties` as a schema, becomes part of the
+    PATH a nested error is built from. The same exact-value scrub the const/enum
+    branches apply to the observed value applies here; an ordinary key still
+    renders verbatim, so a developer sees the real malformed response."""
+    if confidential.is_secret_value(key):
+        return confidential.REDACTED
+    return str(key)
+
+
 def _json_schema_error(value, schema, path: str = "$"):
     """Validate ``value`` against the derived JSON-Schema subset the revl mapping
     emits (item 257, §3). Returns an error string for the FIRST violation, or
@@ -354,13 +373,16 @@ def _json_schema_error(value, schema, path: str = "$"):
         extra = schema.get("additionalProperties", True)
         for key, item in value.items():
             if key in props:
-                err = _json_schema_error(item, props[key], f"{path}.{key}")
+                err = _json_schema_error(item, props[key],
+                                         f"{path}.{_json_schema_key(key)}")
                 if err is not None:
                     return err
             elif extra is False:
-                return f"{path}: unexpected property {key!r}"
+                return (f"{path}: unexpected property "
+                        f"{_json_schema_key(key)!r}")
             elif isinstance(extra, dict):
-                err = _json_schema_error(item, extra, f"{path}.{key}")
+                err = _json_schema_error(item, extra,
+                                         f"{path}.{_json_schema_key(key)}")
                 if err is not None:
                     return err
 
@@ -522,8 +544,13 @@ def grammar_honoured_error(value, schema, path: str = "$"):
         declared = list(schema["properties"])
         observed = list(value)
         if observed != declared:
+            # item 416c / issue #3120: `observed` is the model's own member
+            # list, so a member name the program's prompt fed the model can
+            # come back here as a key; the path may already carry one from a
+            # Map above. Both are scrubbed, exactly like the schema fault.
+            rendered = [_json_schema_key(k) for k in observed]
             return (f"{path}: the stated grammar pins the members "
-                    f"{declared!r}; the completion has {observed!r}")
+                    f"{declared!r}; the completion has {rendered!r}")
         for name, sub in schema["properties"].items():
             err = grammar_honoured_error(value[name], sub, f"{path}.{name}")
             if err is not None:
@@ -532,7 +559,8 @@ def grammar_honoured_error(value, schema, path: str = "$"):
     extra = schema.get("additionalProperties")
     if isinstance(extra, dict) and isinstance(value, dict):
         for name, item in value.items():
-            err = grammar_honoured_error(item, extra, f"{path}.{name}")
+            err = grammar_honoured_error(item, extra,
+                                         f"{path}.{_json_schema_key(name)}")
             if err is not None:
                 return err
         return None
@@ -935,11 +963,23 @@ def revl_declare_model_decision(**members) -> None:
 
     Called from inside the host body that performs the completion, which is the
     only place that knows what this names: which weights answered
-    (`model_digest`), on what host profile (`placement_digest`, item 538's own
-    digest, opaque to revl), how the prompt was bound (`prompt_binding`), what
-    the input carried (`origins`), what the candidates were and which was taken
-    (`candidates`, `chosen`), how it was asked (`sampling`), under which rule
-    (`policy_digest`, `fallback_depth`) and where it ran (`role`, `residence`).
+    (`model_digest`, with `model_digest_basis` saying whether that digest was
+    checked against the loaded bytes or only declared), on what host profile
+    (`placement_digest`, item 538's own digest, opaque to revl), how the prompt
+    was bound (`prompt_binding`) and from which template
+    (`template_digest`, or `template_absence_reason`), what the input carried
+    (`origins`), what the candidates were and which was taken (`candidates`,
+    `chosen`), how it was asked (`sampling`), under which rule
+    (`policy_digest`), how far down the ladder and why (`fallback_depth`,
+    `fallback_reason`), where it ran (`role`, `residence`), and how much of the
+    model's reasoning span the host returned (`reasoning`: its `visibility`, a
+    `tokens` count tagged `host-reported`, and a `digest` of returned reasoning
+    text only when the origins permit one).
+
+    `reasoning` is REQUIRED by envelope 3.0. A host that reported no span says
+    `none-reported` rather than omitting the member, because an omitted member
+    reads exactly like a run that had nothing to hide. The text itself is never
+    declared; only its digest, and only over a non-disclosing input.
 
     It may NOT name `component`, `step_index` or `outcome`: the crossing is the
     one the recorder just made and the outcome is the one the validation seam
@@ -1427,9 +1467,225 @@ def revl_take_produced_by() -> "Optional[int]":
     return token
 
 
-def extern_emit(ctx, name: "str", fn, args: "tuple"):
+#: The three ceiling parameter names, canonical after `cap_order` (`requests`
+#: resolves to `calls`, `bytes` to `size`; `time` is already in ms). A symbolic
+#: ceiling is refused by `cap_order`, so every one that reaches here is an int.
+_CEILING_NAMES = ("calls", "size", "time")
+
+
+def _split_cap_params(spelling: str) -> list:
+    """The `name=value` parts inside a canonical capability spelling's
+    parentheses, split on top-level commas only (a quoted value may contain a
+    comma). Lexical, like the stored spelling itself; a spelling without
+    parentheses has no parts."""
+    start = spelling.find("(")
+    if start < 0 or not spelling.endswith(")"):
+        return []
+    body = spelling[start + 1:-1]
+    parts, buf, quote, escape = [], [], None, False
+    for ch in body:
+        if escape:
+            buf.append(ch)
+            escape = False
+        elif ch == "\\":
+            buf.append(ch)
+            escape = True
+        elif quote is not None:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            buf.append(ch)
+            quote = ch
+        elif ch == ",":
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    parts.append("".join(buf))
+    return parts
+
+
+def _declared_ceilings(capabilities) -> tuple:
+    """The `(token, {kind: limit})` budget declarations a set of canonical
+    capability spellings carries, for the crossing meter (issue #2688).
+
+    The runtime receives the emitted module's declaration spellings verbatim, so
+    it reads the already-canonical parameters lexically: only integer values on
+    the three ceiling names take part, and a spelling with none is omitted. The
+    token rides through to the fault and the trace, so both name the declaration
+    a reviewer sees in the audit. A budget-free extern yields ()."""
+    out = {}
+    for spelling in capabilities or ():
+        if not isinstance(spelling, str):
+            continue
+        limits = {}
+        for part in _split_cap_params(spelling):
+            name, sep, value = part.partition("=")
+            name = name.strip()
+            if sep and name in _CEILING_NAMES \
+                    and value.strip().lstrip("-").isdigit():
+                limits[name] = int(value.strip())
+        if limits:
+            out[spelling] = limits
+    return tuple(out.items())
+
+
+class CeilingExceeded(RuntimeError):
+    """A declared emission ceiling was crossed while the program ran.
+
+    The statement a declared budget makes is a run-time one: `calls` can be
+    proved statically only for a body the cardinality analysis can count, and
+    the `*/host-extern case` is exactly the one it cannot (`bytes` and `time`
+    have no static analogue at all). This fault is the runtime answer: one
+    named type for all three ceiling kinds and every tier, carrying the
+    capability spelling, the kind, the declared limit and the observed count,
+    so a caller can tell which budget refused what (issue #2688)."""
+
+    def __init__(self, capability: str, kind: str, limit: int, observed: int,
+                 component: "Optional[str]" = None) -> None:
+        self.capability = capability
+        self.kind = kind
+        self.limit = limit
+        self.observed = observed
+        self.component = component
+        where = f" in component {component!r}" if component else ""
+        super().__init__(
+            f"declared {kind} ceiling {limit} on `{capability}` exceeded: "
+            f"observed {observed}{where}")
+
+
+class CeilingUnmetered(RuntimeError):
+    """A budgeted crossing reached the runtime with no activation frame.
+
+    The meter is per activation: an emitted component always installs a Frame,
+    so this is a path that is not an activation at all. Refusing is the
+    fail-closed choice: a declared ceiling that cannot be counted must not be
+    treated as unbounded (issue #2688)."""
+
+    def __init__(self, capability: str) -> None:
+        self.capability = capability
+        super().__init__(
+            f"declared ceiling on `{capability}` was reached outside an "
+            f"activation, so it cannot be metered")
+
+
+class CeilingCapsMissing(RuntimeError):
+    """A declared-ceiling crossing reached the seam with no capability spelling.
+
+    The emitter tags a budgeted extern (and any local function that reaches
+    one) with `_revl_declared_caps`, so the runtime can tell "this callee
+    declares a ceiling" from "this callee declares none". If the declaration
+    exists but the emitted call carries no `caps=`, the crossing would meter
+    nothing and silently run unmetered: the exact bypass #2688 is fixing. The
+    runtime refuses by name instead: a missing spelling is a wiring defect,
+    never a license to fire (issue #2688)."""
+
+    def __init__(self, capabilities: "tuple") -> None:
+        self.capabilities = tuple(capabilities)
+        named = ", ".join(f"`{spelling}`" for spelling in self.capabilities)
+        super().__init__(
+            f"declared ceiling(s) {named} reached the runtime seam with no "
+            f"capability spellings; refusing to fire an unmetered crossing")
+
+
+def _ceiling_now() -> float:
+    """The clock a declared `time` ceiling is measured against: the monotonic
+    clock, never wall-clock (a clock adjustment must not move a deadline). Kept
+    a module function so a test can substitute a controlled clock."""
+    return time.monotonic()
+
+
+def _extern_outcome(ctx, step, outcome: str, error, frame, ceilings: tuple) -> None:
+    """Journal one extern crossing outcome, with the observed counts (issue
+    #2688).
+
+    The recorder hook (`_revl_record_extern_outcome`) writes the durable WAL
+    record; the observed counts are the runtime half of the audit JSON, so the
+    document names what the activation actually spent, not only the static
+    ceiling spelling. A context that does not record (the real cordis one)
+    makes this a no-op, exactly as before. `observed` is None for an unmetered
+    crossing, keeping its record byte-identical."""
+    callback = getattr(ctx, "_revl_record_extern_outcome", None)
+    if not callable(callback):
+        return
+    observed = (frame._ceiling_observations(ceilings)
+                if frame is not None else None)
+    callback(step, outcome, error, observed)
+
+
+class _MeteredEmission:
+    """What a crossing that also registered a compensation returns.
+
+    The emitted body yields `.compensation` onto the activation's disposer stack
+    and ignores `.value` (an `emit` step never binds its result). A crossing with
+    no compensation returns the host value unchanged, so every pre-#2688 shape is
+    untouched."""
+
+    __slots__ = ("value", "compensation")
+
+    def __init__(self, value: Any, compensation: "_Compensation") -> None:
+        self.value = value
+        self.compensation = compensation
+
+
+def _compensate_fired(compensation: "Optional[_Compensation]") -> None:
+    """Owe the compensation of a crossing that FIRED and was then refused
+    (issue #2688).
+
+    The entry is registered at the seam when the host body returns, before the
+    outcome (completion or a `time` refusal) is decided, but the emitted body
+    yields it only on a successful return; the refusal raising out of the seam
+    skips that line, so nothing would ever enqueue it for Phase 2. Enqueue it
+    here instead. The frame's Phase-2 hook runs it after every Phase-1 inverse:
+    `install`'s synchronous except for a sync body, and `begin` for an async
+    one, whose unwind goes through cordis's asynchronous dispose path. Neither
+    a crossing refused BEFORE it fired nor a host body that RAISED reaches this
+    call with an entry: registration happens after the body returns, so nothing
+    is owed when the crossing was never confirmed (item 247's rule,
+    `declared_crossing`)."""
+    if compensation is None:
+        return
+    compensation.frame._pending_compensations.append(compensation)
+
+
+def extern_emit(ctx, name: "str", fn, args: "tuple", caps: "tuple" = (),
+                compensate=None):
     """Fire a DIRECT host-extern emission (`emit announce(msg)`, a kind-3/4
     crossing) through the recording seam on `ctx` (item 414).
+
+    `caps` is the extern's declared capability spellings, passed verbatim by the
+    emitter only when one of them can carry a budget. `_declared_ceilings`
+    turns them into `((token, {kind: limit}), ...)`; an extern that declares
+    none keeps the pre-#2688 shape exactly. A declared one is metered by the
+    activation frame BEFORE the record and the host body: the crossing is
+    refused with :class:`CeilingExceeded` when it would take the observed
+    `calls`, `size` (payload bytes) or elapsed `time` past its declared limit.
+
+    Two fail-closed backstops guard the declaration itself. A budgeted callee
+    (tagged `_revl_declared_caps` by the emitter) that arrives with empty `caps`
+    is refused by name (:class:`CeilingCapsMissing`) instead of firing
+    unmetered, and a budgeted crossing with no activation frame is refused
+    (:class:`CeilingUnmetered`). The emitted seam journals the observed counts
+    (`calls`, `bytes`, `elapsed`) with the outcome, so the audit JSON says what
+    the run spent as well as what the declaration allows.
+
+    `compensate`, when the emitter passes it, is a zero-arg factory that
+    registers the step's compensation. It is called when the host body returns
+    and BEFORE the outcome (completion or a `time` refusal) is decided, so the
+    compensation is owed for a crossing that fired even when the fire is then
+    refused: a `time` overrun is only observable when the host call returns
+    (:meth:`Frame._check_time_ceilings`), and that crossing DID happen. Its
+    outcome is journalled as `emitted-then-refused`, and its registered
+    compensation is enqueued for Phase 2. A host body that RAISES registers
+    nothing: the runtime cannot confirm that the crossing happened, item 247's
+    stated rule for a bare emission (`declared_crossing`), and compensating a
+    crossing that never acted is as wrong as dropping one that did. A crossing
+    refused before it fires (calls, size, or a deadline already spent) is
+    refused before the emission record, so it leaves no step in the WAL and
+    registers no compensation: absence of a record is "never fired", and
+    `emitted-then-refused` is "fired then refused". The returned
+    :class:`_MeteredEmission` carries the entry the emitted body yields.
 
     Without this the py tier compiled such a crossing to a bare module-level
     call, so the recorder never saw it, the WAL carried no `KIND_EMISSION` step
@@ -1450,35 +1706,92 @@ def extern_emit(ctx, name: "str", fn, args: "tuple"):
     transparent frame keeps a recorded site on the emitted module's own line
     rather than on this helper."""
     _revl_transparent_frame = True
-    # issue #1504: refuse BEFORE the crossing is recorded or its host body runs
+    # issue #1504: refuse BEFORE the crossing is recorded or its host body runs.
+    # issue #2758: a read-only hold refuses the same new crossing, AFTER the
+    # E-Stop so a suspend is never masked by a read-only hold.
     _estop_check(name)
+    _read_only_check(name)
+    # issue #2688: the declared ceiling, enforced at the same seam and before
+    # the same point. Only a crossing that DECLARES a budget meters (and only a
+    # budgeted crossing traces), so an undeclared one is byte-identical.
+    #
+    # FAIL CLOSED on a declaration the emitter failed to forward: a budgeted
+    # callee carries `_revl_declared_caps` (set by the emitter), so empty caps
+    # beside a non-empty tag is a wiring defect, not an unbounded extern. It is
+    # refused by name rather than fired unmetered.
+    declared_caps = getattr(fn, "_revl_declared_caps", ())
+    ceilings = _declared_ceilings(caps) if caps else ()
+    if declared_caps and not ceilings:
+        raise CeilingCapsMissing(declared_caps)
+    frame = None
+    if ceilings:
+        frame = _frame_for_ctx(ctx)
+        if frame is None:
+            raise CeilingUnmetered(ceilings[0][0])
+        # Canonical payload bytes are measured for EVERY budgeted crossing, not
+        # only when a `size` declaration is present: the audit record reports
+        # the observed bytes beside calls and elapsed, and a 0 there when a
+        # payload was never measured would be a false observation.
+        payload = len(_revl_canonical_args_bytes(args))
+        frame._meter_ceilings(ceilings, payload)
     record = getattr(ctx, "_revl_record_extern", None)
     step = record(name, args) if callable(record) else None
+    # issue #2688: register the compensation when the host body RETURNS, and
+    # before the outcome (completion or a time refusal) is decided. A body that
+    # raises registers nothing: the runtime cannot confirm the crossing
+    # happened, and item 247's rule is that a compensation is owed for an
+    # emission that crossed. A time overrun is only observable on the return,
+    # so registering here (not in the emitted body, and not before the body)
+    # is exactly what keeps a fired-then-refused crossing compensable without
+    # compensating a crossing that never acted.
     try:
         result = fn(*args)
     except BaseException as error:
-        outcome = getattr(ctx, "_revl_record_extern_outcome", None)
-        if callable(outcome):
-            outcome(step, "emission-failed", error)
+        _extern_outcome(ctx, step, "emission-failed", error, frame, ceilings)
         raise
     if inspect.isawaitable(result):
         async def await_extern():
             try:
                 value = await result
             except BaseException as error:
-                outcome = getattr(ctx, "_revl_record_extern_outcome", None)
-                if callable(outcome):
-                    outcome(step, "emission-failed", error)
+                _extern_outcome(ctx, step, "emission-failed", error,
+                                frame, ceilings)
                 raise
-            outcome = getattr(ctx, "_revl_record_extern_outcome", None)
-            if callable(outcome):
-                outcome(step, "emission-complete", None)
-            return value
+            # The await WAS the host body: it settled, so the crossing fired.
+            # Register now, before the return check decides its outcome.
+            compensation = (compensate() if compensate is not None else None)
+            # issue #2688: the time check runs BEFORE the completion record.
+            # Recording completion first wrote a receipt that said the crossing
+            # finished while the ceiling check was about to refuse it, so the
+            # WAL settled an over-budget emission. The host body already ran by
+            # now, so the refusal is journalled as `emitted-then-refused` (never
+            # `emission-refused`): the crossing happened and its compensation
+            # stays owed.
+            if frame is not None:
+                try:
+                    frame._check_time_ceilings(ceilings)
+                except BaseException as error:
+                    _extern_outcome(ctx, step, "emitted-then-refused", error,
+                                    frame, ceilings)
+                    _compensate_fired(compensation)
+                    raise
+            _extern_outcome(ctx, step, "emission-complete", None,
+                            frame, ceilings)
+            return (value if compensation is None
+                    else _MeteredEmission(value, compensation))
         return await_extern()
-    outcome = getattr(ctx, "_revl_record_extern_outcome", None)
-    if callable(outcome):
-        outcome(step, "emission-complete", None)
-    return result
+    compensation = compensate() if compensate is not None else None
+    if frame is not None:
+        try:
+            frame._check_time_ceilings(ceilings)
+        except BaseException as error:
+            _extern_outcome(ctx, step, "emitted-then-refused", error,
+                            frame, ceilings)
+            _compensate_fired(compensation)
+            raise
+    _extern_outcome(ctx, step, "emission-complete", None, frame, ceilings)
+    return (result if compensation is None
+            else _MeteredEmission(result, compensation))
 
 
 def _revl_canonical_args_bytes(args) -> bytes:
@@ -3033,6 +3346,10 @@ def _hold_for_session(entry: Any) -> bool:
 
 _ESTOP_LATCH_ENV = "REVL_ESTOP_LATCH"
 
+#: The ambient read-only latch (issue #2758): the drift control's narrowing
+#: response. An explicit path may also be armed with `arm_read_only_latch`.
+_READ_ONLY_LATCH_ENV = "REVL_READ_ONLY_LATCH"
+
 #: The merged residue schema's two E-Stop `kind` discriminators (docs/design/
 #: teardown-contract.md, "The merged residue schema"). `estop-stranded` is a
 #: registered entry whose inverse or compensation was NEVER ATTEMPTED;
@@ -3051,6 +3368,12 @@ _ESTOP: Optional[dict] = None
 #: crossing seam stats it, so an operator in another terminal can halt a
 #: running composition without a control socket.
 _ESTOP_LATCH: Optional[str] = None
+
+#: An explicit read-only latch path (`arm_read_only_latch`), or None to fall
+#: back to `REVL_READ_ONLY_LATCH`. The drift monitor writes the file when it
+#: fires the `read-only` response; every EFFECTFUL crossing seam refuses while
+#: it is present, while a pure read still proceeds (issue #2758).
+_READ_ONLY_LATCH: Optional[str] = None
 
 #: The crossings currently DISPATCHED and unconfirmed, innermost last. At most
 #: one is unconfirmed per activation at any instant, which is what bounds the
@@ -3086,7 +3409,18 @@ def fail_error(message) -> RuntimeError:
     from any other RuntimeError an activation can raise (a host stub's refusal,
     a runtime guard, a host body's own `raise`). The error is an ordinary
     RuntimeError in every other respect: its type, its traceback line and its
-    pickling are unchanged."""
+    pickling are unchanged.
+
+    The message is funnelled through `confidential.redact_text` before the
+    exception is built (issue #3141). A `fail` step is a disclosure sink: its
+    text is recorded on the FAILED fiber and read back by `revl_load` and
+    `revl_state`, and the lifecycle driver prints it. A remembered `Secret[T]`
+    value is replaced wherever it appears in the sentence, so `fail
+    config.token` and `fail "x" + config.token` both carry the placeholder
+    while the surrounding diagnostic survives. The check is exact-valued, so a
+    `fail` that mentions no registered secret is byte-identical."""
+    if isinstance(message, str):
+        message = confidential.redact_text(message)
     err = RuntimeError(message)
     err._revl_activation_fail = True
     return err
@@ -3123,6 +3457,28 @@ class EstopHalted(RuntimeError):
         self.halt = dict(halt)
 
 
+class ReadOnlyRefused(RuntimeError):
+    """Raised at an effectful crossing seam while a drift control has narrowed
+    the composition to read-only (issue #2758).
+
+    Deliberately NOT an `EstopHalted`: the instance is alive, its reads still
+    work, and nothing is stranded. Only a crossing that could change the world
+    is refused. The refusal happens BEFORE the host body runs, the same seam
+    `estop_gated` uses, so a read-only hold cannot leak one effect while the
+    control is arming."""
+
+    def __init__(self, where: str, record: Optional[dict] = None) -> None:
+        hold = record or {}
+        super().__init__(
+            f"READ-ONLY engaged: `{where}` was refused. "
+            f"reason: {hold.get('reason', 'drift control: read-only')}; "
+            f"operator: {hold.get('operator', 'unknown')}. The composition may "
+            "still read; a fresh admission or an operator clearing the latch is "
+            "the way back (issue #2758).")
+        self.where = where
+        self.record = dict(hold)
+
+
 def arm_estop_latch(path: Optional[str]) -> None:
     """Point the crossing seams at a cross-process E-Stop latch file.
 
@@ -3137,6 +3493,65 @@ def arm_estop_latch(path: Optional[str]) -> None:
 def estop_latch_path() -> Optional[str]:
     """The latch file this process watches, or None."""
     return _ESTOP_LATCH or (os.environ.get(_ESTOP_LATCH_ENV) or None)
+
+
+def arm_read_only_latch(path: Optional[str]) -> None:
+    """Point the NEW effectful crossing seams at a cross-process read-only hold.
+
+    The drift monitor (`revl.drift_monitor`) writes the file when it fires the
+    `read-only` response; a host may also arm the path explicitly. Passing None
+    disarms the explicit path and falls back to `REVL_READ_ONLY_LATCH`. No hold
+    armed means no extra open at any crossing, so a run that never engages drift
+    control is byte-identical."""
+    global _READ_ONLY_LATCH
+    _READ_ONLY_LATCH = path
+
+
+def read_only_latch_path() -> Optional[str]:
+    """The read-only latch file this process watches, or None."""
+    return _READ_ONLY_LATCH or (os.environ.get(_READ_ONLY_LATCH_ENV) or None)
+
+
+def _read_only_latch_record() -> Optional[dict]:
+    """The read-only hold at the latch path, or None when no latch is armed.
+
+    Same fail-closed rule as `_latch_record` and `revl.drift_monitor.
+    read_read_only`: a latch that exists but does not parse, or cannot be read,
+    still narrows authority. Only a genuinely absent latch (FileNotFoundError)
+    reads as absent; a corrupted hold that could be read as "no hold" would let
+    a drift response be switched off by damaging one file."""
+    path = read_only_latch_path()
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            record = json.load(handle)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return {"readOnly": True, "reason": "read-only latch (unreadable)",
+                "operator": "unknown"}
+    except (ValueError, TypeError):
+        return {"readOnly": True, "reason": "read-only latch (unreadable)",
+                "operator": "unknown"}
+    if not isinstance(record, dict):
+        return {"readOnly": True, "reason": "read-only latch (unreadable)",
+                "operator": "unknown"}
+    return record
+
+
+def read_only_engaged() -> bool:
+    """Whether a drift control has narrowed this process to read-only."""
+    return _read_only_latch_record() is not None
+
+
+def _read_only_check(where: str) -> None:
+    """The effectful seam: refuse a new crossing while the read-only hold is in
+    force. Reads do not come through here, so the narrowing is exactly "no new
+    world-changing crossing" rather than a second E-Stop."""
+    record = _read_only_latch_record()
+    if record is not None:
+        raise ReadOnlyRefused(where, record)
 
 
 def _latch_record() -> Optional[dict]:
@@ -3228,11 +3643,13 @@ def estop_gated(name: str):
         if inspect.iscoroutinefunction(fn):
             async def _gated_async(*args, **kwargs):
                 _estop_check(name)
+                _read_only_check(name)
                 return await fn(*args, **kwargs)
             wrapped = _gated_async
         else:
             def _gated(*args, **kwargs):
                 _estop_check(name)
+                _read_only_check(name)
                 return fn(*args, **kwargs)
             wrapped = _gated
         wrapped.__name__ = fn.__name__
@@ -3440,6 +3857,14 @@ class Frame:
     def __init__(self, ctx: Any, name: str) -> None:
         self.ctx = ctx
         self.name = name
+        # issue #2688: the declared-budget meters, one counter per capability
+        # declaration spelling (the token the emitter passed with its canonical
+        # ceilings), all scoped to this activation. Empty until a crossing
+        # declares a budget, so a budget-free component allocates three dicts
+        # and never touches them.
+        self._ceiling_calls: dict = {}
+        self._ceiling_bytes: dict = {}
+        self._ceiling_started: dict = {}
         self._adopted: list = []
         # item 243 (docs/design/243-witnessed-externs.md): the transactional
         # entries this activation registered, in registration order. A witnessed
@@ -3513,6 +3938,12 @@ class Frame:
         # before the frame's first write to it.
         self._open_journal: Any = None
         self._journal: dict = {}
+        # issue #3304: the (map, key) slots the open bracket's forward write
+        # journaled (None: no bracket opened since the last adopt), and the
+        # slots whose newest adopted record is an absolute table inverse with
+        # only such records adopted since (`adopt_bracket`)
+        self._bracket_slots: Optional[set] = None
+        self._coalesce: set = set()
         # Phase-2 residue (teardown-contract.md's `compensation-residue`):
         # one record per compensation that raised or was skipped past the
         # budget. Best-effort introspection for this activation; the merged
@@ -3585,6 +4016,109 @@ class Frame:
             _LIVE_FRAMES.add(self)
             if _ESTOP is not None:
                 self._halted = True
+
+    def _meter_ceilings(self, declarations: tuple, payload: "Optional[int]") -> None:
+        """Meter one host-extern crossing against the ceilings it declares.
+
+        All-or-nothing: every declaration is CHECKED first and the counters are
+        committed only when no ceiling is crossed, so a refused crossing neither
+        spends a `calls` use nor charges its payload bytes. `payload` is the
+        canonical payload-byte count, measured for every budgeted crossing so
+        the audit record can report observed bytes alongside calls and elapsed.
+
+        Semantics (named rather than implied, so the trace is readable):
+        * `calls` counts crossings per capability declaration per activation;
+          the crossing that would be number `limit + 1` is refused.
+        * `size` accumulates the canonical payload bytes per activation; the
+          crossing whose payload would take the total past `limit` is refused
+          before the host body runs, so the over-budget payload is never used.
+        * `time` is a deadline anchored at the capability's FIRST crossing in
+          the activation, measured on `_ceiling_now()` (monotonic, ms limits).
+          It is checked before every crossing, and again when the crossing
+          returns (`_check_time_ceilings`): a synchronous host call cannot be
+          preempted mid-call on this tier, so a call that itself overran faults
+          on return rather than never."""
+        now = _ceiling_now()
+        planned = []
+        for token, limits in declarations:
+            calls_observed = self._ceiling_calls.get(token, 0) + 1
+            limit = limits.get("calls")
+            if limit is not None and calls_observed > limit:
+                self._refuse_ceiling(token, "calls", limit, calls_observed)
+            size_observed = self._ceiling_bytes.get(token, 0) + (payload or 0)
+            limit = limits.get("size")
+            if limit is not None and size_observed > limit:
+                self._refuse_ceiling(token, "size", limit, size_observed)
+            started = self._ceiling_started.get(token)
+            if started is None:
+                started = now
+            limit = limits.get("time")
+            if limit is not None and (now - started) * 1000.0 > limit:
+                self._refuse_ceiling(token, "time", limit,
+                                     int((now - started) * 1000.0))
+            observed = {"calls": calls_observed, "size": size_observed,
+                        "time": int((now - started) * 1000.0)}
+            planned.append((token, limits, observed, started))
+        for token, limits, observed, started in planned:
+            self._ceiling_calls[token] = observed["calls"]
+            self._ceiling_bytes[token] = observed["size"]
+            self._ceiling_started.setdefault(token, started)
+            parts = " ".join(f"{kind}={observed[kind]}/{int(limit)}"
+                             for kind, limit in limits.items())
+            _record(f"ceiling {token} {parts}")
+
+    def _refuse_ceiling(self, token: str, kind: str, limit: int,
+                        observed: int) -> None:
+        """Record the crossing that spent the budget, then raise the named
+        fault. The trace line is the refusal's own, so a trace shows the
+        observed count that crossed rather than only the successes before it."""
+        _record(f"ceiling {token} {kind}={observed}/{int(limit)} refused")
+        raise CeilingExceeded(token, kind, int(limit), observed, self.name)
+
+    def _check_time_ceilings(self, declarations: tuple) -> None:
+        """The after-the-call half of a `time` ceiling.
+
+        A synchronous host body cannot be preempted on this tier, so a call
+        that ITSELF overran the deadline is caught when it returns rather than
+        never: the crossing faults and the activation does not continue on a
+        spent deadline. The before-the-crossing check in `_meter_ceilings`
+        still refuses a crossing whose deadline is already spent, so the next
+        crossing never starts."""
+        now = _ceiling_now()
+        for token, limits in declarations:
+            limit = limits.get("time")
+            if limit is None:
+                continue
+            started = self._ceiling_started.get(token)
+            if started is None:
+                continue
+            elapsed = int((now - started) * 1000.0)
+            if elapsed > limit:
+                self._refuse_ceiling(token, "time", limit, elapsed)
+
+    def _ceiling_observations(self, declarations: tuple) -> dict:
+        """The observed counts behind this activation's metered declarations.
+
+        Returned as `{token: {"calls": n, "bytes": n, "elapsed": ms}}`, the
+        runtime half of the audit record: the static `revl audit --json`
+        surface carries the DECLARED ceiling spelling, while this carries what
+        the run actually counted, so a reviewer can tell "never reached" from
+        "enforced within budget" from "refused". `bytes` is the canonical
+        payload-byte total (the `size` ceiling's observed quantity) and
+        `elapsed` is monotonic milliseconds since the token's first crossing,
+        0 before it has one. Called only for a budgeted crossing, so an
+        undeclared one allocates nothing extra."""
+        now = _ceiling_now()
+        observed = {}
+        for token, _limits in declarations:
+            started = self._ceiling_started.get(token)
+            observed[token] = {
+                "calls": self._ceiling_calls.get(token, 0),
+                "bytes": self._ceiling_bytes.get(token, 0),
+                "elapsed": (0 if started is None
+                            else int((now - started) * 1000.0)),
+            }
+        return observed
 
     def install(self, body: Callable) -> Any:
         """Install the component body (a generator function) as one effect.
@@ -3775,6 +4309,7 @@ class Frame:
             self._take_journal()      # a forward that raised left it open
         prev = _JOURNAL.get()
         self._open_journal = prev
+        self._bracket_slots = set()
         _JOURNAL.set(prev + (self,))
 
     def _take_journal(self) -> bool:
@@ -3913,13 +4448,54 @@ class Frame:
 
     def adopt(self, effect: Any) -> Any:
         """Join an effect created while ACTIVE to this component's accumulator."""
+        # issue #3304: a record that is not an absolute table inverse may read
+        # or write any key when it replays, so no later record is coalesced
+        # across it, and no bracket's slots carry over to a later adopt
+        self._coalesce.clear()
+        self._bracket_slots = None
         self._adopted.append(effect)
+        return effect
+
+    def adopt_bracket(self, effect: Any) -> Any:
+        """`adopt` for a provide-method bracket whose `undo` the emitter proved
+        an ABSOLUTE table inverse on a literal or named key (issue #3304):
+        `insert -> remove`, or the #1980 restore `match prev { Some(v) =>
+        m.insert(k, v), None => m.remove(k) }`. (The `insert_if_absent` CAS
+        must be bound, `let ok = effect ...`, so it is a method `let-effect`
+        adopted through `acquire` and plain `adopt`, never coalesced.) Such
+        an inverse writes only its own `(map, key)`, reads nothing the frame
+        changes, and sets the key to one fixed value.
+
+        When the forward write journaled exactly one `(map, key)` and the frame
+        already holds such a record for it, with only such records adopted
+        since, the new record is released WITHOUT RUNNING. Inverses replay
+        LIFO: the new record would run first and the kept one after it, with
+        only records on other keys between them, so the key ends at the kept
+        record's value either way. The world, the `NotReversed` verdict (it
+        compares against the same value from before the frame's first write)
+        and every other key are the same, and the frame holds one record per
+        key instead of one per call.
+
+        Not coalesced: a recorded timeline (its `step_back` replays its own
+        per-step list, which may already have run the kept record), a forward
+        that journaled more or fewer keys, and anything `adopt` adopted since
+        the kept record."""
+        slots, self._bracket_slots = self._bracket_slots, None
+        if slots is None or len(slots) != 1 \
+                or getattr(self.ctx, "_revl_timeline", None) is not None:
+            return self.adopt(effect)
+        (slot,) = slots
+        if slot in self._coalesce and _release_unrun(effect):
+            return effect
+        self._adopted.append(effect)
+        self._coalesce.add(slot)
         return effect
 
     def acquire(self, label: str, get: Callable[[], Any], undo: Callable[[Any], Any]) -> Any:
         """A ``let-effect`` step inside a provide-method body: run the
         acquisition through the effect protocol, adopt it, return the value."""
         _estop_check(f"{self.name}.{label}")   # item 443
+        _read_only_check(f"{self.name}.{label}")   # issue #2758
         holder: list = []
 
         frame = self
@@ -4337,6 +4913,7 @@ class Frame:
         the driver is always the owner, so this refusal is a guard against a
         misconfigured embedding, never a normal path."""
         _estop_check(f"{receiver}.{method}")   # item 443
+        _read_only_check(f"{receiver}.{method}")   # issue #2758
         if self._owner is None:
             raise RuntimeError(
                 "a deferred emission needs a session owner runtime (the deferral "
@@ -4408,6 +4985,7 @@ class Frame:
         # is the scenario the E-Stop exists for. Refused before the token is
         # spent, so a halt never leaves an approval consumed-but-unfired.
         _estop_check(f"{self.name}.{capability}")
+        _read_only_check(f"{self.name}.{capability}")   # issue #2758
         owner = self._owner
         if owner is None or not owner.approval_enforced \
                 or (isinstance(handle, dict) and handle.get("passthrough")):
@@ -4629,6 +5207,7 @@ class Frame:
 
     def _dispose_adopted(self) -> Any:
         adopted, self._adopted = self._adopted, []
+        self._coalesce.clear()
         if not adopted:
             return None
 
@@ -5244,6 +5823,7 @@ class _Deferred:
         # crosses after the button. The queue entry is left owed and enumerated,
         # never quietly dropped.
         _estop_check(f"{self.receiver}.{self.method}")
+        _read_only_check(f"{self.receiver}.{self.method}")   # issue #2758
         self.fired = True
         fire, self._fire = self._fire, None
         if fire is not None:
@@ -7070,14 +7650,23 @@ class Subscription:
         closing here closes it, each link closes the one above, and closing a
         merge is what detaches it from both sources. The PROVIDERS are untouched:
         each is closed by its own bracket, which keeps the LIFO close order the
-        core guarantee is pinned on."""
+        core guarantee is pinned on.
+
+        Items still buffered here are DISCARDED with the subscription: the
+        consumer is gone, so there is nobody left to take them. That drop is
+        recorded (`stream.discard N`), not silent, because the provider was
+        told each of them was accepted (issue #2711)."""
         if self._closed:
             return False
+        discarded = len(self._buffer)
         self._closed = True
         self._signal()   # item 416b: resolve a parked `next` as `Closed`
         self._cancel_drain()
         self._source._detach(self)
         _record("stream.close")
+        if discarded:
+            _record(f"stream.discard {discarded}")
+            self._buffer.clear()
         if self._source._derived:
             self._source.close()
         return True
@@ -7391,7 +7980,12 @@ class Stream:
 class TimerHandle:
     """One armed timer. Live until it is cancelled (`every`, and an `after`
     before it fires) or has fired to completion (`after`). Cancellation is the
-    schedule's inverse — idempotent, and a no-op once the timer is spent."""
+    schedule's inverse: idempotent, and a no-op once the timer is spent.
+
+    Issue #3377: the clock holds a handle only while it is live. Cancelling
+    it, or an `after` firing, releases it from ``Clock._timers`` and drops its
+    body, so a host that swaps for hours neither scans dead handles on every
+    ``advance`` nor keeps the generation that armed them alive."""
 
     __slots__ = ("serial", "mode", "interval_ms", "_body", "state", "next_at", "fired")
 
@@ -7422,8 +8016,17 @@ class TimerHandle:
         if self.state != "live":
             return False
         self.state = "cancelled"
+        self._release()
         _record(f"{self._tag}.cancel")
         return True
+
+    def _release(self) -> None:
+        """Leave the clock's live list and drop the body (issue #3377)."""
+        try:
+            Clock._timers.remove(self)
+        except ValueError:
+            pass  # already released (an `after` body that cancelled itself)
+        self._body = None
 
     def _fire(self) -> None:
         self.fired += 1
@@ -7435,6 +8038,7 @@ class TimerHandle:
             # the same `cancel` verb so the residue trace stays balanced and the
             # teardown's own `handle.cancel()` is a clean no-op.
             self.state = "done"
+            self._release()
             _record(f"{self._tag}.cancel")
 
     def __repr__(self) -> str:  # pragma: no cover — debugging aid
@@ -7446,10 +8050,14 @@ class Clock:
     :meth:`advance`; timer firings are deterministic timeline steps, not
     wall-clock races (docs/time-coeffect.md)."""
 
+    #: How many of the most recent firings :meth:`firings` keeps (issue
+    #: #3377). The log is a test aid; a host that runs for hours never reads it.
+    FIRINGS_CAP = 1024
+
     _now_ms = 0
     _serial = 0
-    _timers: list = []      # every TimerHandle ever armed, registration order
-    _firings: list = []     # (timer serial, now_ms) per firing, in fire order
+    _timers: list = []      # the live TimerHandles, registration order
+    _firings: deque = deque(maxlen=FIRINGS_CAP)  # (timer serial, now_ms), fire order
 
     @classmethod
     def now(cls) -> int:
@@ -7487,11 +8095,22 @@ class Clock:
     def pending(cls) -> int:
         """Live timers — a teardown that abandons one leaves this > 0 (mirrors
         ``Job.pending``); the countable form of the no-orphaned-interval proof."""
-        return sum(1 for t in cls._timers if t.state == "live")
+        return len(cls._timers)
+
+    @classmethod
+    def next_due(cls) -> int | None:
+        """Milliseconds from :meth:`now` until the earliest live timer is due,
+        or ``None`` with no live timer. A host pumping :meth:`advance` from a
+        real monotonic source sleeps this long, then advances by it, so a
+        timer fires on its tick rather than on a fixed slice (issue #3377)."""
+        if not cls._timers:
+            return None
+        return min(t.next_at for t in cls._timers) - cls._now_ms
 
     @classmethod
     def firings(cls) -> list:
-        """The recorded firing log: ``(timer serial, fired-at ms)`` in order."""
+        """The recorded firing log: ``(timer serial, fired-at ms)`` in order,
+        the most recent :attr:`FIRINGS_CAP` firings only."""
         return list(cls._firings)
 
     @classmethod
@@ -7499,7 +8118,7 @@ class Clock:
         cls._now_ms = 0
         cls._serial = 0
         cls._timers = []
-        cls._firings = []
+        cls._firings = deque(maxlen=cls.FIRINGS_CAP)
 
 
 def schedule_every(interval_ms: int, body: Callable[[], Any]) -> TimerHandle:
@@ -7554,10 +8173,29 @@ def _journal_note(store: Any, key: Any, verb: str) -> None:
     if not stack:
         return
     prior = store.data.get(key, _ABSENT)
+    slot = (id(store), key)
     for frame in stack:
-        frame._journal.setdefault((id(store), key), (store, key, prior, verb))
+        frame._journal.setdefault(slot, (store, key, prior, verb))
+        # issue #3304: the keys an open bracket's forward write touched (an
+        # `undo` replaying under the journal has no bracket open)
+        if frame._open_journal is not None and frame._bracket_slots is not None:
+            frame._bracket_slots.add(slot)
     if key not in store._journaled:
         store._journaled[key] = (prior, stack[0], verb)
+
+
+def _release_unrun(effect: Any) -> bool:
+    """Take a cordis effect off its fiber without running its disposers
+    (issue #3304, `Frame.adopt_bracket`); whether it was one. Anything else (a
+    simulated context's `None`) is left alone and adopted as before."""
+    fiber = getattr(getattr(effect, "_ctx", None), "fiber", None)
+    disposables = getattr(fiber, "_disposables", None)
+    runner = getattr(effect, "_runner", None)
+    if disposables is None or runner is None or not disposables.delete(effect):
+        return False
+    effect._remove = None
+    runner.epoch = False      # a stray call is a no-op, never the inverse
+    return True
 
 
 def _not_reversed(frame: Any, store: Any, key: Any, prior: Any, verb: str,

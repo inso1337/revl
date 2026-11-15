@@ -82,6 +82,8 @@ _WITNESSED = [
     "   mv a b   ",
     "mv 'a\\\nb' c",    # a backslash-newline INSIDE quotes is literal, not a
                         # continuation — the shell and the tokenizer agree
+    "rm a\x0bb",       # VT and FF are word characters (shlex's whitespace is
+    "rm a\x0cb",       # space, tab, CR, LF only): one operand on both tiers
 ]
 _EMISSION = [
     "",

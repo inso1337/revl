@@ -54,6 +54,131 @@ Options:
 | `--approval-record-values {withheld,bound}` | whether an approved crossing's caller-supplied resource value reaches the approval log (default `withheld`). |
 | `--wal PATH` | the session write-ahead log (default: the per-user state directory). |
 | `--upstream-timeout SECONDS` | how long to wait for one upstream answer (default 120). |
+| `--attestation-pin PATH` | pin the upstream's identity and tool manifest to a signed `revl.mcp.pin`; a manifest or key that does not verify is refused ([below](#origin-who-answered-and-what-its-answer-is)). |
+
+## Origin: who answered, and what its answer is
+
+By default the proxy trusts the upstream because something answered at the
+address it was pointed at: a different server, or the same server with one more
+tool, is indistinguishable from the one the operator meant.
+`--attestation-pin PATH` removes that assumption (issue #2990).
+
+An attesting upstream says which server answered and which tool manifest it
+serves, in one signed record carried in `_meta["revl/attestation"]` of its
+`initialize` and `tools/list` results:
+
+- `server_id` and `session`: which server, and which run of it. Two records
+  that disagree on either are two servers, or one server replaced mid-exchange;
+- `tools` and `manifest_digest`: the sha256 of every tool object, so the whole
+  list has one value to compare and every tool has a name a refusal can use;
+- `capabilities`: the server's own declared scope, signed so a client can read
+  it back honestly, not so the client believes it;
+- `issued_at` and `expires_at`: the window the record is good for.
+
+The signature is deterministic ECDSA over NIST P-256, over a domain-separated
+encoding of every member including the signer's public key. It is the same
+primitive the peer pool uses; no new crypto lives in the MCP layer.
+
+`revl mcp serve` produces the record when started with a key, and writes the
+public pin a client stores:
+
+```bash
+revl mcp serve --attestation-key server.key --attestation-server-id notes \
+  --attestation-pin-out notes.pin
+revl mcp proxy --attestation-pin notes.pin -- node notes-server.js
+```
+
+The pin is public: server id, public key, key id, the tool digests, and the
+capability scope the client grants. It carries no private material and can be
+committed beside the client configuration. A pin with no `tools` map is refused,
+because a pin that covers no manifest cannot refuse a changed tool.
+
+### What the pin refuses
+
+With a pin, the upstream's record is verified before any tool is classified.
+The proxy refuses, naming the reason:
+
+| the upstream | the refusal |
+|---|---|
+| presents no record | `the upstream presented no attestation in its initialize result, and this proxy is pinned` |
+| signs with another key | `the record names a different public key than the one pinned` |
+| names another server id | `server_id: pinned 'notes', server claims 'other'` |
+| changes session mid-exchange | `its tools/list attestation names session ..., but its initialize attestation named ...` |
+| attests a changed tool | `the tool manifest does not match the pin: list_notes` |
+| attests an added or removed tool | the same refusal, naming the tool |
+| presents an expired record | `the attestation expired at ...` |
+| paginates a pinned manifest | `a pinned manifest is one signed tools/list, and this server paginates it` |
+
+A manifest that moves after a successful pin does not silently swap in: the
+next `tools/list` is verified again, and a mismatch refuses every proxied tool
+by name until the proxy restarts. A refusal reaches the client as the proxy's
+startup error (`error: revl mcp proxy cannot gate ...: refused the upstream
+...`), before any tool is advertised.
+
+`capabilities` in the pin is the client's declared scope. A tool the server
+attests but the pin does not grant is listed as excluded (`outside the pinned
+capability scope`) and cannot be called, so a proxied call can never exceed
+what the client declared for that origin. An empty list grants the whole
+attested manifest, because the pin a server writes carries an empty list and
+the operator narrows it by editing it; a `capabilities` that is not a list of
+tool names is refused when the pin is read. The scope only narrows: a pinned
+tool the server no longer attests, or an attested manifest that differs from
+the pinned one, is still refused as above.
+
+Only a pinned proxy compares the served tool list with the record's manifest;
+an unpinned proxy relays the upstream unchanged, whatever record it carries.
+
+### What is authenticated, and what is not
+
+Authenticated: the server identity (server id plus key), the exact tool
+manifest it serves, the session those answers belong to, and the validity
+window. A changed description, schema or annotation is a different digest and
+is refused.
+
+Not authenticated: the truth or safety of an answer. A pinned server still
+signs its own lies; the pin says the answer came from the server you chose, not
+that the server is honest. Tool annotations and `readOnlyHint` remain the
+server author's assertions and are gated exactly as before.
+
+A record can also be **replayed for its whole TTL**. `session` is chosen by the
+server and no client nonce is signed, so anyone who holds a record that was
+relayed can present it at the same address until it expires, and the pin will
+accept it. This proxy relays the record to every downstream client, and a log
+keeps a copy. A replayer cannot change the manifest (the signature covers it)
+and cannot produce a record for another manifest, but they can serve that
+manifest's tools and can answer with anything, because answers are not signed.
+Binding a client nonce is a follow-up; until then keep the TTL short and do not
+read a relayed record as proof that the responder holds the key now.
+
+The record's expiry is re-checked on every use, not only at connect: a
+long-lived proxy stops relaying a record that expired since, and a pinned proxy
+refuses `initialize`, `tools/list`, `tools/call` and the forwarded
+`resources/*`, `prompts/*`, `completion/complete` and `logging/setLevel`
+rather than keep presenting a statement about a moment that has passed.
+
+### The answer is untrusted data
+
+Every proxied tool result carries the origin it came from and the fact that it
+is data, under `_meta["revl/origin"]`:
+
+```json
+{"kind": "mcp", "server": "notes", "keyId": "...", "session": "...",
+ "trust": "untrusted", "attested": true}
+```
+
+`attested` is false for an upstream no pin was declared for. The label names
+the origin, not the proxy: an answer relayed through proxy A that came from B
+still names B, and A does not launder it. Resource reads and prompts forwarded
+from the upstream carry the same label, and the tool call's trace carries one
+`origin` record (`{"channel": "origin", "subject": <server>,
+"detail": "untrusted mcp answer"}`) beside the call's own host events.
+
+The same rule applies where an answer enters a revl program: `revl mcp import`
+and the proxy's generated surface declare every tool return `Untrusted[Str]`,
+and an emission or witnessed tool carries `emission[net]` or `witnessed[net]`.
+G9 then refuses the answer at a `Trusted` sink, exactly as it refuses a web
+fetch or a file read: the answer is evidence, and using it as authority needs a
+declared declassification.
 
 ## How a tool is classified
 
@@ -185,7 +310,9 @@ own handler so the operator gate applies: `revl_approve`, `revl_revoke`,
 The client gets no verb that loads, swaps or edits code.
 
 `resources/*`, `prompts/*`, `completion/complete` and `logging/setLevel` are
-forwarded to the upstream unchanged. Upstream notifications are relayed to the
+forwarded to the upstream unchanged, except that a pinned proxy whose held
+attestation no longer verifies (an expired record) refuses them exactly as it
+refuses `tools/list` and `tools/call`. Upstream notifications are relayed to the
 client, except `notifications/tools/list_changed`, which the proxy acts on: it
 lists the tools again, reclassifies them, and sends its own
 `notifications/tools/list_changed`. Over HTTP, which caller receives each
@@ -249,6 +376,10 @@ These hold as long as the proxy is the only way the client reaches the server.
    capability to the upstream, so a conforming upstream sends none of these.
    A client's `notifications/cancelled`, and a closed HTTP response stream, are
    not forwarded.
+9. **That the server behind the address is the one you meant, without a pin.**
+   With no `--attestation-pin`, an upstream is still trusted by address, and
+   its answers carry `attested: false`. With a pin, the identity is verified;
+   the truth of what the server answers is still not.
 
 Transport: stdio to the upstream. To the client, stdio by default, or MCP
 2026-07-28 Streamable HTTP with `--http HOST:PORT`, where each request is bound

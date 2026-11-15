@@ -93,7 +93,9 @@ const CORPUS: &[Doc] = &[
         name: "g7_verified_recursion",
         path: "examples/rejections/v2_verified_direct_recursion.rvl",
         code: Some("G7"),
-        outside_frontier: "totality of a `verified fn`",
+        // decided natively since issue #3107; the reference row must still be
+        // the one the binary publishes, and the native row is deduped by code
+        outside_frontier: "totality of a `verified fn` (decided natively)",
     },
     Doc {
         name: "g8_extern_unclassified",

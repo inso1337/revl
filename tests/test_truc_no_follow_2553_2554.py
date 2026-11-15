@@ -26,8 +26,23 @@ ROOT = Path(__file__).resolve().parents[1]
 ENTRY = "readonly_database"
 OUTSIDE_TEXT = "OUTSIDE-ORIGINAL\n"
 OUTSIDE_JSON = '{"lockVersion": 0, "trucs": []}\n'
-PLAN = json.dumps({"lockAdd": {"name": ENTRY, "registry": "local"}})
 RM_PLAN = json.dumps({"name": ENTRY})
+
+
+def _plan(reg: Path) -> str:
+    """The commit plan `truc add` builds: the sha256 of each file the planner
+    read and the gate admitted ("" for the dossier when absent). Built from the
+    registry as it stands BEFORE a test mutates it, like the real plan."""
+    row = json.loads(_host.index_row(str(reg), ENTRY))
+    entry = json.loads(_host.entry_read(str(reg), ENTRY))
+    assert _host.sha256_hex(entry["source"]) == row["sourceHash"]
+    dossier = entry.get("dossier")
+    return json.dumps({"lockAdd": {
+        "name": ENTRY, "registry": "local",
+        "sourceHash": _host.sha256_hex(entry["source"]),
+        "manifestHash": _host.sha256_hex(entry["manifest"]),
+        "dossierHash": _host.sha256_hex(dossier) if dossier is not None else "",
+    }})
 
 
 def _registry(tmp_path: Path) -> Path:
@@ -61,9 +76,9 @@ def _vendored(proj: Path) -> bool:
     return (proj / "trucs" / ENTRY).exists()
 
 
-def _refused_add(proj: Path, match: str = "symlink"):
+def _refused_add(proj: Path, plan: str, match: str = "symlink"):
     with pytest.raises(_host.TrucNameRefusal) as raised:
-        _host.commit_add(str(proj), PLAN)
+        _host.commit_add(str(proj), plan)
     assert match in str(raised.value)
     return str(raised.value)
 
@@ -74,13 +89,14 @@ def _refused_add(proj: Path, match: str = "symlink"):
                                    "dossier.json"])
 def test_add_refuses_a_registry_file_that_links_outside(world, fname):
     tmp_path, reg, proj, outside = world
+    plan = _plan(reg)
     secret = outside / "secret.txt"
     secret.write_text(OUTSIDE_TEXT)
     entry_file = reg / "components" / ENTRY / fname
     entry_file.unlink()
     entry_file.symlink_to(secret)
 
-    message = _refused_add(proj)
+    message = _refused_add(proj, plan)
 
     assert fname in message and "registry" in message
     assert not _vendored(proj), "part of the entry was vendored"
@@ -90,33 +106,36 @@ def test_add_refuses_a_registry_file_that_links_outside(world, fname):
 
 def test_add_refuses_a_dangling_registry_file_link(world):
     tmp_path, reg, proj, outside = world
+    plan = _plan(reg)
     entry_file = reg / "components" / ENTRY / "dossier.json"
     entry_file.unlink()
     entry_file.symlink_to(outside / "gone.json")
 
-    _refused_add(proj)
+    _refused_add(proj, plan)
 
     assert not _vendored(proj)
 
 
 def test_add_refuses_a_registry_entry_directory_that_is_a_link(world):
     tmp_path, reg, proj, outside = world
+    plan = _plan(reg)
     real = tmp_path / "elsewhere"
     (reg / "components" / ENTRY).rename(real)
     (reg / "components" / ENTRY).symlink_to(real, target_is_directory=True)
 
-    _refused_add(proj)
+    _refused_add(proj, plan)
 
     assert not _vendored(proj)
 
 
 def test_add_refuses_a_components_directory_that_is_a_link(world):
     tmp_path, reg, proj, outside = world
+    plan = _plan(reg)
     real = tmp_path / "elsewhere"
     (reg / "components").rename(real)
     (reg / "components").symlink_to(real, target_is_directory=True)
 
-    message = _refused_add(proj)
+    message = _refused_add(proj, plan)
 
     assert "components" in message
     assert not _vendored(proj)
@@ -125,11 +144,12 @@ def test_add_refuses_a_components_directory_that_is_a_link(world):
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no os.mkfifo here")
 def test_add_refuses_a_registry_source_that_is_not_a_regular_file(world):
     tmp_path, reg, proj, outside = world
+    plan = _plan(reg)
     entry_file = reg / "components" / ENTRY / "dossier.json"
     entry_file.unlink()
     os.mkfifo(entry_file)
 
-    message = _refused_add(proj, "not a regular file")
+    message = _refused_add(proj, plan, "not a regular file")
 
     assert "dossier.json" in message
     assert not _vendored(proj)
@@ -143,7 +163,7 @@ def test_add_refuses_a_lock_that_links_outside(world):
     target.write_text(OUTSIDE_JSON)
     (proj / "truc.lock").symlink_to(target)
 
-    _refused_add(proj, "truc.lock")
+    _refused_add(proj, _plan(reg), "truc.lock")
 
     assert target.read_text(encoding="utf-8") == OUTSIDE_JSON
     assert not _vendored(proj), "vendored before the lock was refused"
@@ -154,7 +174,7 @@ def test_add_refuses_a_dangling_lock_and_creates_nothing(world):
     target = outside / "never-created.lock"
     (proj / "truc.lock").symlink_to(target)
 
-    _refused_add(proj, "truc.lock")
+    _refused_add(proj, _plan(reg), "truc.lock")
 
     assert not target.exists(), "the link's target was created outside"
     assert not _vendored(proj)
@@ -167,7 +187,7 @@ def test_add_refuses_a_truc_toml_that_links_outside(world):
     (proj / "truc.toml").symlink_to(target)
     before = target.read_text(encoding="utf-8")
 
-    _refused_add(proj, "truc.toml")
+    _refused_add(proj, _plan(reg), "truc.toml")
 
     assert target.read_text(encoding="utf-8") == before
     assert not _vendored(proj)
@@ -176,7 +196,7 @@ def test_add_refuses_a_truc_toml_that_links_outside(world):
 
 def test_rm_refuses_a_lock_that_links_outside(world):
     tmp_path, reg, proj, outside = world
-    _host.commit_add(str(proj), PLAN)
+    _host.commit_add(str(proj), _plan(reg))
     lock = proj / "truc.lock"
     target = outside / "victim.lock"
     shutil.move(lock, target)
@@ -193,7 +213,7 @@ def test_rm_refuses_a_lock_that_links_outside(world):
 
 def test_rm_refuses_a_truc_toml_that_links_outside(world):
     tmp_path, reg, proj, outside = world
-    _host.commit_add(str(proj), PLAN)
+    _host.commit_add(str(proj), _plan(reg))
     toml = proj / "truc.toml"
     target = outside / "victim.toml"
     shutil.move(toml, target)
@@ -218,7 +238,7 @@ def test_the_lock_gets_the_mode_write_text_would_give_it(world):
         lock.unlink(missing_ok=True)
         old = os.umask(umask)
         try:
-            _host.commit_add(str(proj), PLAN)
+            _host.commit_add(str(proj), _plan(reg))
         finally:
             os.umask(old)
         assert lock.stat().st_mode & 0o777 == expected, oct(umask)
@@ -256,7 +276,7 @@ def test_assembly_refuses_a_dangling_assembly_json_link(world):
 def test_a_normal_add_assembly_and_rm_still_work(world):
     tmp_path, reg, proj, outside = world
 
-    assert _host.commit_add(str(proj), PLAN) == "committed"
+    assert _host.commit_add(str(proj), _plan(reg)) == "committed"
     vendored = proj / "trucs" / ENTRY
     for fname in ("component.rvl", "manifest.json", "dossier.json"):
         assert (vendored / fname).read_bytes() == \

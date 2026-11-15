@@ -18,9 +18,12 @@ import os
 from .registry import (
     EVIDENCE_ATTESTATION,
     EVIDENCE_CAPABILITIES,
+    EVIDENCE_CEILINGS,
+    EVIDENCE_COMPENSATION,
     EVIDENCE_FAULT_SWEEP,
     EVIDENCE_INVERSE_ROUNDTRIP,
     EVIDENCE_PROVENANCE,
+    EVIDENCE_SECRET_SINKS,
     _BOUND_FACETS,
     _audit_document,
     _components_dir,
@@ -28,6 +31,7 @@ from .registry import (
     _normalize_ir_for_attest,
     _provenance_document,
     _read,
+    _reached_capability_tokens,
     _write_evidence_file,
     load_knowledge,
 )
@@ -41,12 +45,13 @@ def build_evidence(registry_dir: str | os.PathLike, *, key: bytes | None = None,
 
     Nothing here re-implements evidence: it calls the existing producers and
     writes their verbatim output under ``<component>/evidence/``. `capabilities`
-    (the G8 boundary) and `provenance` are always reproducible from source and
-    are always written; `attestation` is written when a signing `key` is given;
-    `fault-sweep` and `inverse-roundtrip` are the runtime-tested facets - written
-    when the cordis-py runtime is present, and honestly skipped (left
-    `unavailable`) when it is absent, never faked. Returns a per-component map of
-    the facets that were assembled.
+    (the G8 boundary), `ceilings`, `secret-sinks`, `compensation` and
+    `provenance` are always reproducible from source and are always written;
+    `attestation` is written when a signing `key` is given; `fault-sweep` and
+    `inverse-roundtrip` are the runtime-tested facets - written when the
+    cordis-py runtime is present, and honestly skipped (left `unavailable`) when
+    it is absent, never faked. Returns a per-component map of the facets that
+    were assembled.
     """
     from .boundary import _boundary  # noqa: PLC0415
 
@@ -77,9 +82,38 @@ def build_evidence(registry_dir: str | os.PathLike, *, key: bytes | None = None,
         # tested facets are honestly skipped (left unavailable) when cordis-py is
         # absent, never faked.
         dossiers: dict[str, tuple[str, dict]] = {}
+        boundary = _boundary(ir)
         dossiers["capabilities"] = (
             EVIDENCE_CAPABILITIES,
-            {"kind": "revl.capabilities", "boundary": _boundary(ir)})
+            {"kind": "revl.capabilities", "boundary": boundary})
+        # issue #2697: the three reviewer facets are projections of producers
+        # the audit already emits - assembled here, never re-derived. Always
+        # written, so an empty document means "none", never "not produced".
+        from .cardinality import cardinality  # noqa: PLC0415
+        dossiers["ceilings"] = (
+            EVIDENCE_CEILINGS,
+            {"kind": "revl.ceilings", "cardinality": cardinality(ir)})
+        from .audit_diff import (  # noqa: PLC0415
+            _recovery_surface, _secrets_table)
+        secrets = _secrets_table(ir)
+        sinks = {row["capability"] for row in secrets}
+        # which component can reach each declared secret sink, read off the same
+        # G8 boundary the capabilities facet carries.
+        reach: dict[str, list[str]] = {}
+        for comp, stats in boundary.items():
+            reached = _reached_capability_tokens(stats)
+            # an unnameable (`*`) reach could be any declared sink, so it is
+            # listed against every one of them: the facet answers "can reach",
+            # and over-approximating a possible sink is the safe direction.
+            hit = sorted(sinks) if "*" in reached else sorted(reached & sinks)
+            if hit:
+                reach[comp] = hit
+        dossiers["secret-sinks"] = (
+            EVIDENCE_SECRET_SINKS,
+            {"kind": "revl.secret-sinks", "secrets": secrets, "reach": reach})
+        dossiers["compensation"] = (
+            EVIDENCE_COMPENSATION,
+            {"kind": "revl.compensation", "recovery": _recovery_surface(ir)})
         from . import fault  # noqa: PLC0415
         try:
             dossiers["fault-sweep"] = (EVIDENCE_FAULT_SWEEP,

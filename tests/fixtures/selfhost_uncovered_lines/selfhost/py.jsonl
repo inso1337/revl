@@ -66,13 +66,17 @@
 
 ["function", "inline-template-rejects-guarded-return-with-missing-expressi", "inline_template", 1, 1]
 
+["reason", "issue-3407-direct-read-guards-on-input-the-frontend-refuses", "issue #3407: defensive guards in the direct-read analysis whose input the frontend refuses. The duplicate-fn guard (`duplicate function `move``) and the callee-or-let-named-like-a-parameter check (`f` is already declared in this function; `move` is bound here and called in this body, and a module function of that name is in scope): no compiled document reaches them."]
+
+["function", "issue-3407-direct-read-guards-on-input-the-frontend-refuses", "dict_receivers", 1, 1]
+
+["function", "issue-3407-direct-read-guards-on-input-the-frontend-refuses", "dr_is_param", 1, 1]
+
 ["reason", "issue-721-method-block-renders-pass-for-an", "issue #721: `method_block` renders `pass` for an EMPTY provide-method control-flow arm. services_control_flow.rvl reaches every other statement, and no corpus document holds an empty arm. The reference renders the same `pass` through `_Lines.close_block` (issue #2284), which every other block shares, so it has no uncovered twin; tests/test_selfhost_emit_py.py `test_comment_only_blocks_agree` holds the two to the same bytes on empty arms."]
 
 ["function", "issue-721-method-block-renders-pass-for-an", "method_block", 1, 1]
 
-["reason", "item-522-slice-3-issue-1369-the-ui", "Item 522 slice 3 (issue #1369), the UI transaction unit, ported into selfhost/emit_py.rvl by issue #1972, together with tests/fixtures/emit_py_corpus/ui_transaction_unit.rvl. What the corpus leaves unexecuted here is structural rather than a missing document: `ui_verb_known` is one `return (... or ...)` statement and a short-circuit cannot execute part of a single statement; `is_computer_use_token`'s `len(segs) < 2` arm needs a capability token with no dot, and every capability in the corpus and in revl.ui_family.REVERSIBILITY is dotted (screen.observe, ui.find, ui.text, ui.click, ui.download); `reaches_computer_use`'s `{kind: 'call', callee: {kind: 'var'}}` arm is entered only from a body-level call node, and the corpus's one such node lives inside the module `fn peek_pane`, which `method_lines` reads at emit time and never at run time. The input family is tests/test_selfhost_emit_py.py and tests/test_ui_transaction_runtime_1369.py::FIVE_STEPS."]
-
-["function", "item-522-slice-3-issue-1369-the-ui", "is_computer_use_token", 1, 1]
+["reason", "item-522-slice-3-issue-1369-the-ui", "Item 522 slice 3 (issue #1369), the UI transaction unit, ported into selfhost/emit_py.rvl by issue #1972, together with tests/fixtures/emit_py_corpus/ui_transaction_unit.rvl. What the corpus leaves unexecuted here is structural rather than a missing document: `ui_verb_known` is one `return (... or ...)` statement and a short-circuit cannot execute part of a single statement; `reaches_computer_use`'s `{kind: 'call', callee: {kind: 'var'}}` arm is entered only from a body-level call node, and the corpus's one such node lives inside the module `fn peek_pane`, which `method_lines` reads at emit time and never at run time. The dotless-capability arm of `is_computer_use_token` is now covered: the issue-#2688 ceiling refusal documents declare `[net(calls=1)]`, whose capability token has no dot. The input family is tests/test_selfhost_emit_py.py and tests/test_ui_transaction_runtime_1369.py::FIVE_STEPS."]
 
 ["function", "item-522-slice-3-issue-1369-the-ui", "reaches_computer_use", 1, 1]
 
@@ -92,10 +96,6 @@
 
 ["function", "lifecycle-step-marker-item-391-lifecycle-step-answers", "lifecycle_step", 1, 1]
 
-["reason", "line-s-empty-text-return-is-bypassed-by", "line's empty-text return is bypassed by callers which append blank lines directly; reference _Lines.add has the same empty-line spelling. This formatter branch does not represent omitted source behavior."]
-
-["function", "line-s-empty-text-return-is-bypassed-by", "line", 1, 1]
-
 ["reason", "map-has-membership-and-unknown-builtin-marker-render", "Map.has membership and unknown-builtin marker: render_builtin matches reference key-in-map output, although current map functions use lookup/set/keys/size/remove. Unknown method names are frontend-invalid. This is an inspected equivalent branch, not a supported-operation waiver."]
 
 ["function", "map-has-membership-and-unknown-builtin-marker-render", "render_builtin", 2, 2]
@@ -104,7 +104,7 @@
 
 ["function", "match-empty-invalid-arm-handling-cmatch-synthesizes-non", "cmatch", 1, 1]
 
-["function", "match-empty-invalid-arm-handling-cmatch-synthesizes-non", "match_expr", 2, 2]
+["function", "match-empty-invalid-arm-handling-cmatch-synthesizes-non", "match_expr", 1, 1]
 
 ["function", "match-empty-invalid-arm-handling-cmatch-synthesizes-non", "match_folds", 1, 1]
 
@@ -134,11 +134,11 @@
 
 ["function", "owned-map-set-computed-key-order-inplace-stmts", "inplace_stmts", 1, 1]
 
-["reason", "reference-bootstrap-inlining-artifacts-not-dead-helpers-ind", "Reference bootstrap inlining artifacts, not dead helpers: ind is folded into line and checked_quotient into checked_div_block when this .rvl compiles to Python. Their declared def bodies remain but no caller invokes them. arithmetic corpus covers the folded checked division/remainder preambles; generated helper scaffolding is excluded from the denominator, these declared functions are deliberately retained."]
-
-["function", "reference-bootstrap-inlining-artifacts-not-dead-helpers-ind", "checked_quotient", 7, 7]
+["reason", "reference-bootstrap-inlining-artifacts-not-dead-helpers-ind", "Reference bootstrap inlining artifacts, not dead helpers: ind is folded into line and is_checked_div into is_checked_form and checked_block when this .rvl compiles to Python. Their declared def bodies remain but no caller invokes them. The checked_div and checked_arith corpus documents cover the folded predicates; generated helper scaffolding is excluded from the denominator, these declared functions are deliberately retained."]
 
 ["function", "reference-bootstrap-inlining-artifacts-not-dead-helpers-ind", "ind", 1, 1]
+
+["function", "reference-bootstrap-inlining-artifacts-not-dead-helpers-ind", "is_checked_div", 1, 1]
 
 ["reason", "runtime-ref-frame-configschema-aliases-are-hardcoded-directl", "runtime_ref Frame/ConfigSchema aliases are hardcoded directly by current module/component scaffolds; the final identity fallback handles runtime names outside the alias set. Reference _runtime_ref uses the same alias-or-name rule. Imported Frame/ConfigSchema behavior is covered by services_basic/config fixtures."]
 
@@ -150,7 +150,7 @@
 
 ["reason", "the-self-host-port-of-the-reference-named-call-kwarg-inert", "The self-host port of the reference `_named_call_kwarg` / `_inert` (issue #1369): the named call an inverse or a compensation writes into its WAL discharge descriptor. The corpus reaches the required-service shape and the witnessed inverse, where the two emitters agree byte for byte. Not reached: an unrecognised call shape, a non-`req` target, a `fn`-kind callee, a field-read argument, and an argument that is itself a call, for the reason the reference entry gives."]
 
-["function", "the-self-host-port-of-the-reference-named-call-kwarg-inert", "call_kwarg", 2, 2]
+["function", "the-self-host-port-of-the-reference-named-call-kwarg-inert", "call_kwarg", 1, 1]
 
 ["function", "the-self-host-port-of-the-reference-named-call-kwarg-inert", "inert_arg", 1, 1]
 

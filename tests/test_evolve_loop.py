@@ -19,7 +19,10 @@ Levels:
   2. the payload contract (`rejection_payload`) normalizes it for a generator;
   3. the loop repairs a G2-refused candidate on attempt 2 (the proof exit);
   4. the loop gives up at budget with the full history + final why-trace;
-  5. the seam plumbing (register_proposer, budget guards).
+  5. the seam plumbing (register_proposer, budget guards);
+  6. the bounded `ProposerPacket` and its digest on every proposal call;
+  7. `rounds`: fresh-context restarts from the retained component, with the
+     original brief and no refusal text carried across the round boundary.
 All pure frontend — the in-memory compile is the only runtime touched.
 """
 
@@ -36,11 +39,16 @@ from revl.compiler import compile_files  # noqa: E402
 from revl.gate_service import admit_structured  # noqa: E402
 from revl import evolve_loop  # noqa: E402
 from revl.evolve_loop import (  # noqa: E402
+    MAX_NOTE_CHARS,
+    MAX_PACKET_NOTES,
     Candidate,
+    ProposerPacket,
+    candidate_digest,
     evolve,
     g2_key_bump_proposer,
     rejection_payload,
     register_proposer,
+    rounds,
     scripted_proposer,
 )
 
@@ -187,9 +195,9 @@ def test_evolve_exhausts_the_budget_when_the_proposer_never_repairs():
 def test_evolve_budget_one_is_a_single_admit_no_propose():
     calls = []
 
-    def spy(candidate, why_trace):
-        calls.append(why_trace)
-        return candidate
+    def spy(packet):
+        calls.append(packet)
+        return packet.candidate
 
     result = evolve(_collide_candidate(), proposer=spy, budget=1)
     assert result.admitted is False
@@ -203,7 +211,8 @@ def test_evolve_clean_candidate_admits_on_attempt_one():
                  "component Extra provides other: Thing { provide other { fn ping() = 3 } }\n"},
         manifest=_running_manifest())
     calls = []
-    result = evolve(clean, proposer=lambda c, w: calls.append(w) or c, budget=3)
+    result = evolve(clean, proposer=lambda p: calls.append(p) or p.candidate,
+                    budget=3)
     assert result.admitted is True
     assert len(result.attempts) == 1
     assert calls == []                              # no refusal, no propose
@@ -233,3 +242,168 @@ def test_evolve_without_a_proposer_seam_is_a_clear_error(monkeypatch):
 def test_evolve_rejects_a_zero_budget():
     with pytest.raises(ValueError, match="budget must be >= 1"):
         evolve(_collide_candidate(), proposer=g2_key_bump_proposer(), budget=0)
+
+
+# --------------------------------------------------------------------------
+# 6. the proposer packet and its digest: the second call sees the first
+#    candidate and refusal exactly, and the attempt records what it saw.
+# --------------------------------------------------------------------------
+
+
+def test_packet_digest_matches_the_packet_the_proposer_saw():
+    seen = []
+    inner = g2_key_bump_proposer("_v2")
+
+    def recorder(packet):
+        seen.append(packet)
+        return inner(packet)
+
+    result = evolve(_collide_candidate(), proposer=recorder, budget=3)
+
+    assert result.admitted is True
+    assert len(seen) == 1                      # only the second attempt asks
+    packet = seen[0]
+    first = result.attempts[0]
+
+    # the one proposal call received exactly the parent candidate and the
+    # refusal payload, with no brief and no earlier notes
+    assert packet.candidate == first.candidate
+    assert packet.last_refusal == first.rejection
+    assert packet.brief == ""
+    assert packet.notes == ()
+
+    # the refused attempt records the digest of that packet, byte for byte
+    assert first.packet_digest == packet.digest()
+    rebuilt = ProposerPacket(brief="", candidate=first.candidate,
+                             last_refusal=first.rejection)
+    assert first.packet_digest == rebuilt.digest()
+
+    # nothing was handed over for the admitted attempt
+    assert result.attempts[1].packet_digest is None
+
+
+def test_packet_digest_is_recorded_for_every_propose_and_absent_when_unspent():
+    result = evolve(_collide_candidate(), proposer=scripted_proposer({}),
+                    budget=3)
+    assert result.admitted is False
+    # two proposes for three attempts: the final refusal is not handed over
+    assert [a.packet_digest is None for a in result.attempts] == [False, False, True]
+    assert len({a.packet_digest for a in result.attempts if a.packet_digest}) == 2
+
+
+def test_packet_notes_carry_earlier_refusals_only_and_are_capped():
+    seen = []
+
+    def recorder(packet):
+        seen.append(packet)
+        return packet.candidate
+
+    evolve(_collide_candidate(), proposer=recorder, budget=MAX_PACKET_NOTES + 3)
+
+    # attempt n's packet sees notes for attempts 1..n-1, capped at the tail
+    assert [len(p.notes) for p in seen[:3]] == [0, 1, 2]
+    assert len(seen[-1].notes) == MAX_PACKET_NOTES
+    assert all(len(note) <= MAX_NOTE_CHARS for note in seen[-1].notes)
+    # the notes name attempts 2..9 only: attempt 1 fell off the cap and the
+    # current refusal (attempt 10) is in last_refusal, not in the notes
+    assert [note.split(":")[0] for note in seen[-1].notes] == [
+        f"attempt {i}" for i in range(2, MAX_PACKET_NOTES + 2)]
+
+
+# --------------------------------------------------------------------------
+# 7. rounds: a bounded run ends at a retained component, and the next round
+#    starts from a fresh packet built from it and the original brief.
+# --------------------------------------------------------------------------
+
+
+def test_two_rounds_have_different_packets_and_round_two_is_fresh():
+    brief = "keep the greeter working"
+    result = rounds(_collide_candidate(), brief,
+                    proposer=g2_key_bump_proposer(), budget=3, max_rounds=2)
+
+    assert result.admitted is True
+    assert len(result.rounds) == 2
+    first, second = result.rounds
+    assert first.packet_digest != second.packet_digest
+
+    # the log names each round's seed packet and digest
+    doc = result.to_json()
+    assert doc["admitted"] is True
+    assert doc["rounds"][1]["packet_digest"] == second.packet_digest
+    assert doc["rounds"][1]["packet"]["brief"] == brief
+
+    # the round-two packet holds no refusal text from round one
+    assert second.packet.last_refusal is None
+    assert second.packet.notes == ()
+    round_one_refusal = first.result.attempts[0].rejection["message"]
+    assert round_one_refusal not in second.packet.canonical_json()
+
+
+def test_round_two_packet_holds_the_kept_component_and_the_original_brief():
+    brief = "extend the greeter safely"
+    result = rounds(_collide_candidate(), brief,
+                    proposer=g2_key_bump_proposer(), budget=3, max_rounds=2)
+
+    kept = result.rounds[0].result.final_candidate
+    packet = result.rounds[1].packet
+
+    assert packet.candidate == kept
+    assert packet.candidate_digest == candidate_digest(kept)
+    assert packet.brief == brief
+    # the kept component is the repaired one, not the round-one input
+    assert "provides thing_v2:" in next(iter(kept.sources.values()))
+    assert result.final_candidate == kept
+
+
+def test_rounds_stop_at_a_failed_round_and_keep_the_last_retained_component():
+    noop = scripted_proposer({})
+    result = rounds(_collide_candidate(), "keep trying", proposer=noop,
+                    budget=2, max_rounds=2)
+
+    assert result.admitted is False
+    assert len(result.rounds) == 1             # the first failed round ends it
+    assert result.final_rejection["g_rule"] == "G2"
+    # no round retained anything, so there is no final candidate
+    assert result.final_candidate is None
+
+
+def test_a_failed_second_round_ends_the_run_without_losing_the_retained_component():
+    inner = g2_key_bump_proposer("_v2")
+    calls = []
+    bad = Candidate(
+        sources={"/evolve/dup.rvl":
+                 "component Dup provides thing: Thing { provide thing { fn ping() = 2 } }\n"},
+        manifest=_collide_candidate().manifest)
+
+    def once(packet):
+        calls.append(packet)
+        if len(calls) == 1:                    # round-one seed: keep the candidate
+            return packet.candidate
+        if len(calls) == 2:                    # round-one repair
+            return inner(packet)
+        return bad                             # round two never converges
+
+    result = rounds(_collide_candidate(), "keep going", proposer=once,
+                    budget=2, max_rounds=2)
+
+    assert len(result.rounds) == 2
+    assert result.rounds[0].result.admitted is True
+    assert result.rounds[1].result.admitted is False
+    assert result.admitted is False
+    assert result.final_rejection["g_rule"] == "G2"
+    # the last retained component is still named, and round two started from it
+    retained = result.rounds[0].result.final_candidate
+    assert result.final_candidate == retained
+    assert result.rounds[1].packet.candidate == retained
+
+
+def test_rounds_are_bounded_and_validate_their_arguments():
+    with pytest.raises(ValueError, match="budget must be >= 1"):
+        rounds(_collide_candidate(), "", proposer=g2_key_bump_proposer(),
+               budget=0)
+    with pytest.raises(ValueError, match="rounds must be >= 1"):
+        rounds(_collide_candidate(), "", proposer=g2_key_bump_proposer(),
+               max_rounds=0)
+    result = rounds(_collide_candidate(), "", proposer=g2_key_bump_proposer(),
+                    budget=3, max_rounds=1)
+    assert len(result.rounds) == 1             # bounded even when admitted

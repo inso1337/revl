@@ -102,6 +102,7 @@ def test_lower_rvl_is_the_stressed_document():
     assert len(_functions("selfhost/lower.rvl")) > 500
 
 
+@pytest.mark.slow
 def test_worklist_not_slower_than_reference_on_lower_rvl():
     """The whole point of #539: the worklist is not slower than the round-based
     driver on the document it regressed on. A loose bound (<= oracle) keeps this

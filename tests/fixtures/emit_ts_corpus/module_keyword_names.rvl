@@ -1,0 +1,17 @@
+// Issue #3179: a module-level fn whose name reaches a JS keyword by dropping
+// trailing `_` takes the keyword ladder (`class_` -> `class__`) at its
+// declaration and at every call, and a local spelled exactly like it takes the
+// same spelling as the module name's own read. The local-name family of the
+// reference is not ported yet, so no other local here is one it renames.
+fn class_(x: Int) -> Int {
+  return x + 1
+}
+
+fn calls(x: Int) -> Int {
+  return class_(x) * 2
+}
+
+fn shadowed(x: Int) -> Int {
+  let class_ = x
+  return class_ + 1
+}

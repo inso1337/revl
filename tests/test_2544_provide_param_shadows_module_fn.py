@@ -44,8 +44,9 @@ fall-through, and the call lowers on the binder itself (pinned below).
 
 The pre-existing lowering refusal (`_refuse_callable_shadowing`, item 445)
 still owns the other binder forms; the controls below pin that the carve-out
-did not widen into them. The self-host lowering still admits the `Str` case
-(it is the next slice of #2544), so this file tests the reference alone.
+did not widen into them. The self-host port of the typecheck rule is pinned
+byte for byte in tests/test_selfhost_lower.py (`_2544_REFUSED_PROGRAMS`), so
+this file tests the reference alone.
 """
 
 import sys

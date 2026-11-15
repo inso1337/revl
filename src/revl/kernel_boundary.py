@@ -57,11 +57,12 @@ defaulted:
 
 WHAT IS ON THE KERNEL SIDE, AND WHY RETENTION IS
 ------------------------------------------------
-`KERNEL_PATHS` is the enumeration: the admission decider, the attestation
-chain, the taint lattice, the retention discipline, the gate crate, the census
-baseline with its `NEVER_BASELINED` list, and `formal/`. Every entry is
-asserted to exist in the tree by `tests/test_kernel_boundary_544.py`, because
-an enumeration naming a file that is not there protects nothing.
+`KERNEL_PATHS` is the kernel's view of `EVALUATOR_PATHS` below: the admission
+decider, the attestation chain, the taint lattice, the retention discipline, the
+gate crate, the census baseline with its `NEVER_BASELINED` list, and `formal/`.
+Every entry is asserted to exist in the tree by `tests/test_kernel_boundary_544.py`
+and `tests/test_evaluator_protocol.py`, because an enumeration naming a file that
+is not there protects nothing.
 
 Retention is on this side, and it is the entry a reader will argue with. A loop
 permitted to "update indexes and retention policies" as ordinary behaviour
@@ -72,16 +73,36 @@ is with no loop touching it: the retention refusal was argument-blind across a
 service seam, so a value past its deadline reached a provider's store with the
 compiler silent.
 
-ONE ENUMERATION, TWO CONSUMERS
-------------------------------
-`KERNEL_PATHS` here is the single list issue #1223 asks for. The diff-side
-consumer is `tools/evolution_controller.py`, whose own `KERNEL_PATHS` is the
-same tuple in the same order; when both land, that file imports this one rather
-than keeping a copy, which is what "enumerated in one place" has to mean if it
-is to mean anything. The capability-side consumer is `lower._check_kernel_
-boundary`, which is this module's reason for sitting under `src/revl/` rather
-than under `tools/`: the capability is enforced by the compiler, and the
-compiler cannot import from `tools/`.
+ONE ENUMERATION, THREE CONSUMERS
+--------------------------------
+`KERNEL_PATHS` here was the single list issue #1223 asks for. The diff-side
+consumer is `tools/evolution_controller.py`, which IMPORTS it rather than
+keeping a copy, which is what "enumerated in one place" has to mean if it is to
+mean anything. The capability-side consumer is `lower._check_kernel_boundary`,
+which is this module's reason for sitting under `src/revl/` rather than under
+`tools/`: the capability is enforced by the compiler, and the compiler cannot
+import from `tools/`.
+
+THE EVALUATOR, NOT ONLY THE KERNEL
+----------------------------------
+Issue #2802 measured a second list problem above the kernel. The judges of the
+evolution loop were three hand-written path lists (`AUTHORITY_FENCE`,
+`HELD_OUT_FENCE`, `KERNEL_PATHS`), and the modules that assemble the scorecard
+(`tools/evolution_reward.py`, `tools/evolution_progress.py`) were on none of
+them, so a diff could edit the scorer, or the retention rule, and be judged by
+the code it had just edited. `EVALUATOR_PATHS` is the single enumeration: the
+evaluator's code, data and protocol. Each row also names the refusals it drives,
+and `KERNEL_PATHS`, `AUTHORITY_FENCE` and `HELD_OUT_FENCE` are views of it
+rather than copies. The kernel is one view among three, which is why the list
+that used to be the whole boundary is now a projection of the boundary.
+
+`protocol_digest` is the identity half of the same argument. A scorecard could
+carry the census baseline's digest, the formal axioms' digest and the draw's
+digest, and still say nothing about which scorer, component list or retention
+rule produced it. The digest is taken from the SCORER's own checkout, so two
+rounds can show they were scored by the same protocol. It proves identity, not
+correctness: who holds the expected value and how it rotates is the custody
+question in issue #2762, and a digest is not a solution to it.
 """
 
 from __future__ import annotations
@@ -96,26 +117,151 @@ from dataclasses import dataclass
 #: already folds, and so that saying so is refusable.
 KERNEL_NAMESPACE = "kernel"
 
-#: Tree paths, matched segment-wise as PREFIXES. This is the enumeration item
-#: 544 asks for in one file. It is the subject of an existence assertion in
-#: `tests/test_kernel_boundary_544.py`.
+# --------------------------------------------------------------- the evaluator
+
+#: The evaluator: every file or tree that decides what a scorecard measures, what
+#: the held-out draw is, what counts as an admission, and what the controller
+#: refuses. It is ONE enumeration, and the three path constants the refusals use
+#: are views of it:
+#:
+#:   "kernel"    -> KERNEL_PATHS      the controller's KERNEL_INTERSECTION
+#:   "authority" -> AUTHORITY_FENCE   the controller's FENCE_TOUCHED
+#:   "held_out"  -> HELD_OUT_FENCE    the held-out scorer's `diff-reaches-fence`
+#:
+#: Each row is `(path, refusals)`. `path` is matched segment-wise as a PREFIX
+#: (`tools/evolution_controller.py::_under`), exactly as `KERNEL_PATHS` entries
+#: were. A path that drives two refusals appears ONCE: the census and its
+#: baseline are kernel paths and also decide the held-out draw's allowance, so
+#: they carry both tags.
 #:
 #: What is NOT here matters as much as what is, and the reasoning is the one
 #: `tools/heldout_scoring.py` states for `HELD_OUT_FENCE`: `src/` at large,
 #: `selfhost/`, `backends/` and the rest of `crates/` are the SUBJECT of the
-#: loop. Fencing them would forbid the work the loop exists to produce.
-KERNEL_PATHS: tuple[str, ...] = (
-    "src/revl/admission.py",
-    "src/revl/admit_profile.py",
-    "src/revl/attest.py",
-    "src/revl/taint.py",
-    "src/revl/retention.py",
-    "src/revl/kernel_boundary.py",
-    "crates/revl-gate",
-    "formal",
-    "tools/gate_reference_census.py",
-    "tools/gate_reference_census_baseline.json",
+#: loop. Fencing them would forbid the work the loop exists to produce. The
+#: evaluator is the judge, never the subject.
+_EVALUATOR: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # The admission kernel (item 544). The census tool and its baseline decide
+    # the census allowance AND the held-out bypass allowance, so they drive two
+    # refusals and are named once.
+    ("src/revl/admission.py", ("kernel",)),
+    ("src/revl/admit_profile.py", ("kernel",)),
+    ("src/revl/attest.py", ("kernel",)),
+    ("src/revl/taint.py", ("kernel",)),
+    ("src/revl/retention.py", ("kernel",)),
+    # This file DEFINES the held-out fence, so it is on that fence too: a diff
+    # that edits the enumeration must not be scored by the fence it widened.
+    # The controller still refuses it with KERNEL_INTERSECTION, not this fence.
+    ("src/revl/kernel_boundary.py", ("kernel", "held_out")),
+    ("crates/revl-gate", ("kernel",)),
+    ("formal", ("kernel",)),
+    ("tools/gate_reference_census.py", ("kernel", "held_out")),
+    ("tools/gate_reference_census_baseline.json", ("kernel", "held_out")),
+    # The held-out draw and the files that decide what counts as a divergence.
+    # The controller refuses them too: a proposal that edited the scorer has not
+    # been scored by it.
+    ("tools/heldout_scoring.py", ("held_out", "authority")),
+    ("tests/test_heldout_scoring.py", ("held_out", "authority")),
+    ("tools/build_gate_crate.py", ("held_out", "authority")),
+    ("tests/test_selfhost_lower.py", ("held_out", "authority")),
+    # The scoring protocol: the reward conjunction, the progress counters, the
+    # lifecycle that reduces stage records, and the loader that puts this
+    # enumeration in front of the tools without importing the compiler.
+    ("tools/evolution_controller.py", ("authority",)),
+    ("tests/test_evolution_controller.py", ("authority",)),
+    ("tools/evolution_reward.py", ("authority",)),
+    ("tests/test_evolution_reward.py", ("authority",)),
+    ("tools/evolution_progress.py", ("authority",)),
+    ("tests/test_evolution_progress.py", ("authority",)),
+    ("tools/evaluator_protocol.py", ("held_out", "authority")),
+    ("tests/test_evaluator_protocol.py", ("authority",)),
 )
+
+#: Every file or tree the evaluator is made of, in one enumeration.
+EVALUATOR_PATHS: tuple[str, ...] = tuple(path for path, _ in _EVALUATOR)
+
+
+def evaluator_fence(name: str) -> tuple[str, ...]:
+    """The evaluator paths one refusal is driven by, in enumeration order.
+
+    `name` is `"kernel"`, `"authority"` or `"held_out"`. There is no fourth
+    value: a name that matches nothing returns an EMPTY tuple, so a typo in a
+    caller narrows a fence to nothing rather than widening it to everything.
+    """
+    return tuple(path for path, refusals in _EVALUATOR if name in refusals)
+
+
+#: Tree paths, matched segment-wise as PREFIXES. This is the kernel view of
+#: `EVALUATOR_PATHS` (issue #1223). It is the subject of an existence assertion
+#: in `tests/test_kernel_boundary_544.py` and `tests/test_evaluator_protocol.py`.
+KERNEL_PATHS: tuple[str, ...] = evaluator_fence("kernel")
+
+
+def protocol_digest(root, paths=EVALUATOR_PATHS) -> str:
+    """`sha256:<hex>` over the evaluator's bytes in `root`, its own checkout.
+
+    The digest covers the TRACKED files under `paths`, read from the working
+    tree. Two consequences, both deliberate:
+
+    * an edit that has not been committed is visible, which is the point: the
+      question is what this process is about to run, not what it once committed;
+    * build output a run left behind (`formal/.lake`, `crates/*/target`) is NOT
+      visible, because hashing a directory would make two rounds differ because
+      one of them happened to have been built. The tracked set is what a
+      candidate can read and change, the same definition `seed_is_in_tree` uses.
+
+    A `path` that names no tracked file is a refusal, not a silent omission: an
+    enumeration missing a member is the hole this function exists to make
+    visible. An EMPTY `paths` is refused for the same reason: `git ls-files`
+    with no pathspec answers with the whole tree, which would make a typo in a
+    fence name look like a protocol instead of an empty one. `paths` is a
+    parameter so a test can hash a staged checkout; production callers take
+    `EVALUATOR_PATHS`.
+    """
+    import hashlib  # noqa: PLC0415 - the compiler must not pay for this module
+    from pathlib import Path  # noqa: PLC0415
+
+    if not paths:
+        raise ValueError(
+            "protocol_digest: an empty path list names no protocol, and "
+            "`git ls-files` with no pathspec would hash the whole tree")
+    root = Path(root)
+    files = _evaluator_files(root, paths)
+    hasher = hashlib.sha256()
+    for rel in files:
+        data = (root / rel).read_bytes()
+        hasher.update(rel.encode("utf-8", "surrogateescape") + b"\0")
+        hasher.update(str(len(data)).encode("ascii") + b"\0")
+        hasher.update(data)
+    return "sha256:" + hasher.hexdigest()
+
+
+def _evaluator_files(root, paths) -> list:
+    """The tracked files under `paths`, sorted, or a refusal.
+
+    `git ls-files` rather than a walk: it is the tracked set that both sides of
+    the digest agree on, and it excludes a build directory without a list of
+    directories to exclude. A path that resolves to no tracked file raises,
+    because a digest that silently drops a member names a protocol it did not
+    read.
+    """
+    import subprocess  # noqa: PLC0415
+
+    proc = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "-z", "--", *paths],
+        capture_output=True, timeout=120)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "protocol_digest: git ls-files failed in " + str(root) + ": "
+            + proc.stderr.decode("utf-8", "replace").strip())
+    files = sorted(p for p in proc.stdout.decode(
+        "utf-8", "surrogateescape").split("\0") if p)
+    for path in paths:
+        prefix = path.rstrip("/") + "/"
+        if not any(f == path or f.startswith(prefix) for f in files):
+            raise FileNotFoundError(
+                path + " names no tracked file under " + str(root)
+                + ", so the protocol digest would omit a member")
+    return files
 
 
 @dataclass(frozen=True)

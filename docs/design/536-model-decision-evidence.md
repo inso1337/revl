@@ -85,9 +85,10 @@ in the issue.
 
 ## 2. What the object binds
 
-One record, `kind: "revl.model-decision"`, version `1.0`, in
+One record, `kind: "revl.model-decision"`, version `3.0`, in
 `src/revl/model_evidence.py`. `BODY_MEMBERS` is the closed body; every member
-is required and every member is inside the MAC.
+is required and every member is inside the MAC. Versions `1.0` and `2.0` are
+still accepted, under their own bodies and their own MAC domains (§2.1, §2.2).
 
 | member | what it binds | why it is here |
 | ------ | ------------- | -------------- |
@@ -97,16 +98,20 @@ is required and every member is inside the MAC.
 | `component` / `step_index` | the crossing | exactly `revl.wal.model_decisions`' key (§5) |
 | `role` / `residence` | the placement | item 512, declared not observed (§3) |
 | `model_digest` | the weights that answered | the item's "model hash" |
+| `model_digest_basis` | what the digest is a claim about | issue #2750's pinned-artifact seam (§4.5) |
 | `placement_digest` | the provider's own profile digest | the item-538 seam (§4.2) |
 | `prompt_binding` | the input, as a mode and a value | the item's "prompt hash", gated (§4.1) |
+| `template_digest` / `template_absence_reason` | the template behind the prompt, or a named absence | issue #2750's "which template" (§2.1) |
 | `origins` | item 249's origin classes on the input | the item's "input taint" |
+| `reasoning` | how much of the model's reasoning span the host returned, its reported size, and a gated digest of returned text | issue #2808's opaque span (§2.2) |
 | `candidates` / `chosen` / `outcome` | what could have been said, and what was | the item's "candidate set" |
 | `sampling` | temperature, top_p, top_k, seed, max_tokens, stop_digest | the item's "sampling parameters" (§4) |
 | `policy_digest` | the policy in force | the item's "policy in force" |
 | `fallback_depth` | how far down the ladder | the item's "fallback depth" |
+| `fallback_reason` | why the ladder moved | issue #2750's "why a fallback" (§2.1) |
 | `retained` | the explicit retention decision, or nothing | the item's content rule (§4.3) |
 
-Three members are worth their own sentence.
+Four members are worth their own sentence.
 
 **`candidates` is a list of digests in the order offered, with `chosen` an
 index into it.** Not a count and not the chosen digest alone. A count cannot be
@@ -118,11 +123,109 @@ see the same menu", and only the ordered set answers it.
 Non-zero means something earlier refused or was unavailable, which item 538
 requires to be a refusal the ladder consumes rather than a silent degradation.
 A record without the depth cannot tell the two apart, and "the ladder ran" is
-exactly the fact an audit of a bad answer starts from.
+exactly the fact an audit of a bad answer starts from. `fallback_reason` is the
+other half of that fact: the depth says the ladder moved and the reason says
+whether the rung was unavailable, declined or refused (§2.1).
 
 **`origins` is sorted and duplicate-free, and that is checked.** Two records
 over the same input must compare equal byte for byte, or the object cannot be
 used for the comparison it exists for.
+
+### 2.1 Version 2.0: the fallback reason, the template, and the digest basis
+
+Version `1.0` bound the fallback DEPTH and the prompt, but not why the ladder
+moved or which template produced the prompt, and it bound `model_digest` with
+no statement of what the digest had been checked against. Issue #2750 adds
+three claims and bumps the envelope to `2.0`.
+
+`fallback_reason` is a closed vocabulary, `declined`, `refused` or
+`unavailable`, and it is present exactly when `fallback_depth` is above zero.
+The words are the KINDS the provider side already spells before its detail; the
+detail is free text and stays in the provider's log, because a member an audit
+compares across records cannot be free text. `None` at depth zero is required:
+a reason would claim a descent the depth says did not happen. The pair is
+checked as one claim, so a depth with no reason and a reason at depth zero are
+both refused.
+
+`template_digest` is the SHA-256 of the template text with its placeholders
+UNFILLED. `template_absence_reason` is the explicit other arm: `no-template`
+when the prompt was not built from a template, `unpublished` when it was but
+its identity is not available. Exactly one arm is set. Silence is refused:
+"which template produced this prompt" with no answer is the gap the member
+exists to close, so a record must name an absence as a reason rather than imply
+one. A filled prompt is what `prompt_binding` already binds, and the template
+member never carries it.
+
+`model_digest_basis` is `declared` or `loaded-bytes`, and says whether
+`model_digest` was checked against the bytes actually loaded or is only the
+provider's declaration. §4.5 is what that does and does not prove.
+
+**Why a version bump, and not additive members.** A `1.0` record verifies under
+its own body, its own closed member set and its own MAC domain
+(`SIGN_DOMAINS`). Adding the members to `1.0` would have made every 1.0 record
+that did not carry them fail, and it would have left a verifier unable to tell
+an old record from a new one whose member was forgotten. Bumping the version
+instead means each record is checked against the body it was sealed with, and
+neither version can be relabelled. A `2.0` record rewritten as `1.0` fails its
+MAC, and even a key holder who re-MACs it is refused for carrying members `1.0`
+does not define. A `1.0` record rewritten as `2.0` is missing the claims `2.0`
+requires.
+
+The limit, stated rather than implied: `seal()` only ever writes `3.0`, so a
+record this tree produces carries the reasoning member. A provider that holds
+the key can still choose to MINT a fresh `1.0` record, exactly as it can lie
+inside a well-formed `3.0` body; the shared-secret threat model in §9 is what
+bounds that, not the version check. What the version check rules out is
+presenting a sealed record as an old one to shed the members.
+
+### 2.2 Version 3.0: the reasoning span (issue #2808)
+
+A decision said what was asked and what was chosen, and nothing about whether
+the model also reasoned in a span the host did not return. That silence read
+exactly like a run that had nothing to hide. Version `3.0` adds one required
+member, `reasoning`, and bumps the envelope for the same reason `2.0` did:
+each record is checked against the body it was sealed with, so a `2.0` record
+cannot be presented as `3.0` without the member and a `3.0` record cannot shed
+it as an older one.
+
+The member has three parts:
+
+* `visibility` is `full` or `summary` when the host returned the span or a
+  summary of it, `hidden` when it reported a span without the text, and
+  `none-reported` when it reported no span at all. `summary` is the one value
+  only the host knows; revl does not infer it from the text.
+* `tokens` is `{"value": <non-negative integer or None>, "provenance":
+  "host-reported"}`. revl cannot measure the reasoning channel, so the count
+  is the host's report and the tag says so; a host that reported a span but
+  not its size gives `None`.
+* `digest` is the SHA-256 of the returned reasoning text, and ONLY that. The
+  text itself is never written. Over an input whose `origins` carry `secret`
+  or `confidential` the digest is refused, because it is the same cross-run
+  confirmation oracle that suppresses a content-addressed `prompt_binding`
+  (§4.3); the visibility and the size are still recorded. A `hidden` span has
+  no returned text to digest, so it cannot carry one, and `none-reported`
+  carries neither a size nor a digest.
+
+The member makes no claim about what the span contained. It records that an
+opaque span existed and how large the host said it was, and §9 keeps that
+limit.
+
+**Why this does not open the door item 121 closed.** The permission rule is
+the one already governing `prompt_binding`, restated in `_check_reasoning`, and
+`seal` and `verify` run the same check. The runtime's own digest gate is not
+widened: a provider that mints a record around the gate is refused by the
+verifier, exactly as for the prompt binding.
+
+**Per-entry replay status.** `revl.replay_modes` turns the member into two
+per-entry verdicts. `fromRecord` says the recorded ANSWER can be served
+without calling the model, which only a retained completion makes true.
+`rederivable` says the answer can be reproduced from the prompt; a `hidden` or
+`summary` span makes it false with the reason named, and a pre-3.0 record is
+not claimed rederivable because it does not say whether an opaque span
+existed. A hidden span does not make `fromRecord` false: a retained answer is
+still there to serve. The plan reports which crossings were opaque and how
+many. `NOT_COMPARABLE`'s `decisionCause` axis states the same limit for a
+comparison of two histories.
 
 ---
 
@@ -295,6 +398,29 @@ decision that carries the taint. `retained` is `None` by default, and:
   explicit the caller was**. Explicitness is what makes a legal retention a
   decision; it is not a waiver for the one case the issue rules out.
 
+### 4.5 Pinned-artifact verification before load
+
+A provider that loads a model artifact can check it against the digest it was
+pinned to and then compute the identity from the bytes it actually loaded. That
+check happens on the host, before the load, and revl never sees it: item 538
+gives the host the load, and the compiler must not learn what a load is.
+
+So the record binds the CLAIM, not the check. `model_digest_basis` names which
+of the two the provider is asserting:
+
+| value | the provider says |
+| ----- | ----------------- |
+| `loaded-bytes` | it checked the artifact against the pinned digest, loaded it, and computed `model_digest` over the loaded bytes |
+| `declared` | `model_digest` is only a declaration, not recomputed from anything it loaded |
+
+`loaded-bytes` is the stronger claim and `declared` is the honest floor; the
+sealer's default is `declared`, so a caller that only holds a digest does not
+claim more by silence. The verifier checks that the member is one of the two
+words and says nothing about whether the bytes were checked. This is the same
+shared-secret limit this note already states in §9: the record says the named
+signer asserted this, not that the assertion is true. A reader that needs proof
+of the load has to hold the host's own evidence for it.
+
 ---
 
 ## 5. Where it slots in
@@ -352,11 +478,14 @@ Two further readings are borrowed rather than re-derived:
 * **Domain separation.** `revl.attest`, `revl.deploy` and this module MAC
   canonical JSON with the same construction and may share key material, so
   without a per-protocol tag an attestation would verify as a decision record
-  and back. `SIGN_DOMAIN` is `b"revl.model-decision/v1\x00"`, and the tests
-  seal a body with `attest._sign` and require this verifier to refuse it. The
-  key fingerprints are domain-separated too, so one secret fingerprints
-  differently for the two protocols and a fingerprint cannot be lifted from one
-  record type onto the other.
+  and back. `SIGN_DOMAINS` gives each accepted envelope version its own tag
+  (`revl.model-decision/v1\x00`, `revl.model-decision/v2\x00`), `SIGN_DOMAIN`
+  is the current one, and `_sign` selects from that closed map by the record's
+  version. A relabelled record therefore cannot be MAC-verified under the other
+  version's tag, and the tests seal a body with `attest._sign` and require this
+  verifier to refuse it. The key fingerprints are domain-separated too, so one
+  secret fingerprints differently for the two protocols and a fingerprint
+  cannot be lifted from one record type onto the other.
 * **The algorithm is validated, not recorded.** `sign_alg` is checked against
   this build's constant rather than read off the record. That is item 428 F1's
   finding on `revl attest`: a record claiming `ed25519` that verified as HMAC
@@ -389,10 +518,11 @@ and a verifier laxer than its sealer is the other half of the same split.
 
 ## 7. Non-vacuity
 
-197 tests pass in `tests/test_model_evidence_517.py`, 1 skips with a reason
-(the item-512 cross-module agreement, which has nothing to compare against
-until that PR lands). A passing test is not evidence until it has been seen to
-fail, so three defects were injected into a clean tree and the suite re-run:
+262 tests pass in `tests/test_model_evidence_517.py`, none skip. A passing test
+is not evidence until it has been seen to fail, so three defects were injected
+into a clean tree and the suite re-run. The numbers below were measured when
+this note landed; the generated per-member sets have grown with the body since,
+and the `1.0` tamper set is generated over `BODY_MEMBERS_V1` separately.
 
 | injected defect | tests red |
 | --------------- | --------- |
@@ -446,6 +576,20 @@ it.
 538), whether a placement was admissible (item 512), and an asymmetric
 signature. The envelope carries `sign_alg` so an Ed25519 upgrade is additive,
 and today the only accepted value is `hmac-sha256` and it is checked.
+
+**Post-2.0 addendum (issue #2750).** Envelope `2.0` adds the fallback reason,
+the template identity and the model-digest basis (§2.1, §4.5) as required
+members, and `verify` still accepts `1.0` records under their own body and MAC
+domain. No compiler, IR, emitter or CLI surface changes; `reconstruct` reports
+the new members, as `None` for a `1.0` record, alongside the envelope version.
+
+**Post-3.0 addendum (issue #2808).** Envelope `3.0` adds the required
+`reasoning` member (§2.2), and `verify` still accepts `1.0` and `2.0` records
+under their own bodies and MAC domains. No compiler, IR or emitter change: the
+provider declares the member, as it already declares the rest of the body.
+`revl.replay_modes` reports the two per-entry replay verdicts and which
+crossings carried an opaque span, and `revl.branch.NOT_COMPARABLE` states the
+same limit for a comparison of two histories.
 
 ---
 
