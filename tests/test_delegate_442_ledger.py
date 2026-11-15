@@ -70,9 +70,9 @@ def _grant(session: Session, *, capability: str = _CAP, uses: int = 3,
         "revoked": False,
         "lease": True,
         "declaredCeilings": {},
-        # The delegation record, written by the first delegated use. A real mint
-        # starts these None; the row a delegated use finds carries the lender's
-        # scope hash taken when the handle was acquired.
+        # The delegation record. `subject` and `chain` are written by the first
+        # delegated use; `lender` and `lenderGeneration` are set when the handle
+        # is acquired. Tests that exercise generation liveness set the last two.
         "subject": None,
         "chain": [],
         "lender": None,
@@ -218,3 +218,79 @@ def test_an_explicitly_revoked_grant_cannot_be_used():
     with pytest.raises(SessionError, match="revoked"):
         session._delegate_use(grant["requestId"], "B", "fs.write")
     assert grant["remainingUses"] == 3
+
+
+# ---------------------------------------------------------------------------
+# delegate_begin: the lease is the authority for its own delegated use
+# ---------------------------------------------------------------------------
+
+def _registered(session: Session, grant: dict, *, key: str = "fs",
+                lender: str = "A") -> None:
+    session._lease_providers[grant["requestId"]] = (key, object(), "Fs", lender)
+    grant["lender"] = lender
+
+
+def test_a_metered_delegated_use_returns_a_spend_for_the_emission_pairing():
+    session = _session()          # no approval policy: the lease meters the use
+    grant = _grant(session, uses=3)
+    _registered(session, grant)
+
+    spends = session.delegate_begin(grant["requestId"], "B", "fs", "write",
+                                    [], "A")
+
+    assert [s["requestId"] for s in spends] == [grant["requestId"]]
+    assert spends[0]["capability"] == grant["capability"]
+    assert spends[0]["use"] == 1
+    assert grant["remainingUses"] == 2 and grant["subject"] == "B"
+
+
+def test_a_handle_naming_another_wiring_key_is_refused_without_spending():
+    session = _session()
+    grant = _grant(session, uses=3)
+    _registered(session, grant, key="fs")
+
+    # refused by the surface check (`other.write` is not `fs.write`) before the
+    # registration is even consulted; either way nothing is spent
+    with pytest.raises(SessionError, match="covers|does not match"):
+        session.delegate_begin(grant["requestId"], "B", "other", "write",
+                               [], "A")
+    assert grant["remainingUses"] == 3 and grant["subject"] is None
+
+
+def test_a_second_lessor_cannot_use_the_first_lessors_registration():
+    session = _session()
+    grant = _grant(session, uses=3)
+    _registered(session, grant, lender="A")
+
+    # a second lender is refused by the one-lender rule on the grant itself
+    with pytest.raises(SessionError, match="already delegated by `A`"):
+        session.delegate_begin(grant["requestId"], "B", "fs", "write",
+                               [], "C")
+    assert grant["remainingUses"] == 3
+
+
+def test_the_lease_grant_is_preferred_over_an_earlier_operator_grant():
+    session = _session()
+    lease = _grant(session, uses=3)
+    operator = dict(lease, requestId="grant:op", lease=False, remainingUses=50,
+                    subject=None, chain=[])
+    session._grants.insert(0, operator)
+    ticket = {"component": lease["component"],
+              "candidateHash": lease["candidateHash"]}
+    now = session._now_ms()
+
+    assert session._live_grant_for(_CAP, ticket, now) is operator
+    assert session._live_grant_for(
+        _CAP, ticket, now, prefer=lease["requestId"]) is lease
+
+
+def test_a_registration_that_names_another_key_is_refused_without_spending():
+    session = _session()
+    grant = _grant(session, uses=3)
+    # the registry says this grant's provider sits behind `net`, while the
+    # handle presents `fs` (the grant's own surface): the registration decides
+    _registered(session, grant, key="net")
+
+    with pytest.raises(SessionError, match="does not match what lease"):
+        session.delegate_begin(grant["requestId"], "B", "fs", "write", [], "A")
+    assert grant["remainingUses"] == 3 and grant["subject"] is None

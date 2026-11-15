@@ -7339,7 +7339,8 @@ class Session:
 
     def _approval_decide_call(self, key: str, method: str, args,
                               record: dict | None = None,
-                              spends: list | None = None) -> None:
+                              spends: list | None = None,
+                              prefer_grant: str | None = None) -> None:
         """The per-call decision (Decision 2). Off -> return immediately (byte-
         identical). class none/(a)/(b) -> proceed and count. class (c) -> consume
         a standing approval and proceed, else mint a ticket, count the prompt, and
@@ -7407,7 +7408,7 @@ class Session:
         # semantic identity covers ANY class-(c) call reaching it (differing
         # args included), so the shell-escape shape auto-approves against one
         # mint instead of prompting per call.
-        grants = self._find_standing_grant(ticket)
+        grants = self._find_standing_grant(ticket, prefer=prefer_grant)
         if grants is not None:
             for g in grants:                   # every class-(c) cap is covered
                 use = self._consume_grant(g)   # durable spend before the fire
@@ -7755,8 +7756,14 @@ class Session:
         if g is None:
             return None
         if key is not None and provider is not None:
-            self._lease_providers[g["requestId"]] = (
-                key, provider, self._require_service(component, key))
+            # First acquirer wins, as the lender and generation do: a second
+            # lease over the same crossing shares this grant (a documented
+            # limit), and it must not repoint the first lender's handle at the
+            # second one's provider. The lender and key are kept so a delegated
+            # crossing can check the handle against what was registered.
+            self._lease_providers.setdefault(g["requestId"], (
+                key, provider, self._require_service(component, key),
+                component))
             g.setdefault("lender", component)
             g.setdefault("lenderGeneration", self._scope_hash(component))
         return g["requestId"]
@@ -7787,7 +7794,7 @@ class Session:
         bound = self._lease_providers.get(request_id)
         if bound is None:
             return None
-        key, provider, service = bound
+        key, provider, service, lender = bound
         return provider, service
 
     def delegate_begin(self, request_id: str, subject: str, key: str,
@@ -7796,35 +7803,45 @@ class Session:
         spends for the emission pairing. The provider fires AFTER this returns.
 
         The delegated grant is validated first (its checks do not spend), then
-        the ORDINARY class-(c) decision for the provider operation runs: that is
-        what spends the lease's grant for `key.method` and also demands coverage
-        for every OTHER class-(c) capability the provider method reaches. A
-        provider method that reaches a second irreversible capability therefore
-        prompts for it instead of firing it under the lease's consent.
+        the ORDINARY class-(c) decision for the provider operation runs with the
+        lease grant PREFERRED: that is what spends the lease's grant for
+        `key.method` and also demands coverage for every OTHER class-(c)
+        capability the provider method reaches, so a provider method that reaches
+        a second irreversible capability prompts for it instead of firing it
+        under the lease's consent. Preferring the lease means an operator grant
+        that sits earlier in the ledger is not spent in its place; a single-use
+        approval the operator gave for this exact crossing still answers it, and
+        is then the authority for it (the lease is not spent and the use is not
+        attributed to the delegation).
 
-        The use is attributed to `subject` only when this delegation's grant was
-        the authority the decision actually spent. If the decision was answered
-        by some other grant, the delegation is not the authority for this
-        crossing and the call fails closed."""
-        from .approval import ApprovalRequired  # noqa: F401, PLC0415
+        The handle must match what the lease registered (its wiring key and its
+        lender), so a second lease sharing the grant cannot be used to fire the
+        first lender's provider."""
         grant = self._delegation_grant(request_id, f"{key}.{method}")
         self._delegation_subject(grant, subject, lender)
+        bound = self._lease_providers.get(request_id)
+        if bound is None or bound[0] != key or (
+                lender is not None and bound[3] != lender):
+            raise SessionError(
+                f"the delegated reference does not match what lease "
+                f"`{request_id}` registered (wiring key `{key}`, lender "
+                f"`{lender}`), so it cannot be used to cross — one grant is "
+                f"lent by the party that registered it (item 442, issue #2693)")
         spends: list = []
         self._approval_decide_call(key, method, list(args or []),
-                                   spends=spends)
+                                   spends=spends, prefer_grant=request_id)
+        self._loop_axes.record_call(self._loop_call_class(key, method))
         if not spends:
-            # no approval policy bound: the lease still meters this crossing.
-            self._delegate_use(request_id, subject, f"{key}.{method}",
-                               lender=lender)
-            return []
-        if grant["requestId"] not in {s["requestId"] for s in spends}:
-            raise SessionError(
-                f"the delegated crossing `{key}.{method}` was authorized by "
-                f"another standing grant, not by the delegation "
-                f"`{request_id}` that was handed over — the delegated reference "
-                f"is the authority for its own use and nothing else "
-                f"(item 442, issue #2693)")
-        self._delegate_attribute(grant, subject, lender)
+            # a class none/(a)/(b) operation, or no approval policy bound: the
+            # lease still meters this crossing, and its spend is paired with an
+            # emission record like any other.
+            use = self._delegate_use(request_id, subject, f"{key}.{method}",
+                                     lender=lender)
+            return [{"requestId": grant["requestId"], "use": use,
+                     "capability": grant["capability"],
+                     "component": grant["component"]}]
+        if grant["requestId"] in {s["requestId"] for s in spends}:
+            self._delegate_attribute(grant, subject, lender)
         return spends
 
     def delegate_fired(self, spends: list) -> None:
@@ -9443,7 +9460,8 @@ class Session:
             f"{refusal}")
 
     def _live_grant_for(self, capability: str, ticket: dict, now: int,
-                        refusals_out: list | None = None):
+                        refusals_out: list | None = None,
+                        prefer: str | None = None):
         """The first LIVE standing grant covering `capability` under this ticket's
         live closure: `_grant_covers` on the minted key, the same component and
         reach-closure candidate hash (invariants 4/5), the same session, unexpired
@@ -9462,8 +9480,17 @@ class Session:
         the clauses are conjunctive, so the result is unchanged, but a refusal
         collected for a grant that is expired, spent, or minted for another
         deputy would name a declaration that is not standing any more, which is
-        a worse sentence than none."""
-        for g in self._grants:
+        a worse sentence than none.
+
+        `prefer` (item 442, issue #2693) names the grant a DELEGATED crossing is
+        made under: it is tried first, so an operator grant that happens to sit
+        earlier in the ledger cannot answer, and be spent, in place of the lease
+        the delegation was handed over under. Nothing else changes: a preferred
+        grant that is not live or does not cover is skipped like any other."""
+        ordered = self._grants if prefer is None else (
+            [g for g in self._grants if g.get("requestId") == prefer]
+            + [g for g in self._grants if g.get("requestId") != prefer])
+        for g in ordered:
             if g["consumed"]:
                 continue
             if g["component"] != ticket["component"]:
@@ -9487,7 +9514,7 @@ class Session:
             return g
         return None
 
-    def _find_standing_grant(self, ticket: dict):
+    def _find_standing_grant(self, ticket: dict, prefer: str | None = None):
         """Every LIVE standing grant needed to JOINTLY cover this class-(c)
         ticket, or None when even one class-(c) capability the ticket reaches has
         no live covering grant (fail-closed: the crossing then prompts single-use
@@ -9548,7 +9575,8 @@ class Session:
         missing = False
         for cap in class_c:
             refused: list = []
-            g = self._live_grant_for(cap, ticket, now, refusals_out=refused)
+            g = self._live_grant_for(cap, ticket, now, refusals_out=refused,
+                                     prefer=prefer)
             if g is None:
                 # a class-(c) capability with no live grant -> prompt. Keep
                 # walking the rest: the operator is about to be asked about the

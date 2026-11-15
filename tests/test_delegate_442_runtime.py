@@ -252,3 +252,59 @@ def test_a_provider_methods_second_class_c_capability_is_not_fired(sink):
     assert _lines(sink) == [], "neither crossing fired before the decision"
     row = _lease_row(session)
     assert row["remainingUses"] == 3, "an uncovered reach spends nothing"
+
+
+# ---------------------------------------------------------------------------
+# A swap of the lender retires the delegation. The old generation's lease
+# teardown revokes its grant, so the row an operator reads says so and no
+# delegated use can go through it again. (Today the successor cannot re-acquire
+# the lease because a swap raises no lease ticket, so the swap is rejected and
+# the lender stays down; that is the shipped 294 behaviour for any lease-holding
+# component, and it is the fail-closed direction. What this pins is the
+# delegation's half: the row is retired and nothing spends it.)
+# ---------------------------------------------------------------------------
+
+@needs_cordis
+def test_swapping_the_lender_retires_the_delegation_row(sink):
+    session = _session()
+    _boot(session)
+    session.call("job", "go", [sink])
+    first = _lease_row(session)
+    assert first["revoked"] is False and first["remainingUses"] == 2
+
+    swapped = _SOURCE.replace(
+        "provide job { fn go(sink) { emit worker.run(sink, l) } }",
+        "provide job { fn go(sink) { emit worker.run(sink, l)  "
+        "emit worker.run(sink, l) } }")
+    new_ir = compile_source(swapped, "delegation_swapped.rvl")
+    with pytest.raises(Exception, match="swap rejected"):
+        session.swap(copy.deepcopy(new_ir), agent_authored=False)
+
+    row = _lease_row(session)
+    assert row["lender"] == "A" and row["subject"] == "W"
+    assert row["revoked"] is True, "the lender's teardown revoked the grant"
+    assert row["consumed"] is True, "and it covers nothing afterwards"
+    assert row["remainingUses"] == 2, "nothing was spent by the swap"
+    assert _lines(sink) == ["w:delegated"], "no delegated write fired after it"
+
+
+@needs_cordis
+def test_approving_the_offered_ticket_lets_the_delegated_call_through(sink):
+    from revl.mcp.approval import ApprovalRequired  # noqa: PLC0415
+
+    session = _session()
+    ir = compile_source(_SOURCE_SECOND_CLASS_C, "deleg_second_c.rvl")
+    try:
+        session.load(copy.deepcopy(ir), record=True)
+    except ApprovalRequired as exc:
+        session.mint_standing_grant(ticket_hash=exc.ticket["hash"])
+        session.load(copy.deepcopy(ir), record=True)
+    session.mint_standing_grant(capability="worker", uses=10)
+
+    with pytest.raises(ApprovalRequired) as asked:
+        session.call("job", "go", [sink])
+    # The remedy the prompt offers works: the operator's single-use approval for
+    # this exact crossing answers the retry (it is not burned and refused).
+    session.approve_ticket(asked.value.ticket["hash"])
+    session.call("job", "go", [sink])
+    assert _lines(sink) == ["w:delegated"]
