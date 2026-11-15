@@ -16057,6 +16057,12 @@ fn mth_type_verdict(body: &[Stmt], i: i64, env: Vec<Bind>, cx: Ctx__m2, ret: Str
     if (rq != "") {
         return mk_verd(rq, ln.clone());
     }
+    if (((((s.bind != "") && (s.bindTy != "")) && (!ct_crossing(s.clone()))) && (!is_bad(s.e.clone()))) && (tk_solid(s.bindTy.clone(), &env) != "")) {
+        let lc = tk_check(s.e.clone(), s.bindTy.clone(), env.clone(), &((((String::from("`let ").revl_concat(&s.bind)).revl_concat(": ")).revl_concat(&tk_render(s.bindTy.clone()))).revl_concat("`")));
+        if (lc.v != "") {
+            return mk_verd(lc.v.clone(), ln.clone());
+        }
+    }
     let mut next = env.clone();
     if (s.bind != "") {
         let mut bound = tk_solid(s.bindTy.clone(), &env);
