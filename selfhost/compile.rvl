@@ -281,8 +281,7 @@ extern pure fn module_path(base: Str, target: Str) -> Str = @py {
         if os.path.exists(cand):
             return os.path.abspath(cand)
     return ""
-}
-  = @ts {
+} = @ts {
     // The py arm also searches the toolchain's own `stdlib/` parent; a ts host has
     // no install tree to name, so this arm resolves against the document's
     // directory and `REVL_IMPORT_PATH` only.
@@ -299,8 +298,7 @@ extern pure fn module_path(base: Str, target: Str) -> Str = @py {
       if (nodeFs.existsSync(cand)) return cand;
     }
     return "";
-  }
-  = @rs {
+  } = @rs {
     fn lexical_abs(p: &std::path::Path) -> std::path::PathBuf {
         let joined = if p.is_absolute() {
             p.to_path_buf()
@@ -351,13 +349,11 @@ extern pure fn read_module_text(path: Str) -> Str = @py {
         return ""
     with open(path, "r", encoding="utf-8") as fh:
         return fh.read()
-}
-  = @ts {
+} = @ts {
     if (path === "") return "";
     const nodeFs = (process as any).getBuiltinModule("node:fs");
     return nodeFs.readFileSync(path, "utf8").replace(/\r\n?/g, "\n");
-  }
-  = @rs {
+  } = @rs {
     if path.is_empty() {
         return String::new();
     }
@@ -437,8 +433,7 @@ extern pure fn ref_probe(base: Str, refpath: Str) -> Str = @py {
     with open(real, "rb") as fh:
         digest = hashlib.sha256(fh.read()).hexdigest()
     return digest + "|" + kind + "|" + rel.replace(os.sep, "/")
-}
-  = @ts {
+} = @ts {
     const nodeFs = (process as any).getBuiltinModule("node:fs");
     const nodePath = (process as any).getBuiltinModule("node:path");
     const nodeCrypto = (process as any).getBuiltinModule("node:crypto");
@@ -471,8 +466,7 @@ extern pure fn ref_probe(base: Str, refpath: Str) -> Str = @py {
     if (nodePath.isAbsolute(rel)) return "";
     const digest = nodeCrypto.createHash("sha256").update(nodeFs.readFileSync(real)).digest("hex");
     return digest + "|" + kind + "|" + rel.split(nodePath.sep).join("/");
-  }
-  = @rs {
+  } = @rs {
     fn lexical_abs(p: &std::path::Path) -> std::path::PathBuf {
         let joined = if p.is_absolute() {
             p.to_path_buf()
