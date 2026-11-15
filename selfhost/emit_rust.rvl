@@ -203,6 +203,23 @@ extern pure fn string_lit(v: Any) -> Str =
     out.push_str("\"");
     out
   }
+  = @ts {
+    const unprintable = /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Zs}]/u;
+    const s = typeof v === "string" ? v : "";
+    let out = "\"";
+    for (const ch of s) {
+      const cp = ch.codePointAt(0) as number;
+      if (cp === 0x22) out += "\\\"";
+      else if (cp === 0x5c) out += "\\\\";
+      else if (cp === 0x0a) out += "\\n";
+      else if (cp === 0x0d) out += "\\r";
+      else if (cp === 0x09) out += "\\t";
+      else if (cp >= 0x20 && cp <= 0x7e) out += ch;
+      else if (cp >= 0x80 && !unprintable.test(ch)) out += ch;
+      else out += "\\u{" + cp.toString(16) + "}";
+    }
+    return out + "\"";
+  }
 // The literal-body host numeral: `_rust_v3_lit` renders an int as `f"{value}i64"`
 // and a float as `f"{value}f64"`, both `str(value)`. Sourced here so the numeral
 // text is exactly Python's.
@@ -285,12 +302,41 @@ extern pure fn num_str(v: Any) -> Str =
         Err(_) => String::new(),
     }
   }
+  = @ts {
+    const pyFloat = (f: number): string => {
+      if (Number.isNaN(f)) return "nan";
+      if (!Number.isFinite(f)) return f < 0 ? "-inf" : "inf";
+      const [mant, exp] = Math.abs(f).toExponential().split("e");
+      const digits = mant.replace(".", "");
+      const decpt = parseInt(exp, 10) + 1;
+      let body: string;
+      if (decpt <= -4 || decpt > 16) {
+        const x = decpt - 1;
+        body = digits[0] + (digits.length > 1 ? "." + digits.slice(1) : "") + "e" + (x < 0 ? "-" : "+") + String(Math.abs(x)).padStart(2, "0");
+      } else if (decpt <= 0) {
+        body = "0." + "0".repeat(-decpt) + digits;
+      } else if (decpt >= digits.length) {
+        body = digits + "0".repeat(decpt - digits.length) + ".0";
+      } else {
+        body = digits.slice(0, decpt) + "." + digits.slice(decpt);
+      }
+      return f < 0 || Object.is(f, -0) ? "-" + body : body;
+    };
+    if (typeof v === "bigint") return v.toString();
+    if (typeof v === "number") return pyFloat(v);
+    if (typeof v === "boolean") return v ? "True" : "False";
+    if (v === null || v === undefined) return "None";
+    return String(v);
+  }
 // A real newline — the line SEPARATOR (`"\n".join(out)` in the reference).
 // The `@rs` body is the native-tier port (item 391 / #106): a single U+000A,
 // so the self-host rust emitter can join its lines when compiled to rust.
 extern pure fn newline() -> Str
   = @py { return chr(10) }
   = @rs { String::from("\n") }
+  = @ts {
+    return "\n";
+  }
 // `_mangle` verbatim: mirror BOTH `_RUST_RESERVED` and `_EMITTER_RESERVED`
 // so user identifiers cannot collide with keywords or generated scaffolding.
 // INJECTIVE: escape a name iff the name
@@ -345,6 +391,25 @@ extern pure fn mangle(name: Str) -> Str
         root = &root[..root.len() - 1];
     }
     name
+  }
+  = @ts {
+    const reserved = [
+      "as", "break", "const", "continue", "crate", "else", "enum",
+      "extern", "false", "fn", "for", "if", "impl", "in", "let",
+      "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
+      "self", "Self", "static", "struct", "super", "trait", "true",
+      "type", "unsafe", "use", "where", "while", "async", "await",
+      "dyn", "abstract", "become", "box", "do", "final", "macro",
+      "override", "priv", "typeof", "unsized", "virtual", "try",
+      "yield", "gen", "ctx", "config", "root", "plugin",
+    ];
+    let root = name;
+    while (root !== "") {
+      if (reserved.includes(root)) return name + "_";
+      if (!root.endsWith("_")) break;
+      root = root.slice(0, -1);
+    }
+    return name;
   }
 // `_in_revl_namespace` + `_REVL_NAMESPACE_RE` (`^(?:revl[A-Z_]|REVL_|_revl|_REVL)`):
 // the emitted module declares `revl_concat`, `REVL_JOURNAL_DEPTH`, ..., so a
@@ -414,6 +479,17 @@ extern pure fn snake(name: Str) -> Str
     }
     out
   }
+  = @ts {
+    let out = "";
+    const chars = Array.from(name);
+    for (let i = 0; i < chars.length; i++) {
+      const ch = chars[i];
+      const prev = i > 0 ? chars[i - 1] : "";
+      if (i > 0 && /^\p{Lu}$/u.test(ch) && (/^\p{Ll}$/u.test(prev) || /^[0-9]$/.test(prev))) out += "_";
+      out += ch.toLowerCase();
+    }
+    return out;
+  }
 // `_camel` verbatim: a provision key -> its PascalCase struct suffix
 // (`greeting` -> `Greeting`), splitting on `_` and capitalising each part.
 // The `@rs` body is the native-tier port (item 391 / #106): split on `_`,
@@ -440,6 +516,13 @@ extern pure fn camel(name: Str) -> Str
         }
     }
     out
+  }
+  = @ts {
+    return name.split("_").map((part) => {
+      if (part === "") return "";
+      const first = String.fromCodePoint(part.codePointAt(0) as number);
+      return first.toUpperCase() + part.slice(first.length).toLowerCase();
+    }).join("");
   }
 
 // `_mname`: the method renames this tier carries. `drop` collides with Rust's

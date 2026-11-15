@@ -245,10 +245,11 @@ unmeasured, each for a distinct, real reason:
 | parser   | 3.74           | unmeasured  | unmeasured      | `cargo build` fails: `E0072` recursive ADT needs `Box`, plus residual `E0382` move shapes (let-RHS / `Vec` `into_iter` twice) and `E0308`/`E0609`/`E0282` (item 278) |
 | checker  | 1.41           | unmeasured  | unmeasured      | same `E0072`/`E0382` build gaps as parser (item 278) |
 | lower    | 2.57           | unmeasured  | unmeasured      | same `E0072`/`E0382` build gaps as parser (item 278) |
-| emit_py  | 4.93           | unmeasured  | unmeasured      | `extern py_repr has no @rs body`: the stage depends on a CPython-only extern (`repr`), fundamentally not portable to a native tier |
+| emit_py  | 4.93           | unmeasured  | unmeasured      | not re-measured since its host externs (`py_repr`, `mangle_with`, ...) gained `@rs` bodies (#3143); it was refused with `extern py_repr has no @rs body` |
 
-The parser/checker/lower build gaps are item 278; the emit_py gap is an
-intentionally py-only extern in `selfhost/emit_py.rvl`. The harness is verified
+The parser/checker/lower build gaps are item 278; the emit_py refusal (a
+py-only extern in `selfhost/emit_py.rvl`) is gone since #3143, and the stage has
+not been measured since. The harness is verified
 end to end: the lexer runs the full emit → assemble → `cargo build --release` →
 run → median path on this box (one-time build ~7s, reported as a note).
 
