@@ -39,6 +39,16 @@ from .inverse import inverse_class, inverse_rank
 from .resources import retention_surface
 
 
+def extern_backends(ext: dict) -> list[str]:
+    """The sorted backend tiers an extern can run on: its inline bodies plus its
+    ref tier (item 396). A ref-only extern has no `bodies` key but DOES cross on
+    its ref tier, so both are unioned in. The one place this is derived, shared
+    by `audit_report` and the `revl audit --json` entry so `--diff` compares like
+    with like.
+    """
+    return sorted(set(ext.get("bodies") or {}) | set(ext.get("refs") or {}))
+
+
 def audit_report(ir: dict, spec_results: dict | None = None) -> dict:
     """Build the same dict `revl audit --json` emits, from a compiled ir.
 
@@ -60,7 +70,7 @@ def audit_report(ir: dict, spec_results: dict | None = None) -> dict:
          # an extern with no provenance fact reads `unknown`. Must match
          # `__main__`'s entry key-for-key.
          "inverse": inverse_class(ext),
-         "backends": sorted((ext.get("bodies") or {}).keys()),
+         "backends": extern_backends(ext),
          # item 373: carry the reach so the drift gate can read it. Absent unless
          # declared — a bare emission's audit entry is byte-identical to today's.
          **({"reach": ext["reach"]} if ext.get("reach") else {}),
