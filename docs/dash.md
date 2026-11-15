@@ -1,6 +1,6 @@
 # `revl dash`: the supervisor's cockpit
 
-*A read-only live view over a running session or a recorded run — the
+*A read-only live view over a running session or a recorded run: the
 dependency graph as it actually is, the causal trace streaming, and the pending
 human decisions with their evidence attached.*
 
@@ -15,7 +15,7 @@ The system grew a row of human-in-the-loop gates. Item 21 (`audit --diff`) asks
 a human to **acknowledge** a boundary widening before a regenerated component is
 admitted. Item 33 (`policy`) refuses admission on a boundary-policy violation
 and waits for a human to **rule** on it. Items 55, 61 and 62 add operator
-actions, leases and interrupts — each one ends a sentence with *"and here a
+actions, leases and interrupts. Each one ends a sentence with *"and here a
 human decides."*
 
 But the human was handed a CLI and a wall of JSON. To see the graph they were
@@ -26,11 +26,11 @@ picture in their head.
 `revl dash` **is** the surface those features assume. One frame, three panes,
 read-only:
 
-1. the **dependency graph** as it actually is — components, the realms they are
+1. the **dependency graph** as it actually is: components, the realms they are
    isolated into, and the service seams between them;
-2. the **causal trace** streaming — every lifecycle transition with the cause
+2. the **causal trace** streaming, with every lifecycle transition and its cause
    behind it (item 27), and optionally the recorded effect timeline;
-3. the **pending-decisions queue** — the boundary widenings awaiting an ack
+3. the **pending-decisions queue**, with boundary widenings awaiting an ack
    (item 21) and the policy exceptions awaiting a call (item 33), each rendered
    *with its evidence inline*.
 
@@ -49,7 +49,7 @@ surfaces that already exist and are only ever read:
 | boundary-widening queue | `audit_diff.diff_crossings` / `evaluate` (item 21) |
 | policy-exception queue | `policy.evaluate` and each violation's why-trace (item 33) |
 
-`build_model` treats every input dict as immutable — it deep-copies the IR
+`build_model` treats every input dict as immutable. It deep-copies the IR
 before handing it to `Composition`, and writes back to none of its arguments.
 The tests pin this two ways: nothing the model is handed is changed
 (`test_build_model_mutates_no_input`), and a session stand-in that raises on any
@@ -57,7 +57,7 @@ attribute other than `ir` and `live_state()` is driven through a full snapshot
 without tripping (`test_dashboard_from_session_is_read_only`).
 
 Because the model is a cheap pure read, `--watch` is just a rebuild-and-reprint
-loop on an interval — a refresh is a re-read, never a re-run.
+loop on an interval. A refresh is a re-read, never a re-run.
 
 ## 3. Two ways to feed it
 
@@ -87,12 +87,12 @@ footnote to it. A supervisor should never have to leave the dash to see *why* a
 choice is being asked of them.
 
 * A **boundary widening** (item 21) is one row per added G8 crossing, decoded
-  from its ack token to the component and the emission or host reach it names —
+  from its ack token to the component and the emission or host reach it names:
   the dossier diff the ack is a decision over. `--accept <token>` /
   `--accept-all` mark rows already acknowledged, so the queue separates *pending*
   from *decided*.
 * A **policy exception** (item 33) is one row per violation, carrying the
-  violation's own why-trace — the offending chain that names which component
+  violation's own why-trace, the offending chain that names which component
   reaches what it may not, and how. `--policy FILE` supplies the policy;
   `--mcp-scope` marks components admitted through the MCP session for the
   policy's `mcp` sandbox.

@@ -707,52 +707,62 @@ IEEE defines ±infinity and `NaN` as *values*. See the Float section above.
   landed; `Int` is 64-bit on all six tiers (`backends/wasm/emit.py` lowers `Int`
   to `i64`). python and TypeScript are arbitrary-precision hosts and impose the
   bound; rust, java, go and wasm carry it natively.
-- ~~**A total, value-returning form.**~~ **Closed.** The `checked_div_*`
+- ~~**A total, value-returning form.**~~ **Closed.** The `checked_*`
   forms below return `Result[Int, Str]`, so a program handles a zero divisor
-  without faulting. `fail` could not serve here: it is a component construct
-  (A8) and is refused in a pure `fn`, so making division "fail" would have
-  meant either extending `fail` into the pure stratum (which costs totality,
-  the property `verified` rests on) or a `Result` form. The second is what
-  was built.
+  and an overflow without faulting. `fail` could not serve here: it is a
+  component construct (A8) and is refused in a pure `fn`, so making it "fail"
+  would have meant either extending `fail` into the pure stratum (which costs
+  totality, the property `verified` rests on) or a `Result` form. The second
+  is what was built.
 
-## The total division forms
+## The total arithmetic forms
 
-Each faulting operation has a value-returning counterpart, named by prefixing
-`checked_`:
+Each faulting binary operation has a value-returning counterpart, named by
+prefixing `checked_`:
 
-| operation | returns | rounding |
-|---|---|---|
-| `a.checked_div_trunc(b)` | `Result[Int, Str]` | toward zero (as `div_trunc`) |
-| `a.checked_div_floor(b)` | `Result[Int, Str]` | toward −∞ (as `div_floor`) |
-| `a.checked_div_euclid(b)` | `Result[Int, Str]` | Euclidean (as `div_euclid`) |
-| `a.checked_mod(b)` | `Result[Int, Str]` | Euclidean remainder (as `mod`) |
+| operation | returns | `Ok` value | fault replaced by `Err` |
+|---|---|---|---|
+| `a.checked_add(b)` | `Result[Int, Str]` | `a + b`, in range | `"revl: Int overflow"` |
+| `a.checked_sub(b)` | `Result[Int, Str]` | `a - b`, in range | `"revl: Int overflow"` |
+| `a.checked_mul(b)` | `Result[Int, Str]` | `a * b`, in range | `"revl: Int overflow"` |
+| `a.checked_div_trunc(b)` | `Result[Int, Str]` | toward zero (as `div_trunc`) | `"revl: division by zero"`, or `"revl: Int overflow"` at `Int.MIN / -1` |
+| `a.checked_div_floor(b)` | `Result[Int, Str]` | toward −∞ (as `div_floor`) | `"revl: division by zero"`, or `"revl: Int overflow"` at `Int.MIN / -1` |
+| `a.checked_div_euclid(b)` | `Result[Int, Str]` | Euclidean (as `div_euclid`) | `"revl: division by zero"`, or `"revl: Int overflow"` at `Int.MIN / -1` |
+| `a.checked_mod(b)` | `Result[Int, Str]` | Euclidean remainder (as `mod`) | `"revl: division by zero"` |
 
-`Ok(quotient)` carries exactly the quotient the faulting operation computes:
-the rounding convention is not a second choice to make. A zero divisor yields
-`Err("revl: division by zero")` instead of the fault:
+`Ok(value)` carries exactly the value the faulting operation computes where
+that value is representable (for the division forms, the quotient: the
+rounding convention is not a second choice to make); the error text is the one
+the faulting operation raises, so a caller can match the reason as data. A zero
+divisor yields `Err("revl: division by zero")` instead of the fault:
 
 ```revl
-fn ratio(a: Int, b: Int) -> Int {
-  return match a.checked_div_trunc(b) { Ok(v) => v, Err(e) => 0 }
+fn sum(a: Int, b: Int) -> Int {
+  return match a.checked_add(b) { Ok(v) => v, Err(e) => 0 }
 }
 ```
 
-Two consequences worth stating:
+Three consequences worth stating:
 
+- **The default operators are unchanged.** `+`, `-` and `*` still trap at the
+  64-bit edge (`INT_OVERFLOW` in `tests/test_cross_tier_execution.py`). The
+  total forms add a way to handle an overflow, never a way to turn checking
+  off.
 - **A literal zero divisor is accepted here** and refused for the faulting
   operations (`arith_zero_divisor.rvl`). The refusal exists because `x.mod(0)`
   is never a program anyone meant to write; passing zero to the *checked*
   form is precisely the program it is for.
-- **A zero divisor is not the only input with no answer.** `Int.MIN / -1` is
-  2^63, one past `Int.MAX`, and the three quotient forms answer it
-  `Err("revl: Int overflow")` on every tier. That is the second half of being
-  total, and it was not always there: rust and wasm reached the host division
-  and faulted, which is what the caller asked these forms not to do. A
-  `checked_*` that can still fault is not checked. `checked_mod` is the
-  exception in both directions, because its answer at that divisor is defined:
-  the Euclidean remainder against `|-1| = 1` is 0 for every dividend, so it
-  answers `Ok(0)` and carries no overflow arm at all. Asserted by execution on
-  all six tiers in `tests/test_int_min_edges_cross_tier.py`.
+- **A zero divisor and the one overflowing quotient are not the only inputs
+  with no answer.** `Int.MIN / -1` is 2^63, one past `Int.MAX`, and the three
+  quotient forms answer it `Err("revl: Int overflow")` on every tier. That is
+  the second half of being total, and it was not always there: rust and wasm
+  reached the host division and faulted, which is what the caller asked these
+  forms not to do. A `checked_*` that can still fault is not checked.
+  `checked_mod` is the exception in both directions, because its answer at
+  that divisor is defined: the Euclidean remainder against `|-1| = 1` is 0 for
+  every dividend, so it answers `Ok(0)` and carries no overflow arm at all.
+  Asserted by execution on all six tiers in
+  `tests/test_int_min_edges_cross_tier.py`.
 
 | tier | Result representation for the Err payload |
 |---|---|
@@ -763,7 +773,9 @@ Two consequences worth stating:
 | go | `RevlResult[int64, string]` (`RevlOk`/`RevlErr` structs) |
 | wasm | a tagged cell (`[u32 tag][i64 payload]`), Err pooling the reason string |
 
-All six tiers lower every form; there is no tier where `checked_div_*` is a
-compile error. Execution is asserted in `tests/test_cross_tier_execution.py`
-(`CHECKED_DIVISION`) on python, TypeScript, go and wasm; rust and java behind
-`REVL_CROSS_TIER_SLOW=1`.
+All six tiers lower every form; there is no tier where a checked operation is
+a compile error. Execution is asserted in
+`tests/test_cross_tier_execution.py` (`CHECKED_DIVISION` and `CHECKED_ARITH`)
+on python, TypeScript and go, with rust and java behind
+`REVL_CROSS_TIER_SLOW=1`; wasm's lowering is checked statically there, and its
+helpers run on real wasmtime in `backends/wasm/test_v3_emit.py`.

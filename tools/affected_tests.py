@@ -109,6 +109,10 @@ BENCH_DEPENDENT_TESTS = (
     # `bench/results/answer-ledger.md`, and the module checks that the
     # committed table reproduces, so a bench change must re-run it.
     "tests/test_answer_ledger_2859.py",
+    # Issue #2847: the shape A/B's committed table is
+    # `bench/results/shape-ab.md`, replayed over the corpus under
+    # `bench/results/`, so a bench change must re-run it.
+    "tests/test_shape_ab_2847.py",
     # Issue #2621: reads the tracked drivers and their manifest under
     # bench/agentic/, and pins their hashes and docstring identity, so a bench
     # change must re-run it.

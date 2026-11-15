@@ -248,6 +248,38 @@ def test_origin_not_listed_is_refused_before_upgrade(wire_factory):
 
 
 @needs_cordis
+def test_the_provider_configured_by_its_row_listens_as_written():
+    """Issue #3484: the socket is configured by its composition row, so a
+    session loaded with NO host config listens on the row's port with the row's
+    origin rule. The rows IR is carried onto the compiled provider in the shape
+    admission writes it (`composition._carry_rows`): a row cannot name
+    `stdlib/socket.rvl` until row `from "stdlib/..."` resolves (#3483)."""
+    from revl.mcp.session import Session
+    port = _free_port()
+    ir = copy.deepcopy(IR)
+    ir["rows"] = {"composition": "App", "origin": ".", "source": "app.rvl",
+                  "rows": [{"label": "wire", "origin": ".",
+                            "qualified": ".::@wire", "source": "socket.rvl",
+                            "component": "SocketWire",
+                            "claims": [{"key": "wire"}], "requires": [],
+                            "config": {"port": port, "origins": [ORIGIN]}}]}
+    session = Session()
+    session.load(ir)
+    try:
+        assert Client(port, origin="http://evil.test").status == "HTTP/1.1 403 Forbidden"
+        client = Client(port)
+        assert client.status == "HTTP/1.1 101 Switching Protocols"
+        knocks = session.call("wire", "take", [100], raw=True)["result"]
+        deadline = time.monotonic() + 5
+        while not knocks and time.monotonic() < deadline:
+            time.sleep(0.02)
+            knocks = session.call("wire", "take", [100], raw=True)["result"]
+        assert [_plain(k)[1] for k in knocks] == ["Opened"]
+    finally:
+        session.unload()
+
+
+@needs_cordis
 def test_message_over_most_closes_1009(wire_factory):
     wire = wire_factory(most=16)
     client = Client(wire.port)
