@@ -1596,6 +1596,25 @@ def build_parser() -> argparse.ArgumentParser:
                      help="on rejection, print a structured diagnostic instead "
                           "of the human rendering")
 
+    docs = sub.add_parser(
+        "docs",
+        help="write and check the behavior comment block derived from the IR "
+             "above each component (issue #2856)")
+    docs_sub = docs.add_subparsers(dest="docs_command", required=True)
+    docs_gen = docs_sub.add_parser(
+        "gen",
+        help="write or refresh the behavior block above every component in FILES")
+    docs_gen.add_argument("files", nargs="+", metavar="FILE",
+                          help="the composition's .rvl sources, as `revl compile` "
+                               "takes them; blocks are written back to the roots "
+                               "that declare components")
+    docs_check = docs_sub.add_parser(
+        "check",
+        help="refuse a behavior block whose digest no longer matches the IR")
+    docs_check.add_argument("files", nargs="+", metavar="FILE",
+                            help="the composition's .rvl sources, as `revl compile` "
+                                 "takes them")
+
     imp = sub.add_parser("import",
                          help="import an external interface definition as revl source")
     imp_sub = imp.add_subparsers(dest="import_command", required=True)
