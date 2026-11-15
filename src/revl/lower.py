@@ -4274,7 +4274,10 @@ def _refuse_effect_position_bound_externs_in_fn_body(
     deferred/witnessed/acquire rules but do not participate in the #2842
     module-function check; component values are resolved in
     `_lower_component_pure_expr`, where lexical scope is available."""
-    from .parser import ExprArrow, ExprCall, ExprVar
+    from .parser import (
+        ExprArrow, ExprBlockArm, ExprCall, ExprMatch, ExprVar, ForStmt,
+        LetPatternStmt, LetStmt,
+    )
 
     witnessed = _witnessed_extern_names(program)
     acquire_undo = {
@@ -4293,23 +4296,25 @@ def _refuse_effect_position_bound_externs_in_fn_body(
     def _walk(node, where: str, in_arrow: bool = False, calls: bool = True,
               check_emission_values: bool = True,
               check_acquire_values: bool = False,
-              shadowed: frozenset = frozenset()):
+              filename: str = filename, bound: frozenset = frozenset()):
         nonlocal first_witnessed, first_teardown, first_emission_value
         nonlocal first_acquire_value
         if isinstance(node, ExprArrow):
             in_arrow = True
-            shadowed = shadowed | frozenset(node.params or ())
         if isinstance(node, ExprVar) and node.name in deferred \
                 and first_teardown is None:
             # a value, not a call: the callee position is skipped below
             first_teardown = _deferred_value_refusal(node.name, where,
                                                      filename, node.line)
         if check_emission_values and isinstance(node, ExprVar) \
-                and node.name in emission_values and first_emission_value is None:
+                and node.name in emission_values and node.name not in bound \
+                and first_emission_value is None:
             # A callable that reaches an irreversible extern cannot escape as
             # a value: the eventual dispatch has no named `emit` call site.
             # Direct call heads are skipped below, so ordinary calls retain
-            # their existing treatment and `emit send(...)` stays valid.
+            # their existing treatment and `emit send(...)` stays valid. A
+            # parameter, `let`, `for` variable, match binding or lambda
+            # parameter in scope (`bound`) shadows the extern (issue #3354).
             first_emission_value = _emission_value_refusal(
                 node.name, emission_values[node.name], filename, node.line)
         if check_emission_values and isinstance(node, ExprArrow) \
@@ -4321,7 +4326,7 @@ def _refuse_effect_position_bound_externs_in_fn_body(
                 first_emission_value = _emission_arrow_refusal(
                     hit[0], emission_values[hit[0]], filename, node.line)
         if check_acquire_values and isinstance(node, ExprVar) \
-                and node.name in acquire_undo and node.name not in shadowed \
+                and node.name in acquire_undo and node.name not in bound \
                 and first_acquire_value is None:
             # Issue #2972: the acquire class follows the value, exactly as the
             # emission class does above. The direct call in a `fn` body is
@@ -4375,46 +4380,46 @@ def _refuse_effect_position_bound_externs_in_fn_body(
                          "from there (docs/design/245-session-commit.md)",
                     code="G4", category="deferred",
                 )
-        def _sub(child, scope=shadowed):
+        def _sub(child, inner=bound):
             _walk(child, where, in_arrow, calls, check_emission_values,
-                  check_acquire_values, scope)
+                  check_acquire_values, filename, inner)
 
-        if hasattr(node, "__dataclass_fields__"):
+        if isinstance(node, ExprArrow):
+            _sub(node.body, bound | set(node.params))
+        elif isinstance(node, ExprMatch):
+            _sub(node.scrutinee)
+            for _pattern, bind, body in node.arms:
+                _sub(body, bound | {bind} if bind else bound)
+        elif isinstance(node, ForStmt):
+            _sub(node.iterable)
+            _sub(node.body, bound | {node.bind})
+        elif isinstance(node, ExprBlockArm):
+            _sub(node.stmts + [node.tail])
+        elif hasattr(node, "__dataclass_fields__"):
             for f in type(node).__dataclass_fields__:
                 child = getattr(node, f)
                 if f == "callee" and isinstance(node, ExprCall) \
                         and isinstance(child, ExprVar):
                     continue  # the callee position is a CALL, judged above
-                if check_acquire_values and isinstance(node, ForStmt) \
-                        and f == "body":
-                    _sub(child, shadowed | {node.bind})
-                elif check_acquire_values and isinstance(node, ExprMatch) \
-                        and f == "arms":
-                    for arm in child:
-                        bind = arm[1] if len(arm) > 1 else None
-                        _sub(arm, shadowed | {bind}
-                             if isinstance(bind, str) else shadowed)
-                elif check_acquire_values and isinstance(node, ExprBlockArm) \
-                        and f == "tail":
-                    _sub(child, shadowed | _block_binders(node.stmts))
-                else:
-                    _sub(child)
+                _sub(child)
         elif isinstance(node, (list, tuple)):
-            # a statement list is a scope: a `let` binds for the statements
-            # after it, and leaves scope where the list ends. A tuple (a match
-            # arm) and an argument list carry no binder statement.
-            scope = shadowed
+            # a statement list is a block: a `let` binds from the next
+            # statement to the block's end (issue #3354)
+            inner = bound
             for x in node:
-                _sub(x, scope)
-                if check_acquire_values:
-                    scope = scope | _stmt_binders(x)
+                _sub(x, inner)
+                if isinstance(x, LetStmt):
+                    inner = inner | {x.name}
+                elif isinstance(x, LetPatternStmt):
+                    inner = inner | set(_pattern_binds(x.pattern))
 
     for fn in program.fn_decls:
-        fn_scope = frozenset(p.name for p in fn.params)
-        for stmt in fn.body:
-            _walk(stmt, f"the body of fn `{fn.name}`",
-                  check_acquire_values=True, shadowed=fn_scope)
-            fn_scope = fn_scope | _stmt_binders(stmt)
+        # the diagnostic names the file the fn is in, not the compile's first
+        # file, and its parameters shadow a same-named extern (issue #3354)
+        _walk(fn.body, f"the body of fn `{fn.name}`",
+              check_acquire_values=True,
+              filename=getattr(fn, "source", "") or filename,
+              bound=frozenset(p.name for p in fn.params))
     for test in program.tests:
         for stmt in test.body:
             _walk(stmt, f"the body of test `{test.name}`",
@@ -4434,26 +4439,6 @@ def _refuse_effect_position_bound_externs_in_fn_body(
         raise first_emission_value
     if first_acquire_value is not None:
         raise first_acquire_value
-
-
-def _stmt_binders(stmt) -> frozenset:
-    """The names a statement binds for the statements after it in its own
-    list: a `let`/`var` or a destructuring `let`. A `for` bind and an arrow or
-    match binder are scoped to their own body, so the walk handles them at the
-    node."""
-    if isinstance(stmt, LetStmt):
-        return frozenset((stmt.name,))
-    if isinstance(stmt, LetPatternStmt):
-        return frozenset(_pattern_binds(stmt.pattern))
-    return frozenset()
-
-
-def _block_binders(stmts) -> frozenset:
-    """Every name a block arm's statements bind, which its tail reads."""
-    out: frozenset = frozenset()
-    for stmt in stmts:
-        out |= _stmt_binders(stmt)
-    return out
 
 
 def _deferred_value_refusal(name: str, where: str, filename: str,
@@ -8415,17 +8400,33 @@ def _component_header_stub(comp: ComponentDecl, filename: str) -> dict:
     topology complete from the parts available BEFORE body lowering — the
     `requires`/`provides` clauses on the `component` declaration — and mark it
     `poisoned` so the body-walking post-passes (taint, spawn bounds/attenuation,
-    holes) skip it. `isolate`/`routes` are body statements, so a stub carries
-    none: its provisions sit in the shared realm, which is exactly enough to
-    stop the route-check fabrication and keep G2/G3 sound over its keys."""
-    return {
+    holes) skip it. `isolate` is a body statement, so a stub carries none: its
+    provisions sit in the shared realm, which is exactly enough to stop the
+    route-check fabrication and keep G2/G3 sound over its keys.
+
+    A multi-realm route over a REQUIRED key is carried (issue #3360): it is
+    what makes a component that requires and provides one key a router rather
+    than a self-cycle, so a stub without it fabricated a G3 refusal next to the
+    real one (an unknown strategy, say). Only the realm set travels; a route
+    over a key the header does not require is the body's own refusal."""
+    from .parser import RouteStmt
+    requires = {local for local, _svc, _line in comp.requires}
+    stub = {
         "name": comp.name,
         "source": comp.source or filename,
-        "requires": {local for local, _svc, _line in comp.requires},
+        "requires": requires,
         "provides": {key for key, _svc, _line in comp.provides},
         "body": [],
         "poisoned": True,
     }
+    routes: dict = {}
+    for stmt in comp.body or ():
+        if isinstance(stmt, RouteStmt) and stmt.key in requires \
+                and stmt.key not in routes:
+            routes[stmt.key] = {"realms": list(stmt.realms), "strategy": None}
+    if routes:
+        stub["routes"] = routes
+    return stub
 
 
 def _raise_collected(errors: list[RevlError], program: Program) -> None:
