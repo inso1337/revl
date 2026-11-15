@@ -914,6 +914,16 @@ def test_the_admission_mirror_matches_the_rust(census):
                    "service S {\n  fn __proto__(x: Int) -> Int\n}\n",
                    "service S {\n  fn __x__()\n}\n"):
         assert not certify(source), source
+    # `a_name_python_would_mangle_is_not_certified` (issue #3135): a method
+    # name that starts with `__` and does not end with `__`.
+    for source in ("service S {\n  fn __a()\n}\n",
+                   "service S {\n  fn __approve(x: Int) -> Int\n}\n",
+                   "service S {\n  fn ___a()\n}\n"):
+        assert not certify(source), source
+    for source in ("service S {\n  fn _a()\n}\n",
+                   "service S {\n  fn a__()\n}\n",
+                   "service S {\n  fn f(__a: Int) -> Int\n}\n"):
+        assert certify(source), source
     # The other name positions this surface sees are admitted by the reference
     # and stay inside it, and `___` has no byte between its `__` pairs.
     for source in ("service __init__ {\n}\n", "type __k__ = Str\n",
