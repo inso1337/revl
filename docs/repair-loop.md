@@ -64,7 +64,15 @@ Three bounds, three behaviours:
 * **eligibility** — a component no rule selects is **ineligible**: the loop
   halts (`status: ineligible`) and hands off to a human. **Closed by default** —
   with no self-repair policy, *nothing* self-repairs. Self-repair is the
-  privileged direction, so its floor is closed, not open.
+  privileged direction, so its floor is closed, not open. A realm rule is read on
+  both sides. The candidate must itself be selected (a component rule selects it
+  whatever its realm), and it may not place the component in a realm it did not
+  run in that no rule selects. Otherwise the loop halts with `status:
+  ineligible`, `eligibility.candidate` names the candidate's realms, and
+  `eligibility.byRunning` keeps the rule that selected the running side. A
+  component that keeps a realm a rule selects stays eligible when it adds
+  another realm a rule also selects. A candidate arriving as untrusted text is
+  still refused first by the realm-placement gate (`status: rejected`).
 * **`mayTouch`** — an absolute cap on the capabilities a repair may reach. A
   candidate that reaches outside it is **refused** (`status: rejected`, reason
   `may-touch`) — not an ack, a refusal: the bound is hard. `None` means *inherit
@@ -104,7 +112,7 @@ runtime. Shape:
   "incident":    {component, status, unattended, swapped, note},
   "fault":       {chain, root, oracle},          # item 27 (+ the 27 oracle)
   "slice":       {bisect | unavailable},          # item 40
-  "eligibility": {eligible, by, note},            # self-repair policy
+  "eligibility": {eligible, by, note, candidate?},  # self-repair policy
   "candidate":   {origin: regenerated|reused, reuse},  # item 49
   "verdicts":    {gauntlet, policy, mayTouch, widening},  # 31 / 33 / self / 21
   "remediation": {strategy, applied, swap, canaryFollowOn},  # item 23
