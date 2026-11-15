@@ -976,7 +976,7 @@ def test_the_residual_is_located_in_lower_not_in_the_emitter(
 # chain compiles this component: go refuses the host acquisition (a named
 # UNSUPPORTED refusal) and the reference refuses it on wasm, and the native ts
 # emitter ladders `ctx_` one rung short of the reference even from the
-# reference IR (issue #3573).
+# reference IR (issue #3573, pinned as a strict xfail).
 _CAPTURE_DOC = (
     "service Store {\n  fn get(key: Str) -> Opt[Int]\n"
     "  emission fn put(key: Str, value: Int)\n}\n"
@@ -991,8 +991,10 @@ _CAPTURE_DOC = (
 
 
 @pytest.mark.parametrize("tier,name", [
-    (tier, name) for tier in ("py", "ts", "java", "rust")
-    for name in ("ctx", "cfg", "err") if (tier, name) != ("ts", "ctx")])
+    pytest.param(tier, name, marks=pytest.mark.xfail(
+        strict=True, reason="issue #3573")) if (tier, name) == ("ts", "ctx")
+    else (tier, name)
+    for tier in ("py", "ts", "java", "rust") for name in ("ctx", "cfg", "err")])
 def test_a_provider_capture_named_like_scaffolding_compiles_natively_as_the_reference(
         compile_to, reference_emit, tier, name):
     source = "fn seed() -> Int {\n  return 0\n}\n" + _CAPTURE_DOC.replace("NAME", name)
