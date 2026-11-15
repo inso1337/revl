@@ -11,11 +11,20 @@ checker promised a `T`; the next `match` on the value raised
 has already been declared`.
 
 The frontend now refuses the ambiguous name instead of emitting a module where
-one name means two things. The same rule covers every declaration that becomes
-a module-scope binding: `fn`, `extern`, `component`, `service` and `type`.
-A `component` named like a case is the loud version of the same shape
-(`Hit = {...}` replaces the class, so `isinstance(x, Hit)` raises), and a
-record `type` beside a case emits two `class Hit` definitions.
+one name means two things. The rule covers the declarations that become a
+module-scope value binding: `fn`, `extern` and `component`. A `component`
+named like a case is the loud version of the same shape (`Hit = {...}` replaces
+the class, so `isinstance(x, Hit)` raises).
+
+A `type` declaration is order-sensitive and only refused when it is written
+AFTER the ADT whose case it shares. Written before, the case class rebinds the
+name after the type class, which is the reading the checker uses (records are
+dicts at run time, and a case's equality resolves the case name at call time);
+that is also the order the OpenAPI importer documents for `type U = A(A) | B(B)`.
+
+A `service` is not a module-scope value binding on either tier (python keeps it
+in the SERVICES table, typescript emits an interface), so `service Search`
+beside the case `Search` is admitted.
 
 The merged-program form of the collision (a case in one module and a `fn` or
 `type` of that name in another) is already refused by the `use`-edge check
@@ -70,9 +79,8 @@ def test_a_case_declared_after_the_fn_is_refused_at_the_case():
 @pytest.mark.parametrize("declaration", [
     "extern pure fn Hit(x: Int) -> Int = @py { return x + 1000 }",
     "component Hit { }",
-    "service Hit { fn go() -> Int }",
     "type Hit = { n: Int }",
-], ids=["extern", "component", "service", "record type"])
+], ids=["extern", "component", "record type"])
 def test_every_module_scope_binding_kind_is_refused(declaration):
     """A declaration of every kind the emitters place at module scope collides
     with a case constructor of the same name: the later definition replaces the
@@ -119,6 +127,44 @@ def test_a_type_may_name_its_own_case():
                        "fn Tag(x: Str) -> Str = x\n", "m.rvl")
     assert classify(caught.value)["message"] == (
         "`Tag` is already declared as a case of `Tag` on line 1")
+
+
+def test_a_service_named_like_a_case_still_compiles():
+    """A service has no module-scope value binding on either tier, so it does
+    not replace the case constructor. The agent-loop fixtures declare
+    `service Search` beside the `Search` case of `Action`."""
+    ir = compile_source(
+        "type Action = Final(Str) | Search(Str)\n"
+        "service Search { fn find(q: Str) -> Str }\n"
+        "component Index provides search: Search {\n"
+        "  provide search { fn find(q) = q }\n"
+        "}\n", "m.rvl")
+    assert ir["services"]["Search"]["methods"]["find"]["returns"] == "Str"
+    assert [case["name"] for case in ir["types"]["Action"]["cases"]] == \
+        ["Final", "Search"]
+
+
+def test_a_type_declared_before_the_adt_keeps_compiling():
+    """The OpenAPI importer's documented `type U = A(A) | B(B)` output declares
+    the referenced records before the union, so the case classes rebind each
+    name after the record class and the case stays the reading the checker
+    uses. That order is admitted."""
+    ir = compile_source(
+        "type Cat = { species: Str }\n"
+        "type Dog = { species: Str }\n"
+        "type Animal = Cat(Cat) | Dog(Dog)\n", "m.rvl")
+    assert [case["name"] for case in ir["types"]["Animal"]["cases"]] == \
+        ["Cat", "Dog"]
+
+
+def test_a_type_declared_after_the_adt_is_refused():
+    """The other order rebinds the name to the type class after the case class
+    was written, so constructing or comparing the case would use the type."""
+    d = _refusal("type Animal = Cat(Int) | Dog(Int)\n"
+                 "type Cat = { species: Str }\n")
+    assert d["message"] == (
+        "`Cat` is already declared as a case of `Animal` on line 1")
+    assert (d["code"], d["category"], d["line"]) == ("G6", "binding", 2)
 
 
 @pytest.mark.parametrize("source", [

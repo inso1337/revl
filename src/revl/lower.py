@@ -8576,46 +8576,57 @@ def _refuse_case_name_collisions(program: Program, filename: str) -> None:
 
     The checker keeps constructors and functions apart, so it happily admitted
     a module `fn Hit` beside the case `Hit(Int)` of some `type T`: `Hit(5)`
-    resolved to the constructor and the enclosing function was typed `T`. Both
-    spellings then became one module-scope binding per tier. The python emitter
-    wrote `class Hit(T)` and, later in the module, `def Hit(x)`, so the `def`
-    replaced the class and the call the checker typed `T` returned whatever the
-    user's function returned. The ts tier wrote two `export function Hit` and
-    the emitted module did not load. A `component` named like a case replaces
-    the class with a `Hit = {...}` record (the loud form, where `isinstance`
-    raises), a record `type` gives two `class Hit` definitions, and a
-    `service` spends the name in the composition's tables.
+    resolved to the constructor and the enclosing function was typed `T`. The
+    python emitter then wrote `class Hit(T)` and, later in the module,
+    `def Hit(x)`, so the `def` replaced the class and the call the checker
+    typed `T` returned whatever the user's function returned. The ts tier wrote
+    two `export function Hit` and the emitted module did not load. An `extern`
+    and a `component` collide the same way: every tier emits both under one
+    value name and the later definition wins.
+
+    A `type` declaration is different. Its class is written once, in
+    declaration order, and a case class written AFTER it rebinds the name to
+    the case, which is the reading the checker uses: record values are dicts,
+    so the record class is only an annotation, and a case's `__eq__` resolves
+    the case name at call time. A type written BEFORE the ADT that names a
+    case after it is therefore admitted, and the OpenAPI importer's documented
+    `type U = A(A) | B(B)` output (records first, unions after) keeps
+    compiling. A type written AFTER the ADT rebinds the name away from the
+    case class, so the case's construction and equality would use the type,
+    and it is refused.
+
+    A `service` is not a module-scope value binding on either tier (python
+    keeps it in the SERVICES table, typescript emits an interface), so a
+    service named like a case is not this defect and stays admitted.
 
     The cross-module form (a case in one module, a `type`/`fn`/`extern` of that
     name in another) is refused earlier by
     `compiler._reject_cross_module_case_collisions` (issue #1145), which
-    deliberately leaves the single-file form here: the merge seam is where the
-    two spellings stop being visible to their author, and a same-file
-    declaration is as authored as a declaration gets. Visibility is not the
-    point, though: each tier still emits one symbol per name, so the value and
-    the checker's type diverge.
+    deliberately leaves the single-file form here.
 
     Runs after `_resolve_type_aliases`, so a transparent alias (which emits no
     binding and whose right-hand side is not a constructor) is not read as a
-    case. Components and services are included because the merge check above
-    never looked at them. `type Tag = Tag(Str)` (a type named after its own
-    single case, the newtype spelling) is one declaration, not two, and keeps
-    compiling: the python tier's `class Tag(Tag)` resolves the base before the
-    case rebinds the name.
+    case. `type Tag = Tag(Str)` (a type named after its own single case, the
+    newtype spelling) is one declaration, not two, and keeps compiling: the
+    python tier's `class Tag(Tag)` resolves the base before the case rebinds
+    the name.
     """
-    cases: dict[str, tuple[str, str, int]] = {}
+    type_index = {id(decl): index
+                  for index, decl in enumerate(program.type_decls)}
+    cases: dict[str, tuple[str, str, int, int]] = {}
     for decl in program.type_decls:
         decl_file = program.decl_files.get(id(decl), filename)
         for case in decl.cases:
             # a case repeated inside one type is refused by `_lower_type_decls`;
             # keep the first site so the citation is stable.
-            cases.setdefault(case.name, (decl.name, decl_file, case.line))
+            cases.setdefault(case.name, (decl.name, decl_file, case.line,
+                                         type_index[id(decl)]))
     if not cases:
         return
     # (kind, name, line, file, decl) for everything the emitters place at
-    # module scope under the declaration's own name. The decl object is kept so
-    # the self-named-type exception can ask the type about its OWN cases
-    # instead of about whichever type happened to claim the name first.
+    # module scope under the declaration's own name. A service is deliberately
+    # absent: it has no module-scope value binding on any tier. The decl object
+    # is kept so the type rules can ask the type about its OWN cases.
     others: list[tuple[str, str, int, str, object]] = []
     for decl in program.type_decls:
         others.append(("a type", decl.name, decl.line,
@@ -8626,9 +8637,6 @@ def _refuse_case_name_collisions(program: Program, filename: str) -> None:
                        decl))
     for decl in program.externs:
         others.append(("an extern", decl.name, decl.line,
-                       program.decl_files.get(id(decl), filename), decl))
-    for decl in program.services:
-        others.append(("a service", decl.name, decl.line,
                        program.decl_files.get(id(decl), filename), decl))
     for decl in program.components:
         others.append(("a component", decl.name, decl.line,
@@ -8642,16 +8650,20 @@ def _refuse_case_name_collisions(program: Program, filename: str) -> None:
         case = cases.get(name)
         if case is None:
             continue
-        type_name, case_file, case_line = case
-        # `type Tag = Tag(Str)` is the newtype spelling: the type declaration
-        # and its OWN case are one declaration, and the python tier emits
-        # `class Tag:` before `class Tag(Tag):`, which resolves the base before
-        # the case rebinds the name. Ask this type about its own case list, not
-        # about the first type to claim the name: two ADTs may share a case
-        # name, and the order the declarations appear in must not decide
-        # whether the newtype spelling is admitted.
-        if kind == "a type" and any(c.name == name for c in decl.cases):
-            continue
+        type_name, case_file, case_line, case_owner_index = case
+        if kind == "a type":
+            # `type Tag = Tag(Str)` is the newtype spelling: the type
+            # declaration and its OWN case are one declaration, and the python
+            # tier emits `class Tag:` before `class Tag(Tag):`, which resolves
+            # the base before the case rebinds the name. Ask this type about
+            # its own case list, not about whichever type claimed the name
+            # first: two ADTs may share a case name.
+            if any(c.name == name for c in decl.cases):
+                continue
+            # The type class is written before the ADT's case class, so the
+            # case rebinds the name to itself, the reading the checker uses.
+            if type_index[id(decl)] < case_owner_index:
+                continue
         if os.path.abspath(decl_file) != os.path.abspath(case_file):
             raise RevlError(
                 case_file, case_line,
