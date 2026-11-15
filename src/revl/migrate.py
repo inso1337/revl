@@ -47,8 +47,8 @@ from .admission import (_caps_widen, _handoff_compatible, _service_compatible,
                         _service_equal, _service_from_ir)
 from .adapt import bridge_plan
 from .audit_diff import (audit_report, diff_backends, diff_capability_scopes,
-                         diff_cardinality, diff_crossings, diff_recovery,
-                         diff_registers)
+                         diff_cardinality, diff_crossings, diff_inverses,
+                         diff_recovery, diff_registers)
 from .compiler import _running_handoffs
 from .composition_diff import _components, _realm
 from .composition_diff import diff as composition_diff
@@ -374,7 +374,8 @@ def authority(old_ir: dict, new_ir: dict) -> dict:
     reach (`reach-weakened:`), widened emission scope (`scope:`), added host
     bodies (`backend:`), weakened idempotency registers (`register:`), widened
     emission ceilings (`cardinality:`), dropped or weakened recovery
-    (`recovery:`), and the service declaration side the audit surface is blind
+    (`recovery:`), a weakened inverse class (`inverse:`, which also carries a
+    recovery kind move, issue #3182), and the service declaration side the audit surface is blind
     to (`capability:`). The safe direction of each bucket is reported under
     `narrowed`.
     """
@@ -386,6 +387,7 @@ def authority(old_ir: dict, new_ir: dict) -> dict:
     registers = diff_registers(before, after)
     cardinality = diff_cardinality(before, after)
     recovery = diff_recovery(before, after)
+    inverses = diff_inverses(before, after)
     declared = _declared_capability_drift(old_ir, new_ir)
     widened = list(crossings.get("added") or [])
     widened += list(crossings.get("reach_weakened") or [])
@@ -395,6 +397,7 @@ def authority(old_ir: dict, new_ir: dict) -> dict:
     widened += list(cardinality.get("cardinality_widened") or [])
     widened += list(recovery.get("recovery_dropped") or [])
     widened += list(recovery.get("recovery_weakened") or [])
+    widened += list(inverses.get("inverse_weakened") or [])
     widened += declared["widened"]
     narrowed = list(crossings.get("removed") or [])
     narrowed += list(crossings.get("reach_tightened") or [])
@@ -403,6 +406,7 @@ def authority(old_ir: dict, new_ir: dict) -> dict:
     narrowed += list(registers.get("registers_strengthened") or [])
     narrowed += list(cardinality.get("cardinality_tightened") or [])
     narrowed += list(recovery.get("recovery_added") or [])
+    narrowed += list(inverses.get("inverse_strengthened") or [])
     narrowed += declared["narrowed"]
     return {
         "widened": sorted(dict.fromkeys(widened)),

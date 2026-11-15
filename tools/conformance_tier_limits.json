@@ -58,18 +58,6 @@
       "reason": "arrow values have no lowering on this tier. A capability limit.",
       "message_prefix": "C.s.f: arrow values are not lowerable"
     },
-    "wasm::expr/true division": {
-      "reason": "Float is not in the tier's lowerable value set. A capability limit.",
-      "message_prefix": "C.s.f: type 'Float' is not lowerable"
-    },
-    "wasm::expr/float equality": {
-      "reason": "Float is not in the tier's lowerable value set. A capability limit.",
-      "message_prefix": "feq: parameter a: type 'Float' is not lowerable"
-    },
-    "wasm::type/Float service": {
-      "reason": "Float is not in the tier's lowerable value set. A capability limit.",
-      "message_prefix": "C: s.f param 'x': type 'Float' is not lowerable"
-    },
     "wasm::type/Map service": {
       "reason": "Map is not in the tier's lowerable value set. A capability limit.",
       "message_prefix": "C: s.f param 'x': type 'Map[Str, Int]' is not lowerable"

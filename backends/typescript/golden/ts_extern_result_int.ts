@@ -6,7 +6,7 @@ import { host } from '../runtime.ts'
 const REVL_I64_MIN = -(2n ** 63n)
 const REVL_I64_MAX = 2n ** 63n - 1n
 function revlI64(v: bigint): bigint {
-  if (v < REVL_I64_MIN || v > REVL_I64_MAX) throw new RangeError('revl: Int overflow')
+  if (BigInt.asIntN(64, v) !== v) throw new RangeError('revl: Int overflow')
   return v
 }
 
@@ -83,7 +83,8 @@ export function big_day_number(): bigint {
 }
 
 export function civil_date(days: bigint): bigint {
-    const z = revlI64(days + 719468n)
+    let $revl_i64 = 0n
+    const z = (BigInt.asIntN(64, $revl_i64 = days + 719468n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
     return z
 }
 
@@ -92,7 +93,8 @@ export function iso_date(n: bigint): bigint {
 }
 
 export function plus_one(): bigint {
-    return revlI64(day_number_now() + 1n)
+    let $revl_i64 = 0n
+    return (BigInt.asIntN(64, $revl_i64 = day_number_now() + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
 }
 
 export function halved(): bigint {
@@ -104,5 +106,6 @@ export function iso_date_now(): bigint {
 }
 
 export function big_plus_one(): bigint {
-    return revlI64(big_day_number() + 1n)
+    let $revl_i64 = 0n
+    return (BigInt.asIntN(64, $revl_i64 = big_day_number() + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
 }

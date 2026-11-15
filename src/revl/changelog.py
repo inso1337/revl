@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 
 from .audit_diff import (
     audit_report, diff_backends, diff_capability_scopes, diff_cardinality,
-    diff_reach, diff_recovery, diff_registers)
+    diff_inverses, diff_reach, diff_recovery, diff_registers)
 from .composition_diff import diff as composition_diff
 
 # --------------------------------------------------------------------------
@@ -109,6 +109,7 @@ CONSUMED_PATHS: dict[tuple, tuple[str, str]] = {
     # the differ whose source `test_every_consumed_path_*` asserts reads the leaf.
     ("boundary", _STAR, "capabilities"): ("audit_diff", "_capability_scopes"),
     ("externs", _STAR, "backends"): ("audit_diff", "diff_backends"),
+    ("externs", _STAR, "inverse"): ("audit_diff", "diff_inverses"),
     ("recovery_surface",): ("audit_diff", "diff_recovery"),
     ("capability_registers",): ("audit_diff", "diff_registers"),
     ("cardinality",): ("audit_diff", "diff_cardinality"),
@@ -411,6 +412,20 @@ def _classify_audit_surfaces(before_audit: dict,
         lines.append(ChangelogLine(
             fact=f"recovery.added:{name}:{rkind}", category="added",
             text=f"extern {name} gained a {rkind} recovery"))
+
+    # externs[*].inverse: a weaker inverse class. It also carries a recovery
+    # kind move, which `diff_recovery` no longer reports as dropped (#3182).
+    inverses = diff_inverses(before_audit, after_audit)
+    for token in inverses["inverse_weakened"]:
+        name = token.split(":", 1)[1]
+        lines.append(ChangelogLine(
+            fact=f"inverse.weakened:{name}", category="breaking", lede=True,
+            text=f"extern {name} moved to a weaker inverse class"))
+    for token in inverses["inverse_strengthened"]:
+        name = token.split(":", 1)[1]
+        lines.append(ChangelogLine(
+            fact=f"inverse.strengthened:{name}", category="added",
+            text=f"extern {name} moved to a stronger inverse class"))
 
     # capability_registers: a weakened idempotency floor lets a consumer that
     # relied on the stronger guarantee double-apply.

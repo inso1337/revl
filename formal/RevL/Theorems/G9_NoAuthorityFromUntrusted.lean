@@ -70,18 +70,20 @@ carries four separate guards, all proved below:
 Stated plainly, because the review's finding is that STATUS.md claimed
 more than the Lean proved.
 
-* **Path coverage is proved over the component-body calculus, not over
-  the interprocedural discovery of paths.** `Flow` starts from a path
-  that is *given*. That the checker *walks* every path a program contains
-  is the obligation that actually broke: `taint._walk_component_methods`
-  descended only into `provide` steps, so a component's **activation
-  body was never taint-checked at all** (fixed on
-  `fix/taint-activation-body-and-secret-receiver`), and a `Secret[T]`
-  parameter was stripped inside its own receiver body. Issue #2108
-  closed the structural obstacle: L0 grew component bodies with the
-  provide/activation distinction and typed parameters, and
-  `RevL.G9Coverage.coversBodyB` now decides the walk against the body's
-  own scopes. The residue is the discovery step below.
+* **Path coverage is NOT proved, and this is where the real bugs live.**
+  `Flow` starts from a path that is *given*. That the checker *walks*
+  every path a program contains is a separate obligation, and it is the
+  one that actually broke: `taint._walk_component_methods` descends only
+  into `provide` steps, so a component's **activation body was never
+  taint-checked at all** (fixed on `fix/taint-activation-body-and-secret-
+  receiver`), and a `Secret[T]` parameter was stripped inside its own
+  receiver body. Nothing in this file would have caught either. The
+  obligation cannot even be *stated* against the current L0: L0 has no
+  component bodies, no `provide`/activation distinction, and no typed
+  parameters — the exact structure both bugs live in. It is therefore
+  recorded as a named open obligation in `formal/STATUS.md`, not smuggled
+  in as a proved row and not `sorry`'d as a statement that does not
+  typecheck.
 * The interprocedural fixed point (`_Signature`, `_infer_signatures`)
   that discovers which paths exist is likewise unmodelled. As `CrossTier`
   says of its emitters: the model proves what follows once the path is
@@ -94,9 +96,9 @@ more than the Lean proved.
   that labelling IS proved: `taint_surface_within_declared_context`
   composes with G6 to bound the origins a statement can mint by its
   declared context.
-* The `TAINT` row in `RevL.G9Flow` decides the rule at the sink the
-  checker reports, on the corpus; it is not coverage of the walk and it
-  does not decide the semantic non-interference section below.
+* No differential-oracle row references these definitions; the oracle
+  carries no taint verdicts, so G9 is not covered by that gate either
+  (review C4 applies here as much as elsewhere).
 * The `via` diagnostic chain carries no security content and is dropped.
 -/
 
@@ -520,116 +522,91 @@ theorem g9_context_hypotheses_are_inhabited :
       decide
     exact h "web.fetch" (by simp [untrustedCtx]) hw
 
-/-! ## Semantic non-interference (issue #2738)
+/-! ## Two-run non-interference over a value model (issue #2738)
 
 The theorems above are rules at the sink: they say which labels an
-admitted path may carry, never what a run computes. The ledger sold the
-`Trusted[T]`/`Secret[T]` half as "non-interference **Done**", which a
-reader takes for the Goguen-Meseguer property. This section states the
-semantic property over the little value semantics in
-`RevL.Lemmas.TaintLemmas` (`Val`, `stepVal`, `exec`); it is not a
-consequence of the flow rules.
+admitted path may carry, never what a run computes. The ledger once sold
+the `Trusted[T]`/`Secret[T]` half as "non-interference **Done**", which a
+reader takes for the Goguen-Meseguer property. This section states a
+two-run property over the value model in `RevL.Lemmas.TaintLemmas` (`Val`,
+`VStep`, `stepV`, `execV`), where crossings and joins ADD the inputs they
+read to the running data.
 
-Two runs of the same step list that agree on the public projection and on
-the input label, and differ only in the hidden component, end with the
-same public projection, provided the path performs no `.declassify` step
-(`secret_noninterference`). The content is in `stepVal`: no step writes
-`pub` from any input except `.declassify`. The flow rules constrain
-labels; they do not make a non-declassifying step unable to read
-`hidden`, and this theorem does not claim they do. The proviso is not a
-hole: `public_changes_require_a_declassifier` proves that a different
-public output needs one on the path, while
-`declassifier_changes_only_its_origin` says what it is allowed to change
-and `endorse_gate_preserves_foreign_origins` says what it may not.
+`secret_noninterference`: two runs of one admitted `Flow` whose inputs
+agree wherever the disclosure sink can see them (`InputsAgree`) end with
+the flow's output label, and with the same data whenever that label is
+admitted by a disclosure sink, provided no declassifier on the path clears
+`confidential`. Both hypotheses on the declassifiers do work:
+`unadmitted_secret_endorse_breaks_noninterference` shows the `Flow`
+hypothesis cannot be dropped (an `endorse[secret]` that `Flow` refuses
+makes the output observable and different), and
+`declassify_breaks_noninterference` shows the `confidential` proviso
+cannot be dropped (an admitted `endorse[confidential]` publishes the
+data). `leak_needs_declassifier` is the
+contrapositive: an observable difference needs a declassifier that clears
+`confidential` on the path.
 
-**This is non-interference of the model, not of the language.** The model
-is the walk plus values; it says nothing about the Python checker, which
-the differential oracle decides on the corpus, and nothing about the
-interprocedural fixed point that discovers which paths exist. -/
+**What this is not.** It is a property of a model defined here, not of the
+language and not of the Python checker, which the differential oracle
+decides on the corpus; `RevL.G9Flow` and the oracle do not read these
+definitions. The observer is the disclosure sink only. Implicit flows
+(control dependence), timing, termination, the other sinks and the
+emission surface are not modelled, and the data of a run is a sum, not an
+arbitrary computation. -/
 
-/-- `declassifiersOf st = []` implies no step is a declassifier. The
-bridge between the audit surface the earlier theorems use and the
-computable predicate the value semantics uses. -/
-theorem noDeclassify_of_declassifiersOf_eq_nil (st : List Step) :
-    declassifiersOf st = [] → NoDeclassify st := by
-  induction st with
-  | nil => intro _; rfl
-  | cons s st ih =>
-    intro h
-    cases s with
-    | declassify d => simp [declassifiersOf] at h
-    | source o => exact ih (by simpa [declassifiersOf] using h)
-    | join m => exact ih (by simpa [declassifiersOf] using h)
-    | propagate => exact ih (by simpa [declassifiersOf] using h)
+/-- **Two-run non-interference of the value model.** See the section
+header. The label half says both runs end with the flow's own output
+label (`execution_labels_match_the_flow`); the data half is the content. -/
+theorem secret_noninterference {P : Profile} {G : Grants}
+    {ℓin ℓout : Label} {st : List VStep} {ρ₁ ρ₂ : Inputs}
+    (hf : Flow P G ℓin (st.map VStep.toStep) ℓout)
+    (hag : InputsAgree ρ₁ ρ₂ st)
+    (hnc : ∀ d, VStep.declassify d ∈ st → ¬ Clears d Origin.confidential)
+    (v₁ v₂ : Val) (h₁ : v₁.label = ℓin) (h₂ : v₂.label = ℓin)
+    (hin : Admits Sink.disclosure ℓin → v₁.data = v₂.data) :
+    (execV ρ₁ st v₁).label = ℓout ∧ (execV ρ₂ st v₂).label = ℓout ∧
+    (Admits Sink.disclosure ℓout →
+      (execV ρ₁ st v₁).data = (execV ρ₂ st v₂).data) :=
+  execV_lowEq st v₁ v₂ hf hag hnc h₁ h₂ hin
 
-/-- The value semantics computes the label transition the flow relation
-states. This ties the label half to `Flow`; it does not make `Flow`
-responsible for the public projection, which is `exec`'s own property. -/
+/-- **The declassification exception.** If the two runs end observable and
+with different data, a declassifier on the path clears `confidential`.
+This is the contrapositive of `secret_noninterference`, so the exception
+is the one thing the theorem excludes, not a separate assumption. -/
+theorem leak_needs_declassifier
+    {P : Profile} {G : Grants} {ℓin ℓout : Label} {st : List VStep}
+    {ρ₁ ρ₂ : Inputs}
+    (hf : Flow P G ℓin (st.map VStep.toStep) ℓout)
+    (hag : InputsAgree ρ₁ ρ₂ st)
+    (v₁ v₂ : Val) (h₁ : v₁.label = ℓin) (h₂ : v₂.label = ℓin)
+    (hin : Admits Sink.disclosure ℓin → v₁.data = v₂.data)
+    (hobs : Admits Sink.disclosure ℓout)
+    (hdiff : (execV ρ₁ st v₁).data ≠ (execV ρ₂ st v₂).data) :
+    ∃ d, VStep.declassify d ∈ st ∧ Clears d Origin.confidential := by
+  by_cases h : ∃ d, VStep.declassify d ∈ st ∧ Clears d Origin.confidential
+  · exact h
+  · exfalso
+    have hnc : ∀ d, VStep.declassify d ∈ st → ¬ Clears d Origin.confidential :=
+      fun d hd hc => h ⟨d, hd, hc⟩
+    exact hdiff ((secret_noninterference hf hag hnc v₁ v₂ h₁ h₂ hin).2.2 hobs)
+
+/-- The label of a run is the label `Flow` states for the same path. -/
 theorem execution_labels_match_the_flow {P : Profile} {G : Grants}
-    {ℓin : Label} {st : List Step} {ℓout : Label}
-    (hf : Flow P G ℓin st ℓout) {v : Val} (hv : v.label = ℓin) :
-    (exec st v).label = ℓout :=
-  exec_label_eq_of_flow hf v hv
+    {ℓin ℓout : Label} {st : List VStep} {ρ : Inputs}
+    (hf : Flow P G ℓin (st.map VStep.toStep) ℓout)
+    (v : Val) (hv : v.label = ℓin) :
+    (execV ρ st v).label = ℓout :=
+  execV_label_eq st v hf hv
 
-/-- **Semantic non-interference of the value semantics.** Two executions
-of the same step list that agree on the public projection and on the
-input label, and differ only in the hidden (secret) component, end with
-the same public projection and the same label, provided no `.declassify`
-step is on the path.
-
-The content is `stepVal`: no step writes `pub` from any input except
-`.declassify`. This is not derived from the G9 flow rules, which constrain
-labels rather than computation; the label half is
-`execution_labels_match_the_flow`. `public_changes_require_a_declassifier`
-shows the exclusion is load-bearing. -/
-theorem secret_noninterference {st : List Step}
-    (hnd : declassifiersOf st = [])
-    (v₁ v₂ : Val) (hpub : v₁.pub = v₂.pub)
-    (hlabel : v₁.label = v₂.label) :
-    (exec st v₁).pub = (exec st v₂).pub ∧
-    (exec st v₁).label = (exec st v₂).label := by
-  have hnod : NoDeclassify st := noDeclassify_of_declassifiersOf_eq_nil st hnd
-  refine ⟨?_, exec_label_congr st hlabel⟩
-  rw [exec_pub_eq_of_noDeclassify st v₁ hnod,
-      exec_pub_eq_of_noDeclassify st v₂ hnod]
-  exact hpub
-
-/-- **Only a declassifier can make the public projection depend on the
-hidden component.** Two runs that agree on the public input but end with
-different public projections have a `.declassify` step on the path. This
-is the declassification exception as a theorem: the semantic statement is
-not weakened by an unexplained hole, it is exact. -/
-theorem public_changes_require_a_declassifier {st : List Step} {v₁ v₂ : Val}
-    (hpub : v₁.pub = v₂.pub) :
-    (exec st v₁).pub = (exec st v₂).pub ∨ ∃ d, .declassify d ∈ st :=
-  pub_eq_or_declassify st v₁ v₂ hpub
-
-/-- **What a declassifier is allowed to change.** A `.declassify` step
-publishes the hidden component, leaves the hidden component itself
-untouched, and clears exactly the origins its kind clears; every other
-origin on the label survives. The exception in the non-interference
-statement is therefore one inspectable transition, not a hole. -/
-theorem declassifier_changes_only_its_origin (d : Declassifier) (v : Val) :
-    (exec [.declassify d] v).pub = v.hidden ∧
-    (exec [.declassify d] v).hidden = v.hidden ∧
-    (exec [.declassify d] v).label = applyD d v.label ∧
-    (∀ o, o ∈ v.label → ¬ Clears d o →
-      o ∈ (exec [.declassify d] v).label) := by
-  refine ⟨rfl, rfl, rfl, ?_⟩
-  intro o ho hc
-  exact applyD_preserves (d := d) (o := o) (ℓ := v.label) hc ho
-
-/-- **An `endorse[o]` gate preserves the invariant it is declared for.** A
-path whose declassifiers are all `endorse[o]` cannot remove any origin
-other than `o`: the semantic form of item 249 Finding 1
-(`applyD_preserves`). The gate may publish the value whose label it
-clears; it may not launder a foreign origin. -/
-theorem endorse_gate_preserves_foreign_origins {st : List Step}
-    {o o' : Origin} {v : Val}
-    (hgate : ∀ d, .declassify d ∈ st → d.kind = .endorse o)
+/-- **An `endorse[o]` gate cannot launder a foreign origin.** A path whose
+declassifiers are all `endorse[o]` leaves every other origin on the label
+(the semantic form of item 249, Finding 1). -/
+theorem endorse_gate_preserves_foreign_origins {st : List VStep}
+    {o o' : Origin} {ρ : Inputs} {v : Val}
+    (hgate : ∀ d, VStep.declassify d ∈ st → d.kind = DeclassKind.endorse o)
     (hne : o' ≠ o) (ho : o' ∈ v.label) :
-    o' ∈ (exec st v).label := by
-  refine exec_preserves_uncleared_origin o' st v ?_ ho
+    o' ∈ (execV ρ st v).label := by
+  refine execV_preserves_uncleared_origin o' ρ st v ?_ ho
   intro d hd hcl
   have hk := hgate d hd
   have hb : (o == o') = true := by
@@ -638,73 +615,141 @@ theorem endorse_gate_preserves_foreign_origins {st : List Step}
 
 /-! ### Non-vacuity witnesses (roadmap item 418, step 8) -/
 
-/-- **Non-interference is not vacuous.** A declassifier-free step list (a
-`web` crossing, a `fs` join and a pure hop) is run on two values that
-agree on the public projection and the input label and differ in the
-hidden component. The public outputs agree. The admitted `Flow` is
-exhibited beside it as the label-side evidence, not as a premise of the
-theorem. -/
-theorem noninterference_witness :
-    Flow untrustedAuthor [] [Origin.confidential]
-        [Step.source Origin.web, Step.join [Origin.fs], Step.propagate]
-        [Origin.fs, Origin.web, Origin.confidential] ∧
-    declassifiersOf
-        [Step.source Origin.web, Step.join [Origin.fs], Step.propagate] = [] ∧
-    (exec [Step.source Origin.web, Step.join [Origin.fs], Step.propagate]
-        ⟨7, 1, [Origin.confidential]⟩).pub =
-      (exec [Step.source Origin.web, Step.join [Origin.fs], Step.propagate]
-        ⟨7, 2, [Origin.confidential]⟩).pub ∧
-    (⟨7, 1, [Origin.confidential]⟩ : Val).hidden ≠
-      (⟨7, 2, [Origin.confidential]⟩ : Val).hidden := by
-  have hf : Flow untrustedAuthor [] [Origin.confidential]
-      [Step.source Origin.web, Step.join [Origin.fs], Step.propagate]
-      [Origin.fs, Origin.web, Origin.confidential] :=
-    Flow.source Origin.web [Origin.confidential]
-      [Step.join [Origin.fs], Step.propagate]
-      [Origin.fs, Origin.web, Origin.confidential]
-      (Flow.join [Origin.fs] [Origin.web, Origin.confidential]
-        [Step.propagate] [Origin.fs, Origin.web, Origin.confidential]
-        (Flow.propagate [Origin.fs, Origin.web, Origin.confidential]
-          [] [Origin.fs, Origin.web, Origin.confidential]
-          (Flow.nil [Origin.fs, Origin.web, Origin.confidential])))
-  refine ⟨hf, rfl, ?_, by decide⟩
-  exact (secret_noninterference rfl _ _ rfl rfl).1
+/-- Input data for the witnesses. -/
+def inputsA : Inputs := fun i => i + 3
 
-/-- **The declassification exception is real, and only its origin is
-cleared.** The same two-run shape with an ADMITTED `endorse[confidential]`
-on the path publishes the hidden component, so the public projections
-differ; the foreign `web` origin survives the gate, which is the endorse
-invariant the non-interference statement excludes. -/
+/-- Agrees with `inputsA` at input 0 and differs at every other input. -/
+def inputsB : Inputs := fun i => if i = 0 then 3 else i + 100
+
+/-- A path that reads only input 0, a `web` crossing. -/
+def observablePath : List VStep := [VStep.source Origin.web 0, VStep.propagate]
+
+/-- A path that reads two inputs: a `web` crossing and an `fs` join. -/
+def secretPath : List VStep :=
+  [VStep.source Origin.web 0, VStep.join [Origin.fs] 1, VStep.propagate]
+
+/-- **The theorem is not vacuous, on both sides of the observer.**
+
+* An observable run: a public entry value and a `web` crossing, run on two
+  input assignments that differ at input 1 and agree at input 0, the only
+  one read. The output label is admitted by the disclosure sink and the
+  two data agree, derived from `secret_noninterference`.
+* A `secret`-labelled entry value, 7 against 9, run through the same kind
+  of path with a `web` crossing and an `fs` join: both runs end with the
+  flow's label, which carries `secret`, so the disclosure sink does not
+  admit it, and the data really do differ. The observer cannot see the
+  difference and the theorem says nothing about it, which is the point. -/
+theorem noninterference_witness :
+    (Flow untrustedAuthor [] [] [Step.source Origin.web, Step.propagate]
+        [Origin.web] ∧
+      Admits Sink.disclosure ([Origin.web] : Label) ∧
+      (execV inputsA observablePath ⟨4, []⟩).data =
+        (execV inputsB observablePath ⟨4, []⟩).data ∧
+      inputsA 1 ≠ inputsB 1) ∧
+    (Flow untrustedAuthor [] [Origin.secret]
+        [Step.source Origin.web, Step.join [Origin.fs], Step.propagate]
+        [Origin.fs, Origin.web, Origin.secret] ∧
+      ¬ Admits Sink.disclosure ([Origin.fs, Origin.web, Origin.secret] : Label) ∧
+      (execV inputsA secretPath ⟨7, [Origin.secret]⟩).label =
+        [Origin.fs, Origin.web, Origin.secret] ∧
+      (execV inputsA secretPath ⟨9, [Origin.secret]⟩).label =
+        [Origin.fs, Origin.web, Origin.secret] ∧
+      (execV inputsA secretPath ⟨7, [Origin.secret]⟩).data ≠
+        (execV inputsA secretPath ⟨9, [Origin.secret]⟩).data) := by
+  have hobsf : Flow untrustedAuthor [] [] [Step.source Origin.web, Step.propagate]
+      [Origin.web] :=
+    Flow.source Origin.web [] [Step.propagate] [Origin.web]
+      (Flow.propagate [Origin.web] [] [Origin.web] (Flow.nil [Origin.web]))
+  have hsecf : Flow untrustedAuthor [] [Origin.secret]
+      [Step.source Origin.web, Step.join [Origin.fs], Step.propagate]
+      [Origin.fs, Origin.web, Origin.secret] :=
+    Flow.source Origin.web [Origin.secret]
+      [Step.join [Origin.fs], Step.propagate]
+      [Origin.fs, Origin.web, Origin.secret]
+      (Flow.join [Origin.fs] [Origin.web, Origin.secret]
+        [Step.propagate] [Origin.fs, Origin.web, Origin.secret]
+        (Flow.propagate [Origin.fs, Origin.web, Origin.secret]
+          [] [Origin.fs, Origin.web, Origin.secret]
+          (Flow.nil [Origin.fs, Origin.web, Origin.secret])))
+  have hweb : Admits Sink.disclosure ([Origin.web] : Label) :=
+    ⟨by decide, by decide⟩
+  refine ⟨⟨hobsf, hweb, ?_, by decide⟩, ⟨hsecf, ?_, ?_, ?_, by decide⟩⟩
+  · exact (secret_noninterference (ρ₁ := inputsA) (ρ₂ := inputsB)
+      (st := observablePath) hobsf
+      ⟨fun _ => by decide, trivial⟩
+      (fun d hd => by simp [observablePath] at hd)
+      ⟨4, []⟩ ⟨4, []⟩ rfl rfl (fun _ => rfl)).2.2 hweb
+  · intro h
+    exact h.1 (by decide)
+  · exact (secret_noninterference (ρ₁ := inputsA) (ρ₂ := inputsA)
+      (st := secretPath) hsecf
+      ⟨fun _ => rfl, fun _ => rfl, trivial⟩
+      (fun d hd => by simp [secretPath] at hd)
+      ⟨7, [Origin.secret]⟩ ⟨9, [Origin.secret]⟩ rfl rfl
+      (fun h => absurd (by decide) h.1)).1
+  · exact (secret_noninterference (ρ₁ := inputsA) (ρ₂ := inputsA)
+      (st := secretPath) hsecf
+      ⟨fun _ => rfl, fun _ => rfl, trivial⟩
+      (fun d hd => by simp [secretPath] at hd)
+      ⟨7, [Origin.secret]⟩ ⟨9, [Origin.secret]⟩ rfl rfl
+      (fun h => absurd (by decide) h.1)).2.1
+
+/-- **The `confidential` proviso is load-bearing.** An ADMITTED
+`endorse[confidential]` on a value labelled `web` and `confidential`
+leaves the foreign `web` origin on the label and makes the output
+observable, and the two runs, entry data 1 against 2, now end with
+different data. The declassifier clears `confidential`, so it is exactly
+the exception `leak_needs_declassifier`
+names, and `endorse_gate_preserves_foreign_origins` keeps `web`. -/
 theorem declassify_breaks_noninterference :
     Flow untrustedAuthor [Origin.confidential]
         [Origin.web, Origin.confidential]
         [Step.declassify endorseConfidential] [Origin.web] ∧
-    declassifiersOf [Step.declassify endorseConfidential] =
-        [endorseConfidential] ∧
-    (exec [Step.declassify endorseConfidential]
-        ⟨0, 1, [Origin.web, Origin.confidential]⟩).pub = 1 ∧
-    (exec [Step.declassify endorseConfidential]
-        ⟨0, 2, [Origin.web, Origin.confidential]⟩).pub = 2 ∧
-    (exec [Step.declassify endorseConfidential]
-        ⟨0, 1, [Origin.web, Origin.confidential]⟩).pub ≠
-      (exec [Step.declassify endorseConfidential]
-        ⟨0, 2, [Origin.web, Origin.confidential]⟩).pub ∧
-    Origin.web ∈ (exec [Step.declassify endorseConfidential]
-        ⟨0, 0, [Origin.web, Origin.confidential]⟩).label := by
-  refine ⟨?_, rfl, rfl, rfl, by decide, ?_⟩
+    Admits Sink.disclosure ([Origin.web] : Label) ∧
+    Clears endorseConfidential Origin.confidential ∧
+    (execV inputsA [VStep.declassify endorseConfidential]
+        ⟨1, [Origin.web, Origin.confidential]⟩).data ≠
+      (execV inputsA [VStep.declassify endorseConfidential]
+        ⟨2, [Origin.web, Origin.confidential]⟩).data ∧
+    Origin.web ∈ (execV inputsA [VStep.declassify endorseConfidential]
+        ⟨1, [Origin.web, Origin.confidential]⟩).label := by
+  refine ⟨?_, ⟨by decide, by decide⟩, by decide, by decide, ?_⟩
   · exact Flow.declassify endorseConfidential
       [Origin.web, Origin.confidential] [] [Origin.web]
       ⟨fun _ => rfl, by decide, by decide⟩
       (Flow.nil [Origin.web])
   · exact endorse_gate_preserves_foreign_origins
-      (st := [Step.declassify endorseConfidential])
+      (st := [VStep.declassify endorseConfidential])
       (o := Origin.confidential) (o' := Origin.web)
-      (v := ⟨0, 0, [Origin.web, Origin.confidential]⟩)
       (by
         intro d hd
         rw [List.mem_singleton] at hd
         cases hd
         rfl)
       (by decide) (by simp)
+
+/-- An `endorse[secret]`, which `kindOK` refuses. -/
+def secretEndorse : Declassifier := ⟨.endorse Origin.secret, true⟩
+
+/-- **The `Flow` hypothesis is load-bearing.** The `endorse[secret]` step
+is not an admitted flow under any profile and grants
+(`endorse_secret_refused`), yet `execV` runs it: it takes `secret` off the
+label, so the output is observable, and the two runs, entry data 1 against
+2, end with different data. Dropping `hf` from `secret_noninterference`
+would make it false. -/
+theorem unadmitted_secret_endorse_breaks_noninterference :
+    (∀ (P : Profile) (G : Grants) (out : Label),
+        ¬ Flow P G [Origin.secret] [Step.declassify secretEndorse] out) ∧
+    Admits Sink.disclosure
+      (execV inputsA [VStep.declassify secretEndorse]
+        ⟨1, [Origin.secret]⟩).label ∧
+    (execV inputsA [VStep.declassify secretEndorse]
+        ⟨1, [Origin.secret]⟩).data ≠
+      (execV inputsA [VStep.declassify secretEndorse]
+        ⟨2, [Origin.secret]⟩).data := by
+  refine ⟨?_, ⟨by decide, by decide⟩, by decide⟩
+  intro P G out hf
+  cases hf with
+  | declassify _ _ _ _ hok _ => exact endorse_secret_refused hok
 
 end RevL.G9
