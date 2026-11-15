@@ -24,7 +24,9 @@ Usage:
 
     python tools/pin_workflow_actions.py            # report every pin
     python tools/pin_workflow_actions.py --check    # exit 1 on a bad pin or a pin
-                                                    # that is not its tag's commit
+                                                    # that is not its tag's commit,
+                                                    # 2 if the API cannot be read;
+                                                    # no staleness report (cheap)
     python tools/pin_workflow_actions.py --write    # rewrite pins in place
     python tools/pin_workflow_actions.py --strict   # a newer release is a failure
 
@@ -40,6 +42,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -56,7 +59,17 @@ SEMVER = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 API = "https://api.github.com"
 
 
+class ApiUnavailable(RuntimeError):
+    """The GitHub API could not be read (network failure, rate limit, 5xx)."""
+
+
+ATTEMPTS = 3
+BACKOFF_SECONDS = 2.0
+
+
 def _get(path: str) -> object | None:
+    """GET `path`; None on 404. A transient failure is retried, then raised as
+    `ApiUnavailable` so `main` can say so instead of printing a traceback."""
     request = urllib.request.Request(f"{API}{path}")
     request.add_header("Accept", "application/vnd.github+json")
     request.add_header("X-GitHub-Api-Version", "2022-11-28")
@@ -64,13 +77,23 @@ def _get(path: str) -> object | None:
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     if token:
         request.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return json.load(response)
-    except urllib.error.HTTPError as error:
-        if error.code == 404:
-            return None
-        raise
+    for attempt in range(ATTEMPTS):
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                return None
+            # 403 is how an exhausted rate limit answers; 422 is a real answer
+            # `_is_commit` handles, so it is not retried.
+            if error.code not in (403, 429) and error.code < 500:
+                raise
+            failure = f"HTTP {error.code}"
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            failure = str(getattr(error, "reason", None) or error)
+        if attempt + 1 < ATTEMPTS:
+            time.sleep(BACKOFF_SECONDS * (2**attempt))
+    raise ApiUnavailable(f"{path}: {failure}")
 
 
 def _is_commit(repo: str, sha: str) -> bool:
@@ -87,6 +110,12 @@ def _is_commit(repo: str, sha: str) -> bool:
         if error.code == 422:
             return False
         raise
+
+
+def _is_commit_cached(repo: str, sha: str, cache: dict[tuple[str, str], bool]) -> bool:
+    if (repo, sha) not in cache:
+        cache[(repo, sha)] = _is_commit(repo, sha)
+    return cache[(repo, sha)]
 
 
 def _tag_commit(repo: str, tag: str) -> str | None:
@@ -151,6 +180,20 @@ def _external_uses() -> list[tuple[Path, re.Match[str]]]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except ApiUnavailable as error:
+        # A pin that could not be verified is not a verified pin, so this fails
+        # the run (exit 2, distinct from a bad pin's 1) rather than passing.
+        print(
+            f"could not reach the GitHub API after {ATTEMPTS} attempts ({error}); "
+            "no pin was reported good or bad",
+            file=sys.stderr,
+        )
+        return 2
+
+
+def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="exit 1 on a bad pin")
     parser.add_argument("--write", action="store_true", help="rewrite pins in place")
@@ -167,6 +210,7 @@ def main(argv: list[str] | None = None) -> int:
     verified = 0
     tag_commits: dict[tuple[str, str], str | None] = {}
     release_tags: dict[str, dict[str, str]] = {}
+    commit_cache: dict[tuple[str, str], bool] = {}
     rewrites: dict[Path, list[tuple[str, str]]] = {}
 
     for path, match in _external_uses():
@@ -196,34 +240,41 @@ def main(argv: list[str] | None = None) -> int:
             rewrites.setdefault(path, []).append((target, f"{repo}@{sha}  # {label}"))
             continue
 
-        if not _is_commit(repo, ref):
+        tag = _recorded_tag(comment)
+        tagged = None
+        if tag is not None:
+            if (repo, tag) not in tag_commits:
+                tag_commits[(repo, tag)] = _tag_commit(repo, tag)
+            tagged = tag_commits[(repo, tag)]
+        if tagged is not None and tagged == ref:
+            # The tag's own peeled commit is a commit in `repo` by construction,
+            # so the `/commits/{sha}` lookup would only repeat the answer.
+            verified += 1
+        elif not _is_commit_cached(repo, ref, commit_cache):
             problems.append(
                 f"{path.name}: `{repo}@{ref}` is not a commit in {repo} -- an "
                 "annotated tag's object sha resolves to nothing at checkout; use "
                 "the PEELED commit"
             )
             continue
-
-        tag = _recorded_tag(comment)
-        if tag is None:
+        elif tag is None:
             unchecked.append(f"{path.name}: {repo}@{ref} ({comment or 'no comment'})")
+        elif tagged is None:
+            problems.append(
+                f"{path.name}: {repo}@{ref} names {tag} in its comment, but "
+                f"{repo} has no tag {tag}"
+            )
         else:
-            if (repo, tag) not in tag_commits:
-                tag_commits[(repo, tag)] = _tag_commit(repo, tag)
-            tagged = tag_commits[(repo, tag)]
-            if tagged is None:
-                problems.append(
-                    f"{path.name}: {repo}@{ref} names {tag} in its comment, but "
-                    f"{repo} has no tag {tag}"
-                )
-            elif tagged != ref:
-                problems.append(
-                    f"{path.name}: {repo}@{ref} is not the commit of {tag}; "
-                    f"{tag} is {tagged}"
-                )
-            else:
-                verified += 1
+            problems.append(
+                f"{path.name}: {repo}@{ref} is not the commit of {tag}; "
+                f"{tag} is {tagged}"
+            )
 
+        # Staleness needs one `/tags` listing per repository, the largest share of
+        # the calls, and `--check` is about whether a pin is right, not whether it
+        # is the newest. So it runs for the plain report and for `--strict` only.
+        if args.check and not args.strict:
+            continue
         line = _pinned_major(comment)
         if line is None:
             continue

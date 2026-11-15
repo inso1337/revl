@@ -455,8 +455,11 @@ jobs:
       # pinned to a 40-hex sha; this proves the sha is the commit of the release
       # its comment names, which needs the API (a read-only GITHUB_TOKEN is
       # enough). A substituted pin, such as a commit from a fork of the action,
-      # is a real commit and answers every other check. Newer releases are only
-      # reported (no `--strict`). Never add `|| true`.
+      # is a real commit and answers every other check. `--check` makes about one
+      # API call per distinct tag (no staleness listing), well inside the job
+      # token's hourly budget. An unreachable API (rate limit, network) is retried,
+      # then exits 2 with a plain message: a pin that could not be verified must
+      # not pass. Never add `|| true`.
       - run: python3 tools/pin_workflow_actions.py --check
         env:
           GITHUB_TOKEN: ${{ github.token }}
