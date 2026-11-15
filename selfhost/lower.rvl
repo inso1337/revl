@@ -6843,7 +6843,7 @@ type EvlX = { cx: Ctx, sn: List[Str], mode: Str, aq: List[Str], where: Str,
               maps: List[Str] }
 
 fn evl_hit(n: Str, x: EvlX, bound: List[Str]) -> Str {
-  if (x.mode == "acquire" || x.mode == "acquire_fn") {
+  if (evl_acq(x)) {
     if (!contains(x.aq, n) || contains(bound, n)) { return "" }
     return acquire_value_msg(n, x.where)
   }
@@ -6916,9 +6916,9 @@ fn acquire_call_msg(n: Str) -> Str {
 // A bound `effect` in a provide-method body that is neither a `spawn` nor a
 // result-declared verb on a host `Map` (lower.py `_lower_provide`'s LetEffect
 // arm, items 386 and 397).
-fn evl_direct_acquire(s: Stmt, x: EvlX) -> Bool {
-  return x.mode == "acquire" && s.kind == "effect" && s.bind != ""
-    && s.spawnTarget == "" && host_write_verb(s.e, x.maps) != "insert_if_absent"
+fn evl_direct_acquire(kind: Str, bind: Str, target: Str, e: Expr, x: EvlX) -> Bool {
+  return x.mode == "acquire" && kind == "effect" && bind != ""
+    && target == "" && host_write_verb(e, x.maps) != "insert_if_absent"
 }
 
 fn evl_list(xs: List[Expr], i: Int, x: EvlX, bound: List[Str]) -> Str {
@@ -6968,7 +6968,9 @@ fn evl_blk(ls: List[ArmLetN], i: Int, tail: Expr, x: EvlX, bound: List[Str]) -> 
 // gate cannot tell which arm a read sits in, so a read in ANOTHER arm of the
 // same `match` is judged as if the arm's `let` were in scope: an under-refusal
 // the gate is allowed to give, pinned in tests/test_acquire_call_shapes_2985.py.
-fn evl_acq(x: EvlX) -> Bool { return x.mode == "acquire" || x.mode == "acquire_fn" }
+fn evl_acq(x: EvlX) -> Bool {
+  return x.mode == "acquire" || x.mode == "acquire_fn" || x.mode == "acquire_undo"
+}
 
 fn evl_carry(bound: List[Str], m: Int) -> List[Str] {
   var out = bound.slice(0, m)
@@ -7024,16 +7026,21 @@ fn evl_stmts(ss: List[Stmt], i: Int, x: EvlX, bound: List[Str], marks: List[Int]
   // (`_host_acquire_root`). Its call spelling is already skipped by
   // `evl_call`; a bare-name root (`let h = effect open_sock`) is skipped here so
   // it keeps the direct-spelling verdict the gate's own slice decides.
-  if (s.kind == "skip" && starts_with(s.edge, "pat:")) {
+  if (k == "skip" && starts_with(s.edge, "pat:")) {
     return evl_stmts(ss, i + 1, x, bound.push(s.edge.slice(4, s.edge.length())), marks)
   }
-  if (evl_direct_acquire(s, x)) {
+  if (evl_direct_acquire(k, s.bind, s.spawnTarget, s.e, x)) {
     return { msg: "only `spawn` may be acquired inside a provide-method body",
              line: s.line, bound: bound }
   }
   let seen = evl_acq(x) ? evl_visible(bound) : bound
+  // a teardown slot lowers under its own mode in the reference (item 308's
+  // re-mint rule judges a call there), so it is not a stray call
+  let xs: EvlX = x.mode == "acquire" && k == "undo"
+    ? { cx: x.cx, sn: x.sn, mode: "acquire_undo", aq: x.aq, where: x.where,
+        maps: x.maps } : x
   let r = x.mode == "acquire" && k == "effect" ? evl_root(s.e, x, seen)
-    : evl_expr(s.e, x, seen)
+    : evl_expr(s.e, xs, seen)
   if (r != "") { return { msg: r, line: s.line, bound: bound } }
   let next = evl_acq(x) ? evl_uncarry(bound) : bound
   return evl_stmts(ss, i + 1, x, s.bind == "" ? next : next.push(s.bind), marks)

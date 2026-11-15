@@ -10898,7 +10898,11 @@ def _lower_component_pure_expr_node(expr, env: Env, scope: dict[str, str],
                     # body of an arrow) cannot buy the reach the bracket does
                     # not have: no effect step is built, so the declared
                     # `undo` is never registered.
+                    # A teardown slot (`undo`) or an `emit` expression lowers
+                    # under its own mode and keeps its own rules (item 308,
+                    # the re-mint refusal), as the witnessed rule above does.
                     if (getattr(env, "in_provide_method", False)
+                            and getattr(env, "_expr_mode", "setup") == "setup"
                             and (getattr(env, "extern_class", None) or {})
                             .get(name) == "acquire"):
                         raise _acquire_call_refusal(name, filename, line)
