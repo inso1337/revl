@@ -233,7 +233,7 @@ because a ref lives in the tree the candidate can rewrite. The record's `base`
 must name that same commit: no operator base is `NO_BASE` and a different commit
 is `BASE_MOVED` (the verdict lists the paths between the two). The scorecard
 and the controller verdict record `base_commit`, `base_pin` and `base_source`.
-The changed set itself is read by `measured_paths`, which the controller imports,
+The changed set itself is read by `measured_paths`, which the controller and the progress counter import,
 and nothing in it asks the candidate's git what changed. The base is read with
 replace refs off, so `git replace` cannot make it mean the candidate's own
 commit. The index is a fresh temporary one read from the base, so
