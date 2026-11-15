@@ -238,24 +238,33 @@ def test_an_abort_restores_the_key(drops):
 @needs_cordis
 def test_the_3381_repro_still_reports_one_not_reversed_per_key_per_generation():
     """Two writes of every key a generation, so each key has a record that is
-    coalesced; the verdict is the one an uncoalesced replay gives."""
+    coalesced; the verdict is the one an uncoalesced replay gives. The records
+    are read from each swap's answer, where #3381 delivers them, and the
+    driver's list is drained, so `unload` has nothing left to report."""
     session = _session(MIND)
     ir = compile_source(MIND, "c.rvl")
+    driver = session._driver
     counts = []
+    reported = []
     for generation in range(3):
         for k in range(5):
             session.call("mind", "set", [k, 10 * generation + k], raw=True)
             session.call("mind", "set", [k, 100 * generation + k], raw=True)
-        session.swap(ir, agent_authored=False)
-        counts.append(len(session._driver._compensation_residue))
+        said = session.swap(ir, agent_authored=False)
+        reported += said["compensationResidue"]
+        counts.append(len(reported))
+        assert driver._compensation_residue == []
     assert counts == [0, 5, 10]
-    messages = _messages(session._driver._compensation_residue)
+    messages = _messages(reported)
     for k in range(5):
         assert sum(f"key {k} " in m for m in messages) == 2, messages
     # the second generation's key 3 was carried as 3 and left absent
     assert any("key 3 held 3 before the first bracketed `insert` of it and "
                "absent" in m for m in messages), messages
-    session.unload()
+    report = session.unload()
+    assert report["noResidue"] is True
+    assert report["compensationResidue"] == []
+    assert driver._compensation_residue == []
 
 
 @needs_cordis
