@@ -1214,7 +1214,8 @@ class _Generator:
             extern = f"a2a_{self.key}_{name}"
             body = a2a_task.task_body(suffix, self.card.endpoint, skill_id,
                                       follow_redirects=self.follow_redirects,
-                                      label=self.key, rest=self._rest)
+                                      label=self.key, rest=self._rest,
+                                      push=False)
             externs.append(
                 f"extern emission[{self.card.net_cap}] fn {extern}({sig}) "
                 f"-> Untrusted[{ret}]\n  = @py {{\n    _args = [{', '.join(names)}]\n"

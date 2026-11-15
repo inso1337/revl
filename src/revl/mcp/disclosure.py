@@ -53,6 +53,11 @@ DISCOVERY = "revl_verbs"
 #:   model that is not shown it cannot finish the loop without first learning
 #:   the hatch, and #2625 measured the prompt that taught it against the schema;
 #: * the way to everything else, `revl_verbs`.
+#:
+#: The apply-repair verb of issue #2855 is deliberately NOT a core member: the
+#: tier is capped, and the refusal that mints a repair names the call in `next`
+#: (`{"tool": "revl_apply_repair", "arguments": {"repairId": ...}}`), so the
+#: caller that needs it is the one that was told it exists.
 CORE = ("revl_resolve", "revl_scaffold", "revl_edit", "revl_query_withdraw",
         "revl_check", "revl_admit", "revl_plan", "revl_explain",
         "revl_load", "revl_call", "revl_swap",
@@ -61,12 +66,13 @@ CORE = ("revl_resolve", "revl_scaffold", "revl_edit", "revl_query_withdraw",
 
 #: `{topic: (what it is for, verbs)}`, in docs/mcp-reference.md's order.
 TOPICS: dict[str, tuple[str, tuple[str, ...]]] = {
-    "author": ("check, admit, plan, select tests and ship a candidate; the loop's "
-               "compact next-step answer; grammar, scaffold, format and explain", (
-        "revl_brief", "revl_check", "revl_admit", "revl_plan",
-        "revl_affected_tests", "revl_ship", "revl_deploy", "revl_audit",
-        "revl_tools", "revl_grammar", "revl_scaffold", "revl_fmt",
-        "revl_explain", "revl_idiom")),
+    "author": ("check, admit, plan, select tests and ship a candidate; apply "
+               "a refusal's repair; the loop's compact next-step answer; "
+               "grammar, scaffold, format and explain", (
+        "revl_brief", "revl_check", "revl_apply_repair", "revl_admit",
+        "revl_plan", "revl_affected_tests", "revl_ship", "revl_deploy",
+        "revl_audit", "revl_tools", "revl_grammar", "revl_scaffold",
+        "revl_fmt", "revl_explain", "revl_idiom")),
     "update": ("check the operator's release feed and apply a verified release "
                "to the running composition through the admission gate", (
         "revl_update_check", "revl_update_apply", "revl_update_status",
@@ -196,6 +202,23 @@ def hatch(arguments: dict) -> tuple[str, dict, str, dict]:
         return verb, {}, (f"`{HATCH_ARGS}` must be an object of the verb's "
                           f"arguments; got {_kind(args)}"), {}
     return verb, args, "", {}
+
+
+def resolved_call(params) -> tuple[object, object]:
+    """The `(verb, arguments)` a `tools/call` is, with the hatch resolved.
+
+    A `revl_verbs` hatch call IS the call it names (issue #2073), so a rule
+    keyed on the verb or its arguments (the cast rule of issue #979, the
+    E-Stop fast path, the per-parameter headers) has to see the inner verb
+    and its `args`, not the discovery tool. A call that is not a well formed
+    hatch resolves to itself: the server refuses a malformed hatch by name."""
+    params = params if isinstance(params, dict) else {}
+    name, arguments = params.get("name"), params.get("arguments")
+    if name == DISCOVERY and isinstance(arguments, dict) and is_hatch(arguments):
+        verb, args, reason, _next = hatch(arguments)
+        if not reason:
+            return verb, args
+    return name, arguments
 
 
 def _kind(value) -> str:

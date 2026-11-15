@@ -160,7 +160,7 @@ provide   := 'provide' IDENT '{' ('fn' IDENT '(' IDENT* ')' ('=' expr | block))*
 composition := 'composition' IDENT '{' (use | row | remote | place | grant | stack | site)* '}'  -- contextual kw
 row       := 'row' '@' IDENT 'from' STRING 'provides' ('nothing' | IDENT (',' IDENT)*)
              ['component' IDENT]            -- disambiguator; provenance, not identity
-             ['config' '{' (IDENT ':' literal)* '}']  -- checked against the header
+             ['config' '{' (IDENT ':' (literal|'['literal*']'))* '}'] -- checked
              ['granted' '{' IDENT (',' IDENT)* '}']   -- reach allowlist, empty default
 place     := 'place' address 'on' 'process' STRING ['backend' IDENT]   -- which process runs the row
 grant     := 'grant' address 'with' '{' IDENT (',' IDENT)* '}'          -- the `requires` keys a row may reach
@@ -189,7 +189,7 @@ remote    := 'remote' '@' IDENT 'provides' IDENT ':' IDENT       -- key : Servic
 layer     := ['site'] 'layer' IDENT 'for' IDENT '{' (touches | op)* '}'  -- contextual
 touches   := 'touches' address (',' address)*   -- enforced; a layer's reach, readable
 op        := 'add' row | 'remove' address | 'replace' address 'with' row
-           | 'configure' address 'with' '{' (IDENT ':' literal)* '}'
+           | 'configure' address 'with' '{' (IDENT ':' (literal|'['literal*']'))* '}'
            | 'resolve' address 'to' label 'over' label     -- site layer only
            | place | grant                                 -- site layer only, as in a composition
 address   := 'key' '(' STRING [',' 'realm' ':' STRING] ')' | label

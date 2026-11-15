@@ -447,6 +447,14 @@ _GENERATORS = {
     "REVL": _fix_zero_arg_sized_receiver,
 }
 
+#: The diagnostic codes with a mechanical generator at all. The engine still
+#: decides per candidate (the verify gate accepts or drops each rewrite), but a
+#: caller that must know whether a refusal CLASS is mechanically repairable
+#: before trying (the MCP apply-repair verb, issue #2855) reads this rather than
+#: duplicating the dispatch. It is derived from `_GENERATORS`, so adding a code
+#: there makes it applyable everywhere.
+APPLYABLE = frozenset(_GENERATORS)
+
 
 # ----------------------------------------------------------- candidate repairs
 
