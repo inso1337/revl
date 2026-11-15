@@ -104,8 +104,13 @@ stat or read, so it is byte-identical whether or not the file exists. What
 keeps working: a path the caller also supplies in-memory (resolved from the
 sources map, no filesystem involved), the search-path spelling of an
 installed module (`use "stdlib/str.rvl"`, or a `REVL_IMPORT_PATH` entry), a
-relative import that stays inside the admitting directory, and every import
-written in a file read from disk, which a human put there. A trusted author's
+relative import that stays inside the operator's admitting directory, and
+every import written in a file read from disk, which a human put there. For
+the bridge gate (`gate_service.admit`/`admit_structured`) the admitting
+directory is not the operator's: its source keys are paths the CALLER wrote,
+so that directory is not an import root. It passes `disk_relative_use=False`
+and a relative `use` resolves only out of the supplied sources and the
+installed search path (issue #3152). A trusted author's
 compile of the same source (`profile=None`, the CLI, `over_the_transport=
 False`) is untouched. The transport predicate `_escaping_use` delegates to
 `compiler.escaping_use_path`, so the two doors cannot drift apart. Evidence:

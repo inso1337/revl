@@ -38,12 +38,22 @@ _CELL = re.compile(r"(?<!\\)\|")
 _HEADER = re.compile(r"^\|\s*Code\s*\|\s*Formal status\s*\|", re.IGNORECASE)
 _BOLD = re.compile(r"^\*\*(.+?)\*\*")
 
-#: The three verdicts an `Oracle` cell can carry, most specific first. The
-#: cells open with the verdict and then qualify it, e.g. "**yes** (V rows, 2
-#: agree-G2)" or "**yes** for the call-site half"; "no" is the bare word.
-_ORACLE = (("partial", re.compile(r"^\**\s*partial\b", re.IGNORECASE)),
-           ("yes", re.compile(r"^\**\s*yes\b", re.IGNORECASE)),
-           ("no", re.compile(r"^\**\s*no\b", re.IGNORECASE)))
+#: The three verdicts an `Oracle` cell can carry. A cell opens with the verdict
+#: and then qualifies it. `**yes** (V rows, 2 agree-G2)` is a full yes: the
+#: parenthesis only counts rows. `**yes** for the call-site half` is NOT, it
+#: says the row decides a half of the rule, so it reads as partial (A6 is that
+#: row). `**partial**` is partial and a bare `no` is no. Any other opening is
+#: refused rather than guessed, so a new spelling is classified on purpose.
+_PARTIAL = re.compile(r"^\*\*partial\*\*", re.IGNORECASE)
+_YES_QUALIFIED = re.compile(r"^\*\*yes\*\*\s+for\b", re.IGNORECASE)
+_YES = re.compile(r"^\*\*yes\*\*(\s*\(|\s*$)", re.IGNORECASE)
+_NO = re.compile(r"^no\b", re.IGNORECASE)
+
+#: Rows whose other side RUNS rather than reads: G7 drives the reference
+#: runtime over an enumerated teardown corpus, A8 and R4 drive the recovery
+#: code over an enumerated WAL corpus. They are named in the summary only when
+#: the table counts them as reaching the oracle.
+EXECUTING = ("G7", "A8", "R4")
 
 
 def _cells(line: str) -> list[str]:
@@ -65,9 +75,13 @@ def _code(cell: str) -> str:
 
 
 def _oracle(cell: str) -> str:
-    for verdict, pattern in _ORACLE:
-        if pattern.match(cell):
-            return verdict
+    cell = cell.strip()
+    if _PARTIAL.match(cell) or _YES_QUALIFIED.match(cell):
+        return "partial"
+    if _YES.match(cell):
+        return "yes"
+    if _NO.match(cell):
+        return "no"
     raise ValueError(f"unreadable Oracle cell: {cell!r}")
 
 
@@ -107,30 +121,39 @@ def block(text: str) -> str:
         raise ValueError("a row's Oracle cell did not classify")
     body = [
         f"**The oracle reaches {len(yes)} of the {len(rows_)} rows in the table "
-        f"above: {_joined(yes) if yes else 'none'}.**",
+        f"above in full: {_joined(yes) if yes else 'none'}.**",
         "",
     ]
     if partial:
+        verb = "carries a" if len(partial) == 1 else "carry a"
         body += [
-            f"{_joined(partial)} carries a **partial** oracle row: the cell in "
-            "the table says which half is decided on the corpus and which half "
-            "is not.",
+            f"{_joined(partial)} {verb} **partial** oracle row: the row's "
+            "entry in the table says which half is decided on the corpus and "
+            "which half is not.",
             "",
         ]
     if no:
         body += [
             f"The {len(no)} row{'s' if len(no) != 1 else ''} with no oracle row "
-            f"{'are' if len(no) != 1 else 'is'} {_joined(no)}; each Oracle cell "
-            "says what that row is checked against instead.",
+            f"{'are' if len(no) != 1 else 'is'} {_joined(no)}; each row's "
+            "entry in the table says what it is checked against instead.",
             "",
         ]
+    executing = [code for code in EXECUTING if code in yes]
+    other_side = (
+        "An oracle row means `harness/diff_corpus.py` compares the model's "
+        "verdict with the shipped implementation's over the corpus. For most "
+        "rows the other side is the checker, through its verdicts or the "
+        "algebra it calls")
+    if executing:
+        other_side += (
+            f"; for {_joined(executing)} it is the runtime or the recovery "
+            "code, run over an enumerated scenario corpus rather than read "
+            "off the corpus documents")
     body += [
-        "An oracle row means the row's verdict is compared against the shipped "
-        "checker over the corpus by `harness/diff_corpus.py`; it relates the "
-        "model to the checker on the corpus and says nothing about lowering. A "
-        "row without one is checked against the design documents and the "
-        "reference source read by hand, which is weaker, and says so in its "
-        "cell rather than leaving a reader to infer it.",
+        other_side + ". A row without one is checked against the design "
+        "documents and the reference source read by hand, which is weaker, "
+        "and says so in its cell rather than leaving a reader to infer it.",
     ]
     inner = "\n".join(body)
     return f"{BEGIN}\n{inner}\n{END}"

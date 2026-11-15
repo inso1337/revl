@@ -24,14 +24,18 @@ import RevL
 #print axioms RevL.G2.linkOK_requires_closed
 #print axioms RevL.G2.realm_separation_admitted
 #print axioms RevL.G2.same_realm_conflict_refused
--- G2 over the IR image (issue #2739): the invariant stated over the `provides`
--- and sparse `isolate` fields the BACKENDS read, from the same link judgment,
--- with the admitted IR document and the lost-realm mutation as witnesses.
-#print axioms RevL.G2.slots_ofIR
-#print axioms RevL.G2.linkOK_ir_disjoint
-#print axioms RevL.G2.tenants_link_ir
+-- G2 over the IR image (issue #2739): the invariant stated over the lowered
+-- document the BACKENDS read (`provides`, the sparse `isolate` map and the
+-- document's own `templates`), from the source composition's link judgment and
+-- the document keeping the source's slots, with the admitted tenants document
+-- and the lost-realm and template mutations as witnesses.
+#print axioms RevL.G2.source_linkOK_ir_disjoint
+#print axioms RevL.G2.ir_disjoint_iff_source_disjoint
+#print axioms RevL.G2.tenants_ir_kept
 #print axioms RevL.G2.tenants_ir_disjoint
 #print axioms RevL.G2.isolate_entry_is_load_bearing
+#print axioms RevL.G2.lost_realm_is_caught_by_kept
+#print axioms RevL.G2.template_exclusion_is_load_bearing
 
 -- G3: the layering certificate excludes dependency cycles, and the link
 -- judgment supplies the certificate (so the hypothesis is dischargeable).
@@ -43,6 +47,15 @@ import RevL
 #print axioms RevL.G3.self_provision_refused
 #print axioms RevL.G3.mutual_cycle_refused
 #print axioms RevL.G3.layering_exists_for_admitted
+
+-- G2/G3 composition: admitted work stays admitted when later work is
+-- withdrawn (tail closure), and a part each of whose components is
+-- admitted over an admitted base composes with it (extension). The
+-- witnesses pin both the applying and the refusing shape.
+#print axioms RevL.Lemmas.linkOK_append_tail
+#print axioms RevL.Lemmas.linkOK_append_of_admittedOver
+#print axioms RevL.Lemmas.append_compose_witness
+#print axioms RevL.Lemmas.append_conflict_refused
 
 -- G4: every admitted mutation carries an inverse or an emit marker.
 #print axioms RevL.G4.inverse_or_emit
@@ -218,6 +231,14 @@ import RevL
 #print axioms RevL.A8.crash_cut_witness
 #print axioms RevL.A8.commit_witness
 #print axioms RevL.A8.mixed_disposition_admitted
+#print axioms RevL.A8.abort_drops_deferred
+#print axioms RevL.A8.abort_run_drops_deferred
+#print axioms RevL.A8.commit_discharges_deferred
+#print axioms RevL.A8.commit_run_queue_empty
+#print axioms RevL.A8.commit_run_discharges_deferred
+#print axioms RevL.A8.deferred_abort_run
+#print axioms RevL.A8.deferred_commit_run
+#print axioms RevL.A8.deferred_commit_run_from_queued
 #print axioms RevL.A8.revert_witness
 #print axioms RevL.A8.revert_witness_restores
 
@@ -484,6 +505,28 @@ import RevL
 #print axioms RevL.G9Coverage.coversB_refuses_a_walk_that_seeds_a_trusted_param
 #print axioms RevL.G9Coverage.coversB_refuses_a_scope_the_body_does_not_have
 #print axioms RevL.G9Coverage.g9Coverage_not_vacuous
+-- Issue #2744: G1 DECLARED-ACCESS COVERAGE. The `GA`/`G1` row decides the rule
+-- over a component's access roots; this states that the walk which resolves
+-- those roots (the lowering walk) visits every scope, as many statements of
+-- each scope as it declares, and every declared parameter of each scope. See
+-- RevL/Theorems/G1Coverage.lean.
+#print axioms RevL.G1Coverage.coversAccessB_iff
+#print axioms RevL.G1Coverage.scopeParamNames_eq
+#print axioms RevL.G1Coverage.coversAccessBodyB_iff
+#print axioms RevL.G1Coverage.coversAccessB_self
+#print axioms RevL.G1Coverage.walk_covers
+#print axioms RevL.G1Coverage.reachIn_callSvc
+#print axioms RevL.G1Coverage.scope_param_names_keep_every_qualifier
+#print axioms RevL.G1Coverage.witnessBody_scopes
+#print axioms RevL.G1Coverage.witnessBody_is_admitted
+#print axioms RevL.G1Coverage.walkOf_is_the_walk
+#print axioms RevL.G1Coverage.coversAccessB_admits_the_full_walk
+#print axioms RevL.G1Coverage.coversAccessB_refuses_a_walk_that_drops_the_activation_scope
+#print axioms RevL.G1Coverage.coversAccessB_refuses_a_shortened_walk
+#print axioms RevL.G1Coverage.coversAccessB_refuses_a_walk_that_strips_a_param
+#print axioms RevL.G1Coverage.coversAccessB_refuses_a_walk_that_seeds_an_extra_param
+#print axioms RevL.G1Coverage.coversAccessB_refuses_a_scope_the_body_does_not_have
+#print axioms RevL.G1Coverage.g1Coverage_not_vacuous
 -- Issue #1811 group 3: G-RETAIN. The retention rule is decided by the oracle's
 -- `RETAIN` row on the sink, scope and TWO INSTANTS the CHECKER reports — the
 -- harness pins the instant (`REVL_RETENTION_AS_OF`) so the verdict is

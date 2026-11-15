@@ -81,7 +81,7 @@ def test_a_raising_close_reports_residue_and_names_the_pool(monkeypatch):
 @needs_cordis
 def test_with_no_host_trace_the_check_is_unverified_never_clean():
     session = _loaded()
-    del session._driver.host_events          # a driver that captured no host trace
+    del session._driver.host_resources       # a driver that captured no host trace
     report = session.unload()
     assert report["unverified"] == ["hostResources"]
     assert "hostResources" not in report["checks"]

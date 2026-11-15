@@ -68,17 +68,21 @@ def _refusal(src: str) -> str:
 
 # the four bind kinds, each reaching a sink through the value the route bound.
 # (label, service-side operation, provide-method signature, the request value)
+# The operations are emissions, so the query-shaped kinds route with `delete`:
+# issue #3186 refuses `get`/`head` on an emission (a browser can fire a GET from
+# any page without an `Origin`), and `delete` binds the same way without being
+# reachable from a cross-site page.
 _BIND_KINDS = [
-    ("path", '  route get "/notes/{id}"\n'
+    ("path", '  route delete "/notes/{id}"\n'
              "  emission fn get_note(id: Str) -> Str\n",
      "get_note(id)", "id"),
-    ("query", '  route get "/notes"\n'
+    ("query", '  route delete "/notes"\n'
               "  emission fn get_note(limit: Str) -> Str\n",
      "get_note(limit)", "limit"),
     ("body", '  route post "/notes"\n'
              "  emission fn get_note(note: NewNote) -> Str\n",
      "get_note(note)", "note.title"),
-    ("request", '  route get "/notes/{id}"\n'
+    ("request", '  route delete "/notes/{id}"\n'
                 "  emission fn get_note(req: Request) -> Str\n",
      "get_note(req)", "req.path"),
 ]
@@ -117,7 +121,7 @@ def test_the_route_clause_alone_is_what_flips_the_verdict():
         "      return id\n"
         "    }\n"
     )
-    routed = _app('  route get "/notes/{id}"\n'
+    routed = _app('  route delete "/notes/{id}"\n'
                   "  emission fn get_note(id: Str) -> Str\n", handler)
     unrouted = _app("  emission fn get_note(id: Str) -> Str\n", handler)
 
@@ -130,7 +134,7 @@ def test_the_pre_existing_web_rule_still_refuses():
     """Non-vacuity of the rule the stamp sits beside: `emission[web]` -> sink
     still refuses, and names its own origin."""
     src = _app(
-        '  route get "/notes"\n'
+        '  route delete "/notes"\n'
         "  emission fn get_note(url: Str) -> Str\n",
         "    fn get_note(url) {\n"
         "      let page = emit fetch(url)\n"
@@ -151,7 +155,7 @@ def test_a_routed_input_reaching_an_ordinary_emission_is_admitted():
     """A request value that reaches only an emission which grants nothing is
     admitted — the stamp does not make every routed handler refuse."""
     src = _app(
-        '  route get "/notes"\n'
+        '  route delete "/notes"\n'
         "  emission fn list_notes(q: Str) -> Str\n",
         "    fn list_notes(q) {\n"
         "      emit save(q)\n"
@@ -167,7 +171,7 @@ def test_endorse_input_declassifies_a_routed_input():
     """The one way out is the audited `endorse[input]` expression, declared on
     the operation and applied to the value."""
     src = _app(
-        '  route get "/notes/{id}"\n'
+        '  route delete "/notes/{id}"\n'
         "  endorse[input] emission fn get_note(id: Str) -> Str\n",
         "    fn get_note(id) {\n"
         '      let safe = endorse[input](id, reason = "operator-reviewed")\n'
@@ -186,7 +190,7 @@ def test_a_declared_qualifier_on_a_routed_parameter_survives_the_stamp():
     label, its origin would become `input` and the disclosure refusal would not
     fire."""
     src = _app(
-        '  route get "/notes/{id}"\n'
+        '  route delete "/notes/{id}"\n'
         "  emission fn get_note(key: Secret[Str]) -> Str\n",
         "    fn get_note(key) {\n"
         "      emit save(key)\n"

@@ -7,11 +7,16 @@ non-ASCII decodes to different characters on Windows, so a compare, parse or
 re-emit that depends on the characters is wrong. #2639 is the same defect on
 `Path.read_text()`; this guard covers the builtin and `Path.open()`.
 
-THE RULE. Two calls are in scope:
+THE RULE. Three calls are in scope:
 
 * a call to the builtin `open` in text mode with no encoding;
 * a call to `.open` whose receiver resolves to `pathlib.Path` from evidence in
-  the same file, in text mode with no encoding.
+  the same file, in text mode with no encoding;
+* a builtin `open` in text mode with no encoding inside a `python -c "..."`
+  (or `python3 -c '...'`) command embedded in a string. That generated
+  subprocess is still code a user runs, so it takes the same platform default.
+  Only a snippet that parses as Python is examined, and only the builtin is
+  claimed there; a shell fragment that merely follows `-c` is not guessed at.
 
 Text mode means the mode argument is absent or a string literal that does not
 contain `b`, read positionally or from the `mode` keyword. An encoding is named
@@ -59,6 +64,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -170,6 +176,29 @@ def _encoding_state(call: ast.Call, positional_index: int):
     if len(call.args) > positional_index:
         return not _names_no_encoding(call.args[positional_index])
     return False
+
+
+_PYTHON_C = re.compile(
+    r"""python(?:3(?:\.\d+)?)?\s+-c\s+("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')""")
+
+
+def _python_c_snippets(text: str):
+    """The code a `python -c` command in `text` hands to the interpreter.
+
+    The command is generated text, but it is still code that runs, so a
+    text-mode `open()` inside it takes the same platform default. A fragment
+    that does not parse as Python is not guessed at.
+    """
+    for match in _PYTHON_C.finditer(text):
+        quoted = match.group(1)
+        body = quoted[1:-1]
+        if quoted[0] == '"':
+            # A double-quoted shell argument escapes its inner quotes.
+            body = re.sub(r'\\(["\\])', r"\1", body)
+        try:
+            yield ast.parse(body)
+        except SyntaxError:
+            continue
 
 
 class FileResolution:
@@ -329,6 +358,29 @@ class FileResolution:
                 self.path_names.add(parameter.arg)
 
 
+def _scan_generated(snippet, relative, lineno, findings, inventory):
+    """Report a text-mode builtin `open()` inside a generated `python -c`."""
+    for node in ast.walk(snippet):
+        if not isinstance(node, ast.Call) or not _is_builtin_open(node.func):
+            continue
+        mode, is_literal = _mode(node, 1)
+        encoding = _encoding_state(node, 3)
+        if encoding is True:
+            continue
+        if is_literal and "b" in mode:
+            continue
+        inventory["generated_text"] += 1
+        inventory["violations"] += 1
+        if encoding is None:
+            detail = "passes **kwargs, so the encoding is unproven"
+        elif not is_literal:
+            detail = "mode is not a literal, treated as text"
+        else:
+            detail = "no encoding in text mode"
+        findings.append(f"{relative}:{lineno}: generated python -c: "
+                        f"builtin open(): {detail}. {REASON}")
+
+
 def scan(root: Path):
     """(findings as `file:line: reason`, inventory dict, attribute calls seen)."""
     findings: list[str] = []
@@ -343,6 +395,8 @@ def scan(root: Path):
         "path_text": 0,
         "path_text_enc": 0,
         "path_binary": 0,
+        "generated_snippets": 0,
+        "generated_text": 0,
         "violations": 0,
     }
     for path in source_files(root):
@@ -394,6 +448,12 @@ def scan(root: Path):
                 inventory["violations"] += 1
                 findings.append(f"{relative}:{node.lineno}: Path.open(): "
                                 f"no encoding in text mode. {REASON}")
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                continue
+            for snippet in _python_c_snippets(node.value):
+                inventory["generated_snippets"] += 1
+                _scan_generated(snippet, relative, node.lineno, findings, inventory)
     return findings, inventory, inventory["attr_open"]
 
 
@@ -585,3 +645,47 @@ def test_a_dynamic_mode_or_hidden_encoding_is_reported(tmp_path):
     assert findings[1].startswith("a.py:3: "), findings[1]
     assert "**kwargs" in findings[1]
     assert inventory["builtin_text"] == 2
+
+
+def test_a_generated_python_c_snippet_without_an_encoding_fails(tmp_path):
+    # Assembled at runtime so the guard's own tree scan does not flag its
+    # fixture; the temp tree still holds the full command.
+    hint = "`python " + '-c "import sys; open(sys.argv[1])" spec.yaml`'
+    _write(tmp_path, "a.py", "HINT = " + repr(hint) + "\n")
+    findings, inventory, _ = scan(tmp_path)
+    assert len(findings) == 1, findings
+    assert findings[0].startswith("a.py:1: "), findings[0]
+    assert "generated python -c" in findings[0]
+    assert "cp1252" in findings[0]
+    assert inventory["generated_snippets"] == 1
+    assert inventory["generated_text"] == 1
+    assert inventory["violations"] == 1
+
+
+def test_a_generated_python_c_snippet_that_names_an_encoding_passes(tmp_path):
+    hint = ('`python -c "import sys; '
+            'open(sys.argv[1], encoding=\\"utf-8\\")" spec.yaml`')
+    _write(tmp_path, "a.py", "HINT = " + repr(hint) + "\n")
+    findings, inventory, _ = scan(tmp_path)
+    assert findings == [], findings
+    assert inventory["generated_snippets"] == 1
+    assert inventory["generated_text"] == 0
+    assert inventory["violations"] == 0
+
+
+def test_a_generated_snippet_does_not_hide_a_real_call(tmp_path):
+    # Assembled at runtime so the guard's own tree scan does not flag its
+    # fixture; the temp tree still holds the full command.
+    hint = "`python " + '-c "import sys; open(sys.argv[1])" spec.yaml`'
+    _write(tmp_path, "a.py",
+           "HINT = " + repr(hint) + "\n"
+           "\n"
+           "\n"
+           "def load(path):\n"
+           "    with open(path) as handle:\n"
+           "        return handle.read()\n")
+    findings, inventory, _ = scan(tmp_path)
+    assert len(findings) == 2, findings
+    assert inventory["builtin_text"] == 1
+    assert inventory["generated_text"] == 1
+    assert inventory["violations"] == 2

@@ -1,16 +1,16 @@
 """Issue #2537: a response that tells the caller the held source is not on disk
 also hands over the call that writes it.
 
-`revl_export` is not in the listed tier. The server serves it by name, but some
-clients will not emit a direct call to an unlisted name, so the note that says
-"call revl_export" can name a call they do not make without first spending a
-`revl_verbs` lookup. The hatch (#2073) reaches it in one call for every
-client, and a structured `next` (#1691) is followed more reliably than prose.
-So every site that sets a disk note also carries
-`next = revl_verbs {name: "revl_export", args: {}}`, ready, because a disk note
-exists only for a composition loaded from files and its export takes no
-arguments. A `next` the payload already carries is kept. All cases run through
-the real dispatch (`handle()`).
+`revl_export` is a listed verb (issue #2625), so the note that says "call
+`revl_export`" carries that call directly. It used to go through the `revl_verbs`
+hatch (#2073, #2581) while the verb was outside the tier, because some clients
+will not emit a direct call to a name they were not shown; the promotion removed
+the indirection. A structured `next` (#1691) is followed more reliably than
+prose. So every site that sets a disk note also carries
+`next = revl_export {}`, ready, because a disk note exists only for a
+composition loaded from files and its export takes no arguments. A `next` the
+payload already carries is kept. All cases run through the real dispatch
+(`handle()`).
 
 The sites (src/revl/mcp/server.py): `_ride_disk` (the change loop's verbs and
 the check's ride, plus the revert verbs' own note), `_note_session_check_disk`,
@@ -27,7 +27,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from revl.mcp import disclosure, remedy  # noqa: E402
+from revl.mcp import remedy  # noqa: E402
 from revl.mcp import edit as edit_mod  # noqa: E402
 from revl.mcp import export_jail  # noqa: E402
 from revl.mcp import server as server_mod  # noqa: E402
@@ -54,10 +54,8 @@ EDIT = {"anchor": 'term == "a"', "replacement": 'term == "b"'}
 #: applies after EDIT has landed: its anchor survives its own replacement
 FIXED_POINT = {"anchor": 'term == "b"', "replacement": 'term == "b"'}
 
-#: The call the disk note's prose names, as the measured arm handed it over.
-EXPORT_NEXT = {"tool": "revl_verbs",
-               "arguments": {"name": "revl_export", "args": {}},
-               "ready": True}
+#: The call the disk note's prose names: the listed verb, directly (#2625).
+EXPORT_NEXT = {"tool": "revl_export", "arguments": {}, "ready": True}
 
 
 def _call(tool: str, arguments: dict) -> dict:
@@ -161,13 +159,13 @@ def test_a_next_the_payload_already_carries_is_kept(tree):
     assert server_mod._with_export_next({"ok": True})["next"] == EXPORT_NEXT
 
 
-def test_the_handed_over_next_survives_the_hatch_and_exports(tree):
-    """Sent as handed over through a real `revl_verbs` call, the `next` reaches
-    the export: the copy under the export directory holds the edit, and the
-    answer then says disk is in step."""
+def test_the_handed_over_next_exports(tree):
+    """Sent as handed over through a real call, the `next` reaches the export:
+    the copy under the export directory holds the edit, and the answer then
+    says disk is in step."""
     changed = _committed(tree)
     nxt = changed["next"]
-    assert nxt["tool"] == disclosure.DISCOVERY
+    assert nxt["tool"] == "revl_export"
     exported = _call(nxt["tool"], nxt["arguments"])
     assert exported["ok"] is True, exported
     copy = Path(export_jail.export_copy(str(tree["mem"]), server_mod._file_roots()))
