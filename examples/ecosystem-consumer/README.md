@@ -1,4 +1,4 @@
-# agent-ci-gate — a third-party consumer of `revl.gate`
+# agent-ci-gate: a third-party consumer of `revl.gate`
 
 This directory is a standalone project, not part of revl. It has its own
 `pyproject.toml` declaring `revl` as a dependency, and `ci_gate.py` is what a
@@ -21,11 +21,11 @@ Read each clause before reading the code:
    and never registered, loaded, or run.
 
 2. **An admission is not a safety verdict.** `admitted = True` means the
-   candidate type-checks, has no open holes, and its effects are classified
-   — as of the frontier named in `gate_version()['frontier']`. It does **not**
+   candidate type-checks, has no open holes, and its effects are classified,
+   as of the frontier named in `gate_version()['frontier']`. It does **not**
    mean the candidate is sandboxed once it runs: a granted `extern` host body
    is arbitrary host code the gate *surfaced*, not code it neutered. This
-   project stops at "eligible to register" for exactly this reason — it never
+   project stops at "eligible to register" for exactly this reason: it never
    claims a bare admission makes a candidate safe to execute unwitnessed.
 
 3. **Revertible execution is a separate adoption.** The witnessed-effect
@@ -48,7 +48,7 @@ It is deliberately not the same program: that gate issues NO admissions (it
 decides the composition and guarantee layer, not the reference type layer), so
 its consumer has only two decisions, reject on a refusal and escalate on
 everything else. Clause 2's "scoped to the frontier" is not a hypothetical
-across those two directories — `double_tool.rvl` below is admitted here and
+across those two directories: `double_tool.rvl` below is admitted here and
 merely not-refused there.
 
 ## What `ci_gate.py` actually does
@@ -60,7 +60,7 @@ python ci_gate.py candidates/
 Walks `candidates/*.rvl`, admits each file with `revl.gate.admit`, and prints
 one line per candidate: `REGISTER` for an admission, `REFUSE <code> —
 <message>` for a refusal. It logs `gate_version()` once per run, and every
-cached or reported verdict carries the `frontier` that produced it — the
+cached or reported verdict carries the `frontier` that produced it, the
 field a consumer must record with any admission it caches or transmits,
 because a verdict from a different gate tier (a narrower rust or wasm
 frontier, once those ship) is not the same fact as this one.
@@ -70,10 +70,10 @@ The three files under `candidates/` are worked examples, not decoration:
 | file | verdict | why |
 |---|---|---|
 | `double_tool.rvl` | admitted | a complete, self-contained tool component |
-| `leaky_tool.rvl` | refused | `requires`s a service nothing in the file provides — an agent proposing a dependency it was never granted |
-| `draft_tool.rvl` | refused, code `T3` | compiles as a checkable draft (a typed hole is legal to write) but is refused by the SAME admission gate `revl run` applies — proof that `admit` is the real admission decision, not `compile_source` alone |
+| `leaky_tool.rvl` | refused | `requires`s a service nothing in the file provides: an agent proposing a dependency it was never granted |
+| `draft_tool.rvl` | refused, code `T3` | compiles as a checkable draft (a typed hole is legal to write) but is refused by the SAME admission gate `revl run` applies. This proves that `admit` is the real admission decision, not `compile_source` alone |
 
-## `compile_gate.py` — the programmatic-compile half of the surface
+## `compile_gate.py`: the programmatic-compile half of the surface
 
 `ci_gate.py` above uses the ADMIT half of `revl.gate` (a verdict). The promised
 surface also carries `compile_to(source, tier)`, which returns that same verdict
@@ -90,18 +90,18 @@ real target source under `--out` **only for an admission**, prints `REFUSE
 <code> — <message>` for a refusal, and writes nothing for one. The asymmetric
 contract is identical, one field wider:
 
-- a **refusal** is authoritative — `emit.output` is `None`, there is no target
+- a **refusal** is authoritative: `emit.output` is `None`, there is no target
   source to write, and nothing is emitted, written, or run for the candidate;
 - an **admission plus emitted `output`** is a compile-time judgment scoped to
   `gate_version()['frontier']`, **not** a guarantee the emitted program is safe
-  to run unwitnessed — this project stops at "wrote it for a human/operator to
+  to run unwitnessed; this project stops at "wrote it for a human/operator to
   review", never executing what it emits;
 - an **unknown `--tier`** is a control verdict (`UNKNOWN_TIER`), fail closed, so
   a bad tier can never be mistaken for an emission.
 
 `draft_tool.rvl` (the typed-hole draft) is the sharp case: it *compiles* as a
 checkable draft but may never run, so `compile_to` refuses it with the same
-`T3` admission diagnostic `admit` gives and emits nothing — `compile_to` never
+`T3` admission diagnostic `admit` gives and emits nothing; `compile_to` never
 emits target source `admit` would refuse. `tests/test_gate_consumer_compile.py`
 runs this script against a freshly assembled, isolated copy of the packaged
 `revl` (emitters shipped inside it as `revl/backends`, the installed-wheel
@@ -111,7 +111,7 @@ import.
 ## The versioning obligation this project honors
 
 `VerdictCache` in `ci_gate.py` keys every stored verdict on the full
-`gate_version()` triple — `api`, `language`, and `frontier` together, never
+`gate_version()` triple: `api`, `language`, and `frontier` together, never
 `language` alone. A revl release that bumps `language` (a new construct
 admitted or refused differently) invalidates every previously cached verdict
 under the old key automatically: the cache simply has no entry under the new

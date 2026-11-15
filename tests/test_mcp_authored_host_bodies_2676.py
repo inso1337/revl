@@ -365,7 +365,7 @@ def test_restore_stores_provenance_on_the_live_generation_and_history(
                    _OPERATOR_PROVIDER}
     origin = {"source": _CANDIDATE, "modules": modules}
 
-    def restore(_snap, *, profile=None, report=None):
+    def restore(_snap, *, profile=None, report=None, **_kwargs):
         ir = _recompile(origin, admitted_name(_snap), profile=profile,
                         report=report)
         server.SESSION.ir = ir

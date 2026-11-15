@@ -223,6 +223,13 @@ compile error, never a host pass-through ([docs/stdlib-2.0.md](stdlib-2.0.md)):
 | `join(sep)` | List[Str] | elements joined by `sep` |
 | `repeat(n)` | Str | `n` copies concatenated |
 
+## What differs from Python and JavaScript
+
+- Timers (`every`, `after`) fire only when the host calls `Clock.advance(ms)`; time does not pass on its own: [time-coeffect.md](time-coeffect.md).
+- `%` is the truncated remainder (sign of the dividend, so `-3 % 4 == -3`); `a.mod(b)` is the Euclidean one, always in `[0, |b|)`: [arithmetic.md](arithmetic.md).
+- `Map.keys()` comes in ascending string order of the keys (`"1"`, `"10"`, `"100"`), not insertion order: [collections.md](collections.md).
+- A plain string has only the escapes `\"` and `\\`; `"a\nb"` is a backslash and an `n`, not a newline: [strings.md](strings.md).
+
 ## What won't compile
 
 This is the point of the language, each rejection names the guarantee and

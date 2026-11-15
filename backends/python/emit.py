@@ -424,19 +424,24 @@ def _deferred_register_kwargs(ext: dict, args: list) -> str:
 # site both flow through), exactly as it already does for Python keywords. The
 # emitter's bare `len(...)` is untouched and keeps resolving to the builtin.
 #
-# `next` is deliberately ABSENT: it is emitted bare only inside the routed-
-# require router (a self-contained emitted class, item 167), and it is also a
-# common, legitimate revl identifier (a `next` callback parameter, a `next`
-# record field) whose every checked-in use is a local/field that shares no scope
-# with that class. Renaming those would be churn with no collision behind it, so
-# `next` stays off the list until a colliding *module-scope* spelling motivates
-# a narrower guard.
+# `next` is emitted bare only inside the routed-require router (a self-contained
+# emitted class, item 167), but that class's methods resolve `next` through the
+# MODULE globals, so a module-scope `fn next` (or a `type next`) rebinds it for
+# the router too. Issue #3129 also names the other bare references this list
+# missed: `chr` (the `to_char` helper), `IndexError`/`KeyError` (the list/str and
+# map index guards), `AssertionError` (the lifecycle residue check), `setattr`
+# (keyword-named provide-method registration) and the imported `realm_label`
+# (the realm router). They join the same ladder, so a user declaration of any of
+# them is escaped and every emitter reference keeps reaching the runtime name.
+# A local of one of these spellings is renamed too; the ladder is the one
+# module-global rename site, and the churn is a pure injective shift.
 _EMITTED_BUILTINS = frozenset({
-    "AttributeError", "Exception", "OverflowError", "RuntimeError", "TypeError",
-    "abs", "bool", "bytes", "callable", "dict", "float", "getattr", "globals",
-    "hasattr", "hash", "int", "isinstance", "len", "list", "max", "min",
-    "object", "ord", "range", "repr", "reversed", "set", "sorted", "str",
-    "tuple", "type",
+    "AssertionError", "AttributeError", "Exception", "IndexError", "KeyError",
+    "OverflowError", "RuntimeError", "TypeError",
+    "abs", "bool", "bytes", "callable", "chr", "dict", "float", "getattr",
+    "globals", "hasattr", "hash", "int", "isinstance", "len", "list", "max",
+    "min", "next", "object", "ord", "range", "realm_label", "repr", "reversed",
+    "set", "setattr", "sorted", "str", "tuple", "type",
 })
 
 # Type names the python emitter injects at module scope, which a user *type* of
@@ -652,6 +657,26 @@ def _pins(step: dict, slot: str) -> str:
     a body with no such capture stays byte-identical."""
     names = step.get(f"{slot}_captures") or []
     return ", ".join(f"{_mangle(n)}={_mangle(n)}" for n in names)
+
+
+def _coalescable_bracket(step: dict) -> bool:
+    """Whether a provide-method bracket's `undo` is an ABSOLUTE table inverse
+    on a literal or named key (issue #3304, `Frame.adopt_bracket`): `remove`
+    after `insert`, or the #1980 `match prev` restore. Both
+    set the key to a value fixed when the bracket registered, so a frame's
+    older record for the key does the newer one's work. The #2640 computed
+    list-append inverse is `table` too but drops one item from the list it
+    reads at undo time, so it is relative and never coalesced; so is a key the
+    undo would evaluate again (a call)."""
+    if step.get("inverse") != "table":
+        return False
+    acquire, undo = step.get("acquire") or {}, step.get("undo") or {}
+    key = (acquire.get("args") or [None])[0]
+    if not (isinstance(key, dict) and key.get("kind") in ("lit", "name")):
+        return False
+    if undo.get("kind") == "call":
+        return undo.get("method") == "remove"
+    return undo.get("kind") == "match"
 
 
 def _inverse_lambda(step: dict, slot: str, params: str = "") -> str:
@@ -1158,11 +1183,19 @@ _REVL_FTOA_SRC = '''def _revl_ftoa(x):
     return sign + body'''
 
 
-# The total, value-returning division forms (docs/arithmetic.md): same
-# rounding as the faulting operations, Err(reason) at a zero divisor.
+# The total, value-returning forms (docs/arithmetic.md): same value as the
+# faulting operations where it fits, Err(reason) instead of the fault
+# otherwise. `checked_add/sub/mul` answer Err("revl: Int overflow") at the
+# 64-bit edge; the division forms answer Err at a zero divisor (and at the
+# one overflowing quotient).
+_CHECKED_ARITH = ("checked_add", "checked_sub", "checked_mul")
 _CHECKED_DIVS = ("checked_div_trunc", "checked_div_floor",
                  "checked_div_euclid", "checked_mod")
+# Every total form produces a Result, so the Result cases travel with any of
+# them (`_uses_builtin_result`).
+_CHECKED_FORMS = _CHECKED_ARITH + _CHECKED_DIVS
 _DIV_ZERO_MSG = "revl: division by zero"
+_INT_OVERFLOW_MSG = "revl: Int overflow"
 
 # The receiver type a builtin reached through `?.` has: the `optcall` IR node
 # carries no `recv` tag (unlike a `builtin` node, which lowering annotates for
@@ -1739,6 +1772,13 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
             return ("(lambda _revl_m, _revl_k: {kk: vv for kk, vv in "
                     "_revl_m.items() if kk != _revl_k})"
                     f"({target}, {args[0]})")
+        if not _py_plain_key(args[0]):
+            # The key sits in the comprehension's condition, which Python
+            # evaluates once per entry: a call key ran len(m) times (issue
+            # #3344). Pass it as an argument, evaluated once per remove call.
+            return ("(lambda _revl_m, _revl_k: {kk: vv for kk, vv in "
+                    "_revl_m.items() if kk != _revl_k})"
+                    f"({target}, {args[0]})")
         return ("{" + f"kk: vv for kk, vv in {target}.items() "
                 f"if kk != {args[0]}" + "}")
     # Integer division and modulo (docs/arithmetic.md). Python's `//` floors
@@ -1771,12 +1811,12 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
         return f"({target})"
     if method == "to_int32":
         return f"_revl_i32({target})"
-    # The total forms (docs/arithmetic.md): same quotient as the faulting
-    # operation, but a zero divisor yields Err(reason) instead of raising —
-    # the whole point is that a pure fn cannot `fail`, so the error travels
-    # as a value. Ok/Err are the tagged classes emitted when the IR uses
-    # Result (gated in `_uses_builtin_result`).
-    if method in _CHECKED_DIVS:
+    # The total forms (docs/arithmetic.md): same value as the faulting
+    # operation, but an overflow (or a zero divisor) yields Err(reason)
+    # instead of raising — the whole point is that a pure fn cannot `fail`,
+    # so the error travels as a value. Ok/Err are the tagged classes emitted
+    # when the IR uses Result (gated in `_uses_builtin_result`).
+    if method in _CHECKED_FORMS:
         return f"_revl_{method}({target}, {args[0]})"
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): python ints on
     # this tier are already i64-clamped, so str() is the exact decimal. A
@@ -4312,7 +4352,10 @@ class _ComponentEmitter:
                 out.add(indent + 1,
                         f"yield _revl_frame._guard({_inverse_lambda(step, 'undo')}: "
                         f"{self._inverse_expr(step.get('undo'), where)})")
-                out.add(indent, f"_revl_frame.adopt(_revl_ctx.effect({fn}, {self._label(label)!r}))")
+                # issue #3304: an absolute table inverse may be coalesced with
+                # the frame's older record for the same key
+                adopt = "adopt_bracket" if _coalescable_bracket(step) else "adopt"
+                out.add(indent, f"_revl_frame.{adopt}(_revl_ctx.effect({fn}, {self._label(label)!r}))")
         elif kind == "let-effect":
             wit = self._witnessed_extern(step.get("acquire"))
             if wit is not None:
@@ -5482,6 +5525,16 @@ def _py_inplace_write(node: dict) -> dict | None:
     return value if value.get("method") in _PY_INPLACE_METHODS else None
 
 
+def _py_plain_key(key: str) -> bool:
+    """A rendered key that is a bare name or a number: re-evaluating it per
+    comprehension entry costs nothing and has no effect (issue #3344). The
+    comprehension's own loop variables `kk` and `vv` are not plain: a user name
+    spelled that way would be captured by them."""
+    return key not in ("", "kk", "vv") and all(
+        c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
+        for c in key)
+
+
 # The persistent methods with an in-place equivalent, and their arity, kept
 # here because `_py_inplace_stmts` renders one statement per method.
 _PY_INPLACE_METHODS = {"push": 1, "set": 2, "remove": 1}
@@ -6331,7 +6384,7 @@ def _find_host_roots(nodes) -> set[str]:
 def _uses_builtin_result(ir: dict) -> bool:
     """True if the IR constructs or matches the built-in Result (Ok/Err) —
     an `adt` node typed Result, a `match` arm on Ok/Err, or a call to one of
-    the total division forms (which *produce* a Result). Used to decide
+    the total forms (which *produce* a Result). Used to decide
     whether the module needs the built-in Result cases, which it now IMPORTS
     from the shared runtime (`_builtin_result_imports`, issue #1932): the gate
     is dead-code hygiene — a module that never builds or matches a `Result`
@@ -6344,7 +6397,7 @@ def _uses_builtin_result(ir: dict) -> bool:
             if node.get("kind") == "match":
                 if any(arm.get("pattern") in ("Ok", "Err") for arm in node.get("arms") or []):
                     return True
-            if node.get("method") in _CHECKED_DIVS:
+            if node.get("method") in _CHECKED_FORMS:
                 return True
             return any(walk(v) for v in node.values())
         if isinstance(node, list):
@@ -7530,33 +7583,40 @@ def emit(ir: dict) -> str:
                    'so dispatch on the payload."""')
         out.add(0, "    return _revl_ftoa(v) if isinstance(v, float) else str(v)")
         out.add(0)
-    for checked in _CHECKED_DIVS:
+    for checked in _CHECKED_FORMS:
         if checked not in _scan.builtins:
             continue
-        # The total forms (docs/arithmetic.md): the same quotient as the
-        # faulting operation, but a zero divisor yields Err(reason) instead of
-        # raising — a pure fn cannot `fail`, so the error travels as a value.
-        quotient = {
-            "checked_div_trunc":
-                "abs(a) // abs(b) if (a < 0) == (b < 0) else -(abs(a) // abs(b))",
-            "checked_div_floor": "a // b",
-            "checked_div_euclid": "a // b if b > 0 else -(a // -b)",
-            "checked_mod": "a % abs(b)",
-        }[checked]
+        # The total forms (docs/arithmetic.md): the same value as the faulting
+        # operation where it fits, Err(reason) instead of the fault otherwise
+        # — a pure fn cannot `fail`, so the error travels as a value.
         out.add(0, f"def _revl_{checked}(a, b):")
-        out.add(0, f'    """Total `{checked[len("checked_"):]}`: a zero divisor '
-                   'is Err(reason), never a raise."""')
-        out.add(0, "    if b == 0:")
-        out.add(0, f"        return Err({_DIV_ZERO_MSG!r})")
-        out.add(0, f"    q = {quotient}")
+        if checked in _CHECKED_DIVS:
+            out.add(0, f'    """Total `{checked[len("checked_"):]}`: a zero divisor '
+                       'is Err(reason), never a raise."""')
+            out.add(0, "    if b == 0:")
+            out.add(0, f"        return Err({_DIV_ZERO_MSG!r})")
+            value = {
+                "checked_div_trunc":
+                    "abs(a) // abs(b) if (a < 0) == (b < 0) else -(abs(a) // abs(b))",
+                "checked_div_floor": "a // b",
+                "checked_div_euclid": "a // b if b > 0 else -(a // -b)",
+                "checked_mod": "a % abs(b)",
+            }[checked]
+        else:
+            out.add(0, f'    """Total `{checked[len("checked_"):]}`: an overflow '
+                       'is Err(reason), never a raise."""')
+            value = {"checked_add": "a + b", "checked_sub": "a - b",
+                     "checked_mul": "a * b"}[checked]
+        out.add(0, f"    v = {value}")
         if checked == "checked_mod":
             # a remainder cannot leave the range its operands are already in
-            out.add(0, "    return Ok(q)")
+            out.add(0, "    return Ok(v)")
         else:
-            # a quotient of 2^63 (Int.MIN/-1) does not fit i64 -> Err, not a value
-            out.add(0, "    if -(2**63) <= q <= 2**63 - 1:")
-            out.add(0, "        return Ok(q)")
-            out.add(0, "    return Err('revl: Int overflow')")
+            # an Int result that leaves i64 (an overflowing product, or the one
+            # overflowing quotient Int.MIN/-1) does not fit -> Err, not a value
+            out.add(0, "    if -(2**63) <= v <= 2**63 - 1:")
+            out.add(0, "        return Ok(v)")
+            out.add(0, f"    return Err({_INT_OVERFLOW_MSG!r})")
         out.add(0)
     if _scan.float_interp:
         # Canonical Float -> Str (docs/strings.md): the ECMAScript
