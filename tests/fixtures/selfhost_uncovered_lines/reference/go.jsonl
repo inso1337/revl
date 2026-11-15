@@ -30,7 +30,7 @@
 
 ["function", "blocking-tier-stream-and-typed-event-runtime-reached", "_stream_stage_arrow", 16, 16]
 
-["reason", "component-effect-undo-frame-and-witnessed-wal-emission", "Component effect/undo frame and witnessed-WAL emission: activation/provide methods register inverses, pin captures and encode residue/teardown descriptors. None is a pure-function step in the accepted selfhost corpus; witnessed runtime support, including secret-witness redaction, remains outside this port. Issue #106, fifth slice: the combined path's method-emit documents (comp_provide_emit.rvl and four tree documents) run more of this; the counts are lowered in place. Issue #2009 adds six statements here: a bracket's forward write to the host Map is wrapped in `revlJournalNote(...)` before it runs and its `undo` in `revlJournalGuard(...)`, so the undo is judged with the journal re-armed (py `Frame._guard`, backends/python/runtime.py:3690)."]
+["reason", "component-effect-undo-frame-and-witnessed-wal-emission", "Component effect/undo frame and witnessed-WAL emission: activation/provide methods register inverses, pin captures and encode residue/teardown descriptors. None is a pure-function step in the accepted selfhost corpus; witnessed runtime support, including secret-witness redaction, remains outside this port. Issue #106, fifth slice: the combined path's method-emit documents (comp_provide_emit.rvl and four tree documents) run more of this; the counts are lowered in place. Issue #2009 adds six statements here: a bracket's forward write to the host Map is wrapped in `revlJournalNote(...)` before it runs and its `undo` in `revlJournalGuard(...)`, so the undo is judged with the journal re-armed (py `Frame._guard`, backends/python/runtime.py:3690). Issue #3217 adds two statements to `_wal_referent`: in secret mode the stringified witness is read through `revlRedactText` before the WAL record, so a witness that quotes a registered value is scrubbed (pinned by tests/test_go_wal_witness_scrub_3217.py)."]
 
 ["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_body_needs_frame", 5, 5]
 
@@ -48,7 +48,7 @@
 
 ["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_teardown_preamble", 2, 2]
 
-["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_wal_referent", 3, 3]
+["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_wal_referent", 5, 5]
 
 ["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_witnessed_extern", 5, 5]
 
