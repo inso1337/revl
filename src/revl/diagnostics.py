@@ -273,6 +273,19 @@ OTHER_CODES = {
         "fix": "admit the turn again against the live generation to get a "
                "handle onto it",
     },
+    "ARGS": {
+        "category": "session",
+        "guarantee": "a call's arguments have the parameter types the service "
+                     "declares",
+        "meaning": "an argument of `Session.call` does not have the declared "
+                   "parameter type (a record missing a field, a value of the "
+                   "wrong kind, too many or too few arguments), so the call "
+                   "was refused before the method ran (issue #3345)",
+        "fix": "pass a value of the declared type: the message names the "
+               "method, the parameter and the path of the first mismatch; a "
+               "caller whose arguments came from the session itself can pass "
+               "`check=False`",
+    },
     "STALE_ARTIFACT": {
         "category": "session",
         "guarantee": "a content handle names text minted in the current unit "
