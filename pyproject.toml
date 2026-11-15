@@ -199,8 +199,8 @@ exclude = [
 ]
 
 # The one place tracked content sits UNDER an ignore rule. `.gitignore:36` is
-# `backends/typescript/tests/generated/` — the TS harness writes throwaway
-# modules there — but nineteen fixtures in that directory were force-added and
+# `backends/typescript/tests/generated/` (the TS harness writes throwaway
+# modules there) but nineteen fixtures in that directory were force-added and
 # ARE tracked. Without this, hatchling's ignore handling drops them from the
 # sdist, and a wheel built out of that sdist (`pip install revl-2.0.0.tar.gz`)
 # comes out nineteen files short of one built in a checkout.

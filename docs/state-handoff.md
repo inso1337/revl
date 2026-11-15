@@ -174,8 +174,10 @@ contract:
   a successor that fails to activate or a vector that cannot be seated: the
   half-loaded successor is disposed, the predecessor reloaded and its captured
   state re-seated, so the composition keeps serving and nothing is dropped. A
-  rollback that itself fails (`SwapRollbackFailed`) disposes any half-restored
-  predecessor, so nothing is left plugged and the key has no provider.
+  rollback first disposes the predecessor again, in case its teardown threw
+  part way and left it providing the key. A rollback that itself fails
+  (`SwapRollbackFailed`) disposes any half-restored predecessor, so nothing is
+  left plugged and the key has no provider.
 * **Cold starts.** A successor that declares no hand-off opts out and starts
   cold with no report. A successor that declares the key but is placed in
   another realm, or whose other placed keys differ, starts cold and the report

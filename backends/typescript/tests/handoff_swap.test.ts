@@ -459,4 +459,92 @@ describe('the swap gate refuses a successor that cannot hold the vector', () => 
     // nothing serves the key: no half-restored predecessor stays plugged
     expect((ctx as any).cache).toBeUndefined()
   })
+
+  it('disposes the reloaded predecessor when its restore throws', async () => {
+    // A state-carrying resource whose restore can be armed to fail: the reload
+    // activates cleanly, then the re-seat throws. The half-restored fiber must
+    // be disposed, so the key has no provider and nothing leaks.
+    let armed = false
+    class FlakyResource {
+      __revl_state__(): [string, string][] { return [['alice', '42']] }
+      __revl_restore__(_state: [string, string][]): void {
+        if (armed) throw new Error('restore fault')
+      }
+    }
+    const flaky: HandoffComponent = {
+      name: 'FlakyProvider',
+      inject: [],
+      provide: ['cache'],
+      handoff: { key: 'cache', type: 'Map[Str, Str]' },
+      apply(c: Context) {
+        const frame = new Frame(c, 'FlakyProvider')
+        frame.track(new FlakyResource())
+        c.effect(() => c.provide('cache', {
+          get: (_k: string) => undefined,
+          put: (_k: string, _v: string) => {},
+          version: () => 1n,
+        }))
+      },
+    }
+    const ctx = new Context()
+    const fiber = await plug(ctx, flaky)
+    await flush()
+
+    const exploding: HandoffComponent = {
+      name: 'Exploding',
+      inject: [],
+      provide: ['cache'],
+      handoff: { key: 'cache', type: 'Map[Str, Str]' },
+      apply(_c: Context) { throw new Error('successor activation failed') },
+    }
+    // the successor fails, so the rollback reloads the predecessor, whose
+    // re-seat then throws
+    armed = true
+
+    await expect(swapProvider(ctx, {
+      from: flaky,
+      fiber,
+      to: exploding,
+    })).rejects.toBeInstanceOf(SwapRollbackFailed)
+
+    // the reloaded predecessor activated, then failed to re-seat: it must not
+    // stay plugged and serving
+    expect((ctx as any).cache).toBeUndefined()
+  })
+
+  it('disposes the predecessor again when its teardown threw part way', async () => {
+    const ctx = new Context()
+    const running = placedCache('Serving', undefined, 1n)
+    const fiber = await plug(ctx, running)
+    await flush()
+    fiber.ctx.cache.put('alice', '42')
+    expect(liveResources.size).toBe(1)
+
+    // the first dispose throws BEFORE tearing anything down, so the first
+    // predecessor is still providing when the rollback starts; later calls
+    // delegate to the real teardown
+    let calls = 0
+    const partial = Object.create(fiber, {
+      dispose: {
+        value: async () => {
+          calls += 1
+          if (calls === 1) throw new Error('teardown fault before disposal')
+          return fiber.dispose()
+        },
+      },
+    })
+
+    await expect(swapProvider(ctx, {
+      from: running,
+      fiber: partial,
+      to: placedCache('Next', undefined, 2n),
+    })).rejects.toBeInstanceOf(SwapRejected)
+
+    // exactly one provider is left: the reload, with its state re-seated, and
+    // the first predecessor's Map was dropped rather than leaked
+    expect(ctx.cache.version()).toBe(1n)
+    expect(ctx.cache.get('alice')).toBe('42')
+    expect(liveResources.size).toBe(1)
+    expect(fiberStateName(fiber.state)).toBe('DISPOSED')
+  })
 })

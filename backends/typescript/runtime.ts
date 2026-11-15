@@ -2103,11 +2103,13 @@ export class Frame {
 // module exists. This tier has no MCP session engine and no trusted-proposal
 // path, so the caller contract is the same one every emit has: the successor
 // was admitted against the running manifest. The runtime check here is
-// STRUCTURAL, vector length and each resource's host class, which is the
-// same defence in depth py's session performs, but it cannot re-prove the §5
-// type relation by itself. A same-class retype (a `Map[Str, Str]` successor
-// accepting `Map[Str, Int]`) is admission's to refuse; a host that loads a
-// successor it did not admit is outside this check.
+// stricter and narrower than py's: it cannot re-run the §5 relation, so
+// `swapProvider` requires the two declared hand-off types to be IDENTICAL and
+// refuses any difference before teardown (a widened acceptor that admission
+// would allow is refused at runtime too). Below the declared type it checks
+// the vector structurally, length and each resource's host class, the same
+// defence in depth py's session performs. A host that loads a successor it
+// did not admit is outside this check. See docs/state-handoff.md.
 
 export interface HandoffDecl {
   /** The provided key whose state crosses. */
@@ -2422,6 +2424,16 @@ async function rollBackProviderSwap(
   successor: (Fiber & PromiseLike<Fiber>) | null,
   captured: CapturedResource[],
 ): Promise<void> {
+  // A teardown of the predecessor that threw part way may have left the first
+  // fiber still providing the key. Dispose it again (cordis disposal is
+  // idempotent, so this is a no-op when the teardown completed) before the
+  // reload plugs a second provider next to it.
+  try {
+    await swap.fiber.dispose()
+  } catch {
+    // Nothing more can be done for a fiber that will not tear down; the reload
+    // below reports loudly if the key is still taken.
+  }
   if (successor !== null) {
     try {
       await successor.dispose()
