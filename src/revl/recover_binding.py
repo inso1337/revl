@@ -117,9 +117,9 @@ def declared_deferred(ir: dict) -> frozenset:
     declares: a ``deferred`` extern, which the emitter enqueues under its own
     name as both receiver and method (issue #3234). This is the whole set of
     calls a ``deferred-emission`` record may name."""
-    return frozenset((e["name"], e["name"]) for e in ir.get("externs") or []
-                     if e.get("class") == "emission" and e.get("deferred")
-                     and isinstance(e.get("name"), str))
+    from .session_commit import deferred_extern_names  # noqa: PLC0415
+    return frozenset((name, name) for name in deferred_extern_names(ir)
+                     if isinstance(name, str))
 
 
 def undeclared_deferred(deferred: frozenset, descriptor: dict) -> bool:
