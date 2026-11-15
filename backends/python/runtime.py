@@ -520,10 +520,10 @@ def grammar_honoured_error(value, schema, path: str = "$"):
     escaping are already gone and no recogniser can see them. What is NOT gone is
     member order, because Python preserves a JSON object's key order on load --
     and member order is exactly the thing the GBNF derivation pins (§5) and the
-    thing item 257's validator is blind to. So this check is precisely the DELTA
-    between the two derivations, which makes it the only part worth checking
-    separately: everything else the grammar says about a value, the validator has
-    already said.
+    thing item 257's validator is blind to. Closure and member presence are not
+    part of the delta: the validator requires every declared member and refuses
+    an undeclared one (issue #3196). So the value-observable addition here is
+    member ORDER, which makes it the part worth checking separately.
 
     It is therefore necessary and not sufficient, and §9.5 says so plainly rather
     than letting "the grammar was honoured" read as a proof.
@@ -597,12 +597,15 @@ def _grammar_claim_error(value, schema, grammar):
         # describe member order, and refusing a provider that honoured exactly
         # what it was handed is the false reject §5 forbids.
         #
-        # There is still a residue, and missing it would have been fail-open.
-        # The artifact the provider was handed is the WIRE schema, which is
-        # strictly tighter than the schema item 257 validates against: it closes
-        # the nested objects 257 leaves open and requires every member. So a
-        # json-schema claim is judged against the artifact that was actually
-        # handed over, not against the looser one the validator uses. §10.3.
+        # The claim is judged against the artifact the provider was actually
+        # handed: the WIRE schema, not the (nullable-spelled) schema item 257
+        # validates against. When this seam landed the wire schema was strictly
+        # tighter than the validator's, closing nested records 257 left open, so
+        # skipping this check would have been fail-open. Issue #3196 closed the
+        # record branch of the derived schema, so at value level the two now
+        # agree and this is the named artifact re-checked rather than a stricter
+        # residue. It stays because a claim must be checked against the artifact
+        # it names even when the two derivations coincide. §10.3.
         return _json_schema_error(value, wire.get("schema") or {}, "$")
     return grammar_honoured_error(value, schema)
 

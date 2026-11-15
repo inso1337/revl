@@ -25699,8 +25699,9 @@ fn sc_json(ty: Str, env: ScEnv, seen: List[Str]) -> Str {
   return sc_json_spec(sc_at(env, ty), env, seen.concat([ty]))
 }
 
-// The `properties` order is the declaration order and `required` is SORTED —
-// `json_schema_for` builds a Python dict and `sorted(fields)` a list.
+// The `properties` order is the declaration order, `required` is SORTED and the
+// record is CLOSED — `json_schema_for` builds a Python dict (in that key order)
+// and `sorted(fields)` a list; issue #3196 added `additionalProperties: false`.
 fn sc_json_spec(sp: ScTy, env: ScEnv, seen: List[Str]) -> Str {
   if (sp.kind == "record") {
     var props = ""
@@ -25713,7 +25714,8 @@ fn sc_json_spec(sp: ScTy, env: ScEnv, seen: List[Str]) -> Str {
       i += 1
     }
     return "{\"type\": \"object\", \"properties\": {".concat(props)
-      .concat("}, \"required\": [").concat(str_list_json(sort_strs(names))).concat("]}")
+      .concat("}, \"required\": [").concat(str_list_json(sort_strs(names)))
+      .concat("], \"additionalProperties\": false}")
   }
   if (sp.kind == "variant") {
     var arms = ""
@@ -37655,6 +37657,14 @@ component C provides s: S {
   provide s { fn go(k) = 1 }
 }""")
   assert v == ""
+}
+
+test "a validated record response schema is closed (issue #3196)" {
+  // the reference record branch emits `additionalProperties: false`, so the
+  // self-host producer must too: the grammar and the wire schema always closed
+  // the record, and the validator is what accepted an undeclared member.
+  let ir = lower_to_ir("type Row = { name: Str } service S { emission validated fn get(p: Str) -> Row }")
+  assert str_has(ir, "\"response_schema\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\"}}, \"required\": [\"name\"], \"additionalProperties\": false}")
 }
 
 test "a verified method effect with a site undo is refused (T1)" {

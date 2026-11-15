@@ -408,9 +408,10 @@ def _wire_json_schema(schema: dict) -> dict:
       `Opt` for.
     * an object with `properties` is closed (`additionalProperties: false`) and
       every property is required. The GBNF derivation renders a record as a
-      closed object with every member present, so a wire schema that left the
-      object open would let an honouring provider emit an extra member that the
-      grammar's language excludes.
+      closed object with every member present, and the record branch of
+      `json_schema_for` closes a record too (issue #3196); the rewrite makes the
+      same guarantee for any object reaching here, so a wire schema can never let
+      an honouring provider emit an extra member the grammar's language excludes.
     * `contentEncoding: base64` is dropped and the node stays a plain string.
       This is the one place the dialects genuinely differ and it is not papered
       over: a `Bytes` field is base64-constrained under `gbnf` and merely

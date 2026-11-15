@@ -100,6 +100,32 @@ def test_schema_and_grammar_reject_the_same_extra_field():
         validate_response({**good, "extra": 1}, schema)
 
 
+RECORD_ARG = """
+type Query = { term: Str, limit: Int }
+service Search {
+  fn find(q: Query) -> Bool
+}
+"""
+
+
+def test_a_record_argument_is_a_closed_object():
+    """Issue #3196: `argument_schema` closed only the top-level parameter
+    object, so a record-typed argument accepted members its record does not
+    declare. The grammar already excluded them."""
+    ir = compile_source(RECORD_ARG, "tool.rvl")
+    contract = tool_schema.tool_contract(ir, "Search", "find")
+    schema = contract["schema"]
+    assert schema["properties"]["q"]["additionalProperties"] is False
+    good = {"q": {"term": "x", "limit": 3}}
+    assert validate_response(good, schema) == good
+    with pytest.raises(ResponseValidationError,
+                       match="unexpected property 'approved'"):
+        validate_response({"q": {**good["q"], "approved": True}}, schema)
+    grammar = contract["grammar"]["text"]
+    assert accepts(grammar, json.dumps(good))
+    assert not accepts(grammar, json.dumps({"q": {**good["q"], "approved": True}}))
+
+
 def test_digest_is_stable_and_changes_when_a_parameter_type_changes():
     first = tool_schema.tool_contract(compile_source(PLAIN, "tool.rvl"),
                                      "Files", "read")
