@@ -62,7 +62,7 @@ regenerated rather than edited.
 | backend-ir-v1.md | needs-work | 16 |  |
 | backend-ir-v3.md | needs-work | 0 |  |
 | backend-ir.md | needs-work | 11 |  |
-| backends-roadmap.md | needs-work | 41 |  |
+| backends-roadmap.md | needs-work | 40 |  |
 | bench-selfhost.md | live-owned (not audited) | 49 |  |
 | boundary-policy.md | needs-work | 27 |  |
 | bundle.md | needs-work | 0 |  |
@@ -81,7 +81,7 @@ regenerated rather than edited.
 | context.md | needs-work | 0 |  |
 | contract-errata.md | needs-work | 56 | yes |
 | crash-recovery.md | needs-work | 51 |  |
-| dash.md | current | 9 |  |
+| dash.md | current | 0 |  |
 | delivery-semantics.md | needs-work | 0 |  |
 | deploy.md | needs-work | 12 |  |
 | derived-versioning.md | current | 9 |  |
@@ -166,7 +166,7 @@ regenerated rather than edited.
 | service-compat.md | needs-work | 17 |  |
 | signals-and-queries.md | needs-work | 44 |  |
 | stability.md | needs-work | 0 |  |
-| state-handoff.md | needs-work | 22 |  |
+| state-handoff.md | needs-work | 21 |  |
 | stdlib-2.0.md | current | 0 | yes |
 | stdlib-json.md | needs-work | 56 |  |
 | stdlib-list.md | current | 14 |  |

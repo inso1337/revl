@@ -1545,11 +1545,13 @@ def _v3_builtin(method: object, target: str, args: list[str],
     statically typed `String`. `recv` carries the receiver's static type only
     where the lowering must dispatch on it (`to_int`: the Int32 widen vs the
     Str parse)."""
-    # The total forms (docs/arithmetic.md): same quotient as the faulting
-    # operation, but a zero divisor yields Err(reason) instead of throwing —
+    # The total forms (docs/arithmetic.md): same value as the faulting
+    # operation where it fits, Err(reason) instead of the fault otherwise —
     # `fail` is refused in a pure fn, so the error travels as a value. The
-    # static helpers (emitted by `_emit_checked_div_helpers`) evaluate each
-    # operand exactly once and return a typed RevlResult.
+    # static helpers evaluate each operand exactly once and return a typed
+    # RevlResult.
+    if method in _CHECKED_ARITH:
+        return f"{_CHECKED_ARITH_HELPER[method]}({target}, {args[0]})"
     if method in _CHECKED_DIVS:
         return f"{_CHECKED_HELPER[method]}({target}, {args[0]})"
     if method == "length":
@@ -3519,8 +3521,8 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
 def _uses_builtin_result(ir: dict) -> bool:
     """True if the IR constructs or matches the built-in Result (Ok/Err) — an
     `adt` node typed Result, a match arm on Ok/Err, or a call to one of the
-    total division forms (which produce a Result). Emitted RevlResult is
-    gated on this so non-Result modules and v1 goldens are unaffected."""
+    total forms (which produce a Result). Emitted RevlResult is gated on this
+    so non-Result modules and v1 goldens are unaffected."""
     def walk(node) -> bool:
         if isinstance(node, dict):
             if node.get("kind") == "adt" and str(node.get("type", "")).startswith("Result"):
@@ -3529,7 +3531,7 @@ def _uses_builtin_result(ir: dict) -> bool:
                 a.get("pattern") in ("Ok", "Err") for a in node.get("arms") or []
             ):
                 return True
-            if node.get("method") in _CHECKED_DIVS:
+            if node.get("method") in _CHECKED_FORMS:
                 return True
             return any(walk(v) for v in node.values())
         if isinstance(node, list):
@@ -3602,7 +3604,19 @@ _CHECKED_HELPER = {
     "checked_div_euclid": "revlCheckedDivEuclid",
     "checked_mod": "revlCheckedMod",
 }
+# The total arithmetic forms (docs/arithmetic.md): same value as `+ - *`
+# where it fits, Err("revl: Int overflow") instead of the fault. The JDK's
+# `*Exact` family is the overflow test; the helper catches its exception and
+# replaces the JDK's own message, as the faulting helpers already do.
+_CHECKED_ARITH = ("checked_add", "checked_sub", "checked_mul")
+_CHECKED_ARITH_HELPER = {
+    "checked_add": "revlCheckedAdd",
+    "checked_sub": "revlCheckedSub",
+    "checked_mul": "revlCheckedMul",
+}
+_CHECKED_FORMS = _CHECKED_ARITH + _CHECKED_DIVS
 _DIV_ZERO_MSG = "revl: division by zero"
+_INT_OVERFLOW_MSG = "revl: Int overflow"
 # The reason a `Map` subscript miss faults (issue #957), spelled identically on
 # every tier so one guarantee does not read as five different bugs.
 _MAP_MISS_MSG = "revl: map index: no entry for key"
@@ -3614,6 +3628,21 @@ def _uses_checked_div(ir: dict) -> bool:
     def walk(node) -> bool:
         if isinstance(node, dict):
             if node.get("method") in _CHECKED_DIVS:
+                return True
+            return any(walk(v) for v in node.values())
+        if isinstance(node, list):
+            return any(walk(v) for v in node)
+        return False
+
+    return walk(ir.get("functions")) or walk(ir.get("tests")) or walk(ir.get("components"))
+
+
+def _uses_checked_arith(ir: dict) -> bool:
+    """True if the IR calls one of the total arithmetic forms — gates the
+    static helpers those calls lower to."""
+    def walk(node) -> bool:
+        if isinstance(node, dict):
+            if node.get("method") in _CHECKED_ARITH:
                 return True
             return any(walk(v) for v in node.values())
         if isinstance(node, list):
@@ -3724,6 +3753,30 @@ def _emit_map_index_helper() -> list[str]:
         f'        throw new java.util.NoSuchElementException("{_MAP_MISS_MSG}");',
         "    }",
         "    return m.get(k);",
+        "}",
+        "",
+    ]
+
+
+def _emit_checked_arith_helpers() -> list[str]:
+    """Static helpers backing the total arithmetic forms — emitted once per
+    file when any of their nodes is present. Each evaluates its operands
+    exactly once and returns a typed RevlResult; `Math.*Exact` throws the
+    overflow, which the helper carries out as `Err` with revl's own text."""
+    return [
+        "// total arithmetic forms (docs/arithmetic.md): an overflow yields",
+        "// Err(reason) instead of the fault the unchecked operations raise.",
+        "private static RevlResult<Long, String> revlCheckedAdd(long a, long b) {",
+        "    try { return new RevlResult.Ok<>(Math.addExact(a, b)); }",
+        f'    catch (ArithmeticException e) {{ return new RevlResult.Err<>("{_INT_OVERFLOW_MSG}"); }}',
+        "}",
+        "private static RevlResult<Long, String> revlCheckedSub(long a, long b) {",
+        "    try { return new RevlResult.Ok<>(Math.subtractExact(a, b)); }",
+        f'    catch (ArithmeticException e) {{ return new RevlResult.Err<>("{_INT_OVERFLOW_MSG}"); }}',
+        "}",
+        "private static RevlResult<Long, String> revlCheckedMul(long a, long b) {",
+        "    try { return new RevlResult.Ok<>(Math.multiplyExact(a, b)); }",
+        f'    catch (ArithmeticException e) {{ return new RevlResult.Err<>("{_INT_OVERFLOW_MSG}"); }}',
         "}",
         "",
     ]
@@ -10065,6 +10118,8 @@ def _emit_v3(ir: dict, package_name: str) -> str:
     # document that reaches only for a `checked_*` form still needs them.
     if _uses_int_arith(ir) or _uses_checked_div(ir):
         out.extend(["    " + line if line else line for line in _emit_int_arith_helpers()])
+    if _uses_checked_arith(ir):
+        out.extend(["    " + line if line else line for line in _emit_checked_arith_helpers()])
     if _uses_checked_div(ir):
         out.extend(["    " + line if line else line for line in _emit_checked_div_helpers()])
     if _uses_map_index(ir):

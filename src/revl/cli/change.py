@@ -278,8 +278,12 @@ def _run_undo(args) -> int:
             if i == 0:
                 session.load(ir, config, origin=origin)
             else:
-                session.swap(ir, origin=origin, agent_authored=False)
+                # replay answers are not printed: their residue stays held
+                # for the unload below (issue #3381)
+                session.rehold_compensation_residue(
+                    session.swap(ir, origin=origin, agent_authored=False))
         result = session.undo(to_session)
+        session.rehold_compensation_residue(result)
     except (SessionError, RevlError) as error:
         print(f"refused: {error}", file=sys.stderr)
         if session.loaded:
@@ -1042,10 +1046,17 @@ def _run_repair(args) -> int:
     if args.predicate:
         arguments["predicate"] = args.predicate
     if args.candidate:
+        # The candidate files ride as FILES, never joined into one inline
+        # source: a joined text compiles under a label that names no file, so
+        # the export rule (`export_area.CliRule`) could not see that one of
+        # them lies under `.revl/export/` and the agent's text would compile
+        # with the operator's trust (issue #2563). Read each one first so an
+        # unreadable path is still reported here.
         try:
+            for p in args.candidate:
+                Path(p).read_text(encoding="utf-8")
             arguments["candidate"] = {
-                "source": "\n".join(Path(p).read_text(encoding="utf-8")
-                                    for p in args.candidate)}
+                "files": [os.path.abspath(p) for p in args.candidate]}
         except OSError as error:
             print(f"error: cannot read candidate: {error}", file=sys.stderr)
             return 1
