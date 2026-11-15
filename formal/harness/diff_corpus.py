@@ -9823,7 +9823,7 @@ def main() -> int:
         f"{len(ref.retain)} retention refusals + "
         f"{len(ref.inv)} inverse refusals + "
         f"{len(ref.sw)} witnessed-site refusals + "
-        f"{len(ref.cards)} cardinality bounds) — "
+        f"{len(ref.cards)} cardinality bounds): "
 
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
