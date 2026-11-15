@@ -10481,7 +10481,11 @@ def main() -> int:
         f"{len(ref.splits)} split-step crash cuts): "
 =======
         f"{len(ref.cards)} cardinality bounds) — "
+<<<<<<< HEAD
 >>>>>>> 68ff02fb7 (formal: state the emission cardinality bound and check it on the corpus (#2743))
+=======
+        f"{len(ref.cards)} cardinality bounds): "
+>>>>>>> f1756e09b (formal: pin the CARD row's Python half in the plain test job (#2743))
 
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
