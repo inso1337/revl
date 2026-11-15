@@ -390,11 +390,21 @@ class _ProcessWal:
     leaves every process's WAL uncommitted, and recover rolls all of them back,
     as it would the same composition run in one process."""
 
-    def __init__(self, path: str, components: list) -> None:
+    def __init__(self, path: str, components: list, *,
+                 process: str = "", run: "int | None" = None) -> None:
         self.path = path
         self.components = list(components)
+        self.process = process
+        self.run = run
         self.recorder = None
         self.committed = False
+
+    def mark_up(self) -> None:
+        """Record that this process is up, just before it prints `UP` (issue
+        #3234): the record `revl recover` requires before it trusts the
+        placement index's `committed` line for this process."""
+        self.recorder.wal.record_process_up(self.process, self.run,
+                                            self.components)
 
     def open(self, module, source: str, ir: dict) -> None:
         import replay  # noqa: PLC0415  backend dir already on sys.path
@@ -917,7 +927,8 @@ async def run(spec: dict, spec_path=None) -> None:
     # so a component's first model call already reads the scheduled device.
     # Re-derived from the files, never believed off the spec.
     _install_model_schedule(spec)
-    wal = _ProcessWal(spec["wal"], spec["components"]) if spec.get("wal") else None
+    wal = (_ProcessWal(spec["wal"], spec["components"], process=name,
+                       run=spec.get("walRun")) if spec.get("wal") else None)
     module = _load_module(running_ir, wal)
     # Trusted stdlib support modules are imported while the loader path still
     # exists; their `@py` bodies run at call time, after the removal below, so
@@ -1189,6 +1200,11 @@ async def run(spec: dict, spec_path=None) -> None:
         except (NotImplementedError, RuntimeError):  # pragma: no cover (non-unix)
             pass
 
+    # issue #3234: the process-up record goes to the WAL before the `UP` line,
+    # so a placement index's `committed` line (written once every process
+    # printed `UP`) is never ahead of the record recover requires behind it
+    if wal is not None:
+        wal.mark_up()
     _funnel_line(f"[{name}] UP")
 
     # A control channel on stdin: the conductor pushes `repoint` commands here
