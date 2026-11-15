@@ -85,7 +85,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import attest
+from . import _childproc, attest
 from .attest import NotCanonicalizable
 from .errors import RevlError
 
@@ -478,11 +478,11 @@ def _census_key(harness: Path) -> tuple[str, str, str] | None:
     work tree, where every request runs the harness again."""
     real = harness.resolve()
     try:
-        head = subprocess.run(["git", "-C", str(real.parent), "rev-parse", "HEAD"],
-                              capture_output=True, text=True, timeout=30)
-        dirty = subprocess.run(
+        head = _childproc.run(["git", "-C", str(real.parent), "rev-parse", "HEAD"],
+                              capture_output=True, timeout=30)
+        dirty = _childproc.run(
             ["git", "-C", str(real.parent), "status", "--porcelain", "-uall"],
-            capture_output=True, text=True, timeout=60)
+            capture_output=True, timeout=60)
     except (OSError, subprocess.SubprocessError):
         return None
     if head.returncode or dirty.returncode:
@@ -493,8 +493,8 @@ def _census_key(harness: Path) -> tuple[str, str, str] | None:
 
 def _run_census(harness: Path) -> dict | None:
     try:
-        run = subprocess.run([sys.executable, str(harness), "--census-json"],
-                             capture_output=True, text=True, timeout=600)
+        run = _childproc.run([sys.executable, str(harness), "--census-json"],
+                             capture_output=True, timeout=600)
         return json.loads(run.stdout) if run.returncode == 0 else None
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
@@ -657,9 +657,9 @@ def tree_commit(root: Path) -> str | None:
     tarball still names every artifact by digest, and the commit is a
     convenience on top of that."""
     try:
-        done = subprocess.run(
+        done = _childproc.run(
             ["git", "-C", str(root), "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=10)
+            capture_output=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
         return None
     if done.returncode != 0:
@@ -680,9 +680,9 @@ def commit_in_history(root: Path, commit: str) -> tuple[bool | None, str]:
     if head is None:
         return None, "the formal package on this machine is not a git work tree"
     try:
-        done = subprocess.run(
+        done = _childproc.run(
             ["git", "-C", str(root), "merge-base", "--is-ancestor", commit, "HEAD"],
-            capture_output=True, text=True, timeout=10)
+            capture_output=True, timeout=10)
     except (OSError, subprocess.SubprocessError) as error:
         return None, f"git could not answer ({error})"
     if done.returncode == 0:

@@ -1,0 +1,45 @@
+// manual_teardown - the author writes teardown order by hand
+//
+// Seeded defect: the provide-method write's `undo` calls `notify`, which reaches the emission `send`; a hand-written inverse in teardown is the only way to express an order, and the language refuses it.
+// Expected catch: compile (G5)
+// Corpus index: bench/saga_defects/defects.json (issue #2736)
+
+extern emission fn send(x: Str) -> Int = @py { return 1 }
+fn notify(x: Str) -> Int { return send(x) }
+
+service Inventory {
+  fn reserve(sku: Str, qty: Int) -> Int
+  fn release(sku: Str, qty: Int) -> Int
+}
+
+service Payments {
+  fn charge(order: Str, cents: Int) -> Str
+  fn refund(order: Str, cents: Int) -> Int
+  emission fn settle(order: Str, cents: Int) -> Int
+  fn reverse(order: Str, cents: Int) -> Int
+}
+
+component Warehouse provides inventory: Inventory {
+  let rows = effect Map.new() undo rows.drop()
+  provide inventory {
+    fn reserve(sku, qty) = rows.insert(sku, qty)
+    fn release(sku, qty) = rows.remove(sku)
+  }
+}
+
+component Ledger provides payments: Payments {
+  let rows = effect Map.new() undo rows.drop()
+  provide payments {
+    fn charge(order, cents) {
+      effect rows.insert(order, cents)
+      undo   notify(order)
+    }
+    fn refund(order, cents) = rows.remove(order)
+    fn settle(order, cents) = rows.insert(order, cents)
+    fn reverse(order, cents) = rows.remove(order)
+  }
+}
+
+component Checkout requires inventory: Inventory, payments: Payments {
+  let auth = effect payments.charge("order-1", 4200) undo payments.refund("order-1", 4200)
+}

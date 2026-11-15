@@ -9,8 +9,8 @@
 2. The MCP HTTP transport read the operator profile once, at start, so a
    `revoked` line took effect only on restart. It now re-reads the file when it
    changes, checked on every request, and a profile that no longer parses
-   refuses every request (503, naming the error) instead of serving on under
-   the old one.
+   refuses every request (503, with a fixed text; the reason goes to the
+   server's stderr log) instead of serving on under the old one.
 """
 
 import hashlib
@@ -175,13 +175,19 @@ def from_file(tmp_path, monkeypatch):
 
 
 SETTLE_S = 1.1   # a little more than the default --profile-settle-ms (1000)
+#: The wire contract for every 503 while the profile is settling or broken (#3123),
+#: written out rather than imported: a test that compares against the constant the
+#: code sends would pass if the code's text changed.
+REFUSAL = "the operator profile is not available, so the request is refused"
 
 
 def _settle(port, who="alice"):
-    """The first request after an edit sees the new content once and is refused
-    ("changing"); one SETTLE later the second identical read adopts it."""
+    """The first request after an edit sees the new content once and is refused;
+    one SETTLE later the second identical read adopts it. The refusal no longer
+    names the state, so it is told apart by the fixed text it carries."""
     status, body = _list(port, who)
-    assert status == 503 and "changing" in body["error"]["message"], (status, body)
+    assert status == 503, (status, body)
+    assert body["error"]["message"] == REFUSAL, body
     time.sleep(SETTLE_S)
 
 
@@ -291,8 +297,12 @@ def test_an_edit_the_stat_signature_cannot_see_is_still_read(from_file, monkeypa
     assert _list(port, "bob")[0] == 401
 
 
-@pytest.mark.parametrize("breakage", ["garbage", "delete"])
-def test_a_broken_profile_refuses_every_request_and_names_why(from_file, breakage):
+@pytest.mark.parametrize("breakage, reason", [
+    ("garbage", "does not parse"),
+    ("delete", "cannot read the operator profile"),
+])
+def test_a_broken_profile_refuses_every_request_with_fixed_text_and_logs_why(
+        from_file, capsys, breakage, reason):
     path, port = from_file
     assert _list(port, "alice")[0] == 200
     if breakage == "delete":
@@ -304,8 +314,12 @@ def test_a_broken_profile_refuses_every_request_and_names_why(from_file, breakag
     for who in ("alice", "bob"):
         status, body = _list(port, who)
         assert status == 503, (who, status)
-        assert "operator profile" in body["error"]["message"]
-        assert "changing" not in body["error"]["message"]
+        assert body["error"]["message"] == REFUSAL, (who, body)
+    # the reason is the operator's: it names the profile on the server's stderr
+    logged = capsys.readouterr().err
+    assert "revl mcp: every request is refused:" in logged, logged
+    assert str(path) in logged, logged
+    assert reason in logged, logged
     # fixing the file restores service without a restart
     path.write_text(_profile({}), encoding="utf-8")
     _settle(port)

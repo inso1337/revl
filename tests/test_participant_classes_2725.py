@@ -355,3 +355,111 @@ def test_a_stranded_peer_settles_against_the_conductor_abort_decision(
     assert settled["verdict"] == "rolled-back"
     assert settled["federationDecision"] == deploy.FEDERATION_ABORTED
     assert rc in (0, 3)
+
+
+def test_a_committed_participant_settles_back_under_an_abort_decision(tmp_path):
+    """A real participant runs its whole commit, so its WAL carries
+    `activation-complete`; a `revl federation-apply` conductor then decides
+    ABORT and dies before sending it. The record decides the verdict: roll back. The inverses run
+    against the world handed in, here the model, which ends empty; the
+    participant's own world file is not what settle rewrites."""
+    from revl import _deploy_participant as dp
+    from revl.recovery import DictWorld
+
+    wal = tmp_path / "db.wal"
+    participant = dp._Participant({
+        "identity": "db",
+        "world": str(tmp_path / "db.world.json"),
+        "wal": str(wal),
+        "effects": [{"name": "row1", "reversible": True},
+                    {"name": "row2", "reversible": True}],
+    })
+    assert participant.commit()["ok"] is True
+    assert '"activation-complete"' in wal.read_text(encoding="utf-8")
+    decision = tmp_path / "decision.jsonl"
+    deploy.write_abort_decision(str(decision), federation_id="app",
+                               generation=0, reason="edge failed",
+                               failed="edge",
+                               writer=deploy.FEDERATION_APPLY_WRITER)
+    world = DictWorld()
+    settled = deploy.settle_stranded(str(wal), str(decision), world=world)
+    assert settled["verdict"] == "rolled-back", settled
+    assert settled["residue"]["clean"] is True, settled
+    assert settled["world"] == "model"
+    assert world.remaining() == []   # the model world, not db.world.json
+
+
+def test_a_redeploy_killed_before_it_commits_keeps_the_earlier_run(tmp_path):
+    """`revl deploy` reuses one WAL across runs (issue #3147). Run 1 commits
+    and is approved; run 2 writes its pending record and dies before the
+    participant writes anything. The WAL is still run 1's, so settle keeps it:
+    rolled forward, no inverse run."""
+    from revl import _deploy_participant as dp
+    from revl.recovery import DictWorld
+
+    spec = {"identity": "db", "world": str(tmp_path / "db.world.json"),
+            "wal": str(tmp_path / "db.wal"),
+            "effects": [{"name": "row1"}, {"name": "row2"}]}
+    decision = str(tmp_path / "decision.jsonl")
+    deploy.write_decision_started(decision, federation_id="m", generation=0)
+    assert dp._Participant(spec).commit()["ok"] is True
+    deploy.write_commit_approval(decision, federation_id="m", generation=0,
+                                 participants=["db"])
+    deploy.write_decision_started(decision, federation_id="m", generation=0)
+    settled = deploy.settle_stranded(spec["wal"], decision, world=DictWorld())
+    assert settled["verdict"] == "rolled-forward", settled
+    assert settled["federationDecision"] == "none"
+    assert settled["committedEffects"] == 2, settled
+    assert settled["worldCalls"] == 0, settled   # no inverse was run
+
+
+def _reused_wal(tmp_path, plan):
+    """One WAL file reused by several openings (issue #3147). ``plan`` is a
+    list of ``(file, completed)``: each opening writes one reversible effect
+    and, when completed, commits its activation and run."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]
+                           / "backends" / "python"))
+    import replay
+
+    path = str(tmp_path / "reused.wal")
+    for generation, (name, completed) in enumerate(plan, 1):
+        wal = replay.WriteAheadLog(path, ir={"composition": "p"},
+                                   generation=generation).open()
+        wal.record_boundary("Store", f"write {name}", resource=f"file:{name}",
+                            inverse_op={"receiver": "fs", "method": "unlink",
+                                        "args": [name]})
+        if completed:
+            wal.commit_activation(["Store"])
+            wal.commit_run()
+        wal.close()
+    return path
+
+
+def test_committed_false_on_two_crashed_openings_inverts_as_much_as_none(
+        tmp_path):
+    """A stronger "did not commit" answer must not roll back LESS. With two
+    openings that both crashed, `committed=None` inverts both (the trailing
+    uncommitted openings); `committed=False` inverts the same effects."""
+    from revl.recovery import DictWorld, recover
+
+    path = _reused_wal(tmp_path, [("a", False), ("b", False)])
+    plain = recover(path, world=DictWorld())
+    answered = recover(path, world=DictWorld(), committed=False)
+    assert plain["verdict"] == answered["verdict"] == "rolled-back"
+    assert plain["worldCalls"] == 2, plain
+    assert answered["worldCalls"] == plain["worldCalls"], answered
+
+
+def test_committed_false_on_two_completed_openings_keeps_the_first(tmp_path):
+    """Both openings completed, and the caller says the step did not commit:
+    only the latest opening is inverted; the earlier opening's committed write
+    is kept."""
+    from revl.recovery import DictWorld, recover
+
+    path = _reused_wal(tmp_path, [("a", True), ("b", True)])
+    answered = recover(path, world=DictWorld(), committed=False)
+    assert answered["verdict"] == "rolled-back", answered
+    assert answered["worldCalls"] == 1, answered
+    assert [e["label"] for e in answered["ran"]] == ["write b"], answered

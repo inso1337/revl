@@ -143,6 +143,33 @@ diverges from its declaration. Either way, a rejected hand-off **rolls the whole
 swap back** — the predecessor is reloaded and its captured state re-seated — so
 the running composition is left exactly as if the swap had never been attempted.
 
+## Undo (the restore direction)
+
+An undo is a generation move too, and it runs this exchange in reverse: the
+generation being left **exports**, the restored generation **accepts** (issue
+#3293). `revl_undo` captures the running hand-off providers before teardown
+exactly as a swap does, then keeps only the captures whose restored provider
+declares a `handoff` on the same key and placement whose shape accepts the
+running one, the same `compatible(accepted, exported)` relation, now pointed
+restore-ward. Those providers start warm on the restored generation. Every
+other one still starts cold, with the `stateDropped` report naming it (and the
+swap report's `handoff` entry carrying `migrated: false, reason:
+"incompatible"` when a restored hand-off exists but does not accept the running
+state). The restored code's authorship counts as it was recorded when that
+generation was admitted (by its load, swap or rollback; an unrecorded one
+counts as agent-authored): an undo to an agent-authored generation applies
+the multi-realm rule above, so a frame spanning realms starts cold with
+`reason: "multi-realm"`.
+The resource-vector check of step 2 does not refuse an undo: a carried
+provider whose runtime resources differ in count or type starts cold with
+`reason: "resources"` and the undo completes, where a forward swap is rolled
+back whole. The instance layer is deliberately not carried by an undo: the
+`handoff_back` policy leaves it at `respawn` semantics. `revl_rollback` stays
+cold-start: it re-admits through `respawn`, which captures no provider state
+at all, so a rollback never carries the generation it leaves into the one it
+returns to (the `respawn` rule `Session.swap` documents). Only `revl_undo`
+runs the reverse hand-off.
+
 ## Files
 
 * grammar + lowering — `src/revl/parser.py` (`HandoffStmt`), `src/revl/lower.py`
@@ -153,7 +180,8 @@ the running composition is left exactly as if the swap had never been attempted.
   `src/revl/lower.py::check_and_lower`; the running provider's exported shape is
   threaded into the ambient by `src/revl/compiler.py::_running_handoffs`;
 * the warm-start threading — `src/revl/mcp/session.py` (`_capture_provider_state`,
-  `_restore_provider_state`, and the extended `_abort_swap`);
+  `_restore_provider_state`, and the extended `_abort_swap`), and the undo's
+  restore-direction filter (`_handoff_back_pairs`, the `handoff_back` policy);
 * tests — `tests/test_state_handoff.py` (grammar, lowering, the gate; no runtime)
   and `tests/test_state_handoff_exec.py` (the warm start and the rollback, on
   cordis-py).

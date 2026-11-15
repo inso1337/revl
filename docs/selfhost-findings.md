@@ -1745,7 +1745,7 @@ document the **fully-native** chain does not reproduce is therefore a
 they are named document by document in
 [`LOWER_GAP_DOCS`](../tests/test_selfhost_compile.py).
 
-Tiers whose whole corpus survives the fully-native chain: `py`, `ts`, `wasm`.
+Tiers whose whole corpus survives the fully-native chain: `py`, `wasm`.
 
 The per-tier counts are not stored here, because they move with every
 corpus document a pull request adds. Print them with
@@ -1781,7 +1781,7 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 
 `ts`:
 
-- none; the fully-native chain reproduces the whole corpus.
+- `int_inline_2904.rvl`
 
 `go`:
 

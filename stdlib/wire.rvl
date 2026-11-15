@@ -1,0 +1,75 @@
+// The revl stdlib WIRE module: the contract a program that serves live clients
+// is written against (issue #3357). Pure revl, every tier.
+//
+// A program names its connections through one service, `Wire`, and reads what
+// happened on them as `Knock`s. Nothing here names an address, a port, an
+// origin, a channel or a ticket: those are a provider's own config. A socket
+// provider is `stdlib/socket.rvl`'s `SocketWire`; a page-to-page provider is
+// another component that `provides wire: Wire` with its own config, and the
+// composition picks the row. The program does not change.
+//
+// Usage:
+//
+//     use "stdlib/wire.rvl" { Wire, Knock, Kind, Why }
+//
+//     component Game requires wire: Wire provides beat: Beat {
+//       provide beat {
+//         fn tick() {
+//           let knocks = emit wire.take(512)
+//           ...
+//         }
+//       }
+//     }
+//
+// Every method declares the boundary it crosses with one fixed token per verb,
+// `wire.take`, `wire.say`, `wire.close` (the `stdlib/server.rvl` rule). Every
+// provider's externs declare the same tokens, the compiler holds each provider
+// to them (G4), and `revl audit` prints the extern name beside the token
+// (`socket_take [wire.take]`), so two providers stay distinguishable while a
+// grant names the contract's verb.
+
+// Why a line shut: one closed set for every provider. A socket provider maps it
+// to the close code it sends (`stdlib/socket.rvl`'s `close_code`); a page
+// provider sends none. The program never sees a code.
+pub type Why =
+    Closed
+  | Silent
+  | TooLarge
+  | TooSlow
+  | TooFast
+  | Refused
+  | Expired
+  | HostGone
+
+// What one knock reports. Exactly one `Opened` and one `Shut` per line, the
+// `Said`s between them; a program's own `close` ends in a `Shut(why)` too.
+pub type Kind = Opened | Said | Shut(Why)
+
+// One thing that happened on one connection (`line`). `seq` counts up per
+// provider. `who` is provider-filled on `Opened` (the `Origin` for a socket) and
+// "" after. `text` is the message for `Said`, the reason text for `Shut`, and ""
+// for `Opened`.
+pub type Knock = { seq: Int, kind: Kind, line: Int, who: Str, text: Str }
+
+pub service Wire {
+  // What happened since the last call, oldest first, at most `most` of it.
+  emission[wire.take] fn take(most: Int) -> List[Knock]
+  // Say `text` to one connection. False: skipped (over its `limit`, or gone).
+  emission[wire.say] fn say(line: Int, text: Str) -> Bool
+  // Shut one connection with a reason. False: already gone.
+  emission[wire.close] fn close(line: Int, why: Why, text: Str) -> Bool
+}
+
+// The stable spelling of a reason, for a log line or a test.
+pub fn why_str(why: Why) -> Str {
+  return match why {
+    Closed => "closed",
+    Silent => "silent",
+    TooLarge => "too_large",
+    TooSlow => "too_slow",
+    TooFast => "too_fast",
+    Refused => "refused",
+    Expired => "expired",
+    HostGone => "host_gone",
+  }
+}

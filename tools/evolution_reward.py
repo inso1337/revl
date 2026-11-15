@@ -503,12 +503,14 @@ def changed_files(candidate: Candidate):
     Committed and uncommitted changes both count, because a trajectory is scored
     on the tree it produced and not on how tidily it was committed.
 
-    `--no-renames` so a move is reported under BOTH of its paths. With rename
-    detection on, `git diff --name-only` prints only the destination, so
-    `git mv src/a.py tools/a.py` would look like one addition inside the grant
-    and the path it left would never be judged against the declared scope, the
-    operator grant or the fence. The measured set is what the grant is meant to
-    be default deny over, so neither half of a move can be hidden.
+    `--no-renames` so a move is reported under BOTH of its paths, and so this
+    stays the same read as `tools/evolution_controller.py`'s `measured_diff`.
+    With rename detection on, `git diff --name-only` prints only the
+    destination, so `git mv src/a.py tools/a.py` would look like one addition
+    inside the grant and the path it left would never be judged against the
+    declared scope, the operator grant or the fence. The measured set is what
+    the grant is meant to be default deny over, so neither half of a move can
+    be hidden.
     """
     ok, out = run_git(candidate,
                       ["diff", "--no-renames", "--name-only", candidate.base])
