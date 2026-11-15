@@ -362,8 +362,13 @@ _PY_RUNTIME_REMEDY = (
     "                    backends/python/.venv/bin/python -P -m revl test    # absolute-interpreter fallback (the `-P` is PYTHONSAFEPATH, issue #317)")
 
 
-def _render_report(results: list, report: str) -> str:
-    """Serialize per-test results for `--report json|tap` (py tier)."""
+def _render_report(results: list, report: str, function_specs: list | None = None) -> str:
+    """Serialize per-test results for `--report json|tap` (py tier).
+
+    ``function_specs`` (issue #2705) is the per-function outcome of the
+    `ensures` clauses this run checked; a document without one renders the
+    same JSON it did before.
+    """
     if report == "tap":
         lines = ["TAP version 13", f"1..{len(results)}"]
         for index, result in enumerate(results, 1):
@@ -377,7 +382,40 @@ def _render_report(results: list, report: str) -> str:
         "failed": sum(1 for r in results if r["status"] == "fail"),
         "total": len(results),
     }
+    if function_specs:
+        payload["function_specs"] = function_specs
     return json.dumps(payload, indent=2)
+
+
+def _function_spec_report(ir: dict, prop_entries: list,
+                          prop_dossier: dict) -> list:
+    """The `function_specs` section of a `revl test --report json` run.
+
+    One row per fn whose `ensures` clause this run checked, carrying the spec
+    and that run's result. `revl audit --spec-results` reads this section to
+    list a function's spec next to its last recorded result
+    (docs/function-specs.md). Each row carries the digest of the function,
+    clause and file it checked, which the audit recomputes before it shows the
+    recorded result."""
+    from .audit_diff import function_spec_digest  # noqa: PLC0415
+
+    by_name = {p.get("name"): p for p in prop_dossier.get("properties") or []}
+    ir_units = {u.get("name"): u for u in ir.get("prop_tests") or []}
+    rows = []
+    for unit in prop_entries:
+        function = unit.get("spec_of")
+        if not function:
+            continue
+        result = by_name.get(unit.get("name")) or {}
+        row = {"function": function, "spec": unit.get("spec"),
+               "property": unit.get("name"),
+               "status": result.get("status") or "unrun",
+               "digest": function_spec_digest(
+                   ir, ir_units.get(unit.get("name")) or unit)}
+        if result.get("counterexample"):
+            row["counterexample"] = result["counterexample"]
+        rows.append(row)
+    return rows
 
 
 def run_py(ir: dict, verbose: bool = False, report: str = None) -> tuple[str, str]:
@@ -449,6 +487,7 @@ def run_py(ir: dict, verbose: bool = False, report: str = None) -> tuple[str, st
 
     failures = 0
     results = []  # per-test {"name", "status", "duration_ms"} for --report
+    function_specs = []  # issue #2705: per-fn `ensures` outcomes for --report
     for name, test_fn in entries:
         started = time.perf_counter()
         try:
@@ -536,9 +575,13 @@ def run_py(ir: dict, verbose: bool = False, report: str = None) -> tuple[str, st
         ran_total += prop_total
         summary.append(
             f"{prop_total - prop_failures} of {prop_total} prop test(s) held")
+        # issue #2705: the `--report json` record a `revl audit --spec-results`
+        # reads back, one row per fn whose `ensures` clause this run checked.
+        function_specs = _function_spec_report(ir, prop_entries, prop_dossier)
 
     if report is not None:
-        print(_render_report(results, report))
+        print(_render_report(results, report,
+                             function_specs=function_specs or None))
     summary[0] = (f"{ran_total - failures} of {ran_total} test(s) passed"
                   if failures else _passed(ran_total))
     if failures:

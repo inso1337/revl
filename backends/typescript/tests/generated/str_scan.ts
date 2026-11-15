@@ -32,7 +32,7 @@ function revlEq(a: unknown, b: unknown): boolean {
 const REVL_I64_MIN = -(2n ** 63n)
 const REVL_I64_MAX = 2n ** 63n - 1n
 function revlI64(v: bigint): bigint {
-  if (v < REVL_I64_MIN || v > REVL_I64_MAX) throw new RangeError('revl: Int overflow')
+  if (BigInt.asIntN(64, v) !== v) throw new RangeError('revl: Int overflow')
   return v
 }
 
@@ -147,28 +147,31 @@ function revlIndexOf(x: string | unknown[], v: unknown): bigint {
 }
 
 export function count_digits(s: string): bigint {
+    let $revl_i64 = 0n
     let n = 0n
     let i = 0n
     while ((i < revlLen(s))) {
       if (((_rc: string) => "0" <= _rc && _rc <= "9")((revlCharAt(s, i)))) {
-        n = revlI64(n + 1n)
+        n = (BigInt.asIntN(64, $revl_i64 = n + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
       }
-      i = revlI64(i + 1n)
+      i = (BigInt.asIntN(64, $revl_i64 = i + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
     }
     return n
 }
 
 export function checksum(s: string): bigint {
+    let $revl_i64 = 0n
     let acc = 0n
     let i = 0n
     while ((i < revlLen(s))) {
-      acc = revlMod((revlI64(acc + revlCharCodeAt(s, i))), 65536n)
-      i = revlI64(i + 1n)
+      acc = revlMod(((BigInt.asIntN(64, $revl_i64 = acc + revlCharCodeAt(s, i)) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))), 65536n)
+      i = (BigInt.asIntN(64, $revl_i64 = i + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
     }
     return acc
 }
 
 export function common_prefix(a: string, b: string): bigint {
+    let $revl_i64 = 0n
     let i = 0n
     while ((i < revlLen(a))) {
       if ((i >= revlLen(b))) {
@@ -177,38 +180,40 @@ export function common_prefix(a: string, b: string): bigint {
       if ((!revlEq(revlCharAt(a, i), revlCharAt(b, i)))) {
         return i
       }
-      i = revlI64(i + 1n)
+      i = (BigInt.asIntN(64, $revl_i64 = i + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
     }
     return i
 }
 
 export function count_marks(text: string): bigint {
+    let $revl_i64 = 0n
     let n = 0n
     let i = 0n
     while ((i < revlLen(text))) {
       const c = revlCharAt(text, i)
       if ((revlEq(c, revlCharAt("<", 0n)) || revlEq(c, revlCharAt(">", 0n)))) {
-        n = revlI64(n + 1n)
+        n = (BigInt.asIntN(64, $revl_i64 = n + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
       }
-      i = revlI64(i + 1n)
+      i = (BigInt.asIntN(64, $revl_i64 = i + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
     }
     return n
 }
 
 export function agree_three(a: string, b: string, c: string): bigint {
+    let $revl_i64 = 0n
     let n = 0n
     let i = 0n
     while ((((i < revlLen(a)) && (i < revlLen(b))) && (i < revlLen(c)))) {
       if (revlEq(revlCharAt(a, i), revlCharAt(b, i))) {
-        n = revlI64(n + 1n)
+        n = (BigInt.asIntN(64, $revl_i64 = n + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
       }
       if (revlEq(revlCharAt(b, i), revlCharAt(c, i))) {
-        n = revlI64(n + 1n)
+        n = (BigInt.asIntN(64, $revl_i64 = n + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
       }
       if (revlEq(revlCharAt(c, i), revlCharAt(a, i))) {
-        n = revlI64(n + 1n)
+        n = (BigInt.asIntN(64, $revl_i64 = n + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
       }
-      i = revlI64(i + 1n)
+      i = (BigInt.asIntN(64, $revl_i64 = i + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
     }
     return n
 }

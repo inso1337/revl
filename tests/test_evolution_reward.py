@@ -62,10 +62,10 @@ def census():
                  ROOT / "tools" / "gate_reference_census.py")
 
 
-def _candidate(mod, tree, base="origin/main", scope=("**",), **extra):
+def _candidate(mod, tree, base="origin/main", scope=("**",), allow=(), **extra):
     record = {"tree": str(tree), "base": base, "scope": list(scope)}
     record.update(extra)
-    return mod.load_candidate(record)
+    return mod.load_candidate(record, allow=allow)
 
 
 def _git_env():
@@ -234,10 +234,10 @@ def test_the_held_out_seed_is_not_a_candidate_record_key(reward):
     """A candidate that could name its own seed would choose its own draw.
 
     `RECORD_KEYS` is the whitelist that keeps a candidate from reaching a
-    probe, and the seed stays outside it: it arrives in the environment, where
-    the operator holds it.
+    probe, and the seed file path stays outside it: it arrives in the
+    environment, where the operator holds it.
     """
-    assert reward.HELDOUT_SEED_ENV not in reward.RECORD_KEYS
+    assert reward.HELDOUT_SEED_FILE_ENV not in reward.RECORD_KEYS
     assert "seed" not in reward.RECORD_KEYS
     candidate = reward.load_candidate(
         {"tree": "/nowhere", "base": "origin/main", "scope": ["tools/**"],
@@ -254,12 +254,12 @@ def test_an_unset_held_out_seed_fails_the_component_rather_than_skipping_it(
     state the item was opened about. There is no `skipped` verdict here and
     this must not invent one.
     """
-    monkeypatch.delenv(reward.HELDOUT_SEED_ENV, raising=False)
+    monkeypatch.delenv(reward.HELDOUT_SEED_FILE_ENV, raising=False)
     candidate = reward.load_candidate(
         {"tree": "/nowhere", "base": "origin/main", "scope": ["tools/**"]})
     verdict = reward.probe_held_out(candidate)
     assert not verdict.verified
-    assert reward.HELDOUT_SEED_ENV in verdict.reason
+    assert reward.HELDOUT_SEED_FILE_ENV in verdict.reason
 
 
 def test_a_refused_held_out_run_fails_the_component(reward, monkeypatch,
@@ -271,7 +271,8 @@ def test_a_refused_held_out_run_fails_the_component(reward, monkeypatch,
     the distinction in the reason and collapses both to `failed`, because
     `verified` means somebody's artifact said yes.
     """
-    monkeypatch.setenv(reward.HELDOUT_SEED_ENV, "a" * 32)
+    monkeypatch.setenv(reward.HELDOUT_SEED_FILE_ENV,
+                       str(tmp_path.parent / "heldout.seed"))
     candidate = reward.load_candidate(
         {"tree": str(tmp_path), "base": "origin/main", "scope": ["tools/**"]})
 
@@ -295,7 +296,8 @@ def test_a_refused_held_out_run_fails_the_component(reward, monkeypatch,
 def test_a_held_out_run_that_writes_no_record_fails(reward, monkeypatch,
                                                     tmp_path):
     """A tool that exits 0 and says nothing has verified nothing."""
-    monkeypatch.setenv(reward.HELDOUT_SEED_ENV, "a" * 32)
+    monkeypatch.setenv(reward.HELDOUT_SEED_FILE_ENV,
+                       str(tmp_path.parent / "heldout.seed"))
     candidate = reward.load_candidate(
         {"tree": str(tmp_path), "base": "origin/main", "scope": ["tools/**"]})
     tool = tmp_path / "tools"
@@ -310,7 +312,8 @@ def test_a_held_out_run_that_writes_no_record_fails(reward, monkeypatch,
 def test_a_clean_held_out_run_verifies_the_component(reward, monkeypatch,
                                                      tmp_path):
     """The control: the only path on which this component passes."""
-    monkeypatch.setenv(reward.HELDOUT_SEED_ENV, "a" * 32)
+    monkeypatch.setenv(reward.HELDOUT_SEED_FILE_ENV,
+                       str(tmp_path.parent / "heldout.seed"))
     candidate = reward.load_candidate(
         {"tree": str(tmp_path), "base": "origin/main", "scope": ["tools/**"]})
     tool = tmp_path / "tools"
@@ -339,7 +342,8 @@ def test_a_held_out_run_that_writes_no_file_into_the_candidate_tree(
     draw never becoming a file. The probe writes it to a scratch directory it
     deletes, so a promotion run leaves the candidate tree as it found it.
     """
-    monkeypatch.setenv(reward.HELDOUT_SEED_ENV, "a" * 32)
+    monkeypatch.setenv(reward.HELDOUT_SEED_FILE_ENV,
+                       str(tmp_path.parent / "heldout.seed"))
     candidate = reward.load_candidate(
         {"tree": str(tmp_path), "base": "origin/main", "scope": ["tools/**"]})
     tool = tmp_path / "tools"
@@ -480,13 +484,13 @@ def test_the_conformance_component_does_not_wait_on_a_tool_that_never_existed(
 
 
 # --------------------------------------------------------------------------
-# Scope: the changed-file set against the declared scope.
+# Scope: the changed-file set against the declared scope AND the operator grant.
 # --------------------------------------------------------------------------
 
-def test_scope_passes_when_every_change_is_declared(reward, tiny_repo):
+def test_scope_passes_when_every_change_is_declared_and_allowed(reward, tiny_repo):
     (tiny_repo / "tools" / "a.py").write_text("a\n")
-    verdict = reward.probe_scope(
-        _candidate(reward, tiny_repo, base="HEAD", scope=("tools/**",)))
+    verdict = reward.probe_scope(_candidate(
+        reward, tiny_repo, base="HEAD", scope=("tools/**",), allow=("tools/**",)))
     assert verdict.verified is True, verdict.reason
 
 
@@ -494,10 +498,12 @@ def test_scope_fails_on_an_undeclared_path(reward, tiny_repo):
     (tiny_repo / "tools" / "a.py").write_text("a\n")
     (tiny_repo / "src").mkdir()
     (tiny_repo / "src" / "sneak.py").write_text("x\n")
-    verdict = reward.probe_scope(
-        _candidate(reward, tiny_repo, base="HEAD", scope=("tools/**",)))
+    verdict = reward.probe_scope(_candidate(
+        reward, tiny_repo, base="HEAD", scope=("tools/**",),
+        allow=("tools/**", "src/**")))
     assert verdict.verified is False
     assert "src/sneak.py" in verdict.reason
+    assert "declared scope" in verdict.reason
 
 
 def test_scope_counts_committed_and_uncommitted_change_alike(reward, tiny_repo):
@@ -505,30 +511,197 @@ def test_scope_counts_committed_and_uncommitted_change_alike(reward, tiny_repo):
     (tiny_repo / "src" / "sneak.py").write_text("x\n")
     _git(tiny_repo, "add", "-A")
     _git(tiny_repo, "commit", "-qm", "out of scope, but committed")
-    verdict = reward.probe_scope(
-        _candidate(reward, tiny_repo, base="HEAD~1", scope=("tools/**",)))
+    verdict = reward.probe_scope(_candidate(
+        reward, tiny_repo, base="HEAD~1", scope=("tools/**",),
+        allow=("tools/**", "src/**")))
     assert verdict.verified is False
     assert "src/sneak.py" in verdict.reason
 
 
 def test_an_empty_scope_declaration_cannot_be_satisfied(reward, tiny_repo):
     (tiny_repo / "tools" / "a.py").write_text("a\n")
-    verdict = reward.probe_scope(
-        _candidate(reward, tiny_repo, base="HEAD", scope=()))
+    verdict = reward.probe_scope(_candidate(
+        reward, tiny_repo, base="HEAD", scope=(), allow=("tools/**",)))
     assert verdict.verified is False
 
 
 def test_an_empty_change_set_is_not_a_pass(reward, tiny_repo):
-    verdict = reward.probe_scope(
-        _candidate(reward, tiny_repo, base="HEAD", scope=("tools/**",)))
+    verdict = reward.probe_scope(_candidate(
+        reward, tiny_repo, base="HEAD", scope=("tools/**",), allow=("tools/**",)))
     assert verdict.verified is False
     assert "no file changed" in verdict.reason
 
 
 def test_an_unreadable_base_fails_rather_than_scoring_nothing(reward, tiny_repo):
-    verdict = reward.probe_scope(
-        _candidate(reward, tiny_repo, base="no/such/ref", scope=("tools/**",)))
+    verdict = reward.probe_scope(_candidate(
+        reward, tiny_repo, base="no/such/ref", scope=("tools/**",),
+        allow=("tools/**",)))
     assert verdict.verified is False
+
+
+# Issue #2803. The declared scope is the candidate's claim; the operator allow
+# set is the grant it is checked against, and a run with no grant is deny.
+
+def test_a_whole_tree_declaration_cannot_escape_the_operator_allow_set(
+        reward, tiny_repo):
+    """The reported case. `**` verified today because it bounded the candidate's
+    own claim and nothing else. The operator grant bounds the measured diff, so
+    the candidate declaring `**` is refused and the path is named."""
+    (tiny_repo / "tools" / "a.py").write_text("a\n")
+    (tiny_repo / "src").mkdir()
+    (tiny_repo / "src" / "sneak.py").write_text("x\n")
+    verdict = reward.probe_scope(_candidate(
+        reward, tiny_repo, base="HEAD", scope=("**",), allow=("tools/**",)))
+    assert verdict.verified is False
+    assert "src/sneak.py" in verdict.reason
+    assert "operator allow set" in verdict.reason
+
+
+@pytest.mark.parametrize("scope", (("**",), ("***",), ("**/**",)))
+def test_a_whole_tree_declaration_is_refused_by_name_when_the_grant_admits_it(
+        reward, tiny_repo, scope):
+    """The other half: a scope that admits every path bounds nothing even when
+    the measured diff happens to sit inside the grant, because the declaration
+    is what the candidate says it may edit. `***` and `**/**` are the same
+    property spelled differently and are refused by the same check."""
+    (tiny_repo / "tools" / "a.py").write_text("a\n")
+    verdict = reward.probe_scope(_candidate(
+        reward, tiny_repo, base="HEAD", scope=scope, allow=("tools/**",)))
+    assert verdict.verified is False
+    assert ";".join(scope) in verdict.reason
+    assert "whole-tree" in verdict.reason
+
+
+def test_no_operator_allow_set_fails_scope_by_name(reward, tiny_repo):
+    """Default deny: no grant names nothing, so nothing may be edited."""
+    (tiny_repo / "tools" / "a.py").write_text("a\n")
+    verdict = reward.probe_scope(_candidate(
+        reward, tiny_repo, base="HEAD", scope=("tools/**",)))
+    assert verdict.verified is False
+    assert reward.ALLOW_ENV in verdict.reason
+    assert "--allow" in verdict.reason
+
+
+def test_a_new_unlisted_tools_file_is_refused_when_tools_is_not_allowed(
+        reward, tiny_repo):
+    """A file nobody listed under a directory the operator did not grant. This
+    is the default-deny half: the path does not have to appear on any fence."""
+    (tiny_repo / "tools" / "fresh.py").write_text("fresh\n")
+    verdict = reward.probe_scope(_candidate(
+        reward, tiny_repo, base="HEAD", scope=("tools/**",), allow=("src/**",)))
+    assert verdict.verified is False
+    assert "tools/fresh.py" in verdict.reason
+    assert "operator allow set" in verdict.reason
+
+
+def test_a_change_to_a_fenced_evaluator_is_refused_even_inside_the_grant(
+        reward, tiny_repo):
+    """A directory glob in the grant covers the judge file too, so the
+    declaration cannot be the only fence. The measured diff is checked against
+    `EVALUATOR_FENCE` after the grant: without that, declaring and granting
+    `tools/**` would let a candidate edit the scorer."""
+    (tiny_repo / "tools" / "evolution_reward.py").write_text("changed\n")
+    verdict = reward.probe_scope(_candidate(
+        reward, tiny_repo, base="HEAD", scope=("tools/**",), allow=("tools/**",)))
+    assert verdict.verified is False
+    assert "fenced" in verdict.reason
+    assert "tools/evolution_reward.py" in verdict.reason
+
+
+def test_the_measured_fence_matches_segment_prefixes(reward):
+    """`kernel_boundary` matches evaluator entries as path prefixes, not exact
+    membership, so a file beneath an entry is fenced too. Exact membership
+    would miss it."""
+    assert reward._under("crates/revl-gate/src/session.rs", "crates/revl-gate")
+    assert reward._under("formal/CheckAxioms.lean", "formal")
+    assert reward._under("tools/evolution_reward.py", "tools/evolution_reward.py")
+    assert not reward._under("formalities.py", "formal")
+    assert not reward._under("crates/revl-gate-foo/x.rs", "crates/revl-gate")
+
+
+def test_a_rename_cannot_move_an_ungranted_file_into_the_grant(reward, tiny_repo):
+    """A rename is two changes. With rename detection on, `git diff --name-only`
+    lists only the destination, so `git mv src/a.py tools/a.py` would look like
+    one addition inside the grant and the source path would go unjudged."""
+    (tiny_repo / "src").mkdir()
+    (tiny_repo / "src" / "a.py").write_text("a\n")
+    _git(tiny_repo, "add", "-A")
+    _git(tiny_repo, "commit", "-qm", "a path the grant does not cover")
+    _git(tiny_repo, "mv", "src/a.py", "tools/a.py")
+    verdict = reward.probe_scope(_candidate(
+        reward, tiny_repo, base="HEAD", scope=("src/**", "tools/**"),
+        allow=("tools/**",)))
+    assert verdict.verified is False
+    assert "src/a.py" in verdict.reason
+    assert "operator allow set" in verdict.reason
+
+
+def test_renaming_a_fenced_evaluator_out_of_the_fence_is_still_refused(
+        reward, tiny_repo):
+    """With rename detection on, `git mv tests/test_evolution_reward.py
+    tests/renamed.py` lists only the new path, which is not fenced.
+    `--no-renames` keeps the old path in the measured set, where the fence
+    finds it."""
+    (tiny_repo / "tests").mkdir()
+    (tiny_repo / "tests" / "test_evolution_reward.py").write_text("# judge\n")
+    _git(tiny_repo, "add", "-A")
+    _git(tiny_repo, "commit", "-qm", "the judge")
+    _git(tiny_repo, "mv", "tests/test_evolution_reward.py", "tests/renamed.py")
+    verdict = reward.probe_scope(_candidate(
+        reward, tiny_repo, base="HEAD", scope=("tests/**",),
+        allow=("tests/**",)))
+    assert verdict.verified is False
+    assert "tests/test_evolution_reward.py" in verdict.reason
+    assert "fenced" in verdict.reason
+
+
+def test_a_declared_scope_naming_a_fenced_path_is_refused_before_measurement(
+        reward, tiny_repo):
+    """A scope that names the scorer is refused by name before the diff is read.
+    The fixture changes nothing, so reaching the diff check would fail with `no
+    file changed` instead; the reason proves which check fired."""
+    verdict = reward.probe_scope(_candidate(
+        reward, tiny_repo, base="HEAD",
+        scope=("tools/evolution_reward.py",), allow=("tools/**",)))
+    assert verdict.verified is False
+    assert "fenced" in verdict.reason
+    assert "tools/evolution_reward.py" in verdict.reason
+    assert "no file changed" not in verdict.reason
+
+
+def test_the_operator_allow_set_is_not_a_candidate_record_key(reward):
+    """The same mechanism that keeps the held-out seed out of the record. A
+    candidate that could name its own grant would choose what it may edit."""
+    assert reward.ALLOW_ENV not in reward.RECORD_KEYS
+    assert "allow" not in reward.RECORD_KEYS
+    candidate = reward.load_candidate(
+        {"tree": "/nowhere", "base": "origin/main", "scope": ["tools/**"],
+         "allow": ["**"]}, allow=("src/**",))
+    assert candidate.allow == ("src/**",)
+    assert "allow" in candidate.prose_ignored
+
+
+def test_parse_allow_reads_the_cli_and_environment_shapes(reward, monkeypatch):
+    assert reward.parse_allow("src/**, tests/**") == ("src/**", "tests/**")
+    assert reward.parse_allow(["src/**", "tests/**,docs/design/**"]) == (
+        "src/**", "tests/**", "docs/design/**")
+    assert reward.parse_allow(None) == ()
+    assert reward.parse_allow("") == ()
+    monkeypatch.setenv(reward.ALLOW_ENV, "src/**")
+    assert reward.allow_from_env() == ("src/**",)
+    monkeypatch.delenv(reward.ALLOW_ENV)
+    assert reward.allow_from_env() == ()
+
+
+def test_every_evaluator_fence_entry_exists_in_this_tree(reward):
+    """A fence entry that is a typo fences nothing at all, and saying so over
+    the whole imported tuple catches a new evaluator path as well as an old
+    one."""
+    assert reward.EVALUATOR_FENCE
+    assert set(reward.EVALUATOR_FENCE) >= set(reward.evaluator_fence("authority"))
+    assert set(reward.EVALUATOR_FENCE) >= set(reward.evaluator_fence("held_out"))
+    for path in reward.EVALUATOR_FENCE:
+        assert (ROOT / path).exists(), path
 
 
 _BASE_READERS = ("probe_no_new_false_admits", "probe_scope", "probe_tests",
@@ -544,7 +717,8 @@ def test_a_base_the_tree_cannot_resolve_is_refused_by_name(
     none of them substitutes a ref of its own. The change is in scope and the
     tree is real, so the refusal is the only thing that can fail it."""
     (tiny_repo / "tools" / "a.py").write_text("a\n")
-    missing = _candidate(reward, tiny_repo, base="origin/main", scope=("**",))
+    missing = _candidate(reward, tiny_repo, base="origin/main",
+                         scope=("tools/**",), allow=("tools/**",))
     verdict = getattr(reward, probe)(missing)
     assert verdict.verified is False
     assert "base `origin/main` does not name a commit" in verdict.reason, (
@@ -843,9 +1017,11 @@ def test_the_cli_exits_nonzero_while_anything_is_unverified(
         {"tree": str(tiny_repo), "base": "HEAD", "scope": ["tools/**"],
          "rationale": "all eight verified"}))
     out = tmp_path / "card.json"
-    assert reward.main(["--candidate", str(record), "--json", str(out)]) == 1
+    assert reward.main(["--candidate", str(record), "--allow", "tools/**",
+                        "--json", str(out)]) == 1
     card = json.loads(out.read_text(encoding="utf-8"))
     assert card["retained"] is False
+    assert card["allow"] == ["tools/**"]
     assert "compiles" in card["blockers"]
     assert "held-out" in card["blockers"]
     assert card["prose_ignored"] == ["rationale"]

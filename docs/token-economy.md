@@ -8,6 +8,10 @@ beside model turns.
 - **Response metric:** `bench/mcp_response_size.py`, pinned by
   `tests/test_mcp_response_size.py`: how much text an MCP verb's answer puts
   back into the agent's context.
+- **Shape A/B:** `tools/shape_ab.py` replays the committed corpus through the
+  current and the shaped form of an exchange; committed table
+  `bench/results/shape-ab.md`, reproduced by `tests/test_shape_ab_2847.py`
+  (issue #2847).
 - **Compound verb:** `revl_ship` in `src/revl/mcp/ship.py`, registered in
   `src/revl/mcp/server.py`, pinned by `tests/test_mcp_ship.py`.
 - **Deferred this wave:** the terse authoring form (needs the parser — owned by

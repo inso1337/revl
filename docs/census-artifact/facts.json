@@ -10,7 +10,8 @@
   "admission:interface_one_service",
   "admission:interface_scalar_alias",
   "admission:interface_two_services",
-  "tests/fixtures/effect_statement_rules/ok_arrow_method_declared.rvl"
+  "tests/fixtures/effect_statement_rules/ok_arrow_method_declared.rvl",
+  "tests/fixtures/emit_ts_refusals/component_module_name.rvl"
  ],
  "mechanism": {
   "bucket": "false-admission",

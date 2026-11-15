@@ -431,8 +431,8 @@ def test_py_answers_the_corpus_as_specified(workspace, monkeypatch):
     refused("sub/../../outside/secret.txt", "EOUTSIDE")
     refused("/etc/hosts", "EOUTSIDE")
     refused("nul\x00byte", "EINVAL")
-    # the refusal names the resolved offender, never leaks a fact about it
-    assert answers["link_out"]["lexists"]["value"]["path"].endswith("secret.txt")
+    # the refusal names the caller's own path, never the symlink target (#3184)
+    assert answers["link_out"]["lexists"]["value"]["path"] == "link_out"
 
 
 def test_no_workspace_root_is_an_operator_refusal_not_a_boundary_one(

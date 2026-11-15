@@ -108,6 +108,37 @@ belongs: the PR jobs on the PR, the heavy jobs after merge.
 6. Report what you changed, what you ran, and the PR number. Then stop.
    **Do not wait for CI.** The orchestrator watches it.
 
+### Proving a changed test
+
+A PR body that says "the test fails on main and passes here" is not evidence:
+it cannot be told apart from a mutation or a stale count (issue #2849). For a
+test the change adds or edits, produce the receipt:
+
+```
+python3 tools/evidence_receipt.py --base origin/main \
+    --node tests/test_foo.py::test_bar
+```
+
+The tool exports `origin/main` with `git archive`, overlays the head's changed
+test files (the implementation stays at the base ref unless `--overlay` names
+a file), runs the node there, then runs it in a `git archive` export of the head
+commit (both sides see only committed files), and prints a
+paste-ready block with the exact commands, the base failure line, the head
+pass line and the diff range. Paste that block into the PR's Verification section; the reviewer reads
+it instead of asking for the counts again.
+
+The tool refuses rather than invent evidence: `NO RED-BEFORE` when the node
+passes on base, `NOT GREEN` when it does not pass on head, `NO RECEIPT` when
+an export cannot be built, the tree has uncommitted or untracked
+changes, or the test file is not committed, and `TIMED OUT` when a run
+outlives `--timeout` (600 seconds by default). Both runs drop every ambient
+`PYTHONPATH` entry inside the repository and keep the entries outside it; a
+path the interpreter's own site-packages adds (a `.pth` file, as an editable
+install writes) is not examined, so a top-level module of the worktree reached
+that way is still importable.
+A dirty tree is refused because it is not the commit the receipt names. A red produced by mutating the implementation is not a base
+failure and is not a receipt.
+
 ## What an agent does not do
 
 - Do not run the full suite locally. That is left to CI: the PR jobs on the PR,
@@ -419,6 +450,13 @@ latent break: the publish job declared `id-token: write` alone, and because a
 job-level `permissions` block **replaces** the workflow-level one rather than
 merging into it, `contents` was `none` and `actions/checkout` could not have
 read the tag it publishes (issue #191, fixed in PR #190).
+
+`check-version` also classifies the tag before anything irreversible happens.
+`tools/release_channel.py` answers `stable` or `prerelease` for the version, and
+the `publish` job runs only when that answer is `stable`. A pre-release tag such
+as `v2.0.0rc1` still runs the tagged commit's CI, but it cannot upload: PyPI has
+no delete, so an unreadable or unrecognized version has to skip the upload
+rather than be published because nobody classified it.
 
 Three things cover it now, and none is a substitute for the others.
 

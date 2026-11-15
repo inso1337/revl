@@ -24,6 +24,13 @@ now CONSTRUCTS the state it is about: `test_a_recorded_bypass_fills_the_hard_
 rung_and_removing_it_empties_it` stages a baseline entry and watches the rung
 fill and empty again, and `test_an_empty_rung_and_a_source_that_could_not_run_
 do_not_print_the_same_thing` holds the two apart at the output.
+
+Slice 3 adds a second hard source, the cross-tier differential probes: the
+`examples/rejections/` programs the census parks in `no-objection-out-of-slice`
+(the reference refuses them, the port raises no objection) and the lower
+oracle's `REJECTED_PROGRAMS` cannot carry yet. Its tasks are re-derived from
+the committed census record, and its vacuity is shown the same constructed way:
+`test_a_staged_probe_fills_the_hard_rung_and_removing_it_empties_it`.
 """
 
 import re
@@ -83,8 +90,9 @@ def test_every_rung_is_reachable_and_the_population_is_measured(derived):
 
     Every rung must be stamped by some source that is reading its artifacts at
     HEAD. How many instances that source currently finds is a fact about the
-    tree, not about the ladder: `hard` is 0 at HEAD because the recorded gate
-    bypasses it derives from were all closed.
+    tree, not about the ladder: the census-bypass half of `hard` is 0 at HEAD
+    because the recorded gate bypasses were all closed, while the probe half
+    fills it from the out-of-slice bucket.
     """
     tool, derivations = derived
     counts = tool.populations(tool.tasks_of(derivations))
@@ -218,16 +226,159 @@ def _refuses_every_named_program(tasks):
 
 
 def test_hard_tasks_name_a_program_the_reference_refuses(curriculum):
-    """Holds over whatever census tasks HEAD has, which is currently none.
+    """Holds over whatever hard tasks HEAD has.
 
-    The assertion is not allowed to be vacuous just because it is empty here,
-    so its teeth are shown on a constructed baseline in
-    `test_a_recorded_bypass_fills_the_hard_rung_and_removing_it_empties_it`
-    rather than by requiring the tree to still have an open gate bypass.
+    The census half is currently empty, because the bypasses it derives from
+    were closed, so its teeth are shown on a constructed baseline in
+    `test_a_recorded_bypass_fills_the_hard_rung_and_removing_it_empties_it`.
+    The probe half is populated at HEAD and is re-derived here directly.
     """
     _, tasks = curriculum
     _refuses_every_named_program(
-        [t for t in tasks if t.task_id.startswith("census/")])
+        [t for t in tasks
+         if t.task_id.startswith(("census/", "probe/"))])
+
+
+def test_probe_tasks_come_from_the_census_out_of_slice_bucket(curriculum):
+    """The probe's route is the committed census record, so re-read the record:
+    the case is the artifact, and the bucket the task quotes is there.
+
+    The expected set is every out-of-slice rejection record minus the
+    `use`-bearing ones, which the census refuses only because an in-memory
+    source has no `modules=` (a harness limit, not a port gap). Deriving the
+    exclusion from the source text, rather than from the generator's compile,
+    is what catches a record the source silently drops.
+    """
+    import json
+
+    tool, tasks = curriculum
+    probes = [t for t in tasks if t.task_id.startswith("probe/")]
+    records = tool._census_out_of_slice_programs(tool._census_record_paths())
+    use_bearing = {
+        program for program, _ in records
+        if any(line.strip().startswith("use ")
+               for line in (ROOT / program).read_text(encoding="utf-8").splitlines())
+    }
+    expected = {program for program, _ in records} - use_bearing
+    # 22 out-of-slice rejection records at this revision; the count is a
+    # non-vacuity guard, and the set comparison below is the real assertion.
+    # It moved from 20 when issue #3110's two `G-SECRET-FLOW`/`G-SECRET`
+    # closure fixtures joined the out-of-slice bucket.
+    assert len(probes) == 22
+    assert {task.artifact for task in probes} == expected
+    for task in probes:
+        record = task.locator.split(" buckets[", 1)[0]
+        saved = json.loads((ROOT / record).read_text(encoding="utf-8"))
+        assert saved["case"] == task.artifact, \
+            f"{task.task_id}: {record} records {saved['case']}"
+        assert "no-objection-out-of-slice" in saved["buckets"], \
+            f"{task.task_id}: {record} is {saved['buckets']}"
+        assert task.subject.startswith("selfhost/lower.rvl")
+        assert "census_artifact.py" in task.mechanism, \
+            "the tier is read off the census corpus, so the census is the " \
+            "mechanism that decides the task"
+
+
+def _staged_census_record(directory, program,
+                          buckets=("no-objection-out-of-slice",)):
+    """One census case, in the record's own shape, for a program the test owns.
+
+    `t13_unknown_match_case` is a checked-in rejection the reference genuinely
+    refuses. The STAGED record says the census parked it out of slice; that is
+    this test's claim, not HEAD's, so staging it demonstrates the source firing
+    without re-opening a closed gap or editing the committed record. `buckets`
+    is a parameter so a test can stage a record the source READS and finds
+    nothing in, which is different from a directory that is not there.
+    """
+    import json
+
+    cases = directory / "cases"
+    cases.mkdir()
+    (cases / "case.json").write_text(json.dumps(
+        {"case": program, "buckets": list(buckets)}))
+    return cases
+
+
+def test_a_staged_probe_fills_the_hard_rung_and_removing_it_empties_it(
+        derived, tmp_path):
+    """The probe source's vacuity detection, in both directions.
+
+    With a record it reads and finds nothing in, it emits no tasks and still
+    DECLARES `hard`, so an empty rung is a measurement rather than a source
+    that stopped working. With one staged out-of-slice record it emits one
+    task, on `hard`, naming the program and the record. What changes between
+    the two runs is one directory this test owns, and `hard` stays reachable
+    through a STAGED empty census-bypass source, so the gate is green in both
+    and this test does not depend on a recorded bypass being absent at HEAD.
+    """
+    tool, live = derived
+    others = [d for d in live if d.source not in
+              ("census-bypass", "cross-tier-probes")]
+    reachable = [tool.adapter_census_bypass(_staged_baseline(tmp_path, ()))]
+
+    program = "examples/rejections/t13_unknown_match_case.rvl"
+    quiet = tmp_path / "quiet"
+    quiet.mkdir()
+    empty = tool.adapter_cross_tier_probe(
+        _staged_census_record(quiet, program, buckets=()))
+    assert empty.tasks == ()
+    assert "hard" in empty.rungs(), "an empty source must still declare its rung"
+
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    filled = tool.adapter_cross_tier_probe(
+        _staged_census_record(staged, program))
+    assert len(filled.tasks) == 1
+    task = filled.tasks[0]
+    assert task.tier == "hard"
+    assert task.artifact == program
+    assert "no-objection-out-of-slice" in task.locator
+    assert _refuses_every_named_program(filled.tasks) == 1
+
+    populated = others + reachable + [filled]
+    assert tool.populations(tool.tasks_of(populated))["hard"] == 1
+    assert "hard" not in tool.empty_rungs(populated)
+    assert tool.check(populated) == []
+
+    emptied = others + reachable + [empty]
+    assert tool.populations(tool.tasks_of(emptied))["hard"] == 0
+    assert "cross-tier-probes" in tool.empty_rungs(emptied)["hard"]
+    assert tool.check(emptied) == [], \
+        "an empty but reachable rung is a measurement, not a failure"
+
+
+def test_a_missing_census_record_reds_instead_of_reading_as_empty(derived,
+                                                                 tmp_path):
+    """A renamed or missing record directory is not an empty bucket.
+
+    `Path.rglob` on a missing directory returns nothing, so the adapter must
+    return no signal: the gate then names the source as one that measured
+    nothing rather than reporting `hard` as empty and reachable.
+    """
+    tool, derivations = derived
+    missing = tool.adapter_cross_tier_probe(tmp_path / "does-not-exist")
+    assert missing.tasks == ()
+    assert missing.signals == ()
+    live = [d for d in derivations if d.source != "cross-tier-probes"]
+    problems = tool.check(live + [missing])
+    assert any("'cross-tier-probes' ran and measured no signal" in p
+               for p in problems), problems
+    assert "cross-tier-probes" not in \
+        tool.empty_rungs(live + [missing]).get("hard", [])
+
+
+def test_a_malformed_census_record_is_refused_with_its_path(tmp_path):
+    """A record that is not an object, or whose case is not a string, is named
+    with its path instead of raising AttributeError from inside the source."""
+    tool = _tool()
+    cases = _staged_census_record(tmp_path, "examples/counter_pair.rvl")
+    (cases / "case.json").write_text("[]")
+    with pytest.raises(ValueError, match="case.json"):
+        tool.adapter_cross_tier_probe(cases)
+
+    (cases / "case.json").write_text('{"case": 3}')
+    with pytest.raises(ValueError, match="case.json"):
+        tool.adapter_cross_tier_probe(cases)
 
 
 # A baseline entry is a recorded divergence, so it cannot be conjured from
@@ -268,7 +419,8 @@ def test_a_recorded_bypass_fills_the_hard_rung_and_removing_it_empties_it(
     assert {t.tier for t in filled.tasks} == {"hard"}
     assert _refuses_every_named_program(filled.tasks) == len(_STAGED_BYPASSES)
 
-    others = [d for d in live if d.source != "census-bypass"]
+    others = [d for d in live
+              if d.source not in ("census-bypass", "cross-tier-probes")]
     with_entries = others + [filled]
     assert tool.populations(tool.tasks_of(with_entries))["hard"] == \
         len(_STAGED_BYPASSES)
@@ -344,15 +496,19 @@ def test_check_reds_on_a_source_that_ran_and_measured_nothing(derived):
 
     A source whose artifacts were renamed away skips every branch and returns
     empty. That must not read as `hard` being done, so a derivation with no
-    signal is named, and the rung it fed reds as unreachable.
+    signal is named, and the rung it fed reds as unreachable. Both sources that
+    feed `hard` are blinded: `hard` is reachable only while one of them keeps
+    stamping it.
     """
     tool, derivations = derived
     import dataclasses
     blinded = [dataclasses.replace(d, signals=(), tasks=())
-               if d.source == "census-bypass" else d for d in derivations]
+               if d.source in ("census-bypass", "cross-tier-probes") else d
+               for d in derivations]
     problems = tool.check(blinded)
-    assert any("'census-bypass' ran and measured no signal" in p
-               for p in problems), problems
+    for source in ("census-bypass", "cross-tier-probes"):
+        assert any(f"'{source}' ran and measured no signal" in p
+                   for p in problems), problems
     assert any("tier 'hard' is unreachable" in p for p in problems), problems
     assert tool.empty_rungs(blinded) == {}, \
         "a source that measured nothing must not be reported as merely empty"
@@ -409,20 +565,26 @@ def test_cli_check_exits_zero_and_the_restricted_run_exits_one():
 def test_an_empty_rung_and_a_source_that_could_not_run_do_not_print_the_same_thing():
     """The output-level half of issue #1410.
 
-    Two different events reach the reader of a `--check` run today: `hard` is
-    empty because the bypasses behind it were closed, and a source that cannot
-    read its artifacts. They are held apart by prefix and by exit code, and
-    both halves are read off real runs rather than asserted.
+    Two different events must not print the same thing: a rung whose source
+    found nothing, and a source that could not run or a rung nothing reaches.
+    Both halves are read off real runs rather than asserted. The census is the
+    source that still reaches `hard` and finds nothing, so the restricted run
+    over it is the empty case; the unrestricted run is green because the probe
+    source now populates `hard`.
     """
     green = _cli("--check")
     assert green.returncode == 0
-    empty = [ln for ln in green.stderr.splitlines()
-             if ln.startswith("CURRICULUM-EMPTY")]
-    assert len(empty) == 1, green.stderr[-2000:]
-    assert "tier 'hard' has 0 tasks at HEAD" in empty[0]
-    assert "census-bypass" in empty[0], "the empty rung does not say who feeds it"
+    assert "CURRICULUM-EMPTY" not in green.stderr, green.stderr[-2000:]
     assert "CURRICULUM-RED" not in green.stderr
-    assert "  hard       0  empty, and reachable" in green.stdout, green.stdout[:400]
+
+    empty = _cli("--check", "--adapter", "census-bypass")
+    assert empty.returncode == 1, "the other rungs are unreachable in this run"
+    empties = [ln for ln in empty.stderr.splitlines()
+               if ln.startswith("CURRICULUM-EMPTY")]
+    hard = [ln for ln in empties if "tier 'hard' has 0 tasks at HEAD" in ln]
+    assert len(hard) == 1, empty.stderr[-2000:]
+    assert "census-bypass" in hard[0], \
+        "the empty rung does not say who feeds it"
 
     red = _cli("--check", "--adapter", "unexplained-refusal")
     assert red.returncode == 1
@@ -433,6 +595,7 @@ def test_an_empty_rung_and_a_source_that_could_not_run_do_not_print_the_same_thi
     # and the two never collide: no line carries both prefixes, and the wording
     # of an empty rung never appears on a red one.
     assert not any("has 0 tasks at HEAD" in ln for ln in reds)
+    assert not any("is unreachable at HEAD" in ln for ln in empties)
 
 
 def test_the_non_vacuity_assertions_would_reject_an_invented_task(curriculum):

@@ -119,10 +119,12 @@ def measure_markers(corpus, cases) -> dict:
 
 def reach_diff(base: dict, head: dict) -> dict:
     """`label -> result` for every case measured on both sides: the decision
-    `revl audit --diff` makes (`audit_diff.evaluate`: added crossings and loosened
-    reach bounds) plus `diff_capability_scopes`, which that decision does not
-    read: a scope widened on a crossing whose token did not change.
-    `unacknowledged` holds every widening; no acknowledgement is honoured."""
+    `revl audit --diff` makes (`audit_diff.evaluate`, every gated bucket since
+    issue #3182) plus `diff_capability_scopes`, kept so the scope axis holds
+    whatever `evaluate` gates. A widened emission ceiling is left out: the
+    resource component judges it (`resource_diff`), so one widening fails one
+    component. `unacknowledged` holds every other widening; no acknowledgement
+    is honoured."""
     from revl.audit_diff import diff_capability_scopes, evaluate  # noqa: PLC0415
 
     out = {}
@@ -133,7 +135,8 @@ def reach_diff(base: dict, head: dict) -> dict:
         result = evaluate(before, after)
         scopes = diff_capability_scopes(before, after)
         result["unacknowledged"] = sorted(
-            set(result["unacknowledged"]) | set(scopes["scope_widened"]))
+            (set(result["unacknowledged"]) | set(scopes["scope_widened"]))
+            - set(result.get("cardinality_widened") or []))
         out[label] = result
     return out
 
