@@ -2386,7 +2386,8 @@ PUSH_REPLY = {"jsonrpc": "2.0", "result": {
 
 
 @contextlib.contextmanager
-def _push_module(replies=None, env="https://receiver.example", on_first=None):
+def _push_module(replies=None, env="https://receiver.example", on_first=None,
+                 pin=None):
     """Execute `_start`, `_poll` and the receiver body in ONE module namespace,
     the way the synthesized row's module carries them, against a stubbed peer.
 
@@ -2394,7 +2395,7 @@ def _push_module(replies=None, env="https://receiver.example", on_first=None):
     queue answers a working task. The caller drives the three functions and
     inspects `calls`, so "the drain did not cross" is a count, not a guess."""
     start_src = task_body("start", "https://agent.example:8443", "research",
-                          label="researcher")
+                          label="researcher", pin=pin)
     poll_src = task_body("poll", "https://agent.example:8443", "research",
                          label="researcher")
     reply_src = task_body("reply", "https://agent.example:8443", "research",
@@ -2851,6 +2852,30 @@ def test_a_start_that_never_reaches_the_peer_leaves_no_entry():
         with pytest.raises(RuntimeError) as excinfo:
             ns["_start"]("survey the field")
         assert getattr(excinfo.value, "_revl_transport_fault", False)
+        assert _registry(ns) == ({}, {})
+
+
+@pytest.mark.parametrize("pin, raised", [
+    (None, "_RedirectRefused"),
+    ("a" * 64, "_RedirectRefused"),
+    ("a" * 64, "TransportFault"),
+])
+def test_a_start_refused_by_redirect_or_pin_leaves_no_entry(pin, raised):
+    """The two re-raise arms before the transport `except` (a redirect refusal,
+    a pin fault) leave `_start` without a handle too, and the peer has already
+    been handed the URL and token. Both exceptions are classes the emitted body
+    defines LOCALLY, so the opener reaches them through its caller's frame."""
+    class _Refuse:
+        def open(self, request, *a, **k):
+            raise sys._getframe(1).f_locals[raised]("refused")
+
+    with _push_module(pin=pin) as (ns, calls, Ev):
+        urllib.request.build_opener = lambda *h: _Refuse()
+        with pytest.raises(RuntimeError) as excinfo:
+            ns["_start"]("survey the field")
+        if raised == "_RedirectRefused":
+            # still NOT a transport failure: it never withdraws the provider
+            assert not getattr(excinfo.value, "_revl_transport_fault", False)
         assert _registry(ns) == ({}, {})
 
 

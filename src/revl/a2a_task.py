@@ -478,7 +478,6 @@ def task_body(kind: str, endpoint: str, base_or_skill: str, *,
     url = json.dumps(endpoint)
     pin_src = tls_pin.py_pin_handler(pin) if pin else ""
     pin_imports = f"    {tls_pin.PY_PIN_IMPORTS}\n" if pin else ""
-    pin_catch = ("    except TransportFault:\n        raise\n" if pin else "")
     policy = py_policy(
         "a2a", follow=follow_redirects,
         extra_handlers=", _PinnedHTTPSHandler()" if pin else "")
@@ -638,6 +637,11 @@ def task_body(kind: str, endpoint: str, base_or_skill: str, *,
     else:  # poll / reply
         handle = _event_from_result(fault, drop=push_drop)
 
+    # The two re-raise arms (a redirect refusal, a pin fault) leave `_start`
+    # without a handle just as the transport `except` does, and the peer has
+    # already been handed the URL and token, so they release the entry too.
+    pin_catch = ("    except TransportFault:\n" + push_cleanup + "        raise\n"
+                 if pin else "")
     tail = gates + handle
     if guard_start:
         # Every shape gate between the reply and the handle is a fault the
@@ -658,6 +662,6 @@ def task_body(kind: str, endpoint: str, base_or_skill: str, *,
 {unwrap}    except _RedirectRefused:
         # NOT a transport failure: the peer declining to be the declared
         # endpoint, re-raised so it is never flattened into a feed event.
-        raise
+{push_cleanup}        raise
 {pin_catch}    except Exception as _exc:
 {push_cleanup}{fault(8, '"a2a: transport failure"', cause="_exc")}{tail}    """
