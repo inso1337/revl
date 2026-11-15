@@ -34,7 +34,7 @@
 
 ["reason", "only-unsupported-literal-kind-markers-and-the-unknown", "Only unsupported literal/kind markers and the unknown Some-payload default Int remain. Supported payloads have an inferable type; bare Some now covers expected-free payload inference."]
 
-["function", "only-unsupported-literal-kind-markers-and-the-unknown", "render_inner", 2, 2]
+["function", "only-unsupported-literal-kind-markers-and-the-unknown", "render_inner", 3, 3]
 
 ["reason", "remaining-aliases-are-frontend-normalized-to-before-canonica", "Remaining ===/!== aliases are frontend-normalized to ==/!= before canonical typed IR reaches the emitters."]
 
@@ -80,7 +80,7 @@
 
 ["reason", "remaining-marker-defers-tagged-payload-reads-constructing-op", "Remaining marker defers ?? tagged payload reads; constructing Opt values does not implement coalescing."]
 
-["function", "remaining-marker-defers-tagged-payload-reads-constructing-op", "render_bin", 1, 1]
+["function", "remaining-marker-defers-tagged-payload-reads-constructing-op", "render_bin", 2, 2]
 
 ["reason", "remaining-marker-rejects-unequal-or-missing-branch-result", "Remaining marker rejects unequal or missing branch result types; typed value conditionals are supported and exercised."]
 

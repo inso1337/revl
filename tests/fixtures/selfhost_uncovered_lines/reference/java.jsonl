@@ -142,9 +142,9 @@
 
 ["function", "backends-java-emit-py-emit-v2-remaining-branches", "_emit_v2", 4, 4]
 
-["reason", "backends-java-emit-py-emit-v3-externs-extern", "backends/java/emit.py::_emit_v3_externs: Extern method wrappers, witnessed signatures and config-schema bindings require extern declarations, explicitly deferred; strict extern_config and method_witnessed cases retain reproductions. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)). Plus, issue #2345: the record-mode statements that journal an emission (an `extern emission fn` wrapper, a service emission or compensation site, or the WAL sink they need), which run only under `emit(ir, record=True)`; the oracle drives the default `emit(ir)` and the self-host port carries no WAL sink."]
+["reason", "backends-java-emit-py-emit-v3-externs-extern", "backends/java/emit.py::_emit_v3_externs: Extern method wrappers, witnessed signatures and config-schema bindings require extern declarations, explicitly deferred; strict extern_config and method_witnessed cases retain reproductions. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)). Plus, issue #2345: the record-mode statements that journal an emission (an `extern emission fn` wrapper, a service emission or compensation site, or the WAL sink they need), which run only under `emit(ir, record=True)`; the oracle drives the default `emit(ir)` and the self-host port carries no WAL sink. Two more statements join the deferred region with the host-body containment fix (#3162, #3166): the check that refuses an @java body which leaves its function. No corpus or refusal document on this tier carries an @java-bodied extern, so those two cannot run."]
 
-["function", "backends-java-emit-py-emit-v3-externs-extern", "_emit_v3_externs", 26, 26]
+["function", "backends-java-emit-py-emit-v3-externs-extern", "_emit_v3_externs", 28, 28]
 
 ["reason", "backends-java-emit-py-emit-v3-lifecycle-tests", "backends/java/emit.py::_emit_v3_lifecycle_tests: Lifecycle test method assembly, load/unload state and conditional REVL_TESTS invocation require in-file lifecycle tests, explicitly deferred. Issue #2009 adds one statement: the generated lifecycle harness arms the provider's `RevlJournal` before each bracketed host-Map write and closes it at the frame's disposer."]
 
@@ -439,6 +439,10 @@
 ["function", "blocking-tier-stream-and-typed-event-runtime-item", "_stream_head", 4, 4]
 
 ["function", "blocking-tier-stream-and-typed-event-runtime-item", "_stream_stage_arrow", 9, 9]
+
+["reason", "host-body-scanner-standalone-bootstrap", "`_host_body_scanner` is the lazy import of the shared `revl.host_body` scanner added for the host-body containment fixes (#3130, #3131, #3162, #3164, #3166). Its `except ModuleNotFoundError` arm runs only when `emit.py` is executed as a script with `revl` not importable, an invocation mode that no corpus document and no refusal document reaches. It is the same class recorded for the `_refuse_deferred_emissions` and `_refuse_validated_emissions` bootstrap above. On the tiers whose corpus carries a host-bodied extern the import and the return are reached and only that arm stays unrun; the java and wasm corpora carry no host-bodied extern, so the whole helper stays unrun there."]
+
+["function", "host-body-scanner-standalone-bootstrap", "_host_body_scanner", 10, 10]
 
 ["reason", "issue-1511-the-java-tier-an-extern-that-declares-compensate", "Issue #1511, the java tier: an extern that declares `compensate` was registered in no position. `_reaches_declared` finds a component that crosses one, `_component_needs_frame` gives it the frame, `_declared_crossing` renders every crossing through `RevlDeclared.crossed`, and `_emit_revl_frame_runtime` appends `RevlDeclared`. selfhost/emit_java.rvl does not port it, and no emit_java corpus document declares an extern `compensate`, so a corpus document would make the byte-agreement oracle diverge; the self-host port is the work that retires this entry. The input family is backends/java/test_declared_compensate_java.py."]
 

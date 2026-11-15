@@ -287,13 +287,13 @@
   },
   "wasm": {
     "blind": {
-      "Issue #2201: the WASM reference refuses `/` by name \u2014 it yields `Float`, which this tier does not lower \u2014 and selfhost/emit_wasm.rvl mirrors that refusal in `render_bin`. No CORPUS document can reach either arm, because a corpus document is one the reference EMITS: `ratio` in tests/fixtures/emit_wasm_refusals/true_division.rvl is the one document in the tree that reaches them, the line-coverage gate drives both halves over it, and tests/test_selfhost_emit_wasm.py::test_a_true_division_the_reference_refuses_is_refused_by_name_here_too asserts the refusal's text on both sides. `%` stays covered by arith.rvl.": [
+      "Issue #3295: the WASM reference lowers `/` as f64.div, since Float is a native f64 and `/` yields Float even over two Ints. selfhost/emit_wasm.rvl has no f64 lowering and names `/` as <<UNSUPPORTED-TRUE-DIVISION:Float>> in `render_bin`, a named port gap tracked by issue #3425. No CORPUS document can reach either arm, because a corpus document is a byte-agreement case and the port cannot agree on f64 output: `ratio` in tests/fixtures/wasm_true_division_port_gap.rvl is the one document in the tree that reaches both, and tests/test_selfhost_emit_wasm.py::test_true_division_lowers_on_the_reference_but_is_a_named_port_gap pins f64.div on the reference and the named gap on the port. `%` stays covered by arith.rvl.": [
         "op=/"
       ],
       "Tagged reads are explicitly deferred: coalescing and match require tag/payload loads and arm binding. WASM tagged construction is covered; it does not implement the match wildcard/Any-payload inference paths.": [
         "op=??"
       ],
-      "The WASM reference explicitly rejects operands=Float and Float-valued module types. Source / yields Float (including Int/Int), so its legacy integer WAT instruction entry is not evidence of supported source division; named integer division builtins are a separate covered family.": [
+      "The WASM reference lowers Float operands as native f64 instructions since issue #3295, but selfhost/emit_wasm.rvl has no f64 lowering at all (issue #3425), so a Float-operand document is a named port gap rather than a byte-agreement case and no CORPUS document can reach this marker until the port learns f64. Named integer division builtins are a separate covered family.": [
         "operands=Float"
       ],
       "parser._CANONICAL_OPS rewrites source ===/!== to ==/!= before typed IR. Compatibility aliases remain in cmp_suffix, but canonical source equality already exercises ==/!=.": [
@@ -358,6 +358,9 @@
         "method=remove",
         "method=set",
         "method=size"
+      ],
+      "Float is a native f64 on the WASM reference since issue #3295, which lowers an Int or Int32 to Float widening as f64.convert_i64_s or f64.convert_i32_s. selfhost/emit_wasm.rvl still carries only the scalar Int/Bool slice with no f64 lowering at all (issue #3425; it names `/` as <<UNSUPPORTED-TRUE-DIVISION:Float>>), so a Float document is a named port gap rather than a byte-agreement case and no CORPUS document can reach this marker until the port learns f64.": [
+        "widen=Float"
       ],
       "Tagged reads are explicitly deferred: coalescing and match require tag/payload loads and arm binding. WASM tagged construction is covered; it does not implement the match wildcard/Any-payload inference paths.": [
         "kind=match",

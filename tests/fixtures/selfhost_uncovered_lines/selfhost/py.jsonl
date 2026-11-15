@@ -66,6 +66,12 @@
 
 ["function", "inline-template-rejects-guarded-return-with-missing-expressi", "inline_template", 1, 1]
 
+["reason", "issue-3407-direct-read-guards-on-input-the-frontend-refuses", "issue #3407: defensive guards in the direct-read analysis whose input the frontend refuses. The duplicate-fn guard (`duplicate function `move``) and the callee-or-let-named-like-a-parameter check (`f` is already declared in this function; `move` is bound here and called in this body, and a module function of that name is in scope): no compiled document reaches them."]
+
+["function", "issue-3407-direct-read-guards-on-input-the-frontend-refuses", "dict_receivers", 1, 1]
+
+["function", "issue-3407-direct-read-guards-on-input-the-frontend-refuses", "dr_is_param", 1, 1]
+
 ["reason", "issue-721-method-block-renders-pass-for-an", "issue #721: `method_block` renders `pass` for an EMPTY provide-method control-flow arm. services_control_flow.rvl reaches every other statement, and no corpus document holds an empty arm. The reference renders the same `pass` through `_Lines.close_block` (issue #2284), which every other block shares, so it has no uncovered twin; tests/test_selfhost_emit_py.py `test_comment_only_blocks_agree` holds the two to the same bytes on empty arms."]
 
 ["function", "issue-721-method-block-renders-pass-for-an", "method_block", 1, 1]
@@ -89,10 +95,6 @@
 ["reason", "lifecycle-step-marker-item-391-lifecycle-step-answers", "Lifecycle-step marker (item 391): lifecycle_step answers a step kind it does not know with `<<UNSUPPORTED-LIFECYCLE-STEP:...>>`. The frontend emits only the seven kinds it renders, so no document reaches it; the reference's matching branch is a `# pragma: no cover` raise."]
 
 ["function", "lifecycle-step-marker-item-391-lifecycle-step-answers", "lifecycle_step", 1, 1]
-
-["reason", "line-s-empty-text-return-is-bypassed-by", "line's empty-text return is bypassed by callers which append blank lines directly; reference _Lines.add has the same empty-line spelling. This formatter branch does not represent omitted source behavior."]
-
-["function", "line-s-empty-text-return-is-bypassed-by", "line", 1, 1]
 
 ["reason", "map-has-membership-and-unknown-builtin-marker-render", "Map.has membership and unknown-builtin marker: render_builtin matches reference key-in-map output, although current map functions use lookup/set/keys/size/remove. Unknown method names are frontend-invalid. This is an inspected equivalent branch, not a supported-operation waiver."]
 

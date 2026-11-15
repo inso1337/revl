@@ -990,8 +990,8 @@ def test_the_derived_rule_does_not_replace_the_hand_written_tables():
 
     `companion_paths` sees a path a test SPELLS. It does not see one the test
     computes, walks to from a root it holds in a variable, or declares only in
-    prose. Of the 32 modules in BENCH_DEPENDENT_TESTS, exactly 15 spell a
-    `bench/` path, so the derived rule finds 15 of 32. It is a
+    prose. Only some of the modules in BENCH_DEPENDENT_TESTS spell a `bench/`
+    path, so the derived rule finds fewer than the table declares. It is a
     complement to those tables, not their replacement."""
     cp = at.companion_paths(ROOT)
     spelled = {t for t, paths in cp.items()

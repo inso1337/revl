@@ -12,6 +12,7 @@ an exhaustive listing. `ls docs/` has more.
 - [syntax-2.0.md](syntax-2.0.md): the full 2.0 language reference
 - [stdlib-2.0.md](stdlib-2.0.md): the specified stdlib surface
 - [function-types.md](function-types.md) · [holes.md](holes.md) · [capabilities.md](capabilities.md): the newer type-system surface
+- [function-specs.md](function-specs.md): a function's `ensures` clause, checked as a `prop test` and recorded in the audit
 - [generics.md](generics.md): implicit and explicit `[T]` type parameters
 - [strings.md](strings.md): a `Str`'s code-point unit and `Float` rendering · [arithmetic.md](arithmetic.md): `/`, `%`, named integer ops and `Int32`
 - [wasm-capabilities.md](wasm-capabilities.md): the substrate tier's capability matrix and its hard refusals

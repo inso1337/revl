@@ -33,7 +33,7 @@ component Store provides kv: Kv {
 
 // ...and the shape that reaches the provide arm: no activation-body bracket at
 // all, the only `effect`/`undo` inside a provide method.
-component Proxy requires db: Db provides kv2: Kv2 {
+component CacheProxy requires db: Db provides kv2: Kv2 {
   provide kv2 {
     // The bracket arm of `_method_body_has_bracket`. Its `if`/`while` arms are
     // NOT exercised here: the frontend refuses a teardown-registering step

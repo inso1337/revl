@@ -66,6 +66,8 @@ Two expression dialects are covered:
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import dataclasses
 import math
 
@@ -2287,9 +2289,58 @@ def _extend_arm_tenv(stmt, tenv: dict, types: dict, filename: str | None) -> Non
                    else infer_ast(stmt.value, tenv, types, filename))
 
 
+# issue #3400: lowering asks for the type of each operand of an operator
+# (`_lower_pure_expr`), and `infer_ast` answers by walking the operand's whole
+# subtree, so a chain of n operators cost n*n/2 inferences: 3000 `+` took over
+# a minute and a half. Inside `infer_memo()` a non-raising inference is kept
+# for the pass, keyed on the node, the type environment and the type table
+# (by identity, all three held by the entry so no id is reused while it
+# lives), so each node of an expression is inferred once. A raising
+# inference (`filename` given) is never memoised: its diagnostics stay exactly
+# where they were.
+_INFER_MEMO: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "revl_infer_memo", default=None)
+
+
+@contextlib.contextmanager
+def infer_memo():
+    """Keep non-raising `infer_ast` answers for the duration of the block.
+
+    Re-entrant: a nested scope shares the outermost one's memo. The caller
+    owns the soundness condition: no type environment handed to `infer_ast`
+    inside the block is mutated in a way that changes the type of an
+    expression already inferred under it.
+    """
+    if _INFER_MEMO.get() is not None:
+        yield
+        return
+    token = _INFER_MEMO.set({})
+    try:
+        yield
+    finally:
+        _INFER_MEMO.reset(token)
+
+
+def infer_memo_active() -> bool:
+    return _INFER_MEMO.get() is not None
+
+
 def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str | None:
     """Best-effort type of a parser-AST expression. With `filename`, definite
     operator/branch/argument mismatches raise; without it, never raises."""
+    memo = _INFER_MEMO.get()
+    if memo is None or filename is not None:
+        return _infer_ast(expr, tenv, types, filename)
+    key = (id(expr), id(tenv), id(types))
+    hit = memo.get(key)
+    if hit is not None and hit[0] is expr and hit[1] is tenv and hit[2] is types:
+        return hit[3]
+    result = _infer_ast(expr, tenv, types, None)
+    memo[key] = (expr, tenv, types, result)
+    return result
+
+
+def _infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str | None:
     from .parser import (
         ExprArrow, ExprBin, ExprBlockArm, ExprCall, ExprField, ExprHole,
         ExprIf, ExprIndex, ExprList, ExprLit, ExprMatch, ExprOptCall,

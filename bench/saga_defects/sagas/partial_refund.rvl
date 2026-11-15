@@ -1,0 +1,53 @@
+// partial_refund - the inverse refunds part of the charge
+//
+// Seeded defect: the charge for 4200 cents is undone by a refund of 2100 cents; the inverse is present and well-shaped but reverts only half the effect.
+// The ledger keeps the charged amount and a refund subtracts from it, so half a
+// refund leaves 2100 behind, which the fault sweep's host-residue check reads.
+// With a refund of 4200 the same saga passes every sweep unit.
+// Expected catch: fault-test
+// Corpus index: bench/saga_defects/defects.json (issue #2736)
+
+service Inventory {
+  fn reserve(sku: Str, qty: Int) -> Int
+  fn release(sku: Str, qty: Int) -> Int
+}
+
+service Payments {
+  fn charge(order: Str, cents: Int) -> Str
+  fn refund(order: Str, cents: Int) -> Int
+  emission fn settle(order: Str, cents: Int) -> Int
+  fn reverse(order: Str, cents: Int) -> Int
+}
+
+component Warehouse provides inventory: Inventory {
+  let rows = effect Map.new() undo rows.drop()
+  provide inventory {
+    fn reserve(sku, qty) = rows.insert(sku, qty)
+    fn release(sku, qty) = rows.remove(sku)
+  }
+}
+
+component Ledger provides payments: Payments {
+  let rows = effect Map.new() undo rows.drop()
+  provide payments {
+    fn charge(order, cents) = rows.insert(order, cents)
+    fn refund(order, cents) {
+      let held = match rows.get(order) {
+        Some(amount) => amount,
+        None => 0,
+      }
+      if (held == cents) {
+        return rows.remove(order)
+      }
+      return rows.insert(order, held - cents)
+    }
+    fn settle(order, cents) = rows.insert(order, cents)
+    fn reverse(order, cents) = rows.remove(order)
+  }
+}
+
+component Checkout requires inventory: Inventory, payments: Payments {
+  let hold = effect inventory.reserve("sku-1", 1) undo inventory.release("sku-1", 1)
+  let auth = effect payments.charge("order-1", 4200) undo payments.refund("order-1", 2100)
+  emit payments.settle("order-1", 4200) compensate payments.reverse("order-1", 4200)
+}

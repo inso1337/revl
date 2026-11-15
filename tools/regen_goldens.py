@@ -210,6 +210,12 @@ def produce_wasm() -> dict[str, str]:
         res = canonical.emit_component(revl.compile_source(text), service=service)
         out[f"backends/wasm/golden/{stem}.core.wat"] = res["core_wat"]
         out[f"backends/wasm/golden/{stem}.wit"] = res["wit"]
+
+    # The browser host's demo component. backends/wasm/host/build_demo.py writes
+    # this WAT together with the demo.wasm assembled from it; the WAT is the
+    # emitter's output, so it is declared here and compared like any golden.
+    demo = emit.emit(revl.compile_files([str(backend / "host" / "demo.rvl")]))
+    out["backends/wasm/host/demo.wat"] = demo["Cart"]
     return out
 
 
@@ -316,7 +322,8 @@ TARGETS: tuple[Target, ...] = (
                "backends/wasm/golden/canonical_aggregates.wit",
                "backends/wasm/golden/canonical_service.core.wat",
                "backends/wasm/golden/canonical_service.wit",
-               "backends/wasm/scenarios/crashproof/crashproof.ir.json"),
+               "backends/wasm/scenarios/crashproof/crashproof.ir.json",
+               "backends/wasm/host/demo.wat"),
         produce=produce_wasm,
         commands=(("bash", "backends/wasm/scenarios/crashproof/regen.sh"),),
         requires=("bash",),

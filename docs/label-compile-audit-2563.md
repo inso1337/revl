@@ -169,9 +169,9 @@ why a label cannot be export text there.
 | src/revl/gate.py:1032 | `propose` | `'<candidate>.rvl'` | label | already correct | `Gate.propose` passes the authoring profile for the agent's source |
 | src/revl/gate.py:1188 | `_compile_candidate_composition` | `'candidate.rvl'` | label | already correct | composition compile after `propose` already decided the author |
 | src/revl/gate.py:1196 | `_compile_candidate_composition` | `paths` | real | already correct | real path argument |
-| src/revl/gate_service.py:69 | `admit` | `paths` | real | already correct | real paths, untrusted author already |
-| src/revl/gate_service.py:122 | `admit_structured` | `paths` | real | already correct | real paths, untrusted author already |
-| src/revl/gate_service.py:189 | `admit_case` | `list(_RUNNING_SOURCES)` | real | out of scope | module-constant fixture sources |
+| src/revl/gate_service.py:74 | `admit` | `paths` | real | already correct | caller-chosen paths; `disk_relative_use=False` keeps a `use` out of them (issue #3152) |
+| src/revl/gate_service.py:128 | `admit_structured` | `paths` | real | already correct | caller-chosen paths; `disk_relative_use=False` keeps a `use` out of them (issue #3152) |
+| src/revl/gate_service.py:196 | `admit_case` | `list(_RUNNING_SOURCES)` | real | out of scope | module-constant fixture sources, compiled with the same caller-path rule |
 | src/revl/lsp/analysis.py:59 | `compute_diagnostics` | `filename` | real | out of scope | editor buffer, diagnostics only |
 | src/revl/mcp/edit.py:772 | `compile_virtual` | `'<candidate>.rvl'` | label | already correct | passes `profile=AUTHORING.profile()` |
 | src/revl/mcp/operator.py:1060 | `_compile_candidate` | `'<candidate>.rvl'` | label | out of scope | target/class derivation only, documented UNPROFILED; the handler's compile enforces the trust |

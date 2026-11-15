@@ -44,6 +44,27 @@ class EmitError(ValueError):
     pass
 
 
+def _host_body_scanner():
+    """The shared host-body scanner (`src/revl/host_body.py`).
+
+    Imported lazily so a standalone `python3 emit.py <ir.json>` keeps working:
+    when the emitter runs through the compiler `revl` is importable, and a bare
+    script run falls back to the source tree beside this file. The scanner is
+    the one place every tier splits an extern body and checks that it cannot
+    leave the function it is spliced into (#3130, #3131, #3162, #3164, #3166).
+    """
+    try:
+        from revl.host_body import body_lines, check_host_body
+    except ModuleNotFoundError:  # standalone `python3 emit.py`: put src/ on the path
+        import pathlib
+        import sys as _sys
+        src = pathlib.Path(__file__).resolve().parents[2] / "src"
+        if src.is_dir() and str(src) not in _sys.path:
+            _sys.path.insert(0, str(src))
+        from revl.host_body import body_lines, check_host_body
+    return body_lines, check_host_body
+
+
 def _finite_float(value):
     """The literal's value, refused when a `Float` is not finite (issue #312).
 
@@ -488,10 +509,29 @@ _GO_KEYWORDS = {"type", "range", "func", "map", "chan", "select", "go",
 #: that name first, so a user binding of one of these spellings made the
 #: assignment target the wrong variable (a go build type error). `_f`, `i`,
 #: `_i` and `_j` stay unreserved: their shadows are never read as a user value.
+#: issue #3095 adds the component activation/provide-impl scaffolding a
+#: `let-effect` bind shares scope with: `ctx` is the activation's
+#: `*stc.Context` and the impl's own field, `cfg` the config struct, the rest
+#: are the emitted frames, method receiver and apply results.
 _EMITTER_RESERVED = {
     "revlT", "root", "_fibers", "_revlLoadOrder", "_revlAt",
     "_svc", "_err", "_r", "_ok",
+    "ctx", "cfg", "err", "revlFrame", "revlJournal", "revlSelf",
+    "_revlUi", "_revlApplyInv", "_revlApplyErr",
 }
+
+# Issue #3168: the go tier lowers arithmetic, string, list and Opt operations to
+# package-level helpers spelled `revl<Upper>...` (`revlAdd`, `revlSub`,
+# `revlStrIndex`, `revlListPush`, ...) and the lifecycle scaffolding to
+# `revl*`/`_revl*`. A user `let` or parameter of one of those spellings is a Go
+# binding INSIDE the function, so the emitter's own bare helper call binds the
+# user's closure instead: `let revlSub = (..) => 0; return a - b` returned 0 and
+# the overflow trap was gone. The whole namespace is therefore unspellable from
+# a user name, the same rule the ts tier's `_TS_HELPER_PREFIX_RE` applies
+# (issue #3179) and java's `_REVL_NAMESPACE_RE` (issue #3160). The root-stripped
+# ladder below keeps the rename injective (`revlSub` -> `revlSub_`,
+# `revlSub_` -> `revlSub__`).
+_REVL_HELPER_PREFIX_RE = re.compile(r"^(?:revl[A-Z]|REVL_|_revl|_REVL)")
 
 
 def _safe_local(name: str) -> str:
@@ -510,21 +550,22 @@ def _safe_local(name: str) -> str:
     compiler CI does not run.
 
     The injective rule: escape a name iff the name OR any name reachable from
-    it by dropping trailing `_` is a Go keyword or an `_EMITTER_RESERVED` name,
-    and escape it by exactly ONE `_`. Names whose underscore-stripped root is
-    reserved shift up one rung of the `kw`/`kw_`/`kw__` ladder (`func` ->
-    `func_`, `func_` -> `func__`), which is injective; every other name is
-    returned unchanged and can never equal a shifted name, because a shifted
-    name's root is reserved and an unchanged name's root is not. The output is
-    never itself reserved: no member of `_GO_KEYWORDS` or `_EMITTER_RESERVED`
-    ends in `_`. Only a name whose root is reserved can change, so a program
-    that binds no reserved name emits byte-identically to before; binding one
-    of the driver's own spellings now moves the USER name one rung clear
-    (issue #3053)."""
+    it by dropping trailing `_` is a Go keyword, an `_EMITTER_RESERVED` name or
+    a helper-namespace name (`_REVL_HELPER_PREFIX_RE`), and escape it by exactly
+    ONE `_`. Names whose underscore-stripped root is reserved shift up one rung
+    of the `kw`/`kw_`/`kw__` ladder (`func` -> `func_`, `func_` -> `func__`),
+    which is injective; every other name is returned unchanged and can never
+    equal a shifted name, because a shifted name's root is reserved and an
+    unchanged name's root is not. The output is never itself reserved: no member
+    of `_GO_KEYWORDS` or `_EMITTER_RESERVED` ends in `_`. Only a name whose root
+    is reserved can change, so a program that binds no reserved name emits
+    byte-identically to before; binding one of the driver's own spellings now
+    moves the USER name one rung clear (issue #3053)."""
     n = str(name)
     root = n
     while root:
-        if root in _GO_KEYWORDS or root in _EMITTER_RESERVED:
+        if (root in _GO_KEYWORDS or root in _EMITTER_RESERVED
+                or _REVL_HELPER_PREFIX_RE.match(root) is not None):
             return n + "_"
         if not root.endswith("_"):
             break
@@ -533,7 +574,18 @@ def _safe_local(name: str) -> str:
 
 
 def _bind_field(name: str) -> str:
-    return _lower_camel(name)
+    """The Go spelling of a component `let-effect` bind.
+
+    `_lower_camel` drops the trailing underscores the frontend's `_safe_name`
+    added to keep binders apart, so the raw binder `ctx` and the escaped one
+    `ctx_` both spelled `ctx`, and `ctx` is also the activation's context
+    parameter and the provide impl's own field. Preserve the trailing rung and
+    escape the component scaffolding through `_safe_local`'s ladder; a bind
+    that lands on no reserved name is unchanged, so ordinary output is
+    byte-identical (issue #3095).
+    """
+    return _safe_local(_lower_camel(str(name))
+                       + "_" * (len(str(name)) - len(str(name).rstrip("_"))))
 
 
 def _req_field(name: str) -> str:
@@ -6317,21 +6369,28 @@ _GO_RESERVED = {
     # ladder below closes it — the user's `len` emits as `len_`, the emitter's
     # `len(...)` stays the builtin.
     #
-    # Only the ACTUALLY-emitted subset is reserved, not the whole predeclared
-    # list: a predeclared identifier the emitter never spells (`clear`, `close`,
-    # `cap`, `new`, `min`/`max`, …) cannot be shadowed because nothing references
-    # it, and over-reserving would rename a user `clear`/`cap` that the
-    # self-hosted `selfhost/emit_go.rvl` (keyword-escape only) leaves alone —
-    # breaking the byte-agreement oracle
-    # (`tests/test_selfhost_emit_go.py::test_selfhosted_emitter_is_byte_identical`,
-    # which `emit_go_corpus/accumulators.rvl`'s `clear` parameter exercises)
-    # without a matching change to that digest-input file. Go service methods
-    # are emitted capitalized (`r.Close()`), so they never reach `_v3_ident`'s
-    # predeclared check and need no exclusion. None of these end in `_`, so the
-    # ladder stays injective and a mangled name never re-enters the set.
-    "any", "append", "bool", "byte", "comparable", "copy", "delete", "error",
-    "float64", "int", "int32", "int64", "len", "make", "panic", "rune",
-    "string", "uint32",
+    # Issue #3161: the WHOLE predeclared set is reserved, not only the subset
+    # this emitter was known to spell. The subset was measured against the code
+    # emitted at the time, but the emitter also writes `recover()` (the
+    # lifecycle test driver and the component `Apply` guard), `close`, `cap`,
+    # `clear` and `uint64`, and a later helper can add another. A zero-argument
+    # `fn recover` compiles and the deferred `if r := recover(); r != nil`
+    # guard calls the USER fn, so a real panic is no longer recovered and an
+    # ordinary lifecycle test fails at the end of every run. Reserving the whole
+    # universe-block set means a helper added later cannot reopen the hole, and
+    # over-reserving only renames a user binding of that spelling (an injective
+    # ladder shift, never a wrong value). `selfhost/emit_go.rvl::is_go_reserved`
+    # carries the identical set, so the byte-agreement oracle stays exact; the
+    # `clear` parameter of `emit_go_corpus/accumulators.rvl` now emits `clear_`
+    # in both implementations. Go service methods are emitted capitalized
+    # (`r.Close()`), so they never reach `_v3_ident`'s predeclared check and
+    # need no exclusion. None of these end in `_`, so the ladder stays injective
+    # and a mangled name never re-enters the set.
+    "any", "append", "bool", "byte", "cap", "clear", "close", "comparable",
+    "complex", "complex64", "complex128", "copy", "delete", "error", "float32",
+    "float64", "imag", "int", "int8", "int16", "int32", "int64", "len", "make",
+    "max", "min", "new", "panic", "print", "println", "real", "recover", "rune",
+    "string", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
 }
 
 _V3_PRIM = {
@@ -6348,17 +6407,21 @@ def _v3_ident(name, role: str) -> str:
     """The pure-v3 counterpart of `_safe_local`, over the full Go keyword set.
 
     Same injective rule (see `_safe_local`): escape a name iff the name OR any
-    name reachable from it by dropping trailing `_` is a Go keyword, by exactly
-    one `_`. The plain "reserved -> name + '_'" map sent both `func` and the
-    equally legal revl identifier `func_` to `func_`, so two distinct revl
-    locals became one Go local and `go build` reported "no new variables on
-    left side of :=" — a loud break here, a SILENT capture on the python tier
-    from the same shape."""
+    name reachable from it by dropping trailing `_` is a Go keyword, an
+    `_EMITTER_RESERVED` helper name or a name in the helper namespace
+    (`_REVL_HELPER_PREFIX_RE`, issue #3168), by exactly one `_`. The plain
+    "reserved -> name + '_'" map sent both `func` and the equally legal revl
+    identifier `func_` to `func_`, so two distinct revl locals became one Go
+    local and `go build` reported "no new variables on left side of :=": a
+    loud break here, a SILENT capture on the python tier from the same shape.
+    A `revl*` user binding is escaped for the same reason a keyword is: the
+    emitter's bare helper call inside the function must keep binding the
+    helper (issue #3168)."""
     if not isinstance(name, str) or not name:
         raise EmitError(f"invalid {role} identifier: {name!r}")
     root = name
     while root:
-        if root in _GO_RESERVED:
+        if (root in _GO_RESERVED or _REVL_HELPER_PREFIX_RE.match(root) is not None):
             return name + "_"
         if not root.endswith("_"):
             break
@@ -8434,6 +8497,26 @@ def _go_v3_match_result(node, ctx: _V3GoCtx, expected, scrut_node,
     return "\n".join(lines)
 
 
+def _v3_infer_arm_body(arm, scrut_t, ctx: _V3GoCtx):
+    """The surface type of a match arm's body with the arm's binder in scope.
+
+    A binder shadows any outer binding of its name, so it is typed as the
+    arm's payload (the whole scrutinee for a wildcard) and, when that is
+    unknown, as nothing, never as the outer binding (issue #3075)."""
+    bind = arm.get("bind")
+    if not bind or bind == "_":
+        return _go_v3_infer_type(arm.get("body"), ctx)
+    bound = scrut_t if arm.get("pattern") == "_" else arm.get("payload_type")
+    outer = ctx.var_types
+    ctx.var_types = {k: v for k, v in outer.items() if k != bind}
+    if bound is not None:
+        ctx.var_types[bind] = bound
+    try:
+        return _go_v3_infer_type(arm.get("body"), ctx)
+    finally:
+        ctx.var_types = outer
+
+
 def _go_v3_match(node: dict, ctx: _V3GoCtx, expected) -> str:
     scrut_node = node.get("scrutinee")
     scrutinee = _go_v3_expr(scrut_node, ctx)
@@ -8442,7 +8525,7 @@ def _go_v3_match(node: dict, ctx: _V3GoCtx, expected) -> str:
     exp_t = _go_v3_type(expected, ctx.types) if expected else None
     if not exp_t:
         for arm in arms:
-            exp_t = _go_v3_type(_go_v3_infer_type(arm.get("body"), ctx), ctx.types)
+            exp_t = _go_v3_type(_v3_infer_arm_body(arm, st, ctx), ctx.types)
             if exp_t:
                 break
     exp_t = exp_t or "any"
@@ -9085,9 +9168,14 @@ def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=Non
             # but pinning the declared type is still correct and keeps a bare
             # `None` / `Err(..)` binding well-typed.
             out.append(f"{pad}var {name} {go_t} = {value}")
+        elif name == "_":
+            # the blank identifier declares nothing: `_ := v` is no new
+            # variable, and `_ = _` reads `_` as a value (issue #3074)
+            out.append(f"{pad}_ = {value}")
         else:
             out.append(f"{pad}{name} := {value}")
-        out.append(f"{pad}_ = {name}")
+        if name != "_":
+            out.append(f"{pad}_ = {name}")
     elif step == "assign":
         raw = node.get("name")
         name = _v3_ident(raw, "binding")
@@ -9460,6 +9548,12 @@ def _emit_v3_go_externs(externs: list, ctx: _V3GoCtx,
                 f"(available: {', '.join(sorted(bodies)) or 'none'})"
             )
         body = bodies["go"].strip()
+        # #3162/#3166: refuse a body Go reads as unbalanced, and split on
+        # newlines only so a comment cannot become a statement. Before the
+        # journalled/secret wrappers so the body is checked once.
+        _body_lines, check_host_body = _host_body_scanner()
+        check_host_body("go", body,
+                        where=f"extern `{ext.get('name')}`", error=EmitError)
         # item 421 F6: an extern whose DECLARED return was `Secret[T]` is the
         # ORIGIN — where the value enters the value world, the case a
         # receiver-end marking misses (`let t = emit mint(); effect
@@ -9530,8 +9624,9 @@ _GO_LANGUAGE_KEYWORDS = frozenset({
 def _hoist_go_imports(body: str, ctx: "_V3GoCtx", extern: str) -> list[str]:
     """Split a @go extern body into emittable lines, pulling any
     `//revl:import [alias] <path>` directive out to the module import set (ctx)."""
+    body_lines, _check_host_body = _host_body_scanner()
     kept: list[str] = []
-    for line in body.splitlines():
+    for line in body_lines(body):
         if _GO_IMPORT_DIRECTIVE_WORD.match(line.strip()):
             spec = _go_import_spec(line.strip(), extern)
             ctx.extern_imports.add(spec)

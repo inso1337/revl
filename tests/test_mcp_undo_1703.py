@@ -90,15 +90,47 @@ def _fresh_server_session():
 
 # ------------------------------------------------- the classification
 
+# Verbs the operator gate holds as AUTHORITY although they mutate nothing:
+# `revl_snapshot` hands back a document, `revl_approvals` (issue #2991) reads
+# the approval tickets, their blast radius and history. Neither has an undo
+# field at all. A new entry here is a decision, checked below against the
+# advertised read-only annotation.
+GATED_READ_ONLY = {"revl_snapshot", "revl_approvals"}
+
+
 def test_every_mutating_verb_is_classified():
     """A mutating verb (one the operator gate holds) either has an exact
-    inverse or names why it has none. `revl_snapshot` is gated as authority
-    but mutates nothing, so it answers with no undo field at all."""
-    mutating = (set(op.TOOL_VERB) | set(op.COMPOSED_TOOL_VERB)) - {"revl_snapshot"}
+    inverse or names why it has none. The gated read-only verbs mutate
+    nothing, so they answer with no undo field at all."""
+    mutating = (set(op.TOOL_VERB) | set(op.COMPOSED_TOOL_VERB)) - GATED_READ_ONLY
     reversible = undo_record.GENERATION_VERBS | {"revl_lease"}
     assert not reversible & set(undo_record.IRREVERSIBLE)
     assert mutating - reversible - set(undo_record.IRREVERSIBLE) == set()
     assert all(reason.strip() for reason in undo_record.IRREVERSIBLE.values())
+
+
+def test_the_gated_read_only_verbs_are_exactly_the_read_only_annotated_ones():
+    """The exemption above is not a free pass: it is exactly the gated verbs
+    the server advertises as read-only and that carry no irreversible-undo
+    reason (`revl_commit` and `revl_fork` are annotated read-only but record a
+    step with no inverse, so they stay in `IRREVERSIBLE`)."""
+    from revl.mcp import server as server_mod
+
+    gated = set(op.TOOL_VERB) | set(op.COMPOSED_TOOL_VERB)
+    read_only = {tool["name"] for tool in server_mod.TOOLS
+                 if (tool.get("annotations") or {}).get("readOnlyHint") is True}
+    assert gated & (read_only - set(undo_record.IRREVERSIBLE)) == GATED_READ_ONLY
+    reversible = undo_record.GENERATION_VERBS | {"revl_lease"}
+    assert not GATED_READ_ONLY & (reversible | set(undo_record.IRREVERSIBLE))
+
+
+def test_the_approval_query_surface_answers_with_no_undo_field():
+    """`revl_approvals` reads and writes nothing (issue #2991): each action
+    answers with no undo field, like `revl_snapshot`."""
+    for action in ("list", "stats"):
+        out = _call("revl_approvals", {"action": action})
+        assert out["ok"] is True, out
+        assert "undo" not in out and "undoReason" not in out
 
 
 @needs_runtime

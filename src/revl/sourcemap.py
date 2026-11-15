@@ -81,10 +81,16 @@ Everything else fails closed: a version that is not 3, an index map
 outside its array, a delta that drives a line or column negative, and a
 `--generated` naming no source in the outer map are all refusals naming what was
 wrong, never a silently unchanged document.
+
+Work is bounded by the documents' size, not by their shape: composition indexes
+each inner line once and answers every mapping into the generated file with a
+bisection, so a crafted map cannot turn the walk quadratic by keeping all its
+segments on one line (issue #3195).
 """
 
 from __future__ import annotations
 
+import bisect
 import posixpath
 from typing import Any
 
@@ -260,6 +266,11 @@ def resolve(lines: list[list[tuple]], line: int, column: int):
     the same on a well-formed document; on a malformed one, scanning makes the
     rule "the last segment at or before the column" true as written instead of
     true only for sorted input.
+
+    One query costs one scan of the line. `compose` does not call this per
+    mapping; it indexes each inner line once with `_line_resolver`, so the scan
+    described here answers a single lookup rather than setting the cost of a
+    whole composition (issue #3195).
     """
     if line < 0 or line >= len(lines):
         return None
@@ -268,6 +279,44 @@ def resolve(lines: list[list[tuple]], line: int, column: int):
         if segment[0] <= column:
             found = segment
     return found
+
+
+def _line_resolver(segments: list[tuple]):
+    """`resolve` for ONE line, indexed once so N mappings cost N bisections.
+
+    The answer is exactly the one `resolve` gives for this line: the last
+    segment in DOCUMENT order whose generated column is at or before the column
+    asked for.
+
+    A line in the order Source Map v3 requires (segments ordered by generated
+    column) is answered by bisecting its columns. A line that is out of order,
+    which the format forbids but this module has always tolerated rather than
+    refused, keeps the document-order answer: the same bisection over sorted
+    `(column, index)` pairs, followed by the running maximum index, names the
+    last matching segment without walking the line per query.
+    """
+    columns = [segment[0] for segment in segments]
+    if all(earlier <= later for earlier, later in zip(columns, columns[1:])):
+        def lookup(column: int):
+            at = bisect.bisect_right(columns, column) - 1
+            return segments[at] if at >= 0 else None
+        return lookup
+
+    by_column = sorted((column, index)
+                       for index, column in enumerate(columns))
+    ordered_columns = [column for column, _ in by_column]
+    last_index_at_or_before: list[int] = []
+    last = -1
+    for _, index in by_column:
+        last = max(last, index)
+        last_index_at_or_before.append(last)
+
+    def lookup(column: int):
+        at = bisect.bisect_right(ordered_columns, column) - 1
+        if at < 0:
+            return None
+        return segments[last_index_at_or_before[at]]
+    return lookup
 
 
 # ------------------------------------------------------------- source naming
@@ -375,6 +424,12 @@ def compose(outer: Any, inner: Any, generated: str | None = None) -> dict:
 
     Mappings into any other source pass through untouched, which is what makes
     the result a map of the whole bundle rather than of the generated fragment.
+
+    The walk is linear in the two documents' segment counts plus one bisection
+    per mapping into the generated file: an inner line is indexed the first
+    time something maps into it, not scanned once per mapping. A crafted pair
+    of maps that keeps every segment on one line therefore cannot make the
+    composition quadratic in that line's length (issue #3195).
     """
     _check_document(outer, "outer map")
     _check_document(inner, "inner map")
@@ -433,6 +488,21 @@ def compose(outer: Any, inner: Any, generated: str | None = None) -> dict:
     composed_names: list[str] = []
     name_index: dict[str, int] = {}
 
+    # One index per inner line that is actually consulted, built on first use
+    # so an inner line nothing maps into costs nothing. Before this, each
+    # mapping into the generated file scanned its whole target line, and a
+    # pair of maps with every segment on one line cost outer times inner
+    # segments (issue #3195).
+    inner_resolvers: dict[int, Any] = {}
+
+    def _resolve_inner(line: int, column: int):
+        if line < 0 or line >= len(inner_lines):
+            return None
+        resolver = inner_resolvers.get(line)
+        if resolver is None:
+            resolver = inner_resolvers[line] = _line_resolver(inner_lines[line])
+        return resolver(column)
+
     def _add_name(name: str) -> int:
         if name not in name_index:
             name_index[name] = len(composed_names)
@@ -465,7 +535,7 @@ def compose(outer: Any, inner: Any, generated: str | None = None) -> dict:
                 out_segments.append(
                     (gcol, outer_index[src], oline, ocol, name))
                 continue
-            hit = resolve(inner_lines, oline, ocol)
+            hit = _resolve_inner(oline, ocol)
             if hit is None or hit[1] is None:
                 # No inner mapping covers it. Blanking is the fail-closed
                 # answer: the generated file is not in the composed `sources`,

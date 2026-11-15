@@ -470,10 +470,15 @@ def _estop_outstanding_placement(index_path: str, index: dict) -> dict:
     """The outstanding entries of a `revl run --placement --wal` run: each
     process WAL the index names, read as one session's WAL is (issue #1477).
     Known only when every process WAL could be read."""
-    from ..placement_wal import process_wal_path  # noqa: PLC0415
+    from ..placement_wal import PlacementIndexError, process_wal_path  # noqa: PLC0415
     processes, entries = [], []
     for entry in index["processes"]:
-        one = _estop_outstanding_wal(process_wal_path(index_path, entry))
+        try:
+            path = process_wal_path(index_path, entry)
+        except PlacementIndexError as error:   # issue #3193: never followed
+            one = {"known": False, "note": str(error)}
+        else:
+            one = _estop_outstanding_wal(path)
         processes.append({"process": entry["name"], **one})
         entries.extend({"process": entry["name"], **e}
                        for e in one.get("entries") or [])
@@ -584,6 +589,11 @@ def _run_recover(args) -> int:
     from ..recovery import recover, render, RecoveryError  # noqa: PLC0415
     from ..wal import WALIntegrityError  # noqa: PLC0415
 
+    # issue #2725: the conductor's ONE durable decision for a multi-node step.
+    # When given, the WAL is settled against that record through the same rule
+    # `deploy.settle_stranded` already implements — not a second rule.
+    decision_path = getattr(args, "decision", None)
+
     # item 440 §(b): the re-issue seam's operator knob rides the SAME `--policy`
     # file the roll-forward path already re-establishes, and is read whether or
     # not `--restore` was given (the seam acts on the owed-emission report, which
@@ -637,25 +647,52 @@ def _run_recover(args) -> int:
             print("error: resolve a crossing on its process WAL, not the placement index",
                   file=sys.stderr)
             return 2
+        if decision_path is not None:
+            print("error: `--decision` settles ONE participant's WAL; pass that "
+                  "process's own WAL, not the placement index", file=sys.stderr)
+            return 2
         return _recover_placement(args, index, reissue, session)
 
     world = None
+    if decision_path is not None:
+        # The decision settles the record; the other settle paths would each
+        # guess at the same question a second way.
+        if getattr(args, "restore", None) or session is not None:
+            print("error: `--decision` settles a stranded participant; it "
+                  "cannot be combined with `--restore`", file=sys.stderr)
+            return 2
+        if getattr(args, "operator_resolved", []):
+            print("error: `--decision` settles the WAL as one record; it cannot "
+                  "be combined with `--operator-resolved`", file=sys.stderr)
+            return 2
+        if getattr(args, "forward", False):
+            print("error: `--decision` decides roll-forward or roll-back; it "
+                  "cannot be combined with `--forward`", file=sys.stderr)
+            return 2
+        if reissue is not None:
+            print("error: `--decision` settles the record itself; a policy's "
+                  "re-issue seam does not apply", file=sys.stderr)
+            return 2
     try:
         # issue #1477: `--composition` binds the REAL world, the composition's
         # own host bodies and providers, checked against the WAL header's digest.
         if getattr(args, "composition", None):
             world = _bind_composition(args)
-        from ..wal import resolve_crossing
-        # Each ack is appended as it is validated, so one invalid seq in
-        # `--operator-resolved 1 --operator-resolved 2` leaves seq 1's ack
-        # on disk and then errors out below: partial application, which is
-        # acceptable because each ack only settles a crossing the operator named;
-        # re-run with the bad seq removed.
-        for seq in getattr(args, "operator_resolved", []):
-            resolve_crossing(args.wal, seq)
-        report = recover(args.wal, world=world, session=session,
-                         snapshot=snapshot, reissue=reissue,
-                         forward_admissions=getattr(args, "forward", False))
+        if decision_path is not None:
+            from ..deploy import settle_stranded  # noqa: PLC0415 — deploy owns the rule
+            report = settle_stranded(args.wal, decision_path, world=world)
+        else:
+            from ..wal import resolve_crossing
+            # Each ack is appended as it is validated, so one invalid seq in
+            # `--operator-resolved 1 --operator-resolved 2` leaves seq 1's ack
+            # on disk and then errors out below: partial application, which is
+            # acceptable because each ack only settles a crossing the operator named;
+            # re-run with the bad seq removed.
+            for seq in getattr(args, "operator_resolved", []):
+                resolve_crossing(args.wal, seq)
+            report = recover(args.wal, world=world, session=session,
+                             snapshot=snapshot, reissue=reissue,
+                             forward_admissions=getattr(args, "forward", False))
         if world is not None:
             report["binding"] = world.describe()
     except (RecoveryError, WALIntegrityError, OSError, ValueError) as error:
@@ -671,6 +708,17 @@ def _run_recover(args) -> int:
 
     if args.json:
         print(json.dumps(report, indent=2))
+    elif decision_path is not None and report.get("verdict") == "unresolved":
+        # `deploy.settle_stranded` fails CLOSED when the decision record cannot
+        # be read, with an explanation rather than a recovery report. Recovery's
+        # renderer expects its own residue shape, so say this one plainly: a
+        # split-brain guess is the one thing this path must not make.
+        print("verdict: UNRESOLVED — nothing was settled")
+        if report.get("decision"):
+            print(report["decision"])
+        proof = (report.get("residue") or {}).get("proof")
+        if proof:
+            print(f"  residue proof: {proof}")
     else:
         print(render(report))
     return _recover_exit_status(report, model_only=getattr(args, "model_only", False))
@@ -679,6 +727,7 @@ def _run_recover(args) -> int:
 def _recover_placement(args, index: dict, reissue, session) -> int:
     """`revl recover --wal INDEX` for a `revl run --placement --wal INDEX` run
     (issue #1477): every process WAL the index names, one verdict."""
+    from ..placement_wal import PlacementIndexError  # noqa: PLC0415
     from ..recover_placement import recover_index, render_placement  # noqa: PLC0415
     from ..recovery import RecoveryError  # noqa: PLC0415
     from ..wal import WALIntegrityError  # noqa: PLC0415
@@ -692,7 +741,7 @@ def _recover_placement(args, index: dict, reissue, session) -> int:
             args.wal, index, composition=getattr(args, "composition", None),
             config=_recover_config(args), reissue=reissue,
             forward_admissions=getattr(args, "forward", False))
-    except (RecoveryError, WALIntegrityError, OSError) as error:
+    except (RecoveryError, WALIntegrityError, PlacementIndexError, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     if args.json:
@@ -842,16 +891,29 @@ def _run_replay(args) -> int:
     each crossing's capability token and is itself admitted under the policy; it
     is compiled statically, so no live effect fires.
 
+    `--probe` with `--under` prints the probe report instead (item 2806, Slice
+    1): one row per `--candidate` composition, with the candidate hash, the
+    number of recorded crossings regraded, the newly refused and newly allowed
+    counts, the first dangerous crossing and the bounds. It is ORDERING
+    evidence only and grants nothing, so a clean row is not an admission and a
+    refusal does not fail this command.
+
     Exit status without `--under`: 0 when at least one mode is plannable from
     the record (the WAL carries model decisions), 1 when none is (no model
     decision recorded, so the WAL cannot inform any LLM-aware replay mode), which
     doubles as an honest gate on "is this WAL model-aware". With `--under`: 0
     when the question is answerable, no recorded crossing is refused and the
     candidate is admitted; 1 when a recording cannot answer it, when a recorded
-    crossing is refused, or when the candidate is refused.
+    crossing is refused, or when the candidate is refused. With `--probe`: 0
+    when the report is produced, 2 on an unreadable or malformed input, because
+    the probe does not decide anything to exit on.
     """
     if getattr(args, "under", None):
         return _run_counterfactual(args)
+    if getattr(args, "probe", False):
+        print("error: --probe is the summary of the --under counterfactual; "
+              "pass --under POLICY and --candidate FILE", file=sys.stderr)
+        return 2
 
     from ..errors import RevlError  # noqa: PLC0415
     from ..model_evidence import resolve_key  # noqa: PLC0415
@@ -879,12 +941,37 @@ def _run_replay(args) -> int:
 def _run_counterfactual(args) -> int:
     """The `--under POLICY` half of `revl replay`: counterfactual incident
     replay over the WAL (roadmap item 467). Reads the record and compiles the
-    candidate; fires no effect."""
-    from ..counterfactual import (CounterfactualError, replay_under,  # noqa: PLC0415
-                                  render)
+    candidate; fires no effect.
 
+    With `--probe` it builds the probe report over every `--candidate`
+    composition (item 2806, Slice 1). `--candidate` is collected as a list of
+    compositions so a probe can compare competing edits; the counterfactual
+    itself still takes exactly one composition."""
+    from ..counterfactual import (CounterfactualError, probe,  # noqa: PLC0415
+                                  render_probe, replay_under, render)
+
+    compositions = args.candidate or []
+    if getattr(args, "probe", False):
+        if not compositions:
+            print("error: a probe needs at least one --candidate composition",
+                  file=sys.stderr)
+            return 2
+        try:
+            doc = probe(args.wal, args.under, compositions)
+        except CounterfactualError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(doc, indent=2) if args.json else render_probe(doc))
+        return 0
+
+    if len(compositions) > 1:
+        print("error: one --candidate composition is required; repeat "
+              "--candidate with --probe to compare candidates",
+              file=sys.stderr)
+        return 2
+    files = compositions[0] if compositions else None
     try:
-        doc = replay_under(args.wal, args.under, candidate=args.candidate)
+        doc = replay_under(args.wal, args.under, candidate=files)
     except CounterfactualError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2

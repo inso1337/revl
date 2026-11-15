@@ -63,6 +63,11 @@ PROTOCOL_VERSION = "2026-07-28"
 SUPPORTED_VERSIONS = (PROTOCOL_VERSION,)
 ENDPOINT = "/mcp"
 MAX_BODY = 4 * 1024 * 1024
+# A 503 never tells the caller why the profile is unavailable: that reason names
+# the profile's absolute path and quotes the rejected line, which is often a
+# `key sha256:` credential line being edited (issue #3123). It goes to the
+# operator's log instead, and the caller gets this fixed text.
+PROFILE_REFUSAL = "the operator profile is not available, so the request is refused"
 NO_CALLER = "<no authenticated caller>"
 BOUND_BY_TRANSPORT = "transport"
 AUTH_MODES = ("bearer", "mtls")
@@ -528,6 +533,8 @@ class HttpTransport:
         self.binding = CallerBinding(server_module, lambda: self.authenticator.registry)
         self.latch = HaltLatch()
         self.hub = EventHub()
+        self._stderr = None
+        self._profile_refusal_logged: str | None = None
         # a quiet listen stream re-checks its caller and sends a keep-alive
         # comment this often; `poll_s` bounds how late it sees a closed peer
         self.keepalive_s = 15.0
@@ -573,6 +580,7 @@ class HttpTransport:
 
     def serve_forever(self, *, stderr=None) -> int:
         stderr = stderr or sys.stderr
+        self._stderr = stderr
         try:
             host, port = self.start()
         except TransportError as error:
@@ -620,11 +628,31 @@ class HttpTransport:
         peer = request.request.getpeercert() \
             if hasattr(request.request, "getpeercert") else None
         operator, why, status = self.authenticator.authenticate(request.headers, peer)
+        if status != 503:
+            # a readable profile starts a new outage, so its first refusal is
+            # logged (even if this request's own credential was refused)
+            self._profile_refusal_logged = None
         if operator is None and status != 503:
             challenge = ('Bearer realm="revl", error="invalid_token"'
                          if self.authenticator.mode == "bearer" else 'Bearer realm="revl"')
             return 401, _rpc_error(None, -32600, why), \
                 [("WWW-Authenticate", challenge), close]
+        estop_candidate = None
+        if operator is None:
+            # the profile is settling or broken. `why` names the profile's path
+            # and quotes the rejected line, so it goes to the operator's log,
+            # never to the caller (issue #3123).
+            self._log_profile_refusal(why)
+            # Only a caller the LAST ADOPTED profile knows may read on, and only
+            # because an E-Stop is never fenced by a profile edit. Every other
+            # caller is refused here, before its body is read.
+            last = getattr(self.authenticator.source, "last_adopted", None)
+            if last is not None:
+                estop_candidate, _last_why, _last_status = \
+                    self.authenticator.authenticate(request.headers, peer,
+                                                    registry=last)
+            if estop_candidate is None:
+                return 503, _rpc_error(None, -32603, PROFILE_REFUSAL), [close]
         from .http_face import _frame_request  # noqa: PLC0415 - one framing reader
 
         length, framing = _frame_request(request.headers, MAX_BODY)
@@ -636,12 +664,11 @@ class HttpTransport:
         except (UnicodeDecodeError, ValueError):
             return 400, _rpc_error(None, -32700, "parse error"), []
         if operator is None:
-            # the profile is settling or broken: every request is refused except
-            # an E-Stop from an operator authorized under the LAST ADOPTED
-            # profile. E-Stop is never fenced, and it only stops things.
-            operator = self._estop_fallback(message, request.headers, peer)
-            if operator is None:
-                return 503, _rpc_error(None, -32603, why), [close]
+            # authenticated under the last adopted profile: read on only for the
+            # one verb never fenced by a profile edit
+            if not is_estop(message):
+                return 503, _rpc_error(None, -32603, PROFILE_REFUSAL), [close]
+            operator = estop_candidate
         # the reply may become an SSE stream, but only from here: the caller is
         # authenticated and its body read
         stream = RequestStream(request, enabled=accepts_sse(request.headers))
@@ -649,13 +676,14 @@ class HttpTransport:
         return self.process(message, operator, request.headers, peer=peer,
                             stream=stream)
 
-    def _estop_fallback(self, message, headers, peer):
-        last = getattr(self.authenticator.source, "last_adopted", None)
-        if not is_estop(message) or last is None:
-            return None
-        operator, _why, _status = self.authenticator.authenticate(
-            headers, peer, registry=last)
-        return operator
+    def _log_profile_refusal(self, why: str) -> None:
+        """The profile path and parser error are the operator's, not a caller's
+        (issue #3123): one log line per distinct reason, not per request."""
+        if why == self._profile_refusal_logged:
+            return
+        self._profile_refusal_logged = why
+        print(f"revl mcp: every request is refused: {why}",
+              file=self._stderr or sys.stderr, flush=True)
 
     def process(self, message, operator, headers, *, peer=None,
                 stream: RequestStream | None = None) -> tuple[int, object, list]:

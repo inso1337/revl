@@ -1,0 +1,22 @@
+// issue #2904: the inline Int bound test in fn and test bodies, and the call
+// kept in an arrow body and a match arm. Nested sites share one temp.
+pub fn nested(a: Int, b: Int, c: Int) -> Int { return (a + b) * c - a }
+pub fn negsub(a: Int, b: Int) -> Int { return -(a - b) }
+pub fn calls(f: (Int) -> Int, x: Int) -> Int { return f(x) + f(x + 1) }
+pub fn lam(x: Int) -> Int { return calls((y) => y * 2, x) }
+pub fn arm(o: Opt[Int]) -> Int { return match o { Some(v) => v + 1, None => 0 - 1 } }
+pub fn later(cb: () -> Async[Int], k: Int) -> Int { return cb() + k }
+pub fn looped(n: Int) -> Int {
+  var p = 0
+  var f = 0
+  while (f < n) {
+    p = p + f
+    f = f + 1
+  }
+  return p
+}
+pub fn compare(a: Int, b: Int) -> Bool { return a < b }
+test "inline in a test body" {
+  let x = nested(1, 2, 3)
+  assert x + 1 == 9
+}

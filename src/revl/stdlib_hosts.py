@@ -40,6 +40,7 @@ STDLIB_HOST_MODULES: tuple[str, ...] = (
     "revl_net",
     "revl_shell_classify",
     "revl_shell_host",
+    "revl_socket",
 )
 
 

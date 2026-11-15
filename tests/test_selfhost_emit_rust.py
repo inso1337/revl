@@ -394,6 +394,9 @@ CORPUS = [
     # issue #2494: the same variant on the component tier, in a service
     # signature and in provide methods
     "comp_provide_generic_variant.rvl",
+    # issues #3159 and #3168: the helper namespace and the prelude constructors
+    # at value positions (fns, externs, params, locals, binds, arrow params)
+    "revl_namespace.rvl",
 ]
 
 

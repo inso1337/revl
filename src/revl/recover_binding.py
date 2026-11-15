@@ -70,6 +70,57 @@ def _open_calls(records: list) -> dict:
     return calls
 
 
+#: The inverses the runtime registers itself, which no IR node spells: a
+#: durable-cursor subscription closes through `Stream.close(cursor)`
+#: (runtime `_DurableClose.descriptor`), replayed as a transactional entry.
+_RUNTIME_INVERSES = {("Stream", "close"): frozenset({"transactional"})}
+
+#: The IR keys that hold a registered inverse, and the descriptor `entry` the
+#: runtime registers each as: an `undo` is a witnessed (transactional) inverse,
+#: a `compensate` a compensation (`Frame.transactional` / `Frame.compensation`).
+_ENTRY_OF_KEY = {"undo": "transactional", "compensate": "compensation"}
+
+
+def declared_inverses(ir: dict) -> dict:
+    """``{(receiver, method): entries}``: every call the composition declares
+    as an inverse (`undo`) or a compensation (`compensate`), at a step or on an
+    extern, with the descriptor `entry` each is registered as (issue #3149).
+    This is the whole set of calls a discharge descriptor may name: a WAL line
+    naming anything else was not written by this composition's runtime."""
+    from ._paths import python_backend_emitter  # noqa: PLC0415
+    # the emitter's own rule for the (receiver, method) a descriptor records
+    named = python_backend_emitter().named_call_target
+    declared = {name: set(entries) for name, entries in _RUNTIME_INVERSES.items()}
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                name = named(value) if key in _ENTRY_OF_KEY else None
+                if name is not None:
+                    declared.setdefault(name, set()).add(_ENTRY_OF_KEY[key])
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+    walk(ir)
+    return {name: frozenset(entries) for name, entries in declared.items()}
+
+
+def undeclared_call(declared: dict, descriptor: dict) -> bool:
+    """Whether ``descriptor`` names a call the composition does not declare as
+    an inverse or compensation, or (for a discharge descriptor) declares as the
+    other kind of entry: a compensation replayed as a transactional inverse, or
+    the reverse. A legacy boundary inverse (an `effect` record) is a
+    transactional entry by construction, so only its name is checked."""
+    call = descriptor.get("call") or {}
+    entries = declared.get((call.get("receiver"), call.get("method")))
+    if not entries:
+        return True
+    if descriptor.get("record") == "effect":
+        return False
+    return descriptor.get("entry") not in entries
+
+
 def _segments(wal: dict) -> list:
     """The log's openings, in order. The header opens it; every later opening
     (a `--watch` reload, or a later run reusing the file, #641/#642) writes a
@@ -173,7 +224,8 @@ class CompositionWorld(World):
                  provider_session: Any, cleanup: list,
                  foreign: Optional[dict] = None,
                  foreign_handles: Optional[dict] = None,
-                 refused: Optional[dict] = None) -> None:
+                 refused: Optional[dict] = None,
+                 declared: dict) -> None:
         self.files = list(files)
         self.digest = digest
         self.module = module
@@ -193,6 +245,9 @@ class CompositionWorld(World):
         #: a component it requires) crosses the boundary and booting it would
         #: cross again. Calls through such a key are declined, by name.
         self.refused = dict(refused or {})
+        #: (receiver, method) -> entries, see `declared_inverses`: the only
+        #: calls a discharge descriptor is handed to the runtime for
+        self.declared = dict(declared)
 
     def describe(self) -> dict:
         """What the verdict says about the binding it ran through."""
@@ -233,6 +288,13 @@ class CompositionWorld(World):
         """The runtime's outcomes for the calls this binding makes, and the
         :meth:`declined` outcome for each call it does not hand over."""
         mine, outcome = self._calls(descriptors)
+        # issue #3149: the runtime resolves a call's name to any callable the
+        # emitted module binds, so a descriptor naming a forward extern (or a
+        # compensation recorded as a transactional inverse) is refused here,
+        # never handed over
+        for descriptor in [d for d in mine if undeclared_call(self.declared, d)]:
+            mine.remove(descriptor)
+            outcome[descriptor.get("seq")] = "undeclared"
         if mine:
             outcome.update(self.runtime.replay_descriptors(
                 self.module, self.wal_path, mine, services=self.services))
@@ -369,6 +431,7 @@ def emit_unactivated(ir: dict, config: dict, cleanup: list) -> tuple:
     the driver's own plug seam (extern config, bound secrets) and NOT
     activated. Forgetting the module is pushed onto ``cleanup``."""
     from .mcp.session import SessionError, _backend  # noqa: PLC0415
+    from .refusal import refusals  # noqa: PLC0415
     from .run import _Driver  # noqa: PLC0415
 
     try:
@@ -376,7 +439,13 @@ def emit_unactivated(ir: dict, config: dict, cleanup: list) -> tuple:
     except SessionError as error:
         raise RecoveryError(str(error)) from None
     driver = _Driver(ir, config, emit, runtime, Context, FiberState)
-    module = driver._emit_module(ir)
+    try:
+        module = driver._emit_module(ir)
+    except refusals(emit) as refusal:
+        # the emitter's own refusal is an answer (issue #1406), not a crash:
+        # `revl recover` reports a RecoveryError, an emitter fault stays loud
+        raise RecoveryError(
+            f"the py emitter refused this composition: {refusal}") from None
     name = module.__name__
 
     def _forget_module() -> None:
@@ -512,4 +581,4 @@ def bind(files: list, wal_path: str, *, config: Optional[dict] = None) -> Compos
                             services=services, booted=booted,
                             provider_session=session, cleanup=cleanup,
                             foreign=foreign, foreign_handles=foreign_handles,
-                            refused=refused)
+                            refused=refused, declared=declared_inverses(ir))
