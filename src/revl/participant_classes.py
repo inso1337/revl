@@ -128,7 +128,6 @@ def _step_carries_approval(nodes) -> bool:
 
 
 _NO_CROSSING_EXTERN_CLASSES = ("pure", "local")
-_EXTERN_CLASSES = ("pure", "local", "acquire", "emission", "witnessed")
 
 
 def _extern_class(decl: dict, *, deferred: bool,
@@ -148,24 +147,25 @@ def _extern_class(decl: dict, *, deferred: bool,
     """
     if decl.get("requires_approval"):
         return IRREVERSIBLE_NEEDS_APPROVAL
-    if decl.get("class") not in _EXTERN_CLASSES:
-        # Checked before `undo`/`compensate`: a declaration whose class is
-        # missing or unknown is not trusted to carry a reversal either.
-        return IRREVERSIBLE
     if deferred:
         return (RECOVERABLE_FORWARD if decl.get("register")
                 else DEFERRED_IRREVERSIBLE)
-    if decl.get("compensate") is not None:
-        return COMPENSABLE
-    if decl.get("class") == "witnessed":
-        return RECOVERABLE_FORWARD if registered else IRREVERSIBLE
-    if decl.get("undo") is not None:
-        return PREPARE_REVERSIBLE
-    if decl.get("class") in _NO_CROSSING_EXTERN_CLASSES:
+    cls = decl.get("class")
+    if cls in _NO_CROSSING_EXTERN_CLASSES:
         return None
-    # An emission, or an acquire with no `undo`: reached, so a crossing, and
-    # only a declared `pure` read or `local` write is known not to cross the
-    # boundary (issue #3351).
+    # A reversal is trusted only from the class that can declare it, so a
+    # missing or unknown class never reads as reversible whatever else the
+    # declaration carries.
+    if cls == "emission" and decl.get("compensate") is not None:
+        return COMPENSABLE
+    if cls == "witnessed":
+        return RECOVERABLE_FORWARD if registered else IRREVERSIBLE
+    if cls == "acquire" and decl.get("undo") is not None:
+        return PREPARE_REVERSIBLE
+    # An emission with no `compensate`, an acquire with no `undo`, a missing
+    # declaration or an unknown class: reached, so a crossing, and only a
+    # declared `pure` read or `local` write is known not to cross the boundary
+    # (issue #3351).
     return IRREVERSIBLE
 
 
