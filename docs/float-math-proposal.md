@@ -10,8 +10,9 @@ family) and this file records what shipped, as `docs/int32-proposal.md` does.
 
 `Float` supports arithmetic, comparison and rendering and nothing else
 (docs/arithmetic.md, "`Float` is IEEE 754 binary64"). There is no square root,
-no rounding, no trigonometry, and no `Float` to `Int`. `Int` to `Float` exists
-only as a side effect of arithmetic (`n * 1.0`). A program that does geometry or
+no rounding, no trigonometry, and no `Float` to `Int`. `Int` widens to `Float`
+implicitly where a `Float` is expected (docs/arithmetic.md, "`Int` widens into
+`Float`"), but there is no explicit spelling, so a program writes `n * 1.0`. A program that does geometry or
 physics declares each function as a host extern with one body per tier, which
 ties the source to the tiers whose bodies were written, rests checkable logic
 on unchecked host code, and gives no promise that the tiers agree. A text
@@ -23,7 +24,9 @@ reaches a host-body extern, so a game that draws anything is refused today.
 IEEE 754 fixes the result of `+ - * /`, `sqrt`, `floor`, `ceil`, `trunc`,
 `abs`, a rounding mode for conversions, and the sign of zero. Every operation
 in slice 1 and 2 below is one of those, or a trivial composition of them, so its
-result is **bit-identical on every tier by definition**, not by tolerance. The
+result is **bit-identical on every tier by definition**, not by tolerance. A
+NaN is compared as a class: its sign and payload bits are not pinned, as nothing
+else in revl pins them. The
 transcendental functions are not in that set: JS `Math.sin`, Rust, Java and Go
 libm and a wasm host all differ in the last bit, and wasm has no `sin` at all.
 Slice 3 therefore does not call a host libm (see there).
@@ -48,7 +51,7 @@ against the builtin method table, no import and no host extern.
 | `x.round()` | to nearest, ties away from zero (`2.5` gives `3.0`, `-2.5` gives `-3.0`) | NaN | unchanged | keeps the sign (`round(-0.4)` is `-0.0`) |
 | `x.min(y)` | the smaller | NaN if either is NaN | ordinary | `-0.0` is smaller than `0.0` |
 | `x.max(y)` | the larger | NaN if either is NaN | ordinary | `0.0` is larger than `-0.0` |
-| `n.to_float()` on `Int` and `Int32` | explicit widening, so `n * 1.0` is no longer the spelling | | | exact up to 2^53, then round to nearest, ties to even |
+| `n.to_float()` on `Int` and `Int32` | the explicit spelling of the existing implicit widening, so `n * 1.0` is no longer needed | | | `Int32` is always exact; `Int` is exact up to 2^53, then rounds to nearest, ties to even |
 
 Choices worth reviewing:
 
@@ -58,16 +61,20 @@ Choices worth reviewing:
   rounding unwrapped. The wasm form is `t = trunc(x)`, then `t + copysign(1, x)`
   when `abs(x - t) >= 0.5`; `x - t` is exact, so this is also right at
   `0.49999999999999994`, where `floor(abs(x) + 0.5)` is wrong.
-- **`sqrt` of a negative is NaN**, the IEEE answer. The playground's extern
-  returns `0.0` there; a caller that wants that writes the guard.
+- **`sqrt` of a negative is NaN**, the IEEE answer. The extern quoted in the
+  issue returns `0.0` there; a caller that wants that writes the guard.
 - **`min` and `max` propagate NaN**, as wasm `f64.min`, JS `Math.min`, Java
-  `Math.min` and Go `math.Min` do. Rust `f64::min` and Python `min` do not, so
-  those tiers need a small wrapper. The alternative (ignore a NaN operand) would
+  `Math.min` and Go `math.Min` do. Rust `f64::min` ignores a NaN operand, and
+  Python `min` depends on argument order (`min(nan, 1.0)` is `nan`,
+  `min(1.0, nan)` is `1.0`) and returns `0.0` for `min(0.0, -0.0)`, so both
+  tiers need a small wrapper, for the NaN rule and the signed-zero rule. The alternative (ignore a NaN operand) would
   be a different pick, and is the one place a reviewer may prefer the other way.
 - **A zero keeps its IEEE sign**, consistent with the Float `%` section: it is
-  invisible in `to_str` and visible through a division. Python's `math.ceil` and
-  `math.floor` return an `int`, so that tier needs a wrapper that returns a float
-  and keeps `-0.0`, and `math.sqrt` raises on a negative, so it needs one too.
+  invisible in `to_str` and visible through a division. Python's `math.ceil`,
+  `math.floor` and `math.trunc` return an `int` (losing `-0.0`), raise
+  `OverflowError` on an infinity and `ValueError` on NaN, and `math.sqrt`
+  raises on any negative including `-inf`. That tier needs wrappers that return
+  a float, keep `-0.0` and pass NaN and infinities through.
 - `abs`, `min` and `max` on `Int` are not asked for and are not proposed here.
 
 ### Slice 2: `Float` to `Int`
@@ -132,7 +139,7 @@ A builtin is not one change. The last single-method builtin (`Int.to_char`,
 #2285) touched the checker table, the lowering table, all six emitters
 (python, TypeScript, wasm, go, java, rust), their self-hosted counterparts under
 `selfhost/`, the gate census, the per-tier corpora and the docs. Slice 1 is that
-size once, with eight methods that share one checker row shape. Slice 2 adds a
+size once, with nine methods in two checker row shapes (one operand or two). Slice 2 adds a
 new fault and the checked forms on top. Slice 3 adds no compiler primitive. Each
 slice is reviewable alone and each leaves the language consistent.
 
