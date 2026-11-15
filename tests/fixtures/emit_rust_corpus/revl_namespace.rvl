@@ -1,0 +1,70 @@
+// The rust helper namespace and the prelude constructors at value positions
+// (issues #3159 and #3168), held to byte agreement by
+// tests/test_selfhost_emit_rust.py.
+//
+//   - The emitted module declares `revl_concat`, `REVL_JOURNAL_DEPTH`, ...,
+//     so a user fn, extern, parameter, local, loop or match binding, or arrow
+//     parameter spelled in `revl[A-Z_]`, `REVL_`, `_revl` or `_REVL` takes one
+//     `_`, at its declaration and at every read.
+//   - `revlate` and `rev` are outside the namespace (a lower case letter after
+//     `revl`, a name shorter than the prefix) and keep their spelling.
+//   - A module `fn Err` emits `fn Err_`, so `Err("denied")` still names the
+//     constructor; `Some_` shifts one rung up the ladder to `Some__`.
+//   - An extern parameter keeps its source name, because the verbatim `@rs`
+//     body spells it; a service parameter takes the rename, and so does a
+//     provide-method parameter, in the method head, the undo clones and
+//     the effect arguments, so the head declares what the body reads.
+
+service Meter {
+  fn add(revl_n: Int) -> Int
+  fn keep(revl_k: Str, revl_v: Str) -> Str
+}
+
+component Gauge provides meter: Meter {
+  let store = effect Map.new() undo store.drop()
+
+  provide meter {
+    fn add(revl_n) = revl_n + 1
+    fn keep(revl_k, revl_v) {
+      let revl_key = revl_k
+      effect store.insert(revl_k, revl_v) undo store.remove(revl_k)
+      return revl_v
+    }
+  }
+}
+
+extern pure fn revlHost(revl_n: Int) -> Int = @rs { revl_n + 1 }
+
+fn revl_double(x: Int) -> Int { return x * 2 }
+fn REVL_N(x: Int) -> Int { return x + 3 }
+fn _revlTmp(x: Int) -> Int { return x }
+fn _REVLX(x: Int) -> Int { return x }
+fn revlTotal(x: Int) -> Int { return x }
+fn revlate(x: Int) -> Int { return x }
+fn rev(x: Int) -> Int { return x }
+fn Err(e: Str) -> Result[Int, Str] { return Ok(1) }
+fn Some_(x: Int) -> Int { return x }
+fn __(x: Int) -> Int { return x }
+
+pub fn check(allowed: Bool) -> Result[Int, Str] { return allowed ? Ok(7) : Err("denied") }
+
+pub fn pick(o: Opt[Int]) -> Int {
+  return match o {
+    Some(revl_v) => revl_v,
+    None => 0
+  }
+}
+
+pub fn walk(revl_xs: List[Int]) -> Int {
+  var revl_sum = 0
+  for (revl_item of revl_xs) {
+    revl_sum = revl_sum + revl_item
+  }
+  let REVL_K = revl_sum + 1
+  return ((revl_x: Int) => revl_x + REVL_K)(revl_sum)
+}
+
+pub fn total(x: Int) -> Int {
+  return revl_double(x) + REVL_N(x) + _revlTmp(x) + _REVLX(x) + revlTotal(x)
+    + revlate(x) + rev(x) + Some_(x) + __(x) + revlHost(x)
+}

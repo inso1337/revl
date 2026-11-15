@@ -55,13 +55,30 @@ listed as `not-covered` and explicitly NOT claimed erased, because the honest
 answer to "was the embedding index deleted?" under a policy that never covered
 embeddings is "the policy does not reach it", never silence.
 
+THE DERIVATIVE RELATION IS NOW DECLARED IN SOURCE (issue #2695)
+
+`derives <class> of <param>` on a `fn` or an `extern` says the callable's result
+is a derivative of the named `Retained[T, <policy>]` parameter and carries that
+same policy. The checker validates it at the DECLARATION (the parameter is
+retained, the class is in the closed vocabulary, the policy covers it), ADDS the
+result's retention origin to the provenance the result already carries (the 249
+dimension is orthogonal, so a declared derivative that is also untrusted or
+secret keeps that origin and its own refusal), and the persistence refusal
+follows the value with the derivation named. `declared_derivatives` enumerates
+the clauses so a receipt can list them as rows.
+
+It is still a DECLARATION and never an inference: a derivative computed inside a
+host body is described only by the crossing that declares it, and one made where
+revl never sees it stays invisible. Nothing here proves a declared class is what
+the body actually computed, and no declared row is a measurement of a store.
+
 WHAT IS STILL NOT IMPLEMENTED (the rest of the design note's prerequisites)
 
-  * The derivative RELATION is declared, not inferred. A policy says which
-    CLASSES of derivative it covers; nothing here proves that a particular
-    boundary crossing wrote a summary of a particular `Retained` value. Rows
-    come from the caller's enumeration (the erase report's crossings, or an
-    operator's inventory), and `covered` is read off the declaration.
+  * No INFERRED derivative relation: the clause above is written by the author,
+    so a derivative made inside a host body or outside a declared crossing is
+    not described. Rows still come from an enumeration the caller supplies (the
+    erase report's crossings, an operator's inventory, or the program's own
+    declared derivations), and `covered` is read off the declaration.
   * The residence is CHECKED against the replica rows a caller supplies, not
     against a placement fact the compiler derives. A replica whose residence
     differs from the declared one is reported as `residence-mismatch`; nothing
@@ -101,17 +118,58 @@ QUALIFIER = "Retained"
 #: provenance one, and vice versa.
 ORIGIN_PREFIX = "retained:"
 
+#: The separator that carries a DECLARED derivation (issue #2695) inside the
+#: same origin: `retained:<policy>!<class>@<callee>.<param>`. The policy is
+#: everything up to this mark, so `policy_of_origin` reads a declared
+#: derivative exactly as it reads a plain retained value and every existing
+#: retention rule (the persistence refusal, the receipt's covered class) keeps
+#: working without knowing the derivation exists. It is not a second origin and
+#: not a second origin CLASS: the value is retained under one policy, and the
+#: suffix says which declaration produced it.
+DERIVATION_MARK = "!"
+
 
 def origin_for(policy: str) -> str:
     """The taint origin a `Retained[T, <policy>]` value carries."""
     return f"{ORIGIN_PREFIX}{policy}"
 
 
+def derivation_origin(policy: str, kind: str, callee: str, source: str) -> str:
+    """The origin a DECLARED derivation's result carries (issue #2695).
+
+    It is a retention origin under the same policy, with the declaration that
+    produced it appended, so the refusal at a persistence sink can name the
+    derivation as well as the sink, and the receipt can attribute the row."""
+    return f"{ORIGIN_PREFIX}{policy}{DERIVATION_MARK}{kind}@{callee}.{source}"
+
+
 def policy_of_origin(origin) -> Optional[str]:
-    """The policy name behind a retention origin, or None for any other origin."""
+    """The policy name behind a retention origin, or None for any other origin.
+
+    A declared-derivation origin reads its policy up to `DERIVATION_MARK`, so
+    every caller that only cares WHICH policy a value is held under is
+    indifferent to how the value was made."""
     if isinstance(origin, str) and origin.startswith(ORIGIN_PREFIX):
-        return origin[len(ORIGIN_PREFIX):]
+        return origin[len(ORIGIN_PREFIX):].split(DERIVATION_MARK, 1)[0]
     return None
+
+
+def derivation_of_origin(origin):
+    """`(kind, callee, source)` behind a declared-derivation origin, or None.
+
+    The suffix `derivation_origin` appends, read back for the diagnostic: a
+    refusal can say which declared derivative reached the sink, not only that a
+    retained value did."""
+    if not isinstance(origin, str) or DERIVATION_MARK not in origin:
+        return None
+    if policy_of_origin(origin) is None:
+        return None
+    rest = origin.split(DERIVATION_MARK, 1)[1]
+    kind, _, target = rest.partition("@")
+    callee, _, source = target.rpartition(".")
+    if not kind or not callee or not source:
+        return None
+    return kind, callee, source
 
 
 # ----------------------------------------------------------- persistence sinks
@@ -144,9 +202,16 @@ def persistence_sink_of(capabilities) -> Optional[str]:
     """The durable-storage scope head a crossing declares, or None when the
     crossing is not a persistence sink. The exact shape of `taint._sink_of`, on
     this module's scope set: only the FIRST capability is consulted for its
-    head, because a crossing declares one resource scope."""
+    head, because a crossing declares one resource scope.
+
+    The parameter list is stripped before the head split, exactly as
+    `taint._sink_of` does: parenthesized parameters (a ceiling such as `calls`
+    or `size`, or a resource dimension such as `path` or `table`) narrow the
+    crossing's cone under the same scope, they do not change the scope. So
+    `db(calls=3)` still declares the `db` sink, and the retention guarantee
+    cannot be switched off by spelling one more parameter (#3194)."""
     for cap in capabilities or ():
-        head = str(cap).split(".", 1)[0]
+        head = str(cap).split("(", 1)[0].split(".", 1)[0]
         if head in PERSISTENCE_SINK_SCOPES:
             return head
     return None
@@ -481,6 +546,10 @@ SCOPE = {
         "signature can name it.",
         "that a covered derivative was reached. `covered` is read off the "
         "declaration; the derivative relation is declared, not inferred.",
+        "that a declared derivative is complete, or that a declared class is "
+        "what the body actually computed. `derives <class> of <param>` is a "
+        "declaration in source: a derivative made inside an opaque host body "
+        "without one, or outside a declared crossing, is never a row.",
         "that a replica actually lives in the declared residence. A row whose "
         "residence differs is reported as `residence-mismatch`; a row that "
         "agrees is reporting what the caller supplied.",
@@ -514,6 +583,42 @@ class Derivative:
     kind: str
     token: Optional[str] = None
     residence: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class Derivation:
+    """A DECLARED derivative relation (issue #2695).
+
+    The `derives <class> of <param>` clause on a `fn` or an `extern`: `callee`'s
+    result is a derivative of its `source` parameter, which is declared
+    `Retained[T, <policy>]`, and the result carries that same policy. `kind` is
+    a `DERIVATIVE_CLASSES` member the policy covers, checked where the clause is
+    read (`revl.taint`), so an uncovered class is refused at the declaration
+    rather than reported as `not-covered` at erasure time.
+
+    This is a DECLARATION, never an inference: a derivative computed inside a
+    host body or outside a declared crossing is not described by one, and
+    `Derivation` does not pretend otherwise."""
+
+    callee: str
+    kind: str
+    source: str
+    policy: str
+    line: int = 0
+
+    @property
+    def origin(self) -> str:
+        """The taint origin the derived result carries."""
+        return derivation_origin(self.policy, self.kind, self.callee, self.source)
+
+    def as_derivative(self) -> "Derivative":
+        """The receipt row this declaration enumerates.
+
+        The name and token identify the DECLARATION, not a measured store: a
+        receipt built from declared derivations says what the program declared
+        it makes, and the operator's inventory says where the copies are."""
+        return Derivative(name=f"{self.callee}({self.source})", kind=self.kind,
+                          token=f"derive:{self.callee}:{self.source}")
 
 
 def load_key(path) -> bytes:
@@ -921,6 +1026,27 @@ def declared_policies(paths, *, sources=None) -> dict:
             queue.append(loader.load(
                 loader.resolve_use(module.dir, module.path, use)))
     return out
+
+
+def declared_derivatives(program, filename: Optional[str] = None) -> list:
+    """Every derivative a program DECLARES in source (issue #2695), as receipt
+    rows.
+
+    Reads a FRESHLY PARSED program, the way `policies` does: the checker strips
+    each qualifier in place, so a program that has already been through
+    `taint.extract_and_normalize` no longer carries the `Retained[T, <policy>]`
+    spelling this reads. The validation is the checker's own
+    (`revl.taint.declared_derivations`), so an uncovered class is refused here
+    with the same refusal admission gives, never enumerated as a row.
+
+    A receipt is an ENUMERATION: this supplies the declared half, the operator
+    supplies the replicas and the measured copies. Nothing here proves the
+    declaration is what a host body actually computed; that is the whole reason
+    the relation is declared rather than inferred."""
+    from . import taint as _taint  # noqa: PLC0415 — taint imports this module
+
+    return [d.as_derivative()
+            for d in _taint.declared_derivations(program, filename)]
 
 
 def resolve_key(key_path, *, env=None) -> bytes:

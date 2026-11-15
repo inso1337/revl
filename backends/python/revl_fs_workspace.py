@@ -934,6 +934,11 @@ def resolve_within(path: str) -> str:
     tested — a link inside the root pointing outside is caught here, not
     followed.
 
+    `..` is collapsed LEXICALLY before any link is resolved, exactly as the ts
+    tier's `path.resolve` does. Otherwise a symlink at one component decides
+    which directory the following `..` applies to, so whether a path is admitted
+    reveals the link's target: a symlink oracle for any host path (#3235).
+
     This is the `named-endpoint` family's guard: every path an op is HANDED
     routes through it, forward ops and inverses alike (must #2). It is not the
     whole story — see `PATH_FAMILIES` for the other three families and their
@@ -950,7 +955,7 @@ def resolve_within(path: str) -> str:
     if _pinned_root is not None:
         return _resolve_bound(path)
     target = path if os.path.isabs(path) else os.path.join(root, path)
-    real = os.path.realpath(target)
+    real = os.path.realpath(os.path.normpath(target))
     if not _is_within(root, real):
         raise ConfinementError(
             "EOUTSIDE",

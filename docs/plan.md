@@ -19,6 +19,10 @@ A plan is that answer, computed without producing any of it.
 When a library caller supplies operator-approved provider modules through
 `modules`, it can pass their paths in `operator_sources`. Apply artifacts then
 keep those providers out of the candidate-authored host-body disclosure list.
+Each entry in that list names the extern, its classification, its backends and
+a `digests` map from backend to the lowercase hex sha256 of that backend's
+verbatim body string, so a body replaced under the same name reads as a
+changed entry.
 Attribution covers the sources the caller names directly and the user-origin
 files the compile reaches from them through `use`; shipped `stdlib` sources are
 not attributed to the candidate. Library callers exclude other trusted operator
