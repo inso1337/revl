@@ -23908,6 +23908,39 @@ fn nr_use_names(ts: &[Token], base: Vec<Bind>) -> Vec<Bind> {
     return out;
 }
 
+fn use_listed_names(ts: &[Token]) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let mut depth = 0i64;
+    let mut i = 0i64;
+    while (i < ts.revl_length()) {
+        let k = (ts)[(i) as usize].kind.clone();
+        if (((k == "{") || (k == "[")) || (k == "(")) {
+            depth = (depth).checked_add(1i64).expect("revl: Int overflow");
+        }
+        if (((k == "}") || (k == "]")) || (k == ")")) {
+            depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
+        }
+        if (((depth == 0i64) && atw(ts, i, "use")) && atk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "string")) {
+            if atk(ts, (i).checked_add(2i64).expect("revl: Int overflow"), "{") {
+                let mut j = (i).checked_add(3i64).expect("revl: Int overflow");
+                while atk(ts, j.clone(), "ident") {
+                    out.push(tkc(ts, j.clone()).text);
+                    j = (j).checked_add(1i64).expect("revl: Int overflow");
+                    if atk(ts, j.clone(), ",") {
+                        j = (j).checked_add(1i64).expect("revl: Int overflow");
+                    }
+                }
+            } else {
+                if (atw(ts, (i).checked_add(2i64).expect("revl: Int overflow"), "as") && atk(ts, (i).checked_add(3i64).expect("revl: Int overflow"), "ident")) {
+                    out.push(tkc(ts, (i).checked_add(3i64).expect("revl: Int overflow")).text);
+                }
+            }
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
 fn nr_binds(ts: &[Token], base: Vec<Bind>) -> Vec<Bind> {
     return tenv_put(&nr_use_names(ts, nr_fn_names(ts, base)), String::from("g1 on"), String::from("1"));
 }
@@ -27128,7 +27161,7 @@ fn verified_totality_refusal(pg: Prog) -> Verd {
 }
 
 fn collect_nonlink(ts: Vec<Token>, pg: Prog, hands: &[MHand], wrefs: &[Verd], ambSvcs: &[String], ambSvcsKnown: bool, ambOps: &[SvcOps]) -> NoLink {
-    let base = ctx_evals(ctx_appr(ctx_amb_ops(ctx_with_callables(build_maps(pg.clone()), &type_ctors(&ts)), amb_ops_map(ambOps, 0i64, std::collections::HashMap::new())), appr_info(&ts, pg.clone())), &ts, pg.clone());
+    let base = ctx_evals(ctx_appr(ctx_amb_ops(ctx_with_callables(build_maps(pg.clone()), &union_into(type_ctors(&ts), &use_listed_names(&ts))), amb_ops_map(ambOps, 0i64, std::collections::HashMap::new())), appr_info(&ts, pg.clone())), &ts, pg.clone());
     let dav = declared_arity_refusal(ts.clone());
     if (dav.v != "") {
         return NoLink { done: true, refs: vec![dav.clone()] };
@@ -44697,9 +44730,23 @@ fn a_multi_realm_bind_whose_realms_all_have_providers_composes() {
 }
 
 #[test]
+fn a_name_a_use_list_spells_resolves_in_a_fn__a_test_and_a_component() {
+    assert!((admit_src(String::from("use \"./lib.rvl\" { Store, wrap }\nfn f() -> Int { return wrap(1) }")) == ""));
+    assert!((admit_src(String::from("use \"./lib.rvl\" { Store, wrap }\ntest \"t\" {\n  assert wrap(1) == 1\n}")) == ""));
+    assert!((admit_src(String::from("use \"./lib.rvl\" { Store, wrap }\nservice Front { fn go() -> Int }\ncomponent C requires store: Store provides front: Front {\n  provide front { fn go() = wrap(1) }\n}")) == ""));
+}
+
+#[test]
 fn a_name_bound_in_a_block_arm_may_be_bound_again_after_it() {
     let v = admit_src(String::from("service S { fn go(n: Int) -> Int }\ncomponent C provides s: S {\n  provide s {\n    fn go(n: Int) {\n      let o = Some(n)\n      let x = match o {\n        Some(v) => {\n          let z = v + 1\n          z\n        },\n        None => 0\n      }\n      let z = x + 1\n      return z\n    }\n  }\n}"));
     assert!((v == ""));
+}
+
+#[test]
+fn a_name_no_use_list_spells_is_refused_in_a_fn__a_test_and_a_component() {
+    assert!((admit_src(String::from("use \"./lib.rvl\" { Store }\nfn f() -> Int { return wrap(1) }")) == "G1|`wrap` is not declared in this function"));
+    assert!((admit_src(String::from("use \"./lib.rvl\" { Store }\ntest \"t\" {\n  assert wrap(1) == 1\n}")) == "G1|`wrap` is not declared in this function"));
+    assert!((admit_src(String::from("use \"./lib.rvl\" { Store }\nservice Front { fn go() -> Int }\ncomponent C requires store: Store provides front: Front {\n  provide front { fn go() = wrap(1) }\n}")) == "G1|`wrap` is not a declared requirement of C"));
 }
 
 #[test]

@@ -254,27 +254,22 @@ _FOREIGN_NAME_REDIRECTS = {
 MODULE_PRIVATE_KEY = "__module_private__"
 
 # issue #3023: every `fn`/`extern` name the merged program declares. A component
-# hands an undeclared bare name to the requirement resolution ("`x` is not a
-# declared requirement of C"), which is the wrong sentence for a module callable
-# the component's module never imported; this set lets that path answer with the
-# fn-body "not declared" refusal instead. A private name of another module stays
-# the G1 module-private refusal above, which runs first.
+# refuses an unresolved bare name with the requirement sentence ("`x` is not a
+# declared requirement of C"), which stays the message for a module callable the
+# component's module never imported (the self-host gate words it the same way, so
+# the two tiers agree). The set only lets that refusal point at the `use` list in
+# its hint instead of suggesting a `requires` clause.
 PROGRAM_VALUES_KEY = "__program_values__"
 
 
-def _reject_unimported_value(name, filename, line, types):
-    """If `name` is a `fn`/`extern` the program declares but the current body's
-    module never imported, raise the G1 "not declared" refusal a fn body gives.
-    The caller has established that `name` is out of this body's scope and is
-    not another module's private declaration (that diagnostic is sharper).
-    Returns None for a name the program does not declare at all."""
+def _unresolved_name_hint(name, component, declared, types):
+    """The hint of a component body's "not a declared requirement" refusal."""
     values = (types or {}).get(PROGRAM_VALUES_KEY)
     if values is not None and name in values:
-        raise RevlError(filename, line,
-                        f"`{name}` is not declared in this function",
-                        hint=f"add `{name}` to this module's `use` list "
-                             f"(G1)",
-                        code="G1", category="binding")
+        return (f"`{name}` is a module `fn` or `extern` that this module never "
+                f"imported: add it to the module's `use` list (G1)")
+    return (f"component {component} requires {declared} — "
+            f"add `requires {name}: <Service>`?")
 
 
 def _reject_module_private(name, filename, line, types):
@@ -9414,7 +9409,7 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     if program.module_private:
         types[MODULE_PRIVATE_KEY] = program.module_private
     # issue #3023: the component path's "is this a module callable the body
-    # never imported?" answer (see `_reject_unimported_value`).
+    # never imported?" answer (see `_unresolved_name_hint`).
     types[PROGRAM_VALUES_KEY] = ({fn.name for fn in program.fn_decls}
                                  | {ext.name for ext in program.externs})
     # item 130 Slice 5: the typed-event contracts. Built after the record table
@@ -10682,18 +10677,15 @@ def _lower_component_pure_expr_node(expr, env: Env, scope: dict[str, str],
             _refuse_stream_requirement_read(env, name, filename, line)
         if getattr(env, "_plain_body", False) and name in _BUILTIN_TYPE_NAMES:
             _refuse_builtin_type_value(name, env, filename, line)
-        # issue #3004: another module's non-`pub` fn/extern, named bare.
-        # issue #3023: a `pub` one this module never imported is "not declared"
-        # here too, not a missing service requirement.
+        # issue #3004: another module's non-`pub` fn/extern, named bare
         _reject_module_private(name, filename, line, getattr(env, "types", None))
-        _reject_unimported_value(name, filename, line, getattr(env, "types", None))
         if getattr(env, "_plain_body", False):
             declared = ", ".join(f"`{r}`" for r in env.requires) or "<nothing>"
             raise RevlError(
                 filename, line,
                 f"`{name}` is not a declared requirement of {env.component.name}",
-                hint=f"component {env.component.name} requires {declared} — "
-                     f"add `requires {name}: <Service>`?",
+                hint=_unresolved_name_hint(name, env.component.name, declared,
+                                           getattr(env, "types", None)),
                 code="G1", category="requirement",
             )
         _reject_foreign_name(name, filename, line)  # item 384
@@ -18447,16 +18439,13 @@ def _lower_postfix(expr: Postfix, env: Env, mode: str):
                    env.filename, expr.line)
         node = {"kind": "host", "fn": f"{head}.{call.name}", "args": host_args}
     else:
-        # issue #3004: another module's non-`pub` fn/extern, named bare.
-        # issue #3023: a `pub` one this module never imported is "not declared"
-        # here too, not a missing service requirement.
+        # issue #3004: another module's non-`pub` fn/extern, named bare
         _reject_module_private(head, env.filename, expr.line, env.types)
-        _reject_unimported_value(head, env.filename, expr.line, env.types)
         declared = ", ".join(f"`{r}`" for r in env.requires) or "<nothing>"
         raise RevlError(
             env.filename, expr.line,
             f"`{head}` is not a declared requirement of {comp.name}",
-            hint=f"component {comp.name} requires {declared} — add `requires {head}: <Service>`?",
+            hint=_unresolved_name_hint(head, comp.name, declared, env.types),
             code="G1", category="requirement",
         )
 

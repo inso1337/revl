@@ -7,11 +7,13 @@ declarations it names. The lowerer enforced that for a non-`pub` declaration
 long as that module was part of the program. Externs leaked everywhere; `test`,
 `prop test` and component bodies saw every declaration of the merged program.
 
-Now an un-imported `pub` fn or extern referenced by bare name is refused with
-"not declared" in fn bodies, tests, prop tests and components, exactly as an
-un-imported `pub fn` already was in a plain fn body. A `pub` name named in the
-`use` list stays callable, and the root modules of a composition keep their one
-shared namespace.
+Now an un-imported `pub` fn or extern referenced by bare name is refused as
+"not declared" in fn bodies, tests and prop tests, exactly as an un-imported
+`pub fn` already was in a plain fn body. A component body refuses it with the
+component's own G1 sentence ("not a declared requirement of C"), the same one
+the self-host driver gives, with a hint that points at the `use` list. A `pub`
+name named in the `use` list stays callable, and the root modules of a
+composition keep their one shared namespace.
 """
 
 import sys
@@ -113,32 +115,52 @@ def test_unimported_pub_fn_in_a_prop_test_is_not_declared(tmp_path):
 
 # ------------------------------------------------------------- components
 
-def test_unimported_pub_fn_in_a_component_is_not_declared(tmp_path):
-    message = _refusal(tmp_path, (
-        'use "m.rvl" { E }\n'
-        + SERVICE +
-        "component C provides s: S {\n"
-        "  provide s {\n"
-        "    fn get() = wrap(1)\n"
-        "  }\n"
-        "}\n"
-    ))
-    assert _not_declared("wrap") in message, message
+def _requirement(name: str, component: str = "C") -> str:
+    """A component body refuses an unresolved bare name with its own G1
+    sentence. It is the message the self-host driver gives too (tests/
+    test_selfhost_compile.py), so the two tiers agree on every body kind; the
+    hint points at the `use` list for a name the program declares."""
+    return f"`{name}` is not a declared requirement of {component}"
 
 
-def test_unimported_pub_fn_as_a_component_value_is_not_declared(tmp_path):
-    """A first-class read of the fn (not only its call) draws the same refusal,
-    not the component's requirement wording."""
-    message = _refusal(tmp_path, (
-        'use "m.rvl" { E }\n'
-        + SERVICE +
-        "component C provides s: S {\n"
-        "  provide s {\n"
-        "    fn get() = wrap\n"
-        "  }\n"
-        "}\n"
-    ))
-    assert _not_declared("wrap") in message, message
+def _component_refusal(tmp_path, body: str):
+    with pytest.raises(RevlError) as info:
+        _compile(tmp_path, (
+            'use "m.rvl" { E }\n'
+            + SERVICE +
+            "component C provides s: S {\n"
+            "  provide s {\n"
+            f"    fn get() = {body}\n"
+            "  }\n"
+            "}\n"
+        ))
+    return info.value
+
+
+def test_unimported_pub_fn_in_a_component_is_refused(tmp_path):
+    error = _component_refusal(tmp_path, "wrap(1)")
+    assert _requirement("wrap") in str(error), str(error)
+    assert (error.code, "`use` list" in (error.hint or "")) == ("G1", True), error
+
+
+def test_unimported_pub_extern_in_a_component_is_refused(tmp_path):
+    error = _component_refusal(tmp_path, "shown(1)")
+    assert _requirement("shown") in str(error), str(error)
+    assert "`use` list" in (error.hint or ""), error.hint
+
+
+def test_unimported_pub_fn_as_a_component_value_is_refused(tmp_path):
+    """A first-class read of the fn (not only its call) draws the same refusal."""
+    error = _component_refusal(tmp_path, "wrap")
+    assert _requirement("wrap") in str(error), str(error)
+
+
+def test_an_undeclared_name_in_a_component_keeps_the_requires_hint(tmp_path):
+    """A name no module declares is still a missing requirement: the hint
+    suggests `requires`, not a `use` entry."""
+    error = _component_refusal(tmp_path, "nobody(1)")
+    assert _requirement("nobody") in str(error), str(error)
+    assert "requires" in (error.hint or "") and "`use` list" not in (error.hint or ""), error.hint
 
 
 # ---------------------------------------------------------------- controls
