@@ -419,12 +419,12 @@ code-point range compare. Lowered native (a chained comparison (`"0" <= x <=
 no call and no intermediate `ord`. See `docs/bench-selfhost.md` for the lexer
 before→after.
 
-**Tier status.** **py, typescript and rust** lower all four native (`char::is_ascii_*`
-on rust, a chained range compare or equality set on ts). **go, java and wasm**
-still refuse them, each with its own message (`unknown v3 builtin method
-'is_digit'` on go, `unknown builtin method 'is_digit'` on java, `unsupported
-builtin method 'is_digit'` on wasm). A tier that later adopts them lowers to its
-own ASCII test.
+**Tier status.** **py, typescript, rust, go and java** lower all four native
+(`char::is_ascii_*` on rust, a chained range compare or equality set on ts, go
+and java; go and java bind the receiver once in a func literal or lambda, so a
+side-effecting receiver is evaluated a single time). **wasm** still refuses
+them (`unsupported builtin method 'is_digit'`). A tier that later adopts them
+lowers to its own ASCII test.
 
 ### `Str.codepoint_at(i)`: codepoint-at-index scan (item 276)
 
