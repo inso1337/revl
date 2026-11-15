@@ -516,6 +516,13 @@ but not seen. Every instance was closed. Representative fixes:
 - HTTP faces: requests are framed by a single agreed `Content-Length`, a
   duplicate credential header is visible, and no authority value is decoded from
   the wire (#901, #914, #1505).
+- `api_key_env` must be an upper-case environment variable name
+  (`[A-Z_][A-Z0-9_]*`, at most 64 characters, for example
+  `ANTHROPIC_API_KEY`), so a pasted `hf_`, `ghp_`, `gsk_` or `AIza` key is
+  refused unechoed. A lower-case name that worked before is now refused: rename
+  the variable. A variable that is not set is named by role, never by name, in
+  the unset-credential errors and the adapter and binding reprs, and `revl run
+  --plan` prints a name only when it is set, because an upper-case key can still pass the shape check (#3126).
 
 ### Operations
 
