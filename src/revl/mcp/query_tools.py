@@ -231,9 +231,13 @@ QUERY_TOOLS = [
             "bindings. Returns every role with an admitted path to the target "
             "capability, one witness path each, plus the graph itself. With "
             "`previous` (a previous result of this tool) it also reports the "
-            "edges a pending update adds, which is the widening direction an "
-            "operator reviews. Over-approximate on the crossing edges: it "
-            "reports what the checker proves, never a predicted behaviour.",
+            "edges a pending update adds and the changes that widen authority "
+            "without one (a weaker proof, a role that stops declaring its "
+            "reach, a model that leaves the device). Always over-approximate: "
+            "an empty answer means no path the checker enumerates, and a role "
+            "that reaches an unscoped emission is listed as `unnameable` for "
+            "every capability. It reports what the checker proves, never a "
+            "predicted behaviour.",
         "inputSchema": {
             "type": "object",
             "properties": {

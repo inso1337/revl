@@ -977,32 +977,56 @@ def drift(ir: dict, service: str, gains=(), losses=()) -> dict:
     )
 
 
+_ASSUMPTION_UNNAMEABLE = (
+    "an unscoped `emission` and a first-class dispatch reach a boundary no "
+    "token names (`*`). A model role that steers a component reaching one is "
+    "listed for every capability, marked `unnameable`: the checker proves the "
+    "crossing exists and cannot say which capability it carries."
+)
+_ASSUMPTION_AUTHORITY_JOIN = (
+    "services are joined by name and capabilities by token. Two realms that "
+    "provide one service are one service node, and a `pure` extern, which the "
+    "checker classifies as reaching nothing, is not an edge."
+)
+
+
 def authority(ir: dict, capability: str, previous: dict = None) -> dict:
     """which model roles can reach a capability? — the authority graph, built
     by joining the audit's boundary surface with the declared model routes and
     secret bindings. `previous` is a previously emitted `authority` result;
-    with it the answer also reports the edges a pending update added."""
+    with it the answer also reports what a pending update adds and changes.
+
+    Always `over-approximation`: the walk is a may-analysis whatever the edge
+    mix, so an empty answer means no admitted path the checker enumerates, not
+    a proof that none exists. Each edge and each witness carries its own
+    precision."""
     from . import authority as authority_graph  # noqa: PLC0415
 
     graph = authority_graph.build_graph(ir)
     known = authority_graph.capabilities(graph)
     if capability not in known:
-        return _unknown("authority", "capability", capability, known)
+        miss = _unknown("authority", "capability", capability, known)
+        # an unknown name is not "no role reaches it": a role that steers a
+        # component with unnameable reach may reach a capability the program
+        # never names, so those roles are returned with the miss
+        miss["unnameableRoles"] = authority_graph.roles_reaching(
+            graph, authority_graph.UNNAMEABLE)
+        return miss
 
     result = _result(
         "authority",
         f"which model roles can reach `{capability}`?",
-        APPROX if any(edge["precision"] == APPROX
-                      for edge in graph["edges"]) else EXACT,
+        APPROX,
         "the graph joins the audit's boundary surface with the declared model "
         "routes and secret bindings. Route, declaration and binding edges are "
-        "read off the admitted IR; a component -> service edge is the audit's "
-        "may-analysis, so a reachable capability is one some admitted path "
-        "can carry, not one every activation does. A model role that declares "
-        "no `reaches [...]` is recorded as opaque, never assumed to reach "
-        "nothing.",
-        [_ASSUMPTION_MAY, _ASSUMPTION_EXTERN, _ASSUMPTION_SWAP,
-         _ASSUMPTION_SCOPE],
+        "read off the admitted IR; a component's crossing edges are the "
+        "audit's may-analysis, so a reachable capability is one some admitted "
+        "path can carry, not one every activation does, and an empty answer "
+        "names no path the checker enumerates rather than proving none "
+        "exists. A model role that declares no `reaches [...]` is recorded as "
+        "opaque, never assumed to reach nothing.",
+        [_ASSUMPTION_MAY, _ASSUMPTION_EXTERN, _ASSUMPTION_UNNAMEABLE,
+         _ASSUMPTION_AUTHORITY_JOIN, _ASSUMPTION_SWAP, _ASSUMPTION_SCOPE],
         target=capability,
         graph=graph,
         roles=authority_graph.roles_reaching(graph, capability),
@@ -1513,6 +1537,10 @@ def render(result: dict) -> str:
         lines = [f"error: {result.get('error')}"]
         if result.get("known"):
             lines.append("  known: " + ", ".join(result["known"]))
+        if result.get("unnameableRoles"):
+            lines.append("  roles that reach a boundary no token names, and "
+                         "so may reach any capability: " + ", ".join(
+                             row["role"] for row in result["unnameableRoles"]))
         return "\n".join(lines)
 
     mode = result.get("mode", MODE_STATIC)
@@ -1654,11 +1682,22 @@ def render(result: dict) -> str:
     elif query == "authority":
         roles = result.get("roles") or []
         if not roles:
-            out.append("\nno model role reaches it through an admitted path.")
+            out.append("\nno model role reaches it through a path the checker "
+                       "enumerates.")
         for role in roles:
             where = f" ({role['residence']})" if role.get("residence") else ""
-            out.append(f"\n  {role['role']}{where}  [{role['precision']}]")
+            tags = [role["precision"]]
+            if role.get("unnameable"):
+                tags.append("unnameable: reaches a boundary no token names")
+            if role.get("opaque"):
+                tags.append("declares no reach")
+            out.append(f"\n  {role['role']}{where}  [{'; '.join(tags)}]")
             out.append("    " + " -> ".join(role["path"]))
+            for hop in role.get("hops") or []:
+                names = (hop.get("externs") or hop.get("via")
+                         or hop.get("components"))
+                if names:
+                    out.append(f"    ({hop['kind']} via {', '.join(names)})")
         if result.get("secrets"):
             out.append("\n  secrets bound to this capability: "
                        + ", ".join(result["secrets"]))
@@ -1668,9 +1707,13 @@ def render(result: dict) -> str:
                        + (", ".join(delta["added"]) or "none"))
             out.append("  removed edges: "
                        + (", ".join(delta["removed"]) or "none"))
+            for row in delta.get("changed") or []:
+                mark = "  WIDENS" if row["widened"] else ""
+                out.append(f"  changed {row['id']} {row['field']}: "
+                           f"{row['before']} -> {row['after']}{mark}")
             out.append("  the update widens authority."
                        if delta["widened"] else
-                       "  the update adds no authority edge.")
+                       "  the update adds and loosens nothing.")
 
     if result.get("assumptions"):
         out.append("\n  this answer assumes:")

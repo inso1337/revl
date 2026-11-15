@@ -357,26 +357,68 @@ proves into one graph:
 
 | edge | source | precision |
 |---|---|---|
-| `role -> component` | the component routes through the role (`manifest.model_reach`) | exact |
-| `component -> service` | the audit's boundary surface, folded across the service seam | over-approximation |
-| `service -> capability` | the service method's declared `emission[<token>]` | exact |
-| `secret -> capability` | the secret's declared binding | exact |
+| `role -> component` (`routes`) | the component routes through the role (`manifest.model_reach`) | exact |
+| `role -> capability` (`steers`) | a capability the routed component holds that the role's reach covers (`holds` minus `attenuated` in the same row; every held capability for a role with no declared reach) | exact |
+| `component -> service` (`crosses`) | the audit's boundary surface, folded across the service seam | over-approximation |
+| `component -> capability` (`host`) | host code the component itself reaches: an extern's declared scope, or its own name when it declares none | over-approximation |
+| `component -> capability` (`emits`) | a crossing through a key nothing in this composition provides, which the audit still enumerates | over-approximation |
+| `service -> capability` (`declares`) | the service method's declared `emission[<token>]` | exact |
+| `secret -> capability` (`binds`) | the secret's declared binding | exact |
 
-A role reaches a capability when an admitted path `role -> component ->
-service -> capability` exists. The answer gives every such role one witness
-path, shortest and lexicographically first, so two runs report the same
-witness. The result also carries the full graph, and the secrets bound to the
-target capability (the secrets a role on a path could receive).
+A role reaches a capability when an admitted path exists: `role -> component ->
+service -> capability`, `role -> component -> capability` for a host extern, or
+`role -> capability` for a capability the component holds. The answer gives every
+such role one witness path, shortest and lexicographically first, so two runs
+report the same witness. A path through the component's own audit surface is
+the witness when one exists; `steers` answers only when no audited crossing
+does, so a role is not left out for a capability its component holds and does
+not emit at the moment. The result also carries the full graph, the edge records
+along each witness (`hops`, naming the extern or the component), and the secrets
+bound to the target capability (the secrets a role on a path could receive).
 
+```bash
 ```bash
 revl query authority  payments.charge  tests/fixtures/authority_mesh.rvl
 revl query authority  payments.charge  tests/fixtures/authority_mesh.rvl --json
 ```
 
 An unknown capability is a miss with the known names, like every other verb.
-A model role that declares no `reaches [...]` is recorded as `opaque` rather
-than assumed to reach nothing, and a host extern body stays opaque: the graph
-reports what the checker proves, never a predicted behaviour.
+
+**The unnameable boundary.** A bare `emission` and a first-class dispatch reach
+a boundary no token names, which the audit and the checker spell `*`. The graph
+keeps it as `capability:*`. A role that reaches it is listed for every capability
+asked about, with `unnameable: true` and its path to `*`, because the checker
+proves a crossing exists and cannot say which capability it carries; a named
+path wins when a role has both. An unknown capability is not an answer either:
+the roles that reach `*` are returned with the miss (`unnameableRoles`), so
+`unknown capability` never reads as "no role reaches it".
+
+**Precision.** The answer is always `over-approximation`: the walk is a
+may-analysis whatever the edge mix, and an empty `roles` list means no admitted
+path the checker enumerates, not a proof that none exists. Each edge and each
+witness carries its own `precision`.
+
+**What the graph does not see.** It reports what the checker proves and never a
+predicted behaviour:
+
+- Host extern bodies are opaque. A `pure` extern is classified as reaching
+  nothing and is not an edge, and an extern whose host code crosses a boundary
+  it did not declare is invisible, as in every query here.
+- Services join by name and capabilities by token. Two realms that provide one
+  service are one `service:` node, so a role in either realm reaches what that
+  service declares; realm and `isolate` placement are not modelled.
+- A `component -> service` edge covers every method the service declares, not
+  only the one a call site names, so a role can be listed for a capability of a
+  sibling method of a service its component crosses.
+- A model role that declares no `reaches [...]` is recorded as `opaque` and may
+  steer everything its component holds; it is never assumed to reach nothing.
+- Only components in the compiled composition are considered. A `use` module is
+  compiled with the composition and is part of it. A spawn template is a
+  component of the composition: a role that steers it is on the graph, and a
+  capability it holds is reached by `steers` even when its spawner never calls
+  it.
+- Which compositions a federation pin joins is not modelled yet (the second
+  slice of issue #2702).
 
 ### 10.1 `--diff` — which pending update widens authority?
 
@@ -390,8 +432,20 @@ revl query authority payments.refund tests/fixtures/authority_mesh_updated.rvl -
 ```
 
 An added service operation that declares a new capability token adds the
-`service -> capability` edge, and the roles that can reach the service gain
-that capability, so the widening is visible both in `diff.added` and in the
-`roles` answer. `diff.widened` is the one-bit summary: true when the update
-adds any edge.
+`service -> capability` edge, and the roles whose reach now names it add a
+`steers` edge, so the widening is visible both in `diff.added` and in the
+`roles` answer.
 
+Authority can widen without an edge being added, so the diff also reports
+`diff.changed`, one row per change with `before`, `after` and `widened`:
+
+| change | `widened` |
+|---|---|
+| an edge's `precision` moved from `exact` to `over-approximation` | true |
+| a role stopped declaring its reach (`opaque` became true) | true |
+| a role's declared `reaches` gained a token | true |
+| a role's `residence` moved to `off_device` | true |
+| the opposite moves (a tighter proof, a declared reach, a smaller reach, back on the device) | false |
+
+`diff.widened` is the one-bit summary: true when the update adds any edge or any
+`changed` row widens. A tightening is reported and never fails the gate.

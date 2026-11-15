@@ -2442,8 +2442,10 @@ composition: model roles, components, services, capabilities and secrets,
 joined from the audit's boundary surface, the declared `route model` edges and
 the secret bindings. Returns every role with an admitted path to the target
 capability, one witness path each, plus the graph itself. With `previous` (a
-previous result) it also reports the edges a pending update adds, the widening
-direction an operator reviews. Over-approximate on the crossing edges.
+previous result) it also reports the edges a pending update adds and the changes
+that widen authority without one. Always over-approximate: an empty answer means
+no path the checker enumerates, and a role that reaches an unscoped emission is
+listed as `unnameable` for every capability.
 
 - Inputs: `source` / `files` / `modules`; `target` (required); `previous`
   (a previous `revl_query_authority` result to diff against).
