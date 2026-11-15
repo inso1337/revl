@@ -32,6 +32,9 @@ revl refuses.)
 | `div_floor(b)` | 1 | Int | integer division rounding toward −∞ | `a // b` | `Math.floor(a / b)` |
 | `div_euclid(b)` | 1 | Int | division whose remainder is ≥ 0 | built | built |
 | `mod(b)` | 1 | Int | Euclidean remainder, always in [0, \|b\|) | `a % abs(b)` | built |
+| `checked_add(b)` | 1 | Int | total `+`: `Result[Int, Str]`, `Err("revl: Int overflow")` at the i64 edge instead of a fault (docs/arithmetic.md) | `a + b` under `Ok` | `a + b` under `Ok` |
+| `checked_sub(b)` | 1 | Int | total `-`, same Result shape | `a - b` under `Ok` | `a - b` under `Ok` |
+| `checked_mul(b)` | 1 | Int | total `*`, same Result shape | `a * b` under `Ok` | `a * b` under `Ok` |
 | `checked_div_trunc(b)` | 1 | Int | total `div_trunc`: `Result[Int, Str]`, `Err(reason)` at a zero divisor instead of a fault (docs/arithmetic.md) | built | built |
 | `checked_div_floor(b)` | 1 | Int | total `div_floor`, same Result shape | native `//` under `Ok` | built |
 | `checked_div_euclid(b)` | 1 | Int | total `div_euclid`, same Result shape | built | built |

@@ -1,0 +1,25 @@
+// docs/arithmetic.md's TOTAL arithmetic forms: `checked_add` / `checked_sub` /
+// `checked_mul`. Same value as `+ - *` where it fits, `Err("revl: Int
+// overflow")` where the faulting operation would trap. A pure fn cannot
+// `fail`, so the overflow travels as a value: each tier's reference emits a
+// per-form helper (or an inline test) and the built-in Result, and every
+// self-hosted emitter has to agree with it byte for byte. Construction only,
+// so the wasm tier (tagged reads deferred) can hold the same document.
+fn safe_add(a: Int, b: Int) -> Result[Int, Str] { return a.checked_add(b) }
+fn safe_sub(a: Int, b: Int) -> Result[Int, Str] { return a.checked_sub(b) }
+fn safe_mul(a: Int, b: Int) -> Result[Int, Str] { return a.checked_mul(b) }
+
+// Operands that are expressions, evaluated once each.
+fn scaled(a: Int, b: Int, k: Int) -> Result[Int, Str] { return (a + 1).checked_mul(b * k) }
+
+// The same call twice in one expression: two Results, each with its own scratch.
+fn first_of(x: Result[Int, Str], y: Result[Int, Str]) -> Result[Int, Str] { return x }
+fn twice(a: Int, b: Int) -> Result[Int, Str] { return first_of(a.checked_add(b), a.checked_add(b)) }
+
+// The calls under a list literal, a `Some` payload and an `if` statement.
+fn listed(a: Int, b: Int) -> List[Result[Int, Str]] { return [a.checked_add(b), a.checked_sub(b)] }
+fn wrapped(a: Int, b: Int) -> Opt[Result[Int, Str]] { return Some(a.checked_add(b)) }
+fn pick(c: Bool, a: Int, b: Int) -> Result[Int, Str] {
+  if (c) { return a.checked_add(b) }
+  return a.checked_sub(b)
+}
