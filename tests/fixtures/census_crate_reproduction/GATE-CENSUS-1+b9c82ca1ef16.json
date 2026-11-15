@@ -979,6 +979,7 @@
   "tests/fixtures/emit_py_corpus/branch_values.rvl",
   "tests/fixtures/emit_py_corpus/branches.rvl",
   "tests/fixtures/emit_py_corpus/cache_pure.rvl",
+  "tests/fixtures/emit_py_corpus/chains.rvl",
   "tests/fixtures/emit_py_corpus/checked_arith.rvl",
   "tests/fixtures/emit_py_corpus/checked_arith_read.rvl",
   "tests/fixtures/emit_py_corpus/checked_div.rvl",
