@@ -16,8 +16,8 @@ These pin the publish half of that:
     the untrusted-author profile, so a source declaring host code is REFUSED;
   * the same bytes from a file outside the export area still publish, so the
     rule reads the ORIGIN and not the content;
-  * the same bytes with no origin at all still publish as they did before, so a
-    caller holding text from no file is not thereby accused.
+  * the same bytes with no origin at all are refused too (fail closed): text
+    from no file cannot be shown to be the operator's, so it is profiled.
 
 The last two are not decoration: without them the first would be satisfied by
 a source that never compiles at all, which is exactly the unreachable
@@ -52,6 +52,10 @@ component Greeter provides greet: Greet {
   }
 }
 """
+
+# the same source without the extern: what the authoring profile admits
+PLAIN = EXPORTED.replace(
+    "extern emission[db] fn pg_write(row: Str) -> Int = @py { return 0 }\n", "")
 
 PROFILED = "untrusted-author profile forbids"
 
@@ -184,19 +188,41 @@ def test_the_same_bytes_from_an_exported_file_are_refused_through_facts(reg, tmp
     assert any(PROFILED in refusal for refusal in facts["refusals"])
 
 
-def test_in_memory_text_from_no_file_still_publishes(reg):
-    """The control for the missing-origin axis, and the guard against this change
-    having inverted the default by accident. Later slices will meet callers that
-    hold registry text from no file at all (an MCP repair candidate, a
-    complaint); none is then the honest answer, and it must not be read as an
-    accusation — the compile keeps item 49's virtual label and no profile, so
-    these callers publish exactly as they do today.
+def test_text_from_no_file_is_profiled_as_author_written(reg, tmp_path):
+    """Fail closed (issue #2563). Text with no real file behind it cannot be
+    shown to be the operator's, and it may be bytes an agent exported into
+    `.revl/export/`: the rule has no path to ask about. So the publish compiles
+    it under the authoring profile, and the source declaring host code is
+    refused, exactly as the same bytes are when named by their exported file.
 
-    BEFORE the fix this is the behaviour of EVERY caller, exported or not, and
-    that is the bug. It stays the behaviour of the source-less ones, which is
-    what distinguishes this slice from a rule inversion.
+    The text is byte for byte the exported file's, but the answer does not
+    depend on that: the profile applies to ANY source with no origin, so a
+    file edited between two reads cannot slip through by no longer matching
+    what was remembered. The plain control below keeps the refusal honest: a
+    source with no extern still publishes with no origin.
     """
-    record = _publish(reg, "greeter", EXPORTED, version="1.0.0")
+    exported = _exported_file(tmp_path)
+    text = exported.read_text(encoding="utf-8")
+
+    with pytest.raises(RevlError) as caught:
+        _publish(reg, "greeter", text, version="1.0.0")
+    assert PROFILED in str(caught.value)
+    assert not (reg / "components" / "greeter").exists()
+
+    edited = text + "\n// edited after the first read\n"
+    with pytest.raises(RevlError) as caught:
+        _publish(reg, "greeter", edited, version="1.0.0")
+    assert PROFILED in str(caught.value)
+
+    facts = registry.release_facts(reg, "greeter", text, "1.0.0")
+    assert any(PROFILED in refusal for refusal in facts["refusals"])
+
+
+def test_plain_text_from_no_file_still_publishes(reg):
+    """The control: a source the authoring profile admits (no host code)
+    publishes with no origin, so the refusal above is the profile and not a
+    refusal of every source-less publish."""
+    record = _publish(reg, "greeter", PLAIN, version="1.0.0")
 
     assert record["version"] == "1.0.0"
     assert registry.verify(reg) == []
@@ -213,12 +239,12 @@ def test_a_real_origin_does_not_change_the_release_bytes(reg, tmp_path):
     """
     own = tmp_path / "src" / "component.rvl"
     own.parent.mkdir()
-    own.write_text(EXPORTED, encoding="utf-8")
+    own.write_text(PLAIN, encoding="utf-8")
 
-    with_origin = _publish(reg, "greeter", EXPORTED, version="1.0.0",
+    with_origin = _publish(reg, "greeter", PLAIN, version="1.0.0",
                            source_path=own)
     plain = _empty_registry(tmp_path / "registry-no-origin")
-    without_origin = _publish(plain, "greeter", EXPORTED, version="1.0.0")
+    without_origin = _publish(plain, "greeter", PLAIN, version="1.0.0")
 
     assert with_origin["sourceSha256"] == without_origin["sourceSha256"]
     assert with_origin["manifestSha256"] == without_origin["manifestSha256"]

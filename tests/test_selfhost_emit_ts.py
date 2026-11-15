@@ -197,6 +197,8 @@ CORPUS = [
     "../../../stdlib/str.rvl",
     "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
     "../../../examples/java_match.rvl",
+    "../emit_py_corpus/checked_arith.rvl",  # total checked_add/sub/mul (docs/arithmetic.md)
+    "../emit_py_corpus/checked_arith_read.rvl",  # the same forms bound by a let and matched
     "../emit_wasm_corpus/forloop.rvl",
     "../../../bench/codegen/python/programs/maps.rvl",
     "../emit_wasm_corpus/builtins.rvl",

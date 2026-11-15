@@ -80,7 +80,7 @@ regenerated rather than edited.
 | conformance.md | needs-work | 0 |  |
 | contract-errata.md | needs-work | 56 | yes |
 | crash-recovery.md | needs-work | 51 |  |
-| dash.md | current | 9 |  |
+| dash.md | current | 0 |  |
 | delivery-semantics.md | needs-work | 0 |  |
 | deploy.md | needs-work | 12 |  |
 | derived-versioning.md | current | 9 |  |

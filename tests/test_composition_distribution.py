@@ -203,3 +203,75 @@ def test_row_table_is_byte_identical_across_differing_registry_indexes(tmp_path)
                         sort_keys=True)
 
     assert first == second
+
+
+# --------------------------------------------------------------------------- #
+# Issue #3483 — a row `from "stdlib/..."` and the jail and the pin.
+# --------------------------------------------------------------------------- #
+
+_STD_LOCK = {"lockVersion": 1,
+             "trucs": [{"name": "pg_database", "sourceHash": "a" * 64},
+                       {"name": "evil", "sourceHash": "b" * 64}]}
+
+
+def _evil_layer(tmp_path: Path, spelling: str, key: str = "db") -> Path:
+    cfg = "origins: []" if key == "wire" else 'url: "x"'
+    doc = _project(tmp_path, lock=_STD_LOCK)
+    (tmp_path / "secret.rvl").write_text(_PG_COMPONENT)
+    evil = tmp_path / "trucs" / "evil"
+    evil.mkdir(parents=True)
+    (evil / "layer.rvl").write_text(f"""
+layer Evil for Demo {{
+  add row @s from "{spelling}" provides {key} config {{ {cfg} }}
+}}
+""")
+    doc.write_text(_base('  stack "trucs/evil/layer.rvl"\n'))
+    return doc
+
+
+def test_a_vendored_layer_may_read_a_row_from_the_shipped_stdlib(tmp_path):
+    """The shipped stdlib is not a vendored truc's bytes: no jail, no pin."""
+    doc = _evil_layer(tmp_path, "stdlib/socket.rvl", "wire")
+    table = resolve_file(str(doc), str(tmp_path))
+    row = [r for r in table.rows if r.label == "s"][0]
+    assert row.component == "SocketWire"
+
+
+def test_a_vendored_layer_cannot_climb_out_through_a_stdlib_spelling(
+        tmp_path, monkeypatch):
+    """`stdlib/../secret.rvl` over a search-path base that is the project root
+    is not the shipped stdlib: it is refused, never admitted past the jail."""
+    monkeypatch.setenv("REVL_IMPORT_PATH", str(tmp_path))
+    doc = _evil_layer(tmp_path, "stdlib/../secret.rvl")
+    with pytest.raises(RevlError) as exc:
+        resolve_file(str(doc), str(tmp_path))
+    assert "which does not exist" in str(exc.value)
+
+
+def test_an_import_path_stdlib_hit_keeps_the_jail(tmp_path, monkeypatch):
+    """A REVL_IMPORT_PATH hit is an ordinary file: a vendored layer reading it
+    resolves outside its own truc and is refused."""
+    imp = tmp_path / "imp"
+    (imp / "stdlib").mkdir(parents=True)
+    (imp / "stdlib" / "socket.rvl").write_text(_PG_COMPONENT)
+    monkeypatch.setenv("REVL_IMPORT_PATH", str(imp))
+    doc = _evil_layer(tmp_path, "stdlib/socket.rvl")
+    with pytest.raises(RevlError) as exc:
+        resolve_file(str(doc), str(tmp_path))
+    assert "outside" in str(exc.value) and "trucs/evil/" in str(exc.value)
+
+
+def test_an_import_path_stdlib_hit_inside_a_truc_keeps_the_pin(
+        tmp_path, monkeypatch):
+    """An import-path entry that points into `trucs/<T>/` is vendored bytes: the
+    consuming composition needs the lock pin, exactly as for a direct path."""
+    doc = _project(tmp_path, lock={"lockVersion": 1, "trucs": []})
+    base = tmp_path / "trucs" / "pg_database"
+    (base / "stdlib").mkdir()
+    (base / "stdlib" / "socket.rvl").write_text(_PG_COMPONENT)
+    monkeypatch.setenv("REVL_IMPORT_PATH", str(base))
+    doc.write_text(_BASE.replace('"trucs/pg_database/component.rvl"',
+                                 '"stdlib/socket.rvl"') % {"stack": ""})
+    with pytest.raises(RevlError) as exc:
+        resolve_file(str(doc), str(tmp_path))
+    assert "unpinned truc" in str(exc.value)

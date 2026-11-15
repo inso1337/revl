@@ -992,10 +992,14 @@ def _apply_plan(arguments: dict) -> dict:
             after_keys = _provided_keys()
             healthy = (server.SESSION.loaded
                        and _keys_served(before_keys, after_keys))
+            # issue #3381: the swap's answer drained the driver's residue
+            # records; this verb's own answer carries them instead
+            residue = list(swap.get("compensationResidue") or ())
             if not healthy:
                 reverted = False
                 try:
-                    server.SESSION.rollback()
+                    residue += server.SESSION.rollback().get(
+                        "compensationResidue") or []
                     reverted = True
                 except Exception:  # noqa: BLE001 - report the uncertain outcome
                     reverted = False
@@ -1011,7 +1015,7 @@ def _apply_plan(arguments: dict) -> dict:
                                sessionId=_SESSION_ID,
                                before=before_generation, after=after_generation)
                 return {"ok": False, "applied": False, "autoReverted": reverted,
-                        "stoppedAt": "health",
+                        "stoppedAt": "health", "compensationResidue": residue,
                         "health": {"before": before_keys, "after": after_keys},
                         "note": ("the successor did not serve the running keys; "
                                  + ("the previous generation was restored"
@@ -1046,6 +1050,7 @@ def _apply_plan(arguments: dict) -> dict:
                 "live": plan.get("live"),
                 "restartRequired": plan.get("restartRequired"),
                 "providedKeys": after_keys,
+                "compensationResidue": residue,
                 "note": "the release is the running generation; the previous "
                         "generation is retained, so revl_update_rollback can "
                         "restore it",
