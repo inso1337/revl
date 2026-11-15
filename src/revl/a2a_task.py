@@ -122,11 +122,14 @@ def push_route(label: str) -> str:
 #: may retry, and the canonical poll still sees the task), never a silent drop.
 PUSH_INBOX_LIMIT = 64
 
-#: The wire states that end a Task (A2A 1.0.0). The push paths compare the
-#: peer's own state STRING against this literal instead of calling the module's
-#: `is_terminal`, so they add no module-level name to what a four-op body
-#: already relies on.
-_TERMINAL_WIRE = ("completed", "failed", "canceled", "rejected")
+def _terminal_wire() -> tuple:
+    """The wire states that end a Task, read from the ONE list the importer owns
+    (`import_a2a._TERMINAL_STATES`) rather than restated here. Imported lazily:
+    `import_a2a` imports this module. The push paths compare the peer's own
+    state STRING against it instead of calling the module's `is_terminal`, so
+    they add no module-level name to what a four-op body already relies on."""
+    from .import_a2a import _TERMINAL_STATES  # noqa: PLC0415 - import cycle
+    return tuple(_TERMINAL_STATES)
 
 
 def _push_state_prelude() -> str:
@@ -234,7 +237,7 @@ def _push_poll_drain() -> str:
         "            return Message(_ev[\"text\"])\n"
         "        if _ev[\"kind\"] == \"artifact\":\n"
         "            return Artifact(_ev[\"text\"])\n"
-        f"        if _ev[\"state\"] not in {_TERMINAL_WIRE!r}:\n"
+        f"        if _ev[\"state\"] not in {_terminal_wire()!r}:\n"
         "            return Status(task_state_from_wire(_ev[\"state\"]))\n"
         "        # a pushed terminal is not trusted: the tasks/get below confirms\n"
         "        # it, and only its answer is returned.\n"
@@ -425,7 +428,7 @@ def _event_from_result(fault, drop: str = "") -> str:
     if drop:
         status_tail = (
             '        _st = task_state_from_wire(_state)\n'
-            f'        if _state in {_TERMINAL_WIRE!r}:\n'
+            f'        if _state in {_terminal_wire()!r}:\n'
             + drop
             + '        return Status(_st)\n')
     else:
