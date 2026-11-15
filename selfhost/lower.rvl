@@ -1637,6 +1637,27 @@ fn drop_last(ss: List[Stmt]) -> List[Stmt] {
   return out
 }
 
+// A destructuring `let` (`let { a, b } = r`, `let [h, ...t] = xs`) is read as
+// inert `skip` statements, one per name it binds, each carrying the name on its
+// `edge` as `pat:<name>`. Only the lexical acquire walk reads them (a bound name
+// shadows an `acquire` extern, lower.py `_stmt_binders`); every other walk
+// passes over a `skip` statement as before, so the pattern stays an inert read
+// for the rest of the gate.
+fn pattern_binders(ts: List[Token], lo: Int, hi: Int) -> List[Stmt] {
+  var out: List[Stmt] = [mkstmt("skip", int_lit0())]
+  var k = lo
+  while (k < hi && !atk(ts, k, "=")) {
+    let t = tkc(ts, k)
+    if (t.kind == "ident") {
+      out = out.push({ kind: "skip", e: int_lit0(), bind: "", spawnTarget: "",
+                       awaited: false, line: 0, inTimer: false, bindTy: "",
+                       edge: "pat:".concat(t.text) })
+    }
+    k += 1
+  }
+  return out
+}
+
 fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
   let t = tkc(ts, lo)
   if (t.kind == "kw" && (t.text == "let" || t.text == "var")) {
@@ -1647,7 +1668,12 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
       if (ta.ok) { ann = taint_strip(ta.ty) }
       eq = ta.i
     }
-    if (!atk(ts, eq, "=")) { return mk_srun([mkstmt("skip", int_lit0())], hi) }
+    if (!atk(ts, eq, "=")) {
+      if (atk(ts, lo + 1, "[") || atk(ts, lo + 1, "{")) {
+        return mk_srun(pattern_binders(ts, lo + 2, hi), hi)
+      }
+      return mk_srun([mkstmt("skip", int_lit0())], hi)
+    }
     let bn = tkc(ts, lo + 1).text
     var j = eq + 1
     var kd = "expr"
@@ -6805,13 +6831,21 @@ fn acquire_extern_names(pg: Prog) -> List[Str] {
 // acquire externs), where the reference's `Env.in_provide_method` refuses it.
 type EvlR = { msg: Str, line: Int, bound: List[Str] }
 
-type EvlX = { cx: Ctx, sn: List[Str], mode: Str, aq: List[Str] }
+//
+// Issue #2985 widens the acquire mode with two things. `mode` "acquire" also
+// refuses a plain CALL of an `acquire` extern in a provide-method body (the
+// reference's `_acquire_call_refusal`; an arrow body is walked too) and the
+// direct bracketed acquisition there (item 386's "only `spawn`" rule, with the
+// item 397 lift for a result-declared verb on a host `Map`, `maps`). `mode`
+// "acquire_fn" is the module-`fn` value walk, which `where` words per fn and
+// which keeps the lexical scope the reference's fn walk now keeps.
+type EvlX = { cx: Ctx, sn: List[Str], mode: Str, aq: List[Str], where: Str,
+              maps: List[Str] }
 
 fn evl_hit(n: Str, x: EvlX, bound: List[Str]) -> Str {
-  if (x.mode == "acquire") {
+  if (x.mode == "acquire" || x.mode == "acquire_fn") {
     if (!contains(x.aq, n) || contains(bound, n)) { return "" }
-    return acquire_value_msg(n,
-      "inside a provide-method body, where only `spawn` may be acquired")
+    return acquire_value_msg(n, x.where)
   }
   let ext = eval_of(x.cx, n)
   if (ext == "" || !contains(x.sn, n) || contains(bound, n) || contains(x.cx.colored, n)) {
@@ -6850,9 +6884,41 @@ fn evl_expr(e: Expr, x: EvlX, bound: List[Str]) -> Str {
 
 // a callee named by a bare name is a call, not a value
 fn evl_call(target: Expr, args: List[Expr], x: EvlX, bound: List[Str]) -> Str {
-  let t = dfr_callee_name(target) != "" ? "" : evl_expr(target, x, bound)
+  let callee = dfr_callee_name(target)
+  // issue #2985: in a provide-method body a call of an `acquire` extern is not
+  // an acquisition either (no bracket, no registered `undo`)
+  if (x.mode == "acquire" && callee != "" && contains(x.aq, callee)
+      && !contains(bound, callee)) {
+    return acquire_call_msg(callee)
+  }
+  let t = callee != "" ? "" : evl_expr(target, x, bound)
   if (t != "") { return t }
   return evl_list(args, 0, x, bound)
+}
+
+// The root of an `effect` bracket is its acquisition, not a value or a stray
+// call (lower.py's `_host_acquire_root`): only its arguments are read.
+fn evl_root(e: Expr, x: EvlX, bound: List[Str]) -> Str {
+  return match e {
+    Var(_) => "",
+    Call(c) => dfr_callee_name(c.target) != "" ? evl_list(c.args, 0, x, bound)
+      : evl_expr(e, x, bound),
+    _ => evl_expr(e, x, bound),
+  }
+}
+
+// lower.py `_acquire_call_refusal` (issue #2985).
+fn acquire_call_msg(n: Str) -> Str {
+  return "`acquire` extern `".concat(n)
+    .concat("` cannot be called inside a provide-method body, where only `spawn` may be acquired; its declared `undo` teardown would be dropped, leaving the acquisition irreversible (G4)")
+}
+
+// A bound `effect` in a provide-method body that is neither a `spawn` nor a
+// result-declared verb on a host `Map` (lower.py `_lower_provide`'s LetEffect
+// arm, items 386 and 397).
+fn evl_direct_acquire(s: Stmt, x: EvlX) -> Bool {
+  return x.mode == "acquire" && s.kind == "effect" && s.bind != ""
+    && s.spawnTarget == "" && host_write_verb(s.e, x.maps) != "insert_if_absent"
 }
 
 fn evl_list(xs: List[Expr], i: Int, x: EvlX, bound: List[Str]) -> Str {
@@ -6893,6 +6959,49 @@ fn evl_blk(ls: List[ArmLetN], i: Int, tail: Expr, x: EvlX, bound: List[Str]) -> 
   return evl_blk(ls, i + 1, tail, x, bound.push(ls[i].name))
 }
 
+// The acquire modes keep a block arm's `let`s visible to the statement that
+// carries the `match` (issue #2985). The lets are hoisted ahead of it inside an
+// `arm_open`/`arm_close` pair, and that statement reads the arm's tail inline,
+// where the arm's own `let` is in scope in the reference. A name bound inside
+// the arm therefore leaves scope at its `arm_close` as a CARRIED name (`^name`),
+// visible to the next ordinary statement only. Within that one statement the
+// gate cannot tell which arm a read sits in, so a read in ANOTHER arm of the
+// same `match` is judged as if the arm's `let` were in scope: an under-refusal
+// the gate is allowed to give, pinned in tests/test_acquire_call_shapes_2985.py.
+fn evl_acq(x: EvlX) -> Bool { return x.mode == "acquire" || x.mode == "acquire_fn" }
+
+fn evl_carry(bound: List[Str], m: Int) -> List[Str] {
+  var out = bound.slice(0, m)
+  var i = m
+  while (i < bound.length()) {
+    let n = bound[i]
+    out = out.push(n.slice(0, 1) == "^" ? n : "^".concat(n))
+    i += 1
+  }
+  return out
+}
+
+fn evl_visible(bound: List[Str]) -> List[Str] {
+  var out = bound
+  var i = 0
+  while (i < bound.length()) {
+    let n = bound[i]
+    if (n.slice(0, 1) == "^") { out = out.push(n.slice(1, n.length())) }
+    i += 1
+  }
+  return out
+}
+
+fn evl_uncarry(bound: List[Str]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < bound.length()) {
+    if (bound[i].slice(0, 1) != "^") { out = out.push(bound[i]) }
+    i += 1
+  }
+  return out
+}
+
 // `marks` holds the scope's length at each open block (`scoped`, `arm_scoped`):
 // a name bound inside leaves scope where the block ends.
 fn evl_stmts(ss: List[Stmt], i: Int, x: EvlX, bound: List[Str], marks: List[Int]) -> EvlR {
@@ -6904,20 +7013,30 @@ fn evl_stmts(ss: List[Stmt], i: Int, x: EvlX, bound: List[Str], marks: List[Int]
   }
   if ((k == "scope_close" || k == "arm_close") && marks.length() > 0) {
     // an `arm_close` carries the arm's tail, read in the arm's scope
-    let t = k == "arm_close" ? evl_expr(s.e, x, bound) : ""
+    let t = k == "arm_close" ? evl_expr(s.e, x, evl_visible(bound)) : ""
     if (t != "") { return { msg: t, line: s.line, bound: bound } }
     let m = marks[marks.length() - 1]
-    return evl_stmts(ss, i + 1, x, bound.slice(0, m), marks.slice(0, marks.length() - 1))
+    let left = k == "arm_close" && evl_acq(x) ? evl_carry(bound, m) : bound.slice(0, m)
+    return evl_stmts(ss, i + 1, x, left, marks.slice(0, marks.length() - 1))
   }
   // Issue #2972: in the acquire mode the ROOT of an effect statement is an
   // acquisition, not a value, and the reference exempts it by identity
   // (`_host_acquire_root`). Its call spelling is already skipped by
   // `evl_call`; a bare-name root (`let h = effect open_sock`) is skipped here so
   // it keeps the direct-spelling verdict the gate's own slice decides.
-  let is_acq_root = x.mode == "acquire" && k == "effect" && dfr_callee_name(s.e) != ""
-  let r = is_acq_root ? "" : evl_expr(s.e, x, bound)
+  if (s.kind == "skip" && starts_with(s.edge, "pat:")) {
+    return evl_stmts(ss, i + 1, x, bound.push(s.edge.slice(4, s.edge.length())), marks)
+  }
+  if (evl_direct_acquire(s, x)) {
+    return { msg: "only `spawn` may be acquired inside a provide-method body",
+             line: s.line, bound: bound }
+  }
+  let seen = evl_acq(x) ? evl_visible(bound) : bound
+  let r = x.mode == "acquire" && k == "effect" ? evl_root(s.e, x, seen)
+    : evl_expr(s.e, x, seen)
   if (r != "") { return { msg: r, line: s.line, bound: bound } }
-  return evl_stmts(ss, i + 1, x, s.bind == "" ? bound : bound.push(s.bind), marks)
+  let next = evl_acq(x) ? evl_uncarry(bound) : bound
+  return evl_stmts(ss, i + 1, x, s.bind == "" ? next : next.push(s.bind), marks)
 }
 
 fn evl_any(sn: List[Str], cx: Ctx, i: Int) -> Bool {
@@ -6929,7 +7048,8 @@ fn evl_any(sn: List[Str], cx: Ctx, i: Int) -> Bool {
 // The component's lexical emission-value verdict: setup first, then each
 // provide method from setup's bindings plus its own parameters.
 fn evl_component(comp: CompD, cx: Ctx) -> Verd {
-  let x: EvlX = { cx: cx, sn: cx.scopeNames, mode: "emission", aq: [] }
+  let x: EvlX = { cx: cx, sn: cx.scopeNames, mode: "emission", aq: [], where: "",
+                  maps: [] }
   if (!evl_any(x.sn, cx, 0)) { return no_verd() }
   let s = evl_stmts(comp.setup, 0, x, [], [])
   if (s.msg != "") {
@@ -6956,12 +7076,16 @@ fn evl_component(comp: CompD, cx: Ctx) -> Verd {
 // (`Env.in_provide_method`), because that is where the direct acquisition is
 // refused; the activation body admits the acquisition, so it keeps the value.
 // Setup's bindings are still in scope in every method, so they are collected
-// first (an empty `aq` makes that walk a no-op that only reports `bound`).
+// first (an empty `aq` makes that walk a no-op that only reports `bound`). The
+// walk also judges the direct acquisition, which needs no `acquire` extern.
 fn aqv_component(comp: CompD, cx: Ctx, aq: List[Str]) -> Verd {
-  if (aq.length() == 0) { return no_verd() }
-  let x0: EvlX = { cx: cx, sn: [], mode: "acquire", aq: [] }
+  let where = "inside a provide-method body, where only `spawn` may be acquired"
+  // setup is walked only for its bindings (`aq` empty): a mode that judges no
+  // statement of its own, so the activation body keeps its direct acquisition
+  let x0: EvlX = { cx: cx, sn: [], mode: "acquire_fn", aq: [], where: where, maps: [] }
   let s = evl_stmts(comp.setup, 0, x0, [], [])
-  let x: EvlX = { cx: cx, sn: [], mode: "acquire", aq: aq }
+  let x: EvlX = { cx: cx, sn: [], mode: "acquire", aq: aq, where: where,
+                  maps: map_handles(comp.setup, 0, []) }
   var pi = 0
   while (pi < comp.provs.length()) {
     let ms = comp.provs[pi].methods
@@ -6981,33 +7105,23 @@ fn aqv_component(comp: CompD, cx: Ctx, aq: List[Str]) -> Verd {
 // Issue #2972: the module-`fn` twin (lower.py's
 // `_refuse_effect_position_bound_externs_in_fn_body`): an `acquire` extern read
 // as a value in a `fn` body loses the teardown registration exactly as the
-// direct call there does, so it is refused by name. The reference's walk over a
-// `fn` body keeps no binding scope, so neither does this one, and a `let` in the
-// body named like the extern shadows it nowhere on either side. Tests are NOT
-// walked, matching the reference's `check_acquire_values`.
-// The statement walk for the fn pass: the first statement whose VALUE position
-// names an acquire extern. `col_values` is the gate's own no-scope collector
-// (the same one `_calls_in(values=...)` mirrors), so a bare call head is the
-// callee and never a value, and a `let` in the body does NOT shadow the extern
-// here, exactly as in the reference's walk.
-fn aqv_fn_stmts(ss: List[Stmt], i: Int, aq: List[Str], where: Str) -> Verd {
-  if (i >= ss.length()) { return no_verd() }
-  let hits = col_values(ss[i].e, aq, [])
-  if (hits.length() > 0) {
-    return mk_verd(tagged("G4", acquire_value_msg(hits[0], where)), ss[i].line)
-  }
-  return aqv_fn_stmts(ss, i + 1, aq, where)
-}
-
-fn aqv_fns(pg: Prog, aq: List[Str]) -> Verd {
+// direct call there does, so it is refused by name. Issue #2985: a name the body
+// binds in scope at the read (a parameter, a `let`, a `for` element, an arrow
+// parameter, a match payload) is that binding, not the extern, so the walk is
+// the same lexical one the component bodies use (`evl_stmts`, mode
+// "acquire_fn"), seeded with the fn's parameters. Tests are NOT walked,
+// matching the reference's `check_acquire_values`.
+fn aqv_fns(pg: Prog, aq: List[Str], base: Ctx) -> Verd {
   if (aq.length() == 0) { return no_verd() }
   var i = 0
   while (i < pg.fns.length()) {
     let f = pg.fns[i]
     if (!f.isEmExtern && !f.isAsyncExtern) {
-      let v = aqv_fn_stmts(f.body, 0, aq,
-                           "in the body of fn `".concat(f.name).concat("`"))
-      if (v.v != "") { return v }
+      let x: EvlX = { cx: base, sn: [], mode: "acquire_fn", aq: aq,
+                      where: "in the body of fn `".concat(f.name).concat("`"),
+                      maps: [] }
+      let r = evl_stmts(f.body, 0, x, param_names(f.params), [])
+      if (r.msg != "") { return mk_verd(tagged("G4", r.msg), r.line) }
     }
     i += 1
   }
@@ -21934,7 +22048,7 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   // reference decides it inside the same walk as #2842's emission values (its
   // `check_acquire_values` arm) and in the same stage, so it rides here.
   let aqNames = acquire_extern_names(pg)
-  let aqv = aqv_fns(pg, aqNames)
+  let aqv = aqv_fns(pg, aqNames, base)
   if (aqv.v != "") { return { done: true, refs: [aqv] } }
   // G4: a host acquire verb in a `fn` body a component reaches. Decided over
   // the whole program before any body is gated, exactly where `check_and_lower`
