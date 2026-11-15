@@ -1133,3 +1133,79 @@ layer Swap for Demo {
 """)
     table = resolve_file(str(doc), str(tmp_path))
     assert table.rows[0].reach == {"url": "prod.internal:5432"}
+
+
+# ------------------------------------------------- list config (issue #3357 S0)
+
+SOCKET = """
+use "services.rvl" { }
+component LocalSocket provides cache: Cache {
+  config { origins: List[Str], port: Int = 8080 }
+  provide cache { fn get(key) = key }
+}
+"""
+
+
+def _list_project(tmp_path: Path, origins: str, layer: str | None = None) -> Path:
+    """A base composition with one row whose `origins: List[Str]` field is set
+    to `origins` (source text), plus an optional stack layer."""
+    doc = _project(tmp_path, *(["tune"] if layer else []),
+                   **({"tune": layer} if layer else {}))
+    (tmp_path / "socket.rvl").write_text(SOCKET)
+    doc.write_text(doc.read_text(encoding="utf-8").replace(
+        '  row @cache from "cache.rvl" provides cache\n',
+        '  row @cache from "socket.rvl" provides cache\n'
+        f'    config {{ origins: {origins} }}\n'
+        '    open   { origins }\n'))
+    return doc
+
+
+def test_a_row_config_takes_a_list_of_literals(tmp_path):
+    """Issue #3357 S0: a row sets a `List[Str]` config field from the
+    composition, and the list reaches the compiled document's rows."""
+    doc = _list_project(tmp_path, '["https://a.example", "https://b.example"]')
+    table = resolve_file(str(doc), str(tmp_path))
+    assert table.rows[1].config == {
+        "origins": ["https://a.example", "https://b.example"]}
+    document = admit_composition(str(doc), str(tmp_path))
+    rows = {row["label"]: row for row in document["rows"]["rows"]}
+    assert rows["cache"]["config"] == {
+        "origins": ["https://a.example", "https://b.example"]}
+    assert document["manifest"]["rows"] == document["rows"]
+
+
+def test_a_list_with_a_mistyped_element_does_not_admit(tmp_path):
+    doc = _list_project(tmp_path, '["https://a.example", 443]')
+    with pytest.raises(RevlError) as caught:
+        resolve_file(str(doc), str(tmp_path))
+    message = str(caught.value)
+    assert "config field `origins` of row `@cache`" in message
+    assert "declared `List[Str]` but the composition supplies `List[Int]`" in message
+
+
+def test_a_list_on_a_scalar_field_does_not_admit(tmp_path):
+    doc = _project(tmp_path)
+    doc.write_text(doc.read_text(encoding="utf-8").replace('url: "sqlite://local"',
+                                           'url: ["sqlite://local"]'))
+    with pytest.raises(RevlError) as caught:
+        resolve_file(str(doc), str(tmp_path))
+    assert "config field `url` of row `@db` is declared `Str`" in str(caught.value)
+
+
+def test_configure_takes_a_list_and_re_checks_it(tmp_path):
+    """A layer's `configure ... with { origins: [...] }` merges a list and is
+    re-checked element-wise like the base row's value."""
+    doc = _list_project(tmp_path, '["https://a.example"]', layer="""
+layer Tune for Demo {
+  configure @cache with { origins: ["https://c.example", "https://d.example"] }
+}
+""")
+    table = resolve_file(str(doc), str(tmp_path))
+    assert table.rows[1].config == {
+        "origins": ["https://c.example", "https://d.example"]}
+    (tmp_path / "layers" / "tune.rvl").write_text(
+        'layer Tune for Demo {\n  configure @cache with { origins: [true] }\n}\n')
+    with pytest.raises(RevlError) as caught:
+        resolve_file(str(doc), str(tmp_path))
+    assert "`origins`" in str(caught.value)
+    assert "List[Bool]" in str(caught.value)

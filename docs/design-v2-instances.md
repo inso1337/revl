@@ -3,7 +3,7 @@
 Status: **phase 1 implemented on the cordis-py reference tier.** The frontend
 (parser, lower, typecheck), the cordis-py runtime and emitter, and an executed
 test are in the tree; the frozen IR, grammar and resolved G-rules are recorded
-in "Phase 1 — frozen" at the end of this document. The six open questions below
+in "Phase 1: frozen" at the end of this document. The six open questions below
 are the design record that phase 1 resolves; the resolutions (not the original
 recommendations) are what shipped. Phases 2–5 (the other four tiers) and the
 held IR-cleanup wave build on the frozen forms below.
@@ -20,14 +20,14 @@ tenant. In revl today those cannot be components at all. They live in the pure
 stratum as records and ADTs, which have no `requires`/`provides`, no effects, and
 no teardown.
 
-So the dynamic structure of an application — precisely the part where residue
-accumulates — sits outside G1-G8.
+So the dynamic structure of an application (precisely the part where residue
+accumulates) sits outside G1-G8.
 
 ## What the runtime already does
 
 Two experiments against cordis-py (the reference tier).
 
-**1. Two instances in one realm are refused — by G2, not by an instance limit.**
+**1. Two instances in one realm are refused: by G2, not by an instance limit.**
 
 The second fiber spawns and executes its body; what it hits is provision
 disjointness:
@@ -49,12 +49,12 @@ substrate is not missing this feature. revl's frontend does not surface it.
 
 ## Local realms, not dynamic labels
 
-`docs/v2.0-roadmap.md:651` pairs this with dynamic realms ("Dynamic realms —
+`docs/v2.0-roadmap.md:651` pairs this with dynamic realms ("Dynamic realms:
 needs instance-parametric components"), and `docs/design-v2-realms.md:50` rejects
 dynamic labels as unsound: the linker "could neither prove nor refute a collision
 between two config-derived realms."
 
-That argument is correct — **for global realms**, which are keyed by label string.
+That argument is correct: **for global realms**, which are keyed by label string.
 `backends/python/runtime.py:62` interns labels into a process-wide registry
 specifically so that equal strings share a realm. Collisions are the point of
 that form, so an unknown label is genuinely unsound.
@@ -62,9 +62,9 @@ that form, so an unknown label is genuinely unsound.
 But cordis has a second realm form revl never exposes.
 `backends/python/.cordis-py/src/cordis/loader.py:538` distinguishes:
 
-- `GlobalRealm(label)` — identity is the label string, shared between entries
+- `GlobalRealm(label)`: identity is the label string, shared between entries
   with equal labels. This is the only form revl surfaces.
-- `LocalRealm(entry)` — **identity is the entry**, unique per instance, no label.
+- `LocalRealm(entry)`: **identity is the entry**, unique per instance, no label.
 
 `Context.isolate(name, label=None)` (`context.py:74`) mints a fresh
 `unique_symbol(name)` when no label is given. Experiment 2 above called it twice
@@ -76,7 +76,7 @@ be known at link or admission time. The soundness objection does not reach this
 case. This is a materially smaller and better-founded change than the roadmap's
 framing: exposing a realm form the compiler already depends on, not inventing one.
 
-## The thesis: instantiation is an acquisition — and what it is missing
+## The thesis: instantiation is an acquisition, and what it is missing
 
 The paradigm contains the right shape. A spawned instance is an effect whose
 inverse is its own teardown:
@@ -92,12 +92,12 @@ The static audit (`docs/notes/static-instance-assumptions.md`, branch
 `provide` is rejected inside a method body (`src/revl/parser.py:1026-1029`), and
 `Frame` is "one component activation's effect accumulator"
 (`backends/python/runtime.py:266-276`). Effects created inside a provide-method
-are *adopted* into the component-level frame — they live until the **component**
+are *adopted* into the component-level frame: they live until the **component**
 tears down, not until the call returns.
 
 So `let s = effect spawn Session ...` inside a provide-method yields a session
 whose lifetime is the component's, not the request's. For a request-scoped
-instance that is precisely wrong: it is an unbounded leak — residue accumulation,
+instance that is precisely wrong: it is an unbounded leak, residue accumulation,
 the exact failure this feature exists to prevent.
 
 G7 covers dynamic structure at **component** granularity. Dynamic instances need
@@ -106,7 +106,7 @@ in any runtime adapter. That is item zero, and it is new work, not a free ride.
 
 ## Prerequisite: the checker's realm function is flat, the runtime's is not
 
-This one opens with `spawn` itself — before per-instance realms are ever added.
+This one opens with `spawn` itself: before per-instance realms are ever added.
 
 The checker (`_realm` in `src/revl/lower.py`):
 
@@ -122,7 +122,7 @@ A flat lookup on the entry's own `isolate` map. The runtime instead reads
 
 These agree today only because everything is plugged onto the root context. The
 moment a child is plugged onto its spawner's context, the linker says "shared
-realm" while the runtime says "whatever the parent was isolated into" — and both
+realm" while the runtime says "whatever the parent was isolated into", and both
 G2 and the G3 edge set silently mis-resolve. Silently is the operative word.
 
 **Hierarchical realm resolution in the checker is a prerequisite for spawn**, not
@@ -140,19 +140,19 @@ Recommendations are mine and are not accepted.
    (`lower.py:3053-3077`) is a link-time injectivity proof over a finite table,
    and with N unknown there is no table.
    *Recommendation: forbid an instance providing into any realm but its own local
-   one.* That replaces the table **for instances** with a structural argument —
-   disjointness by construction — while static entries keep the table. My earlier
+   one.* That replaces the table **for instances** with a structural argument
+   (disjointness by construction) while static entries keep the table. My earlier
    "a rule to write down, not a research problem" was too glib: the rule is
    simple, but proving the two regimes compose is not.
 
 2. **Addressing.** A local realm is private to its spawner, so an instance is
    reachable by its parent and its own children, not by arbitrary siblings.
-   *Recommendation: accept this* — it is OTP's supervision-tree shape. It is a
+   *Recommendation: accept this*: it is OTP's supervision-tree shape. It is a
    product decision, not a detail: "look up the session by id from anywhere"
    becomes inexpressible by construction.
 
 3. **G3 acyclicity.** `lower.py:3086-3097` rejects self-provision categorically,
-   and `graph` is `dict[str, list[str]]` — the linker **cannot represent** the
+   and `graph` is `dict[str, list[str]]`: the linker **cannot represent** the
    type-graph/instance-graph distinction. A `Session` spawning a `Session` is a
    self-edge in the only graph that exists.
 
@@ -160,7 +160,7 @@ Recommendations are mine and are not accepted.
    mechanism to generalize. `ComponentDecl` (`parser.py:182-190`) has no emission
    clause at all, and the only bound (`lower.py:2775-2827`) scopes one
    provide-method against one service declaration. Without one, emissions escape
-   their bound by being moved into a spawned child — a soundness hole.
+   their bound by being moved into a spawned child: a soundness hole.
 
 5. **G8 enumerable boundary.** Audit calls this mechanical: the emission and
    capability sets are already syntactic and instance-independent; only the
@@ -170,7 +170,7 @@ Recommendations are mine and are not accepted.
 6. **Hot-swap** replaces by declaration name (`compiler.py:295`). Undefined with
    N live instances.
 
-Audit's overall split: the assumption is **concentrated, not spread** — `_link`
+Audit's overall split: the assumption is **concentrated, not spread**: `_link`
 (`lower.py:3002-3145`) is the only place G2 and G3 exist. G5, G6, G8 and the
 intra-component half of G7 are already instance-blind. `loadOrder` and its five
 `reversed()` teardown sites are mechanical; LIFO is *already* dynamic at the
@@ -179,16 +179,16 @@ effect level (`runtime.py:266-288`).
 ## Runtime parity (verified, all five tiers)
 
 From `docs/notes/runtime-parity-local-realms.md` (branch `agent/runtime-parity`).
-Every tier was actually executed — no tier rests on source reading. The cordis-py
+Every tier was actually executed: no tier rests on source reading. The cordis-py
 control reproduced both experiments above verbatim.
 
 | tier | 2+ live instances | identity-keyed local realm | independent disposal + LIFO |
 |---|---|---|---|
-| cordis-py | yes | yes — `isolate(name)` mints a fresh symbol per call | yes |
-| cordis (TS) | yes | yes — same implementation as py | yes |
-| cordis-rs | yes | yes — `Context::isolate` → monotonic `Isolation(u64)` | yes |
-| cordis4j | yes | yes — `ctx.fork()` alone isolates, no label needed | yes |
-| cordis-wasm | yes | **no** — no realm concept in the runtime at all | yes |
+| cordis-py | yes | yes: `isolate(name)` mints a fresh symbol per call | yes |
+| cordis (TS) | yes | yes: same implementation as py | yes |
+| cordis-rs | yes | yes: `Context::isolate` → monotonic `Isolation(u64)` | yes |
+| cordis4j | yes | yes: `ctx.fork()` alone isolates, no label needed | yes |
+| cordis-wasm | yes | **no**: no realm concept in the runtime at all | yes |
 
 **Local realms are available on every tier now.** cordis-wasm was the last gap:
 its provider table was a flat `dict[str, Provider]` and realms were compile-time
@@ -214,12 +214,12 @@ where cordis-py, cordis (TS) and cordis-rs all refuse a plain child context.
 
 So on cordis4j, `docs/design-v2-realms.md`'s "equal strings = same realm" is
 **false at the level revl targets**. Global-realm interning exists one layer up in
-`Loader`, which revl's Java emitter bypasses — `backends/java/emit.py:2094-2096`
+`Loader`, which revl's Java emitter bypasses: `backends/java/emit.py:2094-2096`
 emits `ctx.isolate(Svc.class, "<label>")` against core `Context` directly.
 
 The consequence for this design is favourable and worth stating plainly: **the
 realm form instance-parametric components need is the cheap one everywhere, and
-free on Java. The expensive form is global realms — the one already shipped.**
+free on Java. The expensive form is global realms: the one already shipped.**
 
 ## Inputs still outstanding
 
@@ -227,12 +227,12 @@ None blocking. The remaining gate is a decision on question 2 (addressing).
 
 ---
 
-# Phase 1 — frozen
+# Phase 1: frozen
 
 This section is normative for phases 2–5 (the other four tiers) and the held
 IR-cleanup wave. It records what shipped on cordis-py.
 
-## The grammar — exactly one new form
+## The grammar: exactly one new form
 
 `spawn` is an expression, legal **only** as the acquisition of an effect
 binding. No other production changed. `spawn` and (existing) `with` are the
@@ -255,7 +255,7 @@ let s = effect spawn Worker with { tag: "a" } undo s.dispose()
 ```
 
 The handle `s` is a host-frontier value (type `Instance[Worker]`, advisory)
-whose one operation is `.dispose()` — the acquisition's inverse. A spawn must
+whose one operation is `.dispose()`: the acquisition's inverse. A spawn must
 be bound (there must be a handle to name in `undo`); a bare `effect spawn …` is
 rejected. A spawn is legal in a component activation body **or** in a
 provide-method body (the request-scoped case, item zero).
@@ -286,7 +286,7 @@ component Supervisor provides super: Super {
 }
 ```
 
-## The frozen IR — the checkpoint deliverable
+## The frozen IR: the checkpoint deliverable
 
 Instantiation is an acquisition, so **there is no new IR step kind.** A spawn is
 a `let-effect` step whose `acquire` is a `spawn` expression node. The handle is
@@ -305,16 +305,16 @@ The `spawn` acquire node:
 }
 ```
 
-- `component` — the target component's name (a template; see below).
-- `config` — field name → lowered pure-expression node, resolved in the
+- `component`: the target component's name (a template; see below).
+- `config`: field name → lowered pure-expression node, resolved in the
   spawner's scope against the target's declared `config { }` fields (unknown
   fields and missing required fields are rejected at lower time).
-- `realms` — the sorted list of keys the target **provides**. At runtime each is
+- `realms`: the sorted list of keys the target **provides**. At runtime each is
   isolated into a *fresh local realm* (unlabelled `isolate`, a distinct
   identity per spawn), so two instances of one component never collide on a
-  provision — disjoint by construction, no config value known at link time.
-- `line` — source line, for diagnostics.
-- `name` — **present only when the source wrote `as "<name>"`** (the *named
+  provision: disjoint by construction, no config value known at link time.
+- `line`: source line, for diagnostics.
+- `name`: **present only when the source wrote `as "<name>"`** (the *named
   instance*, below). Absent otherwise, so an unnamed spawn node is byte-identical
   to before this slice.
 
@@ -346,8 +346,8 @@ spawn node and `templates` off the manifest; nothing else is required.
 `runtime.spawn(ctx, component, config, realms)`:
 
 1. `scoped = ctx`; for each key in `realms`, `scoped = scoped.isolate(key)` with
-   **no label** — a fresh local realm per spawn.
-2. `fiber = scoped.plugin(component, config)` — the instance is a *child fiber
+   **no label**: a fresh local realm per spawn.
+2. `fiber = scoped.plugin(component, config)`: the instance is a *child fiber
    of its spawner*, nested under the spawner's context. This is verified: the
    child's parent chain is `scoped → spawner-ctx → root`.
 3. return a `SpawnHandle(fiber)`.
@@ -357,13 +357,13 @@ teardown) and is **idempotent**. Because the instance is its own child fiber, it
 is its own nested teardown scope (item zero): `s.dispose()` reclaims it *now*,
 independent of the spawner. The spawner's own inverse (`yield lambda:
 s.dispose()`, or the frame-adopted safety net for a method-body spawn) is a
-harmless no-op once the instance is already gone — so an un-disposed instance
+harmless no-op once the instance is already gone, so an un-disposed instance
 still cannot outlive its spawner, but a request-scoped instance is reclaimed the
 moment the request ends.
 
 **On "the core runtime change" (item zero).** The nested teardown scope is the
 child fiber. cordis-py already has the primitive (a fiber unloads independently
-of its parent); the change is that spawn *uses* it — it plugs a child fiber and
+of its parent); the change is that spawn *uses* it: it plugs a child fiber and
 returns a disposable handle, rather than running the instance's effects inline
 and adopting them flatly into the spawner's `Frame` (which is what would leak).
 No new `Frame` subclass was needed; the sub-scope is a sub-fiber.
@@ -376,7 +376,7 @@ version bump, no new check), and goldens stay byte-identical.
 - **Grammar / parser.** `spawn` keyword (`src/revl/lexer.py`, synced to
   `selfhost/lexer.rvl`); `SpawnExpr` node and `spawn` in the acquisition
   position (`src/revl/parser.py`, `effect_form` / `spawn_expr`).
-- **Lower — spawn node.** `_lower_spawn` (`src/revl/lower.py`), dispatched from
+- **Lower: spawn node.** `_lower_spawn` (`src/revl/lower.py`), dispatched from
   `_lower_expr`; unbound-spawn rejection in `_lower_component`; method-body
   spawn (item zero) in `_lower_provide`'s method loop (`let-effect` step).
 - **Typecheck.** `infer_ir` yields `Instance[C]` for a spawn node
@@ -386,12 +386,12 @@ version bump, no new check), and goldens stay byte-identical.
 - **G2 (disjointness), decision 5.** Structural, not table-based: a template
   provides only into its own fresh local realm and is *excluded* from the
   link-time `provider_of` table (`_link`, the `templates` skip in
-  `src/revl/lower.py`). An instance can never provide into its parent's realm —
+  `src/revl/lower.py`). An instance can never provide into its parent's realm:
   there is no surface form for it, and the runtime always isolates each provided
   key.
 - **G3 (acyclicity), decision 6.** Quantified over the *instance* graph. The
-  instance graph is a **tree by construction** — every spawn mints a fresh child
-  — so spawn edges never form an instance cycle, and a `Session` spawning a
+  instance graph is a **tree by construction** (every spawn mints a fresh child),
+  so spawn edges never form an instance cycle, and a `Session` spawning a
   `Session` is allowed. It is a self-edge on the type graph, but a template is
   not a static entry, so the categorical self-provision rejection in `_link`
   never sees it. Real dependency cycles among *statically composed* components
@@ -402,7 +402,7 @@ version bump, no new check), and goldens stay byte-identical.
   `emission[caps]`) is rejected when the target's emission surface is non-empty
   (or not ⊆ caps). The surface is a sound, conservative over-approximation: the
   union of the target's provided-service emission capabilities, its own `emit`
-  steps, and — by fixpoint over the spawn graph — its own children's surfaces.
+  steps, and (by fixpoint over the spawn graph) its own children's surfaces.
   A body-level spawn has no emission clause to widen, exactly as body-level
   `emit` has none, so it is unconstrained here.
 - **G7 (LIFO teardown).** Unchanged in rule; already dynamic at the effect
@@ -413,7 +413,7 @@ version bump, no new check), and goldens stay byte-identical.
   dynamic)" section from `manifest.templates` (`src/revl/__main__.py`). The
   emission/capability *sets* are syntactic and instance-independent, so they are
   reported per template as before.
-- **Hierarchical realm resolution, decision 9 — see the honest note below.**
+- **Hierarchical realm resolution, decision 9: see the honest note below.**
 
 ## Where the design doc was wrong, and what phase 1 does instead
 
@@ -422,7 +422,7 @@ version bump, no new check), and goldens stay byte-identical.
   teardown scope is a child fiber, a primitive the runtime already has. The
   change is that spawn plugs a child fiber instead of adopting inline. Phase 2
   tiers must each provide an equivalent *nested* scope (a sub-fiber / fork), not
-  a flat adoption — that is the real portable obligation.
+  a flat adoption: that is the real portable obligation.
 
 - **Decision 9 (hierarchical realm resolution in the checker) is a
   prerequisite that phase 1 did not need to exercise, and here is why.** The
@@ -432,7 +432,7 @@ version bump, no new check), and goldens stay byte-identical.
   entries composed under a spawner. The instance's realm resolution is
   hierarchical *at runtime* (cordis `_effective_isolate` walks the parent
   chain), and the checker deliberately does not reason about instances
-  statically (decision 1 — instances are not globally addressable, hence not in
+  statically (decision 1: instances are not globally addressable, hence not in
   the static table). So the flat `_realm` in `_link` stays correct for phase 1,
   and the goldens stay byte-identical. The hierarchical-checker work becomes
   real in phase 2 only if a future model lets a component be *both* statically
@@ -441,8 +441,8 @@ version bump, no new check), and goldens stay byte-identical.
 
 - **A component cannot be both statically composed and a spawn template
   (phase-1 restriction).** Being named by any `spawn C` makes C a template,
-  fully excluded from static composition. This is the clean model — it is what
-  makes the recursive-self-spawn / self-provision paradox disappear — but it is
+  fully excluded from static composition. This is the clean model (it is what
+  makes the recursive-self-spawn / self-provision paradox disappear), but it is
   a restriction, and lifting it (a component with one static instance *and*
   runtime instances) is the natural phase-2 question. It needs exactly the
   hierarchical `_realm` decision 9 asks for, plus a provide-realm/require-realm
@@ -460,11 +460,11 @@ version bump, no new check), and goldens stay byte-identical.
   graph is about acyclicity, not termination: a `Session` that unconditionally
   spawns a `Session` is statically well-formed and will recurse without bound at
   runtime unless its own config gates it. That is the same status as unbounded
-  recursion in any language — a runtime property, not a static one.
+  recursion in any language: a runtime property, not a static one.
 
 ## Not in phase 1
 
-Hot-swap of a component with live instances (question 6) is still undefined —
+Hot-swap of a component with live instances (question 6) is still undefined:
 `compiler.py` replacement is by declaration name, and "replace `Session`" with N
 live instances has no chosen semantics. Phase 1 neither uses nor breaks it: a
 template is not in the manifest a hot-swap admits against. The other four tiers
@@ -472,10 +472,10 @@ template is not in the manifest a hot-swap admits against. The other four tiers
 per-fiber realm-prefix runtime change recorded in
 `docs/notes/runtime-parity-local-realms.md`.
 
-## Instance accessor — frozen (frontend + cordis-py reference landed)
+## Instance accessor: frozen (frontend + cordis-py reference landed)
 
 Phase 1's spawn handle exposed only `.dispose()`, so property (d)'s *positive*
-direction — a spawner **reading a provision back** from its own instance — was
+direction (a spawner **reading a provision back** from its own instance) was
 inexpressible in revl. The accessor closes that with **no new grammar form**:
 field access on the handle.
 
@@ -485,7 +485,7 @@ field access on the handle.
   not provide is a compile error (`` `<key>` is not a provision of C ``).
 - **Supervision-tree preserved:** only a name this component bound to a spawn
   handle carries `Instance[C]`, so `s.<key>` cannot reach a sibling's or the
-  root's provision — it stays on the tree, exactly like phase-1 addressing.
+  root's provision: it stays on the tree, exactly like phase-1 addressing.
 - **Frozen IR node** (what the other five tiers must lower):
   ```json
   { "kind": "instance-get", "target": <handle expr>,
@@ -493,25 +493,25 @@ field access on the handle.
     "service": "<ServiceType>" }
   ```
   `service` is frozen inline (the typing rule's result) so no tier re-derives
-  it — mirroring how `spawn.realms` carries the provided keys.
+  it: mirroring how `spawn.realms` carries the provided keys.
 - **Runtime contract:** every tier resolves `key` through the handle's stored
-  instance context — the private local realm the matching `spawn` node isolated
-  the key into — yielding *that instance's* provision and no other's.
+  instance context (the private local realm the matching `spawn` node isolated
+  the key into), yielding *that instance's* provision and no other's.
 
 **Landed:** typecheck + lower (`src/revl/`) and the cordis-py reference
 (`backends/python/emit.py` + `runtime.py` `SpawnHandle`), with an executed
-test (`tests/test_instances_exec.py` — positive read returns the instance's
+test (`tests/test_instances_exec.py`: positive read returns the instance's
 provision; the compile-error negative). **Remaining (fan-out):** lower
 `instance-get` on ts / rust / java / go / wasm, each resolving through its
 spawn handle's stored context.
 
-## Hot-swap with live instances — migrate state (frozen, cordis-py reference)
+## Hot-swap with live instances: migrate state (frozen, cordis-py reference)
 
 Resolves question 6. When a hot-swap replaces a template `T` that has live
 spawned instances, each instance's **state migrates onto the successor `T'`**
 (the `generational` policy; `respawn` cold-restarts, `reject` refuses). Built on
 `Session.swap`/`snapshot`/`rollback` and modelled on item 9's interface-compat
-gate — the state-compat gate is its analogue: it protects the instance's state
+gate: the state-compat gate is its analogue: it protects the instance's state
 shape the way item 9 protects consumer call sites.
 
 - **Migratable state:** the ordered vector of stateful host resources the
@@ -520,18 +520,18 @@ shape the way item 9 protects consumer call sites.
 - **State-compat gate:** admit iff the successor acquires a **same-length,
   same-type-per-position** resource vector. A successor that drops, retypes, or
   changes the count of state is **rejected** (`StateIncompatible`), never
-  silently drained — a lost store is residue.
+  silently drained: a lost store is residue.
 - **Atomicity:** capture-before-teardown, check-the-whole-cohort-before-writing,
   rollback-on-reject. No half-migrated instance.
-- **Operator visibility:** the swap report names what moved —
+- **Operator visibility:** the swap report names what moved:
   `{policy, templates: {T: {instances, migrated, resources: N}}}`.
 
 ### ⚠️ Named hazard (canonical, not yet closed): same-typed positional collision
 
-The gate checks same-length / same-type — **not** that a same-typed resource
+The gate checks same-length / same-type: **not** that a same-typed resource
 keeps its ROLE. A successor that **reorders two same-typed resources** (a cache
 `Map` and a stats `Map`, acquired in the opposite order) **passes the gate**, and
-positional correlation migrates each one's state into the OTHER's slot — a
+positional correlation migrates each one's state into the OTHER's slot: a
 **silent wrong-state migration**. This is exactly the class of silent wrongness
 this project's discipline exists to prevent; it is invisible today only because
 real components rarely hold two same-typed resources (precisely how earlier
@@ -548,20 +548,20 @@ is the canonical foundation; the declared form is the missing contract half.
 ### Tracked riders
 - **Pool re-establishment:** a `Pool` migrates as a fresh equivalent, not a
   carried value (in-flight checkouts are transient, §4.1). The report must say
-  `pool: re-established, not carried` — a per-resource-type visibility detail
+  `pool: re-established, not carried`: a per-resource-type visibility detail
   folded into item 53's operator-visibility work.
 - **Per-fiber resource ledger (BLOCKING on the phase-2 fan-out):** resource
   attribution here uses a global activation stack, correct for **sync** bodies.
   Concurrently-activating **async** instance bodies could cross-attribute. Every
-  tier that lowers this must carry a proper per-fiber ledger — a blocking
+  tier that lowers this must carry a proper per-fiber ledger: a blocking
   prerequisite, so it is not rediscovered mid-port.
 
-## Named instances — the placement horizon's addressing hook (roadmap item 10)
+## Named instances: the placement horizon's addressing hook (roadmap item 10)
 
 The roadmap's open horizon for item 10 is *placement-aware spawn*: "spawn C for
 tenant X **in process P**". Its standing constraint is that no tier's spawn
 lowering may bake "same process" into its shape. Placement today assigns
-**components**, not instances — and an instance you cannot *name*, you cannot
+**components**, not instances, and an instance you cannot *name*, you cannot
 place. This slice adds that missing primitive: the **named instance**.
 
 **Surface.** An optional trailing `as "<name>"` on a spawn:
@@ -570,23 +570,23 @@ place. This slice adds that missing primitive: the **named instance**.
 let w = effect spawn Worker with { tag: "a" } as "worker-a" undo w.dispose()
 ```
 
-The name is a **static string literal**, not an expression — an address is
+The name is a **static string literal**, not an expression: an address is
 decided in the source, so it can be checked at compile time and read by the
 placement plan. It uses the existing `as` keyword (no lexer change).
 
-**What it means — and, deliberately, what it does not.** The name is a stable
+**What it means, and, deliberately, what it does not.** The name is a stable
 author-declared **address** for the instance. It is:
 
 - **carried onto the spawn IR node** as `name`, present only when written (an
   unnamed spawn is byte-identical, so nothing downstream changes for existing
   programs);
-- **checked unique among a component's spawn sites** — two instances of one
+- **checked unique among a component's spawn sites**: two instances of one
   component cannot share an address, or the address is ambiguous
   (`duplicate spawn instance name`); a name may repeat across *different*
   spawners, because it addresses within its spawner (the supervision tree, 1/2).
 
 It makes **no location claim on its own**. The instance still lands in the
-spawning process, exactly as before — so no tier's lowering has to honour the
+spawning process, exactly as before, so no tier's lowering has to honour the
 name, and there is no silent wrongness (a name that promised a location while
 running elsewhere would be exactly the class of silent wrongness this project
 refuses). The name is the identity a **later** placement slice keys on ("place
@@ -594,15 +594,15 @@ the instance named `worker-a` in process P"), which is why it earns its place
 now: it lets the spawn shape carry a per-instance identity instead of leaving
 "same process" as the only expressible possibility.
 
-**Landed (slice 1 — the address):** parser (`SpawnExpr.name`, `as "<name>"` in
+**Landed (slice 1: the address):** parser (`SpawnExpr.name`, `as "<name>"` in
 `spawn_expr`) + lower (`_lower_spawn` stamps `name`, uniqueness via
 `spawn_reg["names"]`) in `src/revl/`, with static tests
 (`tests/test_instances_frontend.py`, the named-instances section).
 
-**Landed (slice 2 — the address is enumerable at the composition layer):** the
+**Landed (slice 2: the address is enumerable at the composition layer):** the
 address from slice 1 lived only on the deeply-nested `spawn` acquire node, so
 nothing above a single component body could enumerate the named instances of a
-composition — and *the placement plan cannot assign what it cannot enumerate*.
+composition, and *the placement plan cannot assign what it cannot enumerate*.
 This slice surfaces them: `_lower_spawn` records each named instance in
 `spawn_reg["named_instances"]`, and `_link` sorts them into
 
@@ -613,17 +613,17 @@ manifest["named_instances"] = [
 ]
 ```
 
-sorted by `(spawner, name)`. `(spawner, name)` is the stable address — a name is
+sorted by `(spawner, name)`. `(spawner, name)` is the stable address: a name is
 unique within its spawner and may recur across spawners, so the pair
 disambiguates. The key is **additive and named-only**: a composition with no
 `as "<name>"` spawn carries no `named_instances` key and is byte-identical to
-before. It makes **no location claim** — like slice 1 it only records identity,
+before. It makes **no location claim**, like slice 1 it only records identity,
 so no tier's lowering has to honour it; it is the composition-level index a
 placement slice reads to key on an instance rather than only on a template
 component. Static tests: `tests/test_instances_frontend.py`, the
 "named instances surfaced in the manifest" section.
 
-**Landed (slice 3 — the placement-file spelling + plan-time gate):** a
+**Landed (slice 3: the placement-file spelling + plan-time gate):** a
 `[processes.<p>]` block assigns *components* (`components = [...]`); a named
 instance is now assignable by ADDRESS with `instances = ["Spawner/name", ...]`.
 `named_instance_placement_diagnostic(processes, ir)` in `src/revl/placement.py`
@@ -633,18 +633,18 @@ double-placed address is one diagnostic before anything spawns, wired into
 `run_placement` next to the 119/363 gates and `capability_realm_diagnostic`.
 The boot summary reports the recorded placements (`placed_named_instances`).
 Additive: a placement with no `instances` key validates trivially and is
-byte-identical. It makes **no location claim the runtime honours yet** — the
+byte-identical. It makes **no location claim the runtime honours yet**: the
 instance still lands in its spawner's process; the placement is RECORDED and
 gated, the honour deferred (the item-411 Slice-1 discipline). Static tests:
 `tests/test_instances_frontend.py`, the "placement-file spelling" section.
 
-**Remaining (the horizon, unscheduled — gated on the architect scheduling
+**Remaining (the horizon, unscheduled: gated on the architect scheduling
 it):** the next moves each need a cross-tier fan-out, so they are recorded, not
 taken here:
 
 - **Runtime honour + fan-out.** Actually landing a named instance in process P
-  (rather than the spawning process) is the cross-tier port — reference tier
-  first, then the other five — under the standing constraint that no tier's
+  (rather than the spawning process) is the cross-tier port (reference tier
+  first, then the other five) under the standing constraint that no tier's
   spawn lowering may bake "same process" into its shape. The
   `manifest["named_instances"]` index is the substrate that port consumes.
 - **Migration** (with item 23): migrate a named instance across tiers, keyed on

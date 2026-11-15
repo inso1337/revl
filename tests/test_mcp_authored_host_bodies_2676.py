@@ -365,7 +365,7 @@ def test_restore_stores_provenance_on_the_live_generation_and_history(
                    _OPERATOR_PROVIDER}
     origin = {"source": _CANDIDATE, "modules": modules}
 
-    def restore(_snap, *, profile=None, report=None):
+    def restore(_snap, *, profile=None, report=None, **_kwargs):
         ir = _recompile(origin, admitted_name(_snap), profile=profile,
                         report=report)
         server.SESSION.ir = ir
@@ -599,10 +599,11 @@ def test_fork_confirm_real_restore_keeps_the_parent_provenance(tmp_path):
     reads still names them.
     """
     from revl import compile_source
-    from revl.mcp.session import Session
+    from revl.mcp.session import Session, host_body_entry
 
-    authored = [{"extern": "fork_note", "classification": "pure",
-                 "backends": ["py"]}]
+    authored = [host_body_entry(next(
+        extern for extern in compile_source(_FORK_SOURCE, "fork-2676.rvl")["externs"]
+        if extern["name"] == "fork_note"))]
     parent = Session()
     parent._wal_path = str(tmp_path / "parent-2676.wal")
     parent.load(compile_source(_FORK_SOURCE, "fork-2676.rvl"), record=True,
@@ -663,7 +664,7 @@ def test_apply_records_the_resulting_provenance_as_the_live_generation():
     from revl import compile_source
     from revl.apply import build_artifact
     from revl.mcp.approval import ApprovalRequired
-    from revl.mcp.session import Session
+    from revl.mcp.session import Session, host_body_entry
     from revl.plan import plan
 
     running = compile_source(_APPLY_RUNNING)
@@ -674,8 +675,9 @@ def test_apply_records_the_resulting_provenance_as_the_live_generation():
     try:
         session.load(running, origin=server._with_authored_host_bodies(
             {"source": _APPLY_RUNNING},
-            [{"extern": "carried_note", "classification": "emission",
-              "backends": ["py"]}]))
+            [host_body_entry(next(
+                extern for extern in running["externs"]
+                if extern["name"] == "carried_note"))]))
         result = session.apply(artifact)
         assert result["applied"] is True, result
         assert set(result["resulting"]) == {"Pinger"}
