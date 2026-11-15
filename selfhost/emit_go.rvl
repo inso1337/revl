@@ -91,8 +91,8 @@
 // emitter LOGIC (flag collection, dispatch, formatting, the var_types threading,
 // string building) is revl. Only genuine HOST FORMATTING stays `@py`: the
 // `tab`/`newline` char emitters (kin to rust's `newline()`), `num_str`
-// (`str(value)`), `float_lit` (the `float64({v!r})` body), and `go_string` (the
-// reference `_go_string` Go-literal escaper, kin to py's `py_repr`).
+// (`str(value)`, which `float_lit` wraps), and `go_string` (the reference
+// `_go_string` Go-literal escaper, kin to py's `py_repr`).
 use "../stdlib/value.rvl" {
   value_kind, value_is_null, value_field,
   value_list, value_at, value_str, value_int, value_bool, value_keys
@@ -108,17 +108,126 @@ use "../stdlib/list.rvl" { list_sort, list_contains }
 // tabs and the module is `"\n".join(out)`; both are char output, the item-180
 // "NOT obsoleted" category (rust's emitter bridges `newline()` the same way).
 extern pure fn tab() -> Str = @py { return chr(9) }
+  = @ts {
+    return "\t";
+  }
+  = @rs {
+    String::from("\t")
+  }
 extern pure fn newline() -> Str = @py { return chr(10) }
+  = @ts {
+    return "\n";
+  }
+  = @rs {
+    String::from("\n")
+  }
 // The literal-body host numerals: `_go_v3_lit` renders an int as `str(value)`.
 extern pure fn num_str(v: Any) -> Str = @py { return str(v) }
+  = @ts {
+    const pyFloat = (f: number): string => {
+      if (Number.isNaN(f)) return "nan";
+      if (!Number.isFinite(f)) return f < 0 ? "-inf" : "inf";
+      const [mant, exp] = Math.abs(f).toExponential().split("e");
+      const digits = mant.replace(".", "");
+      const decpt = parseInt(exp, 10) + 1;
+      let body: string;
+      if (decpt <= -4 || decpt > 16) {
+        const x = decpt - 1;
+        body = digits[0] + (digits.length > 1 ? "." + digits.slice(1) : "") + "e" + (x < 0 ? "-" : "+") + String(Math.abs(x)).padStart(2, "0");
+      } else if (decpt <= 0) {
+        body = "0." + "0".repeat(-decpt) + digits;
+      } else if (decpt >= digits.length) {
+        body = digits + "0".repeat(decpt - digits.length) + ".0";
+      } else {
+        body = digits.slice(0, decpt) + "." + digits.slice(decpt);
+      }
+      return f < 0 || Object.is(f, -0) ? "-" + body : body;
+    };
+    if (typeof v === "bigint") return v.toString();
+    if (typeof v === "number") return pyFloat(v);
+    if (typeof v === "boolean") return v ? "True" : "False";
+    if (v === null || v === undefined) return "None";
+    return String(v);
+  }
+  = @rs {
+    fn py_float(f: f64) -> String {
+        if f.is_nan() { return String::from("nan"); }
+        if f.is_infinite() {
+            if f < 0.0 { return String::from("-inf"); }
+            return String::from("inf");
+        }
+        let negative = f.is_sign_negative();
+        let mag = f.abs();
+        let e = format!("{:e}", mag);
+        let (mant, exp_str) = match e.split_once('e') {
+            Some(parts) => parts,
+            None => (e.as_str(), "0"),
+        };
+        let exp: i32 = exp_str.parse().unwrap_or(0);
+        let digits: String = mant.chars().filter(|c| *c != '.').collect();
+        let dv: Vec<char> = digits.chars().collect();
+        let ndigits = dv.len() as i32;
+        let decpt = exp + 1;
+        let body: String;
+        if decpt <= -4 || decpt > 16 {
+            let mut m = String::new();
+            m.push(dv[0]);
+            if dv.len() > 1 {
+                m.push('.');
+                for c in &dv[1..] { m.push(*c); }
+            }
+            let e2 = decpt - 1;
+            let eabs = e2.abs();
+            let edig = if eabs < 10 { format!("0{}", eabs) } else { format!("{}", eabs) };
+            let esign = if e2 < 0 { "-" } else { "+" };
+            body = format!("{}e{}{}", m, esign, edig);
+        } else if decpt <= 0 {
+            let mut m = String::from("0.");
+            for _ in 0..(-decpt) { m.push('0'); }
+            m.push_str(&digits);
+            body = m;
+        } else if decpt >= ndigits {
+            let mut m = digits.clone();
+            for _ in 0..(decpt - ndigits) { m.push('0'); }
+            m.push_str(".0");
+            body = m;
+        } else {
+            let mut m = String::new();
+            for i in 0..decpt { m.push(dv[i as usize]); }
+            m.push('.');
+            for i in decpt..ndigits { m.push(dv[i as usize]); }
+            body = m;
+        }
+        if negative { format!("-{}", body) } else { body }
+    }
+    match v.downcast::<serde_json::Value>() {
+        Ok(j) => match &*j {
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    format!("{}", i)
+                } else if let Some(u) = n.as_u64() {
+                    format!("{}", u)
+                } else if let Some(f) = n.as_f64() {
+                    py_float(f)
+                } else {
+                    String::new()
+                }
+            }
+            _ => String::new(),
+        },
+        Err(_) => String::new(),
+    }
+  }
 // A Float literal: the reference renders it as `revlF({value!r})` — Python's
 // repr of the float, so the numeral text is exactly the reference's. The call
 // is what keeps the literal out of Go's CONSTANT world, where a fold has no
 // signed zero and no infinity (issue #721).
-extern pure fn float_lit(v: Any) -> Str = @py { return "revlF(%r)" % v }
+// `repr(float)` is `str(float)`, so it is `num_str`'s text, and `repr(int)` is
+// `str(int)` too: one numeral spelling for every tier, no per-tier body.
+fn float_lit(v: Any) -> Str { return "revlF(".concat(num_str(v)).concat(")") }
 // The same call around an Int literal that a `widen` marker sends to Float:
 // `float64(3)` is still a Go constant.
-extern pure fn widen_float_lit(v: Any) -> Str = @py { return "revlF(%r)" % v }
+fn widen_float_lit(v: Any) -> Str { return "revlF(".concat(num_str(v)).concat(")") }
 // `_go_string` verbatim: a Go double-quoted string literal escaped FROM code
 // points (docs/strings.md) — printable ASCII/BMP verbatim, a `\uXXXX` (4 hex)
 // for a BMP non-ASCII scalar and `\UXXXXXXXX` (8 hex) for an astral one. A
@@ -147,6 +256,55 @@ extern pure fn go_string(v: Any) -> Str = @py {
     out.append('"')
     return "".join(out)
 }
+  = @ts {
+    const hex = (n: number, w: number): string => n.toString(16).padStart(w, "0");
+    const s = typeof v === "string" ? v : String(v);
+    let out = "\"";
+    for (const ch of s) {
+      const cp = ch.codePointAt(0) as number;
+      if (cp === 0x22) out += "\\\"";
+      else if (cp === 0x5c) out += "\\\\";
+      else if (cp === 0x0a) out += "\\n";
+      else if (cp === 0x0d) out += "\\r";
+      else if (cp === 0x09) out += "\\t";
+      else if (cp >= 0x20 && cp <= 0x7e) out += ch;
+      else if (cp <= 0xffff) out += "\\u" + hex(cp, 4);
+      else out += "\\U" + hex(cp, 8);
+    }
+    return out + "\"";
+  }
+  = @rs {
+    let s = match v.downcast::<serde_json::Value>() {
+        Ok(j) => match &*j {
+            serde_json::Value::String(t) => t.clone(),
+            _ => String::new(),
+        },
+        Err(_) => String::new(),
+    };
+    let mut out = String::from("\"");
+    for ch in s.chars() {
+        let cp = ch as u32;
+        if cp == 0x22 {
+            out.push_str("\\\"");
+        } else if cp == 0x5C {
+            out.push_str("\\\\");
+        } else if cp == 0x0A {
+            out.push_str("\\n");
+        } else if cp == 0x0D {
+            out.push_str("\\r");
+        } else if cp == 0x09 {
+            out.push_str("\\t");
+        } else if cp >= 0x20 && cp <= 0x7E {
+            out.push(ch);
+        } else if cp <= 0xFFFF {
+            out.push_str(&format!("\\u{:04x}", cp));
+        } else {
+            out.push_str(&format!("\\U{:08x}", cp));
+        }
+    }
+    out.push_str("\"");
+    out
+  }
 
 // The reference sets `ctx.used_stdlib` as a side effect of RENDERING a stdlib
 // node (a builtin, a `len`, a `??`, an optional chain), and the helper text those
@@ -158,6 +316,12 @@ extern pure fn go_string(v: Any) -> Str = @py {
 // source, and the one place rendered text is turned back into data (the
 // `assert` message) strips it first.
 extern pure fn stdlib_mark() -> Str = @py { return chr(1) }
+  = @ts {
+    return "\x01";
+  }
+  = @rs {
+    String::from("\u{1}")
+  }
 fn marked(text: Str) -> Str { return stdlib_mark().concat(text) }
 
 // The component tier's `_COMP_NEEDS_*` flags, carried the same way. Each is
@@ -166,6 +330,12 @@ fn marked(text: Str) -> Str { return stdlib_mark().concat(text) }
 // reference: `a` the checked Int trio, `d` revlDiv, `m` math.Mod, `n` the
 // Int32 narrow, `s` strconv, `t` a component frame (the teardown preamble).
 extern pure fn flag_char() -> Str = @py { return chr(2) }
+  = @ts {
+    return "\x02";
+  }
+  = @rs {
+    String::from("\u{2}")
+  }
 fn flag(tag: Str) -> Str { return flag_char().concat(tag) }
 fn flagged(tag: Str, text: Str) -> Str { return flag(tag).concat(text) }
 fn strip_marks(s: Str) -> Str {
@@ -253,6 +423,25 @@ fn has_revl_prefix(name: Str) -> Bool {
 extern pure fn camel(name: Str) -> Str = @py {
     return "".join(p[:1].upper() + p[1:] for p in str(name).replace("-", "_").split("_") if p)
 }
+  = @ts {
+    return name.replace(/-/g, "_").split("_").filter((p) => p !== "").map((p) => {
+      const first = String.fromCodePoint(p.codePointAt(0) as number);
+      return first.toUpperCase() + p.slice(first.length);
+    }).join("");
+  }
+  = @rs {
+    let mut out = String::new();
+    for part in name.replace("-", "_").split("_") {
+        let mut cs = part.chars();
+        if let Some(first) = cs.next() {
+            for uc in first.to_uppercase() {
+                out.push(uc);
+            }
+            out.push_str(cs.as_str());
+        }
+    }
+    out
+  }
 
 // `_v3_field_ident`: a record struct field name, EXPORTED (UpperCamel) on every
 // path (item 390) so `encoding/json` marshals it — an unexported field made

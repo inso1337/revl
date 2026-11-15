@@ -76,8 +76,109 @@ use "../stdlib/list.rvl" { list_sort, list_dedup, list_contains }
 // The literal-body host numeral: `_expr` renders an Int literal's numeral as
 // `str(value)`. Sourced here so the text is exactly Python's.
 extern pure fn num_str(v: Any) -> Str = @py { return str(v) }
+  = @ts {
+    const pyFloat = (f: number): string => {
+      if (Number.isNaN(f)) return "nan";
+      if (!Number.isFinite(f)) return f < 0 ? "-inf" : "inf";
+      const [mant, exp] = Math.abs(f).toExponential().split("e");
+      const digits = mant.replace(".", "");
+      const decpt = parseInt(exp, 10) + 1;
+      let body: string;
+      if (decpt <= -4 || decpt > 16) {
+        const x = decpt - 1;
+        body = digits[0] + (digits.length > 1 ? "." + digits.slice(1) : "") + "e" + (x < 0 ? "-" : "+") + String(Math.abs(x)).padStart(2, "0");
+      } else if (decpt <= 0) {
+        body = "0." + "0".repeat(-decpt) + digits;
+      } else if (decpt >= digits.length) {
+        body = digits + "0".repeat(decpt - digits.length) + ".0";
+      } else {
+        body = digits.slice(0, decpt) + "." + digits.slice(decpt);
+      }
+      return f < 0 || Object.is(f, -0) ? "-" + body : body;
+    };
+    if (typeof v === "bigint") return v.toString();
+    if (typeof v === "number") return pyFloat(v);
+    if (typeof v === "boolean") return v ? "True" : "False";
+    if (v === null || v === undefined) return "None";
+    return String(v);
+  }
+  = @rs {
+    fn py_float(f: f64) -> String {
+        if f.is_nan() { return String::from("nan"); }
+        if f.is_infinite() {
+            if f < 0.0 { return String::from("-inf"); }
+            return String::from("inf");
+        }
+        let negative = f.is_sign_negative();
+        let mag = f.abs();
+        let e = format!("{:e}", mag);
+        let (mant, exp_str) = match e.split_once('e') {
+            Some(parts) => parts,
+            None => (e.as_str(), "0"),
+        };
+        let exp: i32 = exp_str.parse().unwrap_or(0);
+        let digits: String = mant.chars().filter(|c| *c != '.').collect();
+        let dv: Vec<char> = digits.chars().collect();
+        let ndigits = dv.len() as i32;
+        let decpt = exp + 1;
+        let body: String;
+        if decpt <= -4 || decpt > 16 {
+            let mut m = String::new();
+            m.push(dv[0]);
+            if dv.len() > 1 {
+                m.push('.');
+                for c in &dv[1..] { m.push(*c); }
+            }
+            let e2 = decpt - 1;
+            let eabs = e2.abs();
+            let edig = if eabs < 10 { format!("0{}", eabs) } else { format!("{}", eabs) };
+            let esign = if e2 < 0 { "-" } else { "+" };
+            body = format!("{}e{}{}", m, esign, edig);
+        } else if decpt <= 0 {
+            let mut m = String::from("0.");
+            for _ in 0..(-decpt) { m.push('0'); }
+            m.push_str(&digits);
+            body = m;
+        } else if decpt >= ndigits {
+            let mut m = digits.clone();
+            for _ in 0..(decpt - ndigits) { m.push('0'); }
+            m.push_str(".0");
+            body = m;
+        } else {
+            let mut m = String::new();
+            for i in 0..decpt { m.push(dv[i as usize]); }
+            m.push('.');
+            for i in decpt..ndigits { m.push(dv[i as usize]); }
+            body = m;
+        }
+        if negative { format!("-{}", body) } else { body }
+    }
+    match v.downcast::<serde_json::Value>() {
+        Ok(j) => match &*j {
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    format!("{}", i)
+                } else if let Some(u) = n.as_u64() {
+                    format!("{}", u)
+                } else if let Some(f) = n.as_f64() {
+                    py_float(f)
+                } else {
+                    String::new()
+                }
+            }
+            _ => String::new(),
+        },
+        Err(_) => String::new(),
+    }
+  }
 // A real newline — the line SEPARATOR (`"\n".join(lines)` in the reference).
 extern pure fn newline() -> Str = @py { return chr(10) }
+  = @ts {
+    return "\n";
+  }
+  = @rs {
+    String::from("\n")
+  }
 
 // ---------------------------------------------------------------- small utils
 fn node_kind(n: Any) -> Str { return value_str(value_field(n, "kind")) }

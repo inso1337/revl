@@ -138,10 +138,264 @@ extern pure fn json_dumps(v: Any) -> Str = @py {
     import json
     return json.dumps(v)
 }
+  = @ts {
+    const pyFloat = (f: number): string => {
+      if (Number.isNaN(f)) return "nan";
+      if (!Number.isFinite(f)) return f < 0 ? "-inf" : "inf";
+      const [mant, exp] = Math.abs(f).toExponential().split("e");
+      const digits = mant.replace(".", "");
+      const decpt = parseInt(exp, 10) + 1;
+      let body: string;
+      if (decpt <= -4 || decpt > 16) {
+        const x = decpt - 1;
+        body = digits[0] + (digits.length > 1 ? "." + digits.slice(1) : "") + "e" + (x < 0 ? "-" : "+") + String(Math.abs(x)).padStart(2, "0");
+      } else if (decpt <= 0) {
+        body = "0." + "0".repeat(-decpt) + digits;
+      } else if (decpt >= digits.length) {
+        body = digits + "0".repeat(decpt - digits.length) + ".0";
+      } else {
+        body = digits.slice(0, decpt) + "." + digits.slice(decpt);
+      }
+      return f < 0 || Object.is(f, -0) ? "-" + body : body;
+    };
+    const str = (s: string): string => {
+      let o = "\"";
+      for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c === 0x22) o += "\\\"";
+        else if (c === 0x5c) o += "\\\\";
+        else if (c === 0x0a) o += "\\n";
+        else if (c === 0x0d) o += "\\r";
+        else if (c === 0x09) o += "\\t";
+        else if (c === 0x08) o += "\\b";
+        else if (c === 0x0c) o += "\\f";
+        else if (c < 0x20 || c > 0x7e) o += "\\u" + c.toString(16).padStart(4, "0");
+        else o += s[i];
+      }
+      return o + "\"";
+    };
+    const dump = (x: any): string => {
+      if (x === null || x === undefined) return "null";
+      if (typeof x === "string") return str(x);
+      if (typeof x === "boolean") return x ? "true" : "false";
+      if (typeof x === "bigint") return x.toString();
+      if (typeof x === "number") return Number.isNaN(x) ? "NaN" : !Number.isFinite(x) ? (x < 0 ? "-Infinity" : "Infinity") : pyFloat(x);
+      if (Array.isArray(x)) return "[" + x.map(dump).join(", ") + "]";
+      return "{" + Object.keys(x).map((k) => str(k) + ": " + dump(x[k])).join(", ") + "}";
+    };
+    return dump(v);
+  }
+  = @rs {
+    fn py_float(f: f64) -> String {
+        if f.is_nan() { return String::from("nan"); }
+        if f.is_infinite() {
+            if f < 0.0 { return String::from("-inf"); }
+            return String::from("inf");
+        }
+        let negative = f.is_sign_negative();
+        let mag = f.abs();
+        let e = format!("{:e}", mag);
+        let (mant, exp_str) = match e.split_once('e') {
+            Some(parts) => parts,
+            None => (e.as_str(), "0"),
+        };
+        let exp: i32 = exp_str.parse().unwrap_or(0);
+        let digits: String = mant.chars().filter(|c| *c != '.').collect();
+        let dv: Vec<char> = digits.chars().collect();
+        let ndigits = dv.len() as i32;
+        let decpt = exp + 1;
+        let body: String;
+        if decpt <= -4 || decpt > 16 {
+            let mut m = String::new();
+            m.push(dv[0]);
+            if dv.len() > 1 {
+                m.push('.');
+                for c in &dv[1..] { m.push(*c); }
+            }
+            let e2 = decpt - 1;
+            let eabs = e2.abs();
+            let edig = if eabs < 10 { format!("0{}", eabs) } else { format!("{}", eabs) };
+            let esign = if e2 < 0 { "-" } else { "+" };
+            body = format!("{}e{}{}", m, esign, edig);
+        } else if decpt <= 0 {
+            let mut m = String::from("0.");
+            for _ in 0..(-decpt) { m.push('0'); }
+            m.push_str(&digits);
+            body = m;
+        } else if decpt >= ndigits {
+            let mut m = digits.clone();
+            for _ in 0..(decpt - ndigits) { m.push('0'); }
+            m.push_str(".0");
+            body = m;
+        } else {
+            let mut m = String::new();
+            for i in 0..decpt { m.push(dv[i as usize]); }
+            m.push('.');
+            for i in decpt..ndigits { m.push(dv[i as usize]); }
+            body = m;
+        }
+        if negative { format!("-{}", body) } else { body }
+    }
+    fn jstr(s: &str) -> String {
+        let mut o = String::from("\"");
+        for ch in s.chars() {
+            let cp = ch as u32;
+            if cp == 0x22 {
+                o.push_str("\\\"");
+            } else if cp == 0x5C {
+                o.push_str("\\\\");
+            } else if cp == 0x0A {
+                o.push_str("\\n");
+            } else if cp == 0x0D {
+                o.push_str("\\r");
+            } else if cp == 0x09 {
+                o.push_str("\\t");
+            } else if cp == 0x08 {
+                o.push_str("\\b");
+            } else if cp == 0x0C {
+                o.push_str("\\f");
+            } else if cp >= 0x20 && cp <= 0x7E {
+                o.push(ch);
+            } else {
+                let mut buf = [0u16; 2];
+                for u in ch.encode_utf16(&mut buf).iter() {
+                    o.push_str(&format!("\\u{:04x}", u));
+                }
+            }
+        }
+        o.push_str("\"");
+        o
+    }
+    fn dump(v: &serde_json::Value) -> String {
+        match v {
+            serde_json::Value::Null => String::from("null"),
+            serde_json::Value::Bool(b) => String::from(if *b { "true" } else { "false" }),
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    format!("{}", i)
+                } else if let Some(u) = n.as_u64() {
+                    format!("{}", u)
+                } else if let Some(f) = n.as_f64() {
+                    py_float(f)
+                } else {
+                    String::new()
+                }
+            }
+            serde_json::Value::String(s) => jstr(s),
+            serde_json::Value::Array(a) => {
+                let parts: Vec<String> = a.iter().map(|x| dump(x)).collect();
+                format!("[{}]", parts.join(", "))
+            }
+            serde_json::Value::Object(m) => {
+                let parts: Vec<String> = m.iter().map(|(k, x)| format!("{}: {}", jstr(k), dump(x))).collect();
+                format!("{{{}}}", parts.join(", "))
+            }
+        }
+    }
+    match v.downcast::<serde_json::Value>() {
+        Ok(j) => dump(&*j),
+        Err(_) => String::new(),
+    }
+  }
 // The literal-body host numeral: `_lit` renders an int as `f"{value}L"` and a
 // float as `f"{value}d"`, both `str(value)`. Sourced here so the numeral text is
 // exactly Python's.
 extern pure fn num_str(v: Any) -> Str = @py { return str(v) }
+  = @ts {
+    const pyFloat = (f: number): string => {
+      if (Number.isNaN(f)) return "nan";
+      if (!Number.isFinite(f)) return f < 0 ? "-inf" : "inf";
+      const [mant, exp] = Math.abs(f).toExponential().split("e");
+      const digits = mant.replace(".", "");
+      const decpt = parseInt(exp, 10) + 1;
+      let body: string;
+      if (decpt <= -4 || decpt > 16) {
+        const x = decpt - 1;
+        body = digits[0] + (digits.length > 1 ? "." + digits.slice(1) : "") + "e" + (x < 0 ? "-" : "+") + String(Math.abs(x)).padStart(2, "0");
+      } else if (decpt <= 0) {
+        body = "0." + "0".repeat(-decpt) + digits;
+      } else if (decpt >= digits.length) {
+        body = digits + "0".repeat(decpt - digits.length) + ".0";
+      } else {
+        body = digits.slice(0, decpt) + "." + digits.slice(decpt);
+      }
+      return f < 0 || Object.is(f, -0) ? "-" + body : body;
+    };
+    if (typeof v === "bigint") return v.toString();
+    if (typeof v === "number") return pyFloat(v);
+    if (typeof v === "boolean") return v ? "True" : "False";
+    if (v === null || v === undefined) return "None";
+    return String(v);
+  }
+  = @rs {
+    fn py_float(f: f64) -> String {
+        if f.is_nan() { return String::from("nan"); }
+        if f.is_infinite() {
+            if f < 0.0 { return String::from("-inf"); }
+            return String::from("inf");
+        }
+        let negative = f.is_sign_negative();
+        let mag = f.abs();
+        let e = format!("{:e}", mag);
+        let (mant, exp_str) = match e.split_once('e') {
+            Some(parts) => parts,
+            None => (e.as_str(), "0"),
+        };
+        let exp: i32 = exp_str.parse().unwrap_or(0);
+        let digits: String = mant.chars().filter(|c| *c != '.').collect();
+        let dv: Vec<char> = digits.chars().collect();
+        let ndigits = dv.len() as i32;
+        let decpt = exp + 1;
+        let body: String;
+        if decpt <= -4 || decpt > 16 {
+            let mut m = String::new();
+            m.push(dv[0]);
+            if dv.len() > 1 {
+                m.push('.');
+                for c in &dv[1..] { m.push(*c); }
+            }
+            let e2 = decpt - 1;
+            let eabs = e2.abs();
+            let edig = if eabs < 10 { format!("0{}", eabs) } else { format!("{}", eabs) };
+            let esign = if e2 < 0 { "-" } else { "+" };
+            body = format!("{}e{}{}", m, esign, edig);
+        } else if decpt <= 0 {
+            let mut m = String::from("0.");
+            for _ in 0..(-decpt) { m.push('0'); }
+            m.push_str(&digits);
+            body = m;
+        } else if decpt >= ndigits {
+            let mut m = digits.clone();
+            for _ in 0..(decpt - ndigits) { m.push('0'); }
+            m.push_str(".0");
+            body = m;
+        } else {
+            let mut m = String::new();
+            for i in 0..decpt { m.push(dv[i as usize]); }
+            m.push('.');
+            for i in decpt..ndigits { m.push(dv[i as usize]); }
+            body = m;
+        }
+        if negative { format!("-{}", body) } else { body }
+    }
+    match v.downcast::<serde_json::Value>() {
+        Ok(j) => match &*j {
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    format!("{}", i)
+                } else if let Some(u) = n.as_u64() {
+                    format!("{}", u)
+                } else if let Some(f) = n.as_f64() {
+                    py_float(f)
+                } else {
+                    String::new()
+                }
+            }
+            _ => String::new(),
+        },
+        Err(_) => String::new(),
+    }
+  }
 // `_camel` verbatim (item 207 bridges the identical body for rust): a provision
 // key -> its PascalCase struct suffix, `"".join(part.capitalize() for part in
 // name.split("_"))`. The java reference `_camel` IS this python byte-for-byte, so
@@ -150,6 +404,30 @@ extern pure fn num_str(v: Any) -> Str = @py { return str(v) }
 extern pure fn camel(name: Str) -> Str = @py {
     return "".join(part.capitalize() for part in name.split("_"))
 }
+  = @ts {
+    return name.split("_").map((part) => {
+      if (part === "") return "";
+      const first = String.fromCodePoint(part.codePointAt(0) as number);
+      return first.toUpperCase() + part.slice(first.length).toLowerCase();
+    }).join("");
+  }
+  = @rs {
+    let mut out = String::new();
+    for part in name.split('_') {
+        let mut cs = part.chars();
+        if let Some(first) = cs.next() {
+            for uc in first.to_uppercase() {
+                out.push(uc);
+            }
+            for ch in cs {
+                for lc in ch.to_lowercase() {
+                    out.push(lc);
+                }
+            }
+        }
+    }
+    out
+  }
 
 // A real newline (U+000A) as the line SEPARATOR (`"\n".join(out)` in the
 // reference). PURE revl: revl `"..."` carries no escapes, but a backtick
