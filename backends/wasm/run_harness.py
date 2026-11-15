@@ -329,6 +329,8 @@ def main() -> int:
         # fuel ceiling reached during teardown would otherwise be reported as a
         # clean unload even though the compiled inverses did not all replay.
         # The runtime records exactly that on its log; fail the round-trip.
+        # (the marker is the cordis-wasm runtime's own log wording; if it ever
+        # changes this check goes quiet rather than failing the run)
         teardown_interrupted = [
             line for line in getattr(rt, "log", [])
             if "trapped: contained" in line]

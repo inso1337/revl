@@ -308,8 +308,14 @@ def _kill_process_group(proc: subprocess.Popen) -> None:
     to pid 1 (issue #3189). ``PermissionError``/``ProcessLookupError`` mean the
     group is already gone; the single-process kill is the fallback.
     """
+    # the session leader's pid is the group id; Windows has no process groups
+    # in this sense, so the single-process kill is the only option there
+    killpg = getattr(os, "killpg", None)
+    if killpg is None or not hasattr(signal, "SIGKILL"):
+        proc.kill()
+        return
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        killpg(proc.pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         proc.kill()
 
