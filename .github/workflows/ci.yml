@@ -480,6 +480,16 @@ jobs:
       # themselves. Never add `|| true`.
       - run: python3 tools/check_vocabulary_mirrors.py --self-test
       - run: python3 tools/check_vocabulary_mirrors.py --check
+      # issue #2844: hand-written `path:line` references in docs and comments.
+      # ADVISORY: `continue-on-error` keeps a new unrecorded finding from
+      # reddening the job while the ledger is being worked down; the step still
+      # shows red in the log so the author sees it. Repair the reference, or
+      # record it with `python3 tools/check_doc_refs.py --write-ledger`. Make it
+      # fatal by deleting the `continue-on-error` line once the ledger is small.
+      # Stdlib only, no revl install; it reads git history, which this job's
+      # full clone provides.
+      - run: python3 tools/check_doc_refs.py --check
+        continue-on-error: true
       # The roadmap's in-progress markers, checked against git: a marker naming
       # a branch that already landed, a branch gone from origin, or a sha not
       # reachable from main is a lie the next reader pays for. Needs no
@@ -2101,8 +2111,15 @@ jobs:
       # exactly its own category.
       - run: cd bench/mcp_host && npm ci && npm test
       # the ROOT, not a named file — naming files is what let the six above rot
-      # unseen. Measured at ~2s for 42 tests, 0 skips with node present.
+      # unseen. Measured at ~2s for 42 tests, 0 skips with node present; the
+      # browser target's headless Chrome run below adds about 30s.
+      # issue #3294: the browser target's gate loads an emitted module in
+      # headless Chrome. `ubuntu-latest` carries `google-chrome`, and this
+      # variable makes a missing engine a failure that names the command to
+      # install one, rather than a silent skip in the one job that can run it.
       - run: pytest backends/typescript/ -q
+        env:
+          REVL_BROWSER_REQUIRED: "1"
 
   # Gap G5 of docs/webapp-competitiveness-report.md, and the structural half of
   # roadmap item 459: NO job built or typechecked the frontend. The suite already
@@ -2181,6 +2198,13 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
           python-version: "3.12"
+      # the browser host's node test (`backends/wasm/test_browser_host.py`)
+      # would otherwise skip here, and this job's no-skip guard reds a skip.
+      # Node runs the same CordisHost module the page imports, on a real
+      # WebAssembly engine.
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5.0.0
+        with:
+          node-version: "22"
       - run: pip install -e ".[test]"
       # the wasmtime-gated tests (WAT validation, emitted-component execution)
       # used to skip silently here: the runtime was never installed. Pin a

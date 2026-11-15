@@ -546,6 +546,23 @@ _EMITTER_RESERVED = {
     "RevlFrame", "RevlSpawnHandle",
 }
 
+# Issue #3160 / #3171: the `Components` class declares its own helpers as
+# private static methods (`revlEq`, `revlConcat`, `revlHash`, `revlLength`,
+# `revlMarkSecret`, `revlSecretResult`, ...), and it emits every top-level user
+# `fn` and extern as a `public static` method of the SAME class under the source
+# name. java resolves an unqualified call among all overloads and picks the most
+# specific, so a user `revlEq(String, String)` beats the helper's
+# `revlEq(Object, Object)` for every Str `==`/`!=` in the module, and a user
+# `revlMarkSecret(String)` beats the varargs secret registration. The whole
+# helper namespace is therefore unspellable from a user name at every position
+# whose spelling is internal (a binding, a top-level fn/extern): names whose
+# root starts `revl` followed by an upper-case letter are escaped by one rung of
+# the same injective ladder. A `record field` / `config field` is a member or
+# wire name and keeps its spelling. This mirrors the ts tier's
+# `_TS_HELPER_PREFIX_RE` (issue #3179) and go's `_REVL_HELPER_PREFIX_RE`
+# (issue #3168).
+_REVL_NAMESPACE_RE = re.compile(r"^(?:revl[A-Z]|REVL_|_revl|_REVL)")
+
 # Host-runtime classes the emitter injects *and* names as bare tokens at host
 # call sites (`Map.new(..)`, `Pool.open(..)`, `Job.run(..)`), so they cannot go
 # into `_EMITTER_RESERVED`: refusing them would make a program that uses the
@@ -576,6 +593,27 @@ _JAVA_TYPE_RESERVED = frozenset({
 
 class EmitError(ValueError):
     """The IR document violates the backend contract."""
+
+
+def _host_body_scanner():
+    """The shared host-body scanner (`src/revl/host_body.py`).
+
+    Imported lazily so a standalone `python3 emit.py <ir.json>` keeps working:
+    when the emitter runs through the compiler `revl` is importable, and a bare
+    script run falls back to the source tree beside this file. The scanner is
+    the one place every tier splits an extern body and checks that it cannot
+    leave the function it is spliced into (#3130, #3131, #3162, #3164, #3166).
+    """
+    try:
+        from revl.host_body import body_lines, check_host_body
+    except ModuleNotFoundError:  # standalone `python3 emit.py`: put src/ on the path
+        import pathlib
+        import sys as _sys
+        src = pathlib.Path(__file__).resolve().parents[2] / "src"
+        if src.is_dir() and str(src) not in _sys.path:
+            _sys.path.insert(0, str(src))
+        from revl.host_body import body_lines, check_host_body
+    return body_lines, check_host_body
 
 
 def _finite_float(value):
@@ -785,7 +823,8 @@ def _split_generic(inner: str) -> list[str]:
     return parts
 
 
-def _mangle(name: str, extra: "frozenset[str]" = frozenset()) -> str:
+def _mangle(name: str, extra: "frozenset[str]" = frozenset(), *,
+            helper_namespace: bool = False) -> str:
     """Rename a syntactically-valid identifier that collides with a *Java*
     reserved word (`class`, `new`, `int`, `default`, …) so a valid revl
     identifier that happens to be a Java keyword emits and RUNS instead of
@@ -831,10 +870,19 @@ def _mangle(name: str, extra: "frozenset[str]" = frozenset()) -> str:
     same injective ladder: a type name passes `_JAVA_TYPE_RESERVED` so the
     host-runtime `Map`/`Pool`/`Job` classes cannot be shadowed by a user type of
     the same simple name (`Map` -> `Map_`, `Map_` -> `Map__` stay distinct),
-    while every other position passes the empty set and is unchanged."""
+    while every other position passes the empty set and is unchanged.
+
+    `helper_namespace=True` adds the `revl*` helper namespace (issue #3160): the
+    `Components` class also declares `revlEq`, `revlConcat`, `revlMarkSecret`
+    and the rest, and java overload resolution prefers a user `revlEq(String,
+    String)` over the helper's `revlEq(Object, Object)`. It is opt-in so a
+    `record field` / `config field` (a member or wire name) keeps its spelling;
+    the binding and top-level-callable positions pass it."""
     root = name
     while root:
-        if root in _JAVA_RESERVED or root in extra:
+        if (root in _JAVA_RESERVED or root in extra
+                or (helper_namespace
+                    and _REVL_NAMESPACE_RE.match(root) is not None)):
             return name + "_"
         if not root.endswith("_"):
             break
@@ -956,7 +1004,7 @@ def _ident(name: object, role: str) -> str:
         raise EmitError(f"invalid {role} identifier: {name!r}")
     extra = _JAVA_TYPE_RESERVED if role == "type name" else frozenset()
     if role in _JAVA_SCAFFOLDING_RENAMABLE_ROLES:
-        return _mangle(name, extra | _EMITTER_RESERVED)
+        return _mangle(name, extra | _EMITTER_RESERVED, helper_namespace=True)
     if role in ("record field", "field"):
         # A record COMPONENT is a member name, not a module-scope binding, so
         # it is a different namespace from the `ctx`/`root`/`frame` tokens the
@@ -1023,7 +1071,8 @@ def _fn_name(name: object) -> str:
         raise EmitError(f"invalid function identifier: {name!r}")
     root = name
     while root:
-        if root in _JAVA_RESERVED or root in _EMITTER_RESERVED:
+        if (root in _JAVA_RESERVED or root in _EMITTER_RESERVED
+                or _REVL_NAMESPACE_RE.match(root) is not None):
             return name + "_"
         if not root.endswith("_"):
             break
@@ -1496,11 +1545,13 @@ def _v3_builtin(method: object, target: str, args: list[str],
     statically typed `String`. `recv` carries the receiver's static type only
     where the lowering must dispatch on it (`to_int`: the Int32 widen vs the
     Str parse)."""
-    # The total forms (docs/arithmetic.md): same quotient as the faulting
-    # operation, but a zero divisor yields Err(reason) instead of throwing —
+    # The total forms (docs/arithmetic.md): same value as the faulting
+    # operation where it fits, Err(reason) instead of the fault otherwise —
     # `fail` is refused in a pure fn, so the error travels as a value. The
-    # static helpers (emitted by `_emit_checked_div_helpers`) evaluate each
-    # operand exactly once and return a typed RevlResult.
+    # static helpers evaluate each operand exactly once and return a typed
+    # RevlResult.
+    if method in _CHECKED_ARITH:
+        return f"{_CHECKED_ARITH_HELPER[method]}({target}, {args[0]})"
     if method in _CHECKED_DIVS:
         return f"{_CHECKED_HELPER[method]}({target}, {args[0]})"
     if method == "length":
@@ -3470,8 +3521,8 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
 def _uses_builtin_result(ir: dict) -> bool:
     """True if the IR constructs or matches the built-in Result (Ok/Err) — an
     `adt` node typed Result, a match arm on Ok/Err, or a call to one of the
-    total division forms (which produce a Result). Emitted RevlResult is
-    gated on this so non-Result modules and v1 goldens are unaffected."""
+    total forms (which produce a Result). Emitted RevlResult is gated on this
+    so non-Result modules and v1 goldens are unaffected."""
     def walk(node) -> bool:
         if isinstance(node, dict):
             if node.get("kind") == "adt" and str(node.get("type", "")).startswith("Result"):
@@ -3480,7 +3531,7 @@ def _uses_builtin_result(ir: dict) -> bool:
                 a.get("pattern") in ("Ok", "Err") for a in node.get("arms") or []
             ):
                 return True
-            if node.get("method") in _CHECKED_DIVS:
+            if node.get("method") in _CHECKED_FORMS:
                 return True
             return any(walk(v) for v in node.values())
         if isinstance(node, list):
@@ -3553,7 +3604,19 @@ _CHECKED_HELPER = {
     "checked_div_euclid": "revlCheckedDivEuclid",
     "checked_mod": "revlCheckedMod",
 }
+# The total arithmetic forms (docs/arithmetic.md): same value as `+ - *`
+# where it fits, Err("revl: Int overflow") instead of the fault. The JDK's
+# `*Exact` family is the overflow test; the helper catches its exception and
+# replaces the JDK's own message, as the faulting helpers already do.
+_CHECKED_ARITH = ("checked_add", "checked_sub", "checked_mul")
+_CHECKED_ARITH_HELPER = {
+    "checked_add": "revlCheckedAdd",
+    "checked_sub": "revlCheckedSub",
+    "checked_mul": "revlCheckedMul",
+}
+_CHECKED_FORMS = _CHECKED_ARITH + _CHECKED_DIVS
 _DIV_ZERO_MSG = "revl: division by zero"
+_INT_OVERFLOW_MSG = "revl: Int overflow"
 # The reason a `Map` subscript miss faults (issue #957), spelled identically on
 # every tier so one guarantee does not read as five different bugs.
 _MAP_MISS_MSG = "revl: map index: no entry for key"
@@ -3565,6 +3628,21 @@ def _uses_checked_div(ir: dict) -> bool:
     def walk(node) -> bool:
         if isinstance(node, dict):
             if node.get("method") in _CHECKED_DIVS:
+                return True
+            return any(walk(v) for v in node.values())
+        if isinstance(node, list):
+            return any(walk(v) for v in node)
+        return False
+
+    return walk(ir.get("functions")) or walk(ir.get("tests")) or walk(ir.get("components"))
+
+
+def _uses_checked_arith(ir: dict) -> bool:
+    """True if the IR calls one of the total arithmetic forms — gates the
+    static helpers those calls lower to."""
+    def walk(node) -> bool:
+        if isinstance(node, dict):
+            if node.get("method") in _CHECKED_ARITH:
                 return True
             return any(walk(v) for v in node.values())
         if isinstance(node, list):
@@ -3675,6 +3753,30 @@ def _emit_map_index_helper() -> list[str]:
         f'        throw new java.util.NoSuchElementException("{_MAP_MISS_MSG}");',
         "    }",
         "    return m.get(k);",
+        "}",
+        "",
+    ]
+
+
+def _emit_checked_arith_helpers() -> list[str]:
+    """Static helpers backing the total arithmetic forms — emitted once per
+    file when any of their nodes is present. Each evaluates its operands
+    exactly once and returns a typed RevlResult; `Math.*Exact` throws the
+    overflow, which the helper carries out as `Err` with revl's own text."""
+    return [
+        "// total arithmetic forms (docs/arithmetic.md): an overflow yields",
+        "// Err(reason) instead of the fault the unchecked operations raise.",
+        "private static RevlResult<Long, String> revlCheckedAdd(long a, long b) {",
+        "    try { return new RevlResult.Ok<>(Math.addExact(a, b)); }",
+        f'    catch (ArithmeticException e) {{ return new RevlResult.Err<>("{_INT_OVERFLOW_MSG}"); }}',
+        "}",
+        "private static RevlResult<Long, String> revlCheckedSub(long a, long b) {",
+        "    try { return new RevlResult.Ok<>(Math.subtractExact(a, b)); }",
+        f'    catch (ArithmeticException e) {{ return new RevlResult.Err<>("{_INT_OVERFLOW_MSG}"); }}',
+        "}",
+        "private static RevlResult<Long, String> revlCheckedMul(long a, long b) {",
+        "    try { return new RevlResult.Ok<>(Math.multiplyExact(a, b)); }",
+        f'    catch (ArithmeticException e) {{ return new RevlResult.Err<>("{_INT_OVERFLOW_MSG}"); }}',
         "}",
         "",
     ]
@@ -4286,7 +4388,12 @@ def _emit_v3_externs(externs: list, journal: bool = False) -> list[str]:
             lines.append("    " + config_bind)
         body = bodies["java"].strip()
         if body:
-            for line in body.splitlines() or [""]:
+            # #3162/#3166: refuse a body Java reads as unbalanced, and split on
+            # newlines only so a comment cannot become a statement.
+            body_lines, check_host_body = _host_body_scanner()
+            check_host_body("java", body,
+                            where=f"extern `{ext.get('name')}`", error=EmitError)
+            for line in body_lines(body):
                 lines.append("    " + line)
         else:
             lines.append("    // (empty @java body)")
@@ -7041,7 +7148,7 @@ def _method_body(env: _Env, key: str, method: dict) -> str:
                     f"operation declared to return a value"
                 )
             return "return;"
-        rename = {b: f"this.{b}" for b in _binds(env.component)}
+        rename = {b: f"this.{_ident(b, 'binding')}" for b in _binds(env.component)}
         # A required service is a field of the provider class, same as a bind.
         rename.update({local: f"this.{env.req_fields[local]}" for local in env.reqs})
         value = _expr(steps[0]["expr"], None, rename, env)
@@ -8397,7 +8504,7 @@ def _method_body_lines(
     lines: list[str] = []
     v3_ctx.arrows = {}  # arrow bindings are local to one body
     _pin_value_map_locals(method.get("body"), method.get("params"), v3_ctx)
-    rename = {b: f"this.{b}" for b in _binds(env.component)}
+    rename = {b: f"this.{_ident(b, 'binding')}" for b in _binds(env.component)}
     rename.update({local: f"this.{env.req_fields[local]}" for local in env.reqs})
 
     def render(steps: list, lines: list[str], pad: str) -> None:
@@ -8880,7 +8987,13 @@ def _emit_component_stmts(
                 # declaration (`Map<...> store = Map.create();`) — `var` would
                 # infer `Map<Object>` from the generic static factory and the
                 # emitted insert/get calls would lose their static types.
-                surface = (map_values or {}).get(bind)
+                # The type table is keyed by the IR's raw bind name while the
+                # local is declared through the binding ladder, so a bind that
+                # the ladder escaped (`ctx` -> `ctx_`) still gets its declared
+                # type here; a lookup by the escaped spelling leaves `var` and
+                # the provider constructor's `Map<V>` parameter then rejects
+                # `Map<Object>` (issue #3095).
+                surface = (map_values or {}).get(step["bind"])
                 decl = f"Map<{_java_v3_type(surface, boxed=True)}>" if surface else "var"
                 out.append(f"{pad}{decl} {bind} = {_expr(step['acquire'], v3_ctx, None, env)};")
             else:
@@ -8901,7 +9014,8 @@ def _emit_component_stmts(
             struct = f"{cname}{_camel(_host_key(key))}"
             ctor_args = ", ".join(
                 ["ctx", "fx"] + (["frame"] if frame_expr else [])
-                + [env.req_fields[b] for b in env.reqs] + list(_binds(component))
+                + [env.req_fields[b] for b in env.reqs]
+                + [_ident(b, "binding") for b in _binds(component)]
                 + [_ident(f.get("name"), "config field")
                    for f in _provider_config_fields(component)]
             )
@@ -9293,7 +9407,7 @@ def _emit_component_modern(
             out.append(f"    private final {service} {env.req_fields[local]};")
         for b in _binds(component):
             btype = _bind_type(component, b, v3_ctx, map_values, env, functions)
-            out.append(f"    private final {btype} {b};")
+            out.append(f"    private final {btype} {_ident(b, 'binding')};")
         # A provide method that reads `config.<f>` needs the field HERE, not
         # only on the plugin (see `_provider_config_fields`).
         for f in provider_config:
@@ -9303,7 +9417,8 @@ def _emit_component_modern(
             ["Context ctx", "Context.EffectScope fx"]
             + (["RevlFrame frame"] if needs_frame else [])
             + [f"{service} {env.req_fields[local]}" for local, service in env.reqs.items()]
-            + [f"{_bind_type(component, b, v3_ctx, map_values, env, functions)} {b}"
+            + [f"{_bind_type(component, b, v3_ctx, map_values, env, functions)} "
+               f"{_ident(b, 'binding')}"
                for b in _binds(component)]
             + [f"{_java_v3_type(f.get('type'))} {_ident(f.get('name'), 'config field')}"
                for f in provider_config]
@@ -9317,7 +9432,8 @@ def _emit_component_modern(
             field = env.req_fields[local]
             out.append(f"        this.{field} = {field};")
         for b in _binds(component):
-            out.append(f"        this.{b} = {b};")
+            field = _ident(b, "binding")
+            out.append(f"        this.{field} = {field};")
         for f in provider_config:
             fname = _ident(f.get("name"), "config field")
             out.append(f"        this.{fname} = {fname};")
@@ -9575,18 +9691,18 @@ def _emit_component(
             out.append(f"    private final {req_service} {env.req_fields[local]};")
         for b in _binds(component):
             out.append(
-                f"    private final {bind_decl(b)} {b};")
+                f"    private final {bind_decl(b)} {_ident(b, 'binding')};")
         ctor_args = ", ".join(
             [f"{req_service} {env.req_fields[local]}"
              for local, req_service in env.reqs.items()]
-            + [f"{bind_decl(b)} {b}"
+            + [f"{bind_decl(b)} {_ident(b, 'binding')}"
                for b in _binds(component)]
         )
         out.append(f"    {struct}({ctor_args}) {{")
         for local in env.reqs:
             out.append(f"        this.{env.req_fields[local]} = {env.req_fields[local]};")
         for b in _binds(component):
-            out.append(f"        this.{b} = {b};")
+            out.append(f"        this.{_ident(b, 'binding')} = {_ident(b, 'binding')};")
         out.append("    }")
         provide = next(
             (s for s in component.get("body") or []
@@ -9653,7 +9769,8 @@ def _emit_component(
             service = step.get("service")
             struct = f"{cname}{_camel(_host_key(key))}"
             ctor_args = ", ".join(
-                [env.req_fields[b] for b in env.reqs] + list(_binds(component)))
+                [env.req_fields[b] for b in env.reqs]
+                + [_ident(b, "binding") for b in _binds(component)])
             # The provision's disposable joins the teardown list — the
             # modern path tracks it via fx.track(ctx.provide(...)); dropping
             # it would leave the provision registered after unload.
@@ -10001,6 +10118,8 @@ def _emit_v3(ir: dict, package_name: str) -> str:
     # document that reaches only for a `checked_*` form still needs them.
     if _uses_int_arith(ir) or _uses_checked_div(ir):
         out.extend(["    " + line if line else line for line in _emit_int_arith_helpers()])
+    if _uses_checked_arith(ir):
+        out.extend(["    " + line if line else line for line in _emit_checked_arith_helpers()])
     if _uses_checked_div(ir):
         out.extend(["    " + line if line else line for line in _emit_checked_div_helpers()])
     if _uses_map_index(ir):

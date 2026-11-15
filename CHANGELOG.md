@@ -160,6 +160,11 @@ also folds in the full agent story and the standing correctness debt.
 - The go tier passes a component `fail` message to `fmt.Errorf` as an argument,
   so a `%` in the message is returned verbatim instead of read as a format verb
   (#2427, closes #2379).
+- A function can state a spec with an `ensures` clause over its parameters and
+  the returned `result`; it expands to a `prop test`, so the type-derived
+  generator, the shrinker and the minimal counterexample all apply, and
+  `revl audit --spec-results` lists each spec with the result of its last
+  recorded check (#2705, docs/function-specs.md).
 
 ### The agent story
 
@@ -262,11 +267,16 @@ also folds in the full agent story and the standing correctness debt.
 
 - A cold `revl_change` withdraw is planned against the carried composition
   (#2406, closes #2225).
-- `revl_undo` still re-admits the target generation by a cold start, and now
-  says so: the undo dossier lists in `stateDropped.components` each running
-  component whose live state the rollback drops and the components the target
-  withdraws, with a note, and a forward call whose undo is `revl_undo` carries
-  an `undoNote` that says the same (#2422, closes #2346).
+- `revl_undo` reports the live state its cold start drops: the undo dossier
+  lists in `stateDropped.components` each running component whose state it
+  drops and the components the target withdraws, with a note, and a forward
+  call whose undo is `revl_undo` carries an `undoNote` that says the same
+  (#2422, closes #2346). An undo now also carries a provider's live state
+  back across a `handoff` both generations declare when the restored shape
+  accepts the running one in the restore direction (#3293, closes #3293):
+  `stateDropped.carried` names what crossed, and the result carries the same
+  `handoff` report a forward swap does. A component with no such hand-off
+  still starts cold, named as before.
 - A refusal made while a proposal is held names the held proposal. When the
   running composition has a name that the held proposal removed, the message
   lists what the proposal removed and how to proceed, and every such refusal
@@ -506,6 +516,13 @@ but not seen. Every instance was closed. Representative fixes:
 - HTTP faces: requests are framed by a single agreed `Content-Length`, a
   duplicate credential header is visible, and no authority value is decoded from
   the wire (#901, #914, #1505).
+- `api_key_env` must be an upper-case environment variable name
+  (`[A-Z_][A-Z0-9_]*`, at most 64 characters, for example
+  `ANTHROPIC_API_KEY`), so a pasted `hf_`, `ghp_`, `gsk_` or `AIza` key is
+  refused unechoed. A lower-case name that worked before is now refused: rename
+  the variable. A variable that is not set is named by role, never by name, in
+  the unset-credential errors and the adapter and binding reprs, and `revl run
+  --plan` prints a name only when it is set, because an upper-case key can still pass the shape check (#3126).
 
 ### Operations
 

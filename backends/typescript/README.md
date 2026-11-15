@@ -48,7 +48,7 @@ of them:
 |---|---|---|
 | `tsconfig.json` | `runtime.ts`, `demo.ts` | `tsc --noEmit`, one program |
 | `tsconfig.generated.json` | `tests/generated/**`, `golden/**` | `scripts/typecheck-generated.mjs`, one program per module |
-| `tsconfig.handwritten.json` | the vitest suites, `bridge.ts`, `revl_fs_ts.ts`, `placement_runner.ts`, `bridge_node.ts`, `revl_shell*.ts`, `scripts/`, `vitest.config.ts` | `scripts/typecheck-handwritten.mjs`, one program per file |
+| `tsconfig.handwritten.json` | the vitest suites, `bridge.ts`, `revl_fs_ts.ts`, `revl_socket_ts.ts`, `placement_runner.ts`, `bridge_node.ts`, `revl_shell*.ts`, `scripts/`, `vitest.config.ts` | `scripts/typecheck-handwritten.mjs`, one program per file |
 
 One program per module is not a performance choice. Every emitted module
 declares its provisions by augmenting cordis' global `Context`, so two modules

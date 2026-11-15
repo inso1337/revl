@@ -166,11 +166,6 @@ ACKNOWLEDGED: dict[str, str] = {
           "computer-use reversibility registry's (`src/revl/ui_family.py`); "
           "it is stated and witnessed in `formal/STATUS.md`'s A5 row "
           "(issue #2114).",
-    "G-SECRET": "the confidentiality fixtures in `examples/rejections/` are "
-                "refused under `G-SECRET-FLOW` (the disclosure-sink half). "
-                "`G-SECRET` (the capability-reach half) is enforced in "
-                "`src/revl/taint.py` and exercised by the per-tier secret "
-                "registry suites, not by a fixture this corpus compiles.",
     "T3": "an open hole is refused at the ADMISSION gate rather than by "
           "`compile_files`, so a hole fixture compiles here and is refused one "
           "stage later; the reproducers live with the gate "

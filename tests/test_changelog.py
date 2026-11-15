@@ -338,6 +338,11 @@ def _resolvable_facts(before_ir: dict, after_ir: dict) -> set[str]:
         facts.add(f"register.weakened:{token.split(':', 1)[-1]}")
     for token in registers["registers_strengthened"]:
         facts.add(f"register.strengthened:{token.split(':', 1)[-1]}")
+    inverses = audit_diff.diff_inverses(ba, aa)
+    for token in inverses["inverse_weakened"]:
+        facts.add(f"inverse.weakened:{token.split(':', 1)[1]}")
+    for token in inverses["inverse_strengthened"]:
+        facts.add(f"inverse.strengthened:{token.split(':', 1)[1]}")
     cardinality = audit_diff.diff_cardinality(ba, aa)
     for token in cardinality["cardinality_widened"]:
         _, comp, cap = token.split(":", 2)
@@ -398,6 +403,39 @@ def test_every_rendered_line_has_a_backing_fact():
                 f"line fact {entry['fact']!r} does not resolve to an input fact")
             seen += 1
     assert seen > 0
+
+
+_UNDO = """\
+type W = { path: Str }
+type E = { msg: Str }
+extern pure fn restore(w: W) -> Unit = @py { return None }
+extern witnessed fn deposit(p: Str) -> Result[W, E] undo restore(result) = @py { return {"path": p} }
+component C {
+  effect deposit("t")
+}
+"""
+_COMPENSATE = """\
+extern pure fn rollback() -> Unit = @py { return None }
+extern emission fn deposit(p: Str) -> Str compensate rollback() = @py { return p }
+component C {
+  emit deposit("t")
+}
+"""
+
+
+def test_every_line_has_a_backing_fact_across_an_inverse_class_move():
+    """The same bijection over a pair whose inverse class moves both ways
+    (`declared` to `compensation` and back), so `inverse.*` lines resolve."""
+    undo = compile_source(_UNDO, "corpus.rvl")
+    compensate = compile_source(_COMPENSATE, "corpus.rvl")
+    for before, after in ((undo, compensate), (compensate, undo)):
+        doc = derive_changelog(before, after, no_semver=True)
+        allowed = _resolvable_facts(before, after)
+        facts = [entry["fact"] for category in
+                 ("breaking", "added", "internal", "unclassified")
+                 for entry in doc[category]]
+        assert [f for f in facts if f.startswith("inverse.")]
+        assert [f for f in facts if f not in allowed] == []
 
 
 def test_changelogline_refuses_an_empty_fact():

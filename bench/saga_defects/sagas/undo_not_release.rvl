@@ -1,0 +1,41 @@
+// undo_not_release - a host acquisition is undone on the wrong handle
+//
+// Seeded defect: the second `Map.new()` is undone with `rows.drop()`; the teardown would release a sibling bracket's handle and leave `spill` open.
+// Expected catch: compile (G4)
+// Corpus index: bench/saga_defects/defects.json (issue #2736)
+
+service Inventory {
+  fn reserve(sku: Str, qty: Int) -> Int
+  fn release(sku: Str, qty: Int) -> Int
+}
+
+service Payments {
+  fn charge(order: Str, cents: Int) -> Str
+  fn refund(order: Str, cents: Int) -> Int
+  emission fn settle(order: Str, cents: Int) -> Int
+  fn reverse(order: Str, cents: Int) -> Int
+}
+
+component Warehouse provides inventory: Inventory {
+  let rows = effect Map.new() undo rows.drop()
+  let spill = effect Map.new() undo rows.drop()
+  provide inventory {
+    fn reserve(sku, qty) = rows.insert(sku, qty)
+    fn release(sku, qty) = rows.remove(sku)
+  }
+}
+
+component Ledger provides payments: Payments {
+  let rows = effect Map.new() undo rows.drop()
+  provide payments {
+    fn charge(order, cents) = rows.insert(order, cents)
+    fn refund(order, cents) = rows.remove(order)
+    fn settle(order, cents) = rows.insert(order, cents)
+    fn reverse(order, cents) = rows.remove(order)
+  }
+}
+
+component Checkout requires inventory: Inventory, payments: Payments {
+  let hold = effect inventory.reserve("sku-1", 1) undo inventory.release("sku-1", 1)
+  let auth = effect payments.charge("order-1", 4200) undo payments.refund("order-1", 4200)
+}

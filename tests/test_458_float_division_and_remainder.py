@@ -54,10 +54,9 @@ MEASURED before the fix, over a corpus of 1415 probe programs (see the PR):
        `revlF` identity call now, the same move `revlDiv` already makes for
        `/`, and a call is not a constant expression.
 
-wasm is the sixth tier and it REFUSES `Float` by name (`type 'Float' is not
-lowerable`), which is the documented limit of that emitter rather than a
-silent approximation; `test_wasm_refuses_float_by_name` pins that it stays a
-named refusal.
+wasm is the sixth tier. It refused `Float` by name until issue #3295 made
+Float a native f64 there; its `%` now calls the exact `$f64_mod` helper, which
+`test_wasm_lowers_float_remainder_to_an_exact_fmod_helper` pins at emit time.
 
 NON-VACUITY. On the tree without the fix, 16 of these fail and 21 pass. The
 three that pass on BOTH trees are the controls:
@@ -87,8 +86,8 @@ from _backend_import import backend_emitter  # noqa: E402
 from revl import compile_source  # noqa: E402
 from revl.test import RUNNERS  # noqa: E402
 
-#: wasm is absent on purpose: it refuses `Float` by name, which
-#: `test_wasm_refuses_float_by_name` pins instead of executing.
+#: wasm is absent from the executed set: its Float lowering is pinned at emit
+#: time by `test_wasm_lowers_float_remainder_to_an_exact_fmod_helper`.
 FLOAT_TIERS = ("py", "ts", "go")
 SLOW_TIERS = ("rust", "java")
 ALL_TIERS = ("py", "ts", "go", "wasm")
@@ -300,9 +299,10 @@ def test_python_answers_nan_for_a_nan_dividend():
         "NaN is neither zero nor signed — it came back an infinity")
 
 
-def test_wasm_refuses_float_by_name():
-    """The sixth tier cannot match, and fails CLOSED: a named refusal at emit
-    time, not a silent approximation at runtime (docs/arithmetic.md)."""
-    with pytest.raises(ValueError) as excinfo:
-        _emit("wasm", "pub fn r(a: Float, b: Float) -> Float { return a % b }")
-    assert "'Float' is not lowerable" in str(excinfo.value), excinfo.value
+def test_wasm_lowers_float_remainder_to_an_exact_fmod_helper():
+    """The sixth tier now matches instead of refusing: `%` over two Floats is
+    C fmod, and wasm has no remainder instruction, so the emitter calls the
+    exact `$f64_mod` helper (docs/arithmetic.md, docs/wasm-capabilities.md)."""
+    emitted = _emit("wasm", "pub fn r(a: Float, b: Float) -> Float { return a % b }")
+    assert "(call $f64_mod)" in emitted, emitted
+    assert "(func $f64_mod" in emitted, emitted

@@ -1,7 +1,7 @@
 import RevL.Syntax
 
 /-!
-# Cardinality — the emission crossing bound (item 260, issue #2743)
+# Cardinality: the emission crossing bound (item 260, issue #2743)
 
 `src/revl/cardinality.py` reports, per component and capability, how many
 times one activation can cross that capability's boundary, and answers
@@ -38,7 +38,7 @@ over that body.
   anything about that body.
 * The model counts crossings of ONE capability at a time, which is the
   granularity the report is keyed by. A statement crossing two capabilities
-  is one `cross` in each of the two commands drawn for it. `Body.cmd` is the
+  is one `cross` in each of the two commands drawn for it. `bodyCmd` is the
   exception and says so: it is the body's TOTAL `emit` surface, not a
   per-capability command.
 * The `Body` half counts an `emit` statement once. A crossing written some
@@ -46,6 +46,12 @@ over that body.
   checker's classification and is not counted by `bodyCmd`; the `CARD` row
   carries the exported command the report actually answers, so the row does
   not depend on this conservative reading.
+* Two gaps sit behind `body_bound_bounds_runs`, and both are named rather
+  than hidden. `Runs` is an execution relation over `Cmd`; L0 has no run
+  semantics for `Body`, so nothing here connects `Runs` to how a component
+  body actually executes. And `bodyCmd` reads `Body.stmts`, which flattens
+  the provide methods: an `emit` inside a method that can be called any
+  number of times is counted once, not once per call.
 -/
 
 namespace RevL.Cardinality
@@ -181,9 +187,10 @@ exercised at a number the theorem can distinguish from its neighbours. -/
 /-- A sequence of two crossings: the reported number is 2. -/
 def seqWitness : Cmd := .seq .cross .cross
 
-/-- A branch of a crossing and nothing: the reported number is 1, not 2 — the
-worse arm, which is what makes a branch a bound and not a sum. -/
-def branchWitness : Cmd := .branch .cross .nil
+/-- A branch whose arms cross twice and once: the reported number is 2, the
+worse arm. A sum of the arms would be 3 and a min would be 1, so this is the
+witness that makes a branch a bound and not a sum. -/
+def branchWitness : Cmd := .branch (.seq .cross .cross) .cross
 
 /-- Three iterations of one crossing: the reported number is 3. -/
 def loopWitness : Cmd := .loop 3 .cross
@@ -191,8 +198,13 @@ def loopWitness : Cmd := .loop 3 .cross
 theorem witness_seq_runs : Runs seqWitness 2 :=
   Runs.seq Runs.cross Runs.cross
 
-theorem witness_branch_runs : Runs branchWitness 1 :=
-  Runs.branchLeft (a := .cross) (b := .nil) Runs.cross
+theorem witness_branch_runs : Runs branchWitness 2 :=
+  Runs.branchLeft (b := .cross) (Runs.seq Runs.cross Runs.cross)
+
+/-- The other arm is an execution too, with its own count: a branch runs one
+arm, and which one is not the analysis's to know. -/
+theorem witness_branch_other_arm_runs : Runs branchWitness 1 :=
+  Runs.branchRight (a := .seq .cross .cross) Runs.cross
 
 theorem witness_loop_runs : Runs loopWitness 3 := by
   have h : Runs (.loop 3 .cross) (sumList [1, 1, 1]) := by
@@ -203,20 +215,24 @@ theorem witness_loop_runs : Runs loopWitness 3 := by
     exact Runs.cross
   simpa [loopWitness, sumList] using h
 
-/-- The witnesses really land on the numbers the count predicts, and an
-execution exceeding the bound is REFUSED by `runs_le_bound` — so an
-execution model that crossed four times in a three-iteration loop can never
-be passed off as an execution of it. -/
+/-- The witnesses really land on the numbers the count predicts (2, 2 and 3,
+where a sum of the branch arms would be 3), and an execution exceeding the
+bound is REFUSED by `runs_le_bound`: an execution that crossed three times
+in the branch, or four times in a three-iteration loop, can never be passed
+off as an execution of it. -/
 theorem cardinality_not_vacuous :
-    bound seqWitness = 2 ∧ bound branchWitness = 1 ∧
+    bound seqWitness = 2 ∧ bound branchWitness = 2 ∧
     bound loopWitness = 3 ∧
-    Runs seqWitness 2 ∧ Runs branchWitness 1 ∧ Runs loopWitness 3 ∧
-    ¬ Runs (.loop 3 .cross) 4 := by
+    Runs seqWitness 2 ∧ Runs branchWitness 2 ∧ Runs loopWitness 3 ∧
+    ¬ Runs branchWitness 3 ∧ ¬ Runs (.loop 3 .cross) 4 := by
   refine ⟨by decide, by decide, by decide, witness_seq_runs,
-    witness_branch_runs, witness_loop_runs, ?_⟩
-  intro h
-  have hb := runs_le_bound h
-  simp [bound] at hb
+    witness_branch_runs, witness_loop_runs, ?_, ?_⟩
+  · intro h
+    have hb := runs_le_bound h
+    simp [branchWitness, bound] at hb
+  · intro h
+    have hb := runs_le_bound h
+    simp [bound] at hb
 
 /-- A body witness: an `emit`, then a pure statement. The body is a
 non-empty sequence, not the empty grammar. -/

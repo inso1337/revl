@@ -28,7 +28,7 @@ than recorded: a record cannot claim one format and carry the other's bytes.
 
 | `sign_alg` | format | signing curve | measurement reported |
 | --- | --- | --- | --- |
-| `tdx-quote-v4-ecdsa-p256` | Intel TDX Quote v4, ECDSA-256-with-P-256 | NIST P-256, SHA-256 | `MRTD`, the TD's initial measurement |
+| `tdx-quote-v4-ecdsa-p256` | Intel TDX Quote v4, ECDSA-256-with-P-256 | NIST P-256, SHA-256 | `MRTD`, the TD's initial measurement, plus the runtime registers, TCB and quoting enclave a `TdxPolicy` names |
 | `sev-snp-report-v2-ecdsa-p384` | AMD SEV-SNP `ATTESTATION_REPORT` v2/v3 | NIST P-384, SHA-384 | `MEASUREMENT`, the guest's launch measurement |
 | `hmac-sha256` | the development verifier, NOT a root | none | whatever the record says |
 
@@ -80,6 +80,57 @@ Two honest limits, stated here rather than implied:
   states is additionally compared against the measurement register the hardware
   reported, and a record whose two halves disagree is refused. This comparison is
   load-bearing, not belt-and-braces.
+
+## What a TDX policy compares, and how to spell it
+
+For TDX, MRTD is the TD's INITIAL measurement and does not cover the kernel, root
+file system or application the TD loads afterwards. Those live in the four
+runtime-extended registers, `RTMR0` to `RTMR3`, and they are compared too: a
+requirement's `TdxPolicy` names the permitted register quadruples, the TCB floors
+(`tee_tcb_svn`, `qe_svn`, `pce_svn`) and the permitted quoting-enclave identities
+when the operator wants them. A TDX quote presented to a requirement that states
+no `TdxPolicy` is REFUSED rather than admitted on MRTD alone;
+`TdxPolicy(accept_mrtd_only=True)` is the explicit acknowledgement that the
+runtime registers are not compared. For SEV-SNP, `sev_min_tcb` is the TCB floor,
+compared on the report's SVN components, each on its own: the TCB version is read
+little-endian, and on Milan and Genoa the bootloader SVN is byte 0, TEE byte 1,
+SNP byte 6 and microcode byte 7, with bytes 2 to 5 reserved. A report below the
+floor in any one component is refused, and a floor that sets a reserved byte is
+refused when the requirement is built. Turin lays the TCB version out
+differently and the report's processor family is not read, so a Turin-layout
+report is not covered by this floor. The TDX policy is required where the
+SEV-SNP floor is optional because a SEV-SNP report's launch measurement covers
+the guest image it was launched with and has no runtime-register analogue, while
+MRTD covers only a TD's initial build. `docs/attested-tee-placement.md` is the
+placement-file spelling of the same demand.
+
+```python
+from revl.tee_attestation import TdxPolicy, TeeRequirement, bundle_identity
+
+requirement = TeeRequirement(
+    bundle=bundle_identity(bundle),
+    measurements=frozenset({td_mrtd_hex}),
+    regions=frozenset({"eu-central"}),
+    nonce=challenge,
+    tdx=TdxPolicy(
+        runtime_measurements=frozenset({
+            (rtmr0_hex, rtmr1_hex, rtmr2_hex, rtmr3_hex),
+        }),
+        min_tee_tcb_svn="03" + "00" * 15,
+        min_qe_svn=3,
+        min_pce_svn=3,
+        qe_mr_signers=frozenset({qe_mr_signer_hex}),
+        qe_mr_enclaves=frozenset({qe_mr_enclave_hex}),
+    ),
+    # microcode 0x73, SNP 0x16, TEE 0x01, bootloader 0x04
+    sev_min_tcb=0x7316000000000104,
+)
+```
+
+Every field but `runtime_measurements`/`accept_mrtd_only` is optional: an absent
+floor or identity means the operator stated no demand for that fact. A policy that
+names no permitted runtime measurement and does not say `accept_mrtd_only=True` is
+refused when it is built, because it would admit a TD on its initial build alone.
 
 ## The root, and why it is not in the placement file
 

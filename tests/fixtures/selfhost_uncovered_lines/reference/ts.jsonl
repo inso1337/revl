@@ -78,6 +78,10 @@
 
 ["function", "frame-allocation-invariants-and-declared-transaction-paths-b", "_needs_frame.walk", 3, 3]
 
+["reason", "host-body-scanner-standalone-bootstrap", "`_host_body_scanner` is the lazy import of the shared `revl.host_body` scanner added for the host-body containment fixes (#3130, #3131, #3162, #3164, #3166). Its `except ModuleNotFoundError` arm runs only when `emit.py` is executed as a script with `revl` not importable, an invocation mode that no corpus document and no refusal document reaches. It is the same class recorded for the `_refuse_deferred_emissions` and `_refuse_validated_emissions` bootstrap above. On the tiers whose corpus carries a host-bodied extern the import and the return are reached and only that arm stays unrun; the java and wasm corpora carry no host-bodied extern, so the whole helper stays unrun there."]
+
+["function", "host-body-scanner-standalone-bootstrap", "_host_body_scanner", 7, 7]
+
 ["reason", "in-file-test-pass-over-emit-ts-tests", "In-file test pass-over: `_emit_ts_tests` skips a lifecycle test and `_emit_ts_lifecycle_tests` skips a plain one, but `_emit_v3` splits the list before calling either, so neither `continue` has an input. Both drivers are otherwise covered (issue #106)"]
 
 ["function", "in-file-test-pass-over-emit-ts-tests", "_emit_ts_lifecycle_tests", 1, 1]

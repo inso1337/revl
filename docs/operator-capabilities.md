@@ -48,6 +48,21 @@ flag is the grant that no caller over the transport can supply.
 `revl_update_status` also answers when updates are disabled, so an operator
 can see why.
 
+The feed is the server's configuration too, and its manifests are
+signature-checked: a networked `release.json` that carries a signature is
+verified against a key pinned in `src/revl/update/release_keys.py`.
+`--update-trust-unsigned` is the operator escape for a mirror whose manifest
+carries no signature at all; a present signature is still verified. It is a
+serve-time flag, never a caller argument.
+
+The caller's consent flags `allowDowngrade`, `acceptNotLive`,
+`acceptIncompatible`, `acceptUnknownVersion` and `acknowledgeWidening` are
+operator grants too. The server enables one only with
+`--update-allow-consent NAME`; without that grant the caller passing the flag
+is refused with `UPDATE_CONSENT_NOT_GRANTED` where the flag would have lifted
+a refusal, never silently ignored. `force` needs no grant: it re-plans the
+release the composition already runs and opts into nothing else.
+
 ## The operator profile
 
 A profile declares one or more **operators**. Each operator has a token and a
@@ -384,15 +399,30 @@ policy-style why:
 
 ### What each verb touches
 
-The target set is computed **before** the action runs, from the session's IR:
+The target set is computed **before** the action runs, from the composition
+that would run: the session's IR for a change to the running composition, the
+candidate's compile for a `load`, the snapshot's `sources` for a `restore`.
 
 * **swap** — the components the candidate actually *changes*: those added,
   removed, or whose IR entry differs (modulo provenance) from the running
   composition. So "may swap within tenant_a" permits changing a `tenant_a`
   component in a multi-realm composition, and refuses changing a `tenant_b`
-  one. A no-op or server-side re-admit targets the whole composition.
+  one. An allow must select a changed component on **both** sides: the realms
+  the running composition puts it in and the realms the candidate puts it in,
+  so a candidate cannot add a realm its grant matches to a component the grant
+  does not already cover. A `may not` is matched against the union of both
+  sides, so a swap that moves a component out of a realm is still selected by
+  a `may not` rule on the realm it leaves. A no-op or server-side re-admit
+  targets the whole composition.
 * **load** — every component in the candidate (a cold boot instantiates all).
-* **restore** — every component named in the snapshot manifest.
+* **restore**: every component the snapshot's `sources` compile to, the
+  composition that actually boots. The document's `manifest` and
+  `meta.components` are caller-written claims and scope nothing. A module
+  the document leaves out of its in-memory sources is read from disk by the
+  gate's compile and again by the boot's; with an operator bound, a boot
+  compile whose disk reads differ from the gate's (another path, or a changed
+  text) is refused, so a file changed between the decision and the boot
+  cannot load.
 * **unload / edit / snapshot / undo / rollback** — the whole running
   composition (each operates on all of it).
 * **estop** (item 443) — the whole running composition too, and deliberately:
@@ -416,6 +446,13 @@ The target set is computed **before** the action runs, from the session's IR:
   approve on payments` is usable while other components are live. It covers
   `revl_approve` (including a multi-party VOTE), `revl_revoke` (a standing grant
   or a pending question), `revl_escalate`, and the two distillation verbs.
+  `revl_approvals` (issue #2991) is the one READ-ONLY verb under this verb: the
+  approval questions, their blast radius and their history are the same
+  authority as answering them, so a bystander cannot enumerate what a crossing
+  would reach and who is being asked. A `show` hash scopes to its crossing
+  component; `list`/`stats` name no one component and need `may approve on *`,
+  whatever other target keys the call carries. A refused `show` reads the same
+  for another component's ticket as for an unknown hash.
 * **override** (item 471) — the crossing component, exactly as `approve` is: an
   override decides ONE question about one candidate, so it must not widen to the
   whole composition. It is `revl_override`'s verb and nothing else's, and it is
@@ -521,6 +558,9 @@ With **no** `--operator-profile`, `session.operator` is `None` and every verb
 is ungated — today's root-over-transport, byte-for-byte unchanged. Read-only
 and diagnostic verbs (`revl_check`, `revl_audit`, `revl_plan`, `revl_query_*`,
 `revl_state`, `revl_grammar`, `revl_resolve`, …) are never gated, profile or
-not. The profile is the **pre-networking safeguard** — opt-in for networked and
+not. The one deliberate exception is `revl_approvals` (issue #2991): it is
+read-only but gated under `approve`, because the pending questions and their
+blast radius are inside the approval boundary rather than diagnostics about
+it. The profile is the **pre-networking safeguard** — opt-in for networked and
 multi-operator use, so that when the management plane is exposed it already has
 declared, checked capability bounds instead of implicit root.
