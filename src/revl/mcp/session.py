@@ -6974,7 +6974,7 @@ class Session:
 
     def _runtime_lease_acquire(self, component: str, capability: str,
                                ttl_ms, uses, key: "str | None" = None,
-                               provider: Any = None) -> str | None:
+                               provider: object = None) -> str | None:
         """The runtime `_revl_frame.acquire_lease` bridge: resolve the standing
         grant the lease gate minted and return its `requestId` (the handle names
         it). None if no live lease grant backs it — the frame then fails closed
