@@ -194,6 +194,8 @@ def test_an_emitted_code_names_the_rewrite_that_satisfies_it():
     that answered "no diagnostic code" before #2028 plus every code a later
     slice adds to the roster (`UNKNOWN_ARTIFACT` and `STALE_ARTIFACT`, #2852;
     `MCP-ATTESTATION`, #2990; `UNKNOWN_REPAIR` and `STALE_REPAIR`, #2855; `SESSION_BUSY`, #3380)."""
+    `MCP-ATTESTATION`, #2990; `UNKNOWN_REPAIR` and `STALE_REPAIR`, #2855;
+    `ARGS`, #3345)."""
     newly = sorted(COVERED - set(dg.GUARANTEES))
     assert len(newly) == 32, newly
     for code in newly:
