@@ -2996,12 +2996,12 @@ class _ComponentEmitter:
             # splits/joins/searches keeps a byte-identical helper preamble.
             if "$str_index_of" in rendered:
                 lines.append(self.v3._helper_str_index_of())
-            if "$str_cmp" in rendered:
-                lines.append(self.v3._helper_str_cmp())
-            if "$list_index_of_str" in rendered:
-                lines.append(self.v3._helper_list_index_of_str())
-            if "$list_index_of_slot" in rendered:
-                lines.append(self.v3._helper_list_index_of_slot())
+            # Str ordering and List.indexOf (issue #3145), same demand rule.
+            for token, helper in (("$str_cmp", self.v3._helper_str_cmp),
+                                  ("$list_index_of_str", self.v3._helper_list_index_of_str),
+                                  ("$list_index_of_slot", self.v3._helper_list_index_of_slot)):
+                if token in rendered:
+                    lines.append(helper())
             if "$str_split" in rendered:
                 lines.append(self.v3._helper_str_split())
             if "$str_join" in rendered:
