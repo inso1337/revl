@@ -668,6 +668,38 @@ def _assert_two_generated_files_chain_in_sequence(mod):
         assert _answer(twice, line, column) is not None, (line, column)
 
 
+def _assert_an_out_of_order_inner_line_is_answered_in_document_order(mod):
+    """Source Map v3 orders a line's segments by generated column, but the
+    composer tolerates a line that is not, and answers it the way a consumer
+    reading the document does: the last segment IN DOCUMENT ORDER at or before
+    the column. The inner line below has columns 4, 1, 3, so column 4 is
+    answered by the segment at 3, not the one at 4 that sorting would pick."""
+    inner = {
+        "version": 3,
+        "file": "gen.ts",
+        "sources": ["page.tpl"],
+        "sourcesContent": [None],
+        "names": [],
+        "mappings": _write_mappings(
+            [[(4, 0, 10, 0, None), (1, 0, 11, 0, None), (3, 0, 12, 0, None)]]),
+    }
+    outer = {
+        "version": 3,
+        "file": "bundle.js",
+        "sources": ["gen.ts"],
+        "sourcesContent": [None],
+        "names": [],
+        "mappings": _write_mappings(
+            [[(column, 0, 0, column, None) for column in range(6)]]),
+    }
+    composed = mod.compose(outer, inner, "gen.ts")
+    assert _by_hand(outer, inner, "gen.ts", 0, 4)[1] == 12, \
+        "the premise: in document order column 4 is answered by the segment at 3"
+    for column in range(6):
+        assert _answer(composed, 0, column) == \
+            _by_hand(outer, inner, "gen.ts", 0, column), column
+
+
 CHECKS = (
     ("the composed map answers the two-step walk",
      _assert_the_composed_map_answers_the_two_step_walk),
@@ -695,6 +727,8 @@ CHECKS = (
      _assert_composition_opens_no_path_a_map_names),
     ("two generated files chain in sequence",
      _assert_two_generated_files_chain_in_sequence),
+    ("an out-of-order inner line is answered in document order",
+     _assert_an_out_of_order_inner_line_is_answered_in_document_order),
 )
 
 
@@ -886,28 +920,24 @@ def _sub(old, new):
 
 
 MUTATIONS = {
-    "N01 resolve keeps the FIRST segment at or before the column": _sub(
-        "    found = None\n"
-        "    for segment in lines[line]:\n"
-        "        if segment[0] <= column:\n"
-        "            found = segment\n"
-        "    return found",
-        "    found = None\n"
-        "    for segment in lines[line]:\n"
-        "        if segment[0] <= column and found is None:\n"
-        "            found = segment\n"
-        "    return found"),
-    "N02 resolve is off by one at the segment boundary": _sub(
-        "    for segment in lines[line]:\n"
-        "        if segment[0] <= column:\n"
-        "            found = segment",
-        "    for segment in lines[line]:\n"
-        "        if segment[0] < column:\n"
-        "            found = segment"),
-    "N03 resolve ignores the generated line": _sub(
-        "    if line < 0 or line >= len(lines):\n        return None",
-        "    if line < 0 or line >= len(lines):\n        return None\n"
-        "    line = 0"),
+    "N01 the line index keeps the FIRST segment at or before the column": _sub(
+        "        def lookup(column: int):\n"
+        "            at = bisect.bisect_right(columns, column) - 1\n"
+        "            return segments[at] if at >= 0 else None",
+        "        def lookup(column: int):\n"
+        "            at = bisect.bisect_right(columns, column) - 1\n"
+        "            return segments[0] if at >= 0 else None"),
+    "N02 the line index is off by one at the segment boundary": _sub(
+        "            at = bisect.bisect_right(columns, column) - 1",
+        "            at = bisect.bisect_left(columns, column) - 1"),
+    "N03 the line index ignores the generated line": _sub(
+        "    def _resolve_inner(line: int, column: int):\n"
+        "        if line < 0 or line >= len(inner_lines):\n"
+        "            return None",
+        "    def _resolve_inner(line: int, column: int):\n"
+        "        if line < 0 or line >= len(inner_lines):\n"
+        "            return None\n"
+        "        line = 0"),
     "N04 an uncovered mapping is deleted instead of blanked": _sub(
         "                out_segments.append((gcol, None, None, None, None))\n"
         "                continue\n"
@@ -987,6 +1017,11 @@ MUTATIONS = {
         '        joined = root.rstrip("/") + "/" + source',
         '    if False:\n'
         '        joined = root.rstrip("/") + "/" + source'),
+    "N20 the out-of-order line index drops document order": _sub(
+        "        last = max(last, index)\n"
+        "        last_index_at_or_before.append(last)",
+        "        last = index\n"
+        "        last_index_at_or_before.append(last)"),
 }
 
 

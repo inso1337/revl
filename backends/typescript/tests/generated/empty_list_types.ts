@@ -32,7 +32,7 @@ function revlEq(a: unknown, b: unknown): boolean {
 const REVL_I64_MIN = -(2n ** 63n)
 const REVL_I64_MAX = 2n ** 63n - 1n
 function revlI64(v: bigint): bigint {
-  if (v < REVL_I64_MIN || v > REVL_I64_MAX) throw new RangeError('revl: Int overflow')
+  if (BigInt.asIntN(64, v) !== v) throw new RangeError('revl: Int overflow')
   return v
 }
 
@@ -107,22 +107,24 @@ export function width_before_write(): bigint {
 }
 
 export function sum_of_empty(): bigint {
+    let $revl_i64 = 0n
     let acc: bigint[] = []
     let t = 0n
     for (const v of acc) {
-      t = revlI64(t + v)
+      t = (BigInt.asIntN(64, $revl_i64 = t + v) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
     }
     return t
 }
 
 export function windows(n: bigint): bigint[][] {
+    let $revl_i64 = 0n
     let out: bigint[][] = []
     let row: bigint[] = []
     let i = 0n
     while ((i < n)) {
       row = [...row, i]
       out.push(row)
-      i = revlI64(i + 1n)
+      i = (BigInt.asIntN(64, $revl_i64 = i + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
     }
     return out
 }

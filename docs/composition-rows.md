@@ -140,6 +140,13 @@ typed `config { field: T = default }` block, and it is checked:
   the type;
 - a field with no default that the composition does not supply is a refusal.
 
+A value is a literal, or a list of literals for a `List[T]` field
+(`origins: ["https://a.example", "https://b.example"]`). Each element is
+checked against `T`, so `["https://a.example", 443]` on a `List[Str]` field is
+refused naming the field. A list holds scalar literals only: no nested lists, no
+records, no expressions. A layer's `configure @row with { ... }` takes the same
+values and is re-checked the same way.
+
 A config typo is the most common way a layered composition breaks in practice.
 Here it is a refusal before anything is compiled, not a runtime surprise.
 

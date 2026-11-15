@@ -189,6 +189,23 @@ dispatch is for **ADT payloads**, which are real objects (`Ok(v)` has a `.value`
 attribute), never for records; it also lets a record a host hands back as an
 object still read on the common case.
 
+Where the receiver can only be a dict this document built, the dispatch is
+dropped and the read is `r['k']` (issue #3407): a `let` bound to a record
+literal or update (and every later assignment of it), or a record-typed
+parameter of a fn that is not `pub` and is called only directly, from fn and
+`test` bodies, with such values. A value a host hands across a typed boundary,
+an extern's return, a component's state, a container element or an ADT payload
+keeps the dispatch. The rule is `_dict_receivers` in `backends/python/emit.py`.
+Every identifier-like word of every string in the IR counts as a reference, so
+a fn an extern's `@py` body calls by name keeps the dispatch too.
+
+Host text that reaches a module-private fn other than by its spelled name (a
+computed `globals()` key, `sys._getframe`, `getattr(sys.modules[...], ...)`) is
+outside the closed world, as it is already outside the typed boundary; a
+record-typed value handed across the typed boundary (an extern's return, a `pub
+fn` call, a service argument, a component's state, a container element) keeps
+the dispatch.
+
 The class carried `@dataclass` until roadmap item 436 F9, which is why building
 one appeared to work. It appeared to work in tests only: `_make_record` and
 three `tests/test_v2_emit.py` cases constructed the class, so both `prop test`

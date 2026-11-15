@@ -355,6 +355,11 @@ def _run_mcp(args) -> int:
             providers=providers or None,
             roots=tuple(getattr(args, "root", None) or ()) or None,
         )
+        # issue #2990: bind the server's own attestation key, and write the
+        # public pin an operator hands to a client when asked for one.
+        refused = _bind_server_attestation(args)
+        if refused is not None:
+            return refused
         # the operator update surface (docs/updates.md): the flags are the
         # grant. A server started without --update refuses every update verb by
         # name at the verb itself, so a caller cannot enable it over the wire.
@@ -370,6 +375,10 @@ def _run_mcp(args) -> int:
                 home=getattr(args, "update_home", None),
                 api_base=getattr(args, "update_api_base", None),
                 trust_tags=bool(getattr(args, "update_trust_tags", False)),
+                trust_unsigned=bool(getattr(args, "update_trust_unsigned",
+                                            False)),
+                consents=tuple(getattr(args, "update_allow_consent", None)
+                               or ()),
                 replacing=tuple(getattr(args, "update_replacing", None) or ()))
         # issue #2524: the files this server reads as operator configuration.
         # No export may replace one, whichever directory it sits in.
@@ -377,7 +386,9 @@ def _run_mcp(args) -> int:
 
         protect_operator_files([
             getattr(args, "operator_profile", None), getattr(args, "policy", None),
-            getattr(args, "restore", None), os.environ.get("REVL_ESTOP_LATCH"),
+            getattr(args, "restore", None),
+            getattr(args, "attestation_key", None),
+            os.environ.get("REVL_ESTOP_LATCH"),
             # issue #2535: the latch beside the WAL, which need not exist yet
             f"{args.wal}.estop" if getattr(args, "wal", None) else None,
             getattr(args, "tls_cert", None), getattr(args, "tls_key", None),
@@ -456,9 +467,14 @@ def _run_mcp(args) -> int:
         return 1
     from ..mcp.schema import parse_undo_specs
     try:
-        source = import_tools(manifest, service=args.service, key=args.key,
-                              backend=args.backend,
-                              undo=parse_undo_specs(getattr(args, "undo", None)))
+        source = import_tools(
+            manifest, service=args.service, key=args.key,
+            backend=args.backend,
+            undo=parse_undo_specs(getattr(args, "undo", None)),
+            # issue #2990: an MCP server's answer is remote evidence. The
+            # generated surface says so (`Untrusted[...]`, origin `net`), so G9
+            # refuses using it as authority without a declared declassification.
+            origin="net")
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
@@ -468,6 +484,45 @@ def _run_mcp(args) -> int:
     else:
         print(source, end="")
     return 0
+
+
+def _bind_server_attestation(args) -> int | None:
+    """`revl mcp serve --attestation-key ...`: load the signing key, bind the
+    server to it, and write the public pin when asked (issue #2990).
+
+    A private key is operator configuration, so a bad file is a refusal at
+    startup, never a server that quietly answers unattested."""
+    key_path = getattr(args, "attestation_key", None)
+    pin_out = getattr(args, "attestation_pin_out", None)
+    if not key_path:
+        if pin_out:
+            print("error: --attestation-pin-out needs --attestation-key: a pin "
+                  "is the public half of a key this server has none of",
+                  file=sys.stderr)
+            return 1
+        return None
+    from ..mcp import server as _server
+    from ..mcp.attestation import write_pin
+    from ..peer_identity import IdentityError, load_private_identity
+
+    try:
+        identity = load_private_identity(key_path)
+    except (OSError, IdentityError, ValueError, KeyError) as error:
+        print(f"error: cannot read the attestation key {key_path}: {error}",
+              file=sys.stderr)
+        return 1
+    _server.set_attestation(
+        identity,
+        server_id=getattr(args, "attestation_server_id", "revl-mcp-serve"),
+        ttl=getattr(args, "attestation_ttl", 3600.0))
+    if pin_out:
+        try:
+            write_pin(pin_out, _server.attestation_pin())
+        except OSError as error:
+            print(f"error: cannot write the attestation pin {pin_out}: {error}",
+                  file=sys.stderr)
+            return 1
+    return None
 
 
 def _run_mcp_proxy(args) -> int:
@@ -488,6 +543,15 @@ def _run_mcp_proxy(args) -> int:
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
+    pin = None
+    if getattr(args, "attestation_pin", None):
+        from ..mcp.attestation import AttestationError, load_pin  # noqa: PLC0415
+
+        try:
+            pin = load_pin(args.attestation_pin)
+        except AttestationError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
     http = None
     if args.http:
         exposure, code = _http_exposure(args)
@@ -512,11 +576,13 @@ def _run_mcp_proxy(args) -> int:
     if http is None:
         return proxy.run(command, undo=undo,
                          trust_read_only=args.trust_read_only_hints,
-                         timeout=args.upstream_timeout, http=http, live=live)
+                         timeout=args.upstream_timeout, http=http, live=live,
+                         pin=pin)
     with _sigterm_unwinds():
         return proxy.run(command, undo=undo,
                          trust_read_only=args.trust_read_only_hints,
-                         timeout=args.upstream_timeout, http=http, live=live)
+                         timeout=args.upstream_timeout, http=http, live=live,
+                         pin=pin)
 
 
 def _run_serve(args) -> int:

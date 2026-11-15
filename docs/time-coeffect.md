@@ -114,6 +114,16 @@ from a real monotonic source; the reference tier keeps it explicit so tests are
 deterministic. The Python (`backends/python/runtime.py`) and TypeScript
 (`backends/typescript/runtime.ts`) clocks agree tick-for-tick.
 
+A host that pumps `advance` from a real clock asks the clock when to wake
+(issue #3377): `Clock.next_due()` (TypeScript `Clock.nextDue()`) is the number
+of milliseconds from `now()` until the earliest live timer is due, or `None`
+(`null`) with no live timer. The host sleeps that long and advances by it, so a
+timer fires on its tick rather than on a fixed slice. The clock holds a handle
+only while it is live: cancelling it, or an `after` firing, releases it and
+drops its body, so `advance` and `pending` cost the same after hundreds of
+swaps as after none. `Clock.firings()` keeps the most recent
+`Clock.FIRINGS_CAP` (1024) firings; it is a test aid, not a history.
+
 ### The `advance` lifecycle statement (item 102)
 
 Property 3 above is driven by a *host* call to `Clock.advance`. Item 57 left a

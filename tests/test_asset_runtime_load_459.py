@@ -949,11 +949,11 @@ _MUTATIONS = {
         '    target = path if os.path.isabs(path) else os.path.join(root, path)',
         '    target = os.path.join(root, path.replace("../", ""))'),
     "realpath-skipped": (
-        '    real = os.path.realpath(target)',
+        '    real = os.path.realpath(os.path.normpath(target))',
         '    real = os.path.normpath(target)'),
     "dotdot-refused-textually-instead": (
-        '    real = os.path.realpath(target)',
-        '    real = target if ".." not in path else os.path.realpath(target)'),
+        '    real = os.path.realpath(os.path.normpath(target))',
+        '    real = target if ".." not in path else os.path.realpath(os.path.normpath(target))'),
     "unset-root-falls-back-to-cwd": (
         '    if not root:\n'
         '        raise ConfinementError(\n'

@@ -126,6 +126,7 @@ def _declaration(**overrides):
                         "value": D("classify this ticket"), "reason": None},
         template_digest=D("classify {ticket}"),
         origins=["input"],
+        reasoning=me.reasoning_span(),
         candidates=[D("candidate a"), D("candidate b"), D("candidate c")],
         chosen=1,
         sampling={"temperature": 0.2, "top_p": 0.95, "top_k": 40,
@@ -810,3 +811,24 @@ def test_the_placement_link_is_distinct_from_the_vocabulary_link():
     outside the vocabulary, and a caller branching on `link` must see both."""
     assert me.EVIDENCE_PLACEMENT in me.EVIDENCE_LINKS
     assert me.EVIDENCE_PLACEMENT != me.EVIDENCE_VOCABULARY
+
+
+def test_a_host_reported_hidden_span_rides_a_real_crossing(tmp_path):
+    """Issue #2808 through the real crossing, not a hand-built record: the
+    provider declares what the host reported (tokens, no text), the sealed
+    account carries `hidden`, and the plan reports it opaque and not
+    rederivable. No answer was retained on this harness, so `fromRecord` is
+    false too."""
+    hidden = me.reasoning_span(tokens=2048, text="")
+    path = _run(tmp_path, sealer=me.CrossingSealer(KEY),
+                declaration=lambda: _declaration(reasoning=hidden))
+    (reading,) = rm.plan(path, evidence_key=KEY)["decisions"]
+    assert reading["verified"] is True
+    assert reading["reasoningVisibility"] == "hidden"
+    assert reading["reasoningTokens"] == 2048
+    assert reading["opaqueReasoning"] is True
+    assert reading["rederivable"] is False
+    assert "hidden" in reading["rederivableReason"]
+    assert reading["fromRecord"] is False
+    assert me.from_wal_record(_decisions(path)[0])["reasoning"][
+        "tokens"]["value"] == 2048
