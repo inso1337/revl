@@ -48,7 +48,7 @@ def _load(files: list[str]):
     ir = compile_files(files)
     templates = set((ir.get("manifest") or {}).get("templates") or ())
     surfaces = _boundary(ir)
-    reaches = behavior_blocks.reached_declarations(ir)
+    reaches = behavior_blocks.reached_by_component(ir)
     return _components_by_source(ir), templates, surfaces, reaches
 
 
@@ -103,7 +103,7 @@ def _targets(files: list[str], grouped: dict[str, list[dict]]):
 
 def _generate(files: list[str], grouped: dict[str, list[dict]],
               templates: set[str], surfaces: dict[str, dict],
-              reaches: dict[str, dict]) -> int:
+              reaches: dict[str, tuple[list, list]]) -> int:
     from .. import behavior_blocks  # noqa: PLC0415
 
     written = 0
@@ -138,7 +138,7 @@ def _generate(files: list[str], grouped: dict[str, list[dict]],
 
 def _check(files: list[str], grouped: dict[str, list[dict]],
            templates: set[str], surfaces: dict[str, dict],
-           reaches: dict[str, dict]) -> int:
+           reaches: dict[str, tuple[list, list]]) -> int:
     from .. import behavior_blocks  # noqa: PLC0415
 
     failed = 0

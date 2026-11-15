@@ -121,59 +121,29 @@ def _without_provenance(node, *, top: bool = False):
     return node
 
 
-def reached_declarations(ir: dict) -> dict[str, dict]:
-    """Per component name, the module functions and externs its body reaches.
+def reached_by_component(ir: dict) -> dict[str, tuple[list, list]]:
+    """Per component name, the `(functions, externs)` its body reaches.
 
-    The walk is `emission_analysis._calls_in`, the same reference collector the
-    G4 emission fixed point and the G8 boundary walk use: a direct call, a
-    first-class function value and a callee computed from other names all count,
-    and a function's own body is walked in turn, so the reach is transitive.
-    A local variable that happens to share a function's name over-approximates
-    the reach, which only ever makes a digest stricter. Each reached entry is the
-    declaration's whole lowered IR, so the body of a called function and the
-    host body or pinned host-module hash of a reached extern are part of what the
-    digest commits to.
+    The definition of "reached" is `revl.placement.reached_declarations`, the
+    one the placement slice uses: an over-inclusive name walk taken to a
+    fixpoint through the functions it reaches. A local variable that happens to
+    share a function's name only over-approximates the reach, which can only make
+    a digest stricter. Each reached entry is the declaration's whole lowered IR,
+    so the body of a called function and the host body or pinned host-module hash
+    of a reached extern are part of what the digest commits to.
     """
-    from .emission_analysis import _calls_in  # noqa: PLC0415 - lazy, like boundary
+    from .placement import reached_declarations  # noqa: PLC0415 - lazy, heavy module
 
-    functions = ir.get("functions") or []
-    if isinstance(functions, dict):
-        functions = list(functions.values())
-    functions_by_name = {fn["name"]: fn for fn in functions
-                         if isinstance(fn, dict) and isinstance(fn.get("name"), str)}
-    externs_by_name = {ext["name"]: ext for ext in ir.get("externs") or ()
-                       if isinstance(ext, dict) and isinstance(ext.get("name"), str)}
-
-    reach: dict[str, dict] = {}
-    for component in ir.get("components") or ():
-        found: set = set()
-        values: set = set()
-        _calls_in(component, found, values)
-        pending = sorted(found | values)
-        seen_functions: dict[str, dict] = {}
-        seen_externs: dict[str, dict] = {}
-        while pending:
-            name = pending.pop()
-            if name in functions_by_name and name not in seen_functions:
-                seen_functions[name] = functions_by_name[name]
-                nested: set = set()
-                nested_values: set = set()
-                _calls_in(functions_by_name[name], nested, nested_values)
-                pending.extend(sorted(nested | nested_values))
-            elif name in externs_by_name and name not in seen_externs:
-                seen_externs[name] = externs_by_name[name]
-        reach[component["name"]] = {
-            "functions": [seen_functions[name] for name in sorted(seen_functions)],
-            "externs": [seen_externs[name] for name in sorted(seen_externs)],
-        }
-    return reach
+    return {component["name"]: reached_declarations(ir, [component])
+            for component in ir.get("components") or ()}
 
 
-def _digest(component: dict, template: bool, reach: dict | None = None) -> str:
+def _digest(component: dict, template: bool,
+            reach: tuple[list, list] | None = None) -> str:
     """The sha256 of the component's lowered behavior, position-independent.
 
     The payload is the component's own IR entry plus the entries of the module
-    functions and externs it reaches (`reached_declarations`). The component's
+    functions and externs it reaches (`reached_by_component`). The component's
     `source` path and every source-position field are dropped, so a move of the
     file, a reformat that keeps the IR, or the insertion of the block itself
     does not change the digest; a change to the component's behavior, to a
@@ -185,8 +155,8 @@ def _digest(component: dict, template: bool, reach: dict | None = None) -> str:
     """
     payload = _without_provenance(component, top=True)
     payload["__template__"] = bool(template)
-    if reach and (reach.get("functions") or reach.get("externs")):
-        payload["__reach__"] = _without_provenance(reach)
+    if reach and (reach[0] or reach[1]):
+        payload["__reach__"] = _without_provenance(list(reach))
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"),
                       ensure_ascii=False)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
@@ -264,7 +234,7 @@ def _realms(component: dict) -> str:
 
 
 def derive(component: dict, *, template: bool, surface: dict | None,
-           reach: dict | None = None) -> dict:
+           reach: tuple[list, list] | None = None) -> dict:
     """The derived facts for one component, in render order."""
     capabilities = _capabilities(surface)
     externs = _externs(component, surface)
@@ -510,7 +480,7 @@ def generate(text: str, path: str, components: list[dict], templates: set[str],
 
     `components` is the IR component list, `templates` the manifest's template
     names, `surfaces` the G8 boundary report keyed by component name and
-    `reaches` the `reached_declarations` of the same IR.
+    `reaches` the `reached_by_component` of the same IR.
     """
     return _component_edits(text, path, components, templates, surfaces,
                             reaches or {})
