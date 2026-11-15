@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from revl.context import context, count_tokens
+from revl.context import IDIOMS, context, count_tokens
 from revl.lexer import lex
 from revl.mcp import server
 from revl.parser import Parser
@@ -57,7 +57,7 @@ def _tool(arguments: dict) -> dict:
 
 
 def test_pack_carries_every_signature_and_no_body():
-    record = context([MEDIATOR], component="NotesConsumer")
+    record = context([MEDIATOR], component="NotesConsumer", idioms=False)
     assert record["ok"]
     assert record["header"] == (
         "component NotesConsumer requires writer: AppendWriter provides notes: Notes")
@@ -138,7 +138,7 @@ def test_budget_sheds_docs_then_collapses_from_the_last_service_back():
     budget = record["budget"]
     assert budget["fits"] and record["tokens"]["pack"] <= 200
     assert budget["steps"] == ["docs off: Ranker", "docs off: NotesConsoleRpc",
-                               "collapsed: Ranker", "collapsed: WebUI",
+                               "idioms off", "collapsed: Ranker", "collapsed: WebUI",
                                "collapsed: NotesConsoleRpc"]
     for name in order:  # every service stays named, with its clause and hash
         assert f"service {name} " in record["pack"]
@@ -181,18 +181,85 @@ def test_the_token_proxy_is_the_one_tokens_to_green_counts_with():
 def test_examples_bar_the_pack_is_under_seventy_percent_and_bodiless():
     """The bar in docs/context.md, set before this change was measured:
     across every component of every example, the pack costs under 70% of the
-    files it was cut from, and no pack carries a body keyword."""
-    pack = raw = 0
+    files it was cut from, and no pack carries a body keyword. The
+    illustration is left out of that and counted on its own: with it the
+    total is still under the bar (68.7% when it was added)."""
+    pack = raw = shipped = 0
     for path in sorted(glob.glob(str(ROOT / "examples" / "**" / "*.rvl"),
                                  recursive=True)):
         if "rejections" in Path(path).parts:
             continue
         for comp in Parser(Path(path).read_text(encoding="utf-8"), path).parse().components:
-            record = context([path], component=comp.name)
+            record = context([path], component=comp.name, idioms=False)
             assert _body_keywords(record["pack"]) == [], (path, comp.name)
             pack += record["tokens"]["pack"]
             raw += record["tokens"]["raw"]
-    assert raw and pack / raw < 0.70
+            shipped += context([path], component=comp.name)["tokens"]["pack"]
+    assert raw and pack / raw < 0.70 and shipped / raw < 0.70
+
+
+# ----- a pack for one component ends with how a provider body is written
+
+def test_the_illustration_compiles_as_shown():
+    from revl import compile_source
+    compile_source(IDIOMS, "idioms.rvl")
+
+
+def test_the_illustration_is_appended_for_a_component_and_only_then():
+    plain = context([MEDIATOR], component="NotesConsumer", idioms=False)
+    full = context([MEDIATOR], component="NotesConsumer")
+    assert full["idioms"] is True and plain["idioms"] is False
+    assert full["pack"].startswith(plain["pack"])
+    assert full["pack"][len(plain["pack"]):].strip() == IDIOMS.strip()
+    # every body keyword in the default pack is the illustration's own
+    assert _body_keywords(full["pack"]) == _body_keywords(IDIOMS)
+    everything = context([MEDIATOR])
+    assert everything["idioms"] is False and IDIOMS.strip() not in everything["pack"]
+    assert context([MEDIATOR], idioms=True)["pack"].endswith(IDIOMS.strip() + "\n")
+
+
+def test_the_illustration_stays_when_docs_off_is_enough():
+    # the full order (docs, the illustration, collapse) is pinned by
+    # test_budget_sheds_docs_then_collapses_from_the_last_service_back
+    path = str(ROOT / "examples" / "app" / "notes.rvl")
+    full = context([path], component="NotesConsole")
+    room = full["tokens"]["pack"] - count_tokens(IDIOMS) + 10
+    record = context([path], component="NotesConsole", budget=room)
+    assert record["budget"]["fits"] and record["idioms"] is True
+    assert record["budget"]["steps"] \
+        and all(s.startswith("docs off: ") for s in record["budget"]["steps"])
+    assert record["pack"].endswith(IDIOMS.strip() + "\n")
+
+
+def test_the_illustration_comes_off_a_budget_with_no_service_to_shrink():
+    # nothing declares the service C requires, so the illustration is all
+    # the budget can take off
+    src = "component C requires s: Missing provides p: Missing {\n}\n"
+    full = _one(src, component="C")
+    assert full["idioms"] is True and full["services"][0]["declared"] is False
+    record = _one(src, component="C", budget=full["tokens"]["pack"] - 1)
+    assert record["budget"]["steps"] == ["idioms off"]
+    assert record["idioms"] is False and record["budget"]["fits"]
+
+
+def test_a_pack_with_no_component_has_no_illustration_to_shed():
+    record = context([MEDIATOR], budget=1)
+    assert record["idioms"] is False
+    assert "idioms off" not in record["budget"]["steps"]
+
+
+def test_no_idioms_on_the_cli_and_in_the_tool_leaves_it_out():
+    plain = context([MEDIATOR], component="NotesConsumer", idioms=False)["pack"]
+    text = subprocess.run([sys.executable, "-P", "-m", "revl", "context", MEDIATOR,
+                           "--component", "NotesConsumer", "--no-idioms"],
+                          capture_output=True, text=True)
+    assert text.returncode == 0 and text.stdout == plain
+    source = Path(MEDIATOR).read_text(encoding="utf-8")
+    off = _tool({"source": source, "component": "NotesConsumer", "idioms": False})
+    on = _tool({"source": source, "component": "NotesConsumer"})
+    assert IDIOMS.strip() not in off["pack"] and IDIOMS.strip() in on["pack"]
+    assert _tool({"source": source, "component": "NotesConsumer",
+                  "idioms": "no"})["ok"] is False
 
 
 # ----- each cut is the declaration's own text, found by its tokens
@@ -274,8 +341,8 @@ def test_the_budget_counts_the_header_it_prints():
 
 def test_collapse_is_skipped_when_it_would_not_shorten_the_service():
     src = "service S { fn f() -> Int }\ncomponent C provides s: S {\n  provide s { fn f() = 1 }\n}\n"
-    full = _one(src, component="C")
-    record = _one(src, component="C", budget=1)
+    full = _one(src, component="C", idioms=False)
+    record = _one(src, component="C", budget=1, idioms=False)
     assert record["budget"]["steps"] == []
     assert record["budget"]["fits"] is False
     assert record["pack"] == full["pack"]

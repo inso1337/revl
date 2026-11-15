@@ -11,6 +11,7 @@ from ..context import context
 from ..diagnostics import report
 from ..errors import RevlError
 from ..parser import Parser
+from .authoring_loop import step_label
 from .query_tools import _SOURCE_INPUT
 
 _INLINE = "<context>.rvl"
@@ -29,6 +30,9 @@ def _tool_context(arguments: dict) -> dict:
     budget = arguments.get("budget")
     if budget is not None and (type(budget) is not int or budget < 1):
         return _usage("`budget` must be a positive integer (a token ceiling)")
+    idioms = arguments.get("idioms")
+    if idioms is not None and type(idioms) is not bool:
+        return _usage("`idioms` must be true or false")
     try:
         if source is not None:
             # a bare source reads nothing from the disk, as `compile_source`
@@ -42,7 +46,8 @@ def _tool_context(arguments: dict) -> dict:
         else:
             return _usage("provide `source` or `files`")
         return context(paths, sources=sources or None,
-                       component=arguments.get("component"), budget=budget)
+                       component=arguments.get("component"), budget=budget,
+                       idioms=idioms)
     except RevlError as error:
         return report(error)
 
@@ -50,6 +55,7 @@ def _tool_context(arguments: dict) -> dict:
 CONTEXT_TOOL = {
     "name": "revl_context",
     "description":
+        step_label("revl_context") + " "
         "WHAT CAN THIS COMPONENT SEE? The service declarations a component "
         "must provide and may require, cut verbatim from the source with no "
         "provider body: operations, types, `emission` markers, the "
@@ -57,9 +63,12 @@ CONTEXT_TOOL = {
         "service lives in another module, and a `hash` that moves on a "
         "signature edit and never on a doc edit. Read it instead of the "
         "composition before writing a component. Builds from the parse, so a "
-        "component whose body does not check yet still grounds. `budget` "
-        "shrinks the pack in a fixed order (docs off, then collapse, from the "
-        "last service backwards) and never drops a service. `tokens` gives "
+        "component whose body does not check yet still grounds. With a "
+        "`component`, the pack ends with a short compiled illustration of how "
+        "a provider body is written (`idioms: false` leaves it out). `budget` "
+        "shrinks the pack in a fixed order (docs off, then the illustration, "
+        "then collapse, from the last service backwards) and never drops a "
+        "service. `tokens` gives "
         "the pack beside the files it was cut from: on a tiny file the raw "
         "file can be the cheaper read.",
     "inputSchema": {
@@ -71,6 +80,10 @@ CONTEXT_TOOL = {
                                          "every declared service)"},
             "budget": {"type": "integer", "minimum": 1,
                        "description": "the pack's token ceiling"},
+            "idioms": {"type": "boolean",
+                       "description": "append the compiled illustration of "
+                                      "how a provider body is written "
+                                      "(default: true with `component`)"},
         },
     },
     "annotations": {"readOnlyHint": True, "destructiveHint": False},
