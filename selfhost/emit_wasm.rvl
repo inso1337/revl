@@ -226,7 +226,12 @@ type WExpr = { wat: Str, ty: Str }
 // typename -> its spec, from which `_record_fields` reads the DECLARED field
 // order/types. It is document-global and constant like the string pool, so it
 // rides in the scope too rather than a separate parameter threaded everywhere.
-type Scope = { slots: Map[Str, Str], types: Map[Str, Str], strs: Map[Str, Str], rectypes: Any, functions: List[Any], tmp: Str }
+// `cdivs` is the function's total-form calls (docs/arithmetic.md) in pre-order,
+// each as its `node_sig` text: the reference numbers them in that order
+// (`_collect_cdiv_locals`, the `_cdiv` id that names the `cdiv_N_*` locals).
+// `cdiv`..`cdiv_hi` is the slice of that order the expression being rendered
+// spans, so a call finds its own id there (see `cdiv_id`).
+type Scope = { slots: Map[Str, Str], types: Map[Str, Str], strs: Map[Str, Str], rectypes: Any, functions: List[Any], tmp: Str, cdivs: List[Str], cdiv: Int, cdiv_hi: Int }
 // A statement-emission result: the emitted lines, the threaded scope, and the
 // accumulated local-width map (the reference's function-global `_local_types`).
 // `loop` is the running pre-order `for`-loop counter (the reference's
@@ -269,7 +274,160 @@ fn loop_control_targets(nodes: List[Any], include_continue: Bool) -> Bool {
 }
 
 fn scope_bind(s: Scope, name: Str, slot: Str, ty: Str) -> Scope {
-  return { slots: s.slots.set(name, slot), types: s.types.set(name, ty), strs: s.strs, rectypes: s.rectypes, functions: s.functions, tmp: s.tmp }
+  return { slots: s.slots.set(name, slot), types: s.types.set(name, ty), strs: s.strs, rectypes: s.rectypes, functions: s.functions, tmp: s.tmp, cdivs: s.cdivs, cdiv: s.cdiv, cdiv_hi: s.cdiv_hi }
+}
+
+// `s` narrowed to the total-form calls in pre-order positions `lo`..`hi`.
+fn scope_cdiv(s: Scope, lo: Int, hi: Int) -> Scope {
+  return { slots: s.slots, types: s.types, strs: s.strs, rectypes: s.rectypes, functions: s.functions, tmp: s.tmp, cdivs: s.cdivs, cdiv: lo, cdiv_hi: hi }
+}
+
+// `s` narrowed to the field `key` of `node`, whose own pre-order position is
+// `s.cdiv`: a total-form call counts itself first, then the calls under the
+// fields before `key` (in the IR's key order, which is the reference's
+// `node.values()` order) come before the ones under `key`.
+fn scope_at(s: Scope, node: Any, key: Str) -> Scope {
+  var lo = s.cdiv
+  if (is_checked_form(value_str(value_field(node, "method")))) { lo = lo + 1 }
+  for (k of value_keys(node)) {
+    if (k == key) { return scope_cdiv(s, lo, lo + count_cdivs(value_field(node, k))) }
+    lo = lo + count_cdivs(value_field(node, k))
+  }
+  return scope_cdiv(s, lo, lo)
+}
+
+// `s` narrowed to the element `i` of the list field `key` of `node`.
+fn scope_item(s: Scope, node: Any, key: Str, i: Int) -> Scope {
+  let field = scope_at(s, node, key)
+  let items = value_list(value_field(node, key))
+  var lo = field.cdiv
+  var j = 0
+  while (j < i) {
+    lo = lo + count_cdivs(items[j])
+    j = j + 1
+  }
+  return scope_cdiv(s, lo, lo + count_cdivs(items[i]))
+}
+
+// `s` narrowed to the value of the record-literal field `fname` (`fields` is a
+// list of `[name, value]` pairs, and a name is text, which holds no call).
+fn scope_rec_field(s: Scope, node: Any, fname: Str) -> Scope {
+  var j = 0
+  for (pair of value_list(value_field(node, "fields"))) {
+    if (value_str(value_list(pair)[0]) == fname) { return scope_item(s, node, "fields", j) }
+    j = j + 1
+  }
+  return scope_cdiv(s, s.cdiv, s.cdiv)
+}
+
+// ====================================================== total forms (docs/arithmetic.md)
+// `checked_add/sub/mul` answer an overflow as Err("revl: Int overflow"); the
+// division forms answer a zero divisor too. Both families are numbered together
+// (`_CHECKED_FORMS`), but only the arithmetic one is lowered by this port: the
+// division family stays behind its `<<UNSUPPORTED-BUILTIN:..>>` marker.
+fn is_checked_arith(m: Str) -> Bool {
+  return m == "checked_add" || m == "checked_sub" || m == "checked_mul"
+}
+fn is_checked_form(m: Str) -> Bool {
+  if (is_checked_arith(m)) { return true }
+  return m == "checked_div_trunc" || m == "checked_div_floor"
+      || m == "checked_div_euclid" || m == "checked_mod"
+}
+
+// The total-form calls under `node`, in pre-order (`_collect_cdiv_locals`).
+fn collect_cdivs(node: Any, acc: List[Any]) -> List[Any] {
+  var a = acc
+  let k = value_kind(node)
+  if (k == "record" && is_checked_form(value_str(value_field(node, "method")))) { a = a.push(node) }
+  if (k == "record" || k == "list") {
+    for (c of value_children(node)) { a = collect_cdivs(c, a) }
+  }
+  return a
+}
+
+fn count_cdivs(node: Any) -> Int { return collect_cdivs(node, []).length() }
+
+// A node's structure as text: two calls compare equal exactly when they are the
+// same expression. The id lookup below needs it, the IR carrying no position.
+fn node_sig(node: Any) -> Str {
+  let k = value_kind(node)
+  if (k == "record") {
+    var parts = []
+    for (key of value_keys(node)) { parts = parts.push(`${key}=${node_sig(value_field(node, key))}`) }
+    return `{${parts.join(",")}}`
+  }
+  if (k == "list") {
+    var parts = []
+    for (c of value_children(node)) { parts = parts.push(node_sig(c)) }
+    return `[${parts.join(",")}]`
+  }
+  if (k == "str") { return `"${value_str(node)}"` }
+  if (k == "null") { return "null" }
+  return `${k}:${num_str(node)}`
+}
+
+// The reference's `_cdiv` id of the call `node` (1-based, function-wide). Every
+// render narrows the scope to the field (and list element) it descends into, so
+// the scope of a call starts at the call's own pre-order position. The id is
+// that position plus one; the structural check is the guard that a render path
+// which did not narrow is named instead of answered with a neighbour's locals.
+fn cdiv_id(node: Any, s: Scope) -> Int {
+  if (s.cdiv < s.cdiv_hi && s.cdivs[s.cdiv] == node_sig(node)) { return s.cdiv + 1 }
+  return 0
+}
+
+// The total arithmetic forms (`_builtin_expr`'s `_CHECKED_ARITH` arm): both
+// operands go to scratch locals once, the value is computed into a third, and
+// the overflow test the trapping `$int_add/$int_sub/$int_mul` helpers run picks
+// the Err or the Ok cell. Multiply branches a zero operand out before its
+// divide-back readback (a zero divisor traps) and names Int.MIN * -1 first.
+fn render_checked_arith(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr {
+  let method = value_str(value_field(node, "method"))
+  var ty = "Result[Int, Str]"
+  if (is_tagged(s.rectypes, expected)) { ty = expected }
+  let id = cdiv_id(node, s)
+  if (id == 0) { return { wat: `<<UNSUPPORTED-BUILTIN:${method}-unplaced>>`, ty: "" } }
+  let n = num_str(id)
+  let ra = `(local.get $cdiv_${n}_a)`
+  let rb = `(local.get $cdiv_${n}_b)`
+  let rr = `(local.get $cdiv_${n}_r)`
+  let left = render_expr(value_field(node, "target"), scope_at(s, node, "target"), "Int", depth)
+  let right = render_expr(value_list(value_field(node, "args"))[0], scope_item(s, node, "args", 0), "Int", depth)
+  var value = `(i64.mul ${ra} ${rb})`
+  if (method == "checked_add") { value = `(i64.add ${ra} ${rb})` }
+  if (method == "checked_sub") { value = `(i64.sub ${ra} ${rb})` }
+  let ok_cell = tagged_cell(ty, "Ok", rr, "Int", s, depth)
+  let err_cell = tagged_cell(ty, "Err", map_get(s.strs, "revl: Int overflow"), "Str", s, depth)
+  let nl = newline()
+  var overflow = ""
+  if (method == "checked_add") {
+    overflow = `(i64.lt_s (i64.and (i64.xor ${ra} ${rr}) (i64.xor ${rb} ${rr})) (i64.const 0))`
+  } else if (method == "checked_sub") {
+    overflow = `(i64.lt_s (i64.and (i64.xor ${ra} ${rb}) (i64.xor ${ra} ${rr})) (i64.const 0))`
+  } else {
+    let lo = "(i64.const -9223372036854775808)"
+    overflow = [
+      "(if (result i32)",
+      `          (i32.or (i64.eqz ${ra}) (i64.eqz ${rb}))`,
+      "          (then (i32.const 0))",
+      "          (else (if (result i32)",
+      "            (i32.or",
+      `              (i32.and (i64.eq ${ra} ${lo}) (i64.eq ${rb} (i64.const -1)))`,
+      `              (i32.and (i64.eq ${ra} (i64.const -1)) (i64.eq ${rb} ${lo})))`,
+      "            (then (i32.const 1))",
+      `            (else (i64.ne (i64.div_s ${rr} ${rb}) ${ra})))))`
+    ].join(nl)
+  }
+  let wat = [
+    left.wat, `      (local.set $cdiv_${n}_a)`,
+    `      ${right.wat}`, `      (local.set $cdiv_${n}_b)`,
+    `      ${value}`, `      (local.set $cdiv_${n}_r)`,
+    "      (if (result i32)",
+    `        ${overflow}`,
+    `        (then ${err_cell.wat})`,
+    `        (else ${ok_cell.wat}))`
+  ].join(nl)
+  return { wat: wat, ty: ty }
 }
 
 // ==================================================== the value/memory ABI (slice 3)
@@ -586,7 +744,7 @@ fn render_list(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr {
   ]
   var i = 0
   for (it of items) {
-    let ev = render_expr(it, s, elem, depth + 1)
+    let ev = render_expr(it, scope_item(s, node, "items", i), elem, depth + 1)
     let addr = `(i32.add (local.get $${tmp}) (i32.const ${num_str(8 + 8 * i)}))`
     lines = lines.push(slot_store(addr, ev.wat, ev.ty))
     i = i + 1
@@ -610,7 +768,7 @@ fn render_record(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr {
   var i = 0
   for (fname of order) {
     let ftype = value_str(value_field(fieldsMap, fname))
-    let ev = render_expr(rec_lit_value(node, fname), s, ftype, depth + 1)
+    let ev = render_expr(rec_lit_value(node, fname), scope_rec_field(s, node, fname), ftype, depth + 1)
     var addr = `(local.get $${tmp})`
     if (i > 0) { addr = `(i32.add (local.get $${tmp}) (i32.const ${num_str(8 * i)}))` }
     lines = lines.push(slot_store(addr, ev.wat, ev.ty))
@@ -679,6 +837,8 @@ fn expr_max_depth(node: Any, base: Int) -> Int {
   if (k == "builtin") {
     var m = expr_max_depth(value_field(node, "target"), base)
     for (a of value_list(value_field(node, "args"))) { m = max_i(m, expr_max_depth(a, base)) }
+    // a total arithmetic form builds its Ok/Err cell at this depth
+    if (is_checked_arith(value_str(value_field(node, "method")))) { m = max_i(m, base) }
     return m
   }
   if (k == "call") {
@@ -868,8 +1028,8 @@ fn render_bin(node: Any, s: Scope, depth: Int) -> WExpr {
   let lty = infer_val_ty(ln, s)
   let rty = infer_val_ty(rn, s)
   if (lty == "Str" && rty == "Str" && (op == "+" || op == "==" || op == "!=" || op == "===" || op == "!==")) {
-    let left = render_expr(ln, s, "Str", depth)
-    let right = render_expr(rn, s, "Str", depth)
+    let left = render_expr(ln, scope_at(s, node, "left"), "Str", depth)
+    let right = render_expr(rn, scope_at(s, node, "right"), "Str", depth)
     let helper = op == "+" ? "$str_concat" : "$str_eq"
     var wat = `${left.wat}
       ${right.wat}
@@ -892,8 +1052,8 @@ fn render_bin(node: Any, s: Scope, depth: Int) -> WExpr {
     // agree by construction. `bin_instr` still answers `i32.and`/`i32.or` and is
     // still what a trap-free right operand emits, which is why every existing
     // golden byte holds.
-    let left = render_expr(ln, s, "Bool", depth)
-    let right = render_expr(rn, s, "Bool", depth)
+    let left = render_expr(ln, scope_at(s, node, "left"), "Bool", depth)
+    let right = render_expr(rn, scope_at(s, node, "right"), "Bool", depth)
     var arms = `(then ${right.wat})
         (else (i32.const 0))`
     if (op == "||") {
@@ -913,8 +1073,8 @@ fn render_bin(node: Any, s: Scope, depth: Int) -> WExpr {
       if (lty == "Int32" && rty == "Int32") { opnd = "Int32" }
     }
   }
-  let left = render_expr(ln, s, "", depth)
-  let right = render_expr(rn, s, "", depth)
+  let left = render_expr(ln, scope_at(s, node, "left"), "", depth)
+  let right = render_expr(rn, scope_at(s, node, "right"), "", depth)
   let instr = bin_instr(op, opnd)
   var result_ty = opnd
   if (is_comparison(op)) { result_ty = "Bool" }
@@ -928,7 +1088,7 @@ fn render_bin(node: Any, s: Scope, depth: Int) -> WExpr {
 
 fn render_un(node: Any, s: Scope, depth: Int) -> WExpr {
   let op = node_op(node)
-  let operand = render_expr(value_field(node, "operand"), s, "", depth)
+  let operand = render_expr(value_field(node, "operand"), scope_at(s, node, "operand"), "", depth)
   if (op == "!") {
     return { wat: `${operand.wat}
       (i32.eqz)`, ty: "Bool" }
@@ -964,7 +1124,7 @@ fn render_field(node: Any, s: Scope, depth: Int) -> WExpr {
   let fields = value_field(value_field(s.rectypes, tty), "fields")
   let fname = value_str(value_field(node, "name"))
   let field_ty = value_str(value_field(fields, fname))
-  let target = render_expr(value_field(node, "target"), s, tty, depth)
+  let target = render_expr(value_field(node, "target"), scope_at(s, node, "target"), tty, depth)
   var pos = 0
   var i = 0
   for (kn of value_keys(fields)) {
@@ -985,15 +1145,15 @@ fn render_field(node: Any, s: Scope, depth: Int) -> WExpr {
 fn render_index(node: Any, s: Scope, depth: Int) -> WExpr {
   let tty = infer_val_ty(value_field(node, "target"), s)
   let idxNode = value_field(node, "index")
-  let index = render_expr(idxNode, s, "Int", depth)
+  let index = render_expr(idxNode, scope_at(s, node, "index"), "Int", depth)
   if (tty == "Str" || tty == "Bytes") {
-    let target = render_expr(value_field(node, "target"), s, tty, depth)
+    let target = render_expr(value_field(node, "target"), scope_at(s, node, "target"), tty, depth)
     return { wat: `${target.wat}
       ${index.wat}
       (call $str_char_at)`, ty: "Str" }
   }
   let elem = list_elem(tty)
-  let target = render_expr(value_field(node, "target"), s, tty, depth)
+  let target = render_expr(value_field(node, "target"), scope_at(s, node, "target"), tty, depth)
   let addr = `(call $list_slot ${target.wat} ${index.wat})`
   return { wat: slot_load(addr, elem), ty: elem }
 }
@@ -1003,7 +1163,7 @@ fn render_index(node: Any, s: Scope, depth: Int) -> WExpr {
 // from the u32 prefix.
 fn render_len(node: Any, s: Scope, depth: Int) -> WExpr {
   let tty = infer_val_ty(value_field(node, "target"), s)
-  let target = render_expr(value_field(node, "target"), s, tty, depth)
+  let target = render_expr(value_field(node, "target"), scope_at(s, node, "target"), tty, depth)
   if (tty == "Str") { return { wat: `(i64.extend_i32_u (call $str_cp_length ${target.wat}))`, ty: "Int" } }
   return { wat: `(i64.extend_i32_u (i32.load ${target.wat}))`, ty: "Int" }
 }
@@ -1019,23 +1179,24 @@ fn render_builtin(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr {
   let tnode = value_field(node, "target")
   let tty = infer_val_ty(tnode, s)
   let args = value_list(value_field(node, "args"))
+  if (is_checked_arith(method)) { return render_checked_arith(node, s, expected, depth) }
   if (method == "length") {
-    let t = render_expr(tnode, s, tty, depth)
+    let t = render_expr(tnode, scope_at(s, node, "target"), tty, depth)
     if (tty == "Str") { return { wat: `(i64.extend_i32_u (call $str_cp_length ${t.wat}))`, ty: "Int" } }
     return { wat: `(i64.extend_i32_u (i32.load ${t.wat}))`, ty: "Int" }
   }
   if (method == "to_int" && tty == "Int32") {
-    let t = render_expr(tnode, s, "Int32", depth)
+    let t = render_expr(tnode, scope_at(s, node, "target"), "Int32", depth)
     return { wat: `(i64.extend_i32_s ${t.wat})`, ty: "Int" }
   }
   if (method == "to_int32") {
-    let t = render_expr(tnode, s, "Int", depth)
+    let t = render_expr(tnode, scope_at(s, node, "target"), "Int", depth)
     return { wat: `(call $int32_narrow ${t.wat})`, ty: "Int32" }
   }
   if (method == "push") {
-    let t = render_expr(tnode, s, tty, depth)
+    let t = render_expr(tnode, scope_at(s, node, "target"), tty, depth)
     let elemty = list_elem(tty)
-    let arg = render_expr(args[0], s, elemty, depth)
+    let arg = render_expr(args[0], scope_item(s, node, "args", 0), elemty, depth)
     var el = arg.wat
     if (elemty != "Int") { el = `(i64.extend_i32_u ${arg.wat})` }
     return { wat: `${t.wat}
@@ -1043,8 +1204,8 @@ fn render_builtin(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr {
       (call $list_push)`, ty: tty }
   }
   if (method == "concat") {
-    let t = render_expr(tnode, s, tty, depth)
-    let arg = render_expr(args[0], s, tty, depth)
+    let t = render_expr(tnode, scope_at(s, node, "target"), tty, depth)
+    let arg = render_expr(args[0], scope_item(s, node, "args", 0), tty, depth)
     var helper = """$list_concat"""
     if (tty == "Str" || tty == "Bytes") { helper = """$str_concat""" }
     return { wat: `${t.wat}
@@ -1052,9 +1213,9 @@ fn render_builtin(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr {
       (call ${helper})`, ty: tty }
   }
   if (method == "slice") {
-    let t = render_expr(tnode, s, tty, depth)
-    let a = render_expr(args[0], s, "Int", depth)
-    let b = render_expr(args[1], s, "Int", depth)
+    let t = render_expr(tnode, scope_at(s, node, "target"), tty, depth)
+    let a = render_expr(args[0], scope_item(s, node, "args", 0), "Int", depth)
+    let b = render_expr(args[1], scope_item(s, node, "args", 1), "Int", depth)
     var helper = """$list_slice"""
     if (tty == "Str") { helper = """$str_cp_slice""" }
     else { if (tty == "Bytes") { helper = """$str_slice""" } }
@@ -1064,8 +1225,8 @@ fn render_builtin(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr {
       (call ${helper})`, ty: tty }
   }
   if (method == "charAt") {
-    let t = render_expr(tnode, s, tty, depth)
-    let arg = render_expr(args[0], s, "Int", depth)
+    let t = render_expr(tnode, scope_at(s, node, "target"), tty, depth)
+    let arg = render_expr(args[0], scope_item(s, node, "args", 0), "Int", depth)
     var helper = """$str_char_at"""
     if (tty == "Str") { helper = """$str_cp_char_at""" }
     return { wat: `${t.wat}
@@ -1073,8 +1234,8 @@ fn render_builtin(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr {
       (call ${helper})`, ty: "Str" }
   }
   if (method == "charCodeAt" || method == "codepoint_at") {
-    let t = render_expr(tnode, s, tty, depth)
-    let arg = render_expr(args[0], s, "Int", depth)
+    let t = render_expr(tnode, scope_at(s, node, "target"), tty, depth)
+    let arg = render_expr(args[0], scope_item(s, node, "args", 0), "Int", depth)
     var helper = """$str_char_code_at"""
     if (tty == "Str") { helper = """$str_cp_char_code_at""" }
     return { wat: `${t.wat}
@@ -1082,29 +1243,29 @@ fn render_builtin(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr {
       (call ${helper})`, ty: "Int" }
   }
   if (method == "div_trunc") {
-    let t = render_expr(tnode, s, "Int", depth)
-    let arg = render_expr(args[0], s, "Int", depth)
+    let t = render_expr(tnode, scope_at(s, node, "target"), "Int", depth)
+    let arg = render_expr(args[0], scope_item(s, node, "args", 0), "Int", depth)
     return { wat: `(i64.div_s ${t.wat} ${arg.wat})`, ty: "Int" }
   }
   if (method == "div_floor" || method == "div_euclid" || method == "mod") {
-    let t = render_expr(tnode, s, "Int", depth)
-    let arg = render_expr(args[0], s, "Int", depth)
+    let t = render_expr(tnode, scope_at(s, node, "target"), "Int", depth)
+    let arg = render_expr(args[0], scope_item(s, node, "args", 0), "Int", depth)
     var call = """$int_mod"""
     if (method == "div_floor") { call = """$int_div_floor""" }
     if (method == "div_euclid") { call = """$int_div_euclid""" }
     return { wat: `(call ${call} ${t.wat} ${arg.wat})`, ty: "Int" }
   }
   if (method == "to_str") {
-    let t = render_expr(tnode, s, "Int", depth)
+    let t = render_expr(tnode, scope_at(s, node, "target"), "Int", depth)
     return { wat: `(call $int_to_str ${t.wat})`, ty: "Str" }
   }
   if (method == "to_int" && tty == "Str") {
-    let t = render_expr(tnode, s, "Str", depth)
+    let t = render_expr(tnode, scope_at(s, node, "target"), "Str", depth)
     return { wat: `(call $str_to_int ${t.wat})`, ty: "Opt[Int]" }
   }
   if (method == "startsWith" || method == "endsWith") {
-    let t = render_expr(tnode, s, tty, depth)
-    let arg = render_expr(args[0], s, "Str", depth)
+    let t = render_expr(tnode, scope_at(s, node, "target"), tty, depth)
+    let arg = render_expr(args[0], scope_item(s, node, "args", 0), "Str", depth)
     var helper = """$str_ends_with"""
     if (method == "startsWith") { helper = """$str_starts_with""" }
     return { wat: `${t.wat}
@@ -1118,9 +1279,15 @@ fn render_builtin(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr {
 // base scratch first (an allocated payload must land one nesting level deeper),
 // store the tag discriminant, then the payload slot (0 for a nullary case).
 fn make_tagged(ty: Str, case: Str, payload: Any, s: Scope, depth: Int) -> WExpr {
-  let layout = tagged_layout(s.rectypes, ty)
-  let tag = tag_of(layout, case)
-  let pty = payload_ty_of(layout, case)
+  if (value_is_null(payload)) { return tagged_cell(ty, case, "", "", s, depth) }
+  let ev = render_expr(payload, s, payload_ty_of(tagged_layout(s.rectypes, ty), case), depth + 1)
+  return tagged_cell(ty, case, ev.wat, ev.ty, s, depth)
+}
+
+// The cell itself, around a payload already lowered (`wat` "" = nullary): the
+// reference's `_make_tagged` over a `__wat` payload node is this, too.
+fn tagged_cell(ty: Str, case: Str, wat: Str, wty: Str, s: Scope, depth: Int) -> WExpr {
+  let tag = tag_of(tagged_layout(s.rectypes, ty), case)
   let tmp = tmp_name(s.tmp, depth)
   var lines = [
     `(call $alloc (i32.const 16))`,
@@ -1128,9 +1295,8 @@ fn make_tagged(ty: Str, case: Str, payload: Any, s: Scope, depth: Int) -> WExpr 
     `(i32.store (local.get $${tmp}) (i32.const ${num_str(tag)}))`
   ]
   let addr = `(i32.add (local.get $${tmp}) (i32.const 8))`
-  if (!value_is_null(payload)) {
-    let ev = render_expr(payload, s, pty, depth + 1)
-    lines = lines.push(slot_store(addr, ev.wat, ev.ty))
+  if (wat != "") {
+    lines = lines.push(slot_store(addr, wat, wty))
   } else {
     lines = lines.push(`(i64.store ${addr} (i64.const 0))`)
   }
@@ -1144,8 +1310,12 @@ fn render_adt(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr {
   let ty = adt_cell_ty(node, s, expected)
   let args = value_list(value_field(node, "args"))
   var payload = value_field(node, "")
-  if (args.length() > 0) { payload = args[0] }
-  return make_tagged(ty, value_str(value_field(node, "case")), payload, s, depth)
+  var ps = s
+  if (args.length() > 0) {
+    payload = args[0]
+    ps = scope_item(s, node, "args", 0)
+  }
+  return make_tagged(ty, value_str(value_field(node, "case")), payload, ps, depth)
 }
 
 fn function_sig(name: Str, s: Scope) -> Any {
@@ -1168,7 +1338,7 @@ fn render_direct_call(node: Any, s: Scope, depth: Int) -> WExpr {
   var parts = []
   var i = 0
   while (i < args.length()) {
-    parts = parts.push(render_expr(args[i], s, value_str(value_field(params[i], "type")), depth).wat)
+    parts = parts.push(render_expr(args[i], scope_item(s, node, "args", i), value_str(value_field(params[i], "type")), depth).wat)
     i = i + 1
   }
   // A user `fn` is `$fn.<name>` (issue #1756): a revl name has no `.`, and none
@@ -1178,9 +1348,9 @@ fn render_direct_call(node: Any, s: Scope, depth: Int) -> WExpr {
 }
 
 fn render_if(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr {
-  let cond = render_expr(value_field(node, "cond"), s, "Bool", depth)
-  let then = render_expr(value_field(node, "then"), s, expected, depth)
-  let otherwise = render_expr(value_field(node, "else"), s, expected, depth)
+  let cond = render_expr(value_field(node, "cond"), scope_at(s, node, "cond"), "Bool", depth)
+  let then = render_expr(value_field(node, "then"), scope_at(s, node, "then"), expected, depth)
+  let otherwise = render_expr(value_field(node, "else"), scope_at(s, node, "else"), expected, depth)
   if (then.ty != otherwise.ty || then.ty == "Unit" || then.ty == "") {
     return { wat: "<<UNSUPPORTED-IF-TYPE>>", ty: "" }
   }
@@ -1228,7 +1398,7 @@ fn render_inner(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr {
         if (inner == "") { inner = "Int" }
         ty = "Opt[".concat(inner).concat("]")
       }
-      return make_tagged(ty, "Some", payload, s, depth)
+      return make_tagged(ty, "Some", payload, scope_item(s, node, "args", 0), depth)
     }
     return render_direct_call(node, s, depth)
   }
@@ -1265,8 +1435,13 @@ fn emit_stmts(nodes: List[Any], s: Scope, widths: Map[Str, Str], rty: Str, loopc
   var w = widths
   var lc = loopc
   var bk = brkc
+  // each statement opens at the pre-order position after its predecessors'
+  // total-form calls (`_collect_cdiv_locals` numbering)
+  var cd = s.cdiv
   for (n of nodes) {
-    let r = emit_stmt(n, sc, w, rty, lc, bk, lctx)
+    let cn = count_cdivs(n)
+    let r = emit_stmt(n, scope_cdiv(sc, cd, cd + cn), w, rty, lc, bk, lctx)
+    cd = cd + cn
     lines = lines.concat(r.lines)
     sc = r.scope
     w = r.widths
@@ -1295,7 +1470,7 @@ fn emit_stmt(node: Any, s: Scope, widths: Map[Str, Str], rty: Str, loopc: Int,
     else { value_ty = map_get(s.types, name) }
     // The inferred/declared type is the `expected` the renderer needs to pin a
     // list/record literal (the reference passes `value_ty` as `expected`).
-    let value = render_expr(valnode, s, value_ty, 0)
+    let value = render_expr(valnode, scope_at(s, node, "value"), value_ty, 0)
     let nw = widths.set(`l_${name}`, wty(value_ty))
     var out = [value.wat, `(local.set $l_${name})`]
     let ns = scope_bind(s, name, `(local.get $l_${name})`, value_ty)
@@ -1304,23 +1479,23 @@ fn emit_stmt(node: Any, s: Scope, widths: Map[Str, Str], rty: Str, loopc: Int,
   if (step == "return") {
     let e = value_field(node, "expr")
     if (value_is_null(e)) { return { lines: ["return"], scope: s, widths: widths, loop: loopc, brk: brkc } }
-    let value = render_expr(e, s, rty, 0)
+    let value = render_expr(e, scope_at(s, node, "expr"), rty, 0)
     return { lines: [value.wat, "return"], scope: s, widths: widths, loop: loopc, brk: brkc }
   }
   if (step == "if") {
-    let cond = render_expr(value_field(node, "cond"), s, "Bool", 0)
+    let cond = render_expr(value_field(node, "cond"), scope_at(s, node, "cond"), "Bool", 0)
     let thenNodes = value_list(value_field(node, "then"))
     let elseNodes = value_list(value_field(node, "else"))
     // an `if` inside a loop body does not reset the loop context: a `break`
     // written one `if` deep still targets the enclosing loop, which is exactly
     // why the named labels are needed (anonymous `br 1` would hit the `if`).
-    let thenR = emit_stmts(thenNodes, s, widths, rty, loopc, brkc, lctx)
+    let thenR = emit_stmts(thenNodes, scope_at(s, node, "then"), widths, rty, loopc, brkc, lctx)
     var w2 = thenR.widths
     var lc = thenR.loop
     var bk = thenR.brk
     var elseLines = []
     if (elseNodes.length() > 0) {
-      let elseR = emit_stmts(elseNodes, s, w2, rty, lc, bk, lctx)
+      let elseR = emit_stmts(elseNodes, scope_at(s, node, "else"), w2, rty, lc, bk, lctx)
       elseLines = elseR.lines
       w2 = elseR.widths
       lc = elseR.loop
@@ -1338,7 +1513,7 @@ fn emit_stmt(node: Any, s: Scope, widths: Map[Str, Str], rty: Str, loopc: Int,
     return { lines: out, scope: s, widths: w2, loop: lc, brk: bk }
   }
   if (step == "while") {
-    let cond = render_expr(value_field(node, "cond"), s, "Bool", 0)
+    let cond = render_expr(value_field(node, "cond"), scope_at(s, node, "cond"), "Bool", 0)
     let body = value_list(value_field(node, "body"))
     // A loop that CARRIES a break/continue gets named labels so a `br` resolves
     // regardless of `if`-nesting depth; one with neither keeps the anonymous
@@ -1348,7 +1523,7 @@ fn emit_stmt(node: Any, s: Scope, widths: Map[Str, Str], rty: Str, loopc: Int,
       let brkl = `$revl_brk_${num_str(n)}`
       let topl = `$revl_top_${num_str(n)}`
       let bctx: LoopCtx = { kind: "while", brk: brkl, top: topl, cnt: "" }
-      let bodyR = emit_stmts(body, s, widths, rty, loopc, n, bctx)
+      let bodyR = emit_stmts(body, scope_at(s, node, "body"), widths, rty, loopc, n, bctx)
       var out = [`(block ${brkl}`, `  (loop ${topl}`, `    ${cond.wat}`, "    (i32.eqz)", `    (br_if ${brkl})`]
       for (l of bodyR.lines) { out = out.push(`    ${l}`) }
       out = out.push(`    (br ${topl})`)
@@ -1356,7 +1531,7 @@ fn emit_stmt(node: Any, s: Scope, widths: Map[Str, Str], rty: Str, loopc: Int,
       out = out.push(")")
       return { lines: out, scope: s, widths: bodyR.widths, loop: bodyR.loop, brk: bodyR.brk }
     }
-    let bodyR = emit_stmts(body, s, widths, rty, loopc, brkc, lctx)
+    let bodyR = emit_stmts(body, scope_at(s, node, "body"), widths, rty, loopc, brkc, lctx)
     var out = ["(block", "  (loop", `    ${cond.wat}`, "    (i32.eqz)", "    (br_if 1)"]
     for (l of bodyR.lines) { out = out.push(`    ${l}`) }
     out = out.push("    (br 0)")
@@ -1373,7 +1548,7 @@ fn emit_stmt(node: Any, s: Scope, widths: Map[Str, Str], rty: Str, loopc: Int,
     let iter_ty = infer_val_ty(value_field(node, "iterable"), s)
     let elem = list_elem(iter_ty)
     let bind = value_str(value_field(node, "bind"))
-    let it = render_expr(value_field(node, "iterable"), s, iter_ty, 0)
+    let it = render_expr(value_field(node, "iterable"), scope_at(s, node, "iterable"), iter_ty, 0)
     let w1 = widths.set(`l_${bind}`, wty(elem))
     let bscope = scope_bind(s, bind, `(local.get $l_${bind})`, elem)
     let body = value_list(value_field(node, "body"))
@@ -1397,7 +1572,7 @@ fn emit_stmt(node: Any, s: Scope, widths: Map[Str, Str], rty: Str, loopc: Int,
       let topl = `$revl_top_${num_str(bn)}`
       let cntl = `$revl_cnt_${num_str(bn)}`
       let bctx: LoopCtx = { kind: "for", brk: brkl, top: topl, cnt: cntl }
-      let bodyR = emit_stmts(body, bscope, w1, rty, n, bn, bctx)
+      let bodyR = emit_stmts(body, scope_at(bscope, node, "body"), w1, rty, n, bn, bctx)
       var out = prologue.concat([
         `(block ${brkl}`,
         `  (loop ${topl}`,
@@ -1415,7 +1590,7 @@ fn emit_stmt(node: Any, s: Scope, widths: Map[Str, Str], rty: Str, loopc: Int,
       out = out.push(")")
       return { lines: out, scope: s, widths: bodyR.widths, loop: bodyR.loop, brk: bodyR.brk }
     }
-    let bodyR = emit_stmts(body, bscope, w1, rty, n, brkc, lctx)
+    let bodyR = emit_stmts(body, scope_at(bscope, node, "body"), w1, rty, n, brkc, lctx)
     var out = prologue.concat([
       "(block",
       "  (loop",
@@ -1432,13 +1607,13 @@ fn emit_stmt(node: Any, s: Scope, widths: Map[Str, Str], rty: Str, loopc: Int,
     return { lines: out, scope: s, widths: bodyR.widths, loop: bodyR.loop, brk: bodyR.brk }
   }
   if (step == "expr") {
-    let value = render_expr(value_field(node, "expr"), s, "", 0)
+    let value = render_expr(value_field(node, "expr"), scope_at(s, node, "expr"), "", 0)
     var out = [value.wat]
     if (value.ty != "" && value.ty != "Unit") { out = out.push("(drop)") }
     return { lines: out, scope: s, widths: widths, loop: loopc, brk: brkc }
   }
   if (step == "assert") {
-    let value = render_expr(value_field(node, "expr"), s, "Bool", 0)
+    let value = render_expr(value_field(node, "expr"), scope_at(s, node, "expr"), "Bool", 0)
     return { lines: [value.wat, "(i32.eqz)", "(if (then unreachable))"], scope: s, widths: widths, loop: loopc, brk: brkc }
   }
   // item 379 / 391: bare loop control -> a `br` to the innermost loop's named
@@ -1567,12 +1742,30 @@ fn emit_function(fnode: Any, strs: Map[Str, Str], rectypes: Any, functions: List
   let names = list_sort(list_dedup(raw))
   var localOrder = []
   let tmp = fresh_tmp(types.keys().concat(names))
-  var scope: Scope = { slots: slots, types: types, strs: strs, rectypes: rectypes, functions: functions, tmp: tmp }
+  // the total-form calls, numbered 1..N in pre-order (`_collect_cdiv_locals`)
+  let cdnodes = collect_cdivs(value_field(fnode, "body"), [])
+  var cdsigs = []
+  for (c of cdnodes) { cdsigs = cdsigs.push(node_sig(c)) }
+  var scope: Scope = { slots: slots, types: types, strs: strs, rectypes: rectypes, functions: functions, tmp: tmp, cdivs: cdsigs, cdiv: 0, cdiv_hi: cdsigs.length() }
   for (nm of names) {
     if (!scope.types.has(nm)) {
       localOrder = localOrder.push(`l_${nm}`)
       scope = scope_bind(scope, nm, `(local.get $l_${nm})`, "")
     }
+  }
+  // each call's i64 operand scratch (plus the computed value for the
+  // arithmetic forms), after the `l_<name>` locals as the reference declares
+  // them (`_declare_local(.., "Int", ..)` makes them i64)
+  var wempty: Map[Str, Str] = Map.empty()
+  var ci = 1
+  for (c of cdnodes) {
+    var names3 = [`cdiv_${num_str(ci)}_a`, `cdiv_${num_str(ci)}_b`]
+    if (is_checked_arith(value_str(value_field(c, "method")))) { names3 = names3.push(`cdiv_${num_str(ci)}_r`) }
+    for (cn of names3) {
+      localOrder = localOrder.push(cn)
+      wempty = wempty.set(cn, "i64")
+    }
+    ci = ci + 1
   }
   // `for`-loop cursor triples, in loop-id order (`_for_temps`): the reference
   // declares them after the `l_<name>` locals and before the base scratch. Ids
@@ -1598,7 +1791,6 @@ fn emit_function(fnode: Any, strs: Map[Str, Str], rectypes: Any, functions: List
   }
   localOrder = localOrder.concat(list_sort(extra))
 
-  var wempty: Map[Str, Str] = Map.empty()
   let r = emit_stmts(body, scope, wempty, return_ty, 0, 0, no_loop())
   var bodyLines = r.lines
   var lastStep = ""
@@ -2205,6 +2397,9 @@ fn collect_lits(node: Any, acc: List[Str]) -> List[Str] {
       let vv = value_field(node, "value")
       if (value_kind(vv) == "str") { a = a.push(value_str(vv)) }
     }
+    // a total arithmetic form's Err reason comes from the emitter, not from a
+    // literal in the source, so it is pooled where the call sits
+    if (is_checked_arith(value_str(value_field(node, "method")))) { a = a.push("revl: Int overflow") }
     for (c of value_children(node)) { a = collect_lits(c, a) }
   } else {
     if (k == "list") {

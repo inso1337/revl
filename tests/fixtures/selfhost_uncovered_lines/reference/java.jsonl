@@ -336,7 +336,7 @@
 
 ["reason", "backends-java-emit-py-uses-builtin-result-walk", "backends/java/emit.py::_uses_builtin_result.walk: Residual short-circuit true branches detect Result cases/types; user variants and Opt do not require this runtime. Built-in Result is explicitly deferred."]
 
-["function", "backends-java-emit-py-uses-builtin-result-walk", "_uses_builtin_result.walk", 3, 3]
+["function", "backends-java-emit-py-uses-builtin-result-walk", "_uses_builtin_result.walk", 2, 2]
 
 ["reason", "backends-java-emit-py-uses-checked-div-walk", "backends/java/emit.py::_uses_checked_div.walk: Only setting found=True for checked integer division remains; this Result-valued arithmetic/runtime is explicitly deferred, unlike covered Float division."]
 

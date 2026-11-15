@@ -65,6 +65,8 @@ from .typecheck import (
     infer_ast,
     infer_memo,
     infer_memo_active,
+    infer_ir_memo,
+    infer_ir_memo_active,
     infer_ir,
     mismatch,
     pin_hole,
@@ -302,9 +304,12 @@ _BUILTIN_METHODS = {
     # The reverse of `codepoint_at` (issue #2285, docs/stdlib-2.0.md
     # §Int.to_char): Int receiver, no argument, a one-code-point Str or "".
     "to_char": 0,
-    # The total forms (docs/arithmetic.md): a zero divisor is the *point*
-    # here, so these are deliberately absent from _DIVIDES_BY below — a
-    # literal zero argument is refused for the faulting operations only.
+    # The total forms (docs/arithmetic.md): same operands as their faulting
+    # counterparts, `Result[Int, Str]` instead of a fault. A zero divisor is
+    # the *point* of the checked division forms, so those four are
+    # deliberately absent from _DIVIDES_BY below — a literal zero argument is
+    # refused for the faulting operations only.
+    "checked_add": 1, "checked_sub": 1, "checked_mul": 1,
     "checked_div_trunc": 1, "checked_div_floor": 1,
     "checked_div_euclid": 1, "checked_mod": 1,
     # The Map value type (docs/stdlib-2.0.md §Map). Names disjoint from the
@@ -817,8 +822,9 @@ def _is_dunder_name(name: str) -> bool:
 def _reject_dunder_name(name: str, kind: str, owner: str,
                         filename: str, line: int) -> None:
     """Refuse a dunder / prototype name in a `kind` (`field`/`method`/`config
-    field`) position, naming its `owner` (record / service / component). A no-op
-    for every ordinary name, so nothing that compiled before is affected."""
+    field`) position, naming its `owner` (a record, service or component, or
+    a record literal or update). A no-op for every ordinary name, so nothing
+    that compiled before is affected."""
     if _is_dunder_name(name):
         raise RevlError(
             filename, line,
@@ -8096,10 +8102,14 @@ def _lower_pure_expr_node(expr, scope: dict, callables: set, alias_fns: dict,
         # exactly this reason, and a bare `var` read (`{ x: v }`) is the same
         # copy — the value is taken, the mutable cell is not captured, so the
         # `var` still never escapes its function. Both forms lower identically.
+        for name, _ in expr.fields:
+            _reject_dunder_name(name, "field", "a record literal", filename, expr.line)
         return {"kind": "record",
                 "fields": [[name, _lower_pure_expr(e, scope, callables, alias_fns, filename, type_env, types)]
                            for name, e in expr.fields]}
     if isinstance(expr, ExprRecordUpdate):
+        for name, _ in expr.updates:
+            _reject_dunder_name(name, "field", "a record update", filename, expr.line)
         return {"kind": "record_update",
                 "base": _lower_pure_expr(expr.base, scope, callables, alias_fns, filename, type_env, types),
                 "updates": [[name, _lower_pure_expr(e, scope, callables, alias_fns, filename, type_env, types)]
@@ -10415,6 +10425,26 @@ def _component_scope_value_is_callee(name: str, env: Env,
 
 def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables: set,
                                pure_only: bool = False) -> dict:
+    """Lower one component-stratum expression.
+
+    Issue #3457: the operator arms below ask `infer_ir` for the type of each
+    operand after lowering it, and each answer walked the operand's subtree,
+    so the outermost call opens an `infer_ir_memo()` and every node of the
+    expression is inferred once per type environment. Sound under the in-place
+    binds this lowering makes to `env.type_env` because that memo keys the
+    environment by content.
+    """
+    if infer_ir_memo_active():
+        return _lower_component_pure_expr_node(expr, env, scope, callables,
+                                               pure_only)
+    with infer_ir_memo():
+        return _lower_component_pure_expr_node(expr, env, scope, callables,
+                                               pure_only)
+
+
+def _lower_component_pure_expr_node(expr, env: Env, scope: dict[str, str],
+                                    callables: set,
+                                    pure_only: bool = False) -> dict:
     filename = env.filename
     line = getattr(expr, "line", 0)
 
@@ -11021,11 +11051,17 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
     if isinstance(expr, ExprRecord):
         if isinstance(expr, ExprAsset):  # item 459 F1
             _require_resolved_asset(expr, env.filename)
+        for name, _ in expr.fields:
+            _reject_dunder_name(name, "field", "a record literal", env.filename,
+                                expr.line)
         return {"kind": "record",
                 "fields": [[name, _lower_component_pure_expr(e, env, scope, callables,
                                                              pure_only)]
                            for name, e in expr.fields]}
     if isinstance(expr, ExprRecordUpdate):
+        for name, _ in expr.updates:
+            _reject_dunder_name(name, "field", "a record update", env.filename,
+                                expr.line)
         return {"kind": "record_update",
                 "base": _lower_component_pure_expr(expr.base, env, scope, callables,
                                                    pure_only),

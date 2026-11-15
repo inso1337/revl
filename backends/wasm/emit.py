@@ -74,14 +74,19 @@ _SLOT = 8
 # addressing the wrong referent and reporting the miss as a clean rollback.
 _REDACTED_SECRET = "<redacted:secret>"
 
-# The total, value-returning division forms (docs/arithmetic.md): same
-# rounding as the faulting operations, Err(reason) at a zero divisor.
+# The total, value-returning forms (docs/arithmetic.md): same value as the
+# faulting operations where it fits, Err(reason) instead of the fault
+# otherwise. `checked_add/sub/mul` answer the overflow; the division forms
+# answer a zero divisor too (and the one overflowing quotient).
+_CHECKED_ARITH = ("checked_add", "checked_sub", "checked_mul")
 _CHECKED_DIVS = ("checked_div_trunc", "checked_div_floor",
                  "checked_div_euclid", "checked_mod")
+_CHECKED_FORMS = _CHECKED_ARITH + _CHECKED_DIVS
 _DIV_ZERO_MSG = "revl: division by zero"
-#: The reason a `checked_*` quotient does not fit (`Int.MIN / -1` is 2^63, one
-#: past Int.MAX). Spelled exactly as the other five tiers spell it: the total
-#: forms answer it as a VALUE, where the faulting operations trap.
+#: The reason an `Int` result does not fit (an overflowing `+`/`-`/`*`, or
+#: `Int.MIN / -1` = 2^63, one past Int.MAX). Spelled exactly as the other
+#: five tiers spell it: the total forms answer it as a VALUE, where the
+#: faulting operations trap.
 _INT_OVERFLOW_MSG = "revl: Int overflow"
 
 
@@ -3722,14 +3727,15 @@ class _V3Emitter:
             if isinstance(node, dict):
                 if node.get("kind") == "lit" and isinstance(node.get("value"), str):
                     seen.setdefault(node["value"], None)
-                if node.get("method") in _CHECKED_DIVS:
-                    # the total division forms carry their Err reasons from
-                    # the emitter, not from a literal in the source — pool them
+                if node.get("method") in _CHECKED_FORMS:
+                    # the total forms carry their Err reasons from the
+                    # emitter, not from a literal in the source — pool them
                     # here so `_str_ptr` can name them at lowering time. The
-                    # three quotient forms carry a second one: `Int.MIN / -1`
-                    # has no representable quotient, and they answer that as a
-                    # value rather than trapping the way `/` does.
-                    seen.setdefault(_DIV_ZERO_MSG, None)
+                    # division forms carry a second one for `Int.MIN / -1`,
+                    # which has no representable quotient; the arithmetic
+                    # forms carry only the overflow reason.
+                    if node.get("method") in _CHECKED_DIVS:
+                        seen.setdefault(_DIV_ZERO_MSG, None)
                     if node.get("method") != "checked_mod":
                         seen.setdefault(_INT_OVERFLOW_MSG, None)
                 if node.get("kind") == "interp":
@@ -5657,12 +5663,12 @@ class _V3Emitter:
         target_node = node.get("target")
         target_ty = self._infer_type(target_node, scope)
         args = node.get("args") or []
-        # The total forms (docs/arithmetic.md): same quotient as the faulting
-        # operation, but a zero divisor yields Err(reason) instead of the
-        # `i64.div_s` trap — `fail` is refused in a pure fn, so the error
-        # travels as a value. Both operands are evaluated once into scratch
-        # slots; each branch allocates its own tagged cell.
-        if method in _CHECKED_DIVS:
+        # The total forms (docs/arithmetic.md): same value as the faulting
+        # operation where it fits, Err(reason) instead of the trap otherwise
+        # — `fail` is refused in a pure fn, so the error travels as a value.
+        # Both operands are evaluated once into scratch slots; each branch
+        # allocates its own tagged cell.
+        if method in _CHECKED_FORMS:
             ty = expected if self._tagged_layout(expected) is not None else "Result[Int, Str]"
             if self._tagged_layout(ty) is None:
                 raise EmitError(f"{where}: {ty!r} is not a tagged union")
@@ -5673,10 +5679,60 @@ class _V3Emitter:
             tmp_b = f"cdiv_{node['_cdiv']}_b"
             self._declare_local(tmp_a, "Int", where)
             self._declare_local(tmp_b, "Int", where)
-            dividend = self._expr(target_node, scope, where, "Int")
-            divisor = self._expr(args[0], scope, where, "Int")
+            left = self._expr(target_node, scope, where, "Int")
+            right = self._expr(args[0], scope, where, "Int")
             read_a = f"(local.get ${tmp_a})"
             read_b = f"(local.get ${tmp_b})"
+            if method in _CHECKED_ARITH:
+                # The value is computed first, then the same overflow test the
+                # trapping `$int_add/$int_sub/$int_mul` helpers run decides
+                # between the Ok and Err cells. For multiply the test must not
+                # divide when the left operand is zero (that traps), so the
+                # zero case is branched out before the readback; `Int.MIN * -1`
+                # is named before it for the same reason `$int_mul` names it.
+                tmp_r = f"cdiv_{node['_cdiv']}_r"
+                self._declare_local(tmp_r, "Int", where)
+                read_r = f"(local.get ${tmp_r})"
+                value = {
+                    "checked_add": f"(i64.add {read_a} {read_b})",
+                    "checked_sub": f"(i64.sub {read_a} {read_b})",
+                    "checked_mul": f"(i64.mul {read_a} {read_b})",
+                }[method]
+                ok_cell = self._make_tagged(
+                    ty, "Ok", {"kind": "__wat", "wat": read_r, "ty": "Int"},
+                    scope, where)
+                err_cell = self._make_tagged(
+                    ty, "Err",
+                    {"kind": "lit", "value": _INT_OVERFLOW_MSG},
+                    scope, where)
+                if method == "checked_add":
+                    overflow = (f"(i64.lt_s (i64.and (i64.xor {read_a} {read_r}) "
+                                f"(i64.xor {read_b} {read_r})) (i64.const 0))")
+                elif method == "checked_sub":
+                    overflow = (f"(i64.lt_s (i64.and (i64.xor {read_a} {read_b}) "
+                                f"(i64.xor {read_a} {read_r})) (i64.const 0))")
+                else:
+                    overflow = (f"(if (result i32)\n"
+                                f"          (i32.or (i64.eqz {read_a}) (i64.eqz {read_b}))\n"
+                                f"          (then (i32.const 0))\n"
+                                f"          (else (if (result i32)\n"
+                                f"            (i32.or\n"
+                                f"              (i32.and (i64.eq {read_a} "
+                                f"(i64.const -9223372036854775808)) "
+                                f"(i64.eq {read_b} (i64.const -1)))\n"
+                                f"              (i32.and (i64.eq {read_a} (i64.const -1)) "
+                                f"(i64.eq {read_b} (i64.const -9223372036854775808))))\n"
+                                f"            (then (i32.const 1))\n"
+                                f"            (else (i64.ne (i64.div_s {read_r} {read_b}) "
+                                f"{read_a})))))")
+                wat = (f"{left.wat}\n      (local.set ${tmp_a})\n"
+                       f"      {right.wat}\n      (local.set ${tmp_b})\n"
+                       f"      {value}\n      (local.set ${tmp_r})\n"
+                       f"      (if (result i32)\n"
+                       f"        {overflow}\n"
+                       f"        (then {err_cell.wat})\n"
+                       f"        (else {ok_cell.wat}))")
+                return _E(wat, ty)
             quotient = {
                 "checked_div_trunc": f"(i64.div_s {read_a} {read_b})",
                 "checked_div_floor": f"(call $int_div_floor {read_a} {read_b})",
@@ -5711,8 +5767,8 @@ class _V3Emitter:
                          f"          (i64.eq {read_b} (i64.const -1)))\n"
                          f"        (then {overflow_cell.wat})\n"
                          f"        (else {ok_cell.wat}))")
-            wat = (f"{dividend.wat}\n      (local.set ${tmp_a})\n"
-                   f"      {divisor.wat}\n      (local.set ${tmp_b})\n"
+            wat = (f"{left.wat}\n      (local.set ${tmp_a})\n"
+                   f"      {right.wat}\n      (local.set ${tmp_b})\n"
                    f"      (if (result i32)\n"
                    f"        (i64.eqz {read_b})\n"
                    f"        (then {err_cell.wat})\n"
@@ -6144,15 +6200,19 @@ class _V3Emitter:
                 self._collect_match_locals(value, binds, scruts)
 
     def _collect_cdiv_locals(self, node: Any, names: list) -> None:
-        """Mint the i64 operand locals each total-division form needs, in the
-        order the bodies are lowered — the same pre-pass `_collect_match_locals`
-        does for match scratch, since both live in expression position."""
+        """Mint the i64 locals each total form needs, in the order the bodies
+        are lowered — the same pre-pass `_collect_match_locals` does for match
+        scratch, since both live in expression position. The arithmetic forms
+        need a third local for the computed value, whose sign is part of the
+        overflow test."""
         if isinstance(node, dict):
-            if node.get("method") in _CHECKED_DIVS and "_cdiv" not in node:
+            if node.get("method") in _CHECKED_FORMS and "_cdiv" not in node:
                 self._cdiv_counter += 1
                 node["_cdiv"] = self._cdiv_counter
                 names.extend([f"cdiv_{self._cdiv_counter}_a",
                               f"cdiv_{self._cdiv_counter}_b"])
+                if node.get("method") in _CHECKED_ARITH:
+                    names.append(f"cdiv_{self._cdiv_counter}_r")
             for value in node.values():
                 self._collect_cdiv_locals(value, names)
         elif isinstance(node, list):
