@@ -63,10 +63,12 @@ component Grower {
 }
 """
 
-# A finite CPU burn (~200M iterations, well over a second), so the wall-clock
-# test does not depend on an infinite loop: with no ceiling the composition
-# completes (the "main" behaviour), and with one it traps.
-_BURN = """
+# A finite CPU burn, so no test depends on an infinite loop: with no ceiling the
+# composition completes (the "main" behaviour), and with one it traps. The
+# iteration count is a parameter: `_BURN` (200M) is a fraction of a second on a
+# fast host and must finish under a generous ceiling, while `_LONG_BURN` (2G,
+# several seconds even on a fast host) must outlast a 1s wall ceiling.
+_BURN_TEMPLATE = """
 type E = { code: Str }
 
 extern pure fn unburn(r: Str) -> Unit = @wasm { }
@@ -75,7 +77,7 @@ extern witnessed[s] fn burn() -> Result[Str, E]
   undo unburn(result)
   = @wasm {
     (local $n i32)
-    (local.set $n (i32.const 200000000))
+    (local.set $n (i32.const @COUNT@))
     (block $done
       (loop $l
         (local.set $n (i32.sub (local.get $n) (i32.const 1)))
@@ -87,6 +89,8 @@ component Burner {
   effect burn()
 }
 """
+_BURN = _BURN_TEMPLATE.replace("@COUNT@", "200000000")
+_LONG_BURN = _BURN_TEMPLATE.replace("@COUNT@", "2000000000")
 
 
 def _run(source: str, policy_text: str | None) -> tuple[int, str]:
@@ -138,9 +142,9 @@ def test_the_fuel_ceiling_stops_a_burn_that_would_otherwise_succeed():
 
 @needs_cordis_wasm
 def test_the_wall_clock_ceiling_interrupts_a_burn_that_would_otherwise_succeed():
-    # The same finite burn, with a huge fuel budget and a 1s wall: only the
+    # A long finite burn, with a huge fuel budget and a 1s wall: only the
     # epoch deadline can stop it. On main there is no deadline and it boots.
-    rc, out = _run(_BURN,
+    rc, out = _run(_LONG_BURN,
                    "wasm component limits fuel = 1000000000000, "
                    "memory = 64MiB, wall = 1s")
     assert rc != 0, out
