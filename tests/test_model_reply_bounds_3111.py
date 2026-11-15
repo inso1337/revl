@@ -263,7 +263,8 @@ def test_a_non_ascii_content_length_is_not_a_raw_error(serve):
 def test_a_server_sending_a_byte_at_a_time_is_cut_off_at_the_deadline(serve):
     def script(conn, stop):
         payload = b'{"choices":[{"message":{"content":"' + b"a" * 5000
-        conn.sendall(http_200(payload, declared=len(payload) + 10))
+        # head only: the whole body then arrives a byte at a time
+        conn.sendall(http_200(b"", declared=len(payload) + 10))
         for i in range(len(payload)):
             if stop.is_set():
                 return
