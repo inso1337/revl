@@ -336,8 +336,13 @@ def test_an_unset_variable_is_never_named_in_a_message(monkeypatch):
     # name stays out of every message while the variable is not set
     odd = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     monkeypatch.delenv(odd, raising=False)
-    binding = _binding(provider="anthropic", model="m", api_key_env=odd)
+    cfg = parse_config({"roles": {"r": {
+        "provider": "anthropic", "model": "m", "api_key_env": odd}}})
+    binding = cfg.binding("r")
     adapter = Adapter(binding)
+    assert odd not in repr(binding)
+    assert odd not in repr(cfg)
+    assert odd not in repr(vars(adapter))
     with pytest.raises(ProviderError) as exc:
         adapter._credential()
     assert odd not in str(exc.value)

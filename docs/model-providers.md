@@ -143,7 +143,8 @@ What the configuration check refuses, without repeating the value:
 - an `api_key_env` that is not an upper-case environment variable name (the
   usual cause is pasting the key itself there; most keys carry a lower-case
   letter or a `-`, which a name in this form cannot). A key that happens to
-  fit is not caught, so a message about an unset credential variable says
+  fit is not caught (an AWS access key id, `AKIA` plus 16 upper-case
+  characters, is one), so a message about an unset credential variable says
   "the variable named in `api_key_env`" for the role and never prints the
   name;
 - a `base_url` with user info (`https://user:key@host`) or a query string

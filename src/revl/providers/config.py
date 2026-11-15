@@ -132,7 +132,9 @@ class Binding:
     provider: str
     model: str
     base_url: str
-    api_key_env: str | None = None
+    #: not in the repr: while the variable is unset, a pasted key that fits
+    #: the name shape would print with it
+    api_key_env: str | None = field(default=None, repr=False)
     max_tokens: int = DEFAULT_MAX_TOKENS
     temperature: float = 0.0
     timeout: float = DEFAULT_TIMEOUT
