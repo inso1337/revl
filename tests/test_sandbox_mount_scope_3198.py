@@ -143,11 +143,17 @@ def test_a_single_file_or_an_unrelated_directory_is_admitted(tmp_path):
     app.write_text(_APP, encoding="utf-8")
     checkout = tmp_path / "checkout" / "src"
     checkout.mkdir(parents=True)
+    # a conductor checkout INSIDE the operator's home is normal (an ancestor of
+    # home is the leak, a subdirectory of it is not)
+    inside_home = home / "revl" / "src"
+    inside_home.mkdir(parents=True)
 
     assert _sb._overbroad_host_mount(
         "p", [(str(app), "ro")], {"fs": []}, home=home) is None
     assert _sb._overbroad_host_mount(
         "p", [(str(checkout), "ro")], {"fs": []}, home=home) is None
+    assert _sb._overbroad_host_mount(
+        "p", [(str(inside_home), "ro")], {"fs": []}, home=home) is None
 
 
 # ==========================================================================
