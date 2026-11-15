@@ -643,6 +643,9 @@ fn render_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
     if (target.indexOf(":=") >= 0) {
       return "(lambda _revl_m, _revl_k: {kk: vv for kk, vv in _revl_m.items() if kk != _revl_k})".concat(`(${target}, ${args[0]})`)
     }
+    if (!py_plain_key(args[0])) {
+      return "(lambda _revl_m, _revl_k: {kk: vv for kk, vv in _revl_m.items() if kk != _revl_k})".concat(`(${target}, ${args[0]})`)
+    }
     return "{".concat(`kk: vv for kk, vv in ${target}.items() if kk != ${args[0]}`).concat("}")
   }
   if (method == "div_trunc") {
@@ -1641,6 +1644,20 @@ fn dr_calls(node: Any, fns: Map[Str, Any], ctx: Int) -> List[DrCall] {
   }
   for (child of value_children(node)) { found = found.concat(dr_calls(child, fns, ctx)) }
   return found
+}
+
+// A rendered key that is a bare name or a number: re-evaluating it per
+// comprehension entry costs nothing and has no effect (issue #3344). The
+// comprehension's own loop variables `kk` and `vv` are not plain: a user name
+// spelled that way would be captured by them.
+fn py_plain_key(key: Str) -> Bool {
+  if (key.length() == 0 || key == "kk" || key == "vv") { return false }
+  var i = 0
+  while (i < key.length()) {
+    if (!dr_word_char(key.slice(i, i + 1))) { return false }
+    i += 1
+  }
+  return true
 }
 
 fn dr_word_char(ch: Str) -> Bool {

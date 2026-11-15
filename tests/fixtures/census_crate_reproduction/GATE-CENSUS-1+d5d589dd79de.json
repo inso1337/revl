@@ -1233,6 +1233,7 @@
   "tests/fixtures/erase_realms.rvl",
   "tests/fixtures/erase_receipt.rvl",
   "tests/fixtures/extern_idempotent_deferred.rvl",
+  "tests/fixtures/g1_coverage/provide_then_emit.rvl",
   "tests/fixtures/g4_emit_arrow_argument_inline.rvl",
   "tests/fixtures/g4_emit_arrow_argument_let_arrow.rvl",
   "tests/fixtures/g4_emit_arrow_argument_let_value.rvl",
