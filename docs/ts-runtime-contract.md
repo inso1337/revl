@@ -180,7 +180,13 @@ tier gets from node are not in a page:
    file it resolves to. Outputs land flat in `<out-dir>`, so the default
    emission (`import ... from '../runtime.ts'`) becomes `./runtime.js`, beside
    the module. A relative `.ts` specifier that resolves to a file the step was
-   not given fails the step, because the page could not load it either. Run the
+   not given fails the step, because the page could not load it either. The
+   step also refuses, by name, what it cannot rewrite or erase: an enum or a
+   namespace that is not `declare`d (a `declare`d one is erased and kept), a
+   constructor parameter property and a dynamic `import()` written with a
+   template string. Each is outside the
+   strip-only rule 3, and the compiler would otherwise convert it silently or
+   leave a `.ts` specifier the page cannot load. Run the
    step once when the module is emitted; the page then loads plain ESM. This is
    the strip step the issue allowed in place of a second JavaScript rendering of
    the emitter: an emitted module is strip-only TypeScript by rule 3, so
@@ -266,17 +272,28 @@ headless Chrome. The page calls the function, applies the component through
 `plug`, calls the service method and reports the `host` keys it sees; the test
 asserts the function's value, the service's value and the host set (as a set:
 the order of `host` is not part of the contract). A page whose module throws
-while running reports `REVL-BROWSER-ERROR` with its stack. A static import that
-cannot be resolved stops the module before the script runs, so the title stays
-`PENDING`; the test fails on that title, which names what it saw either way.
+while running reports `REVL-BROWSER-ERROR` with its stack. The page also
+records what its own `try` cannot see: an `error` event (a throw in a callback),
+an `unhandledrejection` event and a `console.error` call. Any of them makes the
+title `REVL-BROWSER-PAGE-ERRORS` followed by each error, and the test fails on
+it; a second test loads a page that does all three and requires each to be
+named. A static import that cannot be resolved stops the module before the
+script runs, so the title stays `PENDING`; the test fails on that title, which
+names what it saw either way.
 
 The engine is found from `REVL_CHROME` (which names it exclusively when set),
 then `google-chrome` and the other usual names, then the macOS application
 paths. The `backend-typescript` job runs the
 test with `REVL_BROWSER_REQUIRED=1` (`ubuntu-latest` carries `google-chrome`),
-which turns a missing engine into a failure with the command to install one; a
-local run without an engine skips with the same reason. A gate that skips in CI
-would prove nothing, which is why the job sets the variable.
+which turns a missing engine into a failure. The message says what to install
+(Google Chrome or Chromium) or set (`REVL_CHROME`), and when `REVL_CHROME` names
+a file that does not exist it names that path; it gives no install command,
+because the right one depends on the platform. A local run without an engine
+skips with the same reason. A gate that skips in CI would prove nothing, which
+is why the job sets the variable.
+
+Chrome runs in its own process group, and a timeout kills the group, so its
+helper processes do not outlive the test.
 
 ## How it is gated
 

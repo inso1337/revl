@@ -2115,8 +2115,9 @@ jobs:
       # browser target's headless Chrome run below adds about 30s.
       # issue #3294: the browser target's gate loads an emitted module in
       # headless Chrome. `ubuntu-latest` carries `google-chrome`, and this
-      # variable makes a missing engine a failure that names the command to
-      # install one, rather than a silent skip in the one job that can run it.
+      # variable makes a missing engine a failure that says what to install
+      # (Google Chrome or Chromium) or set (REVL_CHROME), rather than a silent
+      # skip in the one job that can run it.
       - run: pytest backends/typescript/ -q
         env:
           REVL_BROWSER_REQUIRED: "1"
