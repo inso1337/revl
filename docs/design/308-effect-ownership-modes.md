@@ -10,10 +10,11 @@ per decision. SHARED landed: slice 3a reserved the contextual markers (PR #503)
 and slice 3b is admitted by the parser and built on the reference tier (PR
 #698), with the S1 spec below complete. TRANSFER's first surface is DECIDED in
 TR1 below: a resource-typed `handoff` across a same-realm swap, where the
-bracket migrates from predecessor to successor. TR1 is design only; its
-implementation slice is next, and the acquire-head reservation in
-`src/revl/parser.py` is the placeholder it replaces. PRODUCT-VISION, 243-261
-arc.
+closing duty of the handle moves from predecessor to successor through a
+swap transit ledger. TR1 is design only, with one question (OQ-T1, how the receiving
+binding obtains the handle) left open for the owner; its implementation
+slice is next, and the acquire-head reservation in `src/revl/parser.py` is
+the placeholder it replaces. PRODUCT-VISION, 243-261 arc.
 Companion docs: [243-witnessed-externs.md](243-witnessed-externs.md),
 [teardown-contract.md](teardown-contract.md),
 [247-compensate.md](247-compensate.md),
@@ -130,8 +131,9 @@ frontend entirely.
 ## The modes, precisely
 
 Each mode is a static discipline plus a runtime teardown consequence. The
-runtime side reuses the teardown contract's entry kinds; only `shared` would
-add one.
+runtime side reuses the teardown contract's entry kinds; `shared` added a
+counted-grant runtime and `transfer` adds a nameable carrier for the
+transferred bindings only (TR1).
 
 ### `owned`
 
@@ -229,11 +231,13 @@ add one.
   passing site, and the source never performs the close at all; the
   receiver accepts the duty explicitly, and the move is checked for
   exactly one owner.
-- **Runtime consequence:** the `bracket` entry migrates from the source
-  frame's LIFO stack to the receiver's: the same entry, never a copy and
-  never a second registration. The first surface, its marker position,
-  the entry move (including E-Stop and G7) and its exit tests are TR1
-  below.
+- **Runtime consequence:** the closing DUTY of the handle migrates from
+  the source frame to the receiver's through a swap transit ledger: one duty, one
+  holder at every instant, never a copy and never a second registration.
+  The reference tier has no nameable bracket entry today, so TR1 adds a
+  carrier for the transferred bindings only. The first surface, its marker
+  position, the protocol (including E-Stop and G7) and its exit tests are
+  TR1 below.
 
 ## Spelling: annotation, inference, or manifest
 
@@ -475,7 +479,7 @@ OWNED values, as noted inline:
    teardown closes the handle: the successor starts warm holding a dead
    descriptor. v1 refuses a resource-tainted handoff type at admission,
    from the same shared taint module. A real handle transfer is "the
-   bracket migrates", which is exactly what the `transfer` marker now
+   duty to close it moves", which is exactly what the `transfer` marker now
    decides (TR1 below); handoff shape-compat alone cannot express it,
    which is why a resource-typed handoff needs the marker.
 
@@ -796,229 +800,651 @@ accepts for a hung activation, not a new one shared introduces).
 
 ## TR1: transfer, the decided first surface (resource-typed handoff)
 
-Status: DECIDED design; implementation not started. No grammar and no
-runtime change has landed for it. The acquire-head reservation in
-`src/revl/parser.py` (slice 3a, PR #503) is the placeholder TR1 replaces.
-The language reference gains `transfer` when the implementation slice
-lands; documenting an unimplemented spelling there would promise syntax
-the compiler refuses.
+Status: DECIDED design, with one question left OPEN on purpose (OQ-T1,
+below). Implementation not started; no grammar and no runtime change has
+landed for it. The acquire-head reservation in `src/revl/parser.py`
+(slice 3a, PR #503) is the placeholder TR1 replaces. The language reference
+gains `transfer` when the implementation slice lands; documenting an
+unimplemented spelling there would promise syntax the compiler refuses.
+
+What TR1 moves is a DUTY: the obligation to close one handle, plus the live
+handle itself. It does not lift an entry off a stack, because on the
+reference tier an activation bracket is not an entry that can be lifted
+(see "What carries a transferred bracket"). The design therefore adds a
+nameable carrier, a refusal table and a three-holder protocol, and states
+each against the code it touches.
 
 ### The surface and the marker position
 
 The first transfer surface is a resource-typed `handoff` across a
-same-realm swap. The predecessor declares that the state it exports at
-replacement is transferred, not copied: its `bracket` entries move to the
-successor that re-provides the same key, and the successor's teardown
-runs their inverses. The predecessor's teardown does not.
+same-realm provider swap. The predecessor declares that the state it
+exports at replacement is transferred, not copied: the closing duty of the
+named handles moves to the successor that re-provides the same key, whose
+teardown then runs the close. The predecessor's teardown does not.
 
 ```
-component Db provides db: Session {
-  handoff db: transfer Session         // the transfer marker
-  let session = effect Db.open() undo session.close()
+type Handles = { conn: Sock, log: LogHandle }
+
+component Db provides db: DbService {
+  handoff db: transfer Handles
+  let conn = effect open_conn(config.url) undo close_conn(conn)
+  let log = effect open_log(config.dir) undo close_log(log)
   // ...
 }
 ```
 
 The marker sits on the handoff state type, after the key's colon:
 `handoff <key>: transfer <Type>`. That is the passing site for this
-surface: the exported state vector is the value that moves. `transfer`
-stays a CONTEXTUAL keyword, so the self-hosted lexer's keyword-set parity
-oracle is untouched and `transfer` remains usable as an identifier. The
-marker is recognized only when `transfer` is followed by a type, so
-`transfer[Sock]` still names a type called `transfer`. The acquire-head
-spelling a mode marker would take (`effect transfer <acquire>`) is
-retired: at the acquisition there is nothing being passed yet, and the
-marker changes who runs the final inverse, which is a property of the
-passing site, not of the acquire. The implementation slice removes that
-refusal and admits the keyword at the handoff type only.
+surface: the exported state is the value that moves. `transfer` stays a
+CONTEXTUAL keyword, so the self-hosted lexer's keyword set is untouched and
+`transfer` remains usable as an identifier and as a type name. The parser
+rule that keeps this unambiguous: `transfer` is the marker only when it
+directly follows the `:` of a `handoff` declaration AND the next token is
+an identifier on the SAME source line. A `transfer` followed by `[`, by a
+newline, or by anything else is an ordinary type name. (A state type is an
+identifier or a parenthesized type there, `type_()` in
+`src/revl/parser.py`; record types come from `type` aliases, as the example
+does, so `{` is not a case.) The same-line rule matters because `route` and
+`on` are plain identifiers, not keywords: without it, a type named
+`transfer` ending a `handoff` line, followed on the next line by a `route`
+or `on` statement, would read the next statement's first word as the type.
+
+The acquire-head spelling the parser reserves today
+(`effect transfer <acquire>`, the `marker == "transfer"` refusal in
+`effect_form`, `src/revl/parser.py`) is retired: at the acquisition nothing
+is being passed yet, and the marker changes who runs the final inverse,
+which is a property of the passing site. The implementation slice replaces
+that refusal; `effect transfer ...` then parses as an ordinary acquisition
+of a callee named `transfer`, exactly as `effect shared()` does.
+
+### The transferred vector
+
+A transfer-marked handoff type must be a record type, and every field of it
+must be resource-typed (an `extern acquire` handle, by the R0 taint base).
+Each field names one activation-scope binding of the same name in the
+component: `conn` and `log` above correspond to `let conn = effect ...`
+and `let log = effect ...`. These bindings, and only these, form the
+transferred vector. Correlation between predecessor and successor is by
+FIELD NAME, never by position: the positional same-type correlation of the
+copy path is a documented hazard (docs/design-v2-instances.md,
+"Named hazard: same-typed positional collision") and the transfer path does
+not inherit it.
+
+The record may not carry non-handle fields in the first slice. A host
+`Map` or `Pool` the component acquires is a `_Closable` in
+`frame._resources` (`backends/python/runtime.py`, `_register_resource`) and
+still crosses only by the copy path, which a transfer-marked slot does not
+run; a component that needs both warm `Map` state and a transferred handle
+is out of the first slice and says so in the refusal (T1).
+
+### What carries a transferred bracket
+
+On the py tier an activation bracket is an anonymous closure: the emitter
+writes `yield lambda: <undo>` (`backends/python/emit.py`, the `let-effect`
+step emission). The body generator hands that closure to cordis through
+`Frame._tracked` and `Frame._guard`, which wraps it for continue-and-record
+and the halt strand; the disposer list itself lives in cordis, not on the
+frame, and cannot be edited. The runtime records that a bracket disposer is
+"a bare closure with no entry object behind it" (`_record_phase1_residue`,
+`_strand_registered`). `frame._resources` holds only `_Closable` host
+resources (`Map`, `Pool`), never `extern acquire` handles. So there is no
+entry to lift, and no list to lift it from.
+
+TR1 introduces two carrier objects, for the transferred vector only.
+
+- `_TransferDuty`: the single logical duty. Fields: `slot`, `name`, `args`
+  (the evaluated acquire arguments), `handle`, `undo` (the evaluated
+  inverse thunk), `holder` (the frame that currently owns it, or none) and
+  `state`, one of `held`, `in-transit`, `claimed`, `closed`.
+- `_TransferEntry`: a per-frame disposer, a callable the body YIELDS at the
+  acquire statement's position (so it lands in cordis's LIFO list where the
+  bare bracket would have), and which `_guard` wraps like a
+  `_Transactional`. `_guard` today passes through any value that is not a
+  function, `_Transactional` or `_Compensation`, so it is extended to wrap
+  `_TransferEntry` too; otherwise the entry would skip continue-and-record
+  and the halt strand. The entry is inert unless its frame holds the duty
+  (see the protocol): it carries a reference to the duty and the frame that
+  registered it, and acts only when `duty.holder is its frame`.
+
+Three details make that work against the real `_guard`. First, `_guard`
+decides the halted case BEFORE the disposer runs (`_guarded` calls
+`_record_estop_stranded(_disposer)` and returns), so it cannot be left to
+treat a `_TransferEntry` like a closure: it special-cases the entry and
+delegates the halted decision to it, so an inert entry records nothing and a
+claimed entry is not stranded in place of returning its duty. Second, the
+entry's `_revl_entry` is the duty, so the existing dedup flag that
+`_record_estop_stranded` sets on `getattr(disposer, "_revl_entry",
+disposer)` lives on the duty and one duty is inventoried at most once
+however many entries point at it; and `_strand_registered`, which today
+enumerates only `_transactional`, `_compensations` and `_resources`, gains a
+frame list of duties, filtered to the duties the frame holds and not owned
+by a live transit ledger. Third, the entry is a callable object, never a
+bound method (`_guard` returns a value whose `__self__` is the frame
+unwrapped), and carries `_revl_method` so `_inverse_label` can name it in
+residue.
+
+For a component with a transfer-marked handoff, the emitter writes each
+transferred binding as
+
+```
+_revl_frame._journal_begin()
+conn = _revl_frame.transferable("conn", (config.url,), open_conn, close_conn)
+yield _revl_frame.transfer_entry("conn")
+```
+
+The journaling prelude is the one the bare bracket carries (issue #1945,
+host `Map` key judging), kept unchanged. On the claim path `call` does not
+run, so the opened journal records no write and `_guard`'s take of it
+reopens nothing; on the cold path `transferable` behaves as the bare
+acquire did.
+
+`transferable(name, args, call, undo)` returns the handle. Cold path (no
+duty is in transit for this slot and name): it runs `call(*args)`, creates
+the duty in state `held` with this frame as holder, and `transfer_entry`
+returns its `_TransferEntry`. Claim path: see the protocol. Every other
+bracket in the component stays an anonymous closure. A component without
+the marker emits byte-identically to today; a marked component's IR gains
+`handoff.transfer: true` and `transfer: true` on each transferred step,
+absent otherwise. Other tiers refuse the marker at emit (T8) until they
+carry the same objects; the reference tier is first, as `shared` was.
 
 ### The receiver and the admission rules
 
-The receiver is the successor frame that re-provides the handoff key in
-the same realm. This is the composition-level provider swap; a template's
+The receiver is the successor frame that re-provides the handoff key in the
+same placement. This is the composition-level provider swap; a template's
 per-instance state migration (item 10) is a different surface and is not
-part of TR1. Both sides of the swap carry the marker:
+part of TR1.
 
-1. A `transfer`-marked handoff must be resource-tainted. The marker on a
-   state type with no resource in it is refused: there is no bracket to
-   move.
-2. The successor must accept the key with a `transfer`-marked handoff of
-   a compatible type. A successor that declares the handoff without the
-   marker, or declares no handoff at all, is refused at admission rather
-   than cold-started: the predecessor would close what the program said it
-   moved. The refusal reuses the existing `_b1_message("handoff", ...)`
-   G7 wording and names the missing accept.
-3. Exactly one successor accepts the (key, placement) slot. Zero or two
-   claimants is a refusal for a transfer-marked export, not the cold start
-   the ordinary handoff allows. A missing same-placement claimant includes
-   the realm case, and that refusal names the realm.
-4. Only plain brackets move. Every entry in the transferred vector is a
-   `bracket` acquired by the predecessor's activation. A `transactional`
-   entry (a `witnessed` handle) is refused: it is WAL-logged with a
-   witness payload, and moving it is the WAL migration this slice does not
-   do. A `shared` handle is refused: its last-holder count is a 294
-   ledger, and moving holders across a swap is out of this slice. A
-   borrowed value in the vector is already refused by B1 clause 1, and a
-   method-scope borrow is not part of the activation vector at all.
+Where a marked slot is exported by the running generation, the successor
+has exactly one receiver or the swap is refused; there is no cold-start
+fallback for that slot. Where no marked export is running (first load, a
+successor over a handoff-less predecessor, `respawn`, an undo, a `--watch`
+reload), `transferable` takes its cold path: it acquires normally and
+nothing moves. Cold is a property of there being nothing to transfer, not a
+fallback for a refused transfer.
 
-The transferred vector is the whole state shape the handoff type
-describes: transfer moves the handles, not `__revl_state__` snapshots.
-The copy path's `Pool` re-establishment rider does not apply here; a
-resource that cannot move by handle is refused for the vector rather
-than silently re-established or copied.
+Every refusal below is named, says where it runs, and names the repair.
+Two places run them: lowering/admission (`_admit_handoff_replacement` in
+`src/revl/admission.py`, only when a manifest is threaded, as the swap code
+notes in `_plan_swap`) and a session gate that does not depend on the
+manifest. The session gate is the authoritative one: it runs in
+`_plan_swap`, after `_enforce_declared_disclosure` and before
+`_capture_provider_state`, so a refusal leaves the running generation
+untouched, as every other pre-teardown gate does. Both call one shared
+function (`transfer_plan_refusals(old_ir, new_ir, migrate,
+agent_authored)`), so the two cannot drift apart. The T5 refusal reuses
+the G7 code and `ownership` category of `_b1_message("handoff", ...)`, but
+not its text, which reads "cannot be carried by a `handoff` type" and would
+mislead here; it gets its own message naming the missing accept.
 
-### The entry move, against teardown-contract.md
+B1 clause 7 refuses any resource-tainted handoff type today
+(`src/revl/lower.py`, the `HandoffStmt` branch), which would refuse a marked
+record of handles. The implementation slice exempts a handoff type carrying
+the marker from clause 7 and validates it under T1 instead; an unmarked
+resource-typed handoff stays refused by clause 7. That is why every T5 test
+below that needs an UNMARKED successor of a marked predecessor uses an
+unmarked non-resource type for it: an unmarked successor with the same
+resource fields cannot lower at all.
 
-The teardown contract's one-stack rule is the model: one LIFO disposer
-stack per activation, and every close is an entry on the stack that owns
-it. Transfer moves the SAME `bracket` entry, never a copy and never a
-second registration. The move has four states and exactly one owner at
-each:
+| id | refusal | where |
+|---|---|---|
+| T1 | the marker on a handoff type that is not a record of resource-typed fields, or whose field has no same-name activation-scope acquire binding | lowering |
+| T2 | a transferred binding is named in any other step's `undo`, `compensate` or witnessed argument, or in a provide method's effect `undo` | lowering |
+| T3 | a transferred binding's own `undo` is not `<declared inverse>(<binding>)` with literal remaining arguments, or its acquire is conditional, not at activation top level, or reads anything but literals and config fields | lowering |
+| T4 | the component is a template, has an async provide method, or uses `effect await` | lowering and session gate |
+| T5 | no receiver for a running marked export: the successor declares no handoff, an unmarked one, a different field set or type, a different placement (a different realm, an added or dropped required or provided key), or two claimants | admission and session gate |
+| T6 | the successor's acquire callee, argument expressions or `undo` for a transferred binding differ from the predecessor's | admission and session gate |
+| T7 | the successor is agent-authored | session gate |
+| T8 | the marker reaches an emitter whose tier has no transfer carrier | emit |
+| T9 | a component with a transfer-marked handoff is placed in a process other than the session that swaps it | placement |
 
-1. **Capture (before the predecessor's teardown).** For each transferred
-   position the entry is lifted out of the predecessor frame's stack into
-   the swap transaction's transfer escrow. The value that crosses is the
-   live host handle itself, not a serialized snapshot: transfer is the
-   one hand-off path that bypasses `__revl_state__`.
-2. **Predecessor teardown (`_dispose_all`).** The entries still on its
-   stack run as usual. The lifted entries do not, because they are no
-   longer on it. They stay registered in the escrow: not run, not
-   discharged.
-3. **Adoption (restore, after the successor loads).** For each position,
-   the successor's fresh entry (it acquired its own vector during
-   activation) is released exactly once and removed: it was acquired
-   moments earlier and never handed out, so this is a scoped release, not
-   a teardown (the F9 precedent). The lifted predecessor entry is
-   inserted at the BOTTOM of the successor's LIFO stack, the close-last
-   position: the handle was acquired before every entry on that stack, so
-   reverse acquisition order puts its close last. The successor's state
-   then observes the predecessor's handle. The slot re-point is a runtime
-   mechanism (adopt the predecessor's host value into the successor's slot
-   object, or alias the slot to the predecessor's object); what the
-   contract fixes is that the moved entry is the only close and the
-   successor's fresh host resource is released.
-4. **Rollback (the successor fails before adoption).** The escrowed
-   entries run in the rollback, exactly once, as the predecessor's
-   teardown would have; the reloaded predecessor starts from the captured
-   state as today. After adoption commits there is nothing to roll back.
+Decisions behind the table, each one a deliberate refusal rather than an
+omission:
 
-The move is one atomic step of the swap transaction (check the whole
-cohort, then apply), so the entries are the predecessor's before it and
-the successor's after it, never on both stacks and never on neither. The
-escrow is a transaction holding area, not a second disposer list: neither
-teardown phase walks it, on the clean path, the abort path, or a
-rollback; only adoption or the rollback consumes it. A crash in that
-window loses the escrow with the process; a `bracket` is not WAL-logged,
-so the handles leak exactly as any acquired handle never torn down does,
-and the host reclaims them. That is the existing bracket crash story, not
-residue `revl recover` should re-issue, and the move adds no WAL record
-kind. This is also why `witnessed` handles are out of the slice: a
-`transactional` entry does have a descriptor.
+- **T2 and T3 (the predecessor's own teardown).** The predecessor's
+  `_dispose_all` runs after the duty is lifted (see the protocol). Any
+  other entry whose `undo` touches the handle would run against a handle
+  the successor now owns, and would revert state the successor inherited
+  (an `undo m.remove(k)` on a transferred map-like handle is exactly the
+  data loss the copy path never had, because there the old teardown acts
+  on the old copy). B1 admits an owned handle in other bindings' `undo`
+  (`src/revl/lower.py`, the clause-5 carve-out for owned values), so TR1
+  adds this refusal for transferred bindings only. T3 keeps the moved
+  inverse closed over the handle alone: no predecessor-owned context
+  (another binding, activation state) may be needed after the predecessor
+  is gone, and its arguments are restricted so T6 can compare them.
+- **T4 (quiescence).** No explicit drain of in-flight calls exists in
+  `_plan_swap` or `_cut_over`: the session reaches `_dispose_all` through
+  `self._run`, and async work the loop is running can progress while
+  teardown awaits. The earlier draft of this section leaned on a drain it
+  could not point to. TR1 instead refuses the components where a call can
+  be in flight against the handle (async provide methods, `effect await`)
+  and states that a quiesce point is the open work that would lift the
+  refusal (OQ-T2).
+- **T5, the added dependency.** The slot is `(key, placement)` and the
+  placement covers every required key (`_handoff_slot`). A successor that
+  adds or drops a required key is placed differently; for a running marked
+  export that is refused, not cold-started, because the handle is bound to
+  the frame's placement and there is no receiver for it elsewhere.
+  Intended. The retire path is below. A marked successor over a running
+  export of a different shape (an unmarked or `Map`-typed one) is refused
+  by T5 itself, before teardown: `transfer_plan_refusals` compares the
+  declared handoff shapes for a marked successor, field set and field types
+  structurally, so a renamed record alias with the same fields counts as the
+  same shape. The existing §5 gate in `_restore_provider_state` runs after
+  the teardown and rolls back, so it stays as defence in depth and is not
+  the gate this case relies on. Over no running marked export at all
+  (first load, a handoff-less predecessor, a predecessor that is PENDING or
+  FAILED and so holds no duties) the successor is cold, by the existing rule
+  that a key nothing exported starts cold.
+- **T6 (same acquisition).** Under the protocol the successor does not run
+  its own acquire for a transferred binding, so the declared acquisition
+  must be the one the predecessor ran. "Same" is two checks. Statically,
+  the same extern callee, structurally equal argument expressions and the
+  same `undo` after lowering. At the claim, the duty carries the evaluated
+  `args` the predecessor acquired with, and `transferable` compares them
+  with the arguments the successor evaluated; a config value that differs
+  at load, which the static comparison cannot see, fails the claim and
+  takes the rollback path. A successor that wants a different acquisition
+  is not receiving a transfer.
+- **T7 (agent-authored successor).** A transferred handle is live host
+  reach, a strictly larger crossing than the copied state the disclosure
+  gate (`_enforce_declared_disclosure`) lets an agent-authored successor
+  inherit. Refused in the first slice when a running marked export would
+  move to an agent-authored successor; with no running marked export
+  nothing crosses and the successor is cold. Relaxing it is the owner's
+  call.
+- **T9 (process seam).** `resource_crossing_refusal` in
+  `src/revl/placement.py` scans service method signatures, never a handoff
+  state type, so it does not by itself refuse a marked slot. The
+  implementation slice extends the placement check to read handoff types
+  and refuse a marked component placed in a process other than the session
+  that would swap it. Nothing crosses a seam when a marked provider merely
+  has a remote consumer, so that is not refused; the hazard is a successor
+  loaded in another process, because the transit ledger below is
+  in-process and moving a duty across processes needs the WAL to move
+  processes (see "Reconciling with the seam").
+- **Retiring the marker.** A marked predecessor cannot be replaced by an
+  unmarked or handoff-less successor through an ordinary swap (T5). The
+  retire path is an explicit cold swap, `migrate="respawn"`: it lifts and
+  moves nothing, so the predecessor's own teardown closes its handles and
+  the successor starts cold.
+- **`respawn` rollback, undo and `--watch`.** A rollback goes through
+  `respawn` and an undo through `handoff_back` (issue #3293); neither is
+  refused, and neither lifts: the lift is skipped for both, the
+  predecessor's teardown closes its handles, and the restored generation
+  starts cold for a marked slot. The undo dossier and the rollback's
+  `stateDropped` report the slot as cold with reason
+  `transfer-not-reversed`. A reverse move needs the protocol below run
+  backwards and the restored generation's marker; it is not in the first
+  slice. The `--watch` reload (`src/revl/run.py`) tears down and loads with
+  no handoff at all, so a marked component is cold there too.
+- **The swap report.** For a marked slot the copy path is skipped:
+  `_capture_provider_state` takes no snapshot and `_restore_provider_state`
+  does not iterate it. The forward swap's `handoff` block names the slot
+  with `transferred: N` (the duties that moved) instead of `resources: N`.
 
-### E-Stop, G7 and the realm/process seams
+### The protocol: three holders, one owner at every instant
 
-- **G7 (LIFO completeness).** The close set is the union of the two
-  frames' stacks: the predecessor's stack loses exactly the moved
-  entries, the successor's gains exactly them, and each inverse runs
-  once. The predecessor skips them (no double-close); the successor runs
-  them in the position above (no leak). The moved entry keeps its place
-  in reverse acquisition order across the two stacks, and the move opens
-  no second close channel.
-- **E-Stop (443).** A move is an ownership change, not a discharge: it
-  writes no `discharge` record and drops no inverse. Under `halted` the
-  move does not commit. Before the commit point the entries are stranded
-  as the predecessor's (registered, not run, not dropped; the halt record
-  carries the entry's crossing identity, and the escrow is inventoried
-  with the predecessor's activation); after it they are stranded as the
-  successor's. The escrow is not a frame stack and never runs under a
-  halt, so `RevL.G7.estop_strands_everything`,
-  `RevL.G7.estop_replays_nothing` and `RevL.G7.estop_discharges_nothing`
-  hold unchanged.
-- **Realm boundary: refused.** A transfer-marked successor placed in
-  another realm is refused at admission, never cold-started: the slot is
-  (key, placement), so a different realm is a different slot and the
-  transfer has no receiver there. A borrowed handle crossing a realm
-  boundary stays refused by B1, as the issue requires.
-- **Process seam: refused, unchanged.** `resource_crossing_refusal`
-  refuses a resource-typed value at a process seam, and transfer does not
-  move a bracket across processes: that needs the WAL to move processes
-  ("Reconciling with the seam"; 363/F1). The refusal stays mode-named;
-  transfer does not approximate it.
+A duty has exactly one holder at any instant. There are three, in order:
+the predecessor frame, the swap's TRANSIT LEDGER, and the successor frame.
+The ledger also keeps a reference to EVERY duty of the swap, in every state,
+until commit or dispose, so that inventory and finalization never depend on
+a frame that may already be disposed. The ledger is a third holding
+structure; it is not a disposer stack and it
+is never walked by either teardown phase (the teardown contract's "one
+stack per activation" is kept for frames; the ledger exists only inside one
+swap transaction). It is distinct from the item-245 session-owner escrow
+(`_hold_for_session`), which holds witnessed and compensation entries for a
+session verdict and never holds a bracket. The duty's `state` is `held`
+(on a frame), `in-transit` (in the ledger, no holder), or `claimed`
+(provisionally on the successor until the swap commits). The per-frame
+`_TransferEntry` is the only thing cordis ever calls, and it acts as
+follows:
+
+- duty `held` by this entry's frame: run `undo` once, mark `closed`;
+- duty `claimed` by this entry's frame: do NOT run `undo`; return the duty
+  to the ledger (`in-transit`, no holder). This is what makes an
+  unwinding successor safe: a claimed duty is inert on unwind;
+- any other state or holder: do nothing.
+
+1. **Lift.** In `_cut_over`, immediately before `driver._dispose_all`, the
+   runtime moves each `held` duty of the predecessor's marked frames to the
+   ledger: `holder` cleared, state `in-transit`, keyed `(slot, name)`. The
+   predecessor's `_TransferEntry` objects stay in cordis's list (it cannot
+   be edited) and are now inert, because their frame no longer holds the
+   duty. Everything that can refuse the swap has already run in
+   `_plan_swap`, so the predecessor is fully intact until this step. The
+   handle stays open. Nothing is serialized: transfer bypasses
+   `__revl_state__`.
+2. **Predecessor teardown.** `_dispose_all` runs the rest of the
+   predecessor's stack as usual. By T2 and T3 nothing on it touches a
+   lifted handle, and the inert entries do nothing.
+3. **Route and claim.** Before the successor loads, the session installs a
+   route table `{successor component: slot}`, because a successor may be a
+   differently-named component and is matched by slot, not by component
+   name (`_handoff_acceptors`). When the successor loads, each
+   `transferable(name, args, ...)` call finds the in-transit duty for
+   `(slot of its component, name)`, compares `args` (T6), and, instead of
+   running `call`, binds the ledger's handle: `holder` becomes this frame,
+   state `claimed`. `transfer_entry` then yields a `_TransferEntry` for the
+   duty at the acquire statement's position, so the successor's LIFO order
+   is its own program order. The successor's acquire never runs, so an
+   exclusive resource (a bound port, a lock, a single-session endpoint) is
+   never opened twice and nothing derived from a fresh handle is later
+   invalidated.
+4. **Commit.** After the health gate (`_assert_successor_activated`) and
+   `_restore_provider_state` succeed, at the end of `_cut_over`, the ledger
+   asserts every duty was claimed and every `claimed` duty becomes `held`.
+   An unclaimed duty is a failure and takes the rollback path.
+5. **Rollback.** A failure of the successor's load, its health gate, the
+   instance reconciliation or the provider-state restore reaches
+   `_abort_swap` (the last two only for `StateIncompatible` today, so see
+   the finalizer below for any other raise). A failure
+   inside the successor's activation unwinds the successor's whole Phase-1
+   list inside cordis before `_load` returns (the same path for the
+   non-raising FAILED activation of item 372), so no step of `_abort_swap`
+   can come first; the protocol therefore relies on the inert-on-unwind rule
+   above: a claimed duty returns itself to the ledger instead of closing
+   the handle. `_abort_swap` then disposes the successor, reloads the
+   predecessor from code (the old frame is already disposed, so there is no
+   stack to put anything back on), and the reloaded predecessor's
+   `transferable` calls claim from the ledger exactly as in step 3, with
+   its own slot route. The handle never closed and no snapshot is
+   involved, which is what `_abort_swap`'s "state intact" promise needs.
+   After the reload, `_abort_swap` commits the ledger as in step 4.
+
+   **The finalizer.** Not every failure reaches `_abort_swap`: in
+   `_cut_over`, `_dispose_all(self.ir)` and the lines up to the `try` are
+   outside it, and `_reconcile_instances` and `_restore_provider_state` are
+   guarded only against `StateIncompatible`; `_abort_swap` itself can raise
+   in its own `_dispose_all` before the reload. Because a claimed duty is
+   inert on unwind, a successor left live and uncommitted would later never
+   close its handle. So the ledger carries a finalizer: `_cut_over` wraps
+   everything from the lift to the commit in a `try/finally`, and
+   `_abort_swap` wraps its whole body in one, and each finalizer, on any
+   exit where the ledger is not committed, calls `ledger.dispose()`. That
+   runs each duty still in the ledger exactly once in reverse lift order,
+   including duties claimed by a frame that never committed, and records a
+   failed inverse as `bracket-fault`. Nothing leaks and nothing runs twice.
+   Neither hook exists today; adding both is part of the implementation
+   slice.
+
+Atomicity across slots: the session gate checks the whole cohort of marked
+slots before the lift, and the ledger holds every lifted duty of one swap,
+so a swap moves all its marked slots or none.
+
+### E-Stop (443), G7 and recovery
+
+- **E-Stop.** A move is an ownership change, not a discharge: it writes no
+  `discharge` record and drops no inverse. Under `halted` every frame
+  keeps its existing behaviour: `drain` does nothing, and `_guard` strands
+  each plain entry it is handed instead of running it
+  (`_record_estop_stranded`). A `_TransferEntry` is handled by the
+  delegation described under "What carries a transferred bracket": it
+  records nothing when its duty belongs to a live ledger or to another
+  frame, and when its frame holds the duty outside any ledger the duty is
+  stranded once, flagged on the duty. While a swap's ledger exists, the
+  LEDGER inventories every one of its duties by duty state, `in-transit`
+  and `claimed` alike, as `estop-stranded` records (outcome
+  `not-attempted`, error type `estop`) naming the acquiring component and
+  the binding, through `runtime.estop_residue()`; it does so by registering
+  itself with the runtime at the lift. This is deliberate: `estop_residue()`
+  walks only live frames (`_LIVE_FRAMES` is a weak set), and a disposed
+  successor frame's record list can vanish, so a claimed duty must not
+  depend on its frame to be reported. A claimed duty stays `claimed` under a
+  halt; its entry does not return it to the ledger and does not run it.
+  Neither `commit` nor `dispose` runs an inverse under a halt. A halt before
+  the lift is not repeated by the lift: the lift re-checks the halt latch
+  and refuses (the swap is refused, the predecessor's duties stay stranded
+  as the halt recorded them), and the duty flag dedups any record that still
+  arrives. A halt is reachable between the lift and the commit, with the
+  predecessor frame already disposed and the successor possibly mid-load
+  (`Frame.acquire` calls `_estop_check`, and `transferable` is specified to).
+  A duty has one holder and one flag, so it appears in one inventory, once.
+- **G7 (LIFO completeness).** Per frame, the stack discipline is unchanged:
+  the predecessor's stack loses exactly the duties it no longer holds and
+  the successor's gains exactly them, at the successor's own acquire
+  positions, each inverse running once. The union over the two frames and
+  the ledger is the close set.
+- **What the formal theorems cover.** The Lean theorems in
+  `formal/RevL/Theorems/G7_LifoComplete.lean` (`phase1_is_lifo`,
+  `estop_strands_everything` and their neighbours) are statements about a
+  single log. They hold for each frame's own log. They say nothing about a
+  duty moving between two logs through a ledger, so TR1 claims no theorem
+  for the move: the move is a new obligation pinned by the exit tests, and
+  a two-holder log in the formalization is open work (OQ-T3).
+- **Recovery: a requirement, scoped to the window.** `revl recover` walks
+  `effect` records, acquires included (`src/revl/recovery.py`,
+  `_roll_back`), but only for an opening that never reached
+  `activation-complete`; an opening with the marker is rolled forward. That
+  fixes what a move must and need not do. A kill BEFORE the lift is an
+  ordinary running predecessor, exactly as for an unmarked bracket. A kill
+  AFTER the successor's `activation-complete` is an ordinary completed
+  activation holding an ordinary handle. Only the window between them,
+  where the successor's opening has not completed, is new: under option B
+  the successor's acquire never runs, so that opening would have no acquire
+  record for the handle, and recovery would roll it back without owing the
+  handle that the predecessor's complete opening no longer reports. TR1
+  therefore requires that the claim in step 3 appends an ordinary `effect`
+  acquire record naming the same referent in the successor's opening, so a
+  kill in the window is rolled back like any in-activation acquire, using
+  the existing record kind and adding none. If the existing writer cannot
+  express that, the finding reopens this design. The crash test below pins
+  the window; the before-lift and after-completion cases are guards that the
+  report equals an unmarked bracket's.
+
+### Open questions
+
+- **OQ-T1: how does the receiving binding obtain the handle? OPEN, put to
+  the owner.** The protocol above specifies option B: the successor's
+  binding is SEEDED from the ledger and its acquire does not run (step 3).
+  The alternative, option A, runs the successor's acquire first and
+  releases the fresh handle at adoption, so the transferred handle replaces
+  it. The evidence, so the choice can be made on the facts and not
+  re-derived:
+  - A fails for an exclusive resource. The fresh acquire runs while the
+    predecessor's handle is still open (in transit or on a frame), so a
+    bound port or a lock refuses it and the motivating case rolls back.
+  - A leaves anything the successor derived from the fresh handle
+    dangling after the release.
+  - A cannot serve rollback. `_abort_swap` reloads the predecessor from
+    code, which acquires again; with the handle held in the ledger that
+    second acquire fails for the same exclusive resources, and if instead
+    the held handle is closed first, the state that lived in the handle is
+    gone, which breaks "state intact".
+  - A is the shape the F9 precedent is closest to (an early release
+    releases a scope without discharging an entry, see "F9, decided"), so
+    it has a precedent where B has none: B skips an acquire the source
+    text still contains, which T6 constrains.
+  - B's WAL consequence: the successor's opening has no acquire record of
+    its own, which is why the recovery requirement above has to add one.
+    A would write it naturally.
+  TR1 is written for B because it is the only option that serves both
+  adoption and rollback with one mechanism. If the owner chooses A, steps 3
+  and 5 change (an acquire-then-release adoption, and a rollback that
+  cannot keep an exclusive handle's state), T6's runtime half and the
+  recovery requirement relax, and every exit test below marked (B) changes
+  or becomes a refusal test.
+- **OQ-T2: a quiesce point.** T4 refuses async components because the swap
+  has no point where in-flight calls are known to have finished. A
+  quiesce step in `_plan_swap` would lift T4; it is separate work.
+- **OQ-T3: a two-holder log in the formalization.** See "What the formal
+  theorems cover".
 
 ### The issue's checks, restated on this surface
 
-Issue #2698 asked for four checks. On the decided first surface they
-take these forms:
+Issue #2698 asked for four checks. On the first surface:
 
-1. **The source cannot use the handle after the marker.** A prelude
-   declaration has no source-order "after", so the check is that the
-   source never runs or performs the close. O1 already refuses every hand
-   close; the swap protocol drains in-flight calls before capture
-   (docs/state-handoff.md), so no source code runs after the move; and
-   the moved entries are gone from the source's stack, so its teardown
-   cannot run them.
-2. **Exactly one owner exists after it.** One entry, one stack: the
-   source's stack loses it at capture, the successor's gains it at
-   adoption, and the all-or-nothing swap leaves no window with two owners
-   or none.
+1. **The source cannot use the handle after the marker.** There is no
+   source-order "after" in a prelude declaration. The check is that no
+   predecessor code can CLOSE or revert through the handle once the duty is
+   lifted: O1 refuses every hand close, T2 refuses a transferred binding in
+   any other entry's `undo`, T3 keeps the moved inverse closed over the
+   handle, and T4 refuses the components where a call could be in flight.
+   No drain is claimed, and not every use stops: the lift precedes
+   `_dispose_all`, which tears consumers down first, and a consumer's
+   teardown can still call the provider's methods against the open
+   in-transit handle. That is the same window a provider has today while
+   its consumers unwind, the handle is open, and it ends before the
+   successor loads.
+2. **Exactly one owner exists after it.** One duty, one holder at every
+   instant (frame, ledger, frame), with a single commit point and a
+   rollback that returns the duty to the predecessor.
 3. **The receiver's teardown includes the close (G7).** The successor's
-   transfer-marked acceptance is what puts the duty in its teardown. A
-   successor that does not accept it (no declaration, no marker, another
-   realm) is refused with the existing G7 handoff wording rather than
-   cold-started.
+   marked acceptance, with the same acquisition (T6), registers the duty on
+   its own stack at its own position. A successor that cannot accept is
+   refused (T5) with the G7 code, never cold-started.
 4. **A borrow taken before the transfer cannot outlive it.** B1 forbids
-   storing a borrow in another activation's state, and the drain ends
-   in-flight borrows before capture. A borrowed value cannot be in the
-   transferred vector (B1 clause 1). The realm refusal above is
-   unchanged.
+   storing a borrow in another activation's state, so no activation holds
+   one past its call. The in-flight window is closed by T4. A borrowed value
+   cannot be in the transferred vector (B1 clause 1, T1).
 
 ### Exit tests (the implementation slice)
 
-The design is done when the implementing slice makes these green; the
-new fixtures belong in `tests/test_ownership_transfer_308.py`, with the
-runtime cases on the py trace harness:
+The new fixtures go in `tests/test_ownership_transfer_308.py`, runtime
+cases on the py trace harness. Rule for every refusal test: it asserts the
+specific T-id and message text, not merely that a `RevlError` is raised
+(the marker is a parse error on main today, so a bare "raises" assertion
+would pass there), and it is paired with a repaired program that is
+admitted. Tests marked (B) depend on OQ-T1 option B.
 
-- **Move and close.** A same-realm cache holding a `Sock` is swapped; the
-  successor closes it exactly once, the predecessor never does, and the
-  trace shows the close in the successor's frame.
-- **LIFO position.** A successor that acquires two resources of its own
-  closes them newest-first and the transferred handle last; its fresh
-  entries for the transferred slots are released at adoption, with no
-  second close and no leak.
-- **Accept rule.** A transfer-marked export whose successor declares no
-  handoff, or declares it without the marker, is refused with the
-  existing G7 handoff wording; the same export with exactly one
-  transfer-marked successor in the same realm is admitted.
-- **Realm.** A successor placed in another realm is refused, not
-  cold-started; a borrowed handle across a realm boundary is still
-  refused (re-pin).
-- **Process seam.** A resource-typed transfer across a process seam is
-  still refused by `resource_crossing_refusal` (re-pin the message).
-- **Rollback.** A successor whose activation fails after capture leaves
-  the running composition on the reloaded predecessor; the escrowed
-  entries run exactly once there, no handle is closed twice and none
-  leaks.
-- **E-Stop.** A halt between capture and adoption strands the entries as
-  the predecessor's; a halt after adoption strands them as the
-  successor's; neither runs nor discharges them, and the stranded
-  inventory reports each at most once.
-- **Static guards.** `transfer` on a non-resource handoff type is
-  refused; a resource-typed handoff without the marker stays B1 clause 7
-  refused; `shared` and `witnessed` in the vector are refused with their
-  mode-named messages.
-- **Additivity.** No transfer-marked program is in the corpus, so the
-  sweep and every backend golden stay byte-identical; a transfer-marked
-  component adds only its handoff flag to the IR.
+- **Move and close.** A same-realm provider holding a `Sock` is swapped;
+  the successor closes it exactly once, the predecessor never does, and the
+  trace shows the close in the successor's frame. (B)
+- **Exclusive resource.** A successor of a provider whose handle is an
+  exclusive resource (a host stub that fails a second open) swaps and keeps
+  serving; the successor's `call` is not invoked. (B; under option A this
+  is the refusal test.)
+- **LIFO position.** A successor that acquires its own resources around the
+  transferred binding closes them in its own reverse program order, the
+  transferred handle at its acquire position, once. (B)
+- **Renamed successor.** The successor is a differently-named component
+  that re-provides the key; the claim succeeds through the route table.
+- **Predecessor undo touches the moved handle.** T2: a transferred binding
+  named in another step's `undo` is refused at lowering, with the repair
+  named.
+- **Moved inverse needs predecessor context.** T3: an `undo` naming another
+  binding, a config field or activation state is refused.
+- **Double swap.** A to B to C moves the duty twice; the close runs once,
+  in C, and the stranded inventory after a halt in C names one duty. (B)
+- **Accept rule.** T5: a successor with no handoff, an unmarked one (of a
+  non-resource type: an unmarked resource-typed handoff cannot lower under
+  B1 clause 7), a different field set, a `Map`-typed export shape, and two
+  claimants are each refused before teardown with the running generation
+  serving; the single same-placement marked successor, including one that
+  names the same fields through a renamed record alias, is admitted.
+- **Added dependency, dropped dependency and realm.** T5: a successor that
+  adds a required key, drops one, or sits in another realm is refused, not
+  cold-started.
+- **Marked successor over no marked export.** Over a handoff-less
+  predecessor, and over a predecessor that is PENDING or FAILED and holds
+  no duties, it is cold (its acquire runs); over an unmarked or
+  `Map`-typed running export it is refused by T5 before teardown.
+- **Same acquisition.** T6: a successor whose callee, argument expressions
+  or `undo` differ is refused statically; one whose config value differs at
+  load fails the claim and rolls back. (B)
+- **Cold path.** A marked component's first load, a `respawn` rollback and
+  a `--watch` reload each acquire normally and close once at teardown.
+- **Agent-authored, template, async.** T7 and T4 each refuse with the
+  running generation untouched, each with a paired admitted program.
+- **Process-placed.** T9: a marked component placed in a process other
+  than the session that swaps it is refused at placement, and a marked
+  provider that merely has a remote consumer is admitted.
+- **Retire path.** `migrate="respawn"` over a marked predecessor closes the
+  predecessor's handles once and starts the successor cold.
+- **Rollback and undo.** A rollback and an undo over a marked slot start
+  cold with the report reason `transfer-not-reversed`.
+- **Successor fails after the claim.** A successor whose activation raises
+  mid-body, and one whose activation FAILS without raising (item 372),
+  after claiming: the handle is not closed during the unwind (the claimed
+  duty returns itself to the ledger), the reloaded predecessor serves with
+  the same live handle (identity, not a copy), nothing is closed twice and
+  nothing leaks. (B)
+- **Failure after the health gate.** The successor activates and claims,
+  then `_restore_provider_state` or `_reconcile_instances` raises
+  `StateIncompatible` and, separately, some other exception: the first
+  rolls back with the live handle intact, the second reaches the finalizer,
+  which closes the handle once and records a failed inverse as
+  `bracket-fault`; neither leaves a live successor with a claimed,
+  never-closed duty. (B)
+- **The predecessor's teardown raises.** `_dispose_all` of the predecessor
+  raising after the lift reaches the finalizer: each in-transit duty is
+  closed exactly once. (B)
+- **Rollback when the reload fails.** The reload raising, and the reload
+  FAILING without raising (item 372), each leave the ledger disposed once:
+  every remaining inverse runs once in reverse lift order and a failure is
+  recorded as `bracket-fault`. (B)
+- **Unclaimed duty at commit.** A successor that never calls
+  `transferable` for a transferred name (it is gone from its source, which
+  T5 catches before teardown, so this is the runtime defence) fails the
+  commit and rolls back with the handle intact. (B)
+- **Halt during the successor's load.** A halt after the lift and before
+  the commit leaves every duty registered, not run, not dropped, each in
+  `estop_residue()` exactly once, whether the duty is in transit or
+  claimed on the successor, including when the successor frame has already
+  been disposed. (B)
+- **Halt before the lift.** A halt that arrives, then a swap that proceeds:
+  the lift refuses, the predecessor's duties stay stranded exactly as the
+  halt recorded them, and no duty appears twice. (B)
+- **`_guard` under halt.** A unit test on `_guard`: an inert
+  `_TransferEntry` records nothing; a claimed one neither runs nor strands
+  its duty; an entry whose frame holds the duty outside a ledger strands it
+  once. (B)
+- **Crash in a recorded session.** A kill in the window, after the lift and
+  before the successor's `activation-complete`, rolls back with the handle
+  reported outstanding while its referent persists, through the acquire
+  record the claim appends; the test pins the exact report and that no new
+  record kind appears. (B) A kill before the lift and a kill after the
+  successor's `activation-complete` report exactly what an unmarked bracket
+  reports; those two are guards, not evidence.
+- **Marker parsing.** The marker parses after `handoff <key>:`, and a
+  marker on a non-resource type is refused with T1. The following already
+  pass on main and are guards, not evidence of the change: `transfer` as a
+  type name, `transfer[T]`, and `handoff k: transfer` ending a line with a
+  `route` or `on` statement on the next line. `effect transfer <acquire>`
+  is an ordinary acquisition of a callee named `transfer` (fails on main:
+  it is refused today).
+- **Seam.** A borrowed handle across a realm boundary is still refused by
+  B1 (guard). The process-seam case is T9 above, not
+  `resource_crossing_refusal`.
+- **Tiers.** The marker on a non-py tier is refused at emit (T8).
+- **Self-host.** `selfhost/lower.rvl` reads a `handoff` by skipping to the
+  end of the line after reading the type with `type_at`, so it would read
+  `transfer Handles` as a type named `transfer` and admit it. The marker is
+  OUT of scope for the self-host ports in the first slice, exactly as the
+  O1/B1 flow walk is: no marked program enters the self-host corpus, and
+  the divergence is pinned in an executable test next to
+  `tests/test_selfhost_ownership_gap_308.py` so it cannot be discovered by
+  a red oracle. This pin passes on main (the reference refuses the marker
+  there and the self-host reads it as a type), so it is a guard recording
+  an accepted gap, not evidence for the change.
+- **Guards (not evidence).** An unmarked program's emitted py and IR are
+  byte-identical.
+
+### What the implementation slice touches
+
+Beyond the parser, lowering, admission, session gate and py runtime above:
+the IR additions (`handoff.transfer`, step `transfer`) need the IR schema
+under `schema/`, the TCK, and the grammar artifacts (`grammar/revl.ebnf`
+through `revl grammar --write`, and `tree-sitter-revl`) for the contextual
+marker, the placement check for T9, and the swap's reporting: the
+`transfer-not-reversed` and `transferred: N` reports need
+`live_state_components` and `_holds_state` (which read resources only) and
+the undo and rollback dossiers to learn about marked slots. The self-host
+ports and the other tiers are out (T8, and the self-host gap above).
 
 ### What the first surface does not include
 
 The call-argument marker (`srv.take(transfer conn)`), realm-crossing
 transfer, process-seam transfer, transfer of `shared` or `witnessed`
-handles, and a general explicit-release surface are out. Each is named
-above with its refusal; none is approximated. The per-call move is the
-next transfer surface after this one, and it will reuse the same
-entry-move primitive: the escrow, the adoption position and the
-single-owner rule are the surface-independent parts.
+handles, a transfer reversed by undo, non-handle state in a transferred
+slot, transfer to an agent-authored successor, async or template
+components, a quiesce point, and a general explicit-release surface are
+out. Each is named above with its refusal; none is approximated. The
+per-call move is the next transfer surface after this one, and it will
+reuse the surface-independent parts: the `_TransferDuty` carrier, the
+three-holder protocol and the single-owner rule.
 
 ## Reconciling with the seam (and the realm boundary)
 
@@ -1056,7 +1482,7 @@ from its undo contract. Per mode:
   a handle acquired in one realm reaching a component of another realm is
   refused by the same promoted resource-type check (the checker now sees
   resource types, so it can see realm labels next to them). TR1 decides
-  that transfer is the surface that moves the bracket, and its first
+  that transfer is the surface that moves the closing duty, and its first
   surface is a same-realm swap only: a transfer-marked handoff whose
   successor is placed in another realm is refused, never cold-started. A
   move across a PROCESS seam is still refused as well, because it needs
@@ -1073,7 +1499,7 @@ from its undo contract. Per mode:
 | no resource in teardown-phase positions | writable; compensations are use-after-close by phase order | refused (B1 clause 5) |
 | no borrow seated in another activation | writable via spawn config and handoff | refused (B1 clauses 6, 7) |
 | shared teardown exactly once | no shared notion at all | S1 completed and landed (PR #698): 294 counted-grant ledger, orderly last-release as an ordinary bracket, whole-process crash via `revl recover` + `reclaim` residue, no wall-clock inverse |
-| a handle can move with its closing duty | not expressible: the owner and its bracket stay together | DECIDED (TR1): a resource-typed `handoff` across a same-realm swap moves the bracket from predecessor to successor; implementation next |
+| a handle can move with its closing duty | not expressible: the owner and its bracket stay together | DECIDED (TR1): a resource-typed `handoff` across a same-realm swap moves the closing duty from predecessor to successor through a swap transit ledger (OQ-T1 open); implementation next |
 | owned cannot cross a seam | refused (363/F1) | unchanged, mode-named diagnostic |
 
 Relation to the arc: G5 is untouched in v1 (checker-only, no new
@@ -1176,7 +1602,7 @@ into the shared corpus and strike this deferral.
 
 Slices are additive and land in order; each leaves the suite green and
 per-backend goldens byte-identical (checker-only until the shared slice;
-the transfer slice adds its marker and the entry move).
+the transfer slice adds its marker, the carrier and the transit protocol).
 
 - **Slice 0: R0 decision + shared resource-type module + report-only
   sweep + the method-scope count.** First, land R0 (nominal acquire
@@ -1269,19 +1695,28 @@ the transfer slice adds its marker and the entry move).
     until the ownership-dialect slice ports the flow walk (the slice-2
     deferral in "Self-host note" extends to S1 unchanged; S1 is checker/
     recover surface, no new grammar).
-- **Slice 3c: transfer (TR1 decided above; implementation next).** TR1 is
-  the whole design: the marker at the handoff state type, the both-sides
-  acceptance rule, the bracket entry move with its E-Stop and G7
-  placement, the realm and process-seam refusals, and the exit tests
-  listed there. No grammar or runtime change has landed yet. This slice
-  removes the acquire-head reservation and admits the contextual marker
-  at the handoff type only; the self-hosted lexer's keyword set is
-  untouched because `transfer` stays contextual.
+- **Slice 3c: transfer (TR1 decided above, OQ-T1 open; implementation
+  next).** TR1 is the whole design: the marker at the handoff state type
+  and its parse rule, the transferred vector and its carrier, the refusal
+  table T1-T9, the three-holder protocol with its E-Stop and G7 placement,
+  the realm and process-seam refusals, and the exit tests listed there. No
+  grammar or runtime change has landed yet. This slice removes the
+  acquire-head reservation, admits the contextual marker at the handoff
+  type only, adds the carrier to the py tier and refuses the marker on the
+  other tiers; the self-hosted lexer's keyword set is untouched because
+  `transfer` stays contextual, and the self-host ports stay out of scope.
+  OQ-T1 is settled by the owner before this slice starts.
 - **Seam re-pin (any slice): owned crosses seam refused.** Already green
   today via `resource_crossing_refusal`; re-pin with the mode-named
   diagnostic text so the message upgrade cannot regress silently.
 
 ## Open questions (left deliberately)
+
+0. **Transfer: OQ-T1, OQ-T2 and OQ-T3 live in TR1, "Open questions".**
+   OQ-T1 (how the receiving binding obtains the handle) is the one the
+   owner decides before the transfer implementation slice starts; OQ-T2 (a
+   quiesce point) and OQ-T3 (a two-holder log in the formalization) are
+   follow-on work that lifts a first-slice refusal.
 
 1. **Early release: CLOSED (F9). See "F9, decided".** The count is zero
    general method-scope acquires; the form is already refused, so option
