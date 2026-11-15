@@ -106,7 +106,12 @@ binary with `include_str!`) in a fixed order (`runtime.rs`, `engine.rs`):
    degrade to PATH.
 3. otherwise **`python3` on PATH**, the honest fallback design A2 records, "a
    native binary PLUS a reference `revl` alongside", so a bare `cargo` build and
-   every machine that already has `revl` keep working unchanged.
+   every machine that already has `revl` keep working unchanged. The fallback is
+   not `-I` (it has to see the installed `revl`), so it is launched with `-P`
+   (PYTHONSAFEPATH, issue #317): an editor starts the server with the opened
+   project as its working directory, and without `-P` the `-c` worker would put
+   that directory at `sys.path[0]`, where it shadows the worker's own imports
+   (issue #3158, the regression of #317 for this binary).
 
 A runtime is resolved from one of five sources, in order: `REVL_LSP_RUNTIME` (an
 already-extracted directory), `REVL_LSP_RUNTIME_ARCHIVE` (a pinned `tar`,

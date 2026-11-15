@@ -1,0 +1,98 @@
+// Issue #3407: a field read whose receiver this document built reads the dict
+// directly. `move` is reached only from record literals (the loop in `run`,
+// the recursion in `walk`, the test), so its parameter qualifies; `step`
+// hands it a host value, so `drift` (same body, other callers) keeps the
+// `isinstance` dispatch, and so does a read through a shadowing arrow.
+type Fly = { x: Float, y: Float, k: Float }
+type Got = Hit(Fly) | Miss
+
+fn move(f: Fly, tx: Float, dt: Float) -> Fly {
+  let dx = tx - f.x
+  return { x: f.x + dx * dt, y: f.y, k: f.k }
+}
+
+fn drift(f: Fly, tx: Float) -> Fly {
+  return { x: f.x + tx, y: f.y, k: f.k }
+}
+
+fn walk(f: Fly, n: Int) -> Fly {
+  if (n == 0) { return f }
+  return walk(move(f, 1.0, 0.5), n - 1)
+}
+
+pub fn run(n: Int, tx: Float) -> Float {
+  var f = { x: 1.0, y: 2.0, k: 3.0 }
+  var i = 0
+  while (i < n) {
+    f = move(f, tx, 0.5)
+    i += 1
+  }
+  let g = { f | k = 0.0 }
+  return walk(g, 2).x + g.y
+}
+
+pub fn step(h: Fly, g: Got) -> Float {
+  let f = { x: 1.0, y: 2.0, k: 3.0 }
+  let pick = (f: Fly) => f.x
+  let a = match g { Hit(p) => drift(p, 1.0).x, Miss => 0.0 }
+  return drift(h, 1.0).x + pick(h) + f.y + a
+}
+
+test "move" {
+  assert move({ x: 0.0, y: 0.0, k: 1.0 }, 2.0, 0.5).x == 1.0
+}
+
+// An `Opt` field on a built record reads TOTAL and direct: `t.get('label')`.
+type Tag = { n: Int, label: Opt[Str] }
+
+pub fn tag() -> Str {
+  let t = { n: 1, label: Some("a") }
+  return t.label ?? "none"
+}
+
+// A fn called twice in one body; a name spelled as an IR key (`value`), which
+// the analysis cannot tell from the node's own key, so it keeps the dispatch;
+// and a name two sibling `let`s bind, which keeps it too.
+pub fn twice(b: Bool) -> Float {
+  let value = { x: 1.0, y: 2.0, k: 3.0 }
+  let a = move(move({ x: 0.0, y: 0.0, k: 0.0 }, 2.0, 0.5), 2.0, 0.5)
+  if (b) {
+    let t = { x: 1.0, y: 1.0, k: 1.0 }
+    return t.x + a.x
+  }
+  let t = { x: 2.0, y: 1.0, k: 1.0 }
+  return t.x + value.x + a.y
+}
+
+// A match bind that reuses a built `let`'s spelling: the bind is whatever the
+// payload is, so both reads of `q` keep the dispatch.
+pub fn rebind(g: Got) -> Float {
+  let q = { x: 1.0, y: 2.0, k: 3.0 }
+  return match g { Hit(q) => q.x, Miss => q.y }
+}
+
+// A bare `return` is a return with no value: the fn builds no record.
+pub fn early(n: Int) {
+  if (n > 0) { return }
+  return
+}
+
+// Host text is emitted verbatim: `poke`'s `@py` body calls `hop` by name with
+// whatever the host hands it, and a string literal spells `skip` as a word.
+// Both keep the dispatch.
+fn hop(f: Fly, t: Float) -> Float {
+  let d = t - f.x
+  return d * f.y
+}
+
+fn skip(f: Fly, t: Float) -> Float {
+  let d = t - f.x
+  return d + f.k
+}
+
+extern pure fn poke(h: Value) -> Float = @py { return hop(h, 1.0) }
+
+pub fn hosted(h: Value) -> Str {
+  let n = poke(h) + hop({ x: 1.0, y: 1.0, k: 1.0 }, 2.0) + skip({ x: 1.0, y: 1.0, k: 1.0 }, 2.0)
+  return "skip(f)"
+}

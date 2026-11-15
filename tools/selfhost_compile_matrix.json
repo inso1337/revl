@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "digest": "017dc3a11daf7dd0025a88537cee724131b890a6cb112ee6c3d9cc27f3edd212",
+ "digest": "834fee2e54fc3c5a158b9117796f8a675239cb12d5c1f3458635dbf59dfa5fa5",
  "tiers": [
   "python",
   "typescript",
@@ -27,15 +27,15 @@
   "checker.rvl": {
    "python": {
     "kind": "ok",
-    "bytes": 371981
+    "bytes": 347633
    },
    "typescript": {
     "kind": "ok",
-    "bytes": 267980
+    "bytes": 329676
    },
    "rust": {
     "kind": "ok",
-    "bytes": 318982
+    "bytes": 319312
    },
    "java": {
     "kind": "refused",
@@ -43,7 +43,7 @@
    },
    "wasm": {
     "kind": "refused",
-    "message": "compat_tt: parameter tt: type 'Map[Str, TySpec]' is not lowerable \u2014 this tier supports Int/Bool/Str/Bytes/List/record/variant/Opt/Result values"
+    "message": "compat_tt: parameter tt: type 'Map[Str, TySpec]' is not lowerable \u2014 this tier supports Int/Int32/Float/Bool/Str/Bytes/List/record/variant/Opt/Result values"
    },
    "go": {
     "kind": "refused",
@@ -53,7 +53,7 @@
   "compile.rvl": {
    "python": {
     "kind": "ok",
-    "bytes": 3575561
+    "bytes": 3515398
    },
    "typescript": {
     "kind": "refused",
@@ -79,7 +79,7 @@
   "emit_go.rvl": {
    "python": {
     "kind": "ok",
-    "bytes": 306177
+    "bytes": 297442
    },
    "typescript": {
     "kind": "refused",
@@ -95,7 +95,7 @@
    },
    "wasm": {
     "kind": "refused",
-    "message": "EmitGo: emitter.render param 'ir': type 'Any' is not lowerable \u2014 this tier supports Int/Bool/Str/Bytes/List/record/variant/Opt/Result values"
+    "message": "EmitGo: emitter.render param 'ir': type 'Any' is not lowerable \u2014 this tier supports Int/Int32/Float/Bool/Str/Bytes/List/record/variant/Opt/Result values"
    },
    "go": {
     "kind": "refused",
@@ -105,7 +105,7 @@
   "emit_java.rvl": {
    "python": {
     "kind": "ok",
-    "bytes": 182275
+    "bytes": 178754
    },
    "typescript": {
     "kind": "refused",
@@ -121,7 +121,7 @@
    },
    "wasm": {
     "kind": "refused",
-    "message": "EmitJava: emitter.render param 'ir': type 'Any' is not lowerable \u2014 this tier supports Int/Bool/Str/Bytes/List/record/variant/Opt/Result values"
+    "message": "EmitJava: emitter.render param 'ir': type 'Any' is not lowerable \u2014 this tier supports Int/Int32/Float/Bool/Str/Bytes/List/record/variant/Opt/Result values"
    },
    "go": {
     "kind": "refused",
@@ -131,7 +131,7 @@
   "emit_py.rvl": {
    "python": {
     "kind": "ok",
-    "bytes": 197513
+    "bytes": 213167
    },
    "typescript": {
     "kind": "refused",
@@ -147,7 +147,7 @@
    },
    "wasm": {
     "kind": "refused",
-    "message": "EmitPy: emitter.render param 'ir': type 'Any' is not lowerable \u2014 this tier supports Int/Bool/Str/Bytes/List/record/variant/Opt/Result values"
+    "message": "EmitPy: emitter.render param 'ir': type 'Any' is not lowerable \u2014 this tier supports Int/Int32/Float/Bool/Str/Bytes/List/record/variant/Opt/Result values"
    },
    "go": {
     "kind": "refused",
@@ -157,7 +157,7 @@
   "emit_rust.rvl": {
    "python": {
     "kind": "ok",
-    "bytes": 321924
+    "bytes": 320297
    },
    "typescript": {
     "kind": "refused",
@@ -165,7 +165,7 @@
    },
    "rust": {
     "kind": "ok",
-    "bytes": 417957
+    "bytes": 420395
    },
    "java": {
     "kind": "refused",
@@ -173,7 +173,7 @@
    },
    "wasm": {
     "kind": "refused",
-    "message": "EmitRust: emitter.render param 'ir': type 'Any' is not lowerable \u2014 this tier supports Int/Bool/Str/Bytes/List/record/variant/Opt/Result values"
+    "message": "EmitRust: emitter.render param 'ir': type 'Any' is not lowerable \u2014 this tier supports Int/Int32/Float/Bool/Str/Bytes/List/record/variant/Opt/Result values"
    },
    "go": {
     "kind": "refused",
@@ -183,7 +183,7 @@
   "emit_ts.rvl": {
    "python": {
     "kind": "ok",
-    "bytes": 196465
+    "bytes": 202755
    },
    "typescript": {
     "kind": "refused",
@@ -199,7 +199,7 @@
    },
    "wasm": {
     "kind": "refused",
-    "message": "EmitTs: emitter.render param 'ir': type 'Any' is not lowerable \u2014 this tier supports Int/Bool/Str/Bytes/List/record/variant/Opt/Result values"
+    "message": "EmitTs: emitter.render param 'ir': type 'Any' is not lowerable \u2014 this tier supports Int/Int32/Float/Bool/Str/Bytes/List/record/variant/Opt/Result values"
    },
    "go": {
     "kind": "refused",
@@ -209,7 +209,7 @@
   "emit_wasm.rvl": {
    "python": {
     "kind": "ok",
-    "bytes": 133956
+    "bytes": 140709
    },
    "typescript": {
     "kind": "refused",
@@ -225,7 +225,7 @@
    },
    "wasm": {
     "kind": "refused",
-    "message": "EmitWasm: emitter.render param 'ir': type 'Any' is not lowerable \u2014 this tier supports Int/Bool/Str/Bytes/List/record/variant/Opt/Result values"
+    "message": "EmitWasm: emitter.render param 'ir': type 'Any' is not lowerable \u2014 this tier supports Int/Int32/Float/Bool/Str/Bytes/List/record/variant/Opt/Result values"
    },
    "go": {
     "kind": "refused",
@@ -235,11 +235,11 @@
   "lexer.rvl": {
    "python": {
     "kind": "ok",
-    "bytes": 39651
+    "bytes": 37522
    },
    "typescript": {
     "kind": "ok",
-    "bytes": 34259
+    "bytes": 44459
    },
    "rust": {
     "kind": "ok",
@@ -261,7 +261,7 @@
   "lower.rvl": {
    "python": {
     "kind": "ok",
-    "bytes": 2151517
+    "bytes": 2089233
    },
    "typescript": {
     "kind": "refused",
@@ -269,7 +269,7 @@
    },
    "rust": {
     "kind": "ok",
-    "bytes": 1764283
+    "bytes": 1794953
    },
    "java": {
     "kind": "refused",
@@ -287,11 +287,11 @@
   "parser.rvl": {
    "python": {
     "kind": "ok",
-    "bytes": 124716
+    "bytes": 119335
    },
    "typescript": {
     "kind": "ok",
-    "bytes": 85746
+    "bytes": 110427
    },
    "rust": {
     "kind": "ok",
@@ -313,15 +313,15 @@
   "types.rvl": {
    "python": {
     "kind": "ok",
-    "bytes": 43825
+    "bytes": 39378
    },
    "typescript": {
     "kind": "ok",
-    "bytes": 43360
+    "bytes": 51638
    },
    "rust": {
     "kind": "ok",
-    "bytes": 54102
+    "bytes": 54432
    },
    "java": {
     "kind": "refused",
@@ -333,7 +333,7 @@
    },
    "go": {
     "kind": "ok",
-    "bytes": 41728
+    "bytes": 41921
    }
   }
  }

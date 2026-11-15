@@ -73,6 +73,8 @@ The guard has three properties that make it real rather than decorative:
 1. **Realpath before the check.** `resolve_within` realpaths the target, which
    resolves every symlink in the path, and only then tests root membership. A
    symlink placed inside the root that points outside is caught, not followed.
+   `..` components are collapsed lexically before any link is resolved, on both
+   tiers, so a symlink cannot move the directory a following `..` applies to.
 2. **The inverse path is guarded too, at BOTH endpoints.** `restore`, `unrm`,
    `unmove`, and `rmdir_if_empty` re-run the same check on the path they are
    about to write. A witness that (through tampering or a moved root) now
@@ -329,7 +331,11 @@ every inverse uses, so the jail is unchanged: a path these refuse is a path no
 op in the catalog would touch, and the refusal codes are the same ones
 (`EOUTSIDE` for the boundary, `EWORKSPACE` for an unconfigured root, `EINVAL`
 for a name no filesystem can hold). A path outside the root answers with a
-refusal, never with a fact about what lives out there.
+refusal, never with a fact about what lives out there: the `EOUTSIDE` refusal's
+`path` is the path the caller passed (a NUL escaped), on both tiers, not the
+resolved spelling, so neither the on-disk case nor a symlink target outside the
+root is reported. The resolved path appears only in the `Ok` value of a path
+inside the root.
 
 **Why they had to exist at the revl level.** A consumer's *host body* had no
 supported door to the guard. Item 396(B) jails a user-origin `= @ts ref` to the

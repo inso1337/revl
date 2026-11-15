@@ -82,12 +82,16 @@ from __future__ import annotations
 CROSSING_TIMEOUT = 30
 
 
-def py_policy(tag: str, *, follow: bool) -> str:
+def py_policy(tag: str, *, follow: bool, extra_handlers: str = "") -> str:
     """The redirect-refusing opener, as python source for an emitted body.
 
     Indented four spaces: both call sites splice it into a host body that sits
     at one level of function indentation. `tag` prefixes every diagnostic
     (`a2a`, `remote`) so a refusal says which crossing refused.
+    `extra_handlers` is spliced into `build_opener` after the redirect policy
+    (a leading comma included) by a caller that installs a handler of its own,
+    such as the pinned TLS leaf check (`revl.tls_pin`, issue #2719); the empty
+    default keeps every body without one byte-identical.
     """
     return f'''
     # -- redirect policy (revl.crossing_redirect) ------------------------
@@ -139,7 +143,7 @@ def py_policy(tag: str, *, follow: bool) -> str:
                                 origin_req_host=_rq.origin_req_host,
                                 unverifiable=True, method=_rq.get_method())
 
-    _opener = _req.build_opener(_RedirectPolicy)
+    _opener = _req.build_opener(_RedirectPolicy{extra_handlers})
 '''
 
 

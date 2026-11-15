@@ -166,11 +166,6 @@ ACKNOWLEDGED: dict[str, str] = {
           "computer-use reversibility registry's (`src/revl/ui_family.py`); "
           "it is stated and witnessed in `formal/STATUS.md`'s A5 row "
           "(issue #2114).",
-    "G-SECRET": "the confidentiality fixtures in `examples/rejections/` are "
-                "refused under `G-SECRET-FLOW` (the disclosure-sink half). "
-                "`G-SECRET` (the capability-reach half) is enforced in "
-                "`src/revl/taint.py` and exercised by the per-tier secret "
-                "registry suites, not by a fixture this corpus compiles.",
     "T3": "an open hole is refused at the ADMISSION gate rather than by "
           "`compile_files`, so a hole fixture compiles here and is refused one "
           "stage later; the reproducers live with the gate "
@@ -1037,7 +1032,8 @@ def support_matrix(*, report: dict | None = None,
                                "evidence": selfhost_emit_evidence},
         })
 
-    return {"tiers": [_short(tier) for tier in conformance.TIERS], "rows": rows}
+    return {"tiers": [_short(tier) for tier in conformance.TIERS], "rows": rows,
+            "selfhost_emit_digest": (emit_ledger or {}).get("digest")}
 
 
 def support_markdown(data: dict | None = None) -> str:
@@ -1069,6 +1065,17 @@ def support_markdown(data: dict | None = None) -> str:
             cell(row[key]) for key in
             ("emits", "executes", "durable_recovery", "selfhost_agreement",
              "selfhost_emits")) + " |")
+    measured_at = data.get("selfhost_emit_digest")
+    if measured_at:
+        # Which measurement the column shows. The ledger is refreshed by the
+        # change that moves a cell, not by every commit that touches a source,
+        # so the table names the digest it was taken at instead of refusing a
+        # tree that has moved on.
+        out += ["",
+                "The self-host emit column shows the measurement recorded at "
+                f"source digest `{measured_at[:12]}`; "
+                "`python3 tools/selfhost_matrix.py --check` reports when the "
+                "sources have moved since."]
     return "\n".join(out)
 
 

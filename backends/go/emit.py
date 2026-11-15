@@ -44,6 +44,27 @@ class EmitError(ValueError):
     pass
 
 
+def _host_body_scanner():
+    """The shared host-body scanner (`src/revl/host_body.py`).
+
+    Imported lazily so a standalone `python3 emit.py <ir.json>` keeps working:
+    when the emitter runs through the compiler `revl` is importable, and a bare
+    script run falls back to the source tree beside this file. The scanner is
+    the one place every tier splits an extern body and checks that it cannot
+    leave the function it is spliced into (#3130, #3131, #3162, #3164, #3166).
+    """
+    try:
+        from revl.host_body import body_lines, check_host_body
+    except ModuleNotFoundError:  # standalone `python3 emit.py`: put src/ on the path
+        import pathlib
+        import sys as _sys
+        src = pathlib.Path(__file__).resolve().parents[2] / "src"
+        if src.is_dir() and str(src) not in _sys.path:
+            _sys.path.insert(0, str(src))
+        from revl.host_body import body_lines, check_host_body
+    return body_lines, check_host_body
+
+
 def _finite_float(value):
     """The literal's value, refused when a `Float` is not finite (issue #312).
 
@@ -488,10 +509,29 @@ _GO_KEYWORDS = {"type", "range", "func", "map", "chan", "select", "go",
 #: that name first, so a user binding of one of these spellings made the
 #: assignment target the wrong variable (a go build type error). `_f`, `i`,
 #: `_i` and `_j` stay unreserved: their shadows are never read as a user value.
+#: issue #3095 adds the component activation/provide-impl scaffolding a
+#: `let-effect` bind shares scope with: `ctx` is the activation's
+#: `*stc.Context` and the impl's own field, `cfg` the config struct, the rest
+#: are the emitted frames, method receiver and apply results.
 _EMITTER_RESERVED = {
     "revlT", "root", "_fibers", "_revlLoadOrder", "_revlAt",
     "_svc", "_err", "_r", "_ok",
+    "ctx", "cfg", "err", "revlFrame", "revlJournal", "revlSelf",
+    "_revlUi", "_revlApplyInv", "_revlApplyErr",
 }
+
+# Issue #3168: the go tier lowers arithmetic, string, list and Opt operations to
+# package-level helpers spelled `revl<Upper>...` (`revlAdd`, `revlSub`,
+# `revlStrIndex`, `revlListPush`, ...) and the lifecycle scaffolding to
+# `revl*`/`_revl*`. A user `let` or parameter of one of those spellings is a Go
+# binding INSIDE the function, so the emitter's own bare helper call binds the
+# user's closure instead: `let revlSub = (..) => 0; return a - b` returned 0 and
+# the overflow trap was gone. The whole namespace is therefore unspellable from
+# a user name, the same rule the ts tier's `_TS_HELPER_PREFIX_RE` applies
+# (issue #3179) and java's `_REVL_NAMESPACE_RE` (issue #3160). The root-stripped
+# ladder below keeps the rename injective (`revlSub` -> `revlSub_`,
+# `revlSub_` -> `revlSub__`).
+_REVL_HELPER_PREFIX_RE = re.compile(r"^(?:revl[A-Z]|REVL_|_revl|_REVL)")
 
 
 def _safe_local(name: str) -> str:
@@ -510,21 +550,22 @@ def _safe_local(name: str) -> str:
     compiler CI does not run.
 
     The injective rule: escape a name iff the name OR any name reachable from
-    it by dropping trailing `_` is a Go keyword or an `_EMITTER_RESERVED` name,
-    and escape it by exactly ONE `_`. Names whose underscore-stripped root is
-    reserved shift up one rung of the `kw`/`kw_`/`kw__` ladder (`func` ->
-    `func_`, `func_` -> `func__`), which is injective; every other name is
-    returned unchanged and can never equal a shifted name, because a shifted
-    name's root is reserved and an unchanged name's root is not. The output is
-    never itself reserved: no member of `_GO_KEYWORDS` or `_EMITTER_RESERVED`
-    ends in `_`. Only a name whose root is reserved can change, so a program
-    that binds no reserved name emits byte-identically to before; binding one
-    of the driver's own spellings now moves the USER name one rung clear
-    (issue #3053)."""
+    it by dropping trailing `_` is a Go keyword, an `_EMITTER_RESERVED` name or
+    a helper-namespace name (`_REVL_HELPER_PREFIX_RE`), and escape it by exactly
+    ONE `_`. Names whose underscore-stripped root is reserved shift up one rung
+    of the `kw`/`kw_`/`kw__` ladder (`func` -> `func_`, `func_` -> `func__`),
+    which is injective; every other name is returned unchanged and can never
+    equal a shifted name, because a shifted name's root is reserved and an
+    unchanged name's root is not. The output is never itself reserved: no member
+    of `_GO_KEYWORDS` or `_EMITTER_RESERVED` ends in `_`. Only a name whose root
+    is reserved can change, so a program that binds no reserved name emits
+    byte-identically to before; binding one of the driver's own spellings now
+    moves the USER name one rung clear (issue #3053)."""
     n = str(name)
     root = n
     while root:
-        if root in _GO_KEYWORDS or root in _EMITTER_RESERVED:
+        if (root in _GO_KEYWORDS or root in _EMITTER_RESERVED
+                or _REVL_HELPER_PREFIX_RE.match(root) is not None):
             return n + "_"
         if not root.endswith("_"):
             break
@@ -533,7 +574,18 @@ def _safe_local(name: str) -> str:
 
 
 def _bind_field(name: str) -> str:
-    return _lower_camel(name)
+    """The Go spelling of a component `let-effect` bind.
+
+    `_lower_camel` drops the trailing underscores the frontend's `_safe_name`
+    added to keep binders apart, so the raw binder `ctx` and the escaped one
+    `ctx_` both spelled `ctx`, and `ctx` is also the activation's context
+    parameter and the provide impl's own field. Preserve the trailing rung and
+    escape the component scaffolding through `_safe_local`'s ladder; a bind
+    that lands on no reserved name is unchanged, so ordinary output is
+    byte-identical (issue #3095).
+    """
+    return _safe_local(_lower_camel(str(name))
+                       + "_" * (len(str(name)) - len(str(name).rstrip("_"))))
 
 
 def _req_field(name: str) -> str:
@@ -1246,9 +1298,9 @@ def _go_comp_match_tuple(node, env: _Env, expected, st, is_opt, is_result,
     err_arm = next((a for a in arms if a.get("pattern") in ("None", "Err")), None)
     wild = next((a for a in arms if a.get("pattern") == "_"), None)
     if scrut_node.get("kind") == "builtin" \
-            and scrut_node.get("method") in _GO_CHECKED_DIV:
-        # the total division forms: the stc-go Result tuple, multi-value
-        scrutinee = _comp_checked_div_expr(scrut_node, env)
+            and scrut_node.get("method") in _GO_CHECKED_FORMS:
+        # the total forms: the stc-go Result tuple, multi-value
+        scrutinee = _comp_checked_expr(scrut_node, env)
     else:
         scrutinee = _expr(scrut_node, env, st)
     saved_types = dict(env.var_types)
@@ -1818,13 +1870,13 @@ def _comp_builtin(method, recv_surface, target, args):
     if method == "remove":
         _COMP_NEEDS_MAP = True
         return "revlMapRemove(%s, %s)" % (target, args[0])
-    if method in _GO_CHECKED_DIV:
-        # The total division forms answer a Result, which the stc-go world
-        # carries as a (T, E, bool) tuple — only valid in the two positions
-        # that accept a multi-value expression: a `match` scrutinee and a
-        # `return` against a Result-typed method. A bare value use would
-        # emit Go that cannot compile, so it is refused here with the way
-        # out named (mirrors the Opt tuple convention on this tier).
+    if method in _GO_CHECKED_FORMS:
+        # The total forms answer a Result, which the stc-go world carries as a
+        # (T, E, bool) tuple — only valid in the two positions that accept a
+        # multi-value expression: a `match` scrutinee and a `return` against a
+        # Result-typed method. A bare value use would emit Go that cannot
+        # compile, so it is refused here with the way out named (mirrors the
+        # Opt tuple convention on this tier).
         raise EmitError(
             f"{method} is only lowerable on the cordis-go tier as a `match` "
             f"scrutinee or in a Result-returning `return` (Result is a "
@@ -1832,18 +1884,20 @@ def _comp_builtin(method, recv_surface, target, args):
     raise EmitError("unknown stdlib method: %r" % (method,))
 
 
-def _comp_checked_div_expr(node, env: _Env) -> str:
-    """The total division forms (docs/arithmetic.md) as the stc-go tier's
-    Result tuple `(T, E, bool)`: an immediately-applied func literal that
-    evaluates each operand once, returns `(0, reason, false)` on a zero
-    divisor (and on the Int.MIN / -1 overflow for the truncating form), else
-    the quotient. Only valid where a multi-value expression is: a `match`
-    scrutinee or a Result-returning `return`."""
+def _comp_checked_expr(node, env: _Env) -> str:
+    """The total forms (docs/arithmetic.md) as the stc-go tier's Result tuple
+    `(T, E, bool)`: an immediately-applied func literal that evaluates each
+    operand once, returns `(0, reason, false)` on the fault (an overflow for
+    `checked_add/sub/mul`, a zero divisor or the one overflowing quotient for
+    the division forms), else the value. Only valid where a multi-value
+    expression is: a `match` scrutinee or a Result-returning `return`."""
     method = node.get("method")
     target = _expr(node.get("target"), env)
     args = [_expr(a, env) for a in node.get("args") or []]
     if len(args) != 1:
-        raise EmitError(f"{method} takes exactly one divisor")
+        raise EmitError(f"{method} takes exactly one argument")
+    if method in _GO_CHECKED_ARITH:
+        return _comp_checked_arith_expr(method, target, args[0])
     if method != "checked_div_trunc":
         # revlDivFloor / revlDivEuclid / revlMod live in the pure-tier
         # int-arith preamble, which the stc-go component path does not emit —
@@ -1858,8 +1912,42 @@ def _comp_checked_div_expr(node, env: _Env) -> str:
         f"var _a, _b int64; _a, _b = {target}, {args[0]}; "
         f'if _b == 0 {{ return 0, "{_GO_DIV_ZERO_MSG}", false }}; '
         "if _a == (-9223372036854775807 - 1) && _b == -1 "
-        '{ return 0, "revl: Int overflow", false }; '
+        f'{{ return 0, "{_GO_INT_OVERFLOW_MSG}", false }}; '
         f"return ({quotient}), \"\", true }}()"
+    )
+
+
+def _comp_checked_arith_expr(method: str, target: str, arg: str) -> str:
+    """The total arithmetic forms as the stc-go tier's `(T, E, bool)` tuple.
+    The overflow tests are the ones the trapping `revlAdd/revlSub/revlMul`
+    helpers use, with the fault carried out as the third tuple value instead
+    of a panic. `checked_mul` names `Int.MIN * -1` explicitly: Go defines
+    `Int.MIN / -1` as `Int.MIN`, so the readback check cannot see that
+    product (docs/arithmetic.md)."""
+    if method == "checked_add":
+        body = ("_r := _a + _b; "
+                "if (_a > 0 && _b > 0 && _r < 0) || "
+                "(_a < 0 && _b < 0 && _r >= 0) "
+                '{ return 0, "revl: Int overflow", false }; '
+                'return _r, "", true')
+    elif method == "checked_sub":
+        body = ("_r := _a - _b; "
+                "if (_b < 0 && _r < _a) || (_b > 0 && _r > _a) "
+                '{ return 0, "revl: Int overflow", false }; '
+                'return _r, "", true')
+    else:
+        body = ('if _a == 0 || _b == 0 { return 0, "", true }; '
+                "if (_a == (-9223372036854775807 - 1) && _b == -1) || "
+                "(_a == -1 && _b == (-9223372036854775807 - 1)) "
+                '{ return 0, "revl: Int overflow", false }; '
+                "_r := _a * _b; "
+                "if _r/_b != _a "
+                '{ return 0, "revl: Int overflow", false }; '
+                'return _r, "", true')
+    return (
+        "func() (int64, string, bool) { "
+        f"var _a, _b int64; _a, _b = {target}, {arg}; "
+        f"{body} }}()"
     )
 
 
@@ -2512,11 +2600,11 @@ def _emit_return(expr, ret_surface, env: _Env, out, pad):
         return
     if rs.startswith("Result[") and isinstance(expr, dict) \
             and expr.get("kind") == "builtin" \
-            and expr.get("method") in _GO_CHECKED_DIV:
-        # The total division forms answer a Result, carried on this tier as
-        # the (T, E, bool) tuple: the multi-value IIFE returns straight into
-        # the method's tuple signature.
-        out.append("%sreturn %s" % (pad, _comp_checked_div_expr(expr, env)))
+            and expr.get("method") in _GO_CHECKED_FORMS:
+        # The total forms answer a Result, carried on this tier as the
+        # (T, E, bool) tuple: the multi-value IIFE returns straight into the
+        # method's tuple signature.
+        out.append("%sreturn %s" % (pad, _comp_checked_expr(expr, env)))
         return
     out.append("%sreturn %s" % (pad, _expr(expr, env, ret_surface)))
 
@@ -6317,21 +6405,28 @@ _GO_RESERVED = {
     # ladder below closes it — the user's `len` emits as `len_`, the emitter's
     # `len(...)` stays the builtin.
     #
-    # Only the ACTUALLY-emitted subset is reserved, not the whole predeclared
-    # list: a predeclared identifier the emitter never spells (`clear`, `close`,
-    # `cap`, `new`, `min`/`max`, …) cannot be shadowed because nothing references
-    # it, and over-reserving would rename a user `clear`/`cap` that the
-    # self-hosted `selfhost/emit_go.rvl` (keyword-escape only) leaves alone —
-    # breaking the byte-agreement oracle
-    # (`tests/test_selfhost_emit_go.py::test_selfhosted_emitter_is_byte_identical`,
-    # which `emit_go_corpus/accumulators.rvl`'s `clear` parameter exercises)
-    # without a matching change to that digest-input file. Go service methods
-    # are emitted capitalized (`r.Close()`), so they never reach `_v3_ident`'s
-    # predeclared check and need no exclusion. None of these end in `_`, so the
-    # ladder stays injective and a mangled name never re-enters the set.
-    "any", "append", "bool", "byte", "comparable", "copy", "delete", "error",
-    "float64", "int", "int32", "int64", "len", "make", "panic", "rune",
-    "string", "uint32",
+    # Issue #3161: the WHOLE predeclared set is reserved, not only the subset
+    # this emitter was known to spell. The subset was measured against the code
+    # emitted at the time, but the emitter also writes `recover()` (the
+    # lifecycle test driver and the component `Apply` guard), `close`, `cap`,
+    # `clear` and `uint64`, and a later helper can add another. A zero-argument
+    # `fn recover` compiles and the deferred `if r := recover(); r != nil`
+    # guard calls the USER fn, so a real panic is no longer recovered and an
+    # ordinary lifecycle test fails at the end of every run. Reserving the whole
+    # universe-block set means a helper added later cannot reopen the hole, and
+    # over-reserving only renames a user binding of that spelling (an injective
+    # ladder shift, never a wrong value). `selfhost/emit_go.rvl::is_go_reserved`
+    # carries the identical set, so the byte-agreement oracle stays exact; the
+    # `clear` parameter of `emit_go_corpus/accumulators.rvl` now emits `clear_`
+    # in both implementations. Go service methods are emitted capitalized
+    # (`r.Close()`), so they never reach `_v3_ident`'s predeclared check and
+    # need no exclusion. None of these end in `_`, so the ladder stays injective
+    # and a mangled name never re-enters the set.
+    "any", "append", "bool", "byte", "cap", "clear", "close", "comparable",
+    "complex", "complex64", "complex128", "copy", "delete", "error", "float32",
+    "float64", "imag", "int", "int8", "int16", "int32", "int64", "len", "make",
+    "max", "min", "new", "panic", "print", "println", "real", "recover", "rune",
+    "string", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
 }
 
 _V3_PRIM = {
@@ -6348,17 +6443,21 @@ def _v3_ident(name, role: str) -> str:
     """The pure-v3 counterpart of `_safe_local`, over the full Go keyword set.
 
     Same injective rule (see `_safe_local`): escape a name iff the name OR any
-    name reachable from it by dropping trailing `_` is a Go keyword, by exactly
-    one `_`. The plain "reserved -> name + '_'" map sent both `func` and the
-    equally legal revl identifier `func_` to `func_`, so two distinct revl
-    locals became one Go local and `go build` reported "no new variables on
-    left side of :=" — a loud break here, a SILENT capture on the python tier
-    from the same shape."""
+    name reachable from it by dropping trailing `_` is a Go keyword, an
+    `_EMITTER_RESERVED` helper name or a name in the helper namespace
+    (`_REVL_HELPER_PREFIX_RE`, issue #3168), by exactly one `_`. The plain
+    "reserved -> name + '_'" map sent both `func` and the equally legal revl
+    identifier `func_` to `func_`, so two distinct revl locals became one Go
+    local and `go build` reported "no new variables on left side of :=": a
+    loud break here, a SILENT capture on the python tier from the same shape.
+    A `revl*` user binding is escaped for the same reason a keyword is: the
+    emitter's bare helper call inside the function must keep binding the
+    helper (issue #3168)."""
     if not isinstance(name, str) or not name:
         raise EmitError(f"invalid {role} identifier: {name!r}")
     root = name
     while root:
-        if root in _GO_RESERVED:
+        if (root in _GO_RESERVED or _REVL_HELPER_PREFIX_RE.match(root) is not None):
             return name + "_"
         if not root.endswith("_"):
             break
@@ -6796,11 +6895,16 @@ class _V3GoCtx:
         return _v3_ident(name, "type name")
 
 
-# The total, value-returning division forms (docs/arithmetic.md): same
-# rounding as the faulting operations, Err(reason) at a zero divisor.
+# The total, value-returning forms (docs/arithmetic.md): same value as the
+# faulting operations where it fits, Err(reason) instead of the fault
+# otherwise. `checked_add/sub/mul` answer the overflow; the division forms
+# answer a zero divisor too.
+_GO_CHECKED_ARITH = ("checked_add", "checked_sub", "checked_mul")
 _GO_CHECKED_DIV = ("checked_div_trunc", "checked_div_floor",
                    "checked_div_euclid", "checked_mod")
+_GO_CHECKED_FORMS = _GO_CHECKED_ARITH + _GO_CHECKED_DIV
 _GO_DIV_ZERO_MSG = "revl: division by zero"
+_GO_INT_OVERFLOW_MSG = "revl: Int overflow"
 
 
 # Int.to_char (issue #2285, docs/stdlib-2.0.md §Int.to_char) as a closure
@@ -6829,8 +6933,7 @@ def _v3_builtin_ret_type(method, recv_type):
     if method in ("startsWith", "endsWith"):
         return "Bool"
     # The total forms (docs/arithmetic.md) produce a Result value.
-    if method in ("checked_div_trunc", "checked_div_floor",
-                  "checked_div_euclid", "checked_mod"):
+    if method in _GO_CHECKED_FORMS:
         return "Result[Int, Str]"
     if method in ("charAt", "repeat", "join"):
         return "Str"
@@ -8139,11 +8242,41 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
         helper = {"div_floor": "revlDivFloor", "div_euclid": "revlDivEuclid",
                   "mod": "revlMod"}[method]
         return f"{helper}({target}, {args[0]})"
-    # The total forms (docs/arithmetic.md): same quotient as the faulting
-    # operation, but a zero divisor yields Err(reason) instead of panicking —
-    # `fail` is refused in a pure fn, so the error travels as a value. An
-    # immediately-applied func literal evaluates each operand exactly once;
-    # the Ok/Err arms are the two-value RevlResult struct (item 434 (d)).
+    # The total arithmetic forms (docs/arithmetic.md): the overflow tests the
+    # trapping `revlAdd/revlSub/revlMul` helpers use, with the fault carried
+    # out as an Err arm instead of a panic. An immediately-applied func
+    # literal evaluates each operand exactly once; the Ok/Err arms are the
+    # two-value RevlResult struct (item 434 (d)).
+    if method in _GO_CHECKED_ARITH:
+        if method == "checked_add":
+            body = ("_r := _a + _b; "
+                    "if (_a > 0 && _b > 0 && _r < 0) || "
+                    "(_a < 0 && _b < 0 && _r >= 0) { "
+                    'return RevlResult[int64, string]{ErrV: "revl: Int overflow"} }; '
+                    "return RevlResult[int64, string]{OkV: _r, Ok: true}")
+        elif method == "checked_sub":
+            body = ("_r := _a - _b; "
+                    "if (_b < 0 && _r < _a) || (_b > 0 && _r > _a) { "
+                    'return RevlResult[int64, string]{ErrV: "revl: Int overflow"} }; '
+                    "return RevlResult[int64, string]{OkV: _r, Ok: true}")
+        else:
+            body = ('if _a == 0 || _b == 0 { '
+                    "return RevlResult[int64, string]{OkV: 0, Ok: true} }; "
+                    "if (_a == (-9223372036854775807 - 1) && _b == -1) || "
+                    "(_a == -1 && _b == (-9223372036854775807 - 1)) { "
+                    'return RevlResult[int64, string]{ErrV: "revl: Int overflow"} }; '
+                    "_r := _a * _b; "
+                    "if _r/_b != _a { "
+                    'return RevlResult[int64, string]{ErrV: "revl: Int overflow"} }; '
+                    "return RevlResult[int64, string]{OkV: _r, Ok: true}")
+        return (f'func(_a, _b int64) RevlResult[int64, string] {{ {body} }}'
+                f'({target}, {args[0]})')
+    # The total division forms (docs/arithmetic.md): same quotient as the
+    # faulting operation, but a zero divisor yields Err(reason) instead of
+    # panicking — `fail` is refused in a pure fn, so the error travels as a
+    # value. An immediately-applied func literal evaluates each operand
+    # exactly once; the Ok/Err arms are the two-value RevlResult struct
+    # (item 434 (d)).
     if method in _GO_CHECKED_DIV:
         if method != "checked_div_trunc":
             ctx.needs_int_arith = True
@@ -9485,6 +9618,12 @@ def _emit_v3_go_externs(externs: list, ctx: _V3GoCtx,
                 f"(available: {', '.join(sorted(bodies)) or 'none'})"
             )
         body = bodies["go"].strip()
+        # #3162/#3166: refuse a body Go reads as unbalanced, and split on
+        # newlines only so a comment cannot become a statement. Before the
+        # journalled/secret wrappers so the body is checked once.
+        _body_lines, check_host_body = _host_body_scanner()
+        check_host_body("go", body,
+                        where=f"extern `{ext.get('name')}`", error=EmitError)
         # item 421 F6: an extern whose DECLARED return was `Secret[T]` is the
         # ORIGIN — where the value enters the value world, the case a
         # receiver-end marking misses (`let t = emit mint(); effect
@@ -9555,8 +9694,9 @@ _GO_LANGUAGE_KEYWORDS = frozenset({
 def _hoist_go_imports(body: str, ctx: "_V3GoCtx", extern: str) -> list[str]:
     """Split a @go extern body into emittable lines, pulling any
     `//revl:import [alias] <path>` directive out to the module import set (ctx)."""
+    body_lines, _check_host_body = _host_body_scanner()
     kept: list[str] = []
-    for line in body.splitlines():
+    for line in body_lines(body):
         if _GO_IMPORT_DIRECTIVE_WORD.match(line.strip()):
             spec = _go_import_spec(line.strip(), extern)
             ctx.extern_imports.add(spec)
@@ -12231,9 +12371,10 @@ def _emit_v3_go(ir: dict, package: str) -> str:
                                              "size", "keys", "remove"))
     if used_map:
         used_opt = True
-    # The total division forms produce a Result value without the source ever
+    # The total forms produce a Result value without the source ever
     # spelling `Result[` — their method names put Result in the module too.
-    used_result = ("Result[" in blob) or ("checked_div_" in blob) or ("checked_mod" in blob)
+    used_result = ("Result[" in blob) or any(
+        f'"method": "{m}"' in blob for m in _GO_CHECKED_FORMS)
     # A `Some(literal)` / `None` / `Ok`/`Err` with no `Opt[`/`Result[` spelled
     # in the IR (element type recovered from the argument, item 280) still
     # emits the sealed types — scan the rendered body so the matching preamble
@@ -13682,7 +13823,8 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
                                              "size", "keys", "remove"))
     if used_map:
         used_opt = True
-    used_result = ("Result[" in blob) or ("checked_div_" in blob) or ("checked_mod" in blob)
+    used_result = ("Result[" in blob) or any(
+        f'"method": "{m}"' in blob for m in _GO_CHECKED_FORMS)
     # the Map SUBSCRIPT helper (issue #957), gated on its own like above
     body_blob = "\n".join(body)
     used_map_index = "revlMapIndex(" in body_blob

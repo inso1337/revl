@@ -378,6 +378,7 @@ ENTRY_POINTS = {
     "revl/run.py": "reports",
     "revl/run_java.py": "reports",
     "revl/run_wasm.py": "reports",
+    "revl/simulate_swap.py": "reports",
     "revl/test.py": "reports",
     "revl/truc/reproduce.py": "reports",
 }

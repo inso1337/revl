@@ -2,7 +2,7 @@
 """Whether each reference emitter can emit the self-host sources (issue #2899).
 
     python3 tools/selfhost_matrix.py --measure   # re-measure, write the ledger
-    python3 tools/selfhost_matrix.py --check     # the cheap staleness and acknowledgement gate
+    python3 tools/selfhost_matrix.py --check     # the cheap acknowledgement gate
     python3 tools/selfhost_matrix.py --json      # the committed ledger
 
 `selfhost/*.rvl` is the largest revl program in the tree (about 82,000 lines), so
@@ -31,28 +31,40 @@ THE MEASUREMENT IS SLOW, SO IT IS A LEDGER
 Compiling the self-host once per file and emitting it once per tier costs
 minutes on a loaded machine, which is too much for a pre-commit gate and for
 the test that regenerates the support table. So `--measure` writes the measured
-cells to `tools/selfhost_compile_matrix.json` and `--check` is cheap:
+cells to `tools/selfhost_compile_matrix.json` and `--check` is cheap. It refuses
+only what is wrong with the LEDGER ITSELF:
 
-  * the ledger's `digest` covers every self-host source, every stdlib source
-    the self-host imports, and every tier emitter, so a change to any of them
-    marks the ledger stale by construction and the fix is to measure again, not
-    to edit a cell;
   * every non-`ok` cell must be named in `tools/selfhost_compile_gaps.json`
     with an issue number or an out-of-scope reason, and an acknowledgement whose
     cell now emits is stale too. This is the same ratchet as
     `tools/tier_guarantees.py::ACKNOWLEDGED`: the gap list can only move
-    deliberately, and a gap cannot exist without somewhere to track it.
+    deliberately, and a gap cannot exist without somewhere to track it;
+  * an acknowledgement needs a reason, and a cell the ledger does not carry
+    cannot be acknowledged.
 
+THE MOVED DIGEST IS A FACT, NOT A REFUSAL
+-----------------------------------------
+The ledger records a `digest` over every self-host source, every stdlib source
+and every tier emitter it was measured against. When those sources move on and
+the ledger is not re-measured, the ledger no longer describes the current tree
+exactly, but a merge that changes no cell has broken nothing. Refusing it would
+red main on every commit that touches a self-host source, an emitter or a
+stdlib file (a large share of the history), and would force every unrelated pull
+request to re-measure for minutes and then conflict on the digest line.
+
+So `--check` REPORTS a moved digest on stdout and exits 0, the support table
+says which measurement it shows (the recorded digest), and `--measure` refreshes
+the ledger in the change that has a reason to: one that moves a cell. A cell that
+changed state shows up as a diff of the ledger at that refresh, and the table
+text names the digest it was measured at, so a reader can see how old it is.
 The digest deliberately does not cover `src/revl/`: a frontend change does not
-change what an emitter does with a given IR, and the tiers' own suites cover
-the frontend. A change that DOES move this table through the frontend is caught
-by the next `--measure`.
+change what an emitter does with a given IR, and the tiers' own suites cover the
+frontend.
 
-WHAT --CHECK CANNOT SEE. The digest covers the measurement's INPUTS, not its
-cells, so a hand-edited ledger whose digest still matches is indistinguishable
-from a measured one, and the frontend exclusion above is the one fail-silent
-path. Coverage and acknowledgement are gated; truth is not, and a cell that
-looks wrong is settled by running `--measure` again.
+WHAT --CHECK CANNOT SEE. It does not re-measure, so it cannot tell a measured
+ledger from a hand-edited one or notice that a cell has changed state since the
+recorded digest. Coverage and acknowledgement are gated; truth is not, and a
+cell that looks wrong is settled by running `--measure` again.
 """
 
 from __future__ import annotations
@@ -174,20 +186,28 @@ def tier_counts(data: dict | None, tier: str) -> tuple[int, int] | None:
     return sum(1 for kind in kinds if kind == OK), len(kinds)
 
 
-def problems(data: dict | None = None, gaps: list[dict] | None = None,
-             expected_digest: str | None = None) -> list[str]:
-    """Every reason the committed ledger may not be published as it stands."""
+def digest_moved(data: dict | None, current: str | None = None) -> bool:
+    """True when the sources a measurement reads have moved since it was taken.
+
+    A fact about how old the ledger is, not a defect: nothing here refuses on it.
+    """
+    if not data:
+        return False
+    return data.get("digest") != (digest() if current is None else current)
+
+
+def problems(data: dict | None = None, gaps: list[dict] | None = None) -> list[str]:
+    """Every reason the committed ledger may not be published as it stands.
+
+    These are properties of the ledger and its acknowledgements alone. A moved
+    source digest is reported by `digest_moved`, never refused here.
+    """
     data = load() if data is None else data
     gaps = load_gaps() if gaps is None else gaps
     if data is None:
         return [f"{LEDGER.name} is missing or unreadable; run "
                 "`python3 tools/selfhost_matrix.py --measure`"]
     found = []
-    expected = digest() if expected_digest is None else expected_digest
-    if data.get("digest") != expected:
-        found.append(
-            f"{LEDGER.name} was measured against different self-host, stdlib or "
-            "tier emitter sources; run `python3 tools/selfhost_matrix.py --measure`")
     measured = cells_of(data)
     acknowledged: dict[str, dict] = {}
     for entry in gaps:
@@ -225,8 +245,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="re-measure every self-host file against every tier "
                              "and write the ledger (slow: minutes)")
     parser.add_argument("--check", action="store_true",
-                        help="fail if the ledger is stale, a non-emitting cell is "
-                             "unacknowledged, or an acknowledgement is stale")
+                        help="fail if a non-emitting cell is unacknowledged or an "
+                             "acknowledgement is stale; a moved source digest is "
+                             "reported, not refused")
     parser.add_argument("--json", action="store_true", help="print the ledger")
     args = parser.parse_args(argv)
 
@@ -244,7 +265,13 @@ def main(argv: list[str] | None = None) -> int:
             print(problem, file=sys.stderr)
         if found:
             return 1
-        print(f"{LEDGER.name} is current and every gap is acknowledged.")
+        print(f"{LEDGER.name}: every non-emitting cell is acknowledged.")
+        data = load()
+        if digest_moved(data):
+            print(f"note: it was measured at source digest {data['digest'][:12]}, "
+                  f"the tree is at {digest()[:12]}; re-measure with "
+                  "`python3 tools/selfhost_matrix.py --measure` when a change "
+                  "needs the table to show the current sources.")
         return 0
     data = load()
     if data is None:

@@ -529,9 +529,10 @@ else
     note "conformance matrix (--check-readme)"
 fi
 # Issue #2899: the per-tier support table's self-host emit column is a measured
-# ledger. It is cheap to check (the digest hashes the sources, it does not
-# re-measure), so the local pre-merge gate must not let a stale ledger through
-# to CI alone.
+# ledger. The check is cheap (it reads the ledger, it does not re-measure) and
+# refuses only what is wrong with the ledger itself: an unacknowledged
+# non-emitting cell or a stale acknowledgement. A moved source digest is
+# reported and exits 0, the same as in CI, so the two stay in step.
 if want gate conformance; then
     step "self-host emit ledger (--check)"    "$PYTHON" tools/selfhost_matrix.py --check
 else

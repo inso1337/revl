@@ -387,8 +387,9 @@ def test_moving_a_component_out_of_a_denied_realm_is_still_refused():
     carol = parse_profile(DENY_PROFILE).get("carol")
     sess = _FakeSession(compile_source(TWO_REALM), carol)
     labels = dict(op._changed_targets(sess.ir, compile_source(_move_b_to_tenant_c())))
-    # an allow is matched where it goes; a deny where it was AND where it goes
+    # an allow is matched where it goes first, a deny where it was AND where it goes
     assert labels == {"TenantBCache": frozenset({"TenantBCache", "tenant_c"})}
+    assert labels["TenantBCache"].was == frozenset({"TenantBCache", "tenant_b"})
     assert labels["TenantBCache"].deny == frozenset({"TenantBCache", "tenant_b", "tenant_c"})
     d = decide(sess, "revl_swap", {"source": _move_b_to_tenant_c()})
     assert d.gated and not d.allowed
@@ -436,13 +437,95 @@ def test_moving_an_allowed_component_out_of_the_allowed_realm_is_refused(
     assert "TenantACache" in d.message
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "issue #3188, allow side NOT fixed: a subject glob selects a component when "
-    "ANY of its labels matches, so a candidate that adds a tenant_a realm to "
-    "the tenant_b component is selected by `may swap on tenant_a*`. Refusing "
-    "it changes how an allow is matched, which is an open design decision."))
+@pytest.mark.parametrize("with_body_change", [True, False])
+def test_moving_a_component_into_the_allowed_realm_from_outside_is_refused(
+        with_body_change):
+    # alice may swap on tenant_a*: moving the tenant_b component INTO tenant_a
+    # is still a change to a component her grant does not cover where it runs,
+    # so the candidate's new realm must not select it
+    alice = parse_profile(PROFILE).get("alice")
+    sess = _FakeSession(compile_source(TWO_REALM), alice)
+    base = _swap_b() if with_body_change else TWO_REALM
+    moved = base.replace('realm("tenant_b")', 'realm("tenant_a")')
+    d = decide(sess, "revl_swap", {"source": moved})
+    assert d.gated and not d.allowed
+    assert "TenantBCache" in d.message
+
+
 def test_adding_an_allowed_realm_to_a_component_outside_it_is_refused():
+    # the issue's T1: a body change plus a requirement isolated in tenant_a
+    # used to put TenantBCache inside `may swap on tenant_a*`; the allow is
+    # now matched on the running side too
     alice = parse_profile(PROFILE).get("alice")
     sess = _FakeSession(compile_source(TWO_REALM), alice)
     d = decide(sess, "revl_swap", {"source": _add_tenant_a_realm_to_b()})
     assert d.gated and not d.allowed
+    assert "TenantBCache" in d.message
+    labels = dict(op._changed_targets(
+        sess.ir, compile_source(_add_tenant_a_realm_to_b())))
+    assert labels["TenantBCache"] == frozenset(
+        {"TenantBCache", "tenant_b", "tenant_a"})
+    assert labels["TenantBCache"].was == frozenset({"TenantBCache", "tenant_b"})
+
+
+def test_adding_an_allowed_realm_refuses_before_the_handler(_profiled_session):
+    running = compile_source(TWO_REALM)
+    server.SESSION.ir = running
+    try:
+        payload = _call("revl_swap", {"source": _add_tenant_a_realm_to_b()})
+        assert payload["ok"] is False
+        assert payload["authorized"] is False
+        assert payload["authority"].get("allowed") is not True
+        assert "TenantBCache" in payload["diagnostics"][0]["message"]
+        assert server.SESSION.ir is running
+    finally:
+        server.SESSION.ir = None
+
+
+def test_a_new_component_in_the_allowed_realm_is_authorized():
+    # an added component has no running side: its candidate labels are the
+    # only side an allow must select
+    alice = parse_profile(PROFILE).get("alice")
+    sess = _FakeSession(compile_source(TWO_REALM), alice)
+    added = TWO_REALM + """
+service Metrics { fn count() -> Int }
+component TenantAMetrics provides cm: Metrics {
+  isolate cm in realm("tenant_a")
+  provide cm { fn count() = 1 }
+}
+"""
+    d = decide(sess, "revl_swap", {"source": added})
+    assert d.gated and d.allowed
+    assert d.subjects == ("TenantAMetrics",)
+
+
+def test_a_new_component_outside_the_allowed_realm_is_refused():
+    # the missing running side must not turn an addition into a grant-less
+    # admit: the candidate labels alone still have to be selected
+    alice = parse_profile(PROFILE).get("alice")
+    sess = _FakeSession(compile_source(TWO_REALM), alice)
+    added = TWO_REALM + """
+service Metrics { fn count() -> Int }
+component TenantBMetrics provides cm: Metrics {
+  isolate cm in realm("tenant_b")
+  provide cm { fn count() = 1 }
+}
+"""
+    d = decide(sess, "revl_swap", {"source": added})
+    assert d.gated and not d.allowed
+    assert "TenantBMetrics" in d.message
+
+
+def test_a_move_between_two_allowed_realms_is_authorized():
+    # an allow must select the component on both sides; separate allow rules
+    # that cover one side each are enough, because the operator holds both
+    both = """
+operator alice may swap on tenant_a*
+operator alice may swap on tenant_b*
+"""
+    alice = parse_profile(both).get("alice")
+    sess = _FakeSession(compile_source(TWO_REALM), alice)
+    moved = _swap_a().replace('realm("tenant_a")', 'realm("tenant_b")')
+    d = decide(sess, "revl_swap", {"source": moved})
+    assert d.gated and d.allowed
+    assert d.subjects == ("TenantACache",)

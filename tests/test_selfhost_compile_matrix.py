@@ -1,19 +1,22 @@
-"""The self-host compile ledger is measured, stale by construction, and total.
+"""The self-host emit ledger is measured, total, and does not red a moved tree.
 
 `tools/selfhost_matrix.py` records, per self-host file and per tier, whether
-that tier's reference emitter compiles the file (issue #2899). The measurement
+that tier's reference emitter emits the file (issue #2899). The measurement
 is minutes long, so it is a committed ledger with a cheap gate rather than a
 walk in CI. This file holds the gate's refusals, each constructed rather than
-hoped for:
+hoped for, and the one thing it must NOT refuse:
 
-  * a ledger whose sources or emitters have moved since it was measured;
   * a cell that does not emit and is not acknowledged anywhere;
   * an acknowledgement whose cell emits now (the ratchet's other direction);
   * an acknowledgement with no issue and no recorded scope decision;
-  * an acknowledgement with no reason naming the construct.
+  * an acknowledgement with no reason naming the construct;
+  * NOT refused: a self-host source, stdlib file or emitter that moved since the
+    measurement while no cell changed. That is reported as a fact, because
+    refusing it would red main on every such merge and force every unrelated
+    pull request to re-measure.
 
-`test_the_committed_ledger_is_current` is the control: it passes on the tree
-every refusal below fails on.
+`test_the_committed_ledger_has_no_refusal` is the control: it passes on the
+tree every refusal below fails on.
 """
 
 from __future__ import annotations
@@ -41,9 +44,8 @@ def ledger():
     return data
 
 
-def _changed_problems(ledger, gaps, **kwargs):
-    kwargs.setdefault("expected_digest", ledger["digest"])
-    return sm.problems(ledger, gaps, **kwargs)
+def _changed_problems(ledger, gaps):
+    return sm.problems(ledger, gaps)
 
 
 def _a_cell(ledger, kind):
@@ -56,7 +58,7 @@ def _a_cell(ledger, kind):
 
 # ----------------------------------------------------------------- the control
 
-def test_the_committed_ledger_is_current():
+def test_the_committed_ledger_has_no_refusal():
     """THE CONTROL: the gate passes on the tree every refusal below fails on."""
     assert sm.problems() == []
     assert sm.main(["--check"]) == 0
@@ -69,30 +71,63 @@ def test_the_ledger_covers_every_self_host_file_and_tier(ledger):
         assert set(ledger["cells"][name]) == set(ledger["tiers"]), name
 
 
-# ------------------------------------------------------------------- staleness
+# ------------------------------------------------------------ the moved digest
 
-def test_a_moved_source_or_emitter_marks_the_ledger_stale(ledger):
-    found = sm.problems(ledger, sm.load_gaps(), expected_digest="0" * 64)
-    assert any("different self-host, stdlib or tier emitter sources" in problem
-               for problem in found)
+def _tree(root: Path) -> dict[str, Path]:
+    (root / "selfhost").mkdir()
+    (root / "stdlib").mkdir()
+    (root / "backends" / "go").mkdir(parents=True)
+    paths = {"corpus": root / "selfhost" / "a.rvl",
+             "stdlib": root / "stdlib" / "s.rvl",
+             "emitter": root / "backends" / "go" / "emit.py"}
+    for name, path in paths.items():
+        path.write_text(name, encoding="utf-8")
+    return paths
 
 
 def test_the_digest_covers_every_kind_of_source_the_measurement_reads(tmp_path):
-    """A digest that quietly stopped hashing an emitter or a stdlib file would
-    make the gate stop noticing the change it exists to notice."""
-    (tmp_path / "selfhost").mkdir()
-    (tmp_path / "stdlib").mkdir()
-    (tmp_path / "backends" / "go").mkdir(parents=True)
-    corpus = tmp_path / "selfhost" / "a.rvl"
-    stdlib = tmp_path / "stdlib" / "s.rvl"
-    emitter = tmp_path / "backends" / "go" / "emit.py"
-    for path, text in ((corpus, "corpus"), (stdlib, "stdlib"), (emitter, "emitter")):
-        path.write_text(text, encoding="utf-8")
+    """The digest is what says which measurement a ledger is. One that quietly
+    stopped hashing an emitter or a stdlib file would report a stale ledger as
+    current."""
+    paths = _tree(tmp_path)
     seen = {sm.digest(tmp_path)}
-    for path, text in ((emitter, "emitter2"), (stdlib, "stdlib2"), (corpus, "corpus2")):
-        path.write_text(text, encoding="utf-8")
+    for name in ("emitter", "stdlib", "corpus"):
+        paths[name].write_text(name + "2", encoding="utf-8")
         seen.add(sm.digest(tmp_path))
     assert len(seen) == 4
+
+
+def test_a_source_that_gained_a_comment_and_moved_no_cell_passes_the_gate(
+        tmp_path, ledger):
+    """THE TEST THAT FAILED BEFORE: a merge that touches a measured source but
+    changes no cell must not red the gate, or every such merge reds main."""
+    paths = _tree(tmp_path)
+    measured = copy.deepcopy(ledger)
+    measured["digest"] = sm.digest(tmp_path)
+    assert not sm.digest_moved(measured, sm.digest(tmp_path))
+
+    paths["corpus"].write_text("corpus\n// a comment, no cell changes\n",
+                               encoding="utf-8")
+    assert sm.digest(tmp_path) != measured["digest"]
+    assert sm.digest_moved(measured, sm.digest(tmp_path))
+    assert sm.problems(measured, sm.load_gaps()) == []
+
+
+def test_check_reports_a_moved_digest_and_still_exits_zero(
+        ledger, monkeypatch, capsys):
+    monkeypatch.setattr(sm, "digest", lambda root=None: "f" * 64)
+    assert sm.main(["--check"]) == 0
+    out = capsys.readouterr().out
+    assert "every non-emitting cell is acknowledged" in out
+    assert "note: it was measured at source digest" in out
+    assert "--measure" in out
+
+
+def test_check_is_quiet_about_the_digest_when_nothing_moved(
+        ledger, monkeypatch, capsys):
+    monkeypatch.setattr(sm, "digest", lambda root=None: ledger["digest"])
+    assert sm.main(["--check"]) == 0
+    assert "note:" not in capsys.readouterr().out
 
 
 # -------------------------------------------------------------- acknowledgement
@@ -164,3 +199,23 @@ def test_tier_counts_follow_the_ledger_cells(ledger):
         kinds = [row[tier]["kind"] for row in ledger["cells"].values()]
         expected = (sum(1 for kind in kinds if kind == sm.OK), len(kinds))
         assert sm.tier_counts(ledger, tier) == expected
+
+
+# ------------------------------------------- the table says which measurement
+
+def test_the_support_table_names_the_digest_it_was_measured_at():
+    import tier_guarantees as tg
+
+    shown = tg.support_markdown(
+        {"tiers": [], "rows": [], "selfhost_emit_digest": "ab" * 32})
+    assert "recorded at source digest `abababababab`" in shown
+    assert "abababababab" + "ab" not in shown  # the short form, not the digest
+
+    without = tg.support_markdown(
+        {"tiers": [], "rows": [], "selfhost_emit_digest": None})
+    assert "source digest" not in without
+
+
+def test_the_committed_support_block_names_the_committed_ledger_digest(ledger):
+    doc = (ROOT / "docs" / "conformance.md").read_text(encoding="utf-8")
+    assert f"recorded at source digest `{ledger['digest'][:12]}`" in doc

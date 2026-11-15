@@ -128,9 +128,10 @@ matrix-check:
 
 # Issue #2899: the per-tier support table's self-host emit column is
 # measured, not authored. The measurement is minutes long, so it is committed
-# as tools/selfhost_compile_matrix.json; --check refuses a ledger whose
-# self-host, stdlib or tier emitter sources have moved, and a non-emitting cell with
-# no issue or recorded scope decision behind it.
+# as tools/selfhost_compile_matrix.json; --check refuses a non-emitting cell with
+# no issue or recorded scope decision behind it and a stale acknowledgement. A
+# source that moved since the measurement is reported, not refused: re-measure in
+# the change that moves a cell.
 selfhost-tiers-measure:
 	python3 tools/selfhost_matrix.py --measure
 

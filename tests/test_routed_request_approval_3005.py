@@ -56,11 +56,13 @@ fn answer(payload: Str) -> Response {
            body: Json(payload) }
 }
 
+// issue #3186: an emission may not be routed with `get`/`head`; `delete` binds
+// its query parameters the same way and no cross-site page can send it.
 service Probe {
-  route get "/fire"
+  route delete "/fire"
   emission fn fire(msg: Str) -> Response
 
-  route get "/fire-req"
+  route delete "/fire-req"
   emission fn fire_req(req: Request) -> Response
 
   route post "/post-req"
@@ -127,17 +129,17 @@ def _ticket(face, ticket_hash) -> dict:
 
 @needs_cordis
 def test_a_routed_request_argument_is_held_then_fires_once_approved(face):
-    ticket = _held(face, "GET", "/fire-req")
+    ticket = _held(face, "DELETE", "/fire-req")
     assert _fired(face) == [], "held, not fired"
     # the identical re-issue asks the same question: the digest is deterministic
-    assert _held(face, "GET", "/fire-req") == ticket
+    assert _held(face, "DELETE", "/fire-req") == ticket
 
     face.session.approve_ticket(ticket)
-    reply = face.dispatch_http("GET", "/fire-req", b"", {})
+    reply = face.dispatch_http("DELETE", "/fire-req", b"", {})
     assert reply.status == 200, (reply.status, reply.body)
     assert _fired(face) == ["/fire-req"], "fired once, on the approved digest"
     # the yes was spent: asking again is a new question with the same ticket
-    assert _held(face, "GET", "/fire-req") == ticket
+    assert _held(face, "DELETE", "/fire-req") == ticket
     assert _fired(face) == ["/fire-req"]
 
 
@@ -155,11 +157,11 @@ def test_a_different_request_body_is_a_different_question(face):
 
 @needs_cordis
 def test_a_scalar_route_digest_is_unchanged(face):
-    ticket = _held(face, "GET", "/fire?msg=hi")
+    ticket = _held(face, "DELETE", "/fire?msg=hi")
     expected = "sha256:" + hashlib.sha256(b'["hi"]').hexdigest()
     assert _ticket(face, ticket)["argsDigest"] == expected
     face.session.approve_ticket(ticket)
-    assert face.dispatch_http("GET", "/fire?msg=hi", b"", {}).status == 200
+    assert face.dispatch_http("DELETE", "/fire?msg=hi", b"", {}).status == 200
     assert _fired(face) == ["hi"]
 
 
