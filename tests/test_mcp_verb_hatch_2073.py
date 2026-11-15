@@ -4,7 +4,7 @@
 `tools/list` advertises `disclosure.CORE`, and the authoring harness builds the
 model's tool list from exactly that:
 
-    tools = bridge.openai_schemas() + FILE_TOOLS        # 14 MCP verbs + 3
+    tools = bridge.openai_schemas() + FILE_TOOLS        # 15 MCP verbs + 3
 
 A function-calling model emits a call for a tool it was SHOWN and for no other,
 so a schema `revl_verbs` returns as text is a document, not a tool. Measured
@@ -14,12 +14,14 @@ its base, `has_component: false` — because `revl_export`, the one verb that
 writes the held source out, was reachable by name and not by tool. The failure
 is invisible in token counts.
 
-The remedy is the escape hatch, and it is not a fifteenth listed verb: it is a
-second FORM of `revl_verbs`, which is already in the tier. `revl_verbs {name,
-args}` is resolved before dispatch to the named verb's OWN name, so it runs the
-whole pipeline and returns what a direct call returns — the same jail, the same
-authoring and operator gates, the same runtime gate, the same handler, the same
-`disk` divergence field, the same `sessionState` footer. The tier stays at 14.
+The remedy is the escape hatch: a second FORM of `revl_verbs`, which is already
+in the tier. `revl_verbs {name, args}` is resolved before dispatch to the named
+verb's OWN name, so it runs the whole pipeline and returns what a direct call
+returns — the same jail, the same authoring and operator gates, the same
+runtime gate, the same handler, the same `disk` divergence field, the same
+`sessionState` footer. It adds no listed verb by itself: #2625 listed
+`revl_export` (the tier is 15 now) because the prompt that taught the hatch cost
+more than the schema, and the hatch still reaches every verb outside the tier.
 
 The claim in `disclosure.py` — "every verb stays callable by name, listed or
 not" — was true of the transport and false of the model's interface. These
@@ -114,13 +116,14 @@ def test_the_hatch_is_in_the_tool_list_the_model_is_given():
 
 
 def test_the_hatch_does_not_grow_the_tier_or_add_a_verb():
-    """The budget decision: `CORE` is still 14 and the listed set is still
-    exactly `CORE`. The hatch is `revl_verbs`' second form, so there is no new
-    verb to gate, to plan, to give a topic or to count."""
-    assert len(disclosure.CORE) <= 14
+    """The budget decision: `CORE` is 15 since #2625 promoted `revl_export`,
+    and the listed set is still exactly `CORE`. The hatch is `revl_verbs`'
+    second form, so by itself it adds no verb to gate, to plan, to give a topic
+    or to count."""
+    assert len(disclosure.CORE) <= 15
     assert disclosure.CORE[-1] == disclosure.DISCOVERY
     names = [t["name"] for t in _list()]
-    assert len(names) == 14
+    assert len(names) == len(PRESENT_CORE)
     assert "revl_verb" not in names           # no new listed verb, singular
     assert names.count(disclosure.DISCOVERY) == 1
     # ...and it did not get there by NOT having a hatch: the hatch exists, as
@@ -242,12 +245,12 @@ def test_a_malformed_hatch_does_not_reach_a_handler():
 
 def test_the_missing_args_refusal_points_at_the_verb_not_the_index():
     """Issue #2110: the refusal for a verb named without `args` used to hand
-    back `revl_verbs {}` — the tier index, which by construction omits every
-    verb outside the tier. `revl_export` is outside it, so that `next` cannot
-    contain the answer, and the model was left guessing `args: {}` to elicit
-    the `path` requirement. The refusal names `names`, and its `next` is the
-    lookup of the verb the caller actually asked for."""
-    verb = "revl_export"
+    back `revl_verbs {}` — the tier index, which by construction carries no
+    schemas. `revl_fmt` is outside the tier, so that `next` could not contain
+    the answer, and the model was left guessing `args` to elicit the `source`
+    requirement. The refusal names `names`, and its `next` is the lookup of the
+    verb the caller actually asked for."""
+    verb = "revl_fmt"
     # the regression only bites for a verb the tier index cannot answer with
     assert verb not in [t["name"] for t in _list()]
 
@@ -266,7 +269,7 @@ def test_the_missing_args_refusal_points_at_the_verb_not_the_index():
     followed = _call(nxt["tool"], nxt["arguments"])
     assert followed["ok"] is True, followed
     assert [t["name"] for t in followed["tools"]] == [verb]
-    assert "path" in followed["tools"][0]["inputSchema"]["properties"]
+    assert "source" in followed["tools"][0]["inputSchema"]["properties"]
     # ...where the call `next` used to point at genuinely cannot
     assert verb not in _call(disclosure.DISCOVERY, {})["listed"]
 
@@ -314,14 +317,15 @@ def tree(tmp_path, monkeypatch):
 
 
 @needs_runtime
-def test_the_authoring_loop_can_reach_revl_export_through_the_hatch(tree):
+def test_the_authoring_loop_reaches_the_listed_export(tree):
     """Evidence 3, the whole of #2042: an agent with the advertised tool list
-    and no other can now finish the loop. The list it was given does not name
-    `revl_export`; the hatch is how it gets there, and the export reconciles
-    the `disk` divergence the change loop already reports."""
-    # 1. the vocabulary the model is handed — no `revl_export` in it
+    and no other can finish the loop. The list names `revl_export` since #2625:
+    the measured runs had to learn the hatch from a prompt, and promoting the
+    verb removed that prompt, so the loop closes with the direct call, and the
+    export reconciles the `disk` divergence the change loop already reports."""
+    # 1. the vocabulary the model is handed now names the writer
     listed = [t["name"] for t in _list()]
-    assert "revl_export" not in listed, listed
+    assert "revl_export" in listed, listed
     assert disclosure.DISCOVERY in listed, "the hatch is listed"
 
     # 2. the loop, driven through the tools the model actually has
@@ -335,12 +339,11 @@ def test_the_authoring_loop_can_reach_revl_export_through_the_hatch(tree):
     # 3. the change is held, not written: the trap #2032 reports
     assert changed["disk"] == {"inSync": False, "stale": [str(tree["mem"])]}
     assert tree["mem"].read_text(encoding="utf-8") == MEM_TEXT
+    # the note hands over the direct call, not a hatch lookup (#2537, #2625)
+    assert changed["next"]["tool"] == "revl_export"
 
-    # 4. find the hatch in the list, and export through it
-    hatch = [t for t in _list() if t["name"] == disclosure.DISCOVERY][0]
-    props = hatch["inputSchema"]["properties"]
-    assert disclosure.HATCH_NAME in props and disclosure.HATCH_ARGS in props
-    exported = _hatch("revl_export")
+    # 4. export through the listed verb
+    exported = _call("revl_export", {})
     assert exported["ok"] is True, exported
     assert exported["written"] == [str(_exported(tree["mem"]))]
     # 5. the artifact exists, and the loop closes in one call
@@ -389,11 +392,12 @@ def test_the_disk_field_rides_on_a_hatched_change(tree):
 def test_the_hatch_reads_a_verb_it_cannot_see_and_then_calls_it(tree):
     """The documented two-step, end to end: `revl_verbs {names}` returns the
     schema, and `revl_verbs {name, args}` is the call. Neither needs the verb
-    to be listed."""
-    assert "revl_export" not in [t["name"] for t in _list()]
-    schema = _call(disclosure.DISCOVERY, {"names": ["revl_export"]})
+    to be listed. `revl_undo` is outside the tier; `revl_export` served as the
+    example until #2625 listed it."""
+    assert "revl_undo" not in [t["name"] for t in _list()]
+    schema = _call(disclosure.DISCOVERY, {"names": ["revl_undo"]})
     assert schema["ok"] is True
-    assert schema["tools"][0]["name"] == "revl_export"
+    assert schema["tools"][0]["name"] == "revl_undo"
     assert _hatch("revl_state")["ok"] is True
 
 

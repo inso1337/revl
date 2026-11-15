@@ -67,6 +67,7 @@ import threading
 import time
 from pathlib import Path
 
+from . import _childproc
 from ._paths import backends_root, stdlib_root, venv_python
 from .activation import local_prereqs
 from .attest import canonical_hash
@@ -80,7 +81,7 @@ from .errors import RevlError
 from .peer_offer import PlacementSlot, offer_admission, offer_eligible
 from .refusal import refusals
 from .resources import PRIMITIVE_TYPE_NAMES, _STRUCTURAL_HEADS, resource_base
-from .tee_attestation import TeeError, TeeRequirement
+from .tee_attestation import TeeError, TeeRequirement, TdxPolicy
 from .typecheck import FN_HEAD, parse_type
 from .estop import (HALTED_LINE, LATCH_ENV, TIERS_WITH_ESTOP, latch_path,
                     read_latch)
@@ -170,7 +171,7 @@ def generate_seam_certs(out_dir: Path, identities, hosts=("127.0.0.1", "localhos
     ca_key, ca_crt = out_dir / "seam_ca.key", out_dir / "seam_ca.crt"
 
     def _openssl(args: list[str]) -> None:
-        result = subprocess.run(["openssl", *args], capture_output=True, text=True)
+        result = _childproc.run(["openssl", *args], capture_output=True)
         if result.returncode:
             raise RuntimeError(f"openssl {args[0]} failed:\n{result.stderr.strip()}")
 
@@ -853,6 +854,23 @@ def _need_covered(kind: str, path: str | None, mode: str | None, env: dict) -> b
 #     max_age_s = 120                    # optional: the proof's freshness window
 #     nonce = "<challenge>"              # optional: else one is minted here
 #
+# A TDX quote is refused unless the table states what it demands of the quote
+# beyond MRTD (the runtime registers, TCB and quoting enclave); the keys below
+# spell that demand, and `accept_mrtd_only` is the explicit narrower choice.
+# `sev_min_tcb` is the SEV-SNP TCB floor, on the same terms:
+#
+#     runtime_measurements = [["<rtmr0>", "<rtmr1>", "<rtmr2>", "<rtmr3>"]]
+#     accept_mrtd_only = true            # only when the registers are not compared
+#     min_tee_tcb_svn = "<32 hex>"       # optional TDX TCB floor
+#     min_qe_svn = 3                     # optional quoting-enclave SVN floor
+#     min_pce_svn = 3                    # optional PCE SVN floor
+#     qe_mr_signers = ["<64 hex>"]       # optional permitted QE signers
+#     qe_mr_enclaves = ["<64 hex>"]      # optional permitted QE images
+#     sev_min_tcb = 0x7316000000000104   # optional SEV-SNP TCB floor: microcode
+#                                        # 0x73, SNP 0x16, TEE 0x01, bootloader
+#                                        # 0x04 (bytes 7, 6, 1, 0; 2 to 5 are
+#                                        # reserved and must be zero)
+#
 # This surface PARSES into the `TeeRequirement` that `tee_attestation.py` already
 # defines and is checked by the `tee_admits` it already has: there is no second
 # implementation of "attested" here, only a second way to spell the demand, so
@@ -869,7 +887,14 @@ TEE_REQUIREMENT_WORDS = (TEE_WORD_ATTESTED,)
 #: Every key `[processes.<p>.attest]` knows. An unknown one is refused by name,
 #: so a typo cannot silently drop a demand (`DEPLOY_KEYS`, item 118).
 ATTEST_KEYS = ("requires", "bundle", "measurements", "region", "regions",
-               "outbound_network", "max_age_s", "nonce")
+               "outbound_network", "max_age_s", "nonce",
+               "runtime_measurements", "accept_mrtd_only", "min_tee_tcb_svn",
+               "min_qe_svn", "min_pce_svn", "qe_mr_signers", "qe_mr_enclaves",
+               "sev_min_tcb")
+#: The subset of keys that spells a :class:`~revl.tee_attestation.TdxPolicy`;
+#: a table carrying any of them states one.
+_ATTEST_TDX_KEYS = ("runtime_measurements", "accept_mrtd_only", "min_tee_tcb_svn",
+                    "min_qe_svn", "min_pce_svn", "qe_mr_signers", "qe_mr_enclaves")
 #: `region` and `regions` are the singular and plural of ONE fact, so a table
 #: carrying both is ambiguous and refused rather than resolved by a rule.
 _ATTEST_REGION_KEYS = ("region", "regions")
@@ -886,6 +911,47 @@ def _attest_text_list(raw: dict, process: str, key: str) -> tuple[list[str] | No
         return None, (f"process {process!r} [attest]: every `{key}` entry must be "
                       f"a string, got {bad!r}")
     return list(spelled), None
+
+
+def _attest_bool(raw: dict, process: str, key: str) -> tuple[bool, str | None]:
+    """`[processes.<p>.attest].<key>` as a boolean, or a diagnostic."""
+    spelled = raw.get(key)
+    if not isinstance(spelled, bool):
+        return False, (f"process {process!r} [attest]: `{key}` must be a boolean, "
+                       f"got {spelled!r}")
+    return spelled, None
+
+
+def _attest_int(raw: dict, process: str, key: str) -> tuple[int | None, str | None]:
+    """`[processes.<p>.attest].<key>` as an integer, or a diagnostic. A TOML
+    integer is not a boolean here even though Python's `bool` is an `int`."""
+    spelled = raw.get(key)
+    if not isinstance(spelled, int) or isinstance(spelled, bool):
+        return None, (f"process {process!r} [attest]: `{key}` must be an integer, "
+                      f"got {spelled!r}")
+    return spelled, None
+
+
+def _attest_rtmrs(raw: dict, process: str
+                  ) -> tuple[list[tuple[str, str, str, str]] | None, str | None]:
+    """`runtime_measurements` as a list of four-value register quadruples."""
+    spelled = raw.get("runtime_measurements")
+    if not isinstance(spelled, (list, tuple)):
+        return None, (f"process {process!r} [attest]: `runtime_measurements` must "
+                      f"be a list of RTMR quadruples, got {spelled!r}")
+    entries: list[tuple[str, str, str, str]] = []
+    for index, entry in enumerate(spelled):
+        if not isinstance(entry, (list, tuple)) or len(entry) != 4:
+            return None, (
+                f"process {process!r} [attest]: `runtime_measurements` entry "
+                f"{index} must be a list of exactly four register values (RTMR0 "
+                f"through RTMR3), got {entry!r}")
+        if any(not isinstance(value, str) for value in entry):
+            return None, (
+                f"process {process!r} [attest]: every `runtime_measurements` entry "
+                f"must be a list of strings, got {entry!r}")
+        entries.append((entry[0], entry[1], entry[2], entry[3]))
+    return entries, None
 
 
 def parse_tee_requirement(placement: dict, process: str, *,
@@ -963,6 +1029,48 @@ def parse_tee_requirement(placement: dict, process: str, *,
     if problem:
         return None, problem
 
+    tdx: TdxPolicy | None = None
+    if any(key in raw for key in _ATTEST_TDX_KEYS):
+        tdx_fields: dict = {}
+        if "runtime_measurements" in raw:
+            entries, problem = _attest_rtmrs(raw, process)
+            if problem:
+                return None, problem
+            tdx_fields["runtime_measurements"] = frozenset(entries)
+        if "accept_mrtd_only" in raw:
+            accept, problem = _attest_bool(raw, process, "accept_mrtd_only")
+            if problem:
+                return None, problem
+            tdx_fields["accept_mrtd_only"] = accept
+        if "min_tee_tcb_svn" in raw:
+            floor = raw["min_tee_tcb_svn"]
+            if not isinstance(floor, str):
+                return None, (f"process {process!r} [attest]: `min_tee_tcb_svn` "
+                              f"must be a hex string, got {floor!r}")
+            tdx_fields["min_tee_tcb_svn"] = floor
+        for key in ("min_qe_svn", "min_pce_svn"):
+            if key in raw:
+                floor, problem = _attest_int(raw, process, key)
+                if problem:
+                    return None, problem
+                tdx_fields[key] = floor
+        for key in ("qe_mr_signers", "qe_mr_enclaves"):
+            if key in raw:
+                values, problem = _attest_text_list(raw, process, key)
+                if problem:
+                    return None, problem
+                tdx_fields[key] = frozenset(values)
+        try:
+            tdx = TdxPolicy(**tdx_fields)
+        except TeeError as error:
+            return None, f"process {process!r} [attest]: {error}"
+
+    sev_min_tcb: int | None = None
+    if "sev_min_tcb" in raw:
+        sev_min_tcb, problem = _attest_int(raw, process, "sev_min_tcb")
+        if problem:
+            return None, problem
+
     challenge = raw.get("nonce")
     if challenge is None:
         challenge = nonce if nonce is not None else secrets.token_urlsafe(32)
@@ -973,6 +1081,7 @@ def parse_tee_requirement(placement: dict, process: str, *,
                                      measurements=frozenset(measurements),
                                      nonce=challenge,
                                      regions=frozenset(regions),
+                                     tdx=tdx, sev_min_tcb=sev_min_tcb,
                                      **optional)
     except TeeError as error:
         return None, f"process {process!r} [attest]: {error}"
@@ -997,6 +1106,27 @@ def render_tee_requirement(requirement: TeeRequirement, *,
         lines.append("regions = [" + ", ".join(json.dumps(r) for r in regions) + "]")
     lines.append(f"outbound_network = {json.dumps(requirement.outbound_network)}")
     lines.append(f"max_age_s = {requirement.max_age_s!r}")
+    if requirement.tdx is not None:
+        policy = requirement.tdx
+        if policy.runtime_measurements:
+            lines.append("runtime_measurements = [" + ", ".join(
+                "[" + ", ".join(json.dumps(value) for value in entry) + "]"
+                for entry in sorted(policy.runtime_measurements)) + "]")
+        if policy.accept_mrtd_only:
+            lines.append("accept_mrtd_only = true")
+        if policy.min_tee_tcb_svn:
+            lines.append(f"min_tee_tcb_svn = {json.dumps(policy.min_tee_tcb_svn)}")
+        if policy.min_qe_svn:
+            lines.append(f"min_qe_svn = {policy.min_qe_svn!r}")
+        if policy.min_pce_svn:
+            lines.append(f"min_pce_svn = {policy.min_pce_svn!r}")
+        for name in ("qe_mr_signers", "qe_mr_enclaves"):
+            values = getattr(policy, name)
+            if values:
+                lines.append(f"{name} = [" + ", ".join(
+                    json.dumps(value) for value in sorted(values)) + "]")
+    if requirement.sev_min_tcb is not None:
+        lines.append(f"sev_min_tcb = {requirement.sev_min_tcb!r}")
     lines.append(f"nonce = {json.dumps(requirement.nonce)}")
     return "\n".join(lines) + "\n"
 
@@ -3454,8 +3584,8 @@ def _emit_ts_module(ir: dict, tmp: Path) -> str:
     gen.mkdir(exist_ok=True)
     ir_json = tmp / "ir.json"
     ir_json.write_text(json.dumps(ts_safe_ir(ir)), encoding="utf-8")
-    result = subprocess.run([sys.executable, str(_TS_DIR / "emit.py"), str(ir_json)],
-                            capture_output=True, text=True)
+    result = _childproc.run([sys.executable, str(_TS_DIR / "emit.py"), str(ir_json)],
+                            capture_output=True)
     if result.returncode != 0:
         raise RuntimeError(f"TS emit failed:\n{result.stderr.strip()}")
     module = gen / f"mod_{tmp.name}.ts"
@@ -3488,16 +3618,16 @@ def _build_java(ir: dict, tmp: Path) -> str:
     # accept/dispatch seams and idle watcher consult. Compiled alongside the
     # runner (it is pure JDK, no cordis4j).
     estop = str(_JAVA_DIR / "placement" / "Estop.java")
-    compile_runner = subprocess.run(
+    compile_runner = _childproc.run(
         ["javac", "--release", "17", "-d", str(out), *stubs, estop,
          str(_JAVA_DIR / "placement" / "PlacementRunner.java")],
-        capture_output=True, text=True,
+        capture_output=True,
     )
     if compile_runner.returncode:
         raise RuntimeError(f"javac (runner) failed:\n{compile_runner.stderr.strip()}")
-    compile_components = subprocess.run(
+    compile_components = _childproc.run(
         ["javac", "--release", "17", "-cp", str(out), "-d", str(out), str(gen / "Components.java")],
-        capture_output=True, text=True,
+        capture_output=True,
     )
     if compile_components.returncode:
         raise RuntimeError(f"javac (components) failed:\n{compile_components.stderr.strip()}")
@@ -3616,9 +3746,9 @@ def rust_runner_lock_manifest() -> Path:
 def rust_generate_lockfile(manifest: Path, *, offline: bool) -> "subprocess.CompletedProcess[str]":
     """Run `cargo generate-lockfile` on `manifest`: the resolver only, no build."""
     flags = ["--offline"] if offline else []
-    return subprocess.run(["cargo", "generate-lockfile", *flags,
+    return _childproc.run(["cargo", "generate-lockfile", *flags,
                            "--manifest-path", str(manifest)],
-                          capture_output=True, text=True)
+                          capture_output=True)
 
 
 def _rust_runner_lock() -> bytes:
@@ -3688,15 +3818,15 @@ def _build_rust(ir: dict, tmp: Path) -> str:
     reuse it. `--locked` holds every key to the one resolved Cargo.lock."""
     ir_json = tmp / "rust_ir.json"
     ir_json.write_text(json.dumps(ir), encoding="utf-8")
-    emitted = subprocess.run([sys.executable, str(_BACKENDS_DIR / "rust" / "emit.py"), str(ir_json)],
-                             capture_output=True, text=True)
+    emitted = _childproc.run([sys.executable, str(_BACKENDS_DIR / "rust" / "emit.py"), str(ir_json)],
+                             capture_output=True)
     if emitted.returncode:
         raise RuntimeError(f"rust emit failed:\n{emitted.stderr.strip()}")
     target_dir = _rust_runner_target_dir()
     crate, binary = _stage_rust_runner(emitted.stdout, target_dir)
-    build = subprocess.run(["cargo", "build", "--locked", "--manifest-path", str(crate / "Cargo.toml"),
+    build = _childproc.run(["cargo", "build", "--locked", "--manifest-path", str(crate / "Cargo.toml"),
                             "--target-dir", str(target_dir)],
-                           capture_output=True, text=True)
+                           capture_output=True)
     if build.returncode:
         raise RuntimeError(f"cargo build (rust runner) failed:\n{build.stderr.strip()}")
     _prune_staged(crate.parent, crate.name, _rust_key_artifacts(target_dir))
@@ -3749,7 +3879,7 @@ def _build_go(ir: dict, tmp: Path) -> str:
     module_src, bridge_src = source.split("\f", 1)
     files = _go_runner_sources()
     # the toolchain is a build input too: a go upgrade gets a new key
-    version = subprocess.run(["go", "version"], capture_output=True, text=True)
+    version = _childproc.run(["go", "version"], capture_output=True)
     files["emitted/gen.go"] = module_src.encode("utf-8")
     files["emitted/bridge_gen.go"] = bridge_src.encode("utf-8")
     key = _content_key({**files, "\0go version": version.stdout.encode("utf-8")})
@@ -3761,8 +3891,8 @@ def _build_go(ir: dict, tmp: Path) -> str:
         fd, part = tempfile.mkstemp(dir=stage, prefix=f".{binary.name}.", suffix=".part")
         os.close(fd)
         try:
-            build = subprocess.run(["go", "build", "-o", part, "."],
-                                   cwd=str(stage / "src"), capture_output=True, text=True)
+            build = _childproc.run(["go", "build", "-o", part, "."],
+                                   cwd=str(stage / "src"), capture_output=True)
             if build.returncode:
                 raise RuntimeError(f"go build (go runner) failed:\n{build.stderr.strip()}")
             os.replace(part, binary)
@@ -3782,7 +3912,7 @@ def _find_jdk21() -> str | None:
             return candidate
     java = shutil.which("java")
     if java:
-        version = subprocess.run([java, "-version"], capture_output=True, text=True).stderr
+        version = _childproc.run([java, "-version"], capture_output=True).stderr
         if 'version "21' in version or "version 21" in version:
             return str(Path(java).resolve().parent)
     return None
@@ -3812,11 +3942,11 @@ def _build_java_real(ir: dict, tmp: Path, jdk_bin: str, cordis_classes: str) -> 
     except refusals(emit_module) as refusal:
         raise RuntimeError(f"java emit failed:\n{refusal}") from refusal
     (gen / "Components.java").write_text(components, encoding="utf-8")
-    compile_result = subprocess.run(
+    compile_result = _childproc.run(
         [str(Path(jdk_bin) / "javac"), "--release", "21", "-cp", cordis_classes, "-d", str(out),
          str(_JAVA_DIR / "placement" / "Estop.java"),
          str(_JAVA_DIR / "placement" / "RealPlacementRunner.java"), str(gen / "Components.java")],
-        capture_output=True, text=True,
+        capture_output=True,
     )
     if compile_result.returncode:
         raise RuntimeError(f"javac (real cordis4j) failed:\n{compile_result.stderr.strip()}")
@@ -5415,9 +5545,9 @@ def run_placement(files, placement_path: str, once: bool = False,
             # the boundary the driver established and the canary confirmed above.
             cmd, proc_env = sandbox_drivers[pname].wrap(
                 pname, cmd, proc_env, sandbox_achieved[pname])
-        proc = subprocess.Popen(
+        proc = _childproc.popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            env=proc_env, text=True, errors="replace",
+            env=proc_env,
         )
         children[pname] = (proc, stop_mode)
         thread = threading.Thread(target=pump, args=(pname, proc), daemon=True)

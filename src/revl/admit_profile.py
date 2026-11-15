@@ -143,10 +143,10 @@ class AdmissionProfile:
     # policy scopes its standing approvals and auto-approve rules by
     # `(component glob, realm)` (`session._find_auto_approve`, matched against
     # `ticket["realm"]`, which is `approval.component_realm` -> the component's
-    # `isolate` map). An untrusted author writes its own component NAMES, so the
-    # glob half is no discriminator at all; the realm is the only one left, and a
-    # source that picks its own realm picks which of the operator's standing
-    # approvals cover its class-(c) crossings.
+    # `isolate` map and `routes` realm sets). An untrusted author writes its own
+    # component NAMES, so the glob half is no discriminator at all; the realm is
+    # the only one left, and a source that picks its own realm picks which of the
+    # operator's standing approvals cover its class-(c) crossings.
     #
     # Off (inert) on a bare `AdmissionProfile()`, so a trusted-author compile is
     # byte-identical; ON in `untrusted_author`, and therefore at EVERY door that
@@ -431,9 +431,10 @@ def check_no_realm_placement(root_programs: list[Program],
 
     A realm is an authority address. The item-246/251 approval policy scopes a
     standing approval and an auto-approve rule by `(component glob, realm)`, and
-    matches the realm half against `ticket["realm"]`, which is read straight off
-    the crossing component's `isolate` map (`approval.component_realm` ->
-    `policy.component_realms` -> the component IR's `isolate` field). An
+    matches the realm half against `ticket["realm"]`, which is read off the
+    crossing component's `isolate` map and `routes` realm sets
+    (`approval.component_realm` -> `policy.component_realms` -> the component
+    IR's `isolate` and `routes` fields). An
     untrusted author chooses its own component NAMES, so the glob half
     discriminates nothing against it; the realm is the only half left. A source
     that writes `isolate <key> in realm("billing")` therefore selects which of
@@ -549,36 +550,83 @@ def _removed_provision_realms(admitted: dict,
     return moved
 
 
-def _requirements(ir: dict) -> dict[tuple[str, str], str | None]:
-    """`(component, key) -> realm` for every key a component requires; `None`
-    is the shared realm."""
+def _key_realms(comp: dict, key: str) -> tuple[str, ...]:
+    """Every realm `comp` places `key` in: the `isolate` map's one realm, or
+    the item-162 `routes` entry's realm set. An empty tuple is the shared
+    realm.
+
+    Lowering writes a `realms(...)` route to its own `routes` field (a route
+    targets a required key only), so reading `isolate` alone missed it (issue
+    #3121). Both fields are read so a component carrying either form is placed
+    exactly where its source says; lowering forbids both on one key, so the
+    union is defensive and never double-counts a real placement."""
+    realms: list[str] = []
+    realm = (comp.get("isolate") or {}).get(key)
+    if realm is not None:
+        realms.append(realm)
+    route = (comp.get("routes") or {}).get(key) or {}
+    realms.extend(r for r in route.get("realms") or () if r is not None)
+    return tuple(dict.fromkeys(realms))
+
+
+def _requirements(ir: dict) -> dict[tuple[str, str], tuple[str, ...]]:
+    """`(component, key) -> the realms it places the key in` for every key a
+    component requires; an empty tuple is the shared realm."""
     out = {}
     for comp in ir.get("components") or []:
-        placed = comp.get("isolate") or {}
         for key in comp.get("requires") or {}:
-            out[(comp.get("name"), key)] = placed.get(key)
+            out[(comp.get("name"), key)] = _key_realms(comp, key)
     return out
 
 
 def _removed_requirement_realms(admitted: dict,
                                 candidate: dict
-                                ) -> list[tuple[str, str, str, str | None]]:
-    """`(component, key, admitted realm, candidate realm)` for every
-    realm-placed requirement the candidate moves out of its realm (issue
-    #2585).
+                                ) -> list[tuple[str, str, tuple[str, ...],
+                                                tuple[str, ...]]]:
+    """`(component, key, admitted realms, candidate realms)` for every
+    realm-placed requirement the candidate moves out of a realm it was placed
+    in (issues #2585, #3121).
 
     Compared per `(component, key)`: only a component that stays admitted and
     still requires `key` has a placement to lose. A requirer withdrawn takes
     its placement with it, a requirer renamed is a new component, which an
     untrusted author may add in the shared realm like any other, and a
-    requirement dropped altogether names no key to bind."""
+    requirement dropped altogether names no key to bind.
+
+    The admitted placement may be one realm (an `isolate` pin) or several (an
+    item-162 `realms(...)` route), and losing ANY of them widens the requirer,
+    so the candidate's placement must cover every admitted realm. Dropping the
+    route, shrinking it, or replacing it with one realm or the shared realm is
+    the same move the singular form already refuses."""
     before = _requirements(admitted)
     after = _requirements(candidate)
-    return [(name, key, realm, after[(name, key)])
-            for (name, key), realm in sorted(
+    return [(name, key, realms, after[(name, key)])
+            for (name, key), realms in sorted(
                 before.items(), key=lambda p: (p[0][0] or "", p[0][1]))
-            if realm is not None and (name, key) in after
-            and after[(name, key)] != realm]
+            if realms and (name, key) in after
+            and not set(realms) <= set(after[(name, key)])]
+
+
+def _placement_spelling(key: str, realms: tuple[str, ...],
+                        routed: bool = False) -> str:
+    """The admitted clause a placement came from: the singular `realm(...)`
+    pin or the item-162 plural `realms(...)` route. `routed` keeps a
+    one-realm route spelled as the route it was."""
+    if len(realms) == 1 and not routed:
+        return f'isolate {key} in realm("{realms[0]}")'
+    return (f'isolate {key} in realms('
+            + ", ".join(f'"{realm}"' for realm in realms) + ")")
+
+
+def _realm_set_spelling(realms: tuple[str, ...], routed: bool = False) -> str:
+    """Where a placement now points: the shared realm, one realm, or a route
+    across several. `routed` renders a one-realm placement as the `realms(...)`
+    clause the candidate wrote, not as the pin it means."""
+    if not realms:
+        return "the shared realm"
+    if len(realms) == 1 and not routed:
+        return f'realm("{realms[0]}")'
+    return "realms(" + ", ".join(f'"{realm}"' for realm in realms) + ")"
 
 
 def _component_line(texts: dict | None, filename: str | None, name: str) -> int:
@@ -596,11 +644,11 @@ def _component_line(texts: dict | None, filename: str | None, name: str) -> int:
 
 def _realm_sets(ir: dict) -> dict[str, frozenset[str]]:
     """`component -> every realm its placements name`, the set the policy
-    selects a component by (`policy.component_realms`): the values of its
-    `isolate` map, provide and require keys alike."""
-    return {comp.get("name"): frozenset(
-                realm for realm in (comp.get("isolate") or {}).values()
-                if realm is not None)
+    selects a component by: read through `policy._entry_realms`, the one
+    definition of the placement fields (`isolate` map and item-162 `routes`),
+    so this walk and the policy selection cannot drift (issue #3121)."""
+    from .policy import _entry_realms  # noqa: PLC0415 — lazy, avoids a cycle
+    return {comp.get("name"): _entry_realms(comp)
             for comp in ir.get("components") or []}
 
 
@@ -683,13 +731,20 @@ def check_no_realm_removal(admitted: dict | None, candidate: dict,
     an untrusted author may add. So a key a surviving component requires in a
     realm must still be required in that realm.
 
+    The item-162 plural `realms(...)` route is the same fact with a fan-out:
+    lowering writes it to the component's `routes` field, not its `isolate`
+    map, so a walk that read `isolate` alone never compared it (issue #3121).
+    Dropping the route, shrinking it or replacing it with one realm left the
+    requirer admitted and free to bind a shared-realm provider of the key, so
+    a surviving requirer must keep every realm its admitted route named.
+
     Neither walk sees a component that renames the key it is placed under, or
     drops it for a shared-realm key: the old pair is gone, so nothing is
     compared (issue #2586). The policy selects a component by its whole realm
     set, so a component the candidate keeps by name must not end with fewer
     realms than it had, whichever realm it left and whatever else the
-    candidate places there. That check runs last, so the per-key refusals
-    keep their text.
+    candidate places there. Route realms are part of that set. That check runs
+    last, so the per-key refusals keep their text.
 
     Withdrawing a component takes its placements with it, which moves nothing
     and is unaffected. So is a trusted author (`None` profile) and a first
@@ -704,19 +759,35 @@ def check_no_realm_removal(admitted: dict | None, candidate: dict,
     if not moved and not required:
         _refuse_realm_set_shrink(admitted, candidate, texts)
         return
+    lost: list[str] = []
     if moved:
         name, key, realm, now, was = moved[0]
+        spelling = f'isolate {key} in realm("{realm}")'
+        where = "the shared realm" if now is None else f'realm("{now}")'
+        lost.extend(m[2] for m in moved)
         what = "provision"
     else:
-        name, key, realm, now = required[0]
+        name, key, admitted_realms, now_realms = required[0]
         was, what = name, "requirement"
-    where = "the shared realm" if now is None else f'realm("{now}")'
+        admitted_comp = next((c for c in admitted.get("components") or []
+                              if c.get("name") == name), {})
+        candidate_comp = next((c for c in candidate.get("components") or []
+                               if c.get("name") == name), {})
+        spelling = _placement_spelling(
+            key, admitted_realms,
+            routed=key in (admitted_comp.get("routes") or {}))
+        where = _realm_set_spelling(
+            now_realms, routed=key in (candidate_comp.get("routes") or {}))
+    # a mixed edit can move a provision AND drop a route: the navigable
+    # refusal names every realm either half left (issue #3121).
+    lost.extend(r for _n, _k, realms, now in required
+                for r in realms if r not in set(now))
     origin = "" if was == name else f" on `{was}`"
     filename = _component_source(candidate, name)
     raise RevlError(
         filename or "<candidate>", _component_line(texts, filename, name),
         f"admission refused: this author cannot remove the realm placement of "
-        f"`{name}`: the admitted `isolate {key} in realm(\"{realm}\")`{origin} "
+        f"`{name}`: the admitted `{spelling}`{origin} "
         f"would move its `{key}` {what} to {where}",
         hint="removing a realm clause from a provider that stays admitted, "
              "or from one renamed in the same edit, makes "
@@ -724,12 +795,13 @@ def check_no_realm_removal(admitted: dict | None, candidate: dict,
              "shared-realm component, which widens authority as surely as "
              "naming a realm does. Removing it from a requirer takes the "
              "component out of the realm the operator's realm-scoped rules "
-             "select it by. Keep the clause, withdraw the component "
+             "select it by, and a `realms(...)` route that is dropped, shrunk "
+             "or narrowed to one realm leaves every realm it no longer names "
+             "the same way. Keep the clause, withdraw the component "
              "instead, or have an operator move it through the gated swap "
-             "(issues #2487, #2523, #2585)",
+             "(issues #2487, #2523, #2585, #3121)",
         code="G9", category="admission",
-        navigate=_realm_removal_navigate([m[2] for m in moved]
-                                         + [r[2] for r in required]),
+        navigate=_realm_removal_navigate(lost),
     )
 
 
@@ -740,9 +812,9 @@ def _realm_removal_navigate(realms) -> dict:
     alts = [
         nav.alternative(
             enacts=nav.ENACTS_AUTHOR,
-            action=("keep the admitted `in realm(...)` clause on the "
-                    "component, or withdraw the component, which takes its "
-                    "placement with it"),
+            action=("keep the admitted `in realm(...)` or `in realms(...)` "
+                    "clause on the component, or withdraw the component, "
+                    "which takes its placement with it"),
             ref="keep-realm"),
         nav.alternative(
             enacts=nav.ENACTS_OPERATOR,

@@ -455,6 +455,11 @@ def redact_value(value: Any, _path: Optional[set] = None) -> Any:
     this is belt-and-braces on top of the positional marking, not a substitute
     for it.
 
+    A dict KEY is scrubbed the same way (issue #3120): a model can echo a secret
+    the program fed into its prompt back out as an object key, and a capture
+    point that keeps the read-back structure would otherwise carry it in the
+    clear. An ordinary key still renders as its own string, exactly as before.
+
     A back-edge is rendered as :data:`RECURSIVE` rather than recursed into: this
     funnel runs inside a capture point, so a `RecursionError` raised here did not
     lose a redaction, it aborted the caller — a record that was about to be
@@ -476,7 +481,10 @@ def redact_value(value: Any, _path: Optional[set] = None) -> Any:
     if isinstance(value, dict):
         if _entered(value, _path):
             return RECURSIVE
-        rendered = {str(k): redact_value(v, _path) for k, v in value.items()}
+        rendered = {
+            (REDACTED if is_secret_value(k) else str(k)): redact_value(v, _path)
+            for k, v in value.items()
+        }
         _path.discard(id(value))
         return rendered
     return repr(value)

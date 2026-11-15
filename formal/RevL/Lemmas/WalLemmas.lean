@@ -25,6 +25,7 @@ that carry no decision content:
 | `discharge` | `Rec.discharge` | the commit-path proof for a set of seqs |
 | `replay-fence` | `Rec.replayFence` | item 309 §3a's durable at-most-once fence |
 | `deferred-emission` | `Rec.deferredEmission` | a class-(b) emission queued but not fired |
+| `flushed` | `Rec.flushed` | a queued emission whose host body crossed at the commit flush |
 | `commit-approved` | `Rec.commitApproved` | the session-commit decision point (item 245) |
 | `aborted` | `Rec.aborted` | the in-process abort's COMPLETION record |
 | `fork-frozen` | `Rec.forkFrozen` | item 250's retired-at-k parent |
@@ -163,6 +164,11 @@ inductive Rec where
   | replayFence (seq : Seq)
   /-- `deferred-emission`: queued, not yet fired. -/
   | deferredEmission (seq : Seq)
+  /-- `flushed`: a deferred emission's host body crossed at the session
+  commit's flush (issue #2740). It is the durable half of "the commit
+  moved this queue entry to discharged"; a fire that RAISED writes the
+  `flush-residue` record instead, which this model does not have. -/
+  | flushed (seq : Seq)
   /-- `commit-approved`: the session-commit decision point (item 245). -/
   | commitApproved
   /-- `aborted`: the in-process abort's completion record. -/
@@ -417,6 +423,7 @@ theorem reissued_recSeq {L : Log} {rc : Rec} {s : Seq} :
   | discharge _ => simp [reissued] at h
   | replayFence _ => simp [reissued] at h
   | deferredEmission _ => simp [reissued] at h
+  | flushed _ => simp [reissued] at h
   | commitApproved => simp [reissued] at h
   | aborted => simp [reissued] at h
   | forkFrozen => simp [reissued] at h
@@ -687,14 +694,16 @@ record. The log is then not an input — it is the trace of the run.
 does `Body.done`: both are stuck, which is what "terminal" means here.
 The three effect-taking rules are the only way a configuration moves, so
 `SemSteps` is a relation with genuine content rather than a function that
-ignores its argument.
+ignores its argument. The in-process frame below adds the deferral-queue
+step and the two session verdicts; its body steps are these same
+`SemStep` forms.
 
 ### Fidelity, stated honestly
 
-* Five body forms against revl's roughly twenty. This is the fragment the
-  WAL guarantees are about — a step either touches nothing, mutates with
-  a declared inverse, or crosses the boundary one-way — and it is not a
-  model of the language.
+* Six body forms against revl's roughly twenty. This is the fragment the
+  WAL guarantees are about: a step either touches nothing, mutates with
+  a declared inverse, crosses the boundary one-way, or enqueues a
+  class-(b) deferred emission, and it is not a model of the language.
 * A `witnessed` step appends its descriptor and creates its referent in
   ONE step. The reference logs the descriptor after the forward extern
   returns `Ok` (`backends/python/emit.py`), so the real runtime has a
@@ -705,6 +714,12 @@ ignores its argument.
   "an emission is a one-way crossing; it has no inverse"
   (`backends/python/replay.py`). That is why the abort cannot restore it
   and why it becomes residue.
+* A `deferred` step only ENQUEUES: it fires nothing and creates no
+  referent. The queue is not part of `Config`, so the `deferred` form has
+  no `SemStep` rule; `FrameStep` below is where it and the verdicts move.
+  A fire that RAISES at the flush (the roll-forward `flush-residue`
+  surface) is not modelled: every queued entry in `FrameStep.commit`
+  fires.
 * The semantics is sequential and single-activation: no cascading abort,
   no compensation drain, no escrow. -/
 
@@ -722,6 +737,10 @@ inductive Body where
   | witnessed (seq : Seq) (undoIdem : Bool) (rest : Body)
   /-- A one-way boundary crossing. -/
   | emit (seq : Seq) (rest : Body)
+  /-- A class-(b) deferred emission: enqueued at its call, fired only by
+  the session commit's flush and dropped by an abort. It has no
+  `SemStep` rule because the queue lives outside `Config`. -/
+  | deferred (seq : Seq) (rest : Body)
   deriving DecidableEq, Repr
 
 /-- What is left to run, the durable referents created so far (newest
@@ -746,6 +765,72 @@ inductive SemStep : Config → Config → Prop where
 inductive SemSteps : Config → Config → Prop where
   | refl : ∀ {c}, SemSteps c c
   | step : ∀ {a b c}, SemStep a b → SemSteps b c → SemSteps a c
+
+/-! ### The in-process frame: the deferral queue and the verdict
+
+`SemStep` models the body's effect steps against the WAL. A class-(b)
+deferred emission is different state: its call neither fires nor creates
+a referent, it is ENQUEUED, and the session verdict later either flushes
+the queue (commit) or drops it (abort, zero crossings). The reference
+holds that queue on the session owner, FIFO (`SessionOwner._queue`), and
+the crossings in the flush's own report; neither is in `Config`, so the
+frame carries them beside it.
+
+The body steps are `SemStep`'s own forms. `Body.deferred` has no
+`SemStep` rule precisely because the queue is outside `Config`; its step
+is `FrameStep.defer`. `commit` and `abort` are the two verdict steps, and
+they are the only steps that settle the verdict, so a settled frame takes
+no further step. -/
+
+/-- The session verdict. `none` is pending; both verdict steps require
+it. -/
+inductive SessionVerdict where
+  | commit
+  | abort
+  deriving DecidableEq, Repr
+
+/-- One in-process activation beside the WAL: the body's `Config`, the
+deferral queue in program order, the crossings the queue has already made
+(the flush's `fired` report), and the session verdict. -/
+structure Frame where
+  config : Config
+  queue : List Seq
+  fired : List Seq
+  verdict : Option SessionVerdict
+  deriving DecidableEq, Repr
+
+/-- The in-process step relation. -/
+inductive FrameStep : Frame → Frame → Prop where
+  /-- A body step, reused from `SemStep`; the queue and the crossings do
+  not move. -/
+  | body : ∀ {c c' q fs}, SemStep c c' →
+      FrameStep ⟨c, q, fs, none⟩ ⟨c', q, fs, none⟩
+  /-- A class-(b) deferred emission at its call: enqueued, logged at
+  ENQUEUE, fired by nothing yet. -/
+  | defer : ∀ {s b w L q fs},
+      FrameStep ⟨⟨.deferred s b, w, L⟩, q, fs, none⟩
+                ⟨⟨b, w, L ++ [.deferredEmission s]⟩, q ++ [s], fs, none⟩
+  /-- The session commit (item 245): `commit-approved` is durable BEFORE
+  the first fire, the queue is fired FIFO, each fire leaves its `flushed`
+  record, and the terminal marker closes the log. A fire that RAISED is
+  the `flush-residue` surface this model does not have; here every entry
+  fires. -/
+  | commit : ∀ {w L q fs},
+      FrameStep ⟨⟨.done, w, L⟩, q, fs, none⟩
+                ⟨⟨.done, w,
+                   L ++ [.commitApproved] ++ q.map Rec.flushed
+                     ++ [.activationComplete]⟩,
+                 [], fs ++ q, some .commit⟩
+  /-- The session abort: the deferral queue is DROPPED, never fired, and
+  the `aborted` completion record is the only write. Zero crossings. -/
+  | abort : ∀ {b w L q fs},
+      FrameStep ⟨⟨b, w, L⟩, q, fs, none⟩
+                ⟨⟨b, w, L ++ [.aborted]⟩, [], fs, some .abort⟩
+
+/-- A run of the in-process frame. -/
+inductive FrameSteps : Frame → Frame → Prop where
+  | refl : ∀ {f}, FrameSteps f f
+  | step : ∀ {a b c}, FrameStep a b → FrameSteps b c → FrameSteps a c
 
 /-! ### Reading the accumulated log -/
 

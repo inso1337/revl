@@ -719,13 +719,19 @@ PRIVATE_KIND = "revl.peer-identity-private"
 PUBLIC_KIND = "revl.peer-identity-public"
 
 
-def write_private_identity(path, identity: PeerIdentity) -> None:
+def write_private_identity(path, identity: PeerIdentity, *,
+                           exclusive: bool = False) -> None:
     """Write a peer's own key pair, private half included, at mode 0600.
 
     The only function in this module that puts a private scalar on disk, and it
     is on the peer's own machine by construction: the operator never calls it
     for someone else's peer, because the whole property this module buys is lost
-    the moment two parties hold the same private half."""
+    the moment two parties hold the same private half.
+
+    ``exclusive`` creates the file with ``O_EXCL``: an existing file, or a link
+    at the path, is a ``FileExistsError`` and is left as it was, so a key is
+    never overwritten and no file is reused with the permissions it had. The
+    release signing key uses it; ``revl pool keygen`` keeps its overwrite."""
     import os  # noqa: PLC0415
     from pathlib import Path  # noqa: PLC0415
 
@@ -736,7 +742,8 @@ def write_private_identity(path, identity: PeerIdentity) -> None:
                "key_id": identity.key_id,
                "public_key": identity.public_key.hex(),
                "private_key": format(identity.private_key, "064x")}
-    handle = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    flags = os.O_WRONLY | os.O_CREAT | (os.O_EXCL if exclusive else os.O_TRUNC)
+    handle = os.open(str(target), flags, 0o600)
     with os.fdopen(handle, "w", encoding="utf-8") as stream:
         json.dump(payload, stream, indent=2, sort_keys=True)
         stream.write("\n")

@@ -53,6 +53,7 @@ def _resolve(args):
         project=getattr(args, "project", None), token=token,
         token_env=token_env, api_base_override=getattr(args, "api_base", None),
         manifest_source=getattr(args, "manifest", None),
+        trust_unsigned=bool(getattr(args, "trust_unsigned", False)),
         timeout=float(getattr(args, "timeout", 20.0)))
 
 
@@ -86,6 +87,12 @@ def _print_check(report: dict) -> None:
         return
     print(f"feed: {report['feed']['repo']} ({report['feed']['channel']}, "
           "release manifest)")
+    signature = (report.get("release") or {}).get("signature") or {}
+    if signature.get("status") == "valid":
+        print(f"signature: verified (key {signature.get('keyId', '?')}, "
+              f"valid until {signature.get('notAfter', '?')})")
+    elif signature.get("status") == "trusted-unsigned":
+        print("signature: accepted without verification (--trust-unsigned)")
     print(f"live: {'yes' if report['live'] else 'no'}; "
           f"restart required: {'yes' if report['restartRequired'] else 'no'}")
     for requirement in report.get("requirements") or []:

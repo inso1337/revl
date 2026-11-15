@@ -102,6 +102,16 @@ the router still grants nothing. Picking the first field instead would let
 `auth.token` and the `Request` escape hatch, which carries every header,
 disagree about what one request presented.
 
+One rule is about the verb rather than the binding: a `route get` or `route head`
+on an operation whose reach is an emission is a compile refusal (issue #3186). A
+browser sends no `Origin` on the cross-site `<img>`, `<script>`, `<link>`, form
+GET or top-level navigation it can fire at any address, so the Origin guard alone
+let one page the operator visits fire the emission, and every derivation that
+serves the route (`revl serve --http`, the ts emitter, `revl export openapi`)
+carried the exposure. An emission is routed with a verb a cross-site page cannot
+send without a preflighted `Origin` (`post`, `put`, `patch`) or with `delete`,
+which it can only send after a preflight this server never grants.
+
 ### Return rules
 
 | declared return | on the wire |

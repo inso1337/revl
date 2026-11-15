@@ -80,12 +80,21 @@ These are **excluded and named in diagnostics** ([syntax-2.0.md](syntax-2.0.md)
   name is refused, so this is safe.)
 - **Statements are separated by newlines; `;` is not a separator.** One
   statement per line is the whole rule.
-- **Strings have no escape sequences.** `"a\nb"` is four characters,
-  backslash, `n` and all. Build multi-line output by concatenation and
-  `` `${…}` `` templates.
+- **A plain string has exactly two escapes, `\"` and `\\`.** Every other
+  backslash sequence stays verbatim: `"a\nb"` is four characters, backslash
+  and `n` included. Build multi-line output by concatenation, `` `${…}` ``
+  templates, or a `"""..."""` verbatim block (no escapes at all). See
+  [strings.md](strings.md).
 - **A component activation body records effects only** (`let x = effect …
   undo …`, `emit`, `fail`, `if`, `return`), plain computation does not belong
   there. Put helper functions at top level and delegate from `provide { }`.
+
+## What differs from Python and JavaScript
+
+- Timers (`every`, `after`) fire only when the host calls `Clock.advance(ms)`; time does not pass on its own: [time-coeffect.md](time-coeffect.md).
+- `%` is the truncated remainder (sign of the dividend, so `-3 % 4 == -3`); `a.mod(b)` is the Euclidean one, always in `[0, |b|)`: [arithmetic.md](arithmetic.md).
+- `Map.keys()` comes in ascending string order of the keys (`"1"`, `"10"`, `"100"`), not insertion order: [collections.md](collections.md).
+- A plain string has only the escapes `\"` and `\\`; `"a\nb"` is a backslash and an `n`, not a newline: [strings.md](strings.md).
 
 ## Null safety (read this twice)
 
@@ -321,6 +330,7 @@ outputs are in [mcp-reference.md](mcp-reference.md).
 | `revl_brief` | between loop steps: one compact answer with what is loaded and at which generation, the last refusal (code, `file:line`, repair) or check verdict, any pending proposal or draft, and the one call to make next, capped at 1200 characters and derived from session state so it cannot drift from `revl_state` | [mcp-reference.md](mcp-reference.md#revl_brief) |
 | `revl_scaffold` | start from a typed, holed skeleton instead of a whole invented component; every hole comes back with its `fillSpec` | [scaffold.md](scaffold.md) |
 | `revl_check` | does this compile? structured diagnostics (code, guarantee, and the `fix` rewrite) **and open holes' `fillSpec`** if not; with no candidate it checks the composition the session holds | [mcp-reference.md](mcp-reference.md#revl_check) |
+| `revl_apply_repair` | take the `repairId` a refusal returned and get the repaired candidate plus its re-check in one call, instead of reconstructing the edit by hand | [fix-code.md](fix-code.md) |
 | `revl_admit` | may it enter **this running composition**? | [mcp-reference.md](mcp-reference.md#revl_admit) |
 | `revl_plan` | and then what? the delta a swap would produce, without applying it | [plan.md](plan.md) |
 | `revl_ship` | check → admit → plan in one early-exit call; `apply:true` also swaps | [token-economy.md](token-economy.md) |
@@ -351,6 +361,7 @@ outputs are in [mcp-reference.md](mcp-reference.md).
 | `revl_explain` · `revl_fmt` | what a diagnostic code guarantees and how to satisfy it; canonical formatting of inline source, IR-equivalence gated | [mcp-reference.md](mcp-reference.md#revl_explain) · [fmt.md](fmt.md) |
 | `revl_commit` · `revl_commit_confirm` · `revl_abort` | the session commit protocol: enumerate the irreversible residue, confirm it by hash, or abort and replay the inverses | [mcp-reference.md](mcp-reference.md) |
 | `revl_approve` · `revl_revoke` | say yes to one outstanding class-(c) crossing, or mint and later withdraw a session-scoped standing grant | [mcp-reference.md](mcp-reference.md#revl_approve) |
+| `revl_approvals` | list the outstanding and answered class-(c) tickets, show one with its policy, bindings, blast radius and grant provenance, and fold the decision history | [mcp-reference.md](mcp-reference.md#revl_approvals) |
 | `revl_escalate` · `revl_override` · `revl_quorum` | hand a stalled multi-party approval question up, admit one without its count (its own `override` verb, recorded as an override), read the decision graph and its admission receipt | [mcp-reference.md](mcp-reference.md#revl_escalate) |
 | `revl_distillation_offers` · `revl_apply_distillation` · `revl_revoke_distillation` | fold repeated yeses into a proposed auto-approve rule, install it, retire it | [mcp-reference.md](mcp-reference.md#revl_distillation_offers) |
 | `revl_estop` · `revl_estop_report` | the operator's emergency halt (a latch flip, not an unwind), and reading back what it stranded | [mcp-reference.md](mcp-reference.md#revl_estop) |

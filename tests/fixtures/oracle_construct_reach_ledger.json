@@ -236,6 +236,7 @@
     "step=let-effect",
     "step=provide",
     "subscribe=<true>",
+    "widen=Float",
     "witness=Str"
   ],
   "gate_census": [
