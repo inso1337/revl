@@ -3351,7 +3351,11 @@ fn method_lines(m: Any, indent: Int, provide_name: Str, comp_name: Str, counter:
 // revertible provision (yield the disposer, then populate). Threads the counter
 // across its methods (a method-body effect shares the component's counter).
 fn provide_lines(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any, externs: List[Any]) -> EmitLines {
-  let name = mangle(host_key(value_str(value_field(step, "name"))))
+  // issue #3538: `key` is the string the runtime is handed (the host key,
+  // unchanged by the builtin ladder); `name` is the escaped python identifier
+  // derived from it.
+  let key = host_key(value_str(value_field(step, "name")))
+  let name = mangle(key)
   let svc = value_str(value_field(step, "service"))
   // item 421 F6: the provided service's method specs, the only place the
   // `Secret[T]` param stamps survive.
@@ -3370,8 +3374,8 @@ fn provide_lines(step: Any, indent: Int, comp_name: Str, counter: Int, services:
     c = me.counter
   }
   out = out.push("")
-  out = out.push(line(indent, `yield _revl_ctx.provide(${py_repr(name)})`))
-  out = out.push(line(indent, `_revl_ctx.set(${py_repr(name)}, ${cls}())`))
+  out = out.push(line(indent, `yield _revl_ctx.provide(${py_repr(key)})`))
+  out = out.push(line(indent, `_revl_ctx.set(${py_repr(key)}, ${cls}())`))
   return { lines: out, counter: c }
 }
 

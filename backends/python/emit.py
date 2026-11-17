@@ -4273,11 +4273,15 @@ class _ComponentEmitter:
         # `self.provides` is keyed by); the HOST spelling is what the runtime is
         # handed and what `_revl_ctx.<field>` is read through.
         raw = step.get("name")
-        name = _ident(_host_key(raw), f"{where}: provide key")
-        if name in _CONTEXT_MEMBERS:
+        # issue #3538: the key published to the runtime is the host key, a string
+        # unchanged by the builtin ladder; `name` is the python identifier
+        # derived from it (class name, method labels) and is the only escaped one.
+        key = _host_key(raw)
+        name = _ident(key, f"{where}: provide key")
+        if key in _CONTEXT_MEMBERS or name in _CONTEXT_MEMBERS:
             raise EmitError(
-                f"{where}: provision key {name!r} collides with a cordis-py "
-                f"Context member — `_revl_ctx.{name}` already exists, so the "
+                f"{where}: provision key {key!r} collides with a cordis-py "
+                f"Context member — `_revl_ctx.{key}` already exists, so the "
                 f"provision would fail at activation. Rename the key."
             )
         service = step.get("service")
@@ -4304,8 +4308,8 @@ class _ComponentEmitter:
                 out.add(indent, f"setattr({cls}, {contract!r}, {cls}.{spelled})")
         # runtime-derived revertible provision (R5): the withdrawal inverse is
         # _revl_ctx.provide's own disposer, yielded into the component accumulator
-        out.add(indent, f"yield _revl_ctx.provide({name!r})")
-        out.add(indent, f"_revl_ctx.set({name!r}, {cls}())")
+        out.add(indent, f"yield _revl_ctx.provide({key!r})")
+        out.add(indent, f"_revl_ctx.set({key!r}, {cls}())")
 
     def _method(self, out: _Lines, indent: int, provide_name: str, method: dict,
                 where: str, raw_key: str | None = None) -> None:
