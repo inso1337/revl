@@ -4408,6 +4408,9 @@ def _pin_record_targets(body: object, params: object, ret_type: object,
     # sibling blocks that reuse a name stay two bindings; `bound` maps the
     # names in scope to those numbers and is restored at each block's end.
     handed_as: dict[int, str] = {}
+    # bindings handed on to two different declared types: no one type names
+    # them, so a literal bound to one is refused, as the go tier does
+    conflicted: set[int] = set()
     alias: dict[int, int] = {}
     scope: dict[str, str | None] = {}
     bound: dict[str, int] = {}
@@ -4455,8 +4458,11 @@ def _pin_record_targets(body: object, params: object, ret_type: object,
             return
         if node.get("kind") == "var":
             ident = bound.get(node.get("name"))
-            while ident is not None and ident not in handed_as:
-                handed_as[ident] = declared
+            seen: set[int] = set()
+            while ident is not None and ident not in seen:
+                seen.add(ident)
+                if handed_as.setdefault(ident, declared) != declared:
+                    conflicted.add(ident)
                 ident = alias.get(ident)
             return
         expr(node, declared)
@@ -4562,7 +4568,7 @@ def _pin_record_targets(body: object, params: object, ret_type: object,
                 alias[ident] = source
             # the type the local is handed on as stands for a literal or an
             # empty list nothing else types
-            declared = handed_as.get(ident)
+            declared = None if ident in conflicted else handed_as.get(ident)
             expr(value, declared)
             bound[name] = ident
             found = infer(value)
@@ -4574,7 +4580,8 @@ def _pin_record_targets(body: object, params: object, ret_type: object,
             scope[name] = found
         elif kind == "assign":
             handed(step.get("value"), scope.get(step.get("name"))
-                   or handed_as.get(bound.get(step.get("name"))))
+                   or (None if bound.get(step.get("name")) in conflicted
+                       else handed_as.get(bound.get(step.get("name")))))
         elif kind == "return":
             handed(step.get("expr"), ret_type)
         elif kind == "if":

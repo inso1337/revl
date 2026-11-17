@@ -231,10 +231,34 @@ def test_a_shared_field_set_takes_its_declared_target(tier, built):
     assert built[1] in body[body.index("at_e("):], src
 
 
+# one local handed on to two records that share its fields: no one of them
+# is the literal's type, so both tiers refuse it instead of picking the first
+TWO_TARGETS = """\
+type Bind = { name: Str, ty: Str }
+type Param = { name: Str, ty: Str }
+fn tb(b: Bind) -> Str { return b.ty }
+fn tp(p: Param) -> Str { return p.name }
+fn both(n: Str) -> Str {
+  let x = { name: n, ty: "T" }
+  return tb(x) + tp(x)
+}
+test "both" { assert both("n") == "Tn" }
+"""
+
+
 @pytest.mark.parametrize("tier", ["go", "java"])
 def test_a_literal_with_no_target_is_still_refused(tier):
     with pytest.raises(EMITTERS[tier].EmitError, match="PR, AtExpr|share"):
         EMITTERS[tier].emit(compile_source(UNTARGETED, "untargeted_3144.rvl"))
+
+
+@pytest.mark.parametrize("tier,words", [
+    ("go", "Bind, Param share them"),
+    ("java", "ambiguous between Bind, Param"),
+])
+def test_a_local_handed_to_two_records_is_refused_by_name(tier, words):
+    with pytest.raises(EMITTERS[tier].EmitError, match=words):
+        EMITTERS[tier].emit(compile_source(TWO_TARGETS, "two_targets_3144.rvl"))
 
 
 @pytest.mark.skipif(shutil.which("go") is None, reason="go is not installed")
