@@ -3224,6 +3224,18 @@ def run_command(args, hold_once: bool = False) -> int:
     problem = _env_contract_problem(ir, env, config)
     if problem is not None:
         return _fail(problem, lifecycle.CONFIG)
+    # issue #3596: the host `--config` table is checked and folded the way a
+    # Session load does it (`configure_rows_from_host`): a row's table is typed
+    # and recorded in the rows IR, and a table for a component no row places
+    # is typed too, so a wrong type or an undeclared field refuses the boot
+    # here. Required fields stay with `_required_config_problem` below, which
+    # also knows the boot component's `--env` door.
+    from .composition import configure_rows_from_host  # noqa: PLC0415
+    try:
+        ir = configure_rows_from_host(ir, config, "<--config>",
+                                      required=False)
+    except RevlError as exc:
+        return _fail(str(exc), lifecycle.CONFIG)
     config = _merge_env(ir, env, config)
 
     # issue #1461: `--providers FILE` binds the composition's model crossings to
