@@ -83,7 +83,7 @@ def _grant(session: Session, *, capability: str = _CAP, uses: int = 3,
 
 
 class _SwappedMap:
-    """A class map whose lender closure resolves to `current` — the only surface
+    """A class map whose lender closure resolves to `current`, the only surface
     `_lender_generation_live` reads."""
 
     def __init__(self, current: str) -> None:

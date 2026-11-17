@@ -238,7 +238,7 @@ def _delegation_covers(granted: str, use: str) -> bool:
     """Does a delegation minted for `granted` authorize a use of `use`?
 
     `use` is what a delegated method call reaches, spelled as the crossing's
-    semantic identity (`fs.write`) — the parameter narrowing is the LEASE's own
+    semantic identity (`fs.write`); the parameter narrowing is the LEASE's own
     and is not re-stated by a method call whose path is an ordinary argument.
     So an IDENTICAL stored spelling and an equal TOKEN both authorize; a wider or
     different token does not. A narrower use (the caller spelling parameters too)
@@ -7811,8 +7811,8 @@ class Session:
         under the lease's consent. Preferring the lease means an operator grant
         that sits earlier in the ledger is not spent in its place; a single-use
         approval the operator gave for this exact crossing still answers it, and
-        is then the authority for it (the lease is not spent and the use is not
-        attributed to the delegation).
+        is then the authority for it (the lease is not spent, but the use is
+        still attributed to the delegation on the row).
 
         The handle must match what the lease registered (its wiring key and its
         lender), so a second lease sharing the grant cannot be used to fire the
@@ -7825,7 +7825,7 @@ class Session:
             raise SessionError(
                 f"the delegated reference does not match what lease "
                 f"`{request_id}` registered (wiring key `{key}`, lender "
-                f"`{lender}`), so it cannot be used to cross — one grant is "
+                f"`{lender}`), so it cannot be used to cross: one grant is "
                 f"lent by the party that registered it (item 442, issue #2693)")
         spends: list = []
         self._approval_decide_call(key, method, list(args or []),
@@ -7840,8 +7840,12 @@ class Session:
             return [{"requestId": grant["requestId"], "use": use,
                      "capability": grant["capability"],
                      "component": grant["component"]}]
-        if grant["requestId"] in {s["requestId"] for s in spends}:
-            self._delegate_attribute(grant, subject, lender)
+        # The crossing was made THROUGH the delegated reference, so the row
+        # records who lent it and who used it whichever authority answered the
+        # decision. When an operator's single-use approval answered instead of
+        # the lease, the lease is not spent, but the operator still reads that
+        # the delegatee used the lender's handle.
+        self._delegate_attribute(grant, subject, lender)
         return spends
 
     def delegate_fired(self, spends: list) -> None:
@@ -9635,22 +9639,22 @@ class Session:
                       if g.get("requestId") == request_id), None)
         if grant is None:
             raise SessionError(
-                f"no standing grant `{request_id}` in this session's ledger — a "
+                f"no standing grant `{request_id}` in this session's ledger: a "
                 f"delegated reference is a lookup key into the receiver's own "
                 f"ledger and is never a bearer token (item 442, issue #2693)")
         if not grant.get("lease"):
             raise SessionError(
                 f"standing grant `{request_id}` is not a lease, so it cannot be "
-                f"delegated — a delegation is a bounded, revocable view of a "
+                f"delegated: a delegation is a bounded, revocable view of a "
                 f"held lease (item 442, issue #2693)")
         if grant.get("session") != self._session_id:
             raise SessionError(
-                f"standing grant `{request_id}` was minted in another session — "
+                f"standing grant `{request_id}` was minted in another session: "
                 f"a delegated use is never replayable across a session "
                 f"boundary (item 442, issue #2693)")
         if grant.get("revoked"):
             raise SessionError(
-                f"standing grant `{request_id}` was revoked — the delegated "
+                f"standing grant `{request_id}` was revoked, so the delegated "
                 f"reference it backed no longer authorizes any crossing "
                 f"(item 442, issue #2693)")
         now = self._now_ms()
@@ -9669,13 +9673,13 @@ class Session:
         remaining = grant.get("remainingUses")
         if remaining is not None and remaining <= 0:
             raise SessionError(
-                f"standing grant `{request_id}` has no uses left — the delegated "
+                f"standing grant `{request_id}` has no uses left, so the delegated "
                 f"reference is exhausted and this crossing is refused "
                 f"(item 442, issue #2693)")
         if not _delegation_covers(grant["capability"], capability):
             raise SessionError(
                 f"standing grant `{request_id}` covers `{grant['capability']}`, "
-                f"not `{capability}` — a delegated reference authorizes only the "
+                f"not `{capability}`: a delegated reference authorizes only the "
                 f"surface it was minted for (item 442, issue #2693)")
         return grant
 
@@ -9705,14 +9709,14 @@ class Session:
                 and known_lender != lender:
             raise SessionError(
                 f"standing grant `{grant['requestId']}` was already delegated "
-                f"by `{known_lender}`, so `{lender}` cannot lend it as well — "
+                f"by `{known_lender}`, so `{lender}` cannot lend it as well: "
                 f"one grant is lent by the party that holds it "
                 f"(item 442, issue #2693)")
         held_by = grant.get("subject")
         if held_by is not None and held_by != subject:
             raise SessionError(
                 f"standing grant `{grant['requestId']}` is already lent to "
-                f"`{held_by}`, so `{subject}` cannot use it — one delegation "
+                f"`{held_by}`, so `{subject}` cannot use it: one delegation "
                 f"names one subject (item 442, issue #2693)")
         return lender
 

@@ -308,3 +308,62 @@ def test_approving_the_offered_ticket_lets_the_delegated_call_through(sink):
     session.approve_ticket(asked.value.ticket["hash"])
     session.call("job", "go", [sink])
     assert _lines(sink) == ["w:delegated"]
+
+    # The operator's approval answered, so the lease was not spent, but the row
+    # still says W used A's handle: the use went through the delegated reference.
+    row = _lease_row(session)
+    assert row["remainingUses"] == 3, "the lease was not the authority spent"
+    assert row["lender"] == "A" and row["subject"] == "W"
+    assert row["chain"] == [{"from": "A", "to": "W", "narrowed": ["path"]}]
+
+
+# ---------------------------------------------------------------------------
+# The two wrong handoffs a program can actually write. Both compile today (the
+# handle is not statically typed `Delegate[S]`), and both are refused at the
+# crossing before anything is spent.
+# ---------------------------------------------------------------------------
+
+_SOURCE_BARE_LEASE = _SOURCE.replace(
+    "component A requires fs: Fs, worker: Worker provides job: Job {",
+    "component A requires worker: Worker provides job: Job {")
+
+_SOURCE_WRONG_SERVICE = _SOURCE.replace(
+    "service Job { emission fn go(sink: Str) }\n",
+    "service Job { emission fn go(sink: Str) }\n"
+    "service Other { emission fn write(sink: Str, msg: Str) }\n").replace(
+    "service Worker { emission fn run(job: Str, d: Delegate[Fs]) }",
+    "service Worker { emission fn run(job: Str, d: Delegate[Other]) }")
+
+
+def _boot_source(session: Session, source: str, name: str) -> None:
+    from revl.mcp.approval import ApprovalRequired  # noqa: PLC0415
+
+    ir = compile_source(source, name)
+    try:
+        session.load(copy.deepcopy(ir), record=True)
+    except ApprovalRequired as exc:
+        session.mint_standing_grant(ticket_hash=exc.ticket["hash"])
+        session.load(copy.deepcopy(ir), record=True)
+    session.mint_standing_grant(capability="worker", uses=10)
+
+
+@needs_cordis
+def test_a_lease_over_a_bare_capability_cannot_be_delegated(sink):
+    session = _session()
+    _boot_source(session, _SOURCE_BARE_LEASE, "deleg_bare.rvl")
+
+    with pytest.raises(Exception, match="not a delegatable lease"):
+        session.call("job", "go", [sink])
+    assert _lines(sink) == [], "nothing fired"
+    assert _lease_row(session)["remainingUses"] == 3, "nothing was spent"
+
+
+@needs_cordis
+def test_a_handle_whose_service_is_not_the_parameters_is_refused(sink):
+    session = _session()
+    _boot_source(session, _SOURCE_WRONG_SERVICE, "deleg_wrong_service.rvl")
+
+    with pytest.raises(Exception, match="the handle and"):
+        session.call("job", "go", [sink])
+    assert _lines(sink) == [], "nothing fired"
+    assert _lease_row(session)["remainingUses"] == 3, "nothing was spent"

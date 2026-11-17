@@ -5006,7 +5006,7 @@ class Frame:
         if begin is None or lookup is None:
             raise LeaseRefused(
                 f"{service}.{method}",
-                "no session grant ledger backs this delegated reference — a "
+                "no session grant ledger backs this delegated reference: a "
                 "delegation is enforced by the receiver's own ledger and is "
                 "never a bearer token (item 442, issue #2693)")
         request_id = getattr(handle, "request_id", None)
@@ -5029,7 +5029,7 @@ class Frame:
             raise LeaseRefused(
                 f"{key}.{method}",
                 f"the delegated reference exposes `{provider_service}`, not "
-                f"the `{service}` the call was typed against — the handle and "
+                f"the `{service}` the call was typed against: the handle and "
                 f"the parameter disagree (item 442, issue #2693)")
         fn = getattr(provider, method, None)
         if not callable(fn):
