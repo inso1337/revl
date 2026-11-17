@@ -14,6 +14,9 @@ from pathlib import Path
 
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _load_by_path import load_by_path  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 _BACKEND = ROOT / "backends" / "python"
@@ -28,8 +31,12 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _emit():
+    return load_by_path("revl_py_emit", _BACKEND / "emit.py")
+
+
 def _keys() -> list[str]:
-    import emit  # noqa: PLC0415
+    emit = _emit()
 
     return sorted(k for k in emit._EMITTED_BUILTINS
                   if k.isidentifier() and not keyword.iskeyword(k)
@@ -65,7 +72,7 @@ def test_builtin_spelled_key_loads_and_is_published_under_its_key(session, key):
         ir = compile_source(_source(key), "app.rvl")
     except Exception as exc:  # the checker refuses this spelling: not a provision key
         pytest.skip(f"checker refuses {key!r}: {exc}")
-    import emit  # noqa: PLC0415
+    emit = _emit()
 
     if key in emit._CONTEXT_MEMBERS:
         # `_revl_ctx.set(...)` is a cordis Context method: refused by name
@@ -86,7 +93,7 @@ def _consumer_source(key: str) -> str:
 
 @pytest.mark.parametrize("key", _keys())
 def test_builtin_spelled_key_is_required_and_read_under_its_key(session, key):
-    import emit  # noqa: PLC0415
+    emit = _emit()
 
     if key in emit._CONTEXT_MEMBERS:
         pytest.skip("a Context member is refused as a provision key")

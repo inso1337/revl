@@ -368,6 +368,7 @@ CORPUS = [
     # port's `py_type` `Value` arm was unreached by all 70 prior documents,
     # which is what the line-coverage ledger reported.
     "keyword_config_value_field.rvl",
+    "keyword_provision_key_3538.rvl",  # issue #3538: a keyword provision key is read by getattr
     "services_method_effects.rvl",  # method-body `effect` + saga `emit ... compensate`: the `_revl_frame.adopt` accumulator + `_label`/`_effect_N`/`_emit_N` counter
     "method_effect_coalesce.rvl",  # issue #3304: `adopt_bracket` for an absolute table inverse, `adopt` for a computed key
     # item 383 / 391 (self-host port) — the `.map`/`.filter`/`.reduce` transforms
