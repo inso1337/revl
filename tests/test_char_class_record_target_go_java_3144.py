@@ -246,6 +246,24 @@ test "both" { assert both("n") == "Tn" }
 """
 
 
+# the second hand-on only appears once the outer literal is named: `outer` is
+# an OB (it is returned as one), which makes `inner` a Param, while `tb(inner)`
+# makes it a Bind
+THROUGH_OUTER = """\
+type Bind = { name: Str, ty: Str }
+type Param = { name: Str, ty: Str }
+type OA = { b: Bind, k: Str }
+type OB = { b: Param, k: Str }
+fn tb(b: Bind) -> Str { return b.ty }
+fn mk(n: Str) -> OB {
+  let inner = { name: n, ty: "T" }
+  let outer = { b: inner, k: tb(inner) }
+  return outer
+}
+test "mk" { assert mk("n").k == "T" }
+"""
+
+
 @pytest.mark.parametrize("tier", ["go", "java"])
 def test_a_literal_with_no_target_is_still_refused(tier):
     with pytest.raises(EMITTERS[tier].EmitError, match="PR, AtExpr|share"):
@@ -269,3 +287,12 @@ def test_go_runs_the_classifiers_like_py():
 @pytest.mark.skipif(shutil.which("go") is None, reason="go is not installed")
 def test_go_runs_the_record_targets_like_py():
     _run("go", RECORDS, "records_3144.rvl", 3)
+
+
+@pytest.mark.parametrize("tier,words", [
+    ("go", "Bind, Param share them"),
+    ("java", "ambiguous between Bind, Param"),
+])
+def test_a_conflict_found_through_an_outer_literal_is_refused(tier, words):
+    with pytest.raises(EMITTERS[tier].EmitError, match=words):
+        EMITTERS[tier].emit(compile_source(THROUGH_OUTER, "through_outer_3144.rvl"))

@@ -4393,8 +4393,9 @@ def _pin_record_targets(body: object, params: object, ret_type: object,
     element type of a `push` receiver, an assignment to a typed local, the
     payload of a variant case. A local handed on whole (`return p`, `xs.push(p)`,
     `f(p)`, `{ k: p }`) carries the type of the slot to where it is bound, so
-    the body is walked twice: the first walk learns what each local is handed
-    on as (through `let a = b` too), the second types each local from it.
+    the body is walked until nothing new is learned (what each local is handed
+    on as, through `let a = b` too), then once more to type each local from the
+    settled facts.
 
     The answer goes into `ctx.record_targets`, keyed by node, and the literal
     renderer reads it. The walk types locals forward from the parameters, an
@@ -4611,7 +4612,7 @@ def _pin_record_targets(body: object, params: object, ret_type: object,
             for value in step.values():
                 expr(value)
 
-    for _walk in range(2):
+    def walk() -> None:
         counter[0] = 0
         bound.clear()
         for p in params or []:
@@ -4621,6 +4622,19 @@ def _pin_record_targets(body: object, params: object, ret_type: object,
         scope.update({p.get("name"): p.get("type")
                       for p in params or [] if p.get("name")})
         stmts(body)
+
+    # A hand-on can appear only once an outer literal is named, and that
+    # naming rests on an earlier hand-on, so walk until nothing new is learned
+    # (at least twice: the first walk learns what each local is handed on as).
+    # Then name every literal again from the settled facts, so a local that
+    # ends up handed to two records is refused rather than keeping the first.
+    for _walk in range(8):
+        before = (len(handed_as), len(conflicted))
+        walk()
+        if _walk and (len(handed_as), len(conflicted)) == before:
+            break
+    targets.clear()
+    walk()
 
 
 def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]:

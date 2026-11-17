@@ -7268,64 +7268,95 @@ def _v3_flow_hints(body, ret_type, ctx) -> dict:
     # names: the returned one, a call argument, a field of a record already
     # resolved. A field-set several records share is read through it.
     targets: dict = {}
-    for node in _v3_walk_nodes(body):
-        if node.get("step") == "return" and ret_type:
-            expr = node.get("expr")
-            if isinstance(expr, dict) and expr.get("kind") == "var":
-                hints.offer(expr.get("name"), ret_type)
-            elif isinstance(expr, dict) and expr.get("kind") == "record":
-                targets[id(expr)] = ret_type
-        if node.get("kind") == "call":
-            callee = node.get("callee") or {}
-            name = callee.get("name") if callee.get("kind") == "var" else None
-            params = (ctx.function_params.get(name)
-                      or ctx.extern_params.get(name) or [])
-            generic = _go_v3_generic_call(name, node.get("args") or [], ctx,
-                                          node.get("expected"))
-            if generic is not None:
-                # issue #2495: a generic callee's `T` is no flow target; the
-                # instantiation the other arguments bind is
-                params = generic[0]
-            for arg, declared in zip(node.get("args") or [], params):
-                if (isinstance(arg, dict) and arg.get("kind") == "var"
-                        and isinstance(declared, str)):
-                    hints.offer(arg.get("name"), declared)
-                elif (isinstance(arg, dict) and arg.get("kind") == "record"
-                        and isinstance(declared, str)):
-                    targets[id(arg)] = declared
-        if node.get("kind") == "adt":
-            # a literal handed to a variant case is built as its payload
-            payload = ctx.case_payload.get(node.get("case"))
-            args = node.get("args") or []
-            if (isinstance(payload, str) and len(args) == 1
-                    and isinstance(args[0], dict)
-                    and args[0].get("kind") == "record"):
-                targets[id(args[0])] = payload
-        if node.get("kind") == "record":
-            # `{ texts: texts }` hands `texts` to the record's declared field
-            fields = node.get("fields") or []
-            raw = ctx.find_record([k for k, _ in fields], targets.get(id(node)))
-            declared = (ctx.types.get(raw) or {}).get("fields") or {} if raw else {}
-            for key, value in fields:
-                if _local_ref(value) and isinstance(declared.get(key), str):
-                    hints.offer(_local_ref(value), declared[key])
-                elif (isinstance(value, dict) and value.get("kind") == "record"
-                        and isinstance(declared.get(key), str)):
-                    targets[id(value)] = declared[key]
-    _flow_through_assigns(body, hints)
-    saved = ctx.var_types
-    ctx.var_types = dict(saved)
-    try:
-        _push_evidence(body, hints, lambda n: _go_v3_infer_type(n, ctx),
-                       ctx.var_types, ctx.types)
-    finally:
-        ctx.var_types = saved
+
+    def walk() -> None:
+        for node in _v3_walk_nodes(body):
+            if node.get("step") == "return" and ret_type:
+                expr = node.get("expr")
+                if isinstance(expr, dict) and expr.get("kind") == "var":
+                    hints.offer(expr.get("name"), ret_type)
+                elif isinstance(expr, dict) and expr.get("kind") == "record":
+                    targets[id(expr)] = ret_type
+            if node.get("kind") == "call":
+                callee = node.get("callee") or {}
+                name = callee.get("name") if callee.get("kind") == "var" else None
+                params = (ctx.function_params.get(name)
+                          or ctx.extern_params.get(name) or [])
+                generic = _go_v3_generic_call(name, node.get("args") or [], ctx,
+                                              node.get("expected"))
+                if generic is not None:
+                    # issue #2495: a generic callee's `T` is no flow target; the
+                    # instantiation the other arguments bind is
+                    params = generic[0]
+                for arg, declared in zip(node.get("args") or [], params):
+                    if (isinstance(arg, dict) and arg.get("kind") == "var"
+                            and isinstance(declared, str)):
+                        hints.offer(arg.get("name"), declared)
+                    elif (isinstance(arg, dict) and arg.get("kind") == "record"
+                            and isinstance(declared, str)):
+                        targets[id(arg)] = declared
+            if node.get("kind") == "adt":
+                # a literal handed to a variant case is built as its payload
+                payload = ctx.case_payload.get(node.get("case"))
+                args = node.get("args") or []
+                if (isinstance(payload, str) and len(args) == 1
+                        and isinstance(args[0], dict)
+                        and args[0].get("kind") == "record"):
+                    targets[id(args[0])] = payload
+            if node.get("kind") == "record":
+                # `{ texts: texts }` hands `texts` to the record's declared field
+                fields = node.get("fields") or []
+                raw = ctx.find_record([k for k, _ in fields], targets.get(id(node)))
+                declared = (ctx.types.get(raw) or {}).get("fields") or {} if raw else {}
+                for key, value in fields:
+                    if _local_ref(value) and isinstance(declared.get(key), str):
+                        hints.offer(_local_ref(value), declared[key])
+                    elif (isinstance(value, dict) and value.get("kind") == "record"
+                            and isinstance(declared.get(key), str)):
+                        targets[id(value)] = declared[key]
+            if node.get("step") == "let" and _is_record_literal(node.get("value")):
+                # a literal bound to a local takes the one record that local
+                # is handed on to; a local handed to two is left unnamed
+                offered = hints.targets.get(node.get("name"), [])
+                if (len(offered) == 1 and isinstance(offered[0], str)
+                        and id(node["value"]) not in targets):
+                    targets[id(node["value"])] = offered[0]
+
+    def flows() -> None:
+        _flow_through_assigns(body, hints)
+        saved = ctx.var_types
+        ctx.var_types = dict(saved)
+        try:
+            _push_evidence(body, hints, lambda n: _go_v3_infer_type(n, ctx),
+                           ctx.var_types, ctx.types)
+        finally:
+            ctx.var_types = saved
+
+    def size() -> int:
+        return sum(len(v) for v in hints.targets.values()) + len(hints.pushed)
+
+    # A hand-on can appear only once an outer literal is named, and that
+    # naming can itself rest on an earlier hand-on, so read the body until no
+    # new offer appears, then name every literal again from the settled hints:
+    # a local that ends up handed to two records must not keep the first.
+    for _ in range(8):
+        before = size()
+        walk()
+        flows()
+        if size() == before:
+            break
+    targets.clear()
+    walk()
     return hints
 
 
 def _is_empty_list(node) -> bool:
     return (isinstance(node, dict) and node.get("kind") == "list"
             and not node.get("items"))
+
+
+def _is_record_literal(node) -> bool:
+    return isinstance(node, dict) and node.get("kind") == "record"
 
 
 def _list_pin(node):
