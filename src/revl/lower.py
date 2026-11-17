@@ -4326,14 +4326,18 @@ def _refuse_effect_position_bound_externs_in_fn_body(
                 first_emission_value = _emission_arrow_refusal(
                     hit[0], emission_values[hit[0]], filename, node.line)
         if check_acquire_values and isinstance(node, ExprVar) \
-                and node.name in acquire_undo and first_acquire_value is None:
+                and node.name in acquire_undo and node.name not in bound \
+                and first_acquire_value is None:
             # Issue #2972: the acquire class follows the value, exactly as the
             # emission class does above. The direct call in a `fn` body is
             # refused below (item 399) because the teardown accumulator that
             # registers the declared `undo` does not exist there; a value has
             # the same problem with no call site at all. Callee positions are
             # skipped by the walk (the `callee` field is not visited), so a
-            # real call keeps its own refusal above.
+            # real call keeps its own refusal above. A name the body binds in
+            # scope at the read (a parameter, a `let`, a `for` or arrow
+            # binder, a match payload) is that binding, not the extern
+            # (issue #2985).
             first_acquire_value = _acquire_value_refusal(
                 node.name, f"in {where}", filename, node.line)
         if calls and isinstance(node, ExprCall) and isinstance(node.callee, ExprVar):
@@ -4501,6 +4505,29 @@ def _acquire_value_refusal(name: str, where: str, filename: str,
         f"declared `undo` teardown would be dropped, leaving the acquisition "
         f"irreversible (G4)",
         hint=hint,
+        code="G4", category="acquire",
+    )
+
+
+def _acquire_call_refusal(name: str, filename: str, line: int) -> RevlError:
+    """A plain call of an `acquire` extern inside a provide-method body (issue
+    #2985), the call twin of `_acquire_value_refusal`.
+
+    The call is not the root of an `effect`/`let-effect` bracket, so no step is
+    built and the `undo` the declaration asserts is never registered. The
+    bracketed acquisition is itself refused in this position ("only `spawn` may
+    be acquired"), so the unbracketed call must not be the spelling that gets
+    through. An arrow whose body makes the call reaches here too: its body is
+    lowered in the method's environment."""
+    return RevlError(
+        filename, line,
+        f"`acquire` extern `{name}` cannot be called inside a provide-method "
+        f"body, where only `spawn` may be acquired; its declared `undo` "
+        f"teardown would be dropped, leaving the acquisition irreversible (G4)",
+        hint="the acquisition belongs in the component's activation body, "
+             "where the teardown accumulator registers its declared `undo`; "
+             "bind the handle there and use it in the method, or use `spawn` "
+             "for a request-scoped instance (docs/design-v2-instances.md)",
         code="G4", category="acquire",
     )
 
@@ -10877,6 +10904,21 @@ def _lower_component_pure_expr_node(expr, env: Env, scope: dict[str, str],
                 # caller bracketed with `_acquire_position`.
                 if expr is not getattr(env, "_host_acquire_root", None):
                     _refuse_unpositioned_witnessed_call(name, env, filename, line)
+                    # issue #2985: the acquire class follows the CALL as well
+                    # as the value. Inside a provide-method body the bracketed
+                    # acquisition is refused outright, so the plain call
+                    # (`let h = open_sock()`, `return open_sock().fd`, or the
+                    # body of an arrow) cannot buy the reach the bracket does
+                    # not have: no effect step is built, so the declared
+                    # `undo` is never registered.
+                    # A teardown slot (`undo`) or an `emit` expression lowers
+                    # under its own mode and keeps its own rules (item 308,
+                    # the re-mint refusal), as the witnessed rule above does.
+                    if (getattr(env, "in_provide_method", False)
+                            and getattr(env, "_expr_mode", "setup") == "setup"
+                            and (getattr(env, "extern_class", None) or {})
+                            .get(name) == "acquire"):
+                        raise _acquire_call_refusal(name, filename, line)
                 return node
         if isinstance(expr.callee, ExprField) and expr.callee.name in _BUILTIN_METHODS:
             method = expr.callee.name

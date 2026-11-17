@@ -370,6 +370,9 @@ pub struct EvlX {
     sn: Vec<String>,
     mode: String,
     aq: Vec<String>,
+    #[serde(rename = "where")]
+    where_: String,
+    maps: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -10272,6 +10275,19 @@ fn drop_last(ss: &[Stmt]) -> Vec<Stmt> {
     return out;
 }
 
+fn pattern_binders(ts: &[Token], lo: i64, hi: i64) -> Vec<Stmt> {
+    let mut out = vec![mkstmt(String::from("skip"), int_lit0())];
+    let mut k = lo;
+    while ((k < hi) && (!atk(ts, k, "="))) {
+        let t = tkc(ts, k);
+        if (t.kind == "ident") {
+            out.push(Stmt { kind: String::from("skip"), e: int_lit0(), bind: String::from(""), spawnTarget: String::from(""), awaited: false, line: 0i64, inTimer: false, bindTy: String::from(""), edge: String::from("pat:").revl_concat(&t.text) });
+        }
+        k = (k).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
 fn p_stmt_run(ts: Vec<Token>, lo: i64, hi: i64) -> SRun {
     let t = tkc(&ts, lo);
     if ((t.kind == "kw") && ((t.text == "let") || (t.text == "var"))) {
@@ -10285,6 +10301,9 @@ fn p_stmt_run(ts: Vec<Token>, lo: i64, hi: i64) -> SRun {
             eq = ta.i;
         }
         if (!atk(&ts, eq, "=")) {
+            if (atk(&ts, (lo).checked_add(1i64).expect("revl: Int overflow"), "[") || atk(&ts, (lo).checked_add(1i64).expect("revl: Int overflow"), "{")) {
+                return mk_srun(pattern_binders(&ts, (lo).checked_add(2i64).expect("revl: Int overflow"), hi), hi);
+            }
             return mk_srun(vec![mkstmt(String::from("skip"), int_lit0())], hi);
         }
         let bn = tkc(&ts, (lo).checked_add(1i64).expect("revl: Int overflow")).text;
@@ -14286,11 +14305,11 @@ fn acquire_extern_names(pg: Prog) -> Vec<String> {
 }
 
 fn evl_hit(n: &str, x: EvlX, bound: &[String]) -> String {
-    if (x.mode == "acquire") {
+    if evl_acq(x.clone()) {
         if ((!contains__m2(&x.aq, n)) || contains__m2(bound, n)) {
             return String::from("");
         }
-        return acquire_value_msg(n, "inside a provide-method body, where only `spawn` may be acquired");
+        return acquire_value_msg(n, &x.where_);
     }
     let ext = eval_of(x.cx.clone(), n);
     if ((((ext == "") || (!contains__m2(&x.sn, n))) || contains__m2(bound, n)) || contains__m2(&x.cx.colored, n)) {
@@ -14322,11 +14341,31 @@ fn evl_expr(e: Expr, x: EvlX, bound: Vec<String>) -> String {
 }
 
 fn evl_call(target: Expr, args: &[Expr], x: EvlX, bound: Vec<String>) -> String {
-    let t = if (dfr_callee_name(target.clone()) != "") { String::from("") } else { evl_expr(target.clone(), x.clone(), bound.clone()) };
+    let callee = dfr_callee_name(target.clone());
+    if ((((x.mode == "acquire") && (callee != "")) && contains__m2(&x.aq, &callee)) && (!contains__m2(&bound, &callee))) {
+        return acquire_call_msg(&callee);
+    }
+    let t = if (callee != "") { String::from("") } else { evl_expr(target.clone(), x.clone(), bound.clone()) };
     if (t != "") {
         return t;
     }
     return evl_list(args, 0i64, x, bound);
+}
+
+fn evl_root(e: Expr, x: EvlX, bound: Vec<String>) -> String {
+    return match e.clone() {
+    Expr::Var(_) => String::from(""),
+    Expr::Call(c) => { let c = *c; if (dfr_callee_name(c.target.clone()) != "") { evl_list(&c.args, 0i64, x.clone(), bound.clone()) } else { evl_expr(e.clone(), x.clone(), bound.clone()) } },
+    _ => evl_expr(e.clone(), x.clone(), bound.clone()),
+};
+}
+
+fn acquire_call_msg(n: &str) -> String {
+    return (String::from("`acquire` extern `").revl_concat(&n)).revl_concat("` cannot be called inside a provide-method body, where only `spawn` may be acquired; its declared `undo` teardown would be dropped, leaving the acquisition irreversible (G4)");
+}
+
+fn evl_direct_acquire(kind: &str, bind: &str, target: &str, e: Expr, x: EvlX) -> bool {
+    return (((((x.mode == "acquire") && (kind == "effect")) && (bind != "")) && (target == "")) && (host_write_verb(e, &x.maps) != "insert_if_absent"));
 }
 
 fn evl_list(xs: &[Expr], i: i64, x: EvlX, bound: Vec<String>) -> String {
@@ -14386,6 +14425,46 @@ fn evl_blk(ls: &[ArmLetN], i: i64, tail: Expr, x: EvlX, bound: Vec<String>) -> S
     return evl_blk(ls, (i).checked_add(1i64).expect("revl: Int overflow"), tail, x, bound.revl_push((ls)[(i) as usize].name.clone()));
 }
 
+fn evl_acq(x: EvlX) -> bool {
+    return (((x.mode == "acquire") || (x.mode == "acquire_fn")) || (x.mode == "acquire_undo"));
+}
+
+fn evl_carry(bound: &[String], m: i64) -> Vec<String> {
+    let mut out = bound.revl_slice(0i64, m);
+    let mut i = m;
+    while (i < bound.revl_length()) {
+        let n = (bound)[(i) as usize].clone();
+        out.push(if (n.revl_slice(0i64, 1i64) == "^") { n.clone() } else { String::from("^").revl_concat(&n) });
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn evl_visible(bound: Vec<String>) -> Vec<String> {
+    let mut out = bound.clone();
+    let mut i = 0i64;
+    while (i < bound.revl_length()) {
+        let n = (bound)[(i) as usize].clone();
+        if (n.revl_slice(0i64, 1i64) == "^") {
+            out.push(n.revl_slice(1i64, n.revl_length()));
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn evl_uncarry(bound: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let mut i = 0i64;
+    while (i < bound.revl_length()) {
+        if ((bound)[(i) as usize].revl_slice(0i64, 1i64) != "^") {
+            out.push((bound)[(i) as usize].clone());
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
 fn evl_stmts(ss: &[Stmt], i: i64, x: EvlX, bound: Vec<String>, marks: &[i64]) -> EvlR {
     if (i >= ss.revl_length()) {
         return EvlR { msg: String::from(""), line: 0i64, bound: bound };
@@ -14396,19 +14475,28 @@ fn evl_stmts(ss: &[Stmt], i: i64, x: EvlX, bound: Vec<String>, marks: &[i64]) ->
         return evl_stmts(ss, (i).checked_add(1i64).expect("revl: Int overflow"), x, bound.clone(), &(marks.revl_push(bound.revl_length())));
     }
     if (((k == "scope_close") || (k == "arm_close")) && (marks.revl_length() > 0i64)) {
-        let t = if (k == "arm_close") { evl_expr(s.e.clone(), x.clone(), bound.clone()) } else { String::from("") };
+        let t = if (k == "arm_close") { evl_expr(s.e.clone(), x.clone(), evl_visible(bound.clone())) } else { String::from("") };
         if (t != "") {
             return EvlR { msg: t.clone(), line: s.line, bound: bound };
         }
         let m = (marks)[((marks.revl_length()).checked_sub(1i64).expect("revl: Int overflow")) as usize].clone();
-        return evl_stmts(ss, (i).checked_add(1i64).expect("revl: Int overflow"), x, bound.revl_slice(0i64, m), &(marks.revl_slice(0i64, (marks.revl_length()).checked_sub(1i64).expect("revl: Int overflow"))));
+        let left = if ((k == "arm_close") && evl_acq(x.clone())) { evl_carry(&bound, m) } else { bound.revl_slice(0i64, m) };
+        return evl_stmts(ss, (i).checked_add(1i64).expect("revl: Int overflow"), x, left, &(marks.revl_slice(0i64, (marks.revl_length()).checked_sub(1i64).expect("revl: Int overflow"))));
     }
-    let is_acq_root = (((x.mode == "acquire") && (k == "effect")) && (dfr_callee_name(s.e.clone()) != ""));
-    let r = if is_acq_root { String::from("") } else { evl_expr(s.e.clone(), x.clone(), bound.clone()) };
+    if ((k == "skip") && starts_with__m2(&s.edge, "pat:")) {
+        return evl_stmts(ss, (i).checked_add(1i64).expect("revl: Int overflow"), x, bound.revl_push(s.edge.revl_slice(4i64, s.edge.revl_length())), marks);
+    }
+    if evl_direct_acquire(&k, &s.bind, &s.spawnTarget, s.e.clone(), x.clone()) {
+        return EvlR { msg: String::from("only `spawn` may be acquired inside a provide-method body"), line: s.line, bound: bound };
+    }
+    let seen = if evl_acq(x.clone()) { evl_visible(bound.clone()) } else { bound.clone() };
+    let xs = if ((x.mode == "acquire") && (k == "undo")) { EvlX { cx: x.cx.clone(), sn: x.sn.clone(), mode: String::from("acquire_undo"), aq: x.aq.clone(), where_: x.where_.clone(), maps: x.maps.clone() } } else { x.clone() };
+    let r = if ((x.mode == "acquire") && (k == "effect")) { evl_root(s.e.clone(), x.clone(), seen.clone()) } else { evl_expr(s.e.clone(), xs, seen.clone()) };
     if (r != "") {
         return EvlR { msg: r.clone(), line: s.line, bound: bound };
     }
-    return evl_stmts(ss, (i).checked_add(1i64).expect("revl: Int overflow"), x, if (s.bind == "") { bound.clone() } else { bound.revl_push(s.bind.clone()) }, marks);
+    let next = if evl_acq(x.clone()) { evl_uncarry(&bound) } else { bound.clone() };
+    return evl_stmts(ss, (i).checked_add(1i64).expect("revl: Int overflow"), x, if (s.bind == "") { next.clone() } else { next.revl_push(s.bind.clone()) }, marks);
 }
 
 fn evl_any(sn: &[String], cx: Ctx__m2, i: i64) -> bool {
@@ -14422,7 +14510,7 @@ fn evl_any(sn: &[String], cx: Ctx__m2, i: i64) -> bool {
 }
 
 fn evl_component(comp: CompD, cx: Ctx__m2) -> Verd {
-    let x = EvlX { cx: cx.clone(), sn: cx.scopeNames.clone(), mode: String::from("emission"), aq: vec![] };
+    let x = EvlX { cx: cx.clone(), sn: cx.scopeNames.clone(), mode: String::from("emission"), aq: vec![], where_: String::from(""), maps: vec![] };
     if (!evl_any(&x.sn, cx.clone(), 0i64)) {
         return no_verd();
     }
@@ -14447,12 +14535,10 @@ fn evl_component(comp: CompD, cx: Ctx__m2) -> Verd {
 }
 
 fn aqv_component(comp: CompD, cx: Ctx__m2, aq: Vec<String>) -> Verd {
-    if (aq.revl_length() == 0i64) {
-        return no_verd();
-    }
-    let x0 = EvlX { cx: cx.clone(), sn: vec![], mode: String::from("acquire"), aq: vec![] };
+    let where_ = String::from("inside a provide-method body, where only `spawn` may be acquired");
+    let x0 = EvlX { cx: cx.clone(), sn: vec![], mode: String::from("acquire_fn"), aq: vec![], where_: where_.clone(), maps: vec![] };
     let s = evl_stmts(&comp.setup, 0i64, x0.clone(), vec![], &(vec![]));
-    let x = EvlX { cx: cx.clone(), sn: vec![], mode: String::from("acquire"), aq: aq.clone() };
+    let x = EvlX { cx: cx.clone(), sn: vec![], mode: String::from("acquire"), aq: aq.clone(), where_: where_.clone(), maps: map_handles(&comp.setup, 0i64, vec![]) };
     let mut pi = 0i64;
     while (pi < comp.provs.revl_length()) {
         let ms = (comp.provs)[(pi) as usize].methods.clone();
@@ -14469,18 +14555,7 @@ fn aqv_component(comp: CompD, cx: Ctx__m2, aq: Vec<String>) -> Verd {
     return no_verd();
 }
 
-fn aqv_fn_stmts(ss: &[Stmt], i: i64, aq: &[String], where_: &str) -> Verd {
-    if (i >= ss.revl_length()) {
-        return no_verd();
-    }
-    let hits = col_values((ss)[(i) as usize].e.clone(), aq, vec![]);
-    if (hits.revl_length() > 0i64) {
-        return mk_verd(tagged("G4", &acquire_value_msg(&(hits)[(0i64) as usize], where_)), (ss)[(i) as usize].line.clone());
-    }
-    return aqv_fn_stmts(ss, (i).checked_add(1i64).expect("revl: Int overflow"), aq, where_);
-}
-
-fn aqv_fns(pg: Prog, aq: &[String]) -> Verd {
+fn aqv_fns(pg: Prog, aq: Vec<String>, base: Ctx__m2) -> Verd {
     if (aq.revl_length() == 0i64) {
         return no_verd();
     }
@@ -14488,9 +14563,10 @@ fn aqv_fns(pg: Prog, aq: &[String]) -> Verd {
     while (i < pg.fns.revl_length()) {
         let f = (pg.fns)[(i) as usize].clone();
         if ((!f.isEmExtern) && (!f.isAsyncExtern)) {
-            let v = aqv_fn_stmts(&f.body, 0i64, aq, &((String::from("in the body of fn `").revl_concat(&f.name)).revl_concat("`")));
-            if (v.v != "") {
-                return v;
+            let x = EvlX { cx: base.clone(), sn: vec![], mode: String::from("acquire_fn"), aq: aq.clone(), where_: (String::from("in the body of fn `").revl_concat(&f.name)).revl_concat("`"), maps: vec![] };
+            let r = evl_stmts(&f.body, 0i64, x.clone(), param_names(&f.params), &(vec![]));
+            if (r.msg != "") {
+                return mk_verd(tagged("G4", &r.msg), r.line);
             }
         }
         i = (i).checked_add(1i64).expect("revl: Int overflow");
@@ -27055,7 +27131,7 @@ fn collect_nonlink(ts: Vec<Token>, pg: Prog, hands: &[MHand], wrefs: &[Verd], am
         return NoLink { done: true, refs: vec![evv.clone()] };
     }
     let aqNames = acquire_extern_names(pg.clone());
-    let aqv = aqv_fns(pg.clone(), &aqNames);
+    let aqv = aqv_fns(pg.clone(), aqNames.clone(), base.clone());
     if (aqv.v != "") {
         return NoLink { done: true, refs: vec![aqv.clone()] };
     }
