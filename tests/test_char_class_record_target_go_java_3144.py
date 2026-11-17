@@ -296,3 +296,36 @@ def test_go_runs_the_record_targets_like_py():
 def test_a_conflict_found_through_an_outer_literal_is_refused(tier, words):
     with pytest.raises(EMITTERS[tier].EmitError, match=words):
         EMITTERS[tier].emit(compile_source(THROUGH_OUTER, "through_outer_3144.rvl"))
+
+
+def _deep(levels: int) -> str:
+    """`levels` nested records, each outer field-set shared by two records, with
+    the innermost local handed to a `Bind` parameter and, through the chain, to
+    a `Param` field: every depth must be refused, not only the shallow ones."""
+    out = ["type Bind = { name: Str, ty: Str }",
+           "type Param = { name: Str, ty: Str }"]
+    for n in range(1, levels + 1):
+        inner_a = "Bind" if n == 1 else f"L{n - 1}A"
+        inner_b = "Param" if n == 1 else f"L{n - 1}B"
+        out.append(f"type L{n}A = {{ f{n}: {inner_a}, k: Str }}")
+        out.append(f"type L{n}B = {{ f{n}: {inner_b}, k: Str }}")
+    out.append("fn tb(b: Bind) -> Str { return b.ty }")
+    out.append(f"fn mk(n: Str) -> L{levels}B {{")
+    out.append('  let v0 = { name: n, ty: "T" }')
+    out.append('  let v1 = { f1: v0, k: tb(v0) }')
+    for n in range(2, levels + 1):
+        out.append(f'  let v{n} = {{ f{n}: v{n - 1}, k: "k" }}')
+    out.append(f"  return v{levels}")
+    out.append("}")
+    out.append('test "mk" { assert mk("n").k == "k" }')
+    return "\n".join(out) + "\n"
+
+
+@pytest.mark.parametrize("levels", [3, 7, 8, 9, 10, 12])
+@pytest.mark.parametrize("tier,words", [
+    ("go", "Bind, Param share them"),
+    ("java", "ambiguous between Bind, Param"),
+])
+def test_a_deep_chain_of_hand_ons_is_refused_at_every_depth(tier, words, levels):
+    with pytest.raises(EMITTERS[tier].EmitError, match=words):
+        EMITTERS[tier].emit(compile_source(_deep(levels), f"deep{levels}_3144.rvl"))

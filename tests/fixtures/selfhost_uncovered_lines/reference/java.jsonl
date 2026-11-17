@@ -500,6 +500,8 @@
 
 ["reason", "partially-exercised-the-corpus-does-call-this-function", "Java reference emitter only, not yet ported to selfhost/emit_java.rvl (issue #3144): the `_pin_record_targets` pass that names a record literal several records share the fields of from the declared type it flows into. The byte-agreement corpus holds only documents the self-host emitter reproduces byte for byte, so a corpus document reaching these lines waits on that port. Shape-checked by tests/test_char_class_record_target_go_java_3144.py and executed on the JVM by backends/java/test_char_class_record_target_java_3144.py."]
 
+["function", "partially-exercised-the-corpus-does-call-this-function", "_pin_record_targets", 1, 1]
+
 ["function", "partially-exercised-the-corpus-does-call-this-function", "_pin_record_targets.expr", 10, 10]
 
 ["function", "partially-exercised-the-corpus-does-call-this-function", "_pin_record_targets.handed", 1, 1]

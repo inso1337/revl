@@ -4628,11 +4628,26 @@ def _pin_record_targets(body: object, params: object, ret_type: object,
     # (at least twice: the first walk learns what each local is handed on as).
     # Then name every literal again from the settled facts, so a local that
     # ends up handed to two records is refused rather than keeping the first.
-    for _walk in range(8):
+    # The facts only grow and are bounded (locals times declared types), and
+    # each walk settles at least one more level of nesting, so the loop ends
+    # after at most one walk per node of the body; a body that runs past that
+    # is refused rather than named from unsettled facts.
+    def count(node: object) -> int:
+        if isinstance(node, dict):
+            return 1 + sum(count(v) for v in node.values())
+        if isinstance(node, list):
+            return sum(count(v) for v in node)
+        return 0
+
+    for _walk in range(count(body) + 3):
         before = (len(handed_as), len(conflicted))
         walk()
         if _walk and (len(handed_as), len(conflicted)) == before:
             break
+    else:
+        raise EmitError(
+            "the record hand-ons of this function do not settle; name the "
+            "record each literal builds")
     targets.clear()
     walk()
 

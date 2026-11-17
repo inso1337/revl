@@ -7339,12 +7339,21 @@ def _v3_flow_hints(body, ret_type, ctx) -> dict:
     # naming can itself rest on an earlier hand-on, so read the body until no
     # new offer appears, then name every literal again from the settled hints:
     # a local that ends up handed to two records must not keep the first.
-    for _ in range(8):
+    # The offers only grow and are bounded (locals times declared types), and
+    # each pass settles at least one more level of nesting, so the loop ends
+    # after at most one pass per node of the body; a body that runs past that
+    # is refused rather than named from unsettled facts.
+    passes = sum(1 for _ in _v3_walk_nodes(body)) + 2
+    for _ in range(passes):
         before = size()
         walk()
         flows()
         if size() == before:
             break
+    else:
+        raise EmitError(
+            "the record hand-ons of this function do not settle; name the "
+            "record each literal builds")
     targets.clear()
     walk()
     return hints
