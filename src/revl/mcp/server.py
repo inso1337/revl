@@ -1127,8 +1127,7 @@ def _restore_gate_profile() -> AdmissionProfile | None:
     (`AUTHORING.profile()`) carries, and nothing else, so a `realm(?NAME)`
     binds the same way in the gate and in the boot. None when the boot binds
     nothing."""
-    boot = AUTHORING.profile()
-    if boot is None or not boot.realm_bindings:
+    if not AUTHORING.realm_bindings:
         return None
     return _bound_only(None)
 
@@ -4250,8 +4249,11 @@ def _tool_restore(arguments: dict) -> dict:
         # for this call). Ungated, the call is unchanged.
         gated = ({"gate_reads": _RESTORE_GATE_READS or {}}
                  if getattr(SESSION, "operator", None) is not None else {})
+        # issue #3510: a trusted author has no profile, but the boot compile
+        # still binds `realm(?NAME)` as `revl_load` does (`_bound_only`)
         result = SESSION.restore(snap, profile=profile,
                                  report=compile_report, agent_supplied=True,
+                                 compile_profile=_bound_only(profile),
                                  **gated)
     except ApprovalRequired as error:
         from .persist import admitted_name  # noqa: PLC0415

@@ -4251,7 +4251,8 @@ class Session:
     def restore(self, snap: dict, profile=None,
                 report: dict | None = None, *,
                 gate_reads: dict[str, str] | None = None,
-                agent_supplied: bool = False) -> dict:
+                agent_supplied: bool = False,
+                compile_profile=None) -> dict:
         """Re-admit a snapshot into this (empty) session by replaying
         admission — compile through the gate, then boot. A component the
         current checker rejects fails loudly and loads nothing. `profile` is
@@ -4263,7 +4264,8 @@ class Session:
         from .persist import restore as _restore  # noqa: PLC0415 — lazy
 
         return _restore(self, snap, profile=profile, report=report,
-                        gate_reads=gate_reads, agent_supplied=agent_supplied)
+                        gate_reads=gate_reads, agent_supplied=agent_supplied,
+                        compile_profile=compile_profile)
 
     def rehold_compensation_residue(self, *answers) -> None:
         """Put back the `compensationResidue` of answers a caller does not
