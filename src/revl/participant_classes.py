@@ -127,6 +127,9 @@ def _step_carries_approval(nodes) -> bool:
     return False
 
 
+_NO_CROSSING_EXTERN_CLASSES = ("pure", "local")
+
+
 def _extern_class(decl: dict, *, deferred: bool,
                   registered: bool) -> str | None:
     """One reached extern's participant class, from its DECLARED facts.
@@ -138,23 +141,32 @@ def _extern_class(decl: dict, *, deferred: bool,
     actually registered; reached any other way it fires and registers nothing,
     so it is irreversible (issue #1707).
 
-    `None` means the extern is not a boundary crossing (a `pure` read or a
-    `local` write).
+    `None` means the extern is declared a `pure` read or a `local` write, so
+    it is not a boundary crossing. A missing declaration (``decl`` empty) or an
+    unknown ``class`` fails closed to irreversible.
     """
     if decl.get("requires_approval"):
         return IRREVERSIBLE_NEEDS_APPROVAL
     if deferred:
         return (RECOVERABLE_FORWARD if decl.get("register")
                 else DEFERRED_IRREVERSIBLE)
-    if decl.get("compensate") is not None:
+    cls = decl.get("class")
+    if cls in _NO_CROSSING_EXTERN_CLASSES:
+        return None
+    # A reversal is trusted only from the class that can declare it, so a
+    # missing or unknown class never reads as reversible whatever else the
+    # declaration carries.
+    if cls == "emission" and decl.get("compensate") is not None:
         return COMPENSABLE
-    if decl.get("class") == "witnessed":
+    if cls == "witnessed":
         return RECOVERABLE_FORWARD if registered else IRREVERSIBLE
-    if decl.get("undo") is not None:
+    if cls == "acquire" and decl.get("undo") is not None:
         return PREPARE_REVERSIBLE
-    if decl.get("class") == "emission":
-        return IRREVERSIBLE
-    return None
+    # An emission with no `compensate`, an acquire with no `undo`, a missing
+    # declaration or an unknown class: reached, so a crossing, and only a
+    # declared `pure` read or `local` write is known not to cross the boundary
+    # (issue #3351).
+    return IRREVERSIBLE
 
 
 def _crossing(component: str, scope: str, kind: str, cls: str, *,
