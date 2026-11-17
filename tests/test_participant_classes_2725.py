@@ -36,6 +36,7 @@ if str(SRC) not in sys.path:
 from revl import deploy, participant_classes as pc  # noqa: E402
 from revl.__main__ import main  # noqa: E402
 from revl.compiler import compile_source  # noqa: E402
+from revl.query import Composition  # noqa: E402
 
 
 SOURCE = """\
@@ -109,6 +110,47 @@ def test_a_participant_with_no_crossing_reads_no_crossing(tmp_path):
     classes = pc.participant_classes(ir, _placement(idle=[]))
     assert classes["idle"]["class"] == pc.NO_CROSSING
     assert classes["idle"]["raisedBy"] == []
+
+
+def _with_class(ir, name, cls):
+    ir = json.loads(json.dumps(ir))
+    for e in ir["externs"]:
+        if e.get("name") == name:
+            e["class"] = cls
+    return ir
+
+
+def test_a_reached_extern_missing_from_the_ir_is_irreversible(tmp_path):
+    # The per-scope facts name `charge` as reached; its declaration is then
+    # gone from the extern index the class is read from.
+    composition = Composition(_ir(tmp_path))
+    del composition.externs["charge"]
+    crossings = pc.component_crossings(composition, "Plain")
+    assert [(c["name"], c["class"]) for c in crossings] == [
+        ("charge", pc.IRREVERSIBLE)]
+
+
+def test_a_reached_extern_with_an_unknown_class_is_irreversible(tmp_path):
+    ir = _with_class(_ir(tmp_path), "charge", "mystery")
+    classes = pc.participant_classes(ir, _placement(plain=["Plain"]))
+    assert classes["plain"]["class"] == pc.IRREVERSIBLE
+
+
+def test_a_reached_extern_with_no_class_is_irreversible(tmp_path):
+    ir = _with_class(_ir(tmp_path), "charge", None)
+    classes = pc.participant_classes(ir, _placement(plain=["Plain"]))
+    assert classes["plain"]["class"] == pc.IRREVERSIBLE
+
+
+def test_only_a_declared_pure_or_local_extern_is_no_crossing():
+    for cls in ("pure", "local"):
+        assert pc._extern_class({"class": cls}, deferred=False,
+                                registered=False) is None
+    for decl in ({}, {"class": "mystery"}, {"class": None},
+                 {"class": "mystery", "undo": "x"},
+                 {"class": "mystery", "compensate": "x"}):
+        assert pc._extern_class(decl, deferred=False,
+                                registered=False) == pc.IRREVERSIBLE
 
 
 def test_the_worst_crossing_sets_the_participant_class(tmp_path):
