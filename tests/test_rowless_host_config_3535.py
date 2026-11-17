@@ -95,3 +95,33 @@ def test_no_host_table_keeps_the_declared_defaults():
         assert _read(session, "url") == "x"
     finally:
         session.unload()
+
+
+SOURCE_NO_POOL = """
+service Database { fn url() -> Str  fn pool() -> Int }
+
+component SqliteDatabase provides db: Database {
+  config { url: Str = "x" }
+  provide db {
+    fn url() = config.url
+    fn pool() = 0
+  }
+}
+"""
+
+
+def test_a_swap_whose_successor_drops_a_host_config_field_is_refused():
+    """The session's host config still sets `pool`, so a successor that no
+    longer declares it is refused like a fresh load would be, and the running
+    composition keeps serving with its config."""
+    from revl.mcp.session import Session
+    session = Session()
+    session.load(compile_source(SOURCE), {"SqliteDatabase": {"pool": 9}})
+    try:
+        with pytest.raises(RevlError) as caught:
+            session.swap(compile_source(SOURCE_NO_POOL), agent_authored=False)
+        assert "`pool` is not a config field of `SqliteDatabase`" in str(
+            caught.value)
+        assert _read(session, "pool") == 9
+    finally:
+        session.unload()

@@ -2520,7 +2520,9 @@ def configure_rows_from_host(document: dict, config: dict | None,
     manifest's copy of it then say what the component runs with. A table for a
     component no row places is typed by the same check (issue #3535), so a
     wrongly typed or undeclared field is refused here too, and otherwise left
-    to the runtime as before. Returns
+    to the runtime as before. A swap's successor must therefore still declare
+    every field the session's host config sets; to drop one, unload and load
+    again with a host config that no longer names it. Returns
     `document` itself when nothing changes, otherwise a copy (the caller's
     document is never mutated)."""
     table = (document or {}).get("rows") or {}
