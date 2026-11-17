@@ -383,7 +383,10 @@ type Ctx = {
   // those parameters (`pt`) and the return of each non-generic top-level fn
   // (`fret`); see `selector_type_args`.
   gen: Map[Str, Bool], gfns: Map[Str, Bool], pn: Map[Str, Bool],
-  pt: Map[Str, Str], fret: Map[Str, Str]
+  pt: Map[Str, Str], fret: Map[Str, Str],
+  // the generic fns whose every type parameter a parameter binds (`gx`), whose
+  // call javac infers exactly from exact arguments; see `infers_exactly`
+  gx: Map[Str, Bool]
 }
 // A rendered expression: its text AND the running match-temp counter.
 type Rendered = { text: Str, counter: Int }
@@ -458,8 +461,11 @@ fn type_map(name: Str) -> Str {
 fn java_v3_type(tv: Any, boxed: Bool) -> Str {
   if (value_is_null(tv)) { return "void" }
   let raw = value_str(tv)
-  let name = trim(raw)
+  var name = trim(raw)
   if (name == "") { return "Object" }
+  // the checker marks a type parameter inside its own generic fn `?T`; the
+  // Java method declares it as `T` (issue #2325)
+  if (name.startsWith("?")) { name = name.slice(1, name.length()) }
   // item 383 (self-host port): a declared function type `(P, ..) -> R` is NOT
   // lowerable on the Java tier — a Java lambda needs a nominal target type and
   // the JDK's functional interfaces are neither generic over arity nor usable
@@ -990,8 +996,16 @@ fn infers_exactly(node: Any, ctx: Ctx) -> Bool {
     let callee = value_field(node, "callee")
     var name = ""
     if (node_kind(callee) == "var") { name = value_str(value_field(callee, "name")) }
-    if (has_fn(ctx, name)) { return !bool_get(ctx.gfns, name) }
     let args = value_list(value_field(node, "args"))
+    if (has_fn(ctx, name)) {
+      if (!bool_get(ctx.gfns, name)) { return true }
+      // a generic fn's return type is inferred from its arguments too: exact
+      // only when a parameter binds every type parameter and every argument
+      // infers exactly (issue #2325)
+      if (!bool_get(ctx.gx, name)) { return false }
+      for (a of args) { if (!infers_exactly(a, ctx)) { return false } }
+      return true
+    }
     return name == "Some" && map_get(ctx.ca, name) == "" && args.length() == 1
       && infers_exactly(args[0], ctx)
   }
@@ -1742,7 +1756,15 @@ fn emit_v3_functions(functions: List[Any], ctx: Ctx) -> List[Str] {
       ps = ps.push(`${java_v3_type(value_field(p, "type"), false)} ${ident_binding(value_str(value_field(p, "name")))}`)
     }
     let ret = java_v3_type(value_field(fnode, "returns"), false)
-    lines = lines.push(`public static ${ret} ${name}(${ps.join(", ")}) {`)
+    // issue #2325: a generic fn declares its type parameters
+    var generics = ""
+    let tps = fn_type_params(fnode, ctx.tys)
+    if (tps.length() > 0) {
+      var names = []
+      for (t of tps) { names = names.push(mangle(t)) }
+      generics = `<${names.join(", ")}> `
+    }
+    lines = lines.push(`public static ${generics}${ret} ${name}(${ps.join(", ")}) {`)
     let body = value_list(value_field(fnode, "body"))
     // issue #2325: a parameter name a match arm rebinds is not counted.
     let binds = match_bind_names(value_field(fnode, "body"))
@@ -1820,11 +1842,6 @@ fn build_ctx(ir: Any) -> Ctx {
   var fret: Map[Str, Str] = Map.empty()
   for (fnode of value_list(value_field(ir, "functions"))) {
     fns = fns.set(value_str(value_field(fnode, "name")), true)
-    if (value_list(value_field(fnode, "type_params")).length() > 0) {
-      gfns = gfns.set(value_str(value_field(fnode, "name")), true)
-    } else {
-      fret = fret.set(value_str(value_field(fnode, "name")), value_str(value_field(fnode, "returns")))
-    }
   }
   var gen: Map[Str, Bool] = Map.empty()
   var ca: Map[Str, Str] = Map.empty()
@@ -1866,22 +1883,97 @@ fn build_ctx(ir: Any) -> Ctx {
   }
   var tys: Map[Str, Bool] = Map.empty()
   for (name of value_keys(types)) { tys = tys.set(name, true) }
+  // issue #2325: the generic fns (`gfns`), the ones a parameter binds every
+  // type parameter of (`gx`) and the return of each non-generic fn (`fret`),
+  // read from the derived type parameters so an implicit `T` counts too.
+  var gx: Map[Str, Bool] = Map.empty()
+  for (fnode of value_list(value_field(ir, "functions"))) {
+    let fname = value_str(value_field(fnode, "name"))
+    let tps = fn_type_params(fnode, tys)
+    if (tps.length() > 0) {
+      gfns = gfns.set(fname, true)
+      if (params_bind_all(fnode, tps)) { gx = gx.set(fname, true) }
+    } else {
+      fret = fret.set(fname, value_str(value_field(fnode, "returns")))
+    }
+  }
   return { fns: fns, ca: ca, cp: cp, rbf: rbf, vcases: vcases, rfields: rfields, rn: Map.empty(), tys: tys,
-           gen: gen, gfns: gfns, pn: Map.empty(), pt: Map.empty(), fret: fret }
+           gen: gen, gfns: gfns, pn: Map.empty(), pt: Map.empty(), fret: fret, gx: gx }
+}
+
+// `_JAVA_TYPE_WORD.findall`: the identifier words of a surface type, in order.
+fn type_words(surface: Str) -> List[Str] {
+  var out: List[Str] = []
+  var word = ""
+  var i = 0
+  while (i < surface.length()) {
+    let ch = surface.charAt(i)
+    if (ch != "" && "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_".indexOf(ch) >= 0) {
+      word = word.concat(ch)
+    } else {
+      if (word != "") { out = out.push(word) }
+      word = ""
+    }
+    i = i + 1
+  }
+  if (word != "") { out = out.push(word) }
+  return out
+}
+
+// `_v3_fn_type_params` (issue #2325): the type parameters of a function
+// signature, in first-use order. The IR carries the author's spelling, so the
+// emitter applies the checker's implicit rule (a single-uppercase name no
+// `type` declares is a type parameter); an explicit list rides the IR as
+// `type_params` and is used instead, minus a name no parameter or return
+// mentions.
+fn fn_type_params(fnode: Any, tys: Map[Str, Bool]) -> List[Str] {
+  var surfaces: List[Str] = []
+  for (p of value_list(value_field(fnode, "params"))) { surfaces = surfaces.push(value_str(value_field(p, "type"))) }
+  surfaces = surfaces.push(value_str(value_field(fnode, "returns")))
+  let listed = value_list(value_field(fnode, "type_params"))
+  var found: List[Str] = []
+  if (listed.length() > 0) {
+    var used: List[Str] = []
+    for (surface of surfaces) { used = used.concat(type_words(surface)) }
+    for (t of listed) {
+      if (used.indexOf(value_str(t)) >= 0) { found = found.push(value_str(t)) }
+    }
+    return found
+  }
+  for (surface of surfaces) {
+    for (word of type_words(surface)) {
+      if (word.length() == 1 && "ABCDEFGHIJKLMNOPQRSTUVWXYZ".indexOf(word) >= 0
+          && !bool_get(tys, word) && found.indexOf(word) < 0) {
+        found = found.push(word)
+      }
+    }
+  }
+  return found
+}
+
+// Whether the parameter types mention every one of `tps`: a type parameter only
+// the return mentions is inferred from the call's target, not its arguments.
+fn params_bind_all(fnode: Any, tps: List[Str]) -> Bool {
+  var words: List[Str] = []
+  for (p of value_list(value_field(fnode, "params"))) {
+    words = words.concat(type_words(value_str(value_field(p, "type"))))
+  }
+  for (t of tps) { if (words.indexOf(t) < 0) { return false } }
+  return true
 }
 
 // Swap in a fresh rename map (the component-capture scope for one render); the
 // modern provide-method path threads `{req -> this.req, bind -> this.bind}`.
 fn set_rn(ctx: Ctx, rn: Map[Str, Str]) -> Ctx {
   return { fns: ctx.fns, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, vcases: ctx.vcases, rfields: ctx.rfields, rn: rn, tys: ctx.tys,
-           gen: ctx.gen, gfns: ctx.gfns, pn: ctx.pn, pt: ctx.pt, fret: ctx.fret }
+           gen: ctx.gen, gfns: ctx.gfns, pn: ctx.pn, pt: ctx.pt, fret: ctx.fret, gx: ctx.gx }
 }
 
 // Swap in the parameter names and types of the top-level fn being emitted
 // (issue #2325).
 fn set_pn(ctx: Ctx, pn: Map[Str, Bool], pt: Map[Str, Str]) -> Ctx {
   return { fns: ctx.fns, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, vcases: ctx.vcases, rfields: ctx.rfields, rn: ctx.rn, tys: ctx.tys,
-           gen: ctx.gen, gfns: ctx.gfns, pn: pn, pt: pt, fret: ctx.fret }
+           gen: ctx.gen, gfns: ctx.gfns, pn: pn, pt: pt, fret: ctx.fret, gx: ctx.gx }
 }
 
 // ============================================================ components/services
