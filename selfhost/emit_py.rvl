@@ -215,6 +215,14 @@ extern pure fn mangle_with(name: Str, builtins: Bool, types: Bool, temps: Bool) 
         root = root[:-1]
     return name
 }
+// issue #3538: the read of provision `key` off the context: attribute access,
+// or `getattr` for a python keyword (mirrors `_ctx_read`).
+extern pure fn ctx_read(key: Str) -> Str = @py {
+    import keyword
+    if keyword.iskeyword(key):
+        return "getattr(_revl_ctx, " + repr(key) + ")"
+    return "_revl_ctx." + key
+}
 fn mangle(name: Str) -> Str { return mangle_with(name, true, false, true) }
 fn mangle_kw(name: Str) -> Str { return mangle_with(name, false, false, false) }
 fn mangle_type(name: Str) -> Str { return mangle_with(name, true, true, true) }
@@ -2813,7 +2821,7 @@ fn cexpr(node: Any) -> Str {
     if (id.startsWith("_revl_route_")) { return id }
     return mangle(id)
   }
-  if (kind == "req") { return "_revl_ctx.".concat(value_str(value_field(node, "name"))) }
+  if (kind == "req") { return ctx_read(value_str(value_field(node, "name"))) }
   // `config.<field>` (slice 4): a read of the resolved config dict. The field
   // is repr'd RAW (unlike the schema declaration, which mangles it) — mirroring
   // the reference `_expr` config branch exactly.
@@ -4251,7 +4259,7 @@ fn component_body(comp: Any, services: Any, externs: List[Any], ir: Any) -> List
   for (k of value_keys(value_field(comp, "requires"))) {
     if (!list_contains(routed, k)) {
       inject_raw = inject_raw.push(k)
-      inject = inject.push(mangle(host_key(k)))
+      inject = inject.push(host_key(k))
     }
   }
   // v2 realm placements (docs/design-v2-realms.md). A component that declares
@@ -4262,7 +4270,7 @@ fn component_body(comp: Any, services: Any, externs: List[Any], ir: Any) -> List
   let icpt = value_field(comp, "intercept")
   if (value_keys(icpt).length() > 0) {
     var pairs = []
-    for (k of inject_raw) { pairs = pairs.push(`${py_repr(mangle(host_key(k)))}: ${py_repr(value_field(icpt, k))}`) }
+    for (k of inject_raw) { pairs = pairs.push(`${py_repr(host_key(k))}: ${py_repr(value_field(icpt, k))}`) }
     out = out.push(line(1, `'inject': {${pairs.join(", ")}},`))
   } else {
     out = out.push(line(1, `'inject': ${py_repr(inject)},`))

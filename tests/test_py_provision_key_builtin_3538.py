@@ -75,3 +75,25 @@ def test_builtin_spelled_key_loads_and_is_published_under_its_key(session, key):
     state = session.load(ir)
     assert state["providedKeys"] == [key]
     assert session._driver.root.get(key) is not None
+
+
+def _consumer_source(key: str) -> str:
+    return (_source(key)
+            + "service W { fn twice() -> Str }\n"
+            + f"component User requires {key}: V provides out: W {{\n"
+            + f"  provide out {{ fn twice() = {key}.value() + {key}.value() }}\n}}\n")
+
+
+@pytest.mark.parametrize("key", _keys())
+def test_builtin_spelled_key_is_required_and_read_under_its_key(session, key):
+    import emit  # noqa: PLC0415
+
+    if key in emit._CONTEXT_MEMBERS:
+        pytest.skip("a Context member is refused as a provision key")
+    try:
+        ir = compile_source(_consumer_source(key), "app.rvl")
+    except Exception as exc:
+        pytest.skip(f"checker refuses {key!r}: {exc}")
+    state = session.load(ir)
+    assert sorted(state["providedKeys"]) == sorted([key, "out"])
+    assert session._driver.root.get("out") is not None

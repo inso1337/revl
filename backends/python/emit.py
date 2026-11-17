@@ -758,6 +758,14 @@ def _host_key(key: Any) -> Any:
     return "__".join(part.replace("_", "_u") for part in key.split(KEY_NAMESPACE_SEP))
 
 
+def _ctx_read(key: str) -> str:
+    """The read of provision `key` off the context: attribute access, or
+    `getattr` for a key that is a python keyword (issue #3538)."""
+    if keyword.iskeyword(key):
+        return f"getattr(_revl_ctx, {key!r})"
+    return f"_revl_ctx.{key}"
+
+
 def _key_binding(key: str) -> str:
     """The local binding a qualified key introduces: its trailing segment
     (`acme::greeter` -> `greeter`), which is what an IR `req` node and the
@@ -2461,10 +2469,11 @@ class _ComponentEmitter:
             _key_binding(local): service
             for local, service in self.requires_raw.items()
         }
-        # the runtime key spelling each `req` resolves through -- the mangled
-        # QUALIFIED key, which is what the provider registers in `_revl_ctx`
+        # the runtime key spelling each `req` resolves through -- the host key,
+        # which is what the provider registers in `_revl_ctx` (issue #3538:
+        # a string, never builtin-escaped)
         self.require_keys = {
-            _key_binding(local): _ident(_host_key(local), "requires key")
+            _key_binding(local): _host_key(local)
             for local in self.requires_raw
         }
         self.provides = dict(self.provides_raw)
@@ -2737,7 +2746,7 @@ class _ComponentEmitter:
                 return f"_revl_route_{_host_key(route)}"
             # committed-view access: resolves through the fiber's store, so it
             # stays readable during this component's own teardown (R3)
-            return f"_revl_ctx.{self.require_keys.get(name, name)}"
+            return _ctx_read(self.require_keys.get(name, name))
         if kind == "call":
             if "target" in expr:
                 target = self._expr(expr.get("target"), where)
@@ -4281,7 +4290,7 @@ class _ComponentEmitter:
         if key in _CONTEXT_MEMBERS or name in _CONTEXT_MEMBERS:
             raise EmitError(
                 f"{where}: provision key {key!r} collides with a cordis-py "
-                f"Context member — `_revl_ctx.{key}` already exists, so the "
+                f"Context member: `_revl_ctx.{key}` already exists, so the "
                 f"provision would fail at activation. Rename the key."
             )
         service = step.get("service")
@@ -6310,7 +6319,7 @@ def _render_providers(ir: dict) -> str:
     providers: dict = {}
     for comp in ir.get("components") or []:
         for key in comp.get("provides") or {}:
-            providers.setdefault(_ident(_host_key(key), "provides key"), []).append(
+            providers.setdefault(_host_key(key), []).append(
                 _ident(comp["name"], "component name"))
     return "{" + ", ".join(
         f"{key!r}: [{', '.join(map(repr, names))}]"
