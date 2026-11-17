@@ -96,6 +96,15 @@ class Endpoint:
                 pass
 
 
+def running(stop, seconds: float = 10.0):
+    """True until `stop` is set or `seconds` pass. A server loop uses it so a
+    regression in the client makes a test fail on its time assertion rather
+    than leave the server (and the test) running."""
+    end = time.monotonic() + seconds
+    while not stop.is_set() and time.monotonic() < end:
+        yield True
+
+
 def http_200(payload: bytes, *, declared: int | None = None) -> bytes:
     n = len(payload) if declared is None else declared
     return (b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
@@ -201,13 +210,15 @@ def test_an_oversize_reply_with_no_length_is_refused_by_counting(serve):
         conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
                      b"Connection: close\r\n\r\n")
         conn.sendall(b'{"choices":[{"message":{"content":"')
-        sent = 0
-        while not stop.is_set() and sent < 50 * 1024 * 1024:
+        for _ in running(stop):
             conn.sendall(chunk)
-            sent += len(chunk)
     endpoint = serve(script)
+    # the stream never ends on its own, so only counting can stop the read: a
+    # reader that takes the whole body first would run to the deadline
+    started = time.monotonic()
     with pytest.raises(ProviderError, match="larger than 8192 bytes"):
         complete(adapter(endpoint.base, max_reply_bytes=8192, timeout=30))
+    assert time.monotonic() - started < 5
 
 
 def test_a_reply_within_the_limit_still_completes(serve):
@@ -265,9 +276,7 @@ def test_a_server_sending_a_byte_at_a_time_is_cut_off_at_the_deadline(serve):
         payload = b'{"choices":[{"message":{"content":"' + b"a" * 5000
         # head only: the whole body then arrives a byte at a time
         conn.sendall(http_200(b"", declared=len(payload) + 10))
-        for i in range(len(payload)):
-            if stop.is_set():
-                return
+        for i, _ in zip(range(len(payload)), running(stop)):
             conn.sendall(payload[i:i + 1])
             time.sleep(0.1)
     endpoint = serve(script)
@@ -281,7 +290,7 @@ def test_a_server_sending_a_chunked_trickle_is_cut_off_too(serve):
     def script(conn, stop):
         conn.sendall(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
                      b"Connection: close\r\n\r\n")
-        while not stop.is_set():
+        for _ in running(stop):
             conn.sendall(b"1\r\na\r\n")
             time.sleep(0.1)
     endpoint = serve(script)
@@ -294,10 +303,8 @@ def test_a_server_sending_a_chunked_trickle_is_cut_off_too(serve):
 def test_headers_that_never_finish_are_cut_off(serve):
     def script(conn, stop):
         conn.sendall(b"HTTP/1.1 200 OK\r\n")
-        i = 0
-        while not stop.is_set():
+        for i, _ in enumerate(running(stop)):
             conn.sendall(b"X-Pad-%d: 1\r\n" % i)
-            i += 1
             time.sleep(0.1)
     endpoint = serve(script)
     started = time.monotonic()

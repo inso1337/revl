@@ -40,11 +40,13 @@ THE FIVE RULES THIS FILE ENFORCES
    whatever the operator bound the role to, and it may be a shared server or a
    compromised proxy. At most `max_bytes` of the reply are read; a larger one,
    declared by `Content-Length` or found by counting, is refused without being
-   held in memory. `timeout` is also the deadline for the exchange once the
-   connection is up, not only for each socket operation, so a server that
-   sends a byte at a time cannot hold the call open: when it passes, the
-   connection is shut down and the call fails with a timeout. Name lookup, the
-   TCP connect and the TLS handshake are bounded per operation by `timeout`.
+   held in memory. `timeout` is also the deadline for the whole call, not only
+   for each socket operation, so a server that sends a byte at a time cannot
+   hold the call open: when it passes, the connection is shut down and the
+   call fails with a timeout. Each step of connecting (name lookup, the TCP
+   connect, the TLS handshake) is also limited to `timeout` on its own, so a
+   stall there is cut off at `timeout` per step, and a connection made after
+   the deadline is shut at once.
 """
 
 from __future__ import annotations
@@ -111,7 +113,7 @@ class _Deadline:
     """An overall time limit on one request.
 
     urllib's `timeout` bounds each socket operation, so a server that answers
-    a byte at a time never trips it. This arms a timer for the connected exchange;
+    a byte at a time never trips it. This arms a timer for the whole call;
     when it fires it shuts down the request's sockets, which wakes any blocked
     read, and `expired` tells the caller why the read failed.
     """
@@ -218,9 +220,10 @@ def request_json(url: str, *, body: dict | None = None,
     """POST `body` as JSON to `url` (GET when `body` is None) and return the
     decoded JSON object.
 
-    `timeout` is in seconds. It is the limit on each socket operation, and the
-    deadline for the request and reply once the connection is up. `max_bytes` is the most of the reply that
-    is read; a larger reply is a `ProviderError`.
+    `timeout` is in seconds. It is the deadline for the whole call, and also
+    the limit on each socket operation and on each step of connecting.
+    `max_bytes` is the most of the reply that is read; a larger reply is a
+    `ProviderError`.
 
     `secrets` are the credential values placed in `headers`; they are redacted
     from every error this raises. `label` names the caller in those errors
