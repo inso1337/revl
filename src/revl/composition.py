@@ -2536,9 +2536,10 @@ def configure_rows_from_host(document: dict, config: dict | None,
     manifest's copy of it then say what the component runs with. A table for a
     component no row places is typed by the same check (issue #3535), so a
     wrongly typed or undeclared field is refused here too, and otherwise left
-    to the runtime as before. Such a component's required field (no
-    default) that the host table does not supply is refused here as well
-    (issue #3596), so it never reaches activation; `required=False` leaves
+    to the runtime as before. When the host table names such a component,
+    a required field (no default) it leaves out is refused here as well
+    (issue #3596), so it never reaches activation; a component the host
+    config does not name keeps the runtime's own check; `required=False` leaves
     that to the caller's own preflight. A swap's successor must therefore still declare
     every field the session's host config sets; to drop one, unload and load
     again with a host config that no longer names it. Returns
@@ -2546,30 +2547,29 @@ def configure_rows_from_host(document: dict, config: dict | None,
     document is never mutated)."""
     table = (document or {}).get("rows") or {}
     rows = table.get("rows") or []
+    if not config:
+        return document
     by_name = {c["name"]: c for c in (document or {}).get("components") or []}
     # issue #3535: a table for a component no row places is typed against the
     # component's declared config by the same check, before any runtime starts;
-    # issue #3596: a required field it leaves out is refused by that check too
+    # issue #3596: a required field that table leaves out is refused too. A
+    # component the host config does not name keeps the runtime's own check.
     placed = {row.get("component") for row in rows}
     # the components the runtime starts at load, in `revl run`'s own sense
     # (`run._load_order`): a template is spawned with its config, so the host
     # table is not where its required fields come from
     started = set(((document or {}).get("manifest") or {}).get("loadOrder")
                   or by_name)
-    for name, component in by_name.items():
-        supplied = (config or {}).get(name)
-        if name in placed or (supplied is not None
-                              and not isinstance(supplied, dict)):
-            continue
-        supplied = supplied or {}
-        if not supplied and not (required and name in started):
+    for name, supplied in config.items():
+        component = by_name.get(name)
+        if component is None or name in placed or not isinstance(supplied, dict):
             continue
         decl = RowDecl(label=name, path="", claims=[], line=1, component=name,
                        config=[(n, v, 1) for n, v in supplied.items()])
         _check_config(decl, _IRHeader(component), where,
                       component.get("source") or "<module>",
                       rowless=True, required=required and name in started)
-    if not rows or not config:
+    if not rows:
         return document
     changed = False
     out_rows = []

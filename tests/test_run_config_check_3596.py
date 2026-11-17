@@ -116,7 +116,12 @@ def _admitted(tmp_path):
 
 def _run_document(tmp_path, capsys, monkeypatch, config_json: str):
     """`revl run` over an admitted composition document (an IR carrying
-    `rows`), capturing the IR the plan is printed from."""
+    `rows`), capturing the IR the plan is printed from.
+
+    `compile_files` is patched to return the admitted document because no
+    `revl run` CLI path yields an IR with `rows` today (`compile_files` never
+    admits a composition, src/revl/run.py `run_command`); this pins what
+    `run_command` does with one when it gets one."""
     document = _admitted(tmp_path)
     monkeypatch.setattr(run_mod, "compile_files", lambda files: document)
     seen = {}
@@ -169,14 +174,32 @@ def test_run_refuses_a_missing_required_field_naming_component_field_type(
 
 
 @needs_cordis
-@pytest.mark.parametrize("config", [{"SqliteDatabase": {"pool": 5}}, None])
-def test_session_refuses_a_missing_required_field_at_load(config):
+def test_session_refuses_a_missing_required_field_at_load():
+    """The host table names the component but leaves `url` out."""
     from revl.mcp.session import Session
     session = Session()
     with pytest.raises(RevlError) as caught:
-        session.load(compile_source(MODULE), config)
+        session.load(compile_source(MODULE), {"SqliteDatabase": {"pool": 5}})
     assert session._driver is None
     message = str(caught.value)
     assert ("component `SqliteDatabase` is missing required config "
             "`url` (`Str`)") in message
     assert "AttributeError" not in message
+
+
+@needs_cordis
+def test_a_config_less_session_load_with_a_required_field_still_loads():
+    """A host config that does not name the component keeps today's behaviour:
+    config-less callers (erase_report, change, interop) load such a module."""
+    from revl.mcp.session import Session
+    source = (ROOT / "examples" / "user_cache.rvl").read_text(encoding="utf-8")
+    ir = compile_source(source, filename=str(ROOT / "examples" / "user_cache.rvl"))
+    assert any(f.get("default") is None
+               for c in ir.get("components") or []
+               for f in c.get("config") or [])
+    session = Session()
+    session.load(ir, None)
+    try:
+        assert session._driver is not None
+    finally:
+        session.unload()
