@@ -3976,9 +3976,19 @@ def _wal_referent(ext: dict) -> str:
     Decided HERE, at the one point that writes the record, off a stamp the
     compiler put in the IR — not at each reader of the log. A tier with no
     value-registry of its own needs no registry for this: the confidentiality is
-    positional and known before the program runs."""
+    positional and known before the program runs.
+
+    The stamp covers only a witness the author declared `Secret[...]`. A witness
+    that merely QUOTES a registered value (a lease id built from a key, a path
+    built from a token) carries no stamp, so in secret mode the stringified
+    witness also reads through the registry (`revlRedactText`) before it is
+    stored, the way the java and rust WAL sinks scrub every descriptor argument
+    and the py tier's `confidential.redact_args` does by value. A program that
+    declares no `Secret[T]` has no registry and emits the call byte-identically."""
     if ext.get("secret_witness"):
         return _go_string(_REDACTED_SECRET)
+    if _SECRET_MODE:
+        return 'revlRedactText(fmt.Sprintf("%v", result))'
     return 'fmt.Sprintf("%v", result)'
 
 
