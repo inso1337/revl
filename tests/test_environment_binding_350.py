@@ -413,6 +413,37 @@ def test_tightening_a_bound_is_not_an_addition_of_the_old_token():
     assert "env:model:in=mock|real|engine" in delta["removed"]
 
 
+def _in_bound_delta(before_values: str, after_values: str):
+    swap = lambda v: BOOT.replace(
+        'model: Str in ["mock", "real", "engine"]', f"model: Str in {v}")
+    return diff_crossings(audit_report(_ir(swap(before_values))),
+                          audit_report(_ir(swap(after_values))))
+
+
+def test_in_bound_split_and_joined_values_are_distinct_crossings():
+    """Issue #3236: `in ["a","b"]` and `in ["a|b"]` joined their values with
+    `|` and shared one token, so swapping one for the other moved no authority
+    in the diff. They must read as a changed env crossing, in both directions."""
+    for before, after in ((' ["a", "b"]', ' ["a|b"]'), (' ["a|b"]', ' ["a", "b"]')):
+        delta = _in_bound_delta(before.strip(), after.strip())
+        assert len(delta["added"]) == 1 and delta["added"][0].startswith("env:model:in=")
+        assert len(delta["removed"]) == 1 and delta["removed"][0].startswith("env:model:in=")
+        assert delta["added"] != delta["removed"]
+
+
+def test_in_bound_escape_char_cannot_collide_either():
+    # a value ending in the escape char must not merge with the next value
+    delta = _in_bound_delta('["a\\\\", "b"]', '["a\\\\|b"]')
+    assert delta["added"] and delta["removed"]
+
+
+def test_an_unchanged_in_bound_stays_unchanged():
+    for values in ('["a|b"]', '["a", "b"]', '["a\\\\"]'):
+        delta = _in_bound_delta(values, values)
+        assert delta["added"] == [] and delta["removed"] == []
+        assert delta["unchanged"]
+
+
 # ---------------------------------------------------------------- the MCP seam
 
 

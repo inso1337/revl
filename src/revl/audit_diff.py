@@ -540,7 +540,14 @@ def _bound_token(bound) -> str:
         return "*"
     if bound.get("kind") == "under":
         return f"under={bound.get('prefix')}"
-    values = "|".join(str(v) for v in (bound.get("values") or []))
+    # `|` joins the values, so a value that itself holds `|` (or the `\` that
+    # escapes it) is escaped: `in ["a","b"]` and `in ["a|b"]` must not share a
+    # token, or a candidate swapping one for the other moves no authority in
+    # the diff (issue #3236). A value with neither character is unchanged, so
+    # every token (and every `--accept` ack) written before still matches.
+    values = "|".join(
+        str(v).replace("\\", "\\\\").replace("|", "\\|")
+        for v in (bound.get("values") or []))
     return f"in={values}"
 
 
