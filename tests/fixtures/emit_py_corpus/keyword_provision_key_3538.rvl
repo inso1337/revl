@@ -1,0 +1,12 @@
+// Issue #3538: a provision key that is a Python KEYWORD. The key is the string
+// the runtime is handed, so the provide and the require both spell it raw; the
+// read off the context is `getattr(_revl_ctx, ...)`, since `_revl_ctx.lambda`
+// does not parse.
+service V { fn value() -> Str }
+service W { fn twice() -> Str }
+component Maker provides lambda: V {
+  provide lambda { fn value() = "x" }
+}
+component User requires lambda: V provides out: W {
+  provide out { fn twice() = lambda.value() + lambda.value() }
+}

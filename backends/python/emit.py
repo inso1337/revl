@@ -31,6 +31,7 @@ import copy
 import keyword
 import math
 import re
+import sys
 import textwrap
 from typing import Any, Callable, Optional
 
@@ -757,6 +758,14 @@ def _host_key(key: Any) -> Any:
     return "__".join(part.replace("_", "_u") for part in key.split(KEY_NAMESPACE_SEP))
 
 
+def _ctx_read(key: str) -> str:
+    """The read of provision `key` off the context: attribute access, or
+    `getattr` for a key that is a python keyword (issue #3538)."""
+    if keyword.iskeyword(key):
+        return f"getattr(_revl_ctx, {key!r})"
+    return f"_revl_ctx.{key}"
+
+
 def _key_binding(key: str) -> str:
     """The local binding a qualified key introduces: its trailing segment
     (`acme::greeter` -> `greeter`), which is what an IR `req` node and the
@@ -1383,6 +1392,107 @@ def _annotated_bin(node: dict, render) -> str | None:
         # every evaluation (item 436 F6).
         return f"_revl_rem({render(node['left'])}, {render(node['right'])})"
     return None
+
+
+# A chain of one operator (`a + b + c + ...`) lowers to a LEFT-DEEP tree, and
+# the nested rendering gave every operand one more level of brackets, so a
+# chain of ~100 bounded `+` overflowed CPython's parser stack at load
+# (`MemoryError: Parser stack overflowed`) after the compiler accepted it
+# (issue #3403). From this many operators on, the spine is written flat; a
+# shorter chain keeps the nested text it always had.
+_CHAIN_FLAT_MIN = 16
+
+
+def _chain_class(node: object) -> str:
+    """The flat-chain family of a `bin` node, or `""` for none.
+
+    Two nodes can share one flat chain only when they render the same way: the
+    bounded Int/Int32 arithmetic (any of `+ - *`, each step is explicit), a
+    plain `+ -` or a plain `*` (python's own precedence and left association
+    then read the flat text as the tree), and `&&` or `||` alone. A node with a
+    `widen` marker is wrapped in `float(...)`, so it is never a spine member.
+    """
+    if (not isinstance(node, dict) or node.get("kind") != "bin"
+            or node.get("widen") == "Float"):
+        return ""
+    op = node.get("op")
+    if op in ("&&", "||"):
+        return op
+    if op not in ("+", "-", "*"):
+        return ""
+    operands = node.get("operands")
+    if operands in ("Int", "Int32"):
+        return "bounded" + operands
+    return "plain+-" if op in ("+", "-") else "plain*"
+
+
+def _chain_spine(node: dict) -> tuple[object, list] | None:
+    """The left spine of a long chain: `(leaf, [step, ...])`, bottom up.
+
+    `None` when `node` heads fewer than `_CHAIN_FLAT_MIN` operators of one
+    family. Each step is a spine `bin` node; the leaf is the leftmost operand.
+    Iterative, so the depth of the chain costs no python frames here.
+    """
+    family = _chain_class(node)
+    if not family:
+        return None
+    steps = [node]
+    left = node.get("left")
+    while _chain_class(left) == family:
+        steps.append(left)
+        left = left.get("left")
+    if len(steps) < _CHAIN_FLAT_MIN:
+        return None
+    steps.reverse()
+    return left, steps
+
+
+def _chain_text(steps: list, leaf: str, rights: list) -> str:
+    """Write a chain flat, with the nesting of ONE operand, not of all of them.
+
+    `steps` are the spine nodes bottom up and `rights` their rendered right
+    operands. Evaluation order is the nested form's: the leaf, then each right
+    operand left to right, each operator applied as soon as its right operand
+    is in.
+
+      * `&&`/`||`: `(a and (b) and (c))`, one python BoolOp, the same
+        short-circuit at the same operand;
+      * plain `+ -` or `*`: `(a + (b) - (c))`, which python associates left;
+      * bounded Int/Int32: a tuple of steps, each the usual inline bound over
+        `_bi op right` where `_bi` is the previous step's value (python loads
+        the left operand before it evaluates the right one, so a bounded op
+        inside a right operand cannot clobber it), and the last element is the
+        answer. A step that leaves the range traps where the nested form did.
+
+    Each right operand is bracketed because it is now followed by another
+    operator instead of a closing bracket.
+    """
+    first = steps[0]
+    family = _chain_class(first)
+    if family in ("&&", "||"):
+        joiner = f" {_PY_BIN_OPS[family]} "
+        return "(" + leaf + "".join(f"{joiner}({r})" for r in rights) + ")"
+    if family.startswith("bounded"):
+        width = 64 if family == "boundedInt" else 32
+        parts = [_bounded(f"{leaf} {first.get('op')} {rights[0]}", width)]
+        for node, right in zip(steps[1:], rights[1:]):
+            parts.append(_bounded(f"{_BOUNDED_TMP} {node.get('op')} {right}", width))
+        return "(" + ", ".join(parts) + ")[-1]"
+    return "(" + leaf + "".join(
+        f" {node.get('op')} ({right})" for node, right in zip(steps, rights)) + ")"
+
+
+def _chain_bin(node: dict, render) -> str | None:
+    """Render a long one-operator chain flat (issue #3403), else `None`.
+
+    Shared by both expression renderers, as `_annotated_bin` is, so a `fn`
+    body and a `provide` body write the same text for the same chain.
+    """
+    spine = _chain_spine(node)
+    if spine is None:
+        return None
+    leaf, steps = spine
+    return _chain_text(steps, render(leaf), [render(s.get("right")) for s in steps])
 
 
 def _annotated_un(node: dict, render) -> str | None:
@@ -2359,10 +2469,11 @@ class _ComponentEmitter:
             _key_binding(local): service
             for local, service in self.requires_raw.items()
         }
-        # the runtime key spelling each `req` resolves through -- the mangled
-        # QUALIFIED key, which is what the provider registers in `_revl_ctx`
+        # the runtime key spelling each `req` resolves through -- the host key,
+        # which is what the provider registers in `_revl_ctx` (issue #3538:
+        # a string, never builtin-escaped)
         self.require_keys = {
-            _key_binding(local): _ident(_host_key(local), "requires key")
+            _key_binding(local): _host_key(local)
             for local in self.requires_raw
         }
         self.provides = dict(self.provides_raw)
@@ -2635,7 +2746,7 @@ class _ComponentEmitter:
                 return f"_revl_route_{_host_key(route)}"
             # committed-view access: resolves through the fiber's store, so it
             # stays readable during this component's own teardown (R3)
-            return f"_revl_ctx.{self.require_keys.get(name, name)}"
+            return _ctx_read(self.require_keys.get(name, name))
         if kind == "call":
             if "target" in expr:
                 target = self._expr(expr.get("target"), where)
@@ -2908,6 +3019,9 @@ class _ComponentEmitter:
             # (issue #2198). Spelling these with the host operator is what
             # made `config.a % config.b` come back as python's floored `1`
             # in a `provide` method and the truncated `-1` in a `fn`.
+            chain = _chain_bin(expr, lambda n: self._expr(n, where))
+            if chain is not None:
+                return chain
             annotated = _annotated_bin(expr, lambda n: self._expr(n, where))
             if annotated is not None:
                 return annotated
@@ -4168,11 +4282,15 @@ class _ComponentEmitter:
         # `self.provides` is keyed by); the HOST spelling is what the runtime is
         # handed and what `_revl_ctx.<field>` is read through.
         raw = step.get("name")
-        name = _ident(_host_key(raw), f"{where}: provide key")
-        if name in _CONTEXT_MEMBERS:
+        # issue #3538: the key published to the runtime is the host key, a string
+        # unchanged by the builtin ladder; `name` is the python identifier
+        # derived from it (class name, method labels) and is the only escaped one.
+        key = _host_key(raw)
+        name = _ident(key, f"{where}: provide key")
+        if key in _CONTEXT_MEMBERS or name in _CONTEXT_MEMBERS:
             raise EmitError(
-                f"{where}: provision key {name!r} collides with a cordis-py "
-                f"Context member — `_revl_ctx.{name}` already exists, so the "
+                f"{where}: provision key {key!r} collides with a cordis-py "
+                f"Context member: `_revl_ctx.{key}` already exists, so the "
                 f"provision would fail at activation. Rename the key."
             )
         service = step.get("service")
@@ -4199,8 +4317,8 @@ class _ComponentEmitter:
                 out.add(indent, f"setattr({cls}, {contract!r}, {cls}.{spelled})")
         # runtime-derived revertible provision (R5): the withdrawal inverse is
         # _revl_ctx.provide's own disposer, yielded into the component accumulator
-        out.add(indent, f"yield _revl_ctx.provide({name!r})")
-        out.add(indent, f"_revl_ctx.set({name!r}, {cls}())")
+        out.add(indent, f"yield _revl_ctx.provide({key!r})")
+        out.add(indent, f"_revl_ctx.set({key!r}, {cls}())")
 
     def _method(self, out: _Lines, indent: int, provide_name: str, method: dict,
                 where: str, raw_key: str | None = None) -> None:
@@ -5213,6 +5331,9 @@ def _expr(node: dict) -> str:
         # component renderer calls too (`_annotated_bin`), so a `fn` body and a
         # `provide`-method body cannot disagree about `+ - * / %` again
         # (issue #2198).
+        chain = _chain_bin(node, _expr)
+        if chain is not None:
+            return chain
         annotated = _annotated_bin(node, _expr)
         if annotated is not None:
             return annotated
@@ -6198,7 +6319,7 @@ def _render_providers(ir: dict) -> str:
     providers: dict = {}
     for comp in ir.get("components") or []:
         for key in comp.get("provides") or {}:
-            providers.setdefault(_ident(_host_key(key), "provides key"), []).append(
+            providers.setdefault(_host_key(key), []).append(
                 _ident(comp["name"], "component name"))
     return "{" + ", ".join(
         f"{key!r}: [{', '.join(map(repr, names))}]"
@@ -7140,6 +7261,34 @@ def _refuse_validated_externs(ir: dict) -> None:
             f"this tier lowers in full.")
 
 
+# The frontend's own recursion headroom (`revl.parser.recursion_headroom`):
+# a chain of one operator is not nesting the parser bounds (`NESTING_LIMIT`
+# counts brackets), so a 1000-operand chain reaches this module as a 1000-deep
+# left spine, and the IR walkers below (`_refuse_holes`, `_find_host_roots`,
+# the inliner's `deepcopy`) each descend it with a frame or three per level.
+# At python's default limit the emitter then raised `RecursionError` on a
+# program the compiler had accepted (issue #3403). This module does not import
+# revl, so the number is repeated rather than shared.
+_EMIT_RECURSION_HEADROOM = 12000
+
+
+def _with_recursion_headroom(fn):
+    """Run `fn` with python's recursion limit at least the headroom above,
+    restoring the embedder's own limit after, and never lowering it."""
+    def wrapped(*args, **kwargs):
+        previous = sys.getrecursionlimit()
+        sys.setrecursionlimit(max(previous, _EMIT_RECURSION_HEADROOM))
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            sys.setrecursionlimit(previous)
+    wrapped.__name__ = fn.__name__
+    wrapped.__qualname__ = fn.__qualname__
+    wrapped.__doc__ = fn.__doc__
+    return wrapped
+
+
+@_with_recursion_headroom
 def emit(ir: dict) -> str:
     """Lower one IR document to a cordis-py Python module (as source text)."""
     if not isinstance(ir, dict):
