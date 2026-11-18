@@ -2888,6 +2888,7 @@ jobs:
           tests/test_go_component_int32_trap_2262.py
           tests/test_go_lifecycle_residue_2505.py
           tests/test_host_map_journal_2009.py
+          tests/test_char_class_record_target_go_java_3144.py
           tests/test_insert_if_absent.py
           tests/test_json_cross_tier_bytes.py
           tests/test_kdf_stdlib.py
