@@ -527,6 +527,11 @@ def test_a_lone_surrogate_never_reaches_utf8_bytes(tier):
 # through unchanged, as they do on py: the rewrite may only touch sentinels the
 # call wrote itself. `qty: 5` makes the document hold a bigint, so the rewrite
 # runs (with no bigint the ts tier returns the builtin result untouched).
+#: `@@revlBigInt` + a run of `0`s of every length 0..59 + `:`, then the digit
+#: salted forms `@@revlBigInt0:` .. `@@revlBigInt59:`
+_MANY_PREFIXES = "".join(f"@@revlBigInt{'0' * k}:" for k in range(60)) + \
+    "".join(f"@@revlBigInt{k}:" for k in range(60))
+
 SENTINEL_LOOKALIKES = [
     # the original prefix, an index in range of the one bigint
     ("string_in_range",
@@ -562,6 +567,12 @@ SENTINEL_LOOKALIKES = [
      'type Rec = { qty: Int, note: Str }\n'
      'fn v() -> Rec { return { qty: 5, note: "x\\"@@revlBigInt:0@@\\"y" } }',
      r'{"qty":5,"note":"x\"@@revlBigInt:0@@\"y"}'),
+    # one string spelling a long run of prefixes, so no fixed number of retries
+    # (and no sequential walk through them) would be enough
+    ("string_with_many_prefixes",
+     'type Rec = { qty: Int, role: Str }\n'
+     'fn v() -> Rec { return { qty: 5, role: "' + _MANY_PREFIXES + '" } }',
+     '{"qty":5,"role":"' + _MANY_PREFIXES + '"}'),
     # a real bigint beside a lookalike still lands as a bare number
     ("two_bigints_and_a_lookalike",
      'type Rec = { a: Int, role: Str, b: Int }\n'

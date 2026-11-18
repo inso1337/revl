@@ -368,13 +368,18 @@ pub extern pure fn json_stringify(v: Any) -> Str
     // word `undefined`) and a key spelled like one would lose its quotes. Each
     // sentinel is written exactly once, so a prefix is clean exactly when its
     // occurrences in the output number the bigints parked. When the data
-    // already spells the prefix the count is larger: serialize again under the
-    // next prefix (the data is finite, so a clean one is reached).
-    for (let salt = 0; ; salt++) {
-      const prefix = "@@revlBigInt" + salt + ":";
+    // already spells the prefix the count is larger. The prefix is
+    // `@@revlBigInt` + a run of `0` + `:`; the first pass uses the empty run,
+    // and a second pass uses the shortest run length that no spelling in the
+    // first output has. The data is the same on both passes, so that prefix is
+    // clean and the second pass never repeats: at most two serializations, whatever
+    // the caller's strings hold.
+    let zeros = 0;
+    for (let pass = 0; ; pass++) {
+      const prefix = "@@revlBigInt" + "0".repeat(zeros) + ":";
       const marks: string[] = [];
       const wire = JSON.stringify(v, (_k, x) => {
-        // JSON.stringify maps a non-finite number to `null` — a SILENT
+        // JSON.stringify maps a non-finite number to `null`: a SILENT
         // substitution of a different value, not a refusal. A non-finite Float
         // is reachable (`/` is IEEE true division: `1.0/0.0` is `inf` on every
         // tier, docs/arithmetic.md) and has no JSON spelling (RFC 8259 section
@@ -386,8 +391,16 @@ pub extern pure fn json_stringify(v: Any) -> Str
         return typeof x === "bigint" ? prefix + (marks.push(x.toString()) - 1) + "@@" : x;
       });
       if (marks.length === 0) return wire;
-      if (wire.split(prefix).length - 1 !== marks.length) continue;
-      return wire.replace(new RegExp('"' + prefix + "(\\d+)@@\"", "g"), (_m, i) => marks[Number(i)]);
+      if (wire.split(prefix).length - 1 === marks.length) {
+        return wire.replace(new RegExp('"' + prefix + "(\\d+)@@\"", "g"), (_m, i) => marks[Number(i)]);
+      }
+      if (pass === 1) throw new Error("json_stringify: could not pick a bigint placeholder the data does not spell");
+      // The run lengths already spelled, in the data or by this pass. The
+      // shortest absent one is at most about the square root of the output.
+      const taken = new Set<number>();
+      wire.replace(/@@revlBigInt(0*):/g, (m, run) => { taken.add(run.length); return m; });
+      zeros = 0;
+      while (taken.has(zeros)) zeros++;
     }
   }
   = @rs { v.downcast::<serde_json::Value>().map(|j| serde_json::to_string(&*j).unwrap_or_default()).unwrap_or_default() }
