@@ -1981,10 +1981,13 @@ def _reject_cross_module_case_collisions(included: list[_LoadedModule]) -> None:
     Deliberately NOT refused here:
 
     * the same file declaring both. The merge seam is where the two spellings
-      stop being visible to their author; inside one file they are, and the
-      single-module rule is unchanged (`examples/rejections/t18_type_alias_cycle
-      .rvl` declares exactly that shape and must keep refusing for its own
-      reason).
+      stop being visible to their author; inside one file the order is the
+      author's, and a `type` written before the ADT whose case shares its name
+      stays admitted (`examples/rejections/t18_type_alias_cycle.rvl` declares
+      that shape and must keep refusing for its own reason). The single-file
+      forms that do replace the constructor, a same-named `fn`, `extern` or
+      `component`, or a `type` written after the ADT, are refused by
+      `lower._refuse_case_name_collisions` (issue #3138).
     * two modules declaring the SAME case name on different ADTs. That one is
       already loud rather than silent: `lower.py::_case_table` drops an
       ambiguous case from the constructor table, so the use site refuses with
