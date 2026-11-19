@@ -1,4 +1,8 @@
 import RevL.Manifest
+-- The G2 theorem file carries the IR image (issue #2739): the
+-- `IRD`/`IRS` rows decide `RevL.G2.IRDisjoint` over a lowered document and
+-- whether its slots are a permutation of the model's own.
+import RevL.Theorems.G2_ProvisionDisjoint
 import RevL.Lemmas.CapLemmas
 import RevL.Theorems.CapCeilings
 import RevL.Theorems.G5_ClassifiedTeardownPure
@@ -311,6 +315,15 @@ Capabilities arrive DECOMPOSED (Z/Y), from `src/revl/cap_order.parse_cap`
 
 Verdict rows out:
   V <file> <disjoint=ok|fail> <closed=ok|fail> <link=ok|fail>
+  IRD <file> <disjoint=ok|fail>                    G2 over the LOWERED IR
+                                                   document (issue #2739):
+                                                   `RevL.G2.IRDisjoint` over
+                                                   the `JR` facts, templates
+                                                   read from the document
+  IRS <file> <kept=ok|fail>                        the document's slots are a
+                                                   permutation of the
+                                                   composition's, the `hk` of
+                                                   `source_linkOK_ir_disjoint`
   G <file> <comp> <g4=ok|fail>                     marker rule (incl. handle)
                                                    AND host-acquisition rule
   P <file> <comp> <key> <svc> <meth> <bound=ok|fail>
@@ -443,6 +456,39 @@ theorem linkOKB_iff : ∀ l : List LComponent, linkOKB l = true ↔ LinkOK l := 
       | cons _ _ h1 h2 h3 h4 =>
         simp only [linkOKB, Bool.and_eq_true, decide_eq_true_eq]
         exact ⟨⟨⟨h1, h2⟩, h3⟩, ih.mpr h4⟩
+
+/-! ## Deciding G2 over the IR image (issue #2739)
+
+The `IRD` row decides `RevL.G2.IRDisjoint` over a LOWERED IR document (`JR`
+facts: each component's `provides` and sparse `isolate` map, and whether the
+document's own `manifest.templates` names it), so the verdict is the L2 model
+applied to the document the backends consume. The `IRS` row decides the
+hypothesis `source_linkOK_ir_disjoint` takes beside `LinkOK`: that the
+document's static slots are a permutation of the source composition's slots.
+Where it says `ok`, `RevL.G2.ir_disjoint_iff_source_disjoint` makes the `IRD`
+verdict the `V` row's `disjoint` column, and `source_linkOK_ir_disjoint`
+derives it from `LinkOK`. -/
+
+/-- G2 over one lowered IR document, as a decision procedure. -/
+def irdisjointB (d : RevL.G2.IRDoc) : Bool :=
+  decide (RevL.G2.IRDisjoint d)
+
+/-- **The IR verdict is the model's judgment.** -/
+theorem irdisjointB_iff (d : RevL.G2.IRDoc) :
+    irdisjointB d = true ↔ RevL.G2.IRDisjoint d := by
+  simp [irdisjointB]
+
+/-- Does the lowered document carry exactly the composition's slots, as a
+multiset? Order is not a claim the row makes, multiplicity is: a lowering that
+drops, adds, duplicates or moves a slot is a `fail` rather than a silent
+agreement. -/
+def irKeptB (d : RevL.G2.IRDoc) (src : List LComponent) : Bool :=
+  decide (d.slots.Perm (src.flatMap slots))
+
+/-- **The kept verdict is the theorem's hypothesis.** -/
+theorem irKeptB_iff (d : RevL.G2.IRDoc) (src : List LComponent) :
+    irKeptB d src = true ↔ d.slots.Perm (src.flatMap slots) := by
+  simp [irKeptB]
 
 /-- Pick a component whose consumed slots are all already provided — the
 linker's Kahn step. Returns it with the rest of the queue. -/
@@ -1062,6 +1108,13 @@ structure MRow where
   realms : List (String × String)
   isTemplate : Bool
 
+structure JRRow where
+  path : String
+  comp : String
+  provides : List String
+  realms : List (String × String)
+  isTemplate : Bool
+
 structure URow where
   path : String
   comp : String
@@ -1399,6 +1452,13 @@ def parseM (f : List String) : Option MRow :=
   | ["M", path, name, reqs, provs, realms, role] =>
       some ⟨path, name, splitKeys reqs, splitKeys provs, parseRealms realms,
             role == "template"⟩
+  | _ => none
+
+def parseJR (f : List String) : Option JRRow :=
+  match f with
+  | ["JR", path, comp, provs, realms, role] =>
+      some ⟨path, comp, (if provs == "-" then [] else splitKeys provs),
+            parseRealms realms, role == "template"⟩
   | _ => none
 
 def parseU (f : List String) : Option URow :=
@@ -3206,6 +3266,7 @@ def main (args : List String) : IO UInt32 := do
     let fields := (text.splitOn "\n").filter (fun l => l != "")
       |>.map (·.splitOn "\t")
     let mrows := fields.filterMap parseM
+    let jrrows := fields.filterMap parseJR
     let urows := fields.filterMap parseU
     let brows := fields.filterMap parseB
     let qrows := fields.filterMap parseQ
@@ -3372,6 +3433,25 @@ def main (args : List String) : IO UInt32 := do
       let cv := if decide (RequiresClosed comps) then "ok" else "fail"
       let lv := if linkVerdict comps then "ok" else "fail"
       out := out ++ s!"V\t{p}\tdisjoint={dv}\tclosed={cv}\tlink={lv}\n"
+      -- G2 over the IR image (issue #2739): the same disjointness judgment,
+      -- decided over the LOWERED document's static composition, plus the
+      -- claim that that document carries the slots of the composition the V
+      -- row just decided. The templates are the document's OWN
+      -- (`manifest.templates`, the `JR` role column), not the parse's.
+      -- Only files that lowered have rows: a document the checker refused
+      -- produces no IR, and its refusal is the V/X rows' business. The
+      -- exporter fails the gate for a document the checker ACCEPTED that
+      -- produced no `JR` row, so this guard cannot hide one.
+      let jc := jrrows.filter (fun r => r.path == p)
+      if !jc.isEmpty then
+        let irDoc : RevL.G2.IRDoc :=
+          { components := jc.map fun r => { name := r.comp, provides := r.provides,
+                                            isolate := r.realms },
+            templates := (jc.filter (·.isTemplate)).map (·.comp) }
+        let ird := if irdisjointB irDoc then "ok" else "fail"
+        let irk := if irKeptB irDoc comps then "ok" else "fail"
+        out := out ++ s!"IRD\t{p}\tdisjoint={ird}\n"
+        out := out ++ s!"IRS\t{p}\tkept={irk}\n"
       let aPairs := ua.map (fun r => (r.comp, r.cap))
       let fPairs := uf.map (fun r => (r.comp, r.cap))
       let owns := groupCaps (aPairs ++ fPairs)
@@ -3578,6 +3658,8 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.stmtSurfaceB_iff
 #print axioms RevLOracle.registrationsB_iff
 #print axioms RevLOracle.linkOKB_iff
+#print axioms RevLOracle.irdisjointB_iff
+#print axioms RevLOracle.irKeptB_iff
 #print axioms RevLOracle.pathPrefixB_iff
 #print axioms RevLOracle.pleqB_iff
 #print axioms RevLOracle.mem_keys_of_lookupV

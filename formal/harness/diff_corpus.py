@@ -38,6 +38,19 @@ Pipeline (formal/STATUS.md, "differential oracle"):
    recomputing it. See `teardown_scenarios` / `teardown_observation`, and
    `teardown_coverage` for the non-vacuity ratchet that keeps the row
    from agreeing over shapes the corpus never reaches.
+2c. the IR rows (issue #2739) read a document rather than a program. `JR`
+   facts are the `provides` and sparse `isolate` columns of the IR a file
+   LOWERS to (`revl.compiler.compile_files`, the door `checker_code` uses),
+   the fields the backends consume, and whether the document's own
+   `manifest.templates` names each component. The model decides
+   `RevL.G2.IRDisjoint` over the document's static composition, G2 stated on
+   the document rather than on the AST the `V` row reads, and the `IRS` row
+   decides that the document's slots are a permutation of the composition's,
+   the hypothesis `RevL.G2.source_linkOK_ir_disjoint` takes beside `LinkOK`.
+   A lowering that drops or moves a realm is then a gate failure
+   (`ir_alignment`), not something a backend discovers at run time, and a
+   file the checker accepts that produces no `JR` row is one too.
+
 3. compute reference verdicts here AND run the Lean oracle
    (`formal/harness/Oracle.lean`) over the same TSV, then diff them. This
    is the HARD gate, and since item 418 step 6 the two sides are no longer
@@ -4811,8 +4824,67 @@ def _a2_step(stmt: object) -> str:
 
 
 
+#: Files the checker ACCEPTED whose lowered document produced no `JR` row, and
+#: the components of used modules each lowered document carried that are not
+#: the file's own. Both are reset by `export` and read by `ir_coverage`.
+_IR_UNLOWERED: list[str] = []
+_IR_FOREIGN: dict[str, int] = {}
+
+
+def _declared_in(source: object, rel: str) -> bool:
+    """Whether a lowered component's `source` is the file `rel`. The IR names
+    the declaring file relative to the invocation (issue #2072), so both sides
+    are resolved against the working directory the way the checker's own
+    output is."""
+    if not isinstance(source, str) or not source:
+        return False
+    return (os.path.realpath(os.path.abspath(source))
+            == os.path.realpath(str(REPO / rel)))
+
+
+def ir_fact_rows(rel: str, lowered: dict) -> tuple[list[str], int]:
+    """The `JR` facts: one row per component of a LOWERED IR document (issue
+    #2739), carrying `provides`, the sparse `isolate` map and a role. These
+    are the fields the backends consume and the model's V row never read,
+    because it reads the parsed AST. A lowering that drops or moves a realm
+    therefore shows up as a slot mismatch in the oracle instead of only in a
+    backend at run time.
+
+    The role is the DOCUMENT's own: a component is a `template` exactly when
+    the lowered `manifest.templates` names it, which is the list `lower._link`
+    uses to keep a spawn target out of the static composition. Lowering still
+    lists the template in `components`, because the backends instantiate it,
+    so it is the role column and not the row that carries the exclusion.
+
+    The rows are the file's own components, selected by each entry's
+    `source`. A component declared by a `use`d module is another file's
+    composition, as the model's V row treats it, and is returned as the second
+    value so the census can say how many the rows do not cover. `-` is the
+    export's empty column (the same spelling the `EX` rows use), so `parseJR`
+    can tell `no keys` from a key named the empty string."""
+    templates = set((lowered.get("manifest") or {}).get("templates") or ())
+    rows: list[str] = []
+    foreign = 0
+    for entry in lowered.get("components") or ():
+        name = entry.get("name")
+        if name is None:
+            continue
+        if not _declared_in(entry.get("source"), rel):
+            foreign += 1
+            continue
+        provides = ",".join((entry.get("provides") or {}).keys()) or "-"
+        isolate = ",".join(
+            f"{k}={v}" for k, v in
+            sorted((entry.get("isolate") or {}).items())) or "-"
+        role = "template" if name in templates else "member"
+        rows.append("\t".join(["JR", rel, name, provides, isolate, role]))
+    return rows, foreign
+
+
 def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
     """Parse the corpus; return (tsv rows, per-file facts, census)."""
+    _IR_UNLOWERED.clear()
+    _IR_FOREIGN.clear()
     tsv: list[str] = []
     file_facts: dict[str, dict] = {}
     caps_seen: set[str] = set()
@@ -5272,6 +5344,25 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
         for name, caps in sorted(op_boundaries.items()):
             tsv.append("\t".join(["EX", rel, name, "emission", "-", "-",
                                    ",".join(caps)]))
+        # IR facts (JR, issue #2739): the provision slots the LOWERED IR
+        # document carries. Lowered the way `checker_code` does, through
+        # `compile_files`, so a file with a `use` resolves and the document is
+        # the one every CLI verb gets; `check_and_lower` on the bare parse
+        # refused four such files and the rows silently skipped them. A file
+        # the checker refuses has no document and so no row; a file it
+        # ACCEPTS that yields none is a gate failure (`ir_coverage`), not an
+        # absence.
+        try:
+            lowered = compile_files([str(REPO / rel)])
+        except RevlError:
+            lowered = None
+        if lowered is not None:
+            jr, foreign = ir_fact_rows(rel, lowered)
+            if not jr:
+                _IR_UNLOWERED.append(rel)
+            if foreign:
+                _IR_FOREIGN[rel] = foreign
+            tsv.extend(jr)
         file_facts[rel] = ff
     # Z/Y decomposition rows go FIRST so the oracle can build its table in
     # one pass; the harness refuses a capability the checker cannot re-read.
@@ -6781,6 +6872,8 @@ class Verdicts(NamedTuple):
     gc: dict[tuple[str, str, str], str]
     g1cov: dict[tuple[str, str, str], str]
     ev: dict[str, str]
+    ir_disjoint: dict[str, str]
+    ir_kept: dict[str, str]
 
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
@@ -6799,7 +6892,7 @@ class Verdicts(NamedTuple):
                 + len(self.inv)
                 + len(self.sw) + len(self.a5) + len(self.gc)
                 + len(self.g1cov)
-                + len(self.ev))
+                + len(self.ev) + len(self.ir_disjoint) + len(self.ir_kept))
 
 
 
@@ -6845,6 +6938,8 @@ def parse_verdicts(text: str) -> Verdicts:
     gc: dict[tuple[str, str, str], str] = {}
     g1cov: dict[tuple[str, str, str], str] = {}
     ev: dict[str, str] = {}
+    ir_disjoint: dict[str, str] = {}
+    ir_kept: dict[str, str] = {}
 
     for line in text.splitlines():
         parts = line.split("\t")
@@ -6919,6 +7014,12 @@ def parse_verdicts(text: str) -> Verdicts:
         elif parts[0] == "EV" and len(parts) == 3:
             # G4 emission value (issues #2842, #2834): file -> ok|fail.
             ev[parts[1]] = parts[2].split("=", 1)[1]
+        elif parts[0] == "IRD" and len(parts) == 3:
+            # G2 over the IR image (issue #2739): file -> ok|fail.
+            ir_disjoint[parts[1]] = parts[2].split("=", 1)[1]
+        elif parts[0] == "IRS" and len(parts) == 3:
+            # G2 over the IR image: the IR keeps the composition's slots.
+            ir_kept[parts[1]] = parts[2].split("=", 1)[1]
         elif parts[0] == "AP" and len(parts) == 5:
             # The approval floor: (file, comp, crossing ord) -> ok|fail.
             approvals[(parts[1], parts[2], parts[3])] = \
@@ -7025,7 +7126,7 @@ def parse_verdicts(text: str) -> Verdicts:
                     a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
             places, model_reach, councils, g9, retain, inv, sw, a5, gc, g1cov,
-            ev)
+            ev, ir_disjoint, ir_kept)
 
 
 
@@ -7033,6 +7134,81 @@ def _slots(provides: list[str], realms: dict[str, str]) -> list[tuple[str, str]]
     """`RevL.Manifest.slots` — the `(key, realm)` pairs a component fills.
     An unisolated key sits in the shared realm (the empty string)."""
     return [(k, realms.get(k, "")) for k in provides]
+
+
+def _ir_reference(mrows: list[list[str]],
+                  jrrows: list[list[str]]) -> tuple[dict, dict]:
+    """The REFERENCE verdicts for the IRD/IRS rows (issue #2739).
+
+    Recomputed from the same two fact sets the oracle decides: the lowered
+    document's `JR` rows (`provides`, `isolate`, and a role read from the
+    document's own `manifest.templates`) and the model's own component facts
+    (`M`). The document's static composition is its `member` rows.
+    `disjoint` is Nodup over those slots, G2 read off the document instead of
+    the AST. `kept` is multiset equality between those slots and the model's
+    own composition's, the hypothesis `source_linkOK_ir_disjoint` takes: the
+    half that fails when a lowering drops, adds, duplicates or moves a realm.
+    The model's composition is the `M` rows its own role column calls a
+    `member`, the same set the oracle's `comps` is.
+
+    Also fills `_IR_ROWS` for `ir_coverage`: what the corpus exercised, kept
+    beside the compared verdict the way `_CONFIG_FIELDS` is."""
+    def csv(s: str) -> list[str]:
+        return [] if s == "-" else [x for x in s.split(",") if x]
+
+    def realms(s: str) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for pair in csv(s):
+            k, v = pair.split("=", 1)
+            out[k] = v
+        return out
+
+    src: dict[str, list[tuple[str, str]]] = {}
+    for r in mrows:
+        if r[6] == "template":
+            # The model's composition excludes a spawn target, as the linker
+            # does (`lower._link`); the document side excludes it by its own
+            # `templates` list, so the two exclusions are compared, not shared.
+            continue
+        rel, provs, rl = r[1], csv(r[4]), realms(r[5])
+        src.setdefault(rel, []).extend((k, rl.get(k, "")) for k in provs)
+    members: dict[str, list[tuple[str, str]]] = {}
+    every: dict[str, list[tuple[str, str]]] = {}
+    templates: dict[str, int] = {}
+    for r in jrrows:
+        rel, provs, rl, role = r[1], csv(r[3]), realms(r[4]), r[5]
+        mine = [(k, rl.get(k, "")) for k in provs]
+        every.setdefault(rel, []).extend(mine)
+        if role == "template":
+            templates[rel] = templates.get(rel, 0) + 1
+        else:
+            members.setdefault(rel, []).extend(mine)
+
+    disjoint: dict[str, str] = {}
+    kept: dict[str, str] = {}
+    _IR_ROWS.clear()
+    for rel in every:
+        slots = members.get(rel, [])
+        disjoint[rel] = "ok" if len(slots) == len(set(slots)) else "fail"
+        kept[rel] = ("ok" if sorted(slots) == sorted(src.get(rel, []))
+                     else "fail")
+        # a spawn template whose slots would collide if it were composed: the
+        # case the document's `templates` list exists to keep out
+        collides = len(every[rel]) != len(set(every[rel]))
+        _IR_ROWS[rel] = {
+            "components": sum(1 for r in jrrows if r[1] == rel),
+            "templates": templates.get(rel, 0),
+            "slots": slots,
+            "realms": sum(1 for _k, rl in slots if rl != ""),
+            "template_collision": collides and disjoint[rel] == "ok",
+        }
+    return disjoint, kept
+
+
+#: What the REFERENCE read out of the lowered IR documents, for `ir_coverage`:
+#: file -> {"components", "templates", "slots", "realms",
+#: "template_collision"}. Filled by `_ir_reference`.
+_IR_ROWS: dict[str, dict] = {}
 
 
 def _link_ok(comps: list[tuple[list[str], list[str], dict[str, str]]]) -> bool:
@@ -7085,6 +7261,7 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     X rows carry a parse refusal through."""
     rows = [r.split("\t") for r in tsv]
     mrows = [r for r in rows if r and r[0] == "M" and len(r) == 7]
+    jrrows = [r for r in rows if r and r[0] == "JR" and len(r) == 6]
     xrows = [r for r in rows if r and r[0] == "X" and len(r) == 3]
     urows = [r for r in rows if r and r[0] == "U" and len(r) == 7]
     brows = [r for r in rows if r and r[0] == "B" and len(r) == 5]
@@ -7825,12 +8002,13 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
         _PRELUDE_ROWS[key] = (steps, targets_by.get(key, set()), provides,
                               calls_by.get(key, set()))
 
+    ir_disjoint, ir_kept = _ir_reference(mrows, jrrows)
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
                     recoveries, confinements, g8surface, g5reg, a9,
                     configs, a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
                     places, model_reach, councils, g9, retain, inv, sw, a5,
-                    gc, g1cov, ev)
+                    gc, g1cov, ev, ir_disjoint, ir_kept)
 
 
 #: What the REFERENCE decided for each config field, for the CD row's
@@ -9056,6 +9234,8 @@ ROW_KINDS = (
     ("gc", "GC walk coverage (G9)"),
     ("g1cov", "G1C access coverage (G1)"),
     ("ev", "EV emission value (G4)"),
+    ("ir_disjoint", "IRD provision disjointness over the IR (G2)"),
+    ("ir_kept", "IRS IR keeps the composition's slots (G2)"),
 )
 
 #: Row kinds whose corpus is one-sided today, as field -> (the side that has no
@@ -9076,6 +9256,14 @@ ONE_SIDED: dict[str, tuple[str, str]] = {
     "g1cov": ("refused", "a document the checker refuses completes no "
               "lowering walk, so it has no row; the refusing side is the "
               "Lean coversAccessB_refuses_* theorems"),
+    "ir_disjoint": ("refused", "a row is exported only for a document that "
+                    "LOWERED, so every document is one the checker admitted; "
+                    "the refusing side is the Lean isolate_entry_is_load_"
+                    "bearing mutation witness"),
+    "ir_kept": ("refused", "a row is exported only for a document that "
+                "lowered, and a kept=ok row is the admitted side by "
+                "construction; the failing side is the Lean "
+                "isolate_entry_is_load_bearing mutation witness"),
 }
 
 
@@ -9146,6 +9334,165 @@ def print_row_census(census: dict[str, dict]) -> None:
               f"{c['accepted']} accepted and {c['refused']} refused documents")
 
 
+#: The bucket every document lands in when BOTH sides admit it: the checker
+#: accepts and every model row is `ok`, so neither side refused it.
+_REFUSED_BY_NEITHER = "agree-accept"
+
+
+def agreed_subset(align: dict[str, int], parse_refused: int,
+                  componentless: int) -> dict:
+    """The agreed subset as numbers (issue #2739).
+
+    `checker_alignment` files every MODELED corpus document in exactly one
+    bucket, so the buckets partition those documents. The subset on which the
+    model and the shipped checker are claimed to agree is the `agree-*` half:
+    the model DECIDES each of those documents and the checker's verdict is the
+    same, whether the agreement is an admission (`agree-accept`, where neither
+    side refuses) or a refusal (`agree-G4` and the rest). The complement is
+    named beside it rather than left to be inferred from the bucket table:
+
+    - each `out-of-fragment*` bucket is a checker refusal under a rule the
+      model states no row about, so the model has no fact to agree or
+      disagree with;
+    - `out-of-scope` is a refusal outside the guarantee backbone by explicit
+      rule, not a hole;
+    - a `missed-*` / `formal-*` document is a DISAGREEMENT, and every one of
+      them fails the gate;
+    - the parse refusals and the componentless documents are outside the
+      model entirely.
+
+    Returned as counts rather than a string so the printed line and the
+    tests read the same partition.
+    """
+    decided = {k: n for k, n in align.items() if k.startswith("agree-")}
+    no_fact = {k: n for k, n in align.items()
+               if k.startswith("out-of-fragment")}
+    disagree = {k: n for k, n in align.items()
+                if k.startswith(("missed-", "formal-"))}
+    out_of_scope = {k: n for k, n in align.items() if k == "out-of-scope"}
+    return {
+        "decided": decided,
+        "refused_by_neither": align.get(_REFUSED_BY_NEITHER, 0),
+        "no_fact": no_fact,
+        "disagree": disagree,
+        "out_of_scope": out_of_scope,
+        "parse_refused": parse_refused,
+        "componentless": componentless,
+    }
+
+
+def format_agreed_subset(a: dict) -> str:
+    """One printed line stating the agreed subset (issue #2739)."""
+    decided = sum(a["decided"].values())
+    refused = decided - a["refused_by_neither"]
+    parts = [
+        f"agreed subset: {decided} corpus documents the model decides and the "
+        f"checker agrees with ({refused} refused by the checker, "
+        f"{a['refused_by_neither']} refused by neither side)"
+    ]
+    if a["no_fact"]:
+        parts.append("the model has no fact about " + ", ".join(
+            f"{k} {n}" for k, n in sorted(a["no_fact"].items())))
+    if a["out_of_scope"]:
+        parts.append("outside the guarantee backbone by explicit rule: "
+                     + ", ".join(f"{k} {n}" for k, n in sorted(
+                         a["out_of_scope"].items())))
+    if a["disagree"]:
+        parts.append("DISAGREEING (the gate fails): " + ", ".join(
+            f"{k} {n}" for k, n in sorted(a["disagree"].items())))
+    parts.append(f"outside the model entirely: {a['parse_refused']} parse "
+                 f"refusals and {a['componentless']} componentless documents")
+    return "; ".join(parts)
+
+
+def ir_alignment(ref: "Verdicts") -> list[str]:
+    """The IR rows against the composition they were lowered from (issue
+    #2739). Returns gate failures.
+
+    The `IRS` row is where a lowering defect lands: the document the backends
+    consume must carry the same `(key, realm)` provision slots as the source
+    composition the model checked, which is the `hk` hypothesis
+    `RevL.G2.source_linkOK_ir_disjoint` takes beside `LinkOK`. Where it holds,
+    `ir_disjoint_iff_source_disjoint` makes the `IRD` row the model's own
+    V-row disjointness for the same file, so the two must agree there; where
+    it does not, the file is already a finding and a second one would only
+    restate it. A file the checker refuses has no IR row; its refusal is the
+    `V`/`X` row's business, not this one's. A file the checker ACCEPTS that
+    has none is a finding here, because absence is how a lowering that stops
+    emitting a file's components would otherwise pass."""
+    findings: list[str] = []
+    for rel in _IR_UNLOWERED:
+        findings.append(
+            f"IR rows missing ({rel}): the checker accepted the file and its "
+            "lowered document carries none of the file's components, so the "
+            "IRD/IRS rows read nothing")
+    for rel, kept in sorted(ref.ir_kept.items()):
+        if kept != "ok":
+            findings.append(
+                f"IR drift ({rel}): the lowered document's provision slots are "
+                "not the composition's, so the IR the backends consume is not "
+                "the one the model proved")
+            continue
+        source = ref.files.get(rel)
+        disjoint = ref.ir_disjoint.get(rel)
+        if source is not None and disjoint != source[0]:
+            findings.append(
+                f"IR G2 drift ({rel}): the IR says disjoint={disjoint} but the "
+                f"model's V row says disjoint={source[0]}")
+    return findings
+
+
+def ir_coverage() -> list[str]:
+    """The non-vacuity ratchet for the IR rows (issue #2739).
+
+    A pair of rows that only ever said `ok` over an empty or realm-free
+    document would certify nothing about the IR image, so the corpus must
+    carry a realm-pinned slot, a composition that provides one key in two
+    realms (the case the slot distinction exists for), and a document whose
+    spawn templates would collide if the document's own `templates` list did
+    not keep them out of the static composition. Also names the components of
+    used modules the rows do not cover, so the claim is not wider than the
+    rows."""
+    findings: list[str] = []
+    if not _IR_ROWS:
+        return ["ir coverage: no IRD/IRS rows at all. The IR rows are vacuous"]
+    components = sum(v["components"] for v in _IR_ROWS.values())
+    slots = sum(len(v["slots"]) for v in _IR_ROWS.values())
+    realms = sum(v["realms"] for v in _IR_ROWS.values())
+    templates = sum(v["templates"] for v in _IR_ROWS.values())
+    collisions = sum(1 for v in _IR_ROWS.values() if v["template_collision"])
+    spread = 0
+    for v in _IR_ROWS.values():
+        by_key: dict[str, set] = {}
+        for k, r in v["slots"]:
+            by_key.setdefault(k, set()).add(r)
+        spread += sum(1 for rs in by_key.values() if len(rs) > 1)
+    if components == 0:
+        findings.append("ir coverage: no IR components. The IR rows are "
+                        "vacuous")
+    if realms == 0:
+        findings.append("ir coverage: NO realm-pinned slot in any lowered "
+                        "document. The isolate column is never exercised")
+    if spread == 0:
+        findings.append("ir coverage: NO composition provides one key in two "
+                        "realms, so the slot distinction is never exercised")
+    if collisions == 0:
+        findings.append("ir coverage: NO document whose spawn templates would "
+                        "collide if composed, so the document's own "
+                        "`templates` list is never load-bearing")
+    if not findings:
+        foreign = sum(_IR_FOREIGN.values())
+        print(f"ir coverage: {len(_IR_ROWS)} lowered documents, "
+              f"{components} components ({templates} spawn templates), "
+              f"{slots} static slots, {realms} realm-pinned, "
+              f"{spread} keys provided in two realms, "
+              f"{collisions} documents kept disjoint only by their templates "
+              f"list; {foreign} components of used modules in "
+              f"{len(_IR_FOREIGN)} documents are another file's composition "
+              "and carry no row")
+    return findings
+
+
 def main() -> int:
     tsv, file_facts, census = export()
     refusals: dict[str, str] = census["refusals"]
@@ -9214,7 +9561,9 @@ def main() -> int:
             ("inv", ref.inv, formal.inv),
             ("sw", ref.sw, formal.sw),
             ("a5", ref.a5, formal.a5),
-            ("emission_value", ref.ev, formal.ev)):
+            ("emission_value", ref.ev, formal.ev),
+            ("ir_disjoint", ref.ir_disjoint, formal.ir_disjoint),
+            ("ir_kept", ref.ir_kept, formal.ir_kept)):
 
         for key, want in refmap.items():
             got = gotmap.get(key)
@@ -9252,7 +9601,8 @@ def main() -> int:
         f"{len(ref.g1cov)} access-coverage scopes + "
         f"{len(ref.retain)} retention refusals + "
         f"{len(ref.inv)} inverse refusals + "
-        f"{len(ref.sw)} witnessed-site refusals) — "
+        f"{len(ref.sw)} witnessed-site refusals + "
+        f"{len(ref.ir_disjoint)} IR documents (G2)): "
 
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
@@ -9281,6 +9631,8 @@ def main() -> int:
     mismatches.extend(g4inverse_coverage())
     mismatches.extend(sw_coverage())
     mismatches.extend(a5_coverage())
+    mismatches.extend(ir_alignment(ref))
+    mismatches.extend(ir_coverage())
     mismatches.extend(polarity_coverage(polarity))
 
     for m in mismatches[:10]:
@@ -9289,6 +9641,11 @@ def main() -> int:
         print(f"  ... and {len(mismatches) - 10} more")
 
     fatal = checker_alignment(file_facts, componentless, formal, tsv, refusals)
+    # The agreed subset, printed rather than left for a reader to reconstruct
+    # from the bucket table (issue #2739). It reads `_ALIGN`, which
+    # `checker_alignment` has just filled, so it must follow that call.
+    print(format_agreed_subset(
+        agreed_subset(_ALIGN, len(refusals), len(componentless))))
     # The two buckets that record an absence rather than a disagreement, held
     # to their committed membership so they can fail at all.
     fatal.extend(out_of_fragment_ratchet(_ALIGN_SAMPLES))
