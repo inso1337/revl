@@ -44,6 +44,7 @@ import pytest
 
 from revl import AdmissionProfile
 from revl import authority_panel
+from revl.__main__ import main
 from revl.composition import admit_composition, resolve, resolve_file, sole_composition
 from revl.compiler import compile_files
 from revl.errors import RevlError
@@ -400,9 +401,11 @@ layer Tune for Demo {
 
 
 def test_a_pure_numeric_config_change_gets_no_token(tmp_path):
-    """426 §8.7: `pool: 8 -> 16` feeds pure computation, so it is NOT
-    authority-bearing and produces no `config:` token — the panel stays clean on
-    a numeric-only change."""
+    """426 §8.7: `pool: 8 -> 16` on a component whose body never reads `pool`
+    feeds no computation, so it is NOT authority-bearing and produces no
+    `config:` token — the panel stays clean on a numeric-only change. The case
+    where the body DOES read the field is
+    `test_a_numeric_or_bool_config_the_body_reads_prevents_clean` below."""
     doc = _panel_project(
         tmp_path, site="tune", tune="""
 layer Tune for Demo {
@@ -413,6 +416,82 @@ layer Tune for Demo {
     res = authority_panel.panel(base, cand)
     assert res["tokens"] == []
     assert res["clean"]
+
+
+# Issue #3203: the numeric half of #706. The type of a value is not a proof it
+# feeds pure computation. A numeric/bool field the component BODY reads may flow
+# to an emission or extern argument, which header-only resolution cannot decide,
+# so it is unclassifiable and authority-bearing (§8.5 conjunct 5). Only a field
+# the body never reads is proven pure and stays token-free.
+_PAYER_EMIT = """
+service Pay { fn send(to: Str) -> Str }
+extern emission fn wire(to: Str, limit: Int, live: Bool) -> Str = @py { return to }
+component Payer provides pay: Pay {
+  config { limit: Int = 100, live: Bool = false }
+  provide pay { fn send(to) = emit wire(to, config.limit, config.live) }
+}
+"""
+
+
+def _emission_config_project(tmp_path: Path) -> Path:
+    """The #3203 reproduction: a site layer raises a numeric limit and flips a
+    bool, and the component body passes both to a host emission."""
+    (tmp_path / "layers").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "payer.rvl").write_text(_PAYER_EMIT)
+    (tmp_path / "layers" / "tune.rvl").write_text("""
+layer Tune for Demo {
+  configure @pay with { limit: 100000000, live: true }
+}
+""")
+    doc = tmp_path / "base.rvl"
+    doc.write_text("""
+composition Demo {
+  row @pay from "payer.rvl" provides pay
+    config { limit: 100, live: false }
+  site "layers/tune.rvl"
+}
+""")
+    return doc
+
+
+def test_a_numeric_or_bool_config_the_body_reads_prevents_clean(tmp_path):
+    """Issue #3203. `limit: 100 -> 100000000` and `live: false -> true` reach a
+    host emission through the component body. Neither may be classified pure by
+    value type: each produces a `config:` token, is listed as unclassifiable,
+    and forfeits `clean`."""
+    doc = _emission_config_project(tmp_path)
+    base, cand = _tables(doc, tmp_path)
+    res = authority_panel.panel(base, cand)
+
+    fields = {tok["field"]: tok for tok in res["tokens"]}
+    assert set(fields) == {"limit", "live"}, fields
+    assert fields["limit"]["was"] == 100
+    assert fields["limit"]["value"] == 100000000
+    assert fields["live"]["was"] is False
+    assert fields["live"]["value"] is True
+    assert fields["limit"]["unclassifiable"] is True
+    assert fields["live"]["unclassifiable"] is True
+    assert "@pay.limit" in res["unclassifiable"]
+    assert "@pay.live" in res["unclassifiable"]
+    assert not res["clean"]
+
+    text = authority_panel.render(res)
+    assert "config:@pay:limit:" in text
+    assert "config:@pay:live:" in text
+    assert "authority-drift: clean" not in text
+
+
+def test_cli_panel_does_not_exit_zero_on_a_numeric_emission_steering_change(
+        tmp_path, capsys):
+    """Issue #3203's CLI half: the panel's exit code is a CI gate, so a layer
+    that raises a numeric limit or flips a bool an emission consumes must not
+    exit 0 with `clean`."""
+    doc = _emission_config_project(tmp_path)
+    code = main(["composition", str(doc), "--root", str(tmp_path), "--panel"])
+    out = capsys.readouterr().out
+    assert code == 2
+    assert "config:@pay:limit:" in out
+    assert "authority-drift: clean" not in out
 
 
 def test_a_bounded_field_configured_outside_its_reach_is_refused(tmp_path):
