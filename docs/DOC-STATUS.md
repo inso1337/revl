@@ -50,7 +50,7 @@ regenerated rather than edited.
 | doc | status | em-dashes | tier-limit notes |
 |---|---|---|---|
 | README.md | needs-work | 0 |  |
-| analyze-liveness.md | needs-work | 15 |  |
+| analyze-liveness.md | needs-work | 0 |  |
 | apply.md | needs-work | 19 |  |
 | arithmetic.md | needs-work | 5 |  |
 | attested-result-delivery.md | needs-work | 0 |  |
