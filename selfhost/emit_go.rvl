@@ -94,7 +94,7 @@
 // (`str(value)`), `float_lit` (the `float64({v!r})` body), and `go_string` (the
 // reference `_go_string` Go-literal escaper, kin to py's `py_repr`).
 use "../stdlib/value.rvl" {
-  value_kind, value_is_null, value_field,
+  value_kind, value_is_null, value_field, value_children,
   value_list, value_at, value_str, value_int, value_bool, value_keys
 }
 use "../stdlib/str.rvl" { split_top, rstrip, trim, str_tab }
