@@ -29860,6 +29860,15 @@ fn unlowered_body(res: IrRes) -> Str {
   return res.why == "" ? at : at.concat(" (").concat(res.why).concat(")")
 }
 
+// A component `let-effect` binder: the reference's `Env.bind_local` runs the
+// name through `_safe_name` against the component's earlier binders, and the
+// scope carries the escape to every later read as a `rename` row (issue #3350:
+// a provider capture named `ctx` binds `ctx_`, as the reference IR has it).
+fn cir_bind_scope(sc: List[Bind], name: Str, ty: Str, safe: Str) -> List[Bind] {
+  let sc1 = sc.push({ name: name, ty: ty })
+  return safe == name ? sc1 : sc1.push({ name: "rename ".concat(name), ty: safe })
+}
+
 // A component activation body -> its `body` step list. `config` is a header
 // declaration, skipped structurally; the accumulated `sc` threads `let-effect`
 // binds into later steps.
@@ -29902,7 +29911,8 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     // the handle's INSTANCE provenance (the reference's `env.type_env[h] =
     // "Instance[C]"`): a later `<h>.<key>` is the target component's provision
     // and not a record field, and only a key that component PROVIDES resolves.
-    let sc2 = sc.push({ name: name, ty: instance_ty(sp.comp) })
+    let safe = safe_name(name, sc, hostSc)
+    let sc2 = cir_bind_scope(sc, name, instance_ty(sp.comp), safe)
     let und = expr_at(ts, sp.i + 1)
     if (is_bad(und.e)) { return cir_fail(ts, i) }
     let ue = cir_expr(und.e, sc2, hostSc, cx_at(cx, tkc(ts, sp.i + 1).line))
@@ -29913,7 +29923,7 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     // issue #2086: `bind` is appended LAST, after the inverse's own keys, as
     // `_lower_effect_step` does (`step["bind"] = bind` after the body is built).
     let step = with_inverse("{\"step\": \"let-effect\", \"acquire\": ".concat(sp.js)
-      .concat(", \"undo\": ").concat(ue.js).concat(", \"bind\": ").concat(jstr(name)).concat("}"),
+      .concat(", \"undo\": ").concat(ue.js).concat(", \"bind\": ").concat(jstr(safe)).concat("}"),
       "asserted")
     let nacc = acc == "" ? step : acc.concat(", ").concat(step)
     return cir_body(ts, und.i, end, cx, provs, sc2, hostSc, nacc)
@@ -29938,7 +29948,8 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
       if (!blk.ok) { return cir_fail(ts, i) }
       // typed by the tail acquisition over the OUTER scope: the reference
       // infers it after dropping the block's setup-let types (issue #2198)
-      let bsc = sc.push({ name: name, ty: value_ty(blk.acqE, cenv_ir(cx, sc)) })
+      let bsafe = safe_name(name, sc, hostSc)
+      let bsc = cir_bind_scope(sc, name, value_ty(blk.acqE, cenv_ir(cx, sc)), bsafe)
       var bstep = "{\"step\": \"let-effect\", \"acquire\": ".concat(blk.acq)
       var bnext = bend
       // issue #1859: an absent `undo` records NO key, exactly as the reference
@@ -29956,7 +29967,7 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
       } else {
         if (!blk.wit) { return cir_fail(ts, i) }
       }
-      bstep = bstep.concat(", \"bind\": ").concat(jstr(name))
+      bstep = bstep.concat(", \"bind\": ").concat(jstr(bsafe))
       if (blk.setup != "") {
         bstep = bstep.concat(", \"setup\": [").concat(blk.setup).concat("]")
       }
@@ -29969,7 +29980,8 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     let ae = cir_expr(acq.e, sc, hostSc, cx_at(cx, tkc(ts, aq0).line))
     if (!ae.ok) { return cir_fail(ts, i) }
     if (!atw(ts, acq.i, "undo")) { return cir_fail(ts, i) }
-    let sc2 = sc.push({ name: name, ty: value_ty(acq.e, cenv_ir(cx, sc)) })
+    let safe = safe_name(name, sc, hostSc)
+    let sc2 = cir_bind_scope(sc, name, value_ty(acq.e, cenv_ir(cx, sc)), safe)
     // host provenance (the reference's `env.host_locals`): a bind whose
     // acquisition lowered to a host node keeps the host verb surface, so every
     // later `name.<verb>(…)` is a `call` and not a stdlib builtin.
@@ -29980,7 +29992,7 @@ fn cir_body(ts: List[Token], i: Int, end: Int, cx: CCtx,
     let ue = cir_expr(und.e, sc2, hostSc2, cx_at(cx, tkc(ts, acq.i + 1).line))
     if (!ue.ok) { return cir_fail(ts, i) }
     let step0 = "{\"step\": \"let-effect\", \"acquire\": ".concat(ae.js)
-      .concat(", \"undo\": ").concat(ue.js).concat(", \"bind\": ").concat(jstr(name)).concat("}")
+      .concat(", \"undo\": ").concat(ue.js).concat(", \"bind\": ").concat(jstr(safe)).concat("}")
     let step1 = with_inverse(step0, site_effect_inverse(acq.e, ae.js, und.e, ue.js,
       hostSc2, cx_at(cx, tkc(ts, acq.i + 1).line)))
     let step = isAsync ? step_async(step1) : step1

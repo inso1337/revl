@@ -840,14 +840,6 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # `stdlib_builtins.rvl` and the borrowed
         # `../emit_ts_corpus/property_edges.rvl` — left it with the
         # `sized_length` property form.)
-        # issue #3095: the native producer leaves the component's `let-effect`
-        # binder raw (`ctx` stays `ctx` in its IR), so the native emitter's
-        # binding ladder lands on `ctx_` while the reference frontend escaped
-        # the binder to `ctx_` and the ladder reaches `ctx__`. The java byte
-        # oracle in tests/test_selfhost_emit_java.py holds this document
-        # byte-exact on the REFERENCE IR, so the residual is the producer's
-        # `_safe_name` handling, not the emitter.
-        "comp_provide_ctx_bind.rvl",
     ),
     "rust": (
         # (`component_edges.rvl` left this list with issue #1818: its provide
@@ -974,6 +966,40 @@ def test_the_residual_is_located_in_lower_not_in_the_emitter(
         f"LOWER_GAP_DOCS[{tier!r}]): {closed}\n"
         f"  newly diverging (a lower.rvl regression, or a corpus document whose "
         f"IR surface lower.rvl does not cover yet): {opened}")
+
+
+# Issue #3350. A provider capture named like a host or emitter scaffolding
+# name (`ctx`, `cfg`, `err`) is a `let-effect` binder, and the reference
+# frontend escapes it (`_safe_name`) before any emitter's binding ladder runs.
+# The native producer wrote the spelling as the author had it, so the java
+# ladder landed one rung short of the reference's. Held on the tiers whose native
+# chain compiles this component: go refuses the host acquisition (a named
+# UNSUPPORTED refusal) and the reference refuses it on wasm, and the native ts
+# emitter ladders `ctx_` one rung short of the reference even from the
+# reference IR (issue #3573, pinned as a strict xfail).
+_CAPTURE_DOC = (
+    "service Store {\n  fn get(key: Str) -> Opt[Int]\n"
+    "  emission fn put(key: Str, value: Int)\n}\n"
+    "component Ledger provides store: Store {\n"
+    "  let NAME = effect Map.new() undo NAME.drop()\n"
+    "  provide store {\n"
+    "    fn get(key) = NAME.get(key)\n"
+    "    fn put(key, value) {\n"
+    "      effect NAME.insert(key, value)\n"
+    "      undo   NAME.remove(key)\n"
+    "    }\n  }\n}\n")
+
+
+@pytest.mark.parametrize("tier,name", [
+    pytest.param(tier, name, marks=pytest.mark.xfail(
+        strict=True, reason="issue #3573")) if (tier, name) == ("ts", "ctx")
+    else (tier, name)
+    for tier in ("py", "ts", "java", "rust") for name in ("ctx", "cfg", "err")])
+def test_a_provider_capture_named_like_scaffolding_compiles_natively_as_the_reference(
+        compile_to, reference_emit, tier, name):
+    source = "fn seed() -> Int {\n  return 0\n}\n" + _CAPTURE_DOC.replace("NAME", name)
+    want = reference_emit[tier](compile_source(source, "t.rvl"))
+    assert compile_to(source, tier) == want
 
 
 # Issue #2594. A component whose body holds one step the native IR producer
