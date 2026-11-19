@@ -30,6 +30,15 @@ This module is the enforcement half:
     error rather than run unbounded, and an incomplete limit set is refused the
     same way.
 
+The seams are shared by both paths that execute a generated component:
+``backends/wasm/canonical.py``'s ``run_component`` (the quarantine route, which
+drives wasmtime as a CLI) and :func:`revl.run_wasm.run_wasm` (the ``revl run
+--backend wasm`` route, which hands the emitted WAT to the cordis-wasm harness
+and passes the resolved :class:`ComponentLimits` in its spec; issue #3189).
+The run path also reads each emitted module's import section back from the
+bytes the harness will compile and applies :func:`check_component_imports` to
+them, so the byte-level check is not limited to the component-model path.
+
 The expected import namespaces are the wasm tier's own ABI surface
 (``backends/wasm/emit.py``): capability channels (``coeffect:`` / ``route:``),
 the spawn/config/dispose/instance seams (with their target checked against the

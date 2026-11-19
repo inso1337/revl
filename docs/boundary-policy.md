@@ -234,6 +234,17 @@ The JSON form parses to the same policy:
   filled in silently. With no policy the conservative defaults still apply, so
   a generated component is confined by default.
 
+  The same ceilings apply to the **run path** (issue #3189):
+  `revl run --backend wasm` resolves them once and the harness gives every
+  component's store the fuel budget, the linear-memory ceiling and a wall-clock
+  epoch deadline before any module is plugged. A composition that hits a
+  ceiling traps and the run exits nonzero (`note raised` names the reason); a
+  harness that outlives the wall ceiling plus a startup grace is killed with
+  its whole process group. The emitted modules' import sections are read back
+  from the bytes the harness compiles and held to the same byte-level check. A
+  runtime or wasmtime that cannot apply a ceiling makes the harness refuse
+  rather than run unconfined.
+
 ### The pair rule: admitted and refused
 
 With `component Agent* may not reach fs.read together with network.call` in
@@ -355,7 +366,10 @@ policy refuses is rejected and the running generation is kept. With
 `--backend wasm` the item-289 least-authority chain over the emitted host
 imports runs as well, and it reads the policy's deny rules as well as its
 allow-lists (issue #3185); it does not run for wasm components placed by
-`--placement`, where only the gate above applies.
+`--placement`, where only the gate above applies. The wasm run path also
+applies the policy's component limits and the byte-level import check (issue
+#3189); a `wasm components confined` policy that names no limits refuses the
+run before the runtime gate.
 
 A policy with evidence rules always refuses `revl run`: run takes no
 `--evidence` or `--key`, so every evidence clause is evaluated against absent

@@ -25,6 +25,13 @@ What is wired and runs live (wherever the cordis-wasm runtime is present):
   coeffect table ``rt.table`` empty — the substrate mirror of the py driver's
   ``registry.size``/``reflect.store`` check). ``NO-RESIDUE`` is printed only when
   that holds.
+* **confinement** — the boundary policy's wasm component limits (fuel, linear
+  memory, wall clock) and the byte-level import check apply to the RUN path
+  (issue #3189), not only to the quarantine path: the driver resolves the
+  ceilings, the harness applies them to every store before any module is
+  plugged, and the driver kills the harness's process group if it outlives the
+  wall ceiling. A policy that asks for confinement without naming the ceilings
+  is refused before anything is emitted.
 
 What is NOT yet wired (honestly fenced, not faked):
 
@@ -45,12 +52,16 @@ exits nonzero, exactly as the py tier does for a missing cordis-py.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 from . import _childproc
@@ -59,10 +70,17 @@ from ._paths import backends_root, venv_python
 from .errors import RevlError
 from .refusal import refusals
 from .wal import header_record
+from .wasm_confinement import ConfinementError, check_component_imports
 
 _BACKENDS_DIR = backends_root()
 _WASM_DIR = _BACKENDS_DIR / "wasm"
 _HARNESS = _WASM_DIR / "run_harness.py"
+
+#: How long the harness may spend starting up (interpreter boot, WAT compile,
+#: import checks) on top of the policy's wall-clock ceiling before the driver
+#: kills it as hung. The runtime's own epoch deadline bounds GUEST execution;
+#: this is the backstop for a harness that never reaches the guest (issue #3189).
+_HARNESS_STARTUP_GRACE_SECONDS = 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +299,105 @@ def _emit_modules(ir: dict, record: bool = False, emit_module=None) -> dict[str,
     return emit_module.emit(ir, record=record)
 
 
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    """Kill the harness AND anything it started.
+
+    The harness runs in its own session (``start_new_session=True``), so a
+    wall-clock expiry kills the whole group: before this, the parent's alarm
+    killed only the driver's child and a spinning harness was left reparented
+    to pid 1 (issue #3189). ``PermissionError``/``ProcessLookupError`` mean the
+    group is already gone; the single-process kill is the fallback.
+    """
+    # the session leader's pid is the group id; Windows has no process groups
+    # in this sense, so the single-process kill is the only option there
+    killpg = getattr(os, "killpg", None)
+    if killpg is None or not hasattr(signal, "SIGKILL"):
+        proc.kill()
+        return
+    try:
+        killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        proc.kill()
+
+
+def _emitted_bytes(modules: dict[str, str]) -> dict[str, bytes]:
+    """Compile the emitted WAT to the bytes the harness will execute.
+
+    The conversion runs under the SAME interpreter that boots the harness
+    (``_cordis_wasm_python``), so the bytes read here are the bytes that run,
+    and no wasmtime install is needed in this interpreter. A WAT the runtime
+    cannot parse is reported before the harness starts.
+    """
+    python = _cordis_wasm_python()
+    if python is None:
+        raise RuntimeError(
+            "no cordis-wasm interpreter is available to compile the emitted "
+            "modules")
+    script = (
+        "import base64, json, sys\n"
+        "import wasmtime\n"
+        "modules = json.load(sys.stdin)\n"
+        "json.dump({name: base64.b64encode(wasmtime.wat2wasm(wat)).decode('ascii')\n"
+        "           for name, wat in modules.items()}, sys.stdout)\n"
+    )
+    result = _childproc.run([python, "-c", script], input=json.dumps(modules),
+                            capture_output=True)
+    if result.returncode != 0:
+        detail = (result.stderr or "").strip().splitlines()
+        raise RuntimeError(detail[-1] if detail else f"exit {result.returncode}")
+    encoded = json.loads(result.stdout)
+    return {name: base64.b64decode(value) for name, value in encoded.items()}
+
+
+def _check_emitted_imports(ir: dict, modules: dict[str, str]) -> None:
+    """Refuse an emitted module whose import section is not confined.
+
+    ``run_component`` has checked the produced component's BYTES since #2729;
+    the run path handed WAT straight to the harness, so on the path that runs
+    real compositions the import section was only scanned by a regex. This
+    compiles the emitted WAT with the runtime's own interpreter and applies the
+    same byte-level check per module: only the component's declared capability
+    addresses, the tier's structural seams, and in-composition spawn/instance
+    targets are admitted. Raises :class:`ConfinementError` on a breach.
+    """
+    from .audit_diff import audit_report  # noqa: PLC0415 - keep the module light
+    from .policy import component_reach  # noqa: PLC0415
+    from .wasm_confinement import component_targets  # noqa: PLC0415
+
+    try:
+        data = _emitted_bytes(modules)
+    except RuntimeError as error:
+        raise ConfinementError(
+            f"the emitted wasm modules could not be read back for the "
+            f"confinement check: {error}") from error
+    audit = audit_report(ir)
+    components = {component.get("name"): component
+                  for component in ir.get("components") or []}
+    targets = component_targets(ir)
+    for name, module_bytes in data.items():
+        component = components.get(name)
+        # What the component DECLARES: the coeffect keys in its `requires`
+        # header (the emitter renders each reached one as a `coeffect:` /
+        # `route:` import) plus its G8 reach (emission capabilities and reached
+        # host externs). The G8 reach alone is not the import surface of a wasm
+        # cell: a plain required coeffect is an import but not an emission.
+        declared: set[str] = set()
+        if component is not None:
+            declared.update((component.get("requires") or {}).keys())
+            declared.update(
+                reach.token for reach in component_reach(audit, name))
+        check_component_imports(
+            module_bytes,
+            declared=frozenset(declared),
+            config_fields=tuple(
+                field.get("name")
+                for field in (component or {}).get("config") or []),
+            isolate=(component or {}).get("isolate") or {},
+            component=name,
+            declared_targets=targets,
+        )
+
+
 def run_wasm(ir: dict, config: dict, files, once: bool = False,
              interactive: bool = False, policy=None,
              proof_out: dict | None = None) -> int:
@@ -294,7 +411,27 @@ def run_wasm(ir: dict, config: dict, files, once: bool = False,
     no runtime, so the least-authority chain that reads the emitted import
     sections runs BEFORE the runtime-availability gate: an over-authority wasm
     cell is refused as an admission decision whether or not wasmtime is present.
+
+    Confinement (issue #3189): the policy's wasm component limits are resolved
+    here (:func:`revl.wasm_confinement.limits_from_policy`) and the harness is
+    started under them, so fuel, linear memory and wall-clock ceilings bound the
+    composition on the RUN path, not only on the quarantine path. A policy that
+    asks for confinement but names no limits is refused before anything is
+    emitted. The emitted modules' import sections are read back from the bytes
+    the harness will execute and held to the same byte-level check
+    ``run_component`` applies. The driver kills the harness's whole process
+    group if it outlives the policy's wall-clock ceiling plus a startup grace.
     """
+    # issue #3189: resolve the ceilings FIRST, so a policy that asks for wasm
+    # confinement without naming them is refused before any work is done (and
+    # before the runtime-availability gate, like the least-authority chain).
+    from .wasm_confinement import limits_from_policy  # noqa: PLC0415
+    try:
+        limits = limits_from_policy(policy)
+    except ConfinementError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
     # item 322 Slice 2: with REVL_WAL set, emit in RECORD mode and drain the
     # module's framed discharge-descriptors into that durable host WAL. Unset
     # (every ordinary run), record mode is off and emission is byte-identical,
@@ -342,6 +479,15 @@ def run_wasm(ir: dict, config: dict, files, once: bool = False,
               f"       {reason}", file=sys.stderr)
         return 3
 
+    # issue #3189: the byte-level import check on the bytes the harness will
+    # actually execute. It needs the runtime interpreter to compile the WAT, so
+    # it sits after the gate; nothing has executed, and a refusal is final.
+    try:
+        _check_emitted_imports(ir, modules)
+    except ConfinementError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
     if once is False and interactive:
         print("note: the interactive REPL is wired for the py tier only; the "
               "wasm tier runs the\n      boot -> teardown -> no-residue "
@@ -360,6 +506,14 @@ def run_wasm(ir: dict, config: dict, files, once: bool = False,
             "record": record,
             "order": order,
             "modules": {name: modules[name] for name in order},
+            # issue #3189: the ceilings the harness applies BEFORE it plugs any
+            # module. Passed explicitly (never omitted) so the harness never
+            # runs a composition unbounded.
+            "limits": {
+                "fuel": limits.fuel,
+                "memoryBytes": limits.memory_bytes,
+                "wallSeconds": limits.wall_seconds,
+            },
         }), encoding="utf-8")
 
         if record:
@@ -392,34 +546,77 @@ def run_wasm(ir: dict, config: dict, files, once: bool = False,
             [_cordis_wasm_python(), str(_HARNESS), str(spec_file)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, env=env,
+            # issue #3189: the harness owns its own session, so a wall-clock
+            # expiry can kill the WHOLE group. Before this the parent's alarm
+            # killed only this child and a spinning harness was reparented to
+            # pid 1, still burning CPU.
+            start_new_session=True,
         )
         # the proof token is stdin's only line; then stdin closes, as before,
         # so the runner never blocks on it (issue #1621)
         proof.send(proc.stdin)
 
         assert proc.stdout is not None
-        for line in proc.stdout:
-            # drain a `[wal] {…}` frame into the durable WAL (item 322 Slice 2);
-            # every other line is the harness's own `[run] …`/`_log` output.
-            if wal_handle is not None:
-                try:
-                    seq = drain_wal_frame(wal_handle, line, proof.tag("wal"))
-                except WALDurabilityError as error:
-                    # a descriptor that is not durable stops the composition
-                    # before it can run on past it (issue #2345)
-                    proc.kill()
-                    proc.wait()
-                    print(f"error: {error}; the wasm composition was stopped",
-                          file=sys.stderr)
-                    return 1
-                if seq is not None:
-                    drained_seqs.append(seq)
-                    continue
-            # only a token-tagged line is the runtime's proof; anything else,
-            # a program's own `[run] NO-RESIDUE` included, is output (#1621)
-            sys.stdout.write(proof.line(line))
-            sys.stdout.flush()
-        rc = proc.wait()
+        pump_failure: list[Exception] = []
+
+        def pump() -> None:
+            try:
+                for line in proc.stdout:
+                    # drain a `[wal] {…}` frame into the durable WAL (item 322
+                    # Slice 2); every other line is the harness's own
+                    # `[run] …`/`_log` output.
+                    if wal_handle is not None:
+                        seq = drain_wal_frame(wal_handle, line, proof.tag("wal"))
+                        if seq is not None:
+                            drained_seqs.append(seq)
+                            continue
+                    # only a token-tagged line is the runtime's proof; anything
+                    # else, a program's own `[run] NO-RESIDUE` included, is
+                    # output (#1621)
+                    sys.stdout.write(proof.line(line))
+                    sys.stdout.flush()
+            except Exception as error:  # noqa: BLE001 - reported below
+                pump_failure.append(error)
+                _kill_process_group(proc)
+
+        reader = threading.Thread(target=pump, name="revl-wasm-output",
+                                  daemon=True)
+        reader.start()
+        # issue #3189: the harness's own epoch deadline bounds GUEST execution;
+        # this is the wall-clock backstop on the PROCESS, with the startup grace
+        # for interpreter boot and WAT compilation. Killing the session group
+        # leaves no orphan behind.
+        deadline = (time.monotonic() + limits.wall_seconds
+                    + _HARNESS_STARTUP_GRACE_SECONDS)
+        wall_expired = False
+        try:
+            rc = proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            wall_expired = True
+            _kill_process_group(proc)
+            rc = proc.wait()
+        reader.join(timeout=10.0)
+        if reader.is_alive():
+            _kill_process_group(proc)
+            reader.join(timeout=2.0)
+            print("error: the wasm composition's output channel did not close "
+                  "after the process was killed", file=sys.stderr)
+            return 1
+        if pump_failure:
+            error = pump_failure[0]
+            if isinstance(error, WALDurabilityError):
+                print(f"error: {error}; the wasm composition was stopped",
+                      file=sys.stderr)
+            else:
+                print(f"error: reading the wasm composition's output failed: "
+                      f"{error}", file=sys.stderr)
+            return 1
+        if wall_expired:
+            print(f"error: the wasm composition did not finish within its "
+                  f"{limits.wall_seconds:g}s wall-clock ceiling (plus "
+                  f"{_HARNESS_STARTUP_GRACE_SECONDS:g}s startup) and was "
+                  f"killed", file=sys.stderr)
+            return 1
 
         # a clean unload commits: stamp the discharge (recover then SKIPS those
         # seqs — a committed transaction is never rolled back) and the terminal
