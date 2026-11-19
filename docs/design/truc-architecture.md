@@ -273,9 +273,19 @@ entry   = ["src/main.rvl"]          # the project's own sources
 local = { path = "registry" }       # a path; a `url` entry is refused (no fetch path ships yet)
 
 [trucs]
-user_cache  = { registry = "local" }
+user_cache  = { registry = "local", grant = ["db"] }   # it requires `db`
 pg_database = { registry = "local" }
 ```
+
+`grant` is the reach bound an operator gives a vendored row (issue #2635): the
+`requires` keys that row may bind, the same vocabulary `apply`'s composition
+grant uses. It is fail-closed. A row whose `[trucs]` entry grants nothing, or
+has no `grant` key, may bind nothing that requires a service, so `truc add`
+refuses it with the missing key named rather than admitting it unbounded.
+Declare the entry (and its grant) before the first `add`: the admission runs
+before anything is vendored, and `truc assemble` re-applies the same
+declaration later. A row that requires nothing needs no grant. `--trust-host-code`
+admits a row's host body but does not widen the reach the grant allows.
 
 No version field in v1, deliberately. The registry has a single namespace
 with first-come names and **no versioning until phase 2** (docs/registry.md
@@ -327,6 +337,7 @@ not exist and is not worth building for a machine-only file.
       "requires": {"db": "Database"},
       "capabilities": ["*"],
       "emissions": 1,
+      "granted": ["db"],
       "admitted": {"at": "2026-08-24T…Z", "indexVersion": "0"}
     }
   }
@@ -340,6 +351,10 @@ not exist and is not worth building for a machine-only file.
   `assemble --check` reports the same drift without writing (drift is a
   refusal, not a warning: the `registry.verify` regenerate-or-red
   discipline, `src/revl/registry.py:194`, applied to the vendor dir).
+- `granted`: the `requires` keys the `[trucs]` entry granted this row when it
+  was added (issue #2635), so the reach bound the gate applied is visible in
+  review. `assemble` and `rm` re-read the declaration from `truc.toml`; the
+  record is what was admitted, not a second authority.
 - `capabilities`/`emissions`: the authority the assembly accepted when it
   admitted this truc. `assemble` re-reports the totals so a lockfile diff
   in review *shows authority growth*: the least-authority ranking of
@@ -489,11 +504,15 @@ cli.run(["add", name])              (or ["add", name, "--trust-host-code"])
    ├ sha256_hex(source) vs index row sourceHash         pure
    │    mismatch → refuse ("registry entry disagrees with its own index")
    ├ ordered := entry sources, vendored rows, then the candidate   pure
+   │    each vendored row carries its `[trucs]` grant (issue #2635)
    ├ gate.admit_all(ordered, truc.lock, thc)           host_admit_all
    │    each row joins the rows before it; a vendored row compiles as an
-   │    untrusted author unless thc or its lock record lifts that
+   │    untrusted author bounded to the `requires` keys its `[trucs]` entry
+   │    grants, and thc or its lock record lifts host-code trust only, never
+   │    that bound; a requiring row the entry does not grant is refused with
+   │    the key named
    │    drift/G2 refusal → print diagnostic + why-trace, exit 1, disk untouched
-   ├ plan.add_report(...) → commit plan {name, admission,
+   ├ plan.add_report(...) → commit plan {name, admission, granted,
    │    sourceHash, manifestHash, dossierHash}          pure
    ├ ws.commit_add(".", commit)                        host_commit_add
    │    reads the entry again, hashes the text it is about to write, and
