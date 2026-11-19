@@ -30764,6 +30764,20 @@ fn taint_source_qualifier(ty: String) -> String {
     return String::from("");
 }
 
+fn taint_source_qualifiers_json(ty: String) -> String {
+    let top = taint_top_qualifier(ty.clone());
+    if (((top != "") && (top != "Untrusted")) && (top != "Secret")) {
+        return String::from("");
+    }
+    if ((ty == "") || (ty_parse(ty.clone()).head == "Retained")) {
+        return String::from("");
+    }
+    if (taint_holds_qualifier(ty.clone(), "Untrusted") && taint_holds_qualifier(ty.clone(), "Secret")) {
+        return String::from(", \"returns_qualifiers\": [\"Untrusted\", \"Secret\"]");
+    }
+    return String::from("");
+}
+
 fn ir_service_params_json(ps: &[ParamN], raw: &[ParamN]) -> String {
     let mut out = String::from("");
     let mut i = 0i64;
@@ -30930,11 +30944,13 @@ fn ir_methods(ts: Vec<Token>, i: i64, end: i64, acc: String, v3: bool, al: std::
     let mut retJson = String::from("null");
     let mut term = String::from("");
     let mut retQual = String::from("");
+    let mut retQuals = String::from("");
     let mut rawRet = String::from("");
     let mut nexti = ps.i;
     if atk(&ts, ps.i, "arrow") {
         let tr = type_at(ts.clone(), (ps.i).checked_add(1i64).expect("revl: Int overflow"));
         retQual = taint_source_qualifier(tr.ty.clone());
+        retQuals = taint_source_qualifiers_json(tr.ty.clone());
         rawRet = taint_strip(alias_subst(tr.ty.clone(), al.clone()));
         if (rawRet == "Criterion") {
             term = String::from("criterion");
@@ -30953,6 +30969,7 @@ fn ir_methods(ts: Vec<Token>, i: i64, end: i64, acc: String, v3: bool, al: std::
     if (retQual != "") {
         mj = (mj.revl_concat(", \"returns_qualifier\": ")).revl_concat(&jstr(&retQual));
     }
+    mj.push_str(&retQuals);
     mj.push_str(&ir_doc_key(st.clone(), dline, dstarts));
     if (term != "") {
         mj = (mj.revl_concat(", \"termination\": ")).revl_concat(&jstr(&term));
