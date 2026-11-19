@@ -53,6 +53,19 @@ def _attempt_limit(text: str) -> int:
     return value
 
 
+def _token_budget(text: str) -> int:
+    """A positive token ceiling for `revl context --budget`."""
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected a whole number of tokens, got {text!r}") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(
+            "the budget must be at least 1 (omit the flag for no budget)")
+    return value
+
+
 def _add_exposure_arguments(sub) -> None:
     """The listener options every revl HTTP server shares (issue #1463,
     `revl.mcp.http_guard`): TLS, and the Host and Origin allowlists."""
@@ -239,6 +252,18 @@ def build_parser() -> argparse.ArgumentParser:
     exp = sub.add_parser("explain", help="what a diagnostic code means and how to fix it")
     exp.add_argument("code", help="a diagnostic code, e.g. G4 (case-insensitive)")
     exp.add_argument("--json", action="store_true", help="machine-readable output")
+
+    ctx = sub.add_parser(
+        "context",
+        help="the service declarations a component may call and must provide, "
+             "with no bodies (docs/context.md)")
+    ctx.add_argument("files", nargs="+", help="the .rvl files of the composition")
+    ctx.add_argument("--component", default=None,
+                     help="ground this component (default: every declared service)")
+    ctx.add_argument("--budget", type=_token_budget, default=None, metavar="TOKENS",
+                     help="shrink the pack to fit: docs off, then collapse, "
+                          "from the last service backwards")
+    ctx.add_argument("--json", action="store_true", help="machine-readable output")
 
     grammar = sub.add_parser(
         "grammar",
