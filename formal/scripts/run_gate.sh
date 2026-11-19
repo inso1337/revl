@@ -205,6 +205,13 @@ python3 scripts/axioms_gate.py \
   RevL.G9.authority_refusal_is_not_universal \
   RevL.G9.sink_rules_are_distinct \
   RevL.G9.secret_refusal_is_load_bearing \
+  RevL.G9.secret_noninterference \
+  RevL.G9.leak_needs_declassifier \
+  RevL.G9.execution_labels_match_the_flow \
+  RevL.G9.endorse_gate_preserves_foreign_origins \
+  RevL.G9.noninterference_witness \
+  RevL.G9.declassify_breaks_noninterference \
+  RevL.G9.unadmitted_secret_endorse_breaks_noninterference \
   RevL.Lemmas.reach_mono_fuel \
   RevL.Lemmas.reaches_le \
   RevL.Lemmas.reach_exact \

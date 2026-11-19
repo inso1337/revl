@@ -188,6 +188,19 @@ import RevL
 #print axioms RevL.G9.sink_rules_are_distinct
 #print axioms RevL.G9.secret_refusal_is_load_bearing
 
+-- G9 two-run non-interference over a value model (issue #2738): the flow
+-- rules above are stated for labels; these are stated for runs of the value
+-- model in RevL.Lemmas.TaintLemmas, where crossings and joins add the inputs
+-- they read. The two breaking witnesses show the `Flow` hypothesis and the
+-- `confidential` proviso are load-bearing.
+#print axioms RevL.G9.secret_noninterference
+#print axioms RevL.G9.leak_needs_declassifier
+#print axioms RevL.G9.execution_labels_match_the_flow
+#print axioms RevL.G9.endorse_gate_preserves_foreign_origins
+#print axioms RevL.G9.noninterference_witness
+#print axioms RevL.G9.declassify_breaks_noninterference
+#print axioms RevL.G9.unadmitted_secret_endorse_breaks_noninterference
+
 -- TODO 3 / R4: the abort's residue surface is exactly what the runtime
 -- reports, stated over the small-step semantics that accumulates the log
 -- (soundness + completeness), plus the two runs that make it non-vacuous.
