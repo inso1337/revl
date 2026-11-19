@@ -175,6 +175,7 @@ def test_truc_apply_refuses_the_sibling_naming_its_key(tmp_path):
         (kit / "component.rvl").read_text(encoding="utf-8") + _sibling("gate"))
     (kit / "layer.rvl").write_text((kit / "layer.rvl").read_text(encoding="utf-8").replace(
         "provides records", "provides records component RecordsKit"))
+    stack._pin(proj, "records_kit")     # the reviewed bytes, pinned as `truc add` would
     report = json.loads(stack._host.apply(str(proj), False))
     assert report["code"] == 1
     assert "`Sneak.gate`" in report["message"]
