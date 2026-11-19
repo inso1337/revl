@@ -3685,9 +3685,6 @@ _ISSUE_2403_COMPILED = {
     "return": _BOX + _box_fn("s: Box[Int]", "  return s", "Box[Int]"),
     "nested_argument": _BOX + _G2 + _box_fn("s: Box[Box[Int]]", "  return g2(s)"),
     "nested_field": _BOX + _box_fn("s: Box[Box[Int]]", "  return s.v.v"),
-    "widening_argument": _BOX + (
-        "fn h(b: Box[Float]) -> Int {\n  return 1\n}\n"
-        + _box_fn("s: Box[Int]", "  return h(s)")),
     "list_argument": _BOX + (
         "fn h(xs: List[Box[Int]]) -> Int {\n  return xs.length()\n}\n"
         + _box_fn("s: List[Box[Int]]", "  return h(s)")),
@@ -3736,6 +3733,30 @@ def test_two_applied_generic_records_are_compared_by_type_argument(compile_rvl, 
     got = compile_rvl["compile_to_at"](text, tier, "x.rvl")
     assert got.startswith("REFUSED|"), got[:120]
     assert got.split("|", 2)[2] == want
+
+
+# Issue #2937: the reference refuses a `Box[Int]` where a `Box[Float]` is
+# declared (no marker converts the field, so the tiers disagreed on the
+# program), as it refuses the same nested mix in `==` (#2715). The native
+# lowering has no mirror of either refusal yet, so it still compiles the
+# program: a silent admit recorded here so it cannot read as agreement. Fails
+# the day the native chain refuses too, so the entry is removed.
+_ISSUE_2937_SILENT_ADMITS = {
+    "widening_argument": _BOX + (
+        "fn h(b: Box[Float]) -> Int {\n  return 1\n}\n"
+        + _box_fn("s: Box[Int]", "  return h(s)")),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_ISSUE_2937_SILENT_ADMITS))
+def test_nested_widening_argument_is_a_known_silent_admit(compile_rvl, name):
+    text = _ISSUE_2937_SILENT_ADMITS[name]
+    assert "only a bare value widens" in _reference_refusal(text)
+    got = compile_rvl["compile_to_at"](text, "py", "x.rvl")
+    assert not got.startswith("REFUSED|"), (
+        f"{name}: the native chain now refuses ({got[:160]!r}); if that is "
+        f"the reference's message, DELETE the entry from "
+        f"_ISSUE_2937_SILENT_ADMITS and compare bytes instead.")
 
 
 @pytest.mark.parametrize("name", sorted(_ISSUE_2403_COMPILED))

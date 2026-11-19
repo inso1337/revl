@@ -7511,9 +7511,15 @@ def _tsb_program(rng) -> str:
 
 # The family this draw once excluded — a receiver-first list transform desugars
 # to a free function and the reference refuses that undeclared NAME — is now
-# BUILT (the G1 read position, docs/design/457). The exclusion list is empty and
-# stays here so the next slice that needs one has the shape to hand.
-_TSB_LATER_SLICES: tuple[str, ...] = ()
+# BUILT (the G1 read position, docs/design/457). The list stays here so the
+# next slice that needs one has the shape to hand.
+#
+# Issue #2937: the reference refuses a value whose type nests a widening
+# (`let z: Opt[Int] = <Int32 value>`) while checking the position, before the
+# value is lowered, so it reports that where the native lowering, which does not
+# mirror the refusal yet, reports the first problem inside the value (a builtin
+# arity). The gate still must never refuse what the reference admits.
+_TSB_LATER_SLICES: tuple[str, ...] = ("only a bare value widens",)
 
 _TSB_TAGS = ("T1", "T2", "TYPE", "HOST-METHOD", "HOST-ARITY", "G1")
 
