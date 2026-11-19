@@ -3061,23 +3061,30 @@ function _jsonTypeOk(value: unknown, jsonType: string): boolean {
  *  `_json_schema_error`: primitive `type`, `const`, `enum`, `nullable`,
  *  `properties`/`required`/`additionalProperties` (bool or schema), `items`, and
  *  a discriminated `oneOf`. No `$ref` (cyclic types are refused), so the walk is
- *  finite. */
+ *  finite.
+ *
+ *  Every membership test is an OWN-key test (`Object.hasOwn`), matching the
+ *  python mirror's dict membership. `in` walks the prototype chain, so an item
+ *  key named like an `Object.prototype` member (`constructor`, `__proto__`,
+ *  `toString`, ...) would be found in a schema's `properties` though the schema
+ *  never declared it, slip past `additionalProperties: false`, and a `required`
+ *  property with such a name would be satisfied by inheritance. */
 function _jsonSchemaError(value: unknown, schema: unknown, path = '$'): string | null {
   if (typeof schema !== 'object' || schema === null) return null
   const s = schema as Record<string, unknown>
 
-  if ('const' in s) {
+  if (Object.hasOwn(s, 'const')) {
     return value === s.const ? null
       : `${path}: expected const ${JSON.stringify(s.const)}, got ${JSON.stringify(value)}`
   }
 
-  if ('enum' in s) {
+  if (Object.hasOwn(s, 'enum')) {
     const arms = (s.enum as unknown[]) ?? []
     return arms.some((a) => a === value) ? null
       : `${path}: ${JSON.stringify(value)} is not one of ${JSON.stringify(arms)}`
   }
 
-  if ('oneOf' in s) {
+  if (Object.hasOwn(s, 'oneOf')) {
     const arms = (s.oneOf as unknown[]) ?? []
     const matches = arms.filter((arm) => _jsonSchemaError(value, arm, path) === null)
     if (matches.length === 1) return null
@@ -3100,11 +3107,11 @@ function _jsonSchemaError(value: unknown, schema: unknown, path = '$'): string |
     const obj = value as Record<string, unknown>
     const props = (s.properties as Record<string, unknown>) ?? {}
     for (const name of (s.required as string[]) ?? []) {
-      if (!(name in obj)) return `${path}: missing required property ${JSON.stringify(name)}`
+      if (!Object.hasOwn(obj, name)) return `${path}: missing required property ${JSON.stringify(name)}`
     }
-    const extra = 'additionalProperties' in s ? s.additionalProperties : true
+    const extra = Object.hasOwn(s, 'additionalProperties') ? s.additionalProperties : true
     for (const key of Object.keys(obj)) {
-      if (key in props) {
+      if (Object.hasOwn(props, key)) {
         const err = _jsonSchemaError(obj[key], props[key], `${path}.${key}`)
         if (err !== null) return err
       } else if (extra === false) {
