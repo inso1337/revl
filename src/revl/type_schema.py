@@ -68,9 +68,11 @@ def admits_json_null(type_name: str | None) -> bool:
 def json_schema_for(type_name: str | None, types: dict | None = None,
                     *, validated: bool = False,
                     seen: frozenset = frozenset()) -> dict:
-    """Surface type -> JSON Schema. Records expand structurally; unknown
-    nominal types degrade to an unconstrained schema carrying the revl name
-    (honest about what the projection does not know).
+    """Surface type -> JSON Schema. Records expand structurally into CLOSED
+    objects (`additionalProperties: false`, issue #3196: a record declares its
+    members and no others, exactly as the GBNF grammar and the wire dialect
+    render it); unknown nominal types degrade to an unconstrained schema
+    carrying the revl name (honest about what the projection does not know).
 
     A payload-carrying variant renders as a DISCRIMINATED union (item 257,
     §3.2): each arm is a closed object keyed by a `tag` pinned with `const` to
@@ -139,6 +141,14 @@ def json_schema_for(type_name: str | None, types: dict | None = None,
             "properties": {n: json_schema_for(t, types, validated=validated, seen=inner_seen)
                            for n, t in fields.items()},
             "required": sorted(fields),
+            # A record declares its members and NO others. `required` alone says
+            # only which members must be present; without this a validator
+            # accepts an extra member and returns it inside the same object
+            # (issue #3196). The GBNF derivation and the wire dialect already
+            # render a record closed, so leaving this out made the validator the
+            # one derivation that did not, and a `validated` model response or
+            # tool argument could carry a member its type does not declare.
+            "additionalProperties": False,
         }
     if spec and spec.get("kind") == "variant":
         cases = spec.get("cases") or []

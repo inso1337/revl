@@ -1966,6 +1966,9 @@ def test_a_handler_lowers_to_the_slice_4_step_with_an_additive_contract():
         "properties": {"order_id": {"type": "string"},
                        "quantity": {"type": "integer"}},
         "required": ["order_id", "quantity"],
+        # issue #3196: a delivered item may not carry a member the event does
+        # not declare
+        "additionalProperties": False,
     }
 
 

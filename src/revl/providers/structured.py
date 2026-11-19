@@ -179,7 +179,8 @@ def _gemini_node(node, gaps: list):
         if extra is False:
             gaps.append("a closed object: `responseSchema` has no "
                         "`additionalProperties: false`, so extra members are "
-                        "not excluded by the decoder")
+                        "not excluded by the decoder and the response validator "
+                        "refuses them (issue #3196)")
     return out
 
 

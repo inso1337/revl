@@ -80,8 +80,13 @@ CANONICAL = '{"tag": "Final", "value": "done"}'
 #: leading space. The decoded value is IDENTICAL to CANONICAL's, so no check
 #: on the decoded value can see the difference; only a byte-level one can.
 LEADING_SPACE = ' {"tag": "Final", "value": "done"}'
-#: valid for item 257's schema (nested objects are open there) and outside
-#: the wire schema, which closes them: the differential for a json-schema claim.
+#: the same value with its members transposed: schema-valid (JSON Schema has no
+#: member order), outside the GBNF, which pins the order. This is the ONE
+#: value-observable delta left between the two derivations.
+REORDERED = '{"value": "done", "tag": "Final"}'
+#: malformed since issue #3196: the record inside the payload is closed, so
+#: item 257's schema now refuses this before any claim is judged. It used to be
+#: the json-schema claim's differential.
 EXTRA_MEMBER = ('{"tag": "ToolCalls", "value": [{"tool": "s", "args": "q", '
                 '"note": "extra"}]}')
 
@@ -160,19 +165,38 @@ def test_json_schema_mode_sends_the_wire_schema_and_claims_it(ir, fake):
     assert "grammar" not in body
 
 
-def test_a_json_schema_claim_is_what_refuses_an_unconstrained_answer(ir, fake):
-    """The differential. The same reply, twice: accepted when the adapter sent
-    no constraint, refused by name when it claimed one. A server that ignored
-    `response_format` is therefore caught rather than believed."""
+def test_an_extra_nested_member_is_malformed_with_or_without_a_claim(ir, fake):
+    """Issue #3196: the validator now closes a record, so the extra member is a
+    schema fault on both arms. The claim check runs after the schema check, so
+    it is reported as a malformed completion, not as a broken claim."""
     fake.reply_text = EXTRA_MEMBER
     plain = _host(ir, fake, structured_output="none")
-    assert _validate(ir, plain)["tag"] == "ToolCalls"
+    with pytest.raises(rt.ResponseValidationError) as unclaimed:
+        _validate(ir, plain)
+    assert not isinstance(unclaimed.value, GrammarNotHonouredError)
     assert "response_format" not in fake.requests[-1]["body"]
 
     claimed = _host(ir, fake)
-    with pytest.raises(GrammarNotHonouredError) as exc:
+    with pytest.raises(rt.ResponseValidationError) as claimed_exc:
         _validate(ir, claimed)
-    assert "not honoured" in str(exc.value)
+    assert not isinstance(claimed_exc.value, GrammarNotHonouredError)
+
+
+def test_a_gbnf_claim_is_what_refuses_a_reordered_answer(ir, fake):
+    """The differential, in the dialect that can still see it. Member order is
+    schema-valid and outside the GBNF, so the same reply is accepted when no
+    constraint was sent and refused by name when the adapter claimed one. The
+    json-schema claim cannot stand in for this: JSON Schema does not describe
+    member order, and since issue #3196 the validator refuses the extra-member
+    case on its own."""
+    fake.reply_text = REORDERED
+    plain = _host(ir, fake, structured_output="none")
+    assert _validate(ir, plain) == json.loads(REORDERED)
+    assert "response_format" not in fake.requests[-1]["body"]
+
+    claimed = _host(ir, fake, structured_output="gbnf")
+    with pytest.raises(GrammarNotHonouredError):
+        _validate(ir, claimed)
 
 
 def test_no_structured_output_without_the_runtime(ir, fake):
@@ -203,9 +227,10 @@ def test_the_claim_survives_the_async_worker_thread(ir, fake):
     """A claim is a context variable, and the request runs on a worker thread
     in a COPY of the context. The host takes the claim before handing off, so
     `validate_retry_async` still sees it: the refusal below cannot happen
-    otherwise."""
-    fake.reply_text = EXTRA_MEMBER
-    host = _host(ir, fake)
+    otherwise. The value is outside the GBNF only by member order, which is
+    schema-valid, so the claim is what makes it a named fault."""
+    fake.reply_text = REORDERED
+    host = _host(ir, fake, structured_output="gbnf")
     spec = _spec(ir, "turn_async")
 
     async def run():
@@ -215,6 +240,7 @@ def test_the_claim_survives_the_async_worker_thread(ir, fake):
 
     with pytest.raises(GrammarNotHonouredError):
         asyncio.run(run())
+    assert rt._revl_grammar_claim.get() is None
 
 
 def test_a_failed_request_does_not_leave_a_claim_behind(ir, fake):
@@ -355,12 +381,15 @@ def test_anthropic_sends_an_object_root_unwrapped(ir, fake):
 
 def test_anthropic_claims_nothing_so_its_answer_is_validated_only(ir, fake):
     """Tool input is schema-guided, not grammar-constrained, so the adapter
-    makes no claim. An answer with an extra nested member is therefore
-    accepted exactly as item 257 accepts it, where a json-schema claim would
-    have refused it: the approximation is a stated gap, not a false claim."""
+    makes no claim and the completion is validated only. Since issue #3196 the
+    validator closes a record, so an extra nested member is refused even though
+    nothing was claimed: the schema guidance is a hint, the validation is the
+    check."""
     fake.reply = _anthropic_tool_reply({"value": json.loads(EXTRA_MEMBER)})
     host = _host(ir, fake, provider="anthropic")
-    assert _validate(ir, host)["tag"] == "ToolCalls"
+    with pytest.raises(rt.ResponseValidationError) as exc:
+        _validate(ir, host)
+    assert not isinstance(exc.value, GrammarNotHonouredError)
 
 
 # --------------------------------------------------------------------------
@@ -464,15 +493,15 @@ def test_the_benchmark_measures_through_the_runtime_path(fake, capsys):
     bench = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(bench)
 
-    fake.reply_text = EXTRA_MEMBER
+    fake.reply_text = REORDERED
     assert bench.main(["--base-url", fake.base + "/v1", "--model", "fake",
-                       "--n", "1", "--arms", "none,json-schema"]) == 0
+                       "--n", "1", "--arms", "none,gbnf"]) == 0
     bodies = [r["body"] for r in fake.requests]
     assert "response_format" not in bodies[0]
-    assert "response_format" in bodies[1]
+    assert "grammar" in bodies[1]
     out = capsys.readouterr().out
     assert "| none | 1 | 1 |" in out
-    assert "| json-schema | 1 | 0 |" in out
+    assert "| gbnf | 1 | 0 |" in out
 
 
 # --------------------------------------------------------------------------
@@ -491,8 +520,8 @@ def test_revl_run_attaches_the_grammar_and_holds_the_answer_to_it(tmp_path,
                                                                   fake):
     """End to end: the emitted module registers the grammars, `revl run`
     attaches the runtime to the model host, the crossing goes out with
-    `response_format`, and an answer outside the wire schema is refused by
-    name inside the running composition."""
+    `response_format`, and an answer outside the response schema is refused
+    inside the running composition."""
     import os  # noqa: PLC0415
     import subprocess  # noqa: PLC0415
     app = tmp_path / "app.rvl"
@@ -519,8 +548,8 @@ def test_revl_run_attaches_the_grammar_and_holds_the_answer_to_it(tmp_path,
 
     fake.reply_text = EXTRA_MEMBER
     done = run()
-    assert re.search(r"error\s+\|\s+GrammarNotHonouredError\|.*stated "
-                     r"decoding grammar not honoured", done.stdout), done.stdout
+    assert re.search(r"error\s+\|\s+ResponseValidationError\|.*response "
+                     r"failed validation", done.stdout), done.stdout
 
 
 def test_the_benchmark_writes_nothing_when_the_server_never_answered(capsys):

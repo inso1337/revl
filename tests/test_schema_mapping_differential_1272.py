@@ -90,7 +90,6 @@ DOCUMENTED_DIVERGENCES = {
     "UNIT_NULL_VS_EMPTY",
     "MAP_KEY_DROPPED",
     "OPT_NULLABLE_VS_ONEOF",
-    "RECORD_OPEN_VS_CLOSED",
     "RECORD_OPT_FIELD_NOT_REQUIRED",
     "VARIANT_TAG_KEYS",
 }
@@ -180,10 +179,10 @@ def _walk(surface, inline, openapi, path, observed, exporter):
             assert schema.get("type") == "object", f"{path}: {name} {schema!r}"
             assert set(schema.get("properties", {})) == set(fields), \
                 f"{path}: {name} properties {sorted(schema['properties'])}"
-        # the OpenAPI document closes the object; the inline fragment does not
-        assert "additionalProperties" not in inline, f"{path}: {inline!r}"
-        assert openapi.get("additionalProperties") is False, f"{path}: {openapi!r}"
-        observed.add("RECORD_OPEN_VS_CLOSED")
+            # both mappings close a record: the inline fragment did not until
+            # issue #3196, which is why this used to be a divergence
+            assert schema.get("additionalProperties") is False, \
+                f"{path}: {name} {schema!r}"
         # the inline fragment requires every field (absence is not nullability);
         # the OpenAPI document drops a bare-`Opt` field from `required`
         assert inline.get("required") == sorted(fields), f"{path}: {inline!r}"

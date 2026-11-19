@@ -317,13 +317,14 @@ def test_the_dialect_corpus_is_not_one_sided():
     assert verdicts.count(False) == 9
 
 
-def test_the_wire_schema_closes_a_nested_record_the_validator_leaves_open():
-    """The reason the rewrite exists. Item 257's schema closes only the variant
-    arms, so a chatty extra member inside a `Call` validates; the GBNF does not
-    admit it. Handing a provider the un-rewritten schema would let an HONOURING
-    provider produce a value outside the grammar revl stated."""
+def test_a_nested_record_is_closed_in_the_validator_and_in_the_wire_schema():
+    """The rewrite still closes an object with `properties`, and the record
+    branch of `json_schema_for` now closes a record too (issue #3196), so the
+    validator refuses a chatty extra member before any claim is judged. The
+    rewrite therefore restates closure for the wire dialect rather than repairing
+    it; it stays so the dialect cannot depend on the validator's derivation."""
     chatty = {"tag": "ToolCalls", "value": [{"tool": "a", "args": "b", "why": "c"}]}
-    assert rt._json_schema_error(chatty, SCHEMA, "$") is None
+    assert rt._json_schema_error(chatty, SCHEMA, "$") is not None
     wire = json_schema_grammar_for(SCHEMA)["schema"]
     assert rt._json_schema_error(chatty, wire, "$") is not None
     assert not accepts(ENTRY["text"], json.dumps(chatty))
@@ -366,21 +367,40 @@ def test_the_json_schema_dialect_promises_no_member_order():
     assert validate_response(REORDERED, SCHEMA, "w", None, KEY) == REORDERED
 
 
-def test_a_json_schema_claim_is_judged_against_the_artifact_it_was_handed():
-    """The residue that skipping would have been fail-open. The wire schema is
-    strictly tighter than the one item 257 validates against, so a completion
-    that passes the validator can still be outside what the provider took."""
+def test_a_chatty_record_is_refused_by_the_validator_before_any_claim():
+    """Issue #3196 removed the residue this test used to pin. The wire schema is
+    no longer strictly tighter than the one item 257 validates against, because
+    the record branch now closes a record too: a chatty member inside a `Call`
+    is a malformed completion whether or not a provider claimed anything, and the
+    schema check runs FIRST, so it is never reported as a broken claim."""
     chatty = {"tag": "ToolCalls", "value": [{"tool": "a", "args": "b", "why": "c"}]}
-    # nobody claimed: accepted, exactly as before this slice
-    assert validate_response(chatty, SCHEMA, "w", None, KEY) == chatty
-    # a json-schema claim: refused, because the wire schema closes that record
+    # no claim: refused by the validator itself
+    with pytest.raises(ResponseValidationError) as unclaimed:
+        validate_response(chatty, SCHEMA, "w", None, KEY)
+    assert not isinstance(unclaimed.value, GrammarNotHonouredError)
+    for dialect in ("json-schema", "gbnf"):
+        revl_constrain(KEY, (dialect,))
+        with pytest.raises(ResponseValidationError) as claimed:
+            validate_response(chatty, SCHEMA, "w", None, KEY)
+        # the schema fault named first, not the false claim
+        assert not isinstance(claimed.value, GrammarNotHonouredError), dialect
+
+
+def test_a_json_schema_claim_is_judged_against_the_wire_artifact_it_names():
+    """The claim is checked against the artifact the provider was handed, not
+    merely against the schema the validator holds. The two derivations agree at
+    value level since issue #3196, so the check is exercised here with a wire
+    schema registered deliberately tighter than the value: the claim names that
+    artifact and the value is outside it."""
+    wire = json_schema_grammar_for(SCHEMA)
+    stricter = dict(wire)
+    stricter["schema"] = {"type": "object", "required": ["also"]}
+    register_grammars({KEY: {**ENTRY, "wire_schema": stricter}})
     revl_constrain(KEY, ("json-schema",))
+    # the value passes the validator's schema; it is outside the named artifact
+    assert rt._json_schema_error(CANONICAL, SCHEMA, "$") is None
     with pytest.raises(GrammarNotHonouredError):
-        validate_response(chatty, SCHEMA, "w", None, KEY)
-    # and a gbnf claim refuses it too, for the same reason in the other dialect
-    revl_constrain(KEY, ("gbnf",))
-    with pytest.raises(GrammarNotHonouredError):
-        validate_response(chatty, SCHEMA, "w", None, KEY)
+        validate_response(CANONICAL, SCHEMA, "w", None, KEY)
 
 
 def test_the_second_dialect_adds_no_ir():

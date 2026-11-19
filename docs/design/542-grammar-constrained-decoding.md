@@ -689,11 +689,15 @@ disagree:
   3.0 keyword and not a JSON Schema one. A converter that does not know it drops
   it, and the resulting constraint cannot emit `null` at all -- a narrowing of an
   `Opt` that refuses the one value the author wrote the `Opt` for.
-* an object with `properties` is closed and every property is required. Item
-  257's schema closes only the variant arms, so a chatty extra member *inside* a
-  nested record validates while the GBNF does not admit it. Handing a provider
-  the un-rewritten schema would let an **honouring** provider produce a value
-  outside the grammar revl stated, which is the worst of the available bugs.
+* an object with `properties` is closed and every property is required. When
+  this slice landed item 257's schema closed only the variant arms, so a chatty
+  extra member *inside* a nested record validated while the GBNF did not admit
+  it, and handing a provider the un-rewritten schema would have let an
+  **honouring** provider produce a value outside the grammar revl stated. Issue
+  #3196 closed the record branch too; the rewrite now restates closure for the
+  wire dialect instead of repairing it, and stays because the dialect is derived
+  from the schema and must not depend on the validator's derivation being
+  closed.
 * `contentEncoding: base64` is dropped and the node stays a plain string. This
   is the one place the dialects genuinely differ: a `Bytes` field is
   base64-constrained under `gbnf` and merely string-constrained under
@@ -718,15 +722,16 @@ describe member order**, so a provider that honoured exactly what it was handed
 may legitimately return members in any order. Holding it to the GBNF's ordering
 would be the same false reject section 5 refuses.
 
-There is still a residue, and skipping it would have been fail-open. The artifact
-a `json-schema` provider was handed is the **wire** schema of section 10.2, which
-is strictly tighter than the one item 257 validates against: it closes the nested
-objects 257 leaves open and requires every member. So a `json-schema` claim is
-judged against the artifact that was actually handed over, not against the looser
-schema the validator happens to use. Concretely, a chatty extra member inside a
-nested record passes item 257's validator, is outside the GBNF, and is outside
-the wire schema -- so it is accepted from a provider that claimed nothing and
-refused from one that claimed either dialect.
+A `json-schema` claim is judged against the artifact the provider was actually
+handed: the **wire** schema of section 10.2, not merely the schema item 257
+validates against. When this slice landed that distinction was fail-open: the
+wire schema closed nested records that 257 left open, so a chatty extra member
+inside a nested record passed the validator and was refused only from a provider
+that had claimed a dialect. Issue #3196 closed the record branch of the derived
+schema, so the two derivations now agree at value level and such a member is a
+malformed completion whether or not a claim was made (the schema check runs
+first, so it is reported as malformed rather than as a broken claim). The wire
+check stays as a check of the named artifact rather than as a stricter residue.
 
 What the `json-schema` dialect does *not* buy is the member order, which is the
 only part of the GBNF's language that the wire schema cannot express. A reader
