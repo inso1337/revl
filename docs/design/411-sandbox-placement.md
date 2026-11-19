@@ -383,6 +383,18 @@ Per rung:
   directory already relies on (`docs/interop-bridge.md`, "Who may call
   across a seam"). The seam mount is exempt from the `fs` grant by
   construction: it IS the composition channel, not a filesystem capability.
+  Beyond the envelope the driver mounts the composition's own COMPILE INPUTS,
+  each as one read-only file bind mount: its roots, every `use` dependency and
+  every host file a `ref`, `asset` or `@backend file` body read. It never
+  mounts the conductor's working directory or a source file's parent
+  directory. Such a directory mount hands the body every file beside the
+  composition (an operator's home, a project root holding `.env` or
+  credentials) regardless of what `fs` declared, which is wider than the
+  envelope and therefore not the boundary the manifest claims. The roots are
+  resolved to absolute in the conductor before launch, so the in-boundary
+  recompile (item 337) needs no working-directory mount, and a driver-added
+  directory mount that covers the operator's home or a declared grant is
+  refused at preflight rather than handed to the body.
 - **microVM.** No shared filesystem by default, so the UDS variant is out;
   the seam crosses the VM's virtio network as TCP+mTLS, which is item 56's
   existing transport with the conductor minting per-process identities
@@ -769,7 +781,10 @@ is a translation layer at the three existing seams:
   command. Container: `docker run --rm -i --name revl_<placement>_<p>
   --user <uid> --network=none --read-only --cap-drop=ALL <mounts>
   <platform> <image> <tier command>`, with the flag set derived from the
-  envelope and printed. The `docker run` CLIENT is the conductor's child
+  envelope and printed; `<mounts>` is the declared grants, the process's own
+  spec and seam identity, and the compile-input FILES (never a directory that
+  holds them) with no working-directory mount. The `docker run` CLIENT is the
+  conductor's child
   process: stdout pumps through the existing `pump` thread (UP/DOWN/
   REPOINTED lines unchanged), stdin gives the rust stop mode a path, and
   signal proxying makes `_stop_all`'s terminate reach the runner inside.
