@@ -1,4 +1,4 @@
-# `revl fmt` — a formatter that proves itself
+# `revl fmt`: a formatter that proves itself
 
 `revl fmt <files>` produces a **canonical formatting** of revl source. Because
 agents write most revl and humans review the diffs, diff noise is a cost paid
@@ -75,10 +75,10 @@ baseline exists.
 
 `fmt` lexes the original and the formatted text with the compiler's own lexer
 (`revl.lexer.lex`) and compares the resulting `(kind, value)` streams. Line
-numbers are excluded — the formatter collapses blank lines, and nothing
-downstream of the parser reads a line number — and everything else is compared
-exactly. Two sources with the same stream parse identically and therefore
-compile identically, so this is a proof, not a heuristic.
+numbers are excluded because the formatter collapses blank lines. Nothing
+downstream of the parser reads them, so everything else is compared exactly.
+Two sources with the same stream parse identically and therefore compile
+identically, so this is a proof, not a heuristic.
 
 It is also fail-closed at every step: an original that does not lex, an output
 that does not lex, or two streams that differ are each a **refusal**.
@@ -97,9 +97,9 @@ For each file `fmt` also computes:
 2. `ir_after  = compile(formatted)`
 
 and canonicalises each IR document (`json.dumps(..., sort_keys=True)`) to a
-byte string. IR carries no source line numbers, so re-indentation — which
-shifts every line — does not perturb it; a difference means the rewrite
-reached something the compiler lowers.
+byte string. IR carries no source line numbers, so re-indentation can shift
+every line without perturbing it. A difference means the rewrite reached
+something the compiler lowers.
 
 When the file is on disk, both compiles go through `compile_files` with the
 text supplied in memory, so `use` imports **resolve** and the formatted
@@ -110,10 +110,10 @@ rewrites through.
 
 | Original | Formatted | Verdict |
 |----------|-----------|---------|
-| any | tokens differ, or either side does not lex | **refused** — before anything else is tried |
-| compiles | compiles, same IR | **admitted** — IR byte-identical (the headline proof) |
+| any | tokens differ, or either side does not lex | **refused** immediately; no later check is tried |
+| compiles | compiles, same IR | **admitted** with byte-identical IR (the headline proof) |
 | compiles | compiles, different IR | **refused** for a canonical format (the IR changed). **Admitted** under `--migrate`, whose whole job is that rewrite |
-| compiles | fails to compile | **refused** — rewrite broke compilation |
+| compiles | fails to compile | **refused** because the rewrite broke compilation |
 | does not compile (rejection example, unresolvable import) | — | **admitted** on the lexer token identity proven above |
 | fails (1.x legacy `$`) | compiles | `--migrate` admits it as **newly admissible** |
 
@@ -127,9 +127,9 @@ check. A weakened check is never silent.
 
 Any rewrite that alters compiled meaning: a changed identifier or literal, a
 regrouped expression, a dropped or reordered statement, a mis-scanned literal.
-The formatter is designed never to do these, but the gate is what makes that a
-*proof* per file rather than a claim — and it is exactly the check a future,
-more aggressive formatting pass (or migration) must pass before it ships.
+The formatter is designed never to do these. The gate turns that design into a
+per-file *proof*, and a future, more aggressive formatting pass (or migration)
+must pass the same check before shipping.
 
 ## How comments survive without touching the parser
 
@@ -149,8 +149,8 @@ silent meaning change.
 
 Reproducing those spans byte-for-byte, plus the fact that the only
 whitespace the lexer treats as significant is the space separating two adjacent
-word tokens, is what lets the formatter normalise everything else while the
-gate confirms — for real, per file — that nothing changed.
+word tokens, lets the formatter normalise all other whitespace. The gate then
+confirms per file that the output is unchanged.
 
 ### Documented limitation
 
