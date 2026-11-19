@@ -108,6 +108,17 @@ def _run_query(args, ir: dict) -> int:
     handler = QUERIES[args.query_command]
     if args.query_command == "drift":
         result = handler(ir, args.target, gains=args.gains, losses=args.loses)
+    elif args.query_command == "authority":
+        previous = None
+        if getattr(args, "diff", None):
+            try:
+                with open(args.diff, encoding="utf-8") as handle:
+                    previous = json.load(handle)
+            except (OSError, ValueError) as error:
+                print(f"error: cannot read --diff {args.diff}: {error}",
+                      file=sys.stderr)
+                return 1
+        result = handler(ir, args.target, previous=previous)
     else:
         result = handler(ir, args.target)
 

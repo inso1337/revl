@@ -1096,6 +1096,8 @@ def build_parser() -> argparse.ArgumentParser:
          "the transitive boundary surface of one component"),
         ("drift", "SERVICE",
          "which providers and call sites a service interface change implicates"),
+        ("authority", "CAPABILITY",
+         "which model roles can reach a capability, and the authority graph"),
     ):
         sub_cmd = query_sub.add_parser(name, help=helptext)
         sub_cmd.add_argument("target", metavar=metavar)
@@ -1119,6 +1121,11 @@ def build_parser() -> argparse.ArgumentParser:
             sub_cmd.add_argument("--loses", action="append", default=[],
                                  metavar="METHOD",
                                  help="a method the service would lose (repeatable)")
+        if name == "authority":
+            sub_cmd.add_argument(
+                "--diff", metavar="PREV.json", default=None,
+                help="report the authority edges this update adds to PREV.json "
+                     "(a previous `revl query authority --json` result)")
 
     # historical mode (docs/queries.md §9): the same envelope, over a RECORDED
     # run instead of a static IR. These read files, not source, so they sit

@@ -144,7 +144,7 @@ regenerated rather than edited.
 | providers-ollama.md | current | 0 | written with issue #1189 (item 515 S2) |
 | providers-openai-compatible.md | current | 0 | written with issue #1461 |
 | quarantine-tier.md | needs-work | 25 |  |
-| queries.md | needs-work | 43 |  |
+| queries.md | needs-work | 45 |  |
 | records.md | needs-work | 15 |  |
 | registry-probe.md | needs-work | 14 |  |
 | registry.md | needs-work | 47 | yes |

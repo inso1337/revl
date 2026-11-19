@@ -1,8 +1,10 @@
 # Composition queries — ask the audit, don't just read it
 
-**Status:** implemented — `revl query {emits-to,withdraw,depends-on,reaches,drift}`,
+**Status:** implemented — `revl query {emits-to,withdraw,depends-on,reaches,drift,authority}`,
 `src/revl/query.py`, MCP tools `revl_query_*` (`src/revl/mcp/query_tools.py`).
-Tests: `tests/test_query.py` over `tests/fixtures/query_mesh.rvl`. Three time
+Tests: `tests/test_query.py` over `tests/fixtures/query_mesh.rvl`; the
+authority graph has its own `tests/test_authority.py` over
+`tests/fixtures/authority_mesh.rvl`. Three time
 modes (§9): the same verbs and envelope answered against the static IR, the
 live session (post-swap), or a recorded run — `revl_live_query`,
 `revl_history_*`, `revl query {emitted-between,touched}`, tests in
@@ -19,6 +21,7 @@ is the right shape for a review and the wrong shape for a refactor. An author
 | who depends on `cache` / on `Database`? | `depends-on` | `query.dependents` |
 | what does `UserCache` reach? | `reaches` | `query.reach` |
 | what if `Database` loses `execute`? | `drift` | `query.drift` |
+| which model role can reach `payments.charge`? | `authority` | `query.authority` |
 
 ```bash
 revl query emits-to  host_write  tests/fixtures/query_mesh.rvl
@@ -82,6 +85,7 @@ will not have read this file. Two values:
 | `depends-on` | **exact** | `requires`/`provides` are declarations (G1) |
 | `reaches` | over-approximation | may-analysis, and see §6 |
 | `drift` | **exact** | providers and call sites are enumerable |
+| `authority` | over-approximation | crossing edge is a may-analysis; route, declaration and binding edges are exact (each edge carries its own) |
 
 ## 3. `emits-to` — who emits to X?
 
@@ -221,7 +225,8 @@ change that still type-checks can still be wrong.
 ## 8. MCP
 
 `revl_query_emitters`, `revl_query_withdraw`, `revl_query_dependents`,
-`revl_query_reach`, `revl_query_drift` — all `readOnlyHint: true`, all
+`revl_query_reach`, `revl_query_drift`, `revl_query_authority` — all
+`readOnlyHint: true`, all
 accepting `source` (inline, never written to disk), `files` or `modules`
 exactly as the rest of the bridge does, so an agent can query a composition
 that has never existed as a file. The tool descriptions lead with the question
@@ -234,7 +239,7 @@ read-only half of a change the gate would otherwise refuse.
 
 ## 9. One query surface, three time modes
 
-The five verbs and the envelope above answer against the **static IR** — the
+The verbs in §3-§7 and the envelope above answer against the **static IR** — the
 composition as compiled from source. But two of the envelope's own stated
 `assumptions` name worlds the static IR is *not*: "a hot swap changes which
 body a service call lands in" and "only components in this IR are considered".
@@ -333,3 +338,114 @@ The point is that `precision` and `assumptions` were already the fields that
 distinguished these worlds, so adding modes needed no second vocabulary: a
 result says which world it answers for, and an agent reading it knows whether
 it holds a proof, a may-analysis, or a log.
+
+## 10. `authority` — which model role can reach a capability?
+
+The per-composition queries answer what a component reaches. The operator of
+several compositions has a different question: **who** can reach a capability,
+where "who" includes the model roles a component routes its decisions through.
+`revl query authority <CAPABILITY> <files...>` joins what the audit already
+proves into one graph:
+
+| node | meaning |
+|---|---|
+| `role:<name>` | a declared model role, with its residence and declared reach |
+| `component:<name>` | a component of the composition |
+| `service:<name>` | a service whose operation a component can cross |
+| `capability:<token>` | a capability token a crossing or a secret carries |
+| `secret:<name>` | a secret bound to a capability |
+
+| edge | source | precision |
+|---|---|---|
+| `role -> component` (`routes`) | the component routes through the role (`manifest.model_reach`) | exact |
+| `role -> capability` (`steers`) | a capability the routed component holds that the role's reach covers (`holds` minus `attenuated` in the same row; every held capability for a role with no declared reach) | exact |
+| `component -> service` (`crosses`) | the audit's boundary surface, folded across the service seam | over-approximation |
+| `component -> capability` (`host`) | host code the component itself reaches: an extern's declared scope, or its own name when it declares none | over-approximation |
+| `component -> capability` (`emits`) | a crossing through a key nothing in this composition provides, which the audit still enumerates | over-approximation |
+| `service -> capability` (`declares`) | the service method's declared `emission[<token>]` | exact |
+| `secret -> capability` (`binds`) | the secret's declared binding | exact |
+
+A role reaches a capability when an admitted path exists: `role -> component ->
+service -> capability`, `role -> component -> capability` for a host extern, or
+`role -> capability` for a capability the component holds. The answer gives every
+such role one witness path, shortest and lexicographically first, so two runs
+report the same witness. A path through the component's own audit surface is
+the witness when one exists; `steers` answers only when no audited crossing
+does, so a role is not left out for a capability its component holds and does
+not emit at the moment. The result also carries the full graph, the edge records
+along each witness (`hops`, naming the extern or the component), and the secrets
+bound to the target capability (the secrets a role on a path could receive).
+
+```bash
+```bash
+revl query authority  payments.charge  tests/fixtures/authority_mesh.rvl
+revl query authority  payments.charge  tests/fixtures/authority_mesh.rvl --json
+```
+
+An unknown capability is a miss with the known names, like every other verb.
+
+**The unnameable boundary.** A bare `emission` and a first-class dispatch reach
+a boundary no token names, which the audit and the checker spell `*`. The graph
+keeps it as `capability:*`. A role that reaches it is listed for every capability
+asked about, with `unnameable: true` and its path to `*`, because the checker
+proves a crossing exists and cannot say which capability it carries; a named
+path wins when a role has both. An unknown capability is not an answer either:
+the roles that reach `*` are returned with the miss (`unnameableRoles`), so
+`unknown capability` never reads as "no role reaches it".
+
+**Precision.** The answer is always `over-approximation`: the walk is a
+may-analysis whatever the edge mix, and an empty `roles` list means no admitted
+path the checker enumerates, not a proof that none exists. Each edge and each
+witness carries its own `precision`.
+
+**What the graph does not see.** It reports what the checker proves and never a
+predicted behaviour:
+
+- Host extern bodies are opaque. A `pure` extern is classified as reaching
+  nothing and is not an edge, and an extern whose host code crosses a boundary
+  it did not declare is invisible, as in every query here.
+- Services join by name and capabilities by token. Two realms that provide one
+  service are one `service:` node, so a role in either realm reaches what that
+  service declares; realm and `isolate` placement are not modelled.
+- A `component -> service` edge covers every method the service declares, not
+  only the one a call site names, so a role can be listed for a capability of a
+  sibling method of a service its component crosses.
+- A model role that declares no `reaches [...]` is recorded as `opaque` and may
+  steer everything its component holds; it is never assumed to reach nothing.
+- Only components in the compiled composition are considered. A `use` module is
+  compiled with the composition and is part of it. A spawn template is a
+  component of the composition: a role that steers it is on the graph, and a
+  capability it holds is reached by `steers` even when its spawner never calls
+  it.
+- Which compositions a federation pin joins is not modelled yet (the second
+  slice of issue #2702).
+
+### 10.1 `--diff` — which pending update widens authority?
+
+Adding authority is the direction that needs review. `--diff PREV.json` takes
+a previous `authority` result and reports the edges the new generation adds
+and removes, which is the graph form of the `revl audit --diff` gate:
+
+```bash
+revl query authority payments.charge tests/fixtures/authority_mesh.rvl --json > prev.json
+revl query authority payments.refund tests/fixtures/authority_mesh_updated.rvl --json --diff prev.json
+```
+
+An added service operation that declares a new capability token adds the
+`service -> capability` edge, and the roles whose reach now names it add a
+`steers` edge, so the widening is visible both in `diff.added` and in the
+`roles` answer.
+
+Authority can widen without an edge being added, so the diff also reports
+`diff.changed`, one row per change with `before`, `after` and `widened`:
+
+| change | `widened` |
+|---|---|
+| an edge's `precision` moved from `exact` to `over-approximation` | true |
+| a role stopped declaring its reach (`opaque` became true) | true |
+| a role's declared `reaches` gained a token | true |
+| a role's `residence` moved to `off_device` | true |
+| the opposite moves (a tighter proof, a declared reach, a smaller reach, back on the device) | false |
+
+`diff.widened` is the one-bit summary: true when the update adds any edge or any
+`changed` row widens. A tightening is reported and never fails the gate.
