@@ -8846,7 +8846,7 @@ fn emit_bridge(ir: Value) -> Vec<String> {
             let mut plist: Vec<String> = vec![];
             let mut argv: Vec<String> = vec![];
             for p in params.clone() {
-                let pname = value_str(value_field(p.clone(), String::from("name")));
+                let pname = value_ident(value_str(value_field(p.clone(), String::from("name"))));
                 let pty = rust_type_t(value_field(p.clone(), String::from("type")), tnames.clone());
                 plist.push(format!("{}: {}", pname, pty));
                 argv.push(bridge_arg_ser(&pname, pty.clone()));
