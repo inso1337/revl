@@ -18,15 +18,15 @@ python mirror on the same schema and items.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
+
+from _load_by_path import load_by_path
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT / "backends" / "typescript" / "runtime.ts"
@@ -151,11 +151,7 @@ def test_ts_admits_exactly_what_the_schema_declares(ts_results, name):
 
 @pytest.mark.parametrize("name", sorted(CASES))
 def test_python_mirror_agrees_with_the_ts_verdict(ts_results, name):
-    spec = importlib.util.spec_from_file_location(
-        "py_runtime_3210", ROOT / "backends" / "python" / "runtime.py")
-    py_runtime = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = py_runtime
-    spec.loader.exec_module(py_runtime)
+    py_runtime = load_by_path("py_runtime_3210", ROOT / "backends" / "python" / "runtime.py")
 
     schema, raw, expected = CASES[name]
     err = py_runtime._json_schema_error(json.loads(raw), schema)
