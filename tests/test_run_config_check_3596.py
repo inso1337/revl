@@ -8,9 +8,9 @@ undeclared one was ignored. A required field (no default) of a component no
 composition row places was refused by `revl run`'s preflight but loaded in a
 session, and then failed at activation with a bare `AttributeError`.
 
-The refusal and folding tests fail on the base commit. Two pass there and pin
-what stays: a correct table still plans, and `revl run`'s own required-config
-preflight keeps its message.
+The refusal and folding tests fail on the base commit. Three pass there and
+pin what stays: a correct table still plans, `revl run`'s own required-config
+preflight keeps its message, and a config-less session load still loads.
 """
 from __future__ import annotations
 
@@ -203,3 +203,23 @@ def test_a_config_less_session_load_with_a_required_field_still_loads():
         assert session._driver is not None
     finally:
         session.unload()
+
+
+@needs_cordis
+@pytest.mark.parametrize("config, expected", [
+    ({"SqliteDatabase": {"pool": 5}},
+     "component `SqliteDatabase` is missing required config `url` (`Str`)"),
+    ({"SqliteDatabase": {"url": "u", "pool": "big"}},
+     "config field `pool` of component `SqliteDatabase` is declared `Int`"),
+])
+def test_the_gauntlet_grades_a_refused_host_config_instead_of_raising(
+        config, expected):
+    """`gauntlet.run` promises a graded dossier, never a raised error: a host
+    config the scratch load refuses is reported as an unavailable lifecycle."""
+    from revl.mcp import gauntlet
+    from revl.mcp.session import Session
+    dossier = gauntlet.run(Session(), {"source": MODULE, "config": config})
+    lifecycle = dossier["tested"]["lifecycle"]
+    assert lifecycle["status"] == "unavailable"
+    assert lifecycle["ran"] is False
+    assert expected in lifecycle["reason"]
