@@ -1612,6 +1612,9 @@ def recover_shared_grants(wal: dict, *, wal_path: Optional[str],
                            "other-generation": f"{note}; not attempted",
                            "would-reactivate": _reactivation_note(
                                world, inverse) + "; not attempted",
+                           "undeclared": "the inverse is not declared as an "
+                                         "inverse or compensation of this "
+                                         "composition; not attempted",
                        }.get(state, "the inverse names no host body in this "
                                     "composition binding; not attempted")},
                 fenced_unknown=state == "fenced"))
@@ -1970,6 +1973,8 @@ def _reissue_through_binding(wal_path: Optional[str], world: World,
                              + "; not fired", "generation-residue"),
         "would-reactivate": (f"{named}: {_reactivation_note(world, call)}; "
                              "not fired", "reactivation-residue"),
+        "undeclared": (f"{named}: not declared as a deferred emission of this "
+                       "composition; not fired", "unresolved-residue"),
     }.get(state, (f"{named}: names no host body in this composition binding; "
                   "not fired", "unresolved-residue"))
     return {"outcome": "failed", "seq": seq, "referent": referent,

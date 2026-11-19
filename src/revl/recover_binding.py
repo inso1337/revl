@@ -48,11 +48,12 @@ def _replay_module():
     return replay_module()
 
 
-def _open_calls(records: list) -> dict:
-    """``{seq: call}`` for every call the binding could still be asked to
-    make: a discharge descriptor, or a legacy boundary effect with a
-    reconstructible inverse op. A seq named in a `discharge` or `aborted`
-    record is settled and needs nothing."""
+def _open_records(records: list) -> dict:
+    """``{seq: (kind, call)}`` for every call the binding could still be asked
+    to make: a discharge descriptor, a deferred emission, or a legacy boundary
+    effect with a reconstructible inverse op (``kind`` is the record kind). A
+    seq named in a `discharge` or `aborted` record is settled and needs
+    nothing."""
     from .wal import settled_descriptor_seqs  # noqa: PLC0415
     settled = settled_descriptor_seqs(records)
     from .wal import seqs_of  # noqa: PLC0415
@@ -63,11 +64,16 @@ def _open_calls(records: list) -> dict:
         if seq in settled:
             continue
         if r.get("record") in ("discharge-descriptor", "deferred-emission"):
-            calls[seq] = r.get("call") or {}
+            calls[seq] = (r["record"], r.get("call") or {})
         elif r.get("record") == "effect" \
                 and (r.get("inverse") or {}).get("reconstructible"):
-            calls[seq] = (r.get("inverse") or {}).get("op") or {}
+            calls[seq] = ("effect", (r.get("inverse") or {}).get("op") or {})
     return calls
+
+
+def _open_calls(records: list) -> dict:
+    """``{seq: call}`` for the calls `_open_records` lists."""
+    return {seq: call for seq, (_kind, call) in _open_records(records).items()}
 
 
 #: The inverses the runtime registers itself, which no IR node spells: a
@@ -104,6 +110,30 @@ def declared_inverses(ir: dict) -> dict:
                 walk(item)
     walk(ir)
     return {name: frozenset(entries) for name, entries in declared.items()}
+
+
+def declared_deferred(ir: dict) -> frozenset:
+    """``{(receiver, method)}`` for every deferred emission the composition
+    declares: a ``deferred`` extern, which the emitter enqueues under its own
+    name as both receiver and method (issue #3234). This is the whole set of
+    calls a ``deferred-emission`` record may name."""
+    from .session_commit import deferred_extern_names  # noqa: PLC0415
+    return frozenset((name, name) for name in deferred_extern_names(ir)
+                     if isinstance(name, str))
+
+
+def undeclared_deferred(deferred: frozenset, descriptor: dict) -> bool:
+    """Whether a ``deferred-emission`` ``descriptor`` names a call the
+    composition does not declare as a deferred extern (issue #3234)."""
+    call = descriptor.get("call") or {}
+    return (call.get("receiver"), call.get("method")) not in deferred
+
+
+def undeclared_inverse(declared: dict, call: dict) -> bool:
+    """Whether ``call`` (a `shared` grant's inverse) names a call the
+    composition does not declare as an inverse or a compensation (issue
+    #3234). A grant carries no `entry`, so only the name is checked."""
+    return (call.get("receiver"), call.get("method")) not in declared
 
 
 def undeclared_call(declared: dict, descriptor: dict) -> bool:
@@ -225,7 +255,7 @@ class CompositionWorld(World):
                  foreign: Optional[dict] = None,
                  foreign_handles: Optional[dict] = None,
                  refused: Optional[dict] = None,
-                 declared: dict) -> None:
+                 declared: dict, deferred: frozenset = frozenset()) -> None:
         self.files = list(files)
         self.digest = digest
         self.module = module
@@ -248,6 +278,9 @@ class CompositionWorld(World):
         #: (receiver, method) -> entries, see `declared_inverses`: the only
         #: calls a discharge descriptor is handed to the runtime for
         self.declared = dict(declared)
+        #: {(receiver, method)}, see `declared_deferred`: the only calls a
+        #: `deferred-emission` record is re-fired for
+        self.deferred = frozenset(deferred)
 
     def describe(self) -> dict:
         """What the verdict says about the binding it ran through."""
@@ -305,6 +338,13 @@ class CompositionWorld(World):
         (`runtime.reissue_deferred`): `flushed` or `flush-residue` per seq. A
         declined call is not fired."""
         mine, outcome = self._calls(descriptors)
+        # issue #3234: the runtime resolves the call's name to any callable
+        # the emitted module binds, so a record naming anything but a deferred
+        # extern the composition declares is refused here, never fired
+        for descriptor in [d for d in mine
+                           if undeclared_deferred(self.deferred, d)]:
+            mine.remove(descriptor)
+            outcome[descriptor.get("seq")] = "undeclared"
         if mine:
             outcome.update(self.runtime.reissue_deferred(
                 self.module, self.wal_path, mine, services=self.services))
@@ -317,6 +357,11 @@ class CompositionWorld(World):
         mine, outcome = self._split(
             grants, lambda g: g.get("handle"),
             lambda g: (g.get("inverse") or {}).get("receiver"))
+        # issue #3234: a grant's inverse is a call the composition declares
+        for grant in [g for g in mine
+                      if undeclared_inverse(self.declared, g.get("inverse") or {})]:
+            mine.remove(grant)
+            outcome[grant.get("handle")] = "undeclared"
         if mine:
             outcome.update(self.runtime.reclaim_shared(
                 self.module, self.wal_path, mine, services=self.services))
@@ -455,16 +500,35 @@ def emit_unactivated(ir: dict, config: dict, cleanup: list) -> tuple:
     return module, runtime
 
 
-def open_keys(wal: dict, foreign: dict, grants: dict, foreign_handles: dict) -> set:
+def open_keys(wal: dict, foreign: dict, grants: dict, foreign_handles: dict, *,
+              declared: Optional[dict] = None,
+              deferred: Optional[frozenset] = None) -> set:
     """The required-service keys this composition's open calls and open
-    `shared` grants call through."""
+    `shared` grants call through.
+
+    With ``declared`` (`declared_inverses`) and ``deferred``
+    (`declared_deferred`), a call or grant naming a call the composition does
+    not declare counts for no key: the binding refuses it (`undeclared`), so it
+    must not make recover boot a provider either (issue #3234)."""
+    checked = declared is not None
+    deferred = deferred or frozenset()
+
+    def named(kind: str, call: dict) -> bool:
+        name = (call.get("receiver"), call.get("method"))
+        if not checked:
+            return True
+        return name in deferred if kind == "deferred-emission" else name in declared
+
     keys = {call.get("receiver")
-            for seq, call in _open_calls(wal["records"]).items()
-            if seq not in foreign and call.get("receiver") is not None}
+            for seq, (kind, call) in _open_records(wal["records"]).items()
+            if seq not in foreign and call.get("receiver") is not None
+            and named(kind, call)}
     keys |= {(g.get("inverse") or {}).get("receiver")
              for h, (g, _seg) in grants.items()
              if h not in foreign_handles
-             and (g.get("inverse") or {}).get("receiver") is not None}
+             and (g.get("inverse") or {}).get("receiver") is not None
+             and (not checked
+                  or undeclared_inverse(declared, g.get("inverse") or {}) is False)}
     return keys
 
 
@@ -567,7 +631,9 @@ def bind(files: list, wal_path: str, *, config: Optional[dict] = None) -> Compos
     config = dict(config or {})
     cleanup: list = []
     module, runtime = emit_unactivated(ir, config, cleanup)
-    keys = open_keys(wal, foreign, grants, foreign_handles)
+    declared, deferred = declared_inverses(ir), declared_deferred(ir)
+    keys = open_keys(wal, foreign, grants, foreign_handles,
+                     declared=declared, deferred=deferred)
     refused = reactivation_refusals(ir, keys)
     try:
         session, booted, services = boot_providers(
@@ -581,4 +647,4 @@ def bind(files: list, wal_path: str, *, config: Optional[dict] = None) -> Compos
                             services=services, booted=booted,
                             provider_session=session, cleanup=cleanup,
                             foreign=foreign, foreign_handles=foreign_handles,
-                            refused=refused, declared=declared_inverses(ir))
+                            refused=refused, declared=declared, deferred=deferred)
