@@ -107,9 +107,14 @@ from `bigint.toString()`, **not** via a `Number()` cast: a cast would silently
 round any value past `Number.MAX_SAFE_INTEGER` (2^53), and revl `Int` is i64, so
 values up to `9223372036854775807` are in range and must round-trip exactly.
 Mechanically, the replacer parks each bigint behind a quoted sentinel
-(`"@@revlBigInt:<n>@@"`) and the enclosing body then strips those quotes, which
-is how the digits land unquoted; with no bigint in the value the body returns
-the builtin result unchanged. Regression: `backends/typescript/tests/
+(`"@@revlBigInt<zeros>:<n>@@"`) and the enclosing body then strips those quotes,
+which is how the digits land unquoted; with no bigint in the value the body
+returns the builtin result unchanged. The rewrite runs over the finished text,
+so the body counts the sentinel prefix in the output: if the caller's own
+strings or object keys spell it (the count exceeds the bigints parked), it
+serializes once more under a prefix whose run of `0`s has a length no spelling
+in the first output has. That is at most two passes whatever the data holds, and
+user text is never rewritten. Regression: `backends/typescript/tests/
 fr3_json_int.test.ts` (runtime, under vitest) cross-checked against the py tier
 in `tests/test_json_stdlib.py::test_ts_int_serialization_matches_py_tier`,
 covering a small, a negative, and a beyond-2^53 `Int`.
