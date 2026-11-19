@@ -117,6 +117,13 @@ from revl import ui_family  # the shipped computer-use reversibility registry
 from revl.compiler import compile_files
 from revl.diagnostics import classify
 from revl.errors import RevlError
+# The shipped cardinality analysis (item 260, issue #2743), whose report is
+# the CARD row's right-hand side. Nothing else is imported from it: the
+# reference rebuilds the crossing command and derives the retry multiplier
+# and the arrow-binding shape from the IR itself (`_card_retry`,
+# `_card_arrow_names`), so a change to the checker's arithmetic or to its
+# helpers is a CARD finding and not a silent agreement.
+from revl.cardinality import cardinality
 from revl.typecheck import _HOST_ACQUIRE_VERBS  # the shipped acquire-verb table
 from revl.typecheck import parse_type  # the shipped type-head splitter
 # The config-is-data tables (item 378), imported rather than restated: the
@@ -2132,10 +2139,13 @@ def _gc_params(field: str) -> list[str]:
 
 
 def g9coverage_rows(rel: str, prog) -> list[str]:
-    """The `GB`/`GP`/`GW` rows of one modeled file (issue #2108).
+    """The `GB`/`GP`/`GW` rows of one modeled file (issue #2108), plus the
+    `CT`/`CR` rows of the same compile (item 260, issue #2743).
 
     `GB`/`GP` come from the parse plus the taint model; `GW` from a real
-    `compile_files` run with the walk observed. Also fills `_GC_ROWS` (the
+    `compile_files` run with the walk observed. The IR that run produced is
+    also handed to `cardinality_rows`, so the checker is compiled ONCE per
+    modeled file and both rows read the same run. Also fills `_GC_ROWS` (the
     per-component comparison the ratchet re-runs under shortening) and
     `_GC_CENSUS`/`_GC_UNOBSERVED`.
 
@@ -2144,17 +2154,21 @@ def g9coverage_rows(rel: str, prog) -> list[str]:
     dropped, and it is NOT a coverage failure — see `g9coverage_coverage`."""
     try:
         with _gc_observation(rel, gc_provide_keys(prog)[0]) as rec:
-            compile_files([str(REPO / rel)])
+            doc = compile_files([str(REPO / rel)])
     except RevlError:
         _GC_CENSUS["refused"] = _GC_CENSUS.get("refused", 0) + 1
+        _CARD_CENSUS["refused"] = _CARD_CENSUS.get("refused", 0) + 1
         return []
+    # The same compile carries the IR the CARD row (item 260, issue #2743)
+    # reads its crossing counts off, so one checker run feeds both rows.
+    card_rows = cardinality_rows(rel, doc)
     if rec.model is None:
         # The checker short-circuits before the taint pass: no walk, no claim.
         _GC_CENSUS["no_walk"] = _GC_CENSUS.get("no_walk", 0) + 1
-        return []
+        return card_rows
     if not any(rec.active):
         _GC_CENSUS["inactive"] = _GC_CENSUS.get("inactive", 0) + 1
-        return []
+        return card_rows
     _GC_CENSUS["active"] = _GC_CENSUS.get("active", 0) + 1
     _GC_CENSUS["walk_calls"] = _GC_CENSUS.get("walk_calls", 0) + rec.calls
     _GC_CENSUS["scopes"] = _GC_CENSUS.get("scopes", 0) + sum(
@@ -2188,7 +2202,7 @@ def g9coverage_rows(rel: str, prog) -> list[str]:
     _GC_ROWS[rel] = per_file
     _GC_CENSUS["components"] = _GC_CENSUS.get("components", 0) + len(per_file)
     _GC_CENSUS.setdefault("findings", []).extend(problems)
-    return rows
+    return rows + card_rows
 
 
 def g9coverage_coverage() -> list[str]:
@@ -2298,6 +2312,519 @@ def g9coverage_coverage() -> list[str]:
               "stripping a parameter and adding a scope — coverage of the "
               "checker's walk ON THE CORPUS")
     return findings
+
+# ---------------------------------------- emission cardinality bound (item 260)
+#
+# THE `CARD` ROW, and what it is for. `src/revl/cardinality.py` reports, per
+# component and capability, how many times one activation can cross that
+# capability, or `unbounded` when it cannot prove a finite number. The paper
+# (`docs/research/papers/P08-static-cost-ceilings-cardinality-slo.md`) carried
+# that analysis with no Lean theorem behind it, and said so. Issue #2743 asks
+# for the count to be proved and for a row that checks the proof's fold
+# against the number the shipped checker reports.
+#
+# `RevL.Cardinality.bound` is the proof's fold over a small crossing syntax:
+# a sequence sums, a branch takes the worse arm, a bounded loop multiplies its
+# body by the iteration ceiling. The exporter below turns the checker's IR
+# into that syntax, one command per (component, capability) for every
+# capability the checker reports a FINITE bound for:
+#
+#   CT <file> <comp> <token> <node> <nil|cross|seq|branch|loop> <a> <b>
+#       one node of the command. `seq`/`branch` name their two children,
+#       `loop` carries the iteration ceiling in `a` and its body in `b`, and
+#       `nil`/`cross` carry `-` in both.
+#   CR <file> <comp> <token> <root> <bound>
+#       the command's root node and the number the checker REPORTED for that
+#       capability (`cardinality(ir)[comp]["per_capability"][token]["bound"]`).
+#   CARD <file> <comp> <token> <card=ok|fail>
+#       the oracle's OUTPUT: the Lean model's `bound` over the exported
+#       command equals the reported number (`RevLOracle.cardRowB`), and the
+#       reference folds the same rows independently (`_card_fold`).
+#
+# WHAT IS INDEPENDENT, AND WHAT IS NOT. The checker's report is the shipped
+# `cardinality()`. The exported command is built from the IR by
+# `_card_steps`/`_card_expr`, and the number the row compares is the fold of
+# that command, computed twice (Lean `bound`, Python `_card_fold`). Derived
+# here and not taken from the checker: the sum and the max, the retry
+# multiplier (`_card_retry`, read from the service method's `retry` in the
+# IR) and the recognition of an arrow binding (`_card_arrow_names`). NOT
+# independent: the traversal follows `cardinality.count_steps` and
+# `count_expr` arm for arm (which nodes are `if`, `match`, a `req` call, a
+# spawn-handle call), and which method declares which capability token is
+# read from the same IR table. A bug in what counts as a crossing, or in
+# where a branch sits, is shared by both sides and is not found by this row.
+#
+# THE ROW GOES RED. A `CARD` row whose fold differs from the reported bound is
+# a fatal finding (`cardinality_coverage`), naming the file, component and
+# capability. Both sides print `fail` for it and so agree with each other, so
+# the differential alone would count it as agreement; the finding is what
+# turns it into a red gate.
+#
+# WHAT IS OUT OF THE ROW, AND COUNTED. The exporter builds a tree only for
+# the shapes it can mirror faithfully: a crossing in an `if` arm, a
+# `match`, a `req`-target emission call, a spawn-handle provision call and
+# the retry multiplier. A crossing reached through an `fn` call, a
+# first-class arrow, a value-position callable or a loop is left to the
+# checker's classification, which reports it `unbounded`; the exporter
+# does the same (`_card_steps` returns None) and `_CARD_CENSUS["unmodelled"]`
+# counts it, so the row cannot silently claim a count for a shape it could
+# not build. Rows the checker itself reports `unbounded` for are counted in
+# `_CARD_CENSUS["unbounded"]` and carry no `CR`: there is no finite number to
+# compare, and the theorem says nothing about an unbounded body.
+#
+# THE LOOP CASE IS NOT ON THE CORPUS. Every loop that reaches the token is
+# declined above, so no exported command contains a `loop` node: the loop
+# multiply is proved in Lean (`RevL.Cardinality.runs_le_bound`, witnessed by
+# `witness_loop_runs`) and is not exercised by this row.
+#
+# THE RATCHET. `cardinality_coverage` fails the gate unless the corpus
+# exercises both combinators (a sequence and a branch), the row has rows at
+# all, and ADDING ONE CROSSING to a row's command flips that row's verdict
+# from ok to fail. The mutation is on the Python side only: it runs the
+# serializer, the reference rebuild and `_card_fold`, so a fold or rebuild
+# that ignored the exported count fails it. `RevLOracle.cardRowB_iff` is what
+# rules out a constant Lean decider, which this mutation cannot reach.
+
+#: One exported command per (file, component, token): the tree and the
+#: checker's reported bound. Read by `cardinality_coverage`.
+_CARD_ROWS: dict = {}
+
+#: How the cardinality pass classified the corpus, so a corpus that stopped
+#: reaching the row fails the ratchet instead of passing vacuously.
+_CARD_CENSUS: dict = {}
+
+#: Bounded reports whose command this mirror could not build (an `fn`/arrow
+#: reach or a loop). Counted and reported, never silently agreed with.
+_CARD_UNMODELLED: dict = {}
+
+
+def _card_seq(items: list) -> tuple:
+    """Fold crossing shapes in evaluation order. `("n",)` (nothing) is
+    dropped so a sequence carries only the parts that cross."""
+    items = [i for i in items if i != ("n",)]
+    if not items:
+        return ("n",)
+    out = items[-1]
+    for item in reversed(items[:-1]):
+        out = ("s", item, out)
+    return out
+
+
+def _card_branch(a: tuple, b: tuple) -> tuple:
+    """The worse arm. Two identical arms collapse to one: the bound does not
+    depend on which branch was taken, only on the worse count."""
+    if a == b:
+        return a
+    return ("b", a, b)
+
+
+def _card_crosses(tree: tuple) -> bool:
+    """Whether a shape contains a crossing at all. Used to decide whether a
+    loop body is in this row's fragment: a loop that reaches a crossing is
+    what the checker calls `unbounded`, so no finite tree may claim it."""
+    kind = tree[0]
+    if kind == "x":
+        return True
+    if kind in ("s", "b"):
+        return _card_crosses(tree[1]) or _card_crosses(tree[2])
+    if kind == "l":
+        return _card_crosses(tree[2])
+    return False
+
+
+def _card_fold(tree: tuple) -> int:
+    """The REFERENCE fold: the same arithmetic `RevL.Cardinality.bound`
+    proves, written once in Python for the corpus half. It is deliberately a
+    separate implementation from `src/revl/cardinality.py`'s fold; that is
+    what makes the three-way agreement a check."""
+    kind = tree[0]
+    if kind == "n":
+        return 0
+    if kind == "x":
+        return 1
+    if kind == "s":
+        return _card_fold(tree[1]) + _card_fold(tree[2])
+    if kind == "b":
+        return max(_card_fold(tree[1]), _card_fold(tree[2]))
+    return tree[1] * _card_fold(tree[2])
+
+
+def _card_retry(spec: dict) -> int:
+    """How many times one crossing of a service method may fire per
+    activation: the first attempt plus the declared `retry` ceiling. Read off
+    the IR's method spec here and not off the checker's `_retry_mult`, so a
+    change to the checker's multiplier disagrees with this row."""
+    return (spec.get("retry") or 0) + 1
+
+
+def _card_arrow_binding(step) -> bool:
+    """A `let` or an assignment whose value is an arrow literal: an arrow
+    bound to a name, counted at its invocations and not where it is written."""
+    if not isinstance(step, dict) or step.get("step") not in ("let", "assign"):
+        return False
+    value = step.get("value")
+    return isinstance(value, dict) and value.get("kind") == "arrow"
+
+
+def _card_arrow_names(node, out: set) -> None:
+    """The names a component body binds an arrow to, by `let` or assignment,
+    at any depth."""
+    if isinstance(node, dict):
+        if _card_arrow_binding(node):
+            out.add(node.get("name"))
+        for child in node.values():
+            _card_arrow_names(child, out)
+    elif isinstance(node, list):
+        for child in node:
+            _card_arrow_names(child, out)
+
+
+def _card_steps(steps, token: str, requires: dict, services: dict,
+                arrows: set):
+    """One body (a list of IR steps) as a crossing shape for `token`, or
+    `None` when the shape is outside this row's fragment.
+
+    Mirrors `cardinality.count_steps`: an `if` sums its condition and takes
+    the worse arm; a loop only contributes when it does not reach the token;
+    a `provide` block is the sequence of its method bodies; an arrow binding
+    is counted at its invocations, not where it is written. Unlike the
+    checker, a loop that reaches the crossing, an `fn`, an arrow or a
+    value-position callable make the WHOLE command unmodelled (`None`)
+    instead of contributing an uncountable crossing."""
+    out: list = []
+    for step in steps or []:
+        kind = step.get("step")
+        if kind == "if":
+            cond = _card_expr(step.get("cond"), token, requires, services, arrows)
+            then = _card_steps(step.get("then") or [], token, requires,
+                               services, arrows)
+            els = _card_steps(step.get("else") or step.get("otherwise") or [],
+                              token, requires, services, arrows)
+            if cond is None or then is None or els is None:
+                return None
+            out.append(("s", cond, _card_branch(then, els)))
+        elif kind in ("while", "for"):
+            body = _card_steps(step.get("body") or [], token, requires,
+                               services, arrows)
+            if body is None:
+                return None
+            if _card_crosses(body):
+                # The checker's count_steps sums a component-body loop
+                # defensively, but its own reach pass calls a crossing behind
+                # a loop `unbounded`; a finite row may not carry it.
+                return None
+            out.append(("n",))
+        elif kind == "provide":
+            for method in step.get("methods") or []:
+                sub = _card_steps(method.get("body") or [], token, requires,
+                                  services, arrows)
+                if sub is None:
+                    return None
+                out.append(sub)
+        elif _card_arrow_binding(step):
+            continue
+        else:
+            sub = _card_expr(step, token, requires, services, arrows)
+            if sub is None:
+                return None
+            out.append(sub)
+    return _card_seq(out)
+
+
+def _card_expr(node, token: str, requires: dict, services: dict,
+               arrows: set):
+    """One expression (or step, through `_card_steps`' default arm) as a
+    crossing shape for `token`, or `None` outside the fragment.
+
+    The two crossing arms are `cardinality.count_expr`'s: a `req`-target
+    emission call and a spawn-handle provision call, each multiplied by the
+    declared retry ceiling. Branch nodes take the worse arm; every other
+    child is evaluated and therefore sums."""
+    if isinstance(node, dict):
+        kind = node.get("kind")
+        if kind in ("fn", "arrow"):
+            # A callee body this mirror does not follow. The checker reaches
+            # it through the fn/arrow pass and reports the token `unbounded`
+            # when it crosses, so a bounded row cannot need it.
+            return None
+        if kind == "name" and node.get("id") in arrows:
+            # A bound arrow in value position: the checker's `_arrow_escape`
+            # reports the token `unbounded`, so there is no finite row here,
+            # and a row must not count it as nothing.
+            return None
+        total: list = []
+        if kind == "call":
+            callee = node.get("callee")
+            if isinstance(callee, dict) and (callee.get("id") in arrows
+                                             or callee.get("name") in arrows):
+                # A call to a bound arrow: the checker follows the body
+                # (issue #1757) and can report a FINITE count, so declining
+                # is the only honest answer this mirror can give.
+                return None
+            target = node.get("target")
+            if isinstance(target, dict) and target.get("kind") == "req":
+                svc = requires.get(target.get("name"))
+                spec = (((services.get(svc) or {}).get("methods") or {})
+                        .get(node.get("method")) or {})
+                if spec.get("emission"):
+                    declared = spec.get("capabilities")
+                    tokens = sorted(declared) if declared is not None else ["*"]
+                    if token in tokens:
+                        total.extend([("x",)] * _card_retry(spec))
+            callee = node.get("callee")
+            if isinstance(callee, dict) and callee.get("kind") == "field":
+                recv = callee.get("target")
+                if isinstance(recv, dict) \
+                        and recv.get("kind") == "instance-get":
+                    svc = recv.get("service")
+                    spec = (((services.get(svc) or {}).get("methods") or {})
+                            .get(callee.get("name")) or {})
+                    if spec.get("emission"):
+                        declared = spec.get("capabilities")
+                        tokens = (sorted(declared)
+                                  if declared is not None else ["*"])
+                        if token in tokens:
+                            total.extend([("x",)] * _card_retry(spec))
+        if kind == "match":
+            scrutinee = _card_expr(node.get("scrutinee"), token, requires,
+                                   services, arrows)
+            arms = [_card_expr(arm.get("body"), token, requires, services, arrows)
+                    for arm in node.get("arms") or []]
+            if scrutinee is None or any(arm is None for arm in arms):
+                return None
+            worst = ("n",)
+            for arm in arms:
+                worst = _card_branch(worst, arm)
+            return _card_seq([scrutinee, worst])
+        if kind == "if":
+            cond = _card_expr(node.get("cond"), token, requires, services, arrows)
+            then = _card_expr(node.get("then"), token, requires, services, arrows)
+            els = _card_expr(node.get("otherwise"), token, requires, services, arrows)
+            if cond is None or then is None or els is None:
+                return None
+            return _card_seq([cond, _card_branch(then, els)])
+        for value in node.values():
+            sub = _card_expr(value, token, requires, services, arrows)
+            if sub is None:
+                return None
+            total.append(sub)
+        return _card_seq(total)
+    if isinstance(node, list):
+        subs = [_card_expr(item, token, requires, services, arrows) for item in node]
+        if any(sub is None for sub in subs):
+            return None
+        return _card_seq(subs)
+    return ("n",)
+
+
+def _card_emit_rows(out: list, rel: str, comp: str, token: str,
+                    counter: list, tree: tuple) -> int:
+    """Serialize one command, node ids allocated parent first. Returns the
+    node's id; the top call's return is the command's root."""
+    node_id = counter[0]
+    counter[0] += 1
+    kind = tree[0]
+    if kind in ("n", "x"):
+        out.append("\t".join(["CT", rel, comp, token, str(node_id),
+                              "nil" if kind == "n" else "cross", "-", "-"]))
+        return node_id
+    if kind in ("s", "b"):
+        left = _card_emit_rows(out, rel, comp, token, counter, tree[1])
+        right = _card_emit_rows(out, rel, comp, token, counter, tree[2])
+        out.append("\t".join(["CT", rel, comp, token, str(node_id),
+                              "seq" if kind == "s" else "branch",
+                              str(left), str(right)]))
+        return node_id
+    body = _card_emit_rows(out, rel, comp, token, counter, tree[2])
+    out.append("\t".join(["CT", rel, comp, token, str(node_id), "loop",
+                          str(tree[1]), str(body)]))
+    return node_id
+
+
+def cardinality_rows(rel: str, doc: dict) -> list[str]:
+    """The `CT`/`CR` rows of one modeled file whose IR is `doc`.
+
+    One (component, capability) pair per capability the checker reports a
+    finite bound for. A report the mirror cannot build a command for is
+    counted in `_CARD_CENSUS`, not turned into a guessed row."""
+    try:
+        report = cardinality(doc)
+    except Exception as exc:  # noqa: BLE001 - a harness failure is a finding
+        _CARD_CENSUS.setdefault("failures", []).append(f"{rel}: {exc!r}")
+        return []
+    comps = {c.get("name"): c for c in doc.get("components") or []}
+    services = doc.get("services") or {}
+    rows: list[str] = []
+    for comp_name, entry in sorted(report.items()):
+        comp = comps.get(comp_name)
+        if comp is None:
+            _CARD_CENSUS.setdefault("findings", []).append(
+                f"{rel}: the report names component {comp_name!r} the IR "
+                "does not carry")
+            continue
+        requires = comp.get("requires") or {}
+        arrows: set = set()
+        _card_arrow_names(comp.get("body") or [], arrows)
+        for token, info in sorted(entry["per_capability"].items()):
+            if info.get("kind") != "bounded":
+                _CARD_CENSUS["unbounded"] = \
+                    _CARD_CENSUS.get("unbounded", 0) + 1
+                continue
+            tree = _card_steps(comp.get("body") or [], token, requires,
+                               services, arrows)
+            if tree is None:
+                _CARD_CENSUS["unmodelled"] = \
+                    _CARD_CENSUS.get("unmodelled", 0) + 1
+                _CARD_UNMODELLED.setdefault(rel, []).append(
+                    f"{comp_name}.{token}")
+                continue
+            counter = [0]
+            node_rows: list[str] = []
+            root = _card_emit_rows(node_rows, rel, comp_name, token, counter,
+                                   tree)
+            rows.extend(node_rows)
+            rows.append("\t".join(["CR", rel, comp_name, token, str(root),
+                                   str(info["bound"])]))
+            _CARD_ROWS[(rel, comp_name, token)] = (tree, info["bound"])
+            _CARD_CENSUS["rows"] = _CARD_CENSUS.get("rows", 0) + 1
+    return rows
+
+
+def _card_from_rows(nodes: dict, node_id: int, fuel: int | None = None):
+    """Rebuild a command from its `CT` nodes, or None for a malformed tree.
+    `fuel` bounds the recursion so a hostile/duplicated row cannot loop."""
+    if fuel is None:
+        fuel = len(nodes) + 1
+    if fuel == 0:
+        return None
+    row = nodes.get(node_id)
+    if row is None:
+        return None
+    kind = row[0]
+    if kind in ("nil", "cross"):
+        return ("n",) if kind == "nil" else ("x",)
+    if kind in ("seq", "branch"):
+        try:
+            left_id, right_id = int(row[1]), int(row[2])
+        except (IndexError, ValueError):
+            return None
+        left = _card_from_rows(nodes, left_id, fuel - 1)
+        right = _card_from_rows(nodes, right_id, fuel - 1)
+        if left is None or right is None:
+            return None
+        return (kind[0] if kind == "seq" else "b", left, right)
+    if kind == "loop":
+        try:
+            count, body_id = int(row[1]), int(row[2])
+        except (IndexError, ValueError):
+            return None
+        body = _card_from_rows(nodes, body_id, fuel - 1)
+        if body is None:
+            return None
+        return ("l", count, body)
+    return None
+
+
+def _card_shape_counts(tree: tuple, out: dict) -> None:
+    """Tally the combinators a corpus row exercises, for the ratchet."""
+    kind = tree[0]
+    if kind in ("s", "b"):
+        out[kind] = out.get(kind, 0) + 1
+        _card_shape_counts(tree[1], out)
+        _card_shape_counts(tree[2], out)
+    elif kind == "l":
+        out["l"] = out.get("l", 0) + 1
+        _card_shape_counts(tree[2], out)
+
+
+def cardinality_coverage(reference: dict | None = None,
+                         formal: dict | None = None) -> list[str]:
+    """The findings of the `CT`/`CR`/`CARD` rows (item 260, issue #2743).
+
+    A DISAGREEMENT IS A FINDING. A row whose fold differs from the number the
+    checker reported is one fatal finding, naming the file, component and
+    capability. The reference and the Lean oracle compute the same
+    `fold == reported`, so both print `fail` and the differential counts that
+    as agreement; this is what makes the row able to go red when the shipped
+    analysis and the model disagree. `reference` and `formal` are the two
+    sides' `CARD` verdict maps (`Verdicts.cards`), so a row either side calls
+    `fail` is a finding even when the Python fold here says `ok`.
+
+    The row also has to fail when there is nothing to decide, when the corpus
+    never exercises a combinator, and when the fold stops reading the count.
+    The last is a MUTATION: adding one crossing to EVERY row's exported
+    command must make the reference rebuild and fold differ from the reported
+    bound. The mutation is on the Python side only (serializer, rebuild,
+    `_card_fold`); `RevLOracle.cardRowB_iff` is what rules out a constant
+    Lean decider.
+
+    The `unmodelled` and `unbounded` counts are printed, never silently
+    dropped: a corpus that moved every row out of the fragment would otherwise
+    still pass.
+    """
+    findings = [f"cardinality: {p}"
+                for p in _CARD_CENSUS.get("findings", [])]
+    findings.extend(f"cardinality: {p}"
+                    for p in _CARD_CENSUS.get("failures", []))
+    if not _CARD_ROWS:
+        findings.append(
+            "cardinality: no CARD row at all - the row would decide nothing")
+        return findings
+    bad: dict = {}
+    for key, (tree, bound) in sorted(_CARD_ROWS.items()):
+        counted = _card_fold(tree)
+        if counted != bound:
+            bad[key] = (f"the model counts {counted} and the checker "
+                        f"reports {bound}")
+    for side, verdicts in (("reference", reference), ("formal", formal)):
+        for key, verdict in sorted((verdicts or {}).items()):
+            if verdict != "ok" and key not in bad:
+                bad[key] = f"the {side} row is `{verdict}`"
+    for (rel, comp, token), why in sorted(bad.items()):
+        findings.append(
+            f"cardinality: {rel}: {comp}: capability {token!r}: {why}, so "
+            "the model and the shipped analysis disagree")
+    shapes: dict = {}
+    for _key, (tree, _bound) in sorted(_CARD_ROWS.items()):
+        _card_shape_counts(tree, shapes)
+    if not shapes.get("s"):
+        findings.append(
+            "cardinality: no exported command has a sequence, so the row "
+            "never decides that crossings add")
+    if not shapes.get("b"):
+        findings.append(
+            "cardinality: no exported command has a branch, so the row never "
+            "decides that a bound takes the worse arm")
+    unflipped = []
+    for (rel, comp, token), (tree, bound) in sorted(_CARD_ROWS.items()):
+        if (rel, comp, token) in bad:
+            continue    # already a finding; the mutation says nothing new
+        # Mutate the EXPORTED command by adding one crossing and run it back
+        # through the same serializer and reference rebuild the real row uses,
+        # so a broken serializer or rebuild fails this too.
+        mutated = ("s", tree, ("x",))
+        counter = [0]
+        node_rows: list[str] = []
+        root = _card_emit_rows(node_rows, rel, comp, token, counter, mutated)
+        nodes = {int(r.split("\t")[4]): r.split("\t")[5:] for r in node_rows}
+        rebuilt = _card_from_rows(nodes, root)
+        if rebuilt is None or _card_fold(rebuilt) == bound:
+            unflipped.append(f"{rel}: {comp}: {token!r}")
+    if unflipped:
+        findings.append(
+            "cardinality: adding one crossing to an exported command "
+            f"changes no verdict for {len(unflipped)} row(s), the first "
+            f"being {unflipped[0]} - the row does not read the count")
+    if not findings:
+        print(f"cardinality: {len(_CARD_ROWS)} bounded capability rows, "
+              f"{shapes.get('s', 0)} sequences and {shapes.get('b', 0)} "
+              f"branches exercised, no row disagreeing with the checker, "
+              f"each verdict flipping under one added crossing; "
+              f"unbounded={_CARD_CENSUS.get('unbounded', 0)} "
+              f"unmodelled={_CARD_CENSUS.get('unmodelled', 0)} "
+              f"refused-files={_CARD_CENSUS.get('refused', 0)}")
+    return findings
+
 
 # ---------------------------------------- G-RETAIN (issue #1811 group 3)
 #
@@ -6781,6 +7308,7 @@ class Verdicts(NamedTuple):
     gc: dict[tuple[str, str, str], str]
     g1cov: dict[tuple[str, str, str], str]
     ev: dict[str, str]
+    cards: dict[tuple[str, str, str], str]
 
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
@@ -6799,7 +7327,7 @@ class Verdicts(NamedTuple):
                 + len(self.inv)
                 + len(self.sw) + len(self.a5) + len(self.gc)
                 + len(self.g1cov)
-                + len(self.ev))
+                + len(self.ev) + len(self.cards))
 
 
 
@@ -6845,6 +7373,7 @@ def parse_verdicts(text: str) -> Verdicts:
     gc: dict[tuple[str, str, str], str] = {}
     g1cov: dict[tuple[str, str, str], str] = {}
     ev: dict[str, str] = {}
+    cards: dict[tuple[str, str, str], str] = {}
 
     for line in text.splitlines():
         parts = line.split("\t")
@@ -7018,14 +7547,21 @@ def parse_verdicts(text: str) -> Verdicts:
             # verdict, the Lean half of `g1coverage_coverage`'s ratchet, which
             # reads these rows from the oracle's output itself.
             continue
+        elif parts[0] == "CARD" and len(parts) == 5:
+            # Emission cardinality bound (item 260, issue #2743):
+            # (file, component, capability token) -> ok|fail. The KEY is the
+            # capability, because the checker reports one finite count per
+            # capability and the model's command is drawn for that token.
+            cards[(parts[1], parts[2], parts[3])] = \
+                parts[4].split("=", 1)[1]
         else:
             raise SystemExit(f"differential oracle: malformed verdict row {line!r}")
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
                     recoveries, confinements, g8surface, g5reg, a9, configs,
                     a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
-            places, model_reach, councils, g9, retain, inv, sw, a5, gc, g1cov,
-            ev)
+                    places, model_reach, councils, g9, retain, inv, sw, a5,
+                    gc, g1cov, ev, cards)
 
 
 
@@ -7825,12 +8361,40 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
         _PRELUDE_ROWS[key] = (steps, targets_by.get(key, set()), provides,
                               calls_by.get(key, set()))
 
+    # CARD rows (item 260, issue #2743), recomputed from the CT nodes with
+    # the reference fold `_card_fold`: the verdict is `ok` exactly when the
+    # model's count over the exported command equals the number the checker
+    # reported on its CR row. This is the same comparison the Lean decider
+    # (`RevLOracle.cardRowB`) makes from the same rows; a tree that cannot be
+    # rebuilt, or a count that differs, is a `fail`.
+    card_nodes: dict = {}
+    card_claims: dict = {}
+    for r in rows:
+        if not r:
+            continue
+        if r[0] == "CT" and len(r) == 8:
+            try:
+                node_id = int(r[4])
+            except ValueError:
+                continue
+            card_nodes.setdefault((r[1], r[2], r[3]), {})[node_id] = r[5:]
+        elif r[0] == "CR" and len(r) == 6:
+            try:
+                card_claims[(r[1], r[2], r[3])] = (int(r[4]), int(r[5]))
+            except ValueError:
+                continue
+    cards: dict[tuple[str, str, str], str] = {}
+    for key, (root, claimed) in card_claims.items():
+        tree = _card_from_rows(card_nodes.get(key) or {}, root)
+        cards[key] = ("ok" if tree is not None and _card_fold(tree) == claimed
+                      else "fail")
+
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
                     recoveries, confinements, g8surface, g5reg, a9,
                     configs, a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
                     places, model_reach, councils, g9, retain, inv, sw, a5,
-                    gc, g1cov, ev)
+                    gc, g1cov, ev, cards)
 
 
 #: What the REFERENCE decided for each config field, for the CD row's
@@ -9056,6 +9620,7 @@ ROW_KINDS = (
     ("gc", "GC walk coverage (G9)"),
     ("g1cov", "G1C access coverage (G1)"),
     ("ev", "EV emission value (G4)"),
+    ("cards", "CARD cardinality bound (item 260)"),
 )
 
 #: Row kinds whose corpus is one-sided today, as field -> (the side that has no
@@ -9076,6 +9641,10 @@ ONE_SIDED: dict[str, tuple[str, str]] = {
     "g1cov": ("refused", "a document the checker refuses completes no "
               "lowering walk, so it has no row; the refusing side is the "
               "Lean coversAccessB_refuses_* theorems"),
+    "cards": ("refused", "a row is exported only for a capability the checker "
+              "reports a FINITE bound for, so every document is accepted; the "
+              "refusing side is the Lean cardinality_not_vacuous theorem and "
+              "the one-crossing mutation in cardinality_coverage"),
 }
 
 
@@ -9214,7 +9783,8 @@ def main() -> int:
             ("inv", ref.inv, formal.inv),
             ("sw", ref.sw, formal.sw),
             ("a5", ref.a5, formal.a5),
-            ("emission_value", ref.ev, formal.ev)):
+            ("emission_value", ref.ev, formal.ev),
+            ("cardinality", ref.cards, formal.cards)):
 
         for key, want in refmap.items():
             got = gotmap.get(key)
@@ -9252,7 +9822,8 @@ def main() -> int:
         f"{len(ref.g1cov)} access-coverage scopes + "
         f"{len(ref.retain)} retention refusals + "
         f"{len(ref.inv)} inverse refusals + "
-        f"{len(ref.sw)} witnessed-site refusals) — "
+        f"{len(ref.sw)} witnessed-site refusals + "
+        f"{len(ref.cards)} cardinality bounds): "
 
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
@@ -9281,6 +9852,7 @@ def main() -> int:
     mismatches.extend(g4inverse_coverage())
     mismatches.extend(sw_coverage())
     mismatches.extend(a5_coverage())
+    mismatches.extend(cardinality_coverage(ref.cards, formal.cards))
     mismatches.extend(polarity_coverage(polarity))
 
     for m in mismatches[:10]:
