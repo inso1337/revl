@@ -190,7 +190,7 @@ def _lifecycle_section(boot_ir: dict | None, config: dict | None,
     try:
         scratch.load(boot_ir, config or {})
     except (SessionError, RevlError) as error:
-        # no runtime, an open hole, a boot that refuses — all graded, not raised.
+        # no runtime, an open hole, a boot that refuses: all graded, not raised.
         # A host config the load refuses (a wrongly typed, undeclared or
         # missing required field, issues #3535 and #3596) is a `RevlError`
         # from `configure_rows_from_host`, graded the same way.
