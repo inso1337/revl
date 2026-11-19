@@ -308,7 +308,10 @@ def test_repair_gate_carries_the_candidate_bodies(monkeypatch):
 
     _verdicts, gate = repair._run_gates(
         SimpleNamespace(ir=ir), {"source": _CANDIDATE, "modules": modules},
-        ir, repair.SelfRepairPolicy(ack_on_widen=False), set())
+        ir, repair.SelfRepairPolicy(
+            eligibility=(repair.Eligibility("component", "*"),),
+            ack_on_widen=False),
+        set(), component="candidate_root")
     assert _body_names(gate["_approval_host_bodies"]) == {
         "candidate_helper", "candidate_root",
     }
