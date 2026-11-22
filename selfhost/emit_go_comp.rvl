@@ -29,7 +29,7 @@ use "./emit_go_module.rvl" {
 // ----------------------------------------------- the uncarried component tier
 // A `component` belongs to the go LIVE tier (the v1/v2 stc-go path in the
 // reference's `emit`), which this slice does not mirror — see WHAT IT DEFERS
-// in the header of selfhost/emit_go.rvl. What follows is about SAYING SO, not about carrying it.
+// above. What follows is about SAYING SO, not about carrying it.
 //
 // The rule is: NAME every `components` entry this file does not carry, except
 // where naming it would break a byte agreement the REFERENCE itself produces.
@@ -93,6 +93,7 @@ fn carries_pure_declarations(ir: Any) -> Bool {
   if (value_keys(value_field(ir, "types")).length() > 0) { return true }
   return value_list(value_field(ir, "externs")).length() > 0
 }
+
 // The reference's `_component_is_observable`: does routing past this component
 // lose something the author wrote? An activation step or a provide method puts
 // something in the component's `body`; an empty `component C { }` renders to
@@ -104,12 +105,14 @@ fn carries_pure_declarations(ir: Any) -> Bool {
 fn component_is_observable(c: Any) -> Bool {
   return value_list(value_field(c, "body")).length() > 0
 }
+
 fn any_component_is_observable(comps: List[Any]) -> Bool {
   for (c of comps) {
     if (component_is_observable(c)) { return true }
   }
   return false
 }
+
 pub fn uncarried_components(ir: Any) -> List[Str] {
   let comps = value_list(value_field(ir, "components"))
   if (comps.length() == 0) { return [] }
@@ -122,6 +125,7 @@ pub fn uncarried_components(ir: Any) -> List[Str] {
   }
   return out
 }
+
 // ------------------------------------------ the deferred fault-test section
 // Plain in-file `test` blocks are emitted (`emit_tests`). A `fault test` is
 // not: the reference refuses the document, and this port names each entry
@@ -144,6 +148,7 @@ pub fn deferred_test_markers(ir: Any) -> List[Str] {
   }
   return out
 }
+
 // `_refuse_deferred_emissions`: a CALL to a `deferred` emission extern, in any
 // position inside a component, needs a session owner runtime this tier does
 // not have, so the reference refuses the document. The port names each
@@ -172,6 +177,7 @@ pub fn deferred_emission_markers(ir: Any) -> List[Str] {
   }
   return out
 }
+
 // ------------------------------------------------------- the IR text probes
 // The reference gates the Opt / Result / Map preambles on substrings of
 // `json.dumps({types, functions, externs, tests})`. A probe that only names
@@ -190,10 +196,12 @@ pub fn ir_text_has(node: Any, needles: List[Str]) -> Bool {
   for (child of value_children(node)) { if (ir_text_has(child, needles)) { return true } }
   return false
 }
+
 pub fn text_has_any(text: Str, needles: List[Str]) -> Bool {
   for (n of needles) { if (text.indexOf(n) >= 0) { return true } }
   return false
 }
+
 // `'"maplit"' in blob`: a key or a string value that IS one of `words`.
 pub fn ir_text_is(node: Any, words: List[Str]) -> Bool {
   let shape = value_kind(node)
@@ -208,6 +216,7 @@ pub fn ir_text_is(node: Any, words: List[Str]) -> Bool {
   for (child of value_children(node)) { if (ir_text_is(child, words)) { return true } }
   return false
 }
+
 // `'"method": "set"' in blob`: a record whose `method` is one of `methods`.
 pub fn ir_has_method(node: Any, methods: List[Str]) -> Bool {
   if (value_kind(node) == "record") {
@@ -217,6 +226,7 @@ pub fn ir_has_method(node: Any, methods: List[Str]) -> Bool {
   for (child of value_children(node)) { if (ir_has_method(child, methods)) { return true } }
   return false
 }
+
 // The live stc-go tier: an ir_version 1/2 document never reaches the pure
 // typed-core path this file mirrors (the reference renders a whole stc-go
 // module for it), so the port names the routing instead of answering with a
@@ -230,6 +240,7 @@ pub fn live_tier_markers(ir: Any) -> List[Str] {
   }
   return out
 }
+
 // item 388 stage 6: the reference collapses a caller-decided-colour extern's
 // sync clone (`X_revl_sync`, same bodies as its twin `X`) into `X` and rewrites
 // its call sites. This port does not rewrite the IR, so it names the clone.
@@ -248,10 +259,12 @@ pub fn colour_clone_markers(externs: List[Any]) -> List[Str] {
   }
   return out
 }
+
 pub fn has_text(lines: List[Str], needle: Str) -> Bool {
   for (l of lines) { if (l.indexOf(needle) >= 0) { return true } }
   return false
 }
+
 // ======================================== the v3 COMBINED path (issue #106)
 // `_emit_v3_combined`: a v3 document whose top-level declarations sit beside
 // an OBSERVABLE component renders both tiers in one package, the pure
@@ -271,6 +284,7 @@ fn is_go_keyword(name: Str) -> Bool {
   return list_contains(["type", "range", "func", "map", "chan", "select", "go",
                         "defer", "return", "var", "const", "package", "import"], name)
 }
+
 // issue #3053: the lifecycle driver's own names; go renames the USER binding.
 // issue #3095 adds the component activation/provide-impl scaffolding a
 // `let-effect` bind shares scope with. Mirrors backends/go/emit.py.
@@ -280,6 +294,7 @@ fn is_emitter_reserved(name: Str) -> Bool {
                         "ctx", "cfg", "err", "revlFrame", "revlJournal", "revlSelf",
                         "_revlUi", "_revlApplyInv", "_revlApplyErr"], name)
 }
+
 fn safe_local(name: Str) -> Str {
   var root = name
   var go = true
@@ -289,14 +304,17 @@ fn safe_local(name: Str) -> Str {
   }
   return name
 }
-// `_lower_camel`: `camel` (the `_camel` extern in selfhost/emit_go_core.rvl) with the first char lowered.
+
+// `_lower_camel`: `camel` (the `_camel` extern above) with the first char lowered.
 fn lower_first(s: Str) -> Str {
   let c = s == "" ? 0 : s.charCodeAt(0)
   let upper = c >= 65 && c <= 90
   return upper ? "abcdefghijklmnopqrstuvwxyz".charAt(c - 65).concat(s.slice(1, s.length())) : s
 }
+
 fn lower_camel(name: Str) -> Str { return lower_first(camel(name)) }
 fn key_var(name: Str) -> Str { return "_key".concat(camel(name)) }
+
 // `_go_type` in v3 mode: the component tier's VALUE-position spelling. Unlike
 // the pure tier's `go_type`, an Opt is a `*T` pointer and an undeclared name
 // is camel-cased rather than kept.
@@ -347,6 +365,7 @@ fn comp_go_type(tv: Any, types: Any) -> Str {
   }
   return value_is_null(value_field(types, t)) ? camel(t) : v3_ident(t)
 }
+
 // `_go_return`: the RETURN-position spelling. Opt[T] -> `(T, bool)` and
 // Result[T, E] -> `(T, E, bool)`, the tuple convention of the live tier.
 fn comp_go_return(tv: Any, types: Any) -> Str {
@@ -360,31 +379,38 @@ fn comp_go_return(tv: Any, types: Any) -> Str {
   }
   return comp_go_type(t, types)
 }
+
 fn is_tuple_surface(tv: Any) -> Bool {
   let t = trim(value_str(tv))
   return t.startsWith("Opt[") || t.startsWith("Result[")
 }
+
 // `_Env` inside a provide method: params are bare locals, a required key is a
 // field on the method receiver.
 type CEnv = { params: List[Str], reqs: List[Str], types: Any, vt: Map[Str, Str], fr: Map[Str, Str], rq: Any, services: Any, cfg: Map[Str, Str], et: Map[Str, Str] }
+
 fn comp_name_ref(env: CEnv, ident: Str) -> Str {
   if (list_contains(env.params, ident)) { return safe_local(ident) }
   if (list_contains(env.reqs, ident)) { return "revlSelf.".concat(lower_camel(ident)) }
   return safe_local(ident)
 }
+
 fn ref_ident(n: Any) -> Str {
   let a = value_str(value_field(n, "name"))
   return a != "" ? a : value_str(value_field(n, "id"))
 }
+
 fn with_vt(env: CEnv, name: Str, t: Str) -> CEnv {
   return { params: env.params, reqs: env.reqs, types: env.types, vt: env.vt.set(name, t),
            fr: env.fr, rq: env.rq, services: env.services, cfg: env.cfg, et: env.et }
 }
+
 // `env.var_types` replaced wholesale, for the untyped-empty-list forward pass.
 fn with_comp_vt(env: CEnv, vt: Map[Str, Str]) -> CEnv {
   return { params: env.params, reqs: env.reqs, types: env.types, vt: vt,
            fr: env.fr, rq: env.rq, services: env.services, cfg: env.cfg, et: env.et }
 }
+
 // `_go_v3_is_interface` over a component env's declared types.
 fn comp_is_interface(t: Str, types: Any) -> Bool {
   // A generic applied variant (`Mb[Int]`, issue #2471) is outside this
@@ -394,10 +420,12 @@ fn comp_is_interface(t: Str, types: Any) -> Bool {
     || (s.startsWith("Result[") && s.endsWith("]"))
     || decl_kind(types, s) == "variant"
 }
+
 // ------------------------------------------- declared records and variants
 fn decl_kind(types: Any, name: Str) -> Str {
   return value_str(value_field(value_field(types, name), "kind"))
 }
+
 // `_v3_record_type_for_fields`: the ONE declared record whose field set is
 // exactly `fields`, else "" (none, or more than one: the reference refuses
 // both by name).
@@ -415,11 +443,13 @@ fn comp_record_for_fields(types: Any, fields: List[Str]) -> Str {
   }
   return count == 1 ? found : ""
 }
+
 fn record_field_names(n: Any) -> List[Str] {
   var names = []
   for (pair of value_list(value_field(n, "fields"))) { names = names.push(value_str(value_at(pair, 0))) }
   return names
 }
+
 // `_v3_case_layout` and `_v3_case_payload` in one walk: the variant that
 // declares `case_name` and that case's payload surface, as [variant, payload],
 // or [] when no declared variant has it. With `adt` given only that variant is
@@ -434,6 +464,7 @@ fn case_entry(types: Any, adt: Str, case_name: Str) -> List[Str] {
   }
   return []
 }
+
 // The variant a case resolves against: `hint` when it is a declared variant
 // (the frozen node type, or the scrutinee's), else the case's own layout
 // entry. "" when neither declares it.
@@ -441,10 +472,12 @@ fn case_variant_of(types: Any, hint: Str, case_name: Str) -> Str {
   let e = case_entry(types, decl_kind(types, hint) == "variant" ? hint : "", case_name)
   return e.length() > 0 ? e[0] : ""
 }
+
 fn case_payload(types: Any, adt: Str, case_name: Str) -> Str {
   let e = case_entry(types, adt, case_name)
   return e.length() > 0 ? e[1] : ""
 }
+
 // `_v3_comp_applied` (issue #2471): the instantiation (`Mb[Int]`) a
 // component-body construction of `case` builds when its variant is generic,
 // else "". The type arguments come from the flow target when it names the same
@@ -470,6 +503,7 @@ fn comp_applied(env: CEnv, adt: Str, case: Str, expected: Str, arg_nodes: List[A
   for (p of av.params) { args = args.push(bound.lookup(p) ?? "any") }
   return `${av.head}[${args.join(", ")}]`
 }
+
 // `_v3_comp_case_type`: the Go case struct of `case` under `instance`:
 // `MbJj[int64]` for `Mb[Int]`, `StepFinal` for a monomorphic `Step`.
 fn comp_case_type(instance: Str, case: Str, types: Any) -> Str {
@@ -480,11 +514,13 @@ fn comp_case_type(instance: Str, case: Str, types: Any) -> Str {
   if (!av.generic) { return struct }
   return struct.concat(variant_type_args(instance, gv))
 }
+
 // The variant an `adt` node constructs: the type the checker froze onto it,
 // else the layout's. "" when that is not a declared variant.
 fn adt_variant(n: Any, types: Any) -> Str {
   return case_variant_of(types, value_str(value_field(n, "type")), value_str(value_field(n, "case")))
 }
+
 // A literal's surface type by its JSON shape ("" for a null). A table rather
 // than comparisons: tools/selfhost_coverage.py would read `.. == "bool"` as
 // the legacy `bool` node kind.
@@ -495,6 +531,7 @@ fn lit_surface(shape: Str) -> Str {
   while (i < shapes.length() && shapes[i] != shape) { i = i + 1 }
   return surfaces[i]
 }
+
 // ------------------------------------------------------ `_comp_infer`
 // The surface type of a component-body expression, "" when unknown. Mirrors
 // the arms of `_comp_infer` the slice can reach.
@@ -551,6 +588,7 @@ fn comp_infer(n: Any, env: CEnv) -> Str {
   }
   return ""
 }
+
 // Does `_expr` in a provide method render this node in the ported subset? The
 // rest of the component expression surface (builtins, `??`, interpolation, an
 // Opt/Result `match`, an Opt/Result construction as a value) is outside it. A
@@ -596,6 +634,7 @@ fn comp_expr_ok(n: Any, env: CEnv) -> Bool {
   if (k == "format") { return all_ok(value_list(value_field(n, "args")), env) }
   return k == "match" && comp_match_ok(n, env)
 }
+
 // `_comp_builtin` for the methods this slice ports. A Map method, `Str.to_int`
 // (the Opt-returning parse) and the division forms are outside it.
 fn comp_builtin_ok(method: Str, recv: Str) -> Bool {
@@ -604,6 +643,7 @@ fn comp_builtin_ok(method: Str, recv: Str) -> Bool {
                 "to_char"]
   return list_contains(ported, method) && !(method == "to_int" && recv == "Str")
 }
+
 // `_comp_builtin(method, recv, target, args)`: the revl* helper, `strings`
 // probe or `strconv` rendering for one stdlib call. A Str receiver picks the
 // Str helper where the List one shares the method name. Every builtin pulls
@@ -640,10 +680,12 @@ fn comp_builtin(method: Str, recv: Str, target: Str, args: List[Str]) -> Str {
   }
   return marked(text)
 }
+
 fn is_ascii_digit(ch: Str) -> Bool {
   let c = ch == "" ? 0 : ch.charCodeAt(0)
   return c >= 48 && c <= 57
 }
+
 // `_format(template, args, arg_types)`: a `$N` template as a Go string. With
 // every operand's surface type known it is a `+` chain of string pieces (a Str
 // as is, an Int or Int32 through `strconv.FormatInt`, a Bool through
@@ -695,6 +737,7 @@ fn comp_format(n: Any, env: CEnv) -> Str {
   if (typed && used == args.length()) { return pieces.length() == 1 ? pieces[0] : `(${pieces.join(" + ")})` }
   return `fmt.Sprintf(${fmt_str}, ${args.join(", ")})`
 }
+
 // The callee or receiver of a call. A built-in Opt/Result constructor as a
 // bare value is refused; it is matched by list rather than by the comparison
 // the blind-spot gate (tools/selfhost_coverage.py) reads as a ported arm.
@@ -704,11 +747,13 @@ fn call_head_ok(n: Any, env: CEnv) -> Bool {
   if (node_kind(callee) == "field") { return comp_expr_ok(value_field(callee, "target"), env) }
   return !list_contains(["Some", "None", "Ok", "Err"], ref_ident(callee)) && comp_expr_ok(callee, env)
 }
+
 fn all_ok(nodes: List[Any], env: CEnv) -> Bool {
   var ok = true
   for (x of nodes) { ok = ok && comp_expr_ok(x, env) }
   return ok
 }
+
 // A `match` over a declared variant (the type switch). An Opt/Result scrutinee
 // takes the tuple form, which is outside the slice. A bound payload's type
 // stays visible to the later arms, as it does when the match renders.
@@ -736,6 +781,7 @@ fn comp_match_ok(n: Any, env: CEnv) -> Bool {
   }
   return ok
 }
+
 // `_expr(node, env, expected)` over that subset. A `widen` marker is the
 // explicit Int -> Float conversion, rendered around the node it marks.
 fn comp_expr(n: Any, env: CEnv, expected: Str) -> Str {
@@ -744,11 +790,13 @@ fn comp_expr(n: Any, env: CEnv, expected: Str) -> Str {
   }
   return comp_expr_bare(n, env, expected)
 }
+
 fn comp_args(n: Any, env: CEnv) -> Str {
   var parts = []
   for (a of value_list(value_field(n, "args"))) { parts = parts.push(comp_expr(a, env, "")) }
   return parts.join(", ")
 }
+
 // The `if`/`match` result type: the expected surface's Go spelling when there
 // is one, else the first of `candidates` that has one, else `any`.
 fn result_go_type(expected: Str, candidates: List[Any], env: CEnv) -> Str {
@@ -757,6 +805,7 @@ fn result_go_type(expected: Str, candidates: List[Any], env: CEnv) -> Str {
   if (expected != "") { gt = comp_go_type(expected, env.types) }
   return gt == "" && expected == "" ? "any" : gt
 }
+
 // `_comp_typed_arith`: an arithmetic node keys on its `operands` as a `fn`
 // body's does (docs/arithmetic.md). Int `+ - *` trap through the checked
 // helpers (issue #2259), `/` is true division through `revlDiv`, a Float `%`
@@ -788,6 +837,7 @@ fn comp_typed_arith(n: Any, left: Str, right: Str, env: CEnv) -> Str {
   if (op == "%" && opnd == "Float") { return flagged("m", `math.Mod(${l}, ${r})`) }
   return `(${l} ${go_bin_op(op)} ${r})`
 }
+
 fn comp_expr_bare(n: Any, env: CEnv, expected: Str) -> Str {
   let k = node_kind(n)
   if (k == "name") { return comp_name_ref(env, value_str(value_field(n, "id"))) }
@@ -902,6 +952,7 @@ fn comp_expr_bare(n: Any, env: CEnv, expected: Str) -> Str {
   // the match arm (`comp_expr_ok` admits no other kind)
   return comp_match(n, env, expected)
 }
+
 // `_go_comp_match` over a declared variant: an immediately applied func whose
 // type switch returns each arm's body. A bound payload's type is visible to
 // every later arm too, as on the reference (its `var_types` is restored only
@@ -930,6 +981,7 @@ fn comp_infer_match(n: Any, env: CEnv) -> Str {
   }
   return found
 }
+
 fn comp_match(n: Any, env: CEnv, expected: Str) -> Str {
   let scrut_node = value_field(n, "scrutinee")
   let st = comp_infer(scrut_node, env)
@@ -992,10 +1044,12 @@ fn comp_match(n: Any, env: CEnv, expected: Str) -> Str {
   lines = lines.push(line(1, "}")).push("}()")
   return lines.join(newline())
 }
+
 // The service a provide block implements, and its declared method table.
 fn service_methods(services: Any, svc: Str) -> Any {
   return value_field(value_field(services, svc), "methods")
 }
+
 // ---------------------------------- untyped empty lists in a provide body
 // `_method_flow_hints` + `_empty_list_type`: the same evidence analysis over
 // `_comp_infer`, keyed by name (the component tier's hints carry no binding
@@ -1004,6 +1058,7 @@ fn service_methods(services: Any, svc: Str) -> Any {
 fn method_add_read(acc: HintAcc, key: Str, kind: Str, other: Str) -> HintAcc {
   return { acc | reads = acc.reads.push([key, kind, other]) }
 }
+
 fn method_reads(node: Any, acc: HintAcc, pos: Str, other: Str, env: CEnv) -> HintAcc {
   if (value_kind(node) == "list") {
     var la = acc
@@ -1022,6 +1077,7 @@ fn method_reads(node: Any, acc: HintAcc, pos: Str, other: Str, env: CEnv) -> Hin
   for (child of value_children(node)) { a = method_reads(child, a, "other", "", env) }
   return a
 }
+
 // The body is the slice's flat one (`emit` steps and a final `return` beside
 // `let`/`var` bindings), so the forward typing and the push/reassign evidence
 // are collected in one pass over the top-level steps, in document order.
@@ -1054,6 +1110,7 @@ fn method_scan(body: List[Any], ret_surface: Str, env: CEnv) -> HintScan {
   }
   return finish_scan(a, "List[Int]", false)
 }
+
 // Is this provide method an empty body or a single `return` the slice renders?
 fn provide_method_ok(m: Any, decl: Any, env: CEnv) -> Bool {
   let steps = value_list(value_field(m, "body"))
@@ -1072,6 +1129,7 @@ fn provide_method_ok(m: Any, decl: Any, env: CEnv) -> Bool {
   }
   return !is_tuple_surface(value_field(decl, "returns")) && !secret && body_ok
 }
+
 // A method-body `let`/`var` the slice renders: its value is an expression the
 // slice renders (an untyped `[]` included), so `_emit_method_body`'s let arm is
 // the only statement form this widens.
@@ -1092,6 +1150,7 @@ fn method_let_ok(st: Any, env: CEnv) -> Bool {
     || (surface.startsWith("Result[") && surface.endsWith("]"))
   return comp_expr_ok(v, env) && !sum
 }
+
 // A method-body `emit`: its expression, and a site-spelled `compensate` clause
 // if it has one. A clause that pins a mutable local by value
 // (`compensate_captures`) is past the slice; a provide method here binds none.
@@ -1101,6 +1160,7 @@ fn method_emit_ok(st: Any, env: CEnv) -> Bool {
     && (value_is_null(comp) || comp_expr_ok(comp, env))
     && value_list(value_field(st, "compensate_captures")).length() == 0
 }
+
 // `_method_body_has_compensate` / `_provide_has_method_frame`: a provide block
 // one of whose methods parks an `emit .. compensate ..` offset on the
 // component's activation frame. Its impl takes the frame, and the component's
@@ -1119,6 +1179,7 @@ fn component_needs_frame(c: Any) -> Bool {
   for (s of value_list(value_field(c, "body"))) { hit = hit || provide_has_frame(s) }
   return hit
 }
+
 // `_call_descriptor`: the static (key, method) a residue record names for a
 // compensation call, a service call's receiver and method or a free function's
 // name twice.
@@ -1132,10 +1193,12 @@ fn call_descriptor(n: Any) -> List[Str] {
   return k == "call" && !value_is_null(value_field(n, "method")) ? [key, value_str(value_field(n, "method"))]
     : (k == "fn" ? [callee, callee] : ["call", "call"])
 }
+
 // The document-wide tables a provide method's renderer reads: the declared
 // types, the services, and every module fn's and extern's declared return
 // (`_FN_RET`).
 type CDoc = { types: Any, services: Any, fr: Map[Str, Str] }
+
 fn comp_doc(ir: Any) -> CDoc {
   var fr: Map[Str, Str] = Map.empty()
   for (d of value_list(value_field(ir, "functions")).concat(value_list(value_field(ir, "externs")))) {
@@ -1144,6 +1207,7 @@ fn comp_doc(ir: Any) -> CDoc {
   }
   return { types: value_field(ir, "types"), services: value_field(ir, "services"), fr: fr }
 }
+
 // The `_Env` of one provide method: its params typed from the service
 // declaration (`env.var_types[pn] = ptypes.get(pn)`), and the component's
 // required keys as receiver fields.
@@ -1168,6 +1232,7 @@ fn method_env(m: Any, decl: Any, c: Any, doc: CDoc) -> CEnv {
   return { params: params, reqs: value_keys(rq), types: doc.types, vt: vt, fr: doc.fr,
            rq: rq, services: doc.services, cfg: cfg, et: Map.empty() }
 }
+
 fn component_ok(c: Any, doc: CDoc) -> Bool {
   let rq = value_field(c, "requires")
   var ok = value_keys(value_field(c, "routes")).length() == 0
@@ -1182,6 +1247,7 @@ fn component_ok(c: Any, doc: CDoc) -> Bool {
   }
   return ok
 }
+
 // `_collect_host_calls`: a `host` node whose family has no fixed runtime here
 // (anything but Pool / Map / Stream) needs a generated stub, outside the slice.
 fn has_stub_host(node: Any) -> Bool {
@@ -1190,11 +1256,13 @@ fn has_stub_host(node: Any) -> Bool {
   for (child of value_children(node)) { hit = hit || has_stub_host(child) }
   return hit
 }
+
 // A boolean IR flag, read through a helper. Used where the combined slice
 // DECLINES a document over a flag (a `Secret[T]` marking, a lifecycle test):
 // tools/selfhost_coverage.py reads the inline `value_bool(value_field(.., "f"))`
 // spelling as "this tier ports construct f", and a decline is not a port.
 fn flag_of(node: Any, field: Str) -> Bool { return value_bool(value_field(node, field)) }
+
 // `_declares_secret`: a surviving `Secret[T]` marking turns on the
 // confidentiality funnel, which this slice does not carry.
 fn declares_secret(ir: Any) -> Bool {
@@ -1213,11 +1281,13 @@ fn declares_secret(ir: Any) -> Bool {
   for (x of marked) { hit = hit || flag_of(x, "secret") }
   return hit
 }
+
 fn has_lifecycle_test(ir: Any) -> Bool {
   var hit = false
   for (t of value_list(value_field(ir, "tests"))) { hit = hit || flag_of(t, "lifecycle") }
   return hit
 }
+
 // The reference routes a v3 document to `_emit_v3_combined` when a top-level
 // declaration (a fn, type, extern or test) sits beside an observable component
 // and no lifecycle test keeps it on the live path. The rest of `combined_ok`
@@ -1228,9 +1298,11 @@ fn takes_combined_path(ir: Any) -> Bool {
   return value_int(value_field(ir, "ir_version")) == 3 && comps.length() > 0 && !has_lifecycle_test(ir)
     && top && any_component_is_observable(comps)
 }
+
 pub fn combined_ok(ir: Any) -> Bool {
   return takes_combined_path(ir) && components_in_slice(ir)
 }
+
 // The reach of this file's component renderer, shared by the combined path
 // and the live one: what each component's body may hold, and the document
 // features (a fault test, a `Secret[T]` marking, a stub host family, a
@@ -1251,6 +1323,7 @@ pub fn components_in_slice(ir: Any) -> Bool {
   for (c of value_list(value_field(ir, "components"))) { ok = ok && component_ok(c, doc) }
   return ok && keys_in_slice(ir)
 }
+
 // `_key_ident` / `_check_host_keys`: a namespaced key (`acme::greeter`) is
 // mangled on the reference, and two keys that land on one Go identifier are
 // refused there. This file ports neither, so it declines both.
@@ -1268,6 +1341,7 @@ fn keys_in_slice(ir: Any) -> Bool {
   }
   return ok
 }
+
 // `_emit_services`: one interface per declared service, in declaration order.
 fn emit_comp_services(services: Any, types: Any) -> List[Str] {
   var out = []
@@ -1292,6 +1366,7 @@ fn emit_comp_services(services: Any, types: Any) -> List[Str] {
   }
   return out
 }
+
 // `_emit_keys`: one typed key per provided or required name, first seen wins.
 fn emit_comp_keys(comps: List[Any]) -> List[Str] {
   var names = []
@@ -1317,6 +1392,7 @@ fn emit_comp_keys(comps: List[Any]) -> List[Str] {
   if (names.length() > 0) { out = out.push("") }
   return out
 }
+
 // `_emit_component` for the slice: the constructor (required services
 // resolved, each provide block wired), then one impl struct per block.
 fn emit_comp_component(c: Any, doc: CDoc) -> List[Str] {
@@ -1366,6 +1442,7 @@ fn emit_comp_component(c: Any, doc: CDoc) -> List[Str] {
   for (s of steps) { out = out.concat(emit_comp_provide_impl(cname, s, c, doc)) }
   return out
 }
+
 // `_emit_config_struct`: the component's config struct and its defaults
 // constructor (a field with no default is left to its zero value).
 fn emit_comp_config_struct(c: Any, cname: Str, types: Any) -> List[Str] {
@@ -1382,10 +1459,12 @@ fn emit_comp_config_struct(c: Any, cname: Str, types: Any) -> List[Str] {
   }
   return out.push(line(1, "}")).push("}").push("")
 }
+
 // `_default_lit`: a config default as its Go literal for the field's type.
 fn default_lit(v: Any, gt: Str) -> Str {
   return gt == "string" ? go_string(v) : (gt == "bool" ? (value_bool(v) ? "true" : "false") : num_str(v))
 }
+
 // `_emit_provide_impl`: the impl struct (ctx plus every required handle) and
 // one method per provided operation, typed from the service declaration.
 fn emit_comp_provide_impl(cname: Str, s: Any, c: Any, doc: CDoc) -> List[Str] {
@@ -1429,6 +1508,7 @@ fn emit_comp_provide_impl(cname: Str, s: Any, c: Any, doc: CDoc) -> List[Str] {
   }
   return out
 }
+
 // `_emit_method_body` over the slice's steps. An `emit` fires inline, then
 // parks its site-spelled offset on the activation frame through
 // `registerMethodCompensation` (item 247): discharged on a clean commit,
@@ -1437,9 +1517,11 @@ fn emit_comp_provide_impl(cname: Str, s: Any, c: Any, doc: CDoc) -> List[Str] {
 // as a refusal, an integer/float binding is pinned to the tier's type, and a
 // user-variant binding holds its interface (issue #2898 / item 280).
 type MethodStep = { lines: List[Str], env: CEnv }
+
 fn with_comp_scan(env: CEnv, scan: HintScan) -> CEnv {
   return { env | et = scan.et }
 }
+
 fn emit_method_step(st: Any, env: CEnv, decl: Any) -> MethodStep {
   let e = value_field(st, "expr")
   let step = node_step(st)
@@ -1482,6 +1564,7 @@ fn emit_method_step(st: Any, env: CEnv, decl: Any) -> MethodStep {
   }
   return { lines: [line(1, value_is_null(e) ? "return" : `return ${comp_expr(e, env, value_str(value_field(decl, "returns")))}`)], env: env }
 }
+
 // `_emit_load_helpers`: a component that isolates a key into a
 // realm or intercepts one loads into a child context that carries both.
 fn emit_comp_load_helpers(comps: List[Any]) -> List[Str] {
@@ -1511,6 +1594,7 @@ fn emit_comp_load_helpers(comps: List[Any]) -> List[Str] {
   }
   return out
 }
+
 // `_go_literal` over an intercept's metadata: scalars as `go_literal` spells
 // them, a list as `[]any{..}` and a record as `map[string]any{..}` in its
 // declared key order.
@@ -1529,6 +1613,7 @@ fn meta_literal(v: Any) -> Str {
   if (shape == "null") { return "nil" }
   return go_literal(v)
 }
+
 // `_emit_realm_helper`: the realm interner, emitted when any component
 // isolates a key (a routed key would reach it too, but routes are past the
 // slice).
@@ -1548,10 +1633,12 @@ fn emit_comp_realm_helper(comps: List[Any]) -> List[Str] {
     line(1, "return r"), "}", ""
   ]
 }
+
 // The component half of the combined body, after the pure tier.
 pub fn emit_comp_section(ir: Any) -> List[Str] {
   return ["", "// ---- live stc-go components (placement) -------------------"].concat(emit_comp_body(ir))
 }
+
 // The services, keys, realm interner, components and load helpers, in the
 // order both the combined path and the live one render them.
 fn emit_comp_body(ir: Any) -> List[Str] {
@@ -1582,6 +1669,7 @@ pub fn takes_live_path(ir: Any) -> Bool {
     && value_list(value_field(ir, "components")).length() > 0
     && !carries_pure_declarations(ir) && value_list(value_field(ir, "tests")).length() == 0
 }
+
 // The module, when every component is in the slice (`in_slice`) and the body
 // it renders is too. Otherwise the live tier's banner, so the answer still
 // says which module the reference renders, then one marker per component and
@@ -1626,6 +1714,7 @@ pub fn emit_live_module(ir: Any, in_slice: Bool) -> Str {
   if (teardown) { out = out.concat(teardown_preamble()) }
   return out.concat(body).join(newline()).concat(newline())
 }
+
 // `_host_runtime()` for this document: a declared `Row` drops the runtime's own
 // alias, so `Query` answers the declared record (issue #1356 on the reference).
 pub fn host_runtime_for(types: Any) -> List[Str] {
@@ -1643,6 +1732,7 @@ pub fn host_runtime_for(types: Any) -> List[Str] {
   }
   return out
 }
+
 // `_host_runtime()` in v3 mode (`@INT@` = int64), with no `Secret[T]` declared
 // and no declared record renaming a host type: the fixed, recording Pool/Map
 // runtime the combined module always carries. One entry per line of the
@@ -1796,6 +1886,7 @@ fn host_runtime() -> List[Str] {
     ""
   ]
 }
+
 // `_teardown_preamble(True)`: the frame teardown accumulator with the item 318
 // method-registered extension, line for line. A provide method's
 // `emit .. compensate ..` parks its offset through `registerMethodCompensation`,

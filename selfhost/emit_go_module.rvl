@@ -12,6 +12,9 @@ use "../stdlib/value.rvl" {
   value_keys
 }
 use "../stdlib/str.rvl" { rstrip, trim }
+// The list kit (item 194): `list_sort` is the codepoint-lexicographic `sorted(..)`
+// the reference uses to canonicalise a record's field set into a `record_by_fields`
+// key — no re-hand-roll (byte-fuzz-pinned against Python `sorted()`).
 use "../stdlib/list.rvl" { list_sort, list_contains }
 use "./emit_go_core.rvl" {
   Fout, TypeTables, collect_reserved, emit_stmts, flow_hints, go_string,
@@ -51,6 +54,7 @@ fn emit_generic_variant(gname: Str, spec: Any, gv: Map[Str, Str]) -> List[Str] {
   out = out.push("")
   return out
 }
+
 pub fn emit_v3_types(types: Any) -> List[Str] {
   var out = []
   let gv = gv_of(types)
@@ -92,6 +96,7 @@ pub fn emit_v3_types(types: Any) -> List[Str] {
   }
   return out
 }
+
 // `_emit_v3_go_externs`: each extern as a Go `func` carrying its verbatim `@go`
 // body, blank-line separated, in declaration order and BEFORE the free functions.
 //
@@ -121,6 +126,7 @@ pub fn is_extra_linebreak(code: Int) -> Bool {
   if (code == 133) { return true }
   return code == 8232 || code == 8233
 }
+
 pub fn has_extra_linebreak(s: Str) -> Bool {
   let n = s.length()
   var i = 0
@@ -130,6 +136,7 @@ pub fn has_extra_linebreak(s: Str) -> Bool {
   }
   return false
 }
+
 // The reference's `_go_literal`, over a config default. The frontend only
 // admits a scalar literal there (a `null` default marks the field required and
 // never reaches this), so the reference's list and record arms, which serve its
@@ -141,7 +148,9 @@ pub fn go_literal(v: Any) -> Str {
   if (shape == "int" || shape == "float") { return num_str(v) }
   return `<<UNSUPPORTED-CONFIG-DEFAULT:${shape}>>`
 }
+
 fn has_config(ext: Any) -> Bool { return value_list(value_field(ext, "config")).length() > 0 }
+
 // `_go_extern_config_bind`: the `_revl_config := ..` first body line of a
 // config extern, from its schema's required names and defaults.
 fn config_bind(ext: Any) -> Str {
@@ -156,6 +165,7 @@ fn config_bind(ext: Any) -> Str {
   let name = go_string(value_str(value_field(ext, "name")))
   return `_revl_config := _revlExternConfig(${name}, []string{${required.join(", ")}}, map[string]any{${defaults.join(", ")}})`
 }
+
 // Only ever handed one character of a line. The whitespace Python's `\s` and
 // `strip()` read, not only ASCII: the C0 separators (28-31), NEL, NBSP, Ogham
 // space, U+2000-U+200A, U+2028/2029, U+202F, U+205F and U+3000. A line break
@@ -166,6 +176,7 @@ fn is_ws_char(ch: Str) -> Bool {
     || c == 5760 || (c >= 8192 && c <= 8202) || c == 8232 || c == 8233 || c == 8239
     || c == 8287 || c == 12288
 }
+
 // `_GO_IMPORT_DIRECTIVE_WORD` (`^//revl:import(?:\s|$)` on the stripped line):
 // whether a body line is a `//revl:import` directive, that is whether its first
 // whitespace-separated word is the directive's name. A longer word
@@ -174,6 +185,7 @@ pub fn is_import_directive(l: Str) -> Bool {
   let words = ws_words(l)
   return words.length() > 0 && words[0] == "//revl:import"
 }
+
 // The whitespace-separated words of `s`.
 fn ws_words(s: Str) -> List[Str] {
   var out: List[Str] = []
@@ -190,6 +202,7 @@ fn ws_words(s: Str) -> List[Str] {
   if (word != "") { out = out.push(word) }
   return out
 }
+
 // `[A-Za-z_]\w*|\.`: an import alias. `is_word_char` is ASCII only, so a
 // non-ASCII alias is refused here where Python's `\w` would take it.
 fn is_import_alias(w: Str) -> Bool {
@@ -202,12 +215,14 @@ fn is_import_alias(w: Str) -> Bool {
   let first = w == "" ? 0 : w.charCodeAt(0)
   return w == "." || (all_word && !(first >= 48 && first <= 57))
 }
+
 // `"[^"\s]+"|[^"\s]+`: an import path, quoted or bare (a word has no space).
 fn is_import_path(w: Str) -> Bool {
   let quoted = w.startsWith("\"")
   let inner = quoted && w.length() >= 2 ? w.slice(1, w.length() - 1) : w
   return w != "" && (!quoted || (w.length() >= 3 && w.endsWith("\""))) && inner.indexOf("\"") < 0
 }
+
 // `_GO_LANGUAGE_KEYWORDS`: none can name an import.
 fn is_go_language_keyword(w: Str) -> Bool {
   return list_contains(["break", "case", "chan", "const", "continue", "default",
@@ -215,6 +230,7 @@ fn is_go_language_keyword(w: Str) -> Bool {
     "interface", "map", "package", "range", "return", "select", "struct",
     "switch", "type", "var"], w)
 }
+
 // `_go_import_spec`: the Go import spec (`"time"`, `tm "time"`, `. "strings"`)
 // a directive line asks for, as `[spec]`; `[]` for a line the reference
 // refuses with an EmitError (it does not parse as `//revl:import [alias]
@@ -229,6 +245,7 @@ pub fn import_spec(l: Str) -> List[Str] {
   let spec = one ? quoted : (two ? `${words[1]} ${quoted}` : "")
   return spec == "" ? [] : [spec]
 }
+
 // `_go_import_name`: the file-scope name an import spec binds: its alias, else
 // the last element of its path.
 pub fn import_name(spec: Str) -> Str {
@@ -241,6 +258,7 @@ pub fn import_name(spec: Str) -> Str {
   let parts = path.split("/")
   return parts[parts.length() - 1]
 }
+
 // `_go_refuse_extern_alias_clash`: the alias of a hoisted aliased spec that the
 // module's import block already binds to a different spec (one the preamble
 // imports, or another directive's), else "". The same spec twice is one import.
@@ -261,7 +279,9 @@ pub fn import_alias_clash(preamble: List[Str], hoisted: List[Str]) -> Str {
   }
   return ""
 }
+
 type Hoisted = { kept: List[Str], specs: List[Str], bad: Bool }
+
 // `_hoist_go_imports`: the body lines a Go extern keeps, and the import specs
 // its `//revl:import` directives hoist. `bad` when a directive is one the
 // reference refuses.
@@ -279,7 +299,9 @@ fn hoist_imports(body: Str) -> Hoisted {
   }
   return { kept: kept, specs: specs, bad: bad }
 }
+
 pub type Eout = { lines: List[Str], imports: List[Str] }
+
 pub fn emit_externs(externs: List[Any], gv: Map[Str, Str]) -> Eout {
   var out = []
   var imports = []
@@ -343,6 +365,7 @@ pub fn emit_externs(externs: List[Any], gv: Map[Str, Str]) -> Eout {
   }
   return { lines: out, imports: imports }
 }
+
 // `_v3_fn_type_params` (issue #2495): the type parameters of a function
 // signature, in first-use order. The IR carries the author's spelling
 // (`fn id[T](x: T) -> T` arrives as params typed `T`, with no parameter
@@ -364,6 +387,7 @@ fn fn_type_params(fnode: Any, tnames: List[Str]) -> List[Str] {
   }
   return found
 }
+
 // `_emit_v3_go_functions`: each module fn as a Go `func`, blank-line separated.
 // A generic function carries its type parameters as Go type parameters,
 // `func id[T any](x T) T` (issue #2495).
@@ -414,6 +438,7 @@ pub fn emit_functions(functions: List[Any], fr: Map[Str, Str], er: Map[Str, Str]
   }
   return { lines: out, uses_strings: uses_strings, reserved: last_reserved }
 }
+
 // `_go_v3_test_name`: `Test` + each alphanumeric run of the test's name with
 // its first character upper-cased, numbered on a clash.
 fn test_name(name: Str, used: List[Str]) -> Str {
@@ -438,10 +463,12 @@ fn test_name(name: Str, used: List[Str]) -> Str {
   }
   return candidate
 }
+
 fn is_alnum_ascii(ch: Str) -> Bool {
   let c = ch.charCodeAt(0)
   return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
 }
+
 pub fn upper_first(part: Str) -> Str {
   let c = part.charCodeAt(0)
   if (c >= 97 && c <= 122) {
@@ -449,6 +476,7 @@ pub fn upper_first(part: Str) -> Str {
   }
   return part
 }
+
 // `_emit_v3_go_tests`: each in-file `test` as a `func TestX(revlT *testing.T)`,
 // whose asserts fail through the receiver. The ctx carries no parameters and
 // no return type; the reserved names and the strings alias are the ones the
@@ -484,6 +512,7 @@ pub fn emit_tests(tests: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t: Typ
   }
   return { lines: out, uses_strings: uses_strings, reserved: res }
 }
+
 // ------------------------------------------------------------- feature flags
 // Which runtime preambles the pure path prepends is a deterministic function of
 // the IR: the reference sets each flag while RENDERING a node, and every node in
@@ -494,9 +523,11 @@ pub fn emit_tests(tests: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t: Typ
 // types it infers as it renders, so `emit_go_src` reads them off the rendered
 // lines instead of re-deriving that inference structurally.
 type Flags = { fdiv: Bool, ovf: Bool, ovf32: Bool }
+
 fn flags_or(a: Flags, b: Flags) -> Flags {
   return { fdiv: a.fdiv || b.fdiv, ovf: a.ovf || b.ovf, ovf32: a.ovf32 || b.ovf32 }
 }
+
 fn flag_walk(node: Any, acc: Flags) -> Flags {
   var f = acc
   if (value_kind(node) == "record") {
@@ -517,11 +548,13 @@ fn flag_walk(node: Any, acc: Flags) -> Flags {
   for (c of value_children(node)) { f = flag_walk(c, f) }
   return f
 }
+
 pub fn collect_flags(functions: List[Any]) -> Flags {
   var f = { fdiv: false, ovf: false, ovf32: false }
   for (fnode of functions) { f = flag_walk(fnode, f) }
   return f
 }
+
 // ------------------------------------------------------------- runtime preambles
 // The trapping Int arithmetic trio (docs/arithmetic.md): Go has no checked
 // arithmetic, so the helpers detect overflow. Built line-by-line to match the
@@ -562,6 +595,7 @@ pub fn overflow_preamble() -> List[Str] {
   o = o.push("")
   return o
 }
+
 // The Int32 trap block: each op is computed in int64 and range-checked before
 // narrowing (Go's int32 wraps). Mirrors the reference append sequence.
 pub fn overflow32_preamble() -> List[Str] {
@@ -578,6 +612,7 @@ pub fn overflow32_preamble() -> List[Str] {
   o = o.push("")
   return o
 }
+
 // ------------------------------------------- the stdlib / Opt / Result / Map
 // The reference's preamble constants, line for line (a constant appended as one
 // element of the module's line list joins exactly as its own lines do). The two
@@ -588,11 +623,13 @@ pub fn stdlib_preamble(alias: Str) -> List[Str] {
   for (l of stdlib_preamble_raw()) { out = out.push(replace_all(l, "strings.", alias.concat("."))) }
   return out
 }
+
 pub fn ftoa_helper(alias: Str) -> List[Str] {
   var out = []
   for (l of ftoa_helper_raw()) { out = out.push(replace_all(l, "strings.", alias.concat("."))) }
   return out
 }
+
 // The integer-division helpers (`div_trunc`/`div_floor`/`div_euclid`/`mod` and
 // the total forms built on them), in the reference's append order.
 pub fn int_arith_preamble() -> List[Str] {
@@ -641,6 +678,7 @@ pub fn int_arith_preamble() -> List[Str] {
     ""
   ]
 }
+
 // `_V3_OPT_PREAMBLE`
 pub fn opt_preamble() -> List[Str] {
   return [
@@ -671,6 +709,7 @@ pub fn opt_preamble() -> List[Str] {
     ""
   ]
 }
+
 // `_V3_PARSE_INT_HELPER`
 pub fn parse_int_helper() -> List[Str] {
   return [
@@ -715,6 +754,7 @@ pub fn parse_int_helper() -> List[Str] {
     ""
   ]
 }
+
 // `_V3_RESULT_PREAMBLE`
 pub fn result_preamble() -> List[Str] {
   return [
@@ -735,6 +775,7 @@ pub fn result_preamble() -> List[Str] {
     ""
   ]
 }
+
 // `_V3_MAP_PREAMBLE`
 pub fn map_preamble() -> List[Str] {
   return [
@@ -788,6 +829,7 @@ pub fn map_preamble() -> List[Str] {
     ""
   ]
 }
+
 // `_V3_MAP_INDEX_HELPER`
 pub fn map_index_helper() -> List[Str] {
   return [
@@ -803,6 +845,7 @@ pub fn map_index_helper() -> List[Str] {
     ""
   ]
 }
+
 // `_V3_ANY_INDEX_HELPER`
 pub fn any_index_helper() -> List[Str] {
   return [
@@ -838,6 +881,7 @@ pub fn any_index_helper() -> List[Str] {
     ""
   ]
 }
+
 // `_V3_FTOA_HELPER` (`strings.` spelled raw; see `ftoa_helper`)
 fn ftoa_helper_raw() -> List[Str] {
   return [
@@ -918,6 +962,7 @@ fn ftoa_helper_raw() -> List[Str] {
     "}"
   ]
 }
+
 // `_V3_LIST_INDEX_OF_EQ`
 pub fn list_index_of_eq() -> List[Str] {
   return [
@@ -931,6 +976,7 @@ pub fn list_index_of_eq() -> List[Str] {
     "}"
   ]
 }
+
 // `_V3_STDLIB_PREAMBLE` (`strings.` spelled raw; see `stdlib_preamble`)
 fn stdlib_preamble_raw() -> List[Str] {
   return [
@@ -1160,6 +1206,7 @@ fn stdlib_preamble_raw() -> List[Str] {
     ""
   ]
 }
+
 // `_GO_EXTERN_CONFIG_SCAFFOLD`
 fn extern_config_scaffold() -> List[Str] {
   return [

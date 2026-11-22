@@ -118,6 +118,9 @@ use "../stdlib/value.rvl" {
   value_is_null, value_field, value_list, value_str, value_keys
 }
 use "../stdlib/str.rvl" { rstrip, str_tab }
+// The list kit (item 194): `list_sort` is the codepoint-lexicographic `sorted(..)`
+// the reference uses to canonicalise a record's field set into a `record_by_fields`
+// key — no re-hand-roll (byte-fuzz-pinned against Python `sorted()`).
 use "../stdlib/list.rvl" { list_sort, list_contains }
 use "./emit_go_core.rvl" {
   Ctx, build_type_tables, collect_reserved, flag, fresh_ident, go_bin_op,
@@ -145,6 +148,7 @@ pub fn emit_go_src(ir: Any) -> Str {
   if (takes_live_path(ir)) { return emit_live_module(ir, components_in_slice(ir)) }
   return emit_module(ir, combined_ok(ir))
 }
+
 // The module assembly shared by the pure typed-core path (`_emit_v3_go`) and
 // the combined one (`_emit_v3_combined`, `combined`), which add the same pure
 // tier in the same order and differ in the banner, the imports, the host
@@ -312,8 +316,7 @@ fn emit_module(ir: Any, combined: Bool) -> Str {
 
   var out = banner
   // The reference refuses a hoisted alias the block already binds to another
-  // spec; the pure path is the only one that hoists (see `hoist_imports` in
-  // selfhost/emit_go_module.rvl).
+  // spec; the pure path is the only one that hoists (see above).
   let clash = combined ? "" : import_alias_clash(imports, ext.imports)
   if (clash != "") { out = out.push(`<<UNSUPPORTED-EXTERN-IMPORT-ALIAS:${clash}>>`) }
   if (unique.length() > 0) {
@@ -358,6 +361,7 @@ fn emit_module(ir: Any, combined: Bool) -> Str {
   out = out.concat(deferred_emission_markers(ir))
   return rstrip(out.join(newline())).concat(newline())
 }
+
 // ---------------------------------------------------------------- in-file tests
 test "go_type covers the scalar and generic surface" {
   assert go_type("Int", Map.empty()) == "int64"
@@ -367,6 +371,7 @@ test "go_type covers the scalar and generic surface" {
   assert go_type("Map[Str, Int]", Map.empty()) == "map[string]int64"
   assert go_type("Opt[Str]", Map.empty()) == "RevlOpt[string]"
 }
+
 test "the go bin-op table maps the longest revl ops" {
   assert go_bin_op("===") == "=="
   assert go_bin_op("!==") == "!="
@@ -375,6 +380,7 @@ test "the go bin-op table maps the longest revl ops" {
   assert is_addsubmul("+")
   assert is_scalar("Int")
 }
+
 test "indentation is one tab per level" {
   assert ind(0) == ""
   assert ind(2).length() == 2
@@ -388,11 +394,13 @@ test "indentation is one tab per level" {
   assert v3_ident("use_add") == "use_add"
   assert v3_ident("total_") == "total_"
 }
+
 test "sorted_key canonicalises a record's field set by code point" {
   assert sorted_key(["y", "x"]) == "x,y"
   assert sorted_key(["label", "at"]) == "at,label"
   assert sorted_key(["x"]) == "x"
 }
+
 fn typed_ctx() -> Ctx {
   var ca: Map[Str, Str] = Map.empty()
   var cp: Map[Str, Str] = Map.empty()
@@ -413,6 +421,7 @@ fn typed_ctx() -> Ctx {
     et: Map.empty(), keys: [], key_i: 0
   }
 }
+
 test "render_construct lowers user variants (nullary + payload)" {
   let ctx = typed_ctx()
   assert render_construct(ctx, "Leaf", [], "", []) == "TreeLeaf{}"
@@ -422,12 +431,14 @@ test "render_construct lowers user variants (nullary + payload)" {
   assert render_construct(ctx, "None", [], "", []) == "RevlOpt[any]{}"
   assert render_construct(ctx, "Err", ["e"], "Result[Int, Str]", []) == "RevlResult[int64, string]{ErrV: e}"
 }
+
 test "record_type_for_fields infers a nominal struct from its field set" {
   let ctx = typed_ctx()
   assert record_type_for_fields(ctx, ["x", "y"]) == "Point"
   assert record_type_for_fields(ctx, ["y", "x"]) == "Point"
   assert record_type_for_fields(ctx, ["q"]) == "<<DEFER-record>>"
 }
+
 test "a declared Secret[T] extern return wraps its verbatim body" {
   // item 421 F6 / 429(d). The stamped extern splits into an exported one-line
   // `revlSecretResult` wrapper and the inner `revlSecret_<name>` holding the
@@ -442,6 +453,7 @@ test "a declared Secret[T] extern return wraps its verbatim body" {
   assert stamped[1] == str_tab().concat("return revlSecretResult(revlSecret_mint())")
   assert stamped[4] == "func revlSecret_mint() string {"
 }
+
 test "an import directive leaves the extern body for the module import block" {
   assert is_import_directive("//revl:import encoding/json")
   assert is_import_directive(`${str_tab()}//revl:import "bytes"  `)
@@ -454,6 +466,7 @@ test "an import directive leaves the extern body for the module import block" {
   assert import_spec(`//revl:import _ embed`) == [`_ "embed"`]
   assert import_spec(`//revl:import . "strings"`) == [`. "strings"`]
 }
+
 test "an import directive the reference refuses has no spec" {
   assert import_spec("//revl:import") == []
   assert import_spec(`//revl:import tm "time" x`) == []
@@ -462,6 +475,7 @@ test "an import directive the reference refuses has no spec" {
   assert import_spec(`//revl:import "ti"me"`) == []
   assert import_spec(`//revl:import tm "`) == []
 }
+
 test "a hoisted alias the import block already binds is a clash" {
   assert import_name(`tm "time"`) == "tm"
   assert import_name(`"text/template"`) == "template"
@@ -472,6 +486,7 @@ test "a hoisted alias the import block already binds is a clash" {
   assert import_alias_clash([line(1, `tm "time"`)], [`tm "time"`]) == ""
   assert import_alias_clash([line(1, `_ "embed"`), line(1, `_ "x/y"`)], [`_ "embed"`, `_ "x/y"`]) == ""
 }
+
 test "a body Python splitlines would break differently takes a marker" {
   // `split(newline())` and `splitlines()` agree only on LF; VT/FF/CR, the
   // file/group/record separators, NEL and U+2028/U+2029 all break the second.
@@ -480,11 +495,13 @@ test "a body Python splitlines would break differently takes a marker" {
   assert is_extra_linebreak(11) && is_extra_linebreak(12) && is_extra_linebreak(13)
   assert is_extra_linebreak(8232) && is_extra_linebreak(133)
 }
+
 test "go_type passes user record/variant names through" {
   assert go_type("Point", Map.empty()) == "Point"
   assert go_type("List[Point]", Map.empty()) == "[]Point"
   assert go_type("Opt[Point]", Map.empty()) == "RevlOpt[Point]"
 }
+
 // --------------------------------------------------------------- component wrap
 // A trivial provider so the emitted module is a valid plugin (the pure
 // `emit_go_src` above is what the cross-check exercises); mirrors the wrapper the
@@ -492,6 +509,7 @@ test "go_type passes user record/variant names through" {
 service EmitStream {
   fn render(ir: Any) -> Str
 }
+
 component EmitGo provides emitter: EmitStream {
   provide emitter {
     fn render(ir) = emit_go_src(ir)

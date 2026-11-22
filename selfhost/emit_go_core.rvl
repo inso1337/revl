@@ -15,6 +15,9 @@ use "../stdlib/value.rvl" {
   value_int, value_bool, value_keys
 }
 use "../stdlib/str.rvl" { split_top, rstrip, trim }
+// The list kit (item 194): `list_sort` is the codepoint-lexicographic `sorted(..)`
+// the reference uses to canonicalise a record's field set into a `record_by_fields`
+// key — no re-hand-roll (byte-fuzz-pinned against Python `sorted()`).
 use "../stdlib/list.rvl" { list_sort, list_contains }
 
 // ------------------------------------------------- host formatting (kept @py)
@@ -61,6 +64,7 @@ pub extern pure fn go_string(v: Any) -> Str = @py {
     out.append('"')
     return "".join(out)
 }
+
 // The reference sets `ctx.used_stdlib` as a side effect of RENDERING a stdlib
 // node (a builtin, a `len`, a `??`, an optional chain), and the helper text those
 // nodes render is not unique to them: `x.to_str()` on an Int is the same
@@ -72,6 +76,7 @@ pub extern pure fn go_string(v: Any) -> Str = @py {
 // `assert` message) strips it first.
 pub extern pure fn stdlib_mark() -> Str = @py { return chr(1) }
 pub fn marked(text: Str) -> Str { return stdlib_mark().concat(text) }
+
 // The component tier's `_COMP_NEEDS_*` flags, carried the same way. Each is
 // U+0002 and a one-letter tag in front of the helper text that sets it, so a
 // Str literal that spells a helper call (`"revlAdd("`) sets nothing, as on the
@@ -87,6 +92,7 @@ pub fn strip_marks(s: Str) -> Str {
   return t
 }
 pub fn replace_all(s: Str, needle: Str, repl: Str) -> Str { return s.split(needle).join(repl) }
+
 // ---------------------------------------------------------------- small utils
 pub fn ind(n: Int) -> Str { return tab().repeat(n) }
 pub fn line(indent: Int, text: Str) -> Str { return ind(indent).concat(text) }
@@ -94,6 +100,7 @@ pub fn node_kind(n: Any) -> Str { return value_str(value_field(n, "kind")) }
 pub fn node_op(n: Any) -> Str { return value_str(value_field(n, "op")) }
 pub fn node_operands(n: Any) -> Str { return value_str(value_field(n, "operands")) }
 pub fn node_step(n: Any) -> Str { return value_str(value_field(n, "step")) }
+
 // `_v3_ident`: rename a Go reserved word so a valid revl identifier that is a
 // Go keyword still emits (mirrors `_v3_ident`; the fixtures use `use_add`,
 // itself not reserved, so this is exercised only defensively). The rename is
@@ -110,6 +117,7 @@ pub fn v3_ident(name: Str) -> Str {
   }
   return name
 }
+
 pub fn is_go_reserved(name: Str) -> Bool {
   if (name == "break" || name == "case" || name == "chan" || name == "const") { return true }
   if (name == "continue" || name == "default" || name == "defer" || name == "else") { return true }
@@ -141,6 +149,7 @@ pub fn is_go_reserved(name: Str) -> Bool {
   if (name == "uint" || name == "uint8" || name == "uint16" || name == "uint32" || name == "uint64") { return true }
   return name == "uintptr"
 }
+
 // The reference's `_REVL_HELPER_PREFIX_RE` (issue #3168): the go emitter's own
 // helpers are spelled `revl<Upper>`, `REVL_`, `_revl` or `_REVL`, and a user
 // binding of that shape would shadow a bare helper call inside its function.
@@ -153,6 +162,7 @@ fn has_revl_prefix(name: Str) -> Bool {
   let c = name.charCodeAt(4)
   return c >= 65 && c <= 90
 }
+
 // `_camel` verbatim (item 390): snake_or_lower / `-` -> UpperCamel, keeping the
 // tail of each part as-is. This is the reference `_camel` byte-for-byte
 // (`p[:1].upper() + p[1:]`, NOT `.capitalize()`, which would lowercase the tail
@@ -160,15 +170,18 @@ fn has_revl_prefix(name: Str) -> Bool {
 pub extern pure fn camel(name: Str) -> Str = @py {
     return "".join(p[:1].upper() + p[1:] for p in str(name).replace("-", "_").split("_") if p)
 }
+
 // `_v3_field_ident`: a record struct field name, EXPORTED (UpperCamel) on every
 // path (item 390) so `encoding/json` marshals it — an unexported field made
 // `json_stringify(record)` return `{}` on go. Paired with `json_tag` below,
 // which pins the wire key to the source field name. Used at EVERY field site
 // (struct decl, literal construction, field read) so records round-trip.
 pub fn v3_field_ident(field: Str) -> Str { return camel(field) }
+
 // The struct tag ``json:"<field>"`` (a backtick-delimited Go raw string). Built
 // with double-quoted literals because a template `..` cannot embed a backtick.
 pub fn json_tag(field: Str) -> Str { return "`json:\"".concat(field).concat("\"`") }
+
 // `_V3_GO_ATOMIC`: a postfix-safe primary appends `.field`/`[i]`/`(…)` without a
 // wrapping paren.
 fn is_atomic(kind: Str) -> Bool {
@@ -180,6 +193,7 @@ fn is_atomic(kind: Str) -> Bool {
   if (kind == "index") { return true }
   return kind == "builtin"
 }
+
 // `_V3_GO_BIN_OPS`: revl operator -> Go operator, "" when unmapped.
 pub fn go_bin_op(op: Str) -> Str {
   if (op == "==") { return "==" }
@@ -208,12 +222,14 @@ pub fn go_bin_op(op: Str) -> Str {
   if (op == ">>") { return ">>" }
   return ""
 }
+
 fn is_eq_op(op: Str) -> Bool { return op == "==" || op == "===" || op == "!=" || op == "!==" }
 fn is_negated_eq(op: Str) -> Bool { return op == "!=" || op == "!==" }
 pub fn is_addsubmul(op: Str) -> Bool { return op == "+" || op == "-" || op == "*" }
 pub fn is_scalar(t: Str) -> Bool {
   return t == "Int" || t == "Int32" || t == "Float" || t == "Str" || t == "Bool"
 }
+
 // ---------------------------------------------------------------- lowering ctx
 // `_V3GoCtx` (subset): a binding's surface type (seeded from params, updated on
 // `let`/`for`) types a `let`'s `var T =` pin, the scalar-`==` split, and the
@@ -264,6 +280,7 @@ pub type TypeTables = {
 // is visible to every later statement (the reference mutates one `ctx`).
 type Sout = { lines: List[Str], ctx: Ctx }
 pub type Fout = { lines: List[Str], uses_strings: Bool, reserved: Map[Str, Str] }
+
 pub fn map_get(m: Map[Str, Str], k: Str) -> Str {
   return match m.lookup(k) { Some(v) => v, None => "" }
 }
@@ -280,6 +297,7 @@ fn set_vt(ctx: Ctx, k: Str, v: Str) -> Ctx {
     et: ctx.et, keys: ctx.keys, key_i: ctx.key_i
   }
 }
+
 // The scan-loop state, threaded like `vt`: the cursor table in force and the
 // per-function rune counter.
 pub fn set_fh(ctx: Ctx, fh: Map[Str, Str]) -> Ctx {
@@ -308,6 +326,7 @@ fn with_scan(ctx: Ctx, sc: Map[Str, Str], seq: Int) -> Ctx {
     et: ctx.et, keys: ctx.keys, key_i: ctx.key_i
   }
 }
+
 // `ctx.var_types` replaced wholesale: the untyped-empty-list analysis types a
 // body's locals forward through a scratch copy, and renders every inference
 // against that view.
@@ -322,10 +341,12 @@ fn with_vt_map(ctx: Ctx, vt: Map[Str, Str]) -> Ctx {
     fh: ctx.fh, et: ctx.et, keys: ctx.keys, key_i: ctx.key_i
   }
 }
+
 // Attach an untyped-empty-list analysis to the context that renders its body.
 pub fn set_scan(ctx: Ctx, scan: HintScan) -> Ctx {
   return { ctx | et = scan.et, keys = scan.order, key_i = 0 }
 }
+
 pub fn collect_reserved(node: Any, reserved: Map[Str, Str]) -> Map[Str, Str] {
   var out = reserved
   if (value_kind(node) == "record") {
@@ -341,6 +362,7 @@ pub fn collect_reserved(node: Any, reserved: Map[Str, Str]) -> Map[Str, Str] {
   for (child of value_children(node)) { out = collect_reserved(child, out) }
   return out
 }
+
 pub fn fresh_ident(base: Str, reserved: Map[Str, Str]) -> Str {
   var candidate = base
   var suffix = 0
@@ -353,10 +375,12 @@ pub fn fresh_ident(base: Str, reserved: Map[Str, Str]) -> Str {
 // Whether a `ca`/`rbf` entry names a usable (unique) type; the `<<AMBIG>>`
 // sentinel and a missing key both mean "not a byte-exact target here".
 fn resolved(name: Str) -> Bool { return name != "" && name != "<<AMBIG>>" }
+
 // `record_by_fields`' key: the field NAMES sorted (Python `tuple(sorted(..))`),
 // joined with a `,`. Both the type-decl side (`fields.keys()`) and the record
 // literal side (`[k for k, _ in fields]`) reduce to the same key.
 pub fn sorted_key(names: List[Str]) -> Str { return list_sort(names).join(",") }
+
 // `_V3GoCtx`'s type-table construction: fold the document `types` into the case /
 // record lookups. Ambiguity (a case name / field set shared by two decls) is
 // marked `<<AMBIG>>`, exactly where the reference stores `None`.
@@ -401,6 +425,7 @@ pub fn build_type_tables(types: Any) -> TypeTables {
   }
   return { ca: ca, cp: cp, rbf: rbf, rf: rf, variants: variants, tnames: tnames, gv: gv }
 }
+
 // `_V3GoCtx.record_type_for_fields`: a record literal's nominal struct type, from
 // its (sorted) field set. Reference RAISES on no-unique-match; here the marker
 // keeps the emitter total (no in-corpus literal is ambiguous or unknown).
@@ -409,6 +434,7 @@ pub fn record_type_for_fields(ctx: Ctx, names: List[Str]) -> Str {
   if (!resolved(name)) { return "<<DEFER-record>>" }
   return v3_ident(name)
 }
+
 // -------------------------------------------------------------------- types
 pub fn split_fn_type(name: Str) -> List[Str] {
   // `(A, B) -> C` -> ["A", "B", "C"] with the RETURN last (always non-empty for
@@ -425,6 +451,7 @@ pub fn split_fn_type(name: Str) -> List[Str] {
   parts = parts.push(returns)
   return parts
 }
+
 fn trim_str(s: Str) -> Str {
   var a = 0
   var b = s.length()
@@ -434,6 +461,7 @@ fn trim_str(s: Str) -> Str {
   while (go && b > a) { if (s.charCodeAt(b - 1) == 32) { b = b - 1 } else { go = false } }
   return s.slice(a, b)
 }
+
 // The index of the top-level `->` (depth 0 over `[]`/`()`), or -1.
 fn top_arrow(name: Str) -> Int {
   var depth = 0
@@ -452,6 +480,7 @@ fn top_arrow(name: Str) -> Int {
   }
   return 0 - 1
 }
+
 pub fn erase_async(ret: Str) -> Str {
   let r = trim_str(ret)
   if (r.startsWith("Async[") && r.endsWith("]")) {
@@ -459,6 +488,7 @@ pub fn erase_async(ret: Str) -> Str {
   }
   return ret
 }
+
 fn prim_go(t: Str) -> Str {
   if (t == "Int") { return "int64" }
   if (t == "Int32") { return "int32" }
@@ -468,6 +498,7 @@ fn prim_go(t: Str) -> Str {
   if (t == "Bytes") { return "[]byte" }
   return ""
 }
+
 // `_go_v3_type`: a surface type -> its Go spelling. "" for None/""/Unit.
 pub fn go_type(tv: Any, gv: Map[Str, Str]) -> Str {
   let raw = value_str(tv)
@@ -521,7 +552,9 @@ pub fn go_type(tv: Any, gv: Map[Str, Str]) -> Str {
   }
   return v3_ident(t)
 }
+
 fn contains_ch(s: Str, ch: Str) -> Bool { return s.indexOf(ch) >= 0 }
+
 // ================================================ user generic variants (#2471)
 // A user generic variant (`type Mb[T] = Jj(T) | Nn`) lowers to Go generics:
 // `type Mb[T any] interface { isMb(T) }` with one `MbJj[T any]` struct per case.
@@ -529,6 +562,7 @@ fn contains_ch(s: Str, ch: Str) -> Bool { return s.indexOf(ch) >= 0 }
 // `case MbJj[int64]:`), because Go cannot infer a type argument from a composite
 // literal or from the position a value flows into.
 type AppliedVariant = { generic: Bool, head: Str, params: List[Str], args: List[Str] }
+
 // The generic variants a document declares: head -> comma-joined parameters.
 pub fn gv_of(types: Any) -> Map[Str, Str] {
   var gv: Map[Str, Str] = Map.empty()
@@ -545,11 +579,13 @@ pub fn gv_of(types: Any) -> Map[Str, Str] {
   }
   return gv
 }
+
 fn generic_params(gv: Map[Str, Str], head: Str) -> List[Str] {
   let raw = map_get(gv, head)
   if (raw == "") { return [] }
   return split_generic_args(raw)
 }
+
 // `_v3_generic_variant`: `(head, params, args)` for an applied generic user
 // variant (`Mb[Int]`), else a non-generic answer. A bare head of a generic
 // variant answers its parameters as `any`.
@@ -571,12 +607,14 @@ pub fn applied_variant(surface: Str, gv: Map[Str, Str]) -> AppliedVariant {
   }
   return { generic: true, head: head, params: params, args: bound }
 }
+
 pub fn pair_map(params: List[Str], args: List[Str]) -> Map[Str, Str] {
   var out: Map[Str, Str] = Map.empty()
   var i = 0
   while (i < params.length() && i < args.length()) { out = out.set(params[i], args[i]); i = i + 1 }
   return out
 }
+
 // `_go_v3_applied_variant`: the instantiation (`Mb[Int]`) a construction of
 // `case` builds, when its variant is generic, else "". The type arguments come
 // from the flow target when it names the same variant, else from the payload
@@ -602,6 +640,7 @@ fn construct_instance(ctx: Ctx, case: Str, expected: Str, arg_nodes: List[Any]) 
   for (p of av.params) { args = args.push(bound.lookup(p) ?? "any") }
   return `${av.head}[${args.join(", ")}]`
 }
+
 // `_go_v3_variant_payload`: the case payload with a generic variant's
 // parameters substituted (`T` -> `Int` for `Mb[Int]`).
 fn variant_payload(ctx: Ctx, case: Str, expected: Str, arg_nodes: List[Any]) -> Str {
@@ -611,6 +650,7 @@ fn variant_payload(ctx: Ctx, case: Str, expected: Str, arg_nodes: List[Any]) -> 
   let av = applied_variant(inst, ctx.gv)
   return v3_subst(payload, pair_map(av.params, av.args))
 }
+
 // `_go_v3_type_args`: `[int64]` for the instantiation `Mb[Int]`, "" for a
 // non-generic type: the suffix a case struct takes (`MbJj[int64]`).
 pub fn variant_type_args(instance: Str, gv: Map[Str, Str]) -> Str {
@@ -620,6 +660,7 @@ pub fn variant_type_args(instance: Str, gv: Map[Str, Str]) -> Str {
   let head = v3_ident(av.head)
   return rendered.slice(head.length(), rendered.length())
 }
+
 // `_v3_refuse_unbound`: a construction whose type argument nothing pins is
 // refused by name (the reference raises EmitError). Go infers no type argument
 // from where a value flows later, and `any` is a different instantiation
@@ -636,6 +677,7 @@ pub fn unbound_refusal(instance: Str, case: Str, gv: Map[Str, Str]) -> Str {
   if (free.length() == 0) { return "" }
   return `<<UNSUPPORTED-GENERIC-VARIANT-UNBOUND:${case}:${free.join(",")}>>`
 }
+
 // `_v3_has_unbound_arg`: does the surface carry an unbound (`any`) type
 // argument of a generic variant at ANY depth? `Mb[Mb[any]]` does, `Mb[any]`
 // does, `List[Mb[Int]]` does not (issue #2497).
@@ -651,6 +693,7 @@ fn has_unbound_arg(surface: Str, gv: Map[Str, Str]) -> Bool {
   }
   return false
 }
+
 // `_v3_list_elem`: the element type of an unpinned list literal, the first item
 // type with no unbound generic variant argument at any depth (`[Nn, Jj(4)]` is
 // a `List[Mb[Int]]`; `[Jj(Nn), Jj(Jj(1)), Nn]` is a
@@ -663,6 +706,7 @@ pub fn list_elem(item_types: List[Str], gv: Map[Str, Str]) -> Str {
   }
   return known.length() > 0 ? known[0] : ""
 }
+
 // `_go_v3_lit`: a v3 literal.
 fn go_v3_lit(node: Any) -> Str {
   let v = value_field(node, "value")
@@ -674,12 +718,14 @@ fn go_v3_lit(node: Any) -> Str {
   if (k == "float") { return float_lit(v) }
   return "<<UNSUPPORTED-LIT>>"
 }
+
 // --------------------------------------------------- type inference (subset)
 fn ref_name(node: Any) -> Str {
   let nm = value_str(value_field(node, "name"))
   if (nm != "") { return nm }
   return value_str(value_field(node, "id"))
 }
+
 // `_go_v3_infer_type`: the surface type of an expression when knowable, else "".
 fn infer_type(node: Any, ctx: Ctx) -> Str {
   if (value_kind(node) != "record") { return "" }
@@ -798,6 +844,7 @@ fn infer_type(node: Any, ctx: Ctx) -> Str {
   }
   return ""
 }
+
 // `_go_v3_infer_ctor`: a built-in Opt/Result construction's surface type, when
 // the argument reveals the element type (`Some(7)` is `Opt[Int]`); the side the
 // argument says nothing about stays the erased `any` (item 280).
@@ -809,6 +856,7 @@ fn infer_ctor(case: Str, args: List[Any], ctx: Ctx) -> Str {
   if (case == "Ok") { return `Result[${el}, any]` }
   return `Result[any, ${el}]`
 }
+
 // `_v3_builtin_ret_type`: a builtin call's surface result type, from its method
 // and its receiver's surface type ("" when unknown).
 pub fn builtin_ret_type(method: Str, recv: Str) -> Str {
@@ -835,20 +883,24 @@ pub fn builtin_ret_type(method: Str, recv: Str) -> Str {
   }
   return ""
 }
+
 // The total, value-returning division forms (docs/arithmetic.md).
 fn is_checked_div(method: Str) -> Bool {
   if (method == "checked_div_trunc" || method == "checked_div_floor") { return true }
   return method == "checked_div_euclid" || method == "checked_mod"
 }
+
 // The total arithmetic forms (docs/arithmetic.md): the overflow answered as a
 // value.
 fn is_checked_arith(method: Str) -> Bool {
   return method == "checked_add" || method == "checked_sub" || method == "checked_mul"
 }
+
 // The reference's `_GO_CHECKED_FORMS`: every total form produces a Result.
 fn is_checked_form(method: Str) -> Bool {
   return is_checked_arith(method) || is_checked_div(method)
 }
+
 // -------------------------------------------------------------- expressions
 // `_infer_arrow_param`: recover an untyped lambda parameter's type from its
 // first use as a binary operand in the body (pre-order DFS), or "".
@@ -871,14 +923,17 @@ fn arrow_param_hint(node: Any, name: Str, ctx: Ctx) -> Str {
   }
   return ""
 }
+
 fn is_ref_named(node: Any, name: Str) -> Bool {
   let k = node_kind(node)
   if (k != "var" && k != "name") { return false }
   return ref_name(node) == name
 }
+
 fn is_builtin_ctor(name: Str) -> Bool {
   return name == "Some" || name == "None" || name == "Ok" || name == "Err"
 }
+
 // `_v3_has_any`: whether a surface type has an erased `any` component, as a
 // WHOLE WORD, so a user type that merely embeds the letters (`Company`) is not
 // mistaken for one.
@@ -894,6 +949,7 @@ pub fn has_any_word(t: Str) -> Bool {
   }
   return false
 }
+
 pub fn is_word_char(ch: Str) -> Bool {
   if (ch == "") { return false }
   let c = ch.charCodeAt(0)
@@ -902,6 +958,7 @@ pub fn is_word_char(ch: Str) -> Bool {
   if (c >= 97 && c <= 122) { return true }
   return c == 95
 }
+
 fn render_bin(node: Any, ctx: Ctx) -> Str {
   let op = node_op(node)
   if (op == "??") {
@@ -976,6 +1033,7 @@ fn render_bin(node: Any, ctx: Ctx) -> Str {
   }
   return `(${left} ${goop} ${right})`
 }
+
 fn render_un(node: Any, ctx: Ctx) -> Str {
   let op = node_op(node)
   let operand = render_expr(value_field(node, "operand"), ctx, "")
@@ -992,6 +1050,7 @@ fn render_un(node: Any, ctx: Ctx) -> Str {
   }
   return `<<UNSUPPORTED-UN:${op}>>`
 }
+
 fn render_call(node: Any, ctx: Ctx, expected: Str) -> Str {
   let callee = value_field(node, "callee")
   if (value_is_null(callee)) { return "<<UNSUPPORTED-EXPR:component-call>>" }
@@ -1045,6 +1104,7 @@ fn render_call(node: Any, ctx: Ctx, expected: Str) -> Str {
   let csrc = render_expr(callee, ctx, "").concat(explicit_instantiation(cn, g, ctx))
   return `${csrc}(${args.join(", ")})`
 }
+
 // `_v3_host_constructor` (issue #1356): `Pool.open(..)` in a plain top-level fn
 // is the host runtime's FREE function `PoolOpen`, not a method on the family
 // root. "" for anything that is not one of the four roots, or is a root name the
@@ -1065,6 +1125,7 @@ fn host_constructor(callee: Any, ctx: Ctx) -> Str {
   if (root == "Map" && verb == "new") { return go.concat("[string]") }
   return go
 }
+
 fn render_index(node: Any, ctx: Ctx) -> Str {
   let tn = value_field(node, "target")
   var target = render_expr(tn, ctx, "")
@@ -1078,6 +1139,7 @@ fn render_index(node: Any, ctx: Ctx) -> Str {
   if (go_type(infer_type(tn, ctx), ctx.gv) == "any") { return `revlAnyIndex(${target}, ${index})` }
   return `${target}[${index}]`
 }
+
 fn render_list(node: Any, ctx: Ctx, expected: Str) -> Str {
   var elem = ""
   let pin = expected == "" ? value_str(value_field(node, "expected")) : expected
@@ -1096,6 +1158,7 @@ fn render_list(node: Any, ctx: Ctx, expected: Str) -> Str {
   for (it of items) { parts = parts.push(render_expr(it, ctx, elem)) }
   return `[]${goelem}{${parts.join(", ")}}`
 }
+
 fn render_arrow(node: Any, ctx: Ctx) -> Str {
   let names = value_list(value_field(node, "params"))
   let ptypes = value_list(value_field(node, "param_types"))
@@ -1156,6 +1219,7 @@ fn render_arrow(node: Any, ctx: Ctx) -> Str {
   }
   return rendered
 }
+
 // `_go_v3_interp`: a `${..}` template, rendered from the operand types the
 // emitter already knows (roadmap item 434 (f)). `fmt.Sprintf` with `%v` takes
 // `...any`, so every operand is boxed: `${a}/${b}` over two `Str` measured 3
@@ -1209,6 +1273,7 @@ fn render_interp(node: Any, ctx: Ctx) -> Str {
   }
   return `fmt.Sprintf(${go_string(joined)}, ${args.join(", ")})`
 }
+
 // Double every `%` in interpolation text (Go verb escaping).
 fn double_pct(s: Str) -> Str {
   var out = ""
@@ -1220,6 +1285,7 @@ fn double_pct(s: Str) -> Str {
   }
   return out
 }
+
 // `_go_v3_construct` (user-variant subset): an ADT construction from a case name
 // and rendered args. A user variant is `<Variant><Case>{}` (nullary) or
 // `<Variant><Case>{Value: arg}` (payload) — the variant name is `_v3_ident`ed and
@@ -1292,6 +1358,7 @@ pub fn render_construct(ctx: Ctx, case: Str, args: List[Str], expected: Str, arg
   }
   return `<<UNSUPPORTED-CTOR:${case}>>`
 }
+
 // `_go_v3_expr` field branch: a record field access. A non-atomic receiver is
 // parenthesised so the `.field` selector binds correctly; the field name is the
 // EXPORTED spelling (`_v3_field_ident` = `_camel`, item 390) — the same spelling
@@ -1302,6 +1369,7 @@ fn render_field(node: Any, ctx: Ctx) -> Str {
   if (!is_atomic(node_kind(tn))) { target = `(${target})` }
   return `${target}.${v3_field_ident(value_str(value_field(node, "name")))}`
 }
+
 // `_go_v3_expr` record branch: a nominal `Struct{f: v, ..}` literal. Go copies by
 // value, so there is no clone (unlike the rust tier); the struct name is inferred
 // from the (sorted) field set. Declared field types pin empty nested collections.
@@ -1319,6 +1387,7 @@ fn render_record(node: Any, ctx: Ctx) -> Str {
   }
   return `${tn}{${body.join(", ")}}`
 }
+
 // `_v3_infer_arm_body`: an arm body's type with its binder in scope, typed as the
 // arm's payload (the scrutinee for a wildcard), else as nothing, never as an
 // outer binding of the same name (issue #3075).
@@ -1329,6 +1398,7 @@ fn infer_arm_body(arm: Any, st: Str, ctx: Ctx) -> Str {
   let bound = value_str(value_field(arm, "pattern")) == "_" ? st : value_str(value_field(arm, "payload_type"))
   return infer_type(body, with_vt_map(ctx, bound == "" ? ctx.vt.remove(bind) : ctx.vt.set(bind, bound)))
 }
+
 // `_go_v3_match`: a `match` over a user variant as a Go type switch wrapped in an
 // IIFE (`func() T { switch _m := scrut.(type) { .. } }()`). The switch/case/body
 // lines carry a LITERAL one/two-tab indent (the reference builds them with a
@@ -1441,6 +1511,7 @@ fn render_match(node: Any, ctx: Ctx, expected: Str) -> Str {
   lines = lines.push("}()")
   return lines.join(newline())
 }
+
 // `_go_v3_is_interface`: whether a scrutinee needs discriminated `match`
 // handling rather than the concrete-value wildcard shortcut: Go's `any`, a
 // built-in Opt/Result (two-value structs that discriminate on `.Ok`), or a
@@ -1454,13 +1525,16 @@ fn is_interface(surface: Str, ctx: Ctx) -> Bool {
   if (applied_variant(s, ctx.gv).generic) { return true }
   return list_contains(ctx.variants, s)
 }
+
 fn arm_named(arms: List[Any], pattern: Str) -> List[Any] {
   for (arm of arms) {
     if (value_str(value_field(arm, "pattern")) == pattern) { return [arm] }
   }
   return []
 }
+
 fn has_bind(bind: Str) -> Bool { return bind != "" && bind != "_" }
+
 // A wildcard arm on a two-value match: it binds the WHOLE value (`_m`) at
 // `depth` tabs and returns its body.
 fn wild_arm_lines(arm: Any, ctx: Ctx, expected: Str, st: Str, depth: Int) -> List[Str] {
@@ -1476,6 +1550,7 @@ fn wild_arm_lines(arm: Any, ctx: Ctx, expected: Str, st: Str, depth: Int) -> Lis
   }
   return out.push(line(depth, `return ${render_expr(value_field(arm, "body"), armctx, expected)}`))
 }
+
 // A payload arm: binds `_m.<field>` (typed `ptype`) at `depth` tabs.
 fn payload_arm_lines(arm: Any, ctx: Ctx, expected: Str, field: Str, ptype: Str, depth: Int) -> List[Str] {
   let bind = value_str(value_field(arm, "bind"))
@@ -1490,6 +1565,7 @@ fn payload_arm_lines(arm: Any, ctx: Ctx, expected: Str, field: Str, ptype: Str, 
   }
   return out.push(line(depth, `return ${render_expr(value_field(arm, "body"), armctx, expected)}`))
 }
+
 // `_go_v3_match_opt` / `_go_v3_match_result`, which differ only in their
 // patterns and payload fields: `yes` / `no` are `[pattern, field, type]` for the
 // present (`.Ok`) and absent sides. Opt's absent side carries no payload (an
@@ -1526,6 +1602,7 @@ fn match_two_value(node: Any, ctx: Ctx, expected: Str, scrutinee: Str, st: Str,
   }
   return lines.push("}()").join(newline())
 }
+
 // ----------------------------------------------- erased type arguments (#1631)
 // `_v3_fn_value_ret`: the declared return of a function-typed binding
 // (`g: (Int) -> Int` -> `Int`), or "". Calling a function VALUE answers its
@@ -1535,6 +1612,7 @@ fn fn_value_ret(surface: Str) -> Str {
   if (ft.length() == 0) { return "" }
   return erase_async(ft[ft.length() - 1])
 }
+
 // `_v3_fill_erased`: `surface` with each erased top-level `any` type argument
 // of a built-in Opt/Result filled from `declared`, a type of the same family
 // (else `surface` unchanged).
@@ -1570,6 +1648,7 @@ fn fill_erased(surface: Str, declared: Str, gv: Map[Str, Str]) -> Str {
   }
   return surface
 }
+
 // The `let` arm's flow refinement: a bare `None` infers nothing and is an `Opt`
 // of what it flows into; an Opt/Result value with an erased type argument
 // takes the missing part from the binding's flow hint.
@@ -1583,6 +1662,7 @@ fn flow_typed(valnode: Any, inferred: Str, hint: Str, gv: Map[Str, Str]) -> Str 
   if (has_any_word(t)) { t = fill_erased(t, hint, gv) }
   return t
 }
+
 // The declared parameter types a call hands an argument to: the module fn's,
 // else the extern's (the reference's `function_params or extern_params`).
 fn declared_params(signatures: List[Any], name: Str) -> List[Str] {
@@ -1597,6 +1677,7 @@ fn declared_params(signatures: List[Any], name: Str) -> List[Str] {
   }
   return fn_params.length() > 0 ? fn_params : ext_params
 }
+
 // The declared parameter types of the FUNCTION `name`, and nothing for an
 // extern of that name: the reference's `function_params`/`function_tparams`
 // tables are built from functions only, so an extern never reads as a
@@ -1612,6 +1693,7 @@ fn function_params(signatures: List[Any], name: Str) -> List[Str] {
   }
   return fn_params
 }
+
 // `_v3_split_generic`: `A, B` at top-level commas (depth-aware).
 fn split_generic_args(inner: Str) -> List[Str] {
   var out: List[Str] = []
@@ -1629,6 +1711,7 @@ fn split_generic_args(inner: Str) -> List[Str] {
   if (trim_str(cur) != "") { out = out.push(trim_str(cur)) }
   return out
 }
+
 // `_v3_subst`: `surface` with each whole-word type parameter replaced from
 // `mapping`.
 pub fn v3_subst(surface: Str, mapping: Map[Str, Str]) -> Str {
@@ -1649,6 +1732,7 @@ pub fn v3_subst(surface: Str, mapping: Map[Str, Str]) -> Str {
   if (word != "") { out = out.concat(mapping.lookup(word) ?? word) }
   return out
 }
+
 // `_v3_unify`: bind the type parameters `pattern` mentions from the matching
 // parts of `actual` (`List[T]` against `List[Int]` binds `T` to `Int`); an
 // `any` actual binds nothing.
@@ -1673,6 +1757,7 @@ pub fn v3_unify(pattern: Str, actual: Str, params: List[Str], bound: Map[Str, St
   }
   return bound
 }
+
 // The type parameters of a callee's signature, by the rule `fn_type_params`
 // applies to a definition (the reference's `function_tparams` table).
 fn callee_tparams(name: Str, ctx: Ctx) -> List[Str] {
@@ -1695,6 +1780,7 @@ fn callee_tparams(name: Str, ctx: Ctx) -> List[Str] {
   }
   return found
 }
+
 // `_go_v3_generic_call` (issue #2495): for a call to a generic function, the
 // parameter types with each type parameter replaced by what the arguments
 // bind it to, the binding itself, and the callee's type parameters. A
@@ -1727,6 +1813,7 @@ fn go_generic_call(name: Str, arg_nodes: List[Any], ctx: Ctx, expected: Str) -> 
   for (p of params) { subst = subst.push(v3_subst(p, mapping)) }
   return { generic: true, params: subst, mapping: mapping, tparams: tparams }
 }
+
 // `_go_v3_explicit_instantiation` (issue #2545): `[int64]` for a call whose
 // callee has a type parameter only its return mentions, once the expected
 // type binds it; else "". The list runs up to the last return-only parameter
@@ -1754,6 +1841,7 @@ fn explicit_instantiation(name: Str, g: GenericCall, ctx: Ctx) -> Str {
   }
   return `[${items.join(", ")}]`
 }
+
 // `_go_v3_typed_generic_arg`: an `Int` literal passed where a generic
 // callee's parameter is a bare type parameter is spelled `int64(1)`: Go
 // infers a type argument from an untyped constant as `int`, not the `int64`
@@ -1765,6 +1853,7 @@ fn typed_generic_arg(arg: Any, rendered: Str, declared: Str, tparams: List[Str])
   }
   return rendered
 }
+
 // --------------------------------------------- untyped empty lists (#2898)
 // The reference types a `let x = []` from where the binding flows (a declared
 // return, a parameter, a record field, another binding it is assigned to, or
@@ -1783,24 +1872,29 @@ fn fresh_binding(name: Str, seen: Map[Str, Str]) -> Str {
   while (seen.has(`${name}#${n}`)) { n = n + 1 }
   return `${name}#${n}`
 }
+
 pub fn is_empty_list_lit(n: Any) -> Bool {
   return node_kind(n) == "list" && value_list(value_field(n, "items")).length() == 0
 }
+
 // `_list_pin`: the `List[T]` an annotated `var x: List[T] = []` threads onto its
 // itemless literal.
 pub fn empty_list_pin(n: Any) -> Str {
   let pin = value_str(value_field(n, "expected"))
   return pin.startsWith("List[") && pin.endsWith("]") ? pin : ""
 }
+
 // An untyped itemless list literal: the shape this whole analysis types.
 pub fn untyped_empty_list(n: Any) -> Bool {
   return is_empty_list_lit(n) && empty_list_pin(n) == ""
 }
+
 // `_empty_list_type.is_list`: a fully concrete List surface (`List[any]` is the
 // erased fallback, not evidence).
 fn is_list_surface(t: Str) -> Bool {
   return t.startsWith("List[") && t.endsWith("]") && !has_any_word(t)
 }
+
 // `_local_ref`: the local a bare reference names.
 pub fn local_ref_of(node: Any) -> Str {
   if (value_kind(node) != "record") { return "" }
@@ -1808,6 +1902,7 @@ pub fn local_ref_of(node: Any) -> Str {
   if (k == "var" || k == "name") { return ref_name(node) }
   return ""
 }
+
 // `_self_concat`: the argument of an `out = out.concat(arg)` assignment, else
 // `[]` (so a caller can tell the shape without an erased maybe value).
 fn self_concat_of(step: Any) -> List[Any] {
@@ -1821,9 +1916,11 @@ fn self_concat_of(step: Any) -> List[Any] {
   }
   return args
 }
+
 fn map_list_get(m: Map[Str, List[Str]], k: Str) -> List[Str] {
   return match m.lookup(k) { Some(v) => v, None => [] }
 }
+
 // `_FlowHints` plus the binding-key bookkeeping and the two list-only analyses
 // (`_only_sized_or_appended`, `_empty_list_class`). Those read the body as
 // evidence about a binding, so the scan records the read POSITIONS and write
@@ -1848,6 +1945,7 @@ type HintWalk = { scope: Map[Str, Str], acc: HintAcc }
 // the binding keys in emission order, and each untyped empty list's declared
 // type ("" marks a refusal).
 pub type HintScan = { hints: Map[Str, Str], order: List[Str], et: Map[Str, Str] }
+
 pub fn empty_acc(scope: Map[Str, Str]) -> HintAcc {
   return {
     seen: scope, order: [], empties: [],
@@ -1857,6 +1955,7 @@ pub fn empty_acc(scope: Map[Str, Str]) -> HintAcc {
     writes: [], reads: [], scratch: Map.empty()
   }
 }
+
 // `_FlowHints.offer`: `declared` is always a target of `name`, and the first
 // offer fixes `name`'s own type.
 fn hint_offer(acc: HintAcc, name: Str, declared: Str) -> HintAcc {
@@ -1868,9 +1967,11 @@ fn hint_offer(acc: HintAcc, name: Str, declared: Str) -> HintAcc {
   if (!a.fh.has(name)) { a = { a | fh = a.fh.set(name, declared) } }
   return a
 }
+
 fn add_read(acc: HintAcc, key: Str, kind: Str, other: Str) -> HintAcc {
   return { acc | reads = acc.reads.push([key, kind, other]) }
 }
+
 // The `let`-body flow analysis must type the locals FORWARD in document order
 // (`_push_evidence`'s scratch): a binding in scope is spelled by its source
 // name, but its type lives under its binding key.
@@ -1882,6 +1983,7 @@ fn scoped_infer(node: Any, scope: Map[Str, Str], scratch: Map[Str, Str], ctx: Ct
   }
   return infer_type(node, with_vt_map(ctx, vt))
 }
+
 // Walk an expression: record the read position every binding reference
 // occupies, the flow target a call or record literal declares, and the `push`
 // aliases `_flow_through_assigns` carries.
@@ -1949,9 +2051,11 @@ fn scan_expr_pos(node: Any, scope: Map[Str, Str], acc: HintAcc, ctx: Ctx, pos: S
   }
   return a
 }
+
 fn scan_expr(node: Any, scope: Map[Str, Str], acc: HintAcc, ctx: Ctx) -> HintAcc {
   return scan_expr_pos(node, scope, acc, ctx, "other", "")
 }
+
 fn scan_call_offers(n: Any, scope: Map[Str, Str], acc: HintAcc, ctx: Ctx) -> HintAcc {
   let callee = value_field(n, "callee")
   if (node_kind(callee) != "var") { return acc }
@@ -1973,6 +2077,7 @@ fn scan_call_offers(n: Any, scope: Map[Str, Str], acc: HintAcc, ctx: Ctx) -> Hin
   }
   return a
 }
+
 fn scan_record_offers(n: Any, scope: Map[Str, Str], acc: HintAcc, ctx: Ctx) -> HintAcc {
   let fields = value_list(value_field(n, "fields"))
   var names: List[Str] = []
@@ -1991,6 +2096,7 @@ fn scan_record_offers(n: Any, scope: Map[Str, Str], acc: HintAcc, ctx: Ctx) -> H
   }
   return a
 }
+
 fn scan_stmts(stmts: List[Any], scope: Map[Str, Str], acc: HintAcc, ctx: Ctx) -> HintWalk {
   var sc = scope
   var a = acc
@@ -2001,6 +2107,7 @@ fn scan_stmts(stmts: List[Any], scope: Map[Str, Str], acc: HintAcc, ctx: Ctx) ->
   }
   return { scope: sc, acc: a }
 }
+
 fn scan_stmt(st: Any, scope: Map[Str, Str], acc: HintAcc, ctx: Ctx) -> HintWalk {
   let step = node_step(st)
   var a = acc
@@ -2142,6 +2249,7 @@ fn scan_stmt(st: Any, scope: Map[Str, Str], acc: HintAcc, ctx: Ctx) -> HintWalk 
   a = scan_expr(value_field(st, "cond"), scope, a, ctx)
   return { scope: scope, acc: a }
 }
+
 // `_flow_through_assigns`: extend the first-offer hints across aliases. Go
 // assigns only between identical types, so a source is declared as its target
 // is; every offer is recorded, but only a NEW binding makes progress.
@@ -2167,6 +2275,7 @@ fn flow_through(acc: HintAcc) -> HintAcc {
   }
   return a
 }
+
 // `_empty_list_class`: `name` and every untyped empty-list binding it is
 // assigned to or from, directly or through a chain.
 fn empty_class(name: Str, empties: List[Str], edges: List[Any]) -> List[Str] {
@@ -2189,11 +2298,13 @@ fn empty_class(name: Str, empties: List[Str], edges: List[Any]) -> List[Str] {
   }
   return group
 }
+
 fn group_order(name: Str, group: List[Str]) -> List[Str] {
   var rest: List[Str] = []
   for (m of group) { if (m != name) { rest = rest.push(m) } }
   return [name].concat(list_sort(rest))
 }
+
 fn evidence_targets(order: List[Str], targets: Map[Str, List[Str]]) -> List[Str] {
   var found: List[Str] = []
   for (m of order) {
@@ -2203,6 +2314,7 @@ fn evidence_targets(order: List[Str], targets: Map[Str, List[Str]]) -> List[Str]
   }
   return found
 }
+
 fn evidence_pushed(order: List[Str], pushed: Map[Str, Str]) -> List[Str] {
   var found: List[Str] = []
   for (m of order) {
@@ -2211,6 +2323,7 @@ fn evidence_pushed(order: List[Str], pushed: Map[Str, Str]) -> List[Str] {
   }
   return found
 }
+
 // `_only_sized_or_appended`: every read of a group member is a `.length()`, an
 // allowed alias position, or (with `appends`) its own unique push receiver, and
 // every write is one of those or another `[]`.
@@ -2242,6 +2355,7 @@ fn group_ok(group: List[Str], writes: List[Any], reads: List[Any], appends: Bool
   }
   return true
 }
+
 // `_empty_list_type`: one untyped empty list's declared type, "" for a refusal.
 // `_empty_list_type`: the whole decision, from the facts one body walk
 // collected. `appends` is true on the pure tier (a unique self rebind lowers to
@@ -2262,11 +2376,13 @@ fn decide_empty_parts(name: Str, empties: List[Str], aliases: List[Any],
   if (group_ok(group, writes, reads, appends)) { return fallback }
   return ""
 }
+
 fn decide_empty(name: Str, acc: HintAcc, fallback: Str, appends: Bool) -> Str {
   return decide_empty_parts(name, acc.empties, acc.aliases.concat(acc.concat_aliases),
                             acc.targets, acc.pushed, acc.writes, acc.reads,
                             fallback, appends)
 }
+
 // The three evidence passes, applied in the reference's order: primary offers,
 // then assignment aliases, then the push/assignment evidence.
 pub fn finish_scan(acc: HintAcc, fallback: Str, appends: Bool) -> HintScan {
@@ -2286,12 +2402,14 @@ pub fn finish_scan(acc: HintAcc, fallback: Str, appends: Bool) -> HintScan {
   for (k of a.empties) { et = et.set(k, decide_empty(k, a, fallback, appends)) }
   return { hints: a.fh, order: a.order, et: et }
 }
+
 // `_v3_flow_hints` + the untyped-empty-list analysis, in one body walk.
 pub fn flow_hints(body: List[Any], ret_type: Str, ctx: Ctx) -> HintScan {
   var scope: Map[Str, Str] = Map.empty()
   for (k of ctx.vt.keys()) { scope = scope.set(k, k) }
   return finish_scan(scan_stmts(body, scope, empty_acc(scope), ctx).acc, "List[any]", true)
 }
+
 // The kind dispatch, mirroring `_go_v3_expr`'s branch order (post-widen).
 fn render_inner(node: Any, ctx: Ctx, expected: Str) -> Str {
   let kind = node_kind(node)
@@ -2345,6 +2463,7 @@ fn render_inner(node: Any, ctx: Ctx, expected: Str) -> Str {
   if (kind == "optfield" || kind == "optcall") { return render_optchain(node, ctx, kind) }
   return `<<UNSUPPORTED-EXPR:${kind}>>`
 }
+
 // `_go_v3_expr`'s builtin arm: a scan-loop read is answered from the rune in
 // hand; anything else renders its receiver (parenthesised when not atomic) and
 // its arguments, then dispatches on the method.
@@ -2358,6 +2477,7 @@ fn render_builtin(node: Any, ctx: Ctx) -> Str {
   for (a of value_list(value_field(node, "args"))) { args = args.push(render_expr(a, ctx, "")) }
   return builtin_call(value_str(value_field(node, "method")), infer_type(tn, ctx), target, args, ctx.strings_alias)
 }
+
 // `_go_v3_builtin`: one stdlib method call, dispatched on the method and the
 // receiver's surface type `rt`. Every helper it names lives in the stdlib,
 // Opt, Map or integer-arithmetic preamble, and the module assembly reads which
@@ -2367,6 +2487,7 @@ fn builtin_call(method: Str, rt: Str, target: Str, args: List[Str], alias: Str) 
   if (text == "") { return `<<UNSUPPORTED-BUILTIN:${method}>>` }
   return marked(text)
 }
+
 fn builtin_text(method: Str, rt: Str, target: Str, args: List[Str], alias: Str) -> Str {
   let is_str = rt == "Str"
   if (method == "length") { return is_str ? `revlStrLen(${target})` : `revlListLen(${target})` }
@@ -2389,6 +2510,7 @@ fn builtin_text(method: Str, rt: Str, target: Str, args: List[Str], alias: Str) 
   if (method == "to_char") { return `func(n int64) string { if n < 0 || n > 0x10FFFF || (n >= 0xD800 && n <= 0xDFFF) { return "" }; return string(rune(n)) }(${target})` }
   return builtin_text_tail(method, rt, target, args, alias)
 }
+
 // The structural `indexOf` on a List: a scalar element keeps the native `==`
 // helper, anything else goes through `revlEq` (reflect.DeepEqual), since Go `==`
 // is a compile error on a slice element.
@@ -2399,6 +2521,7 @@ fn index_of_text(rt: Str, target: Str, arg: Str) -> Str {
   if (is_scalar(elem)) { return `revlListIndexOf(${target}, ${arg})` }
   return `revlListIndexOfEq(${target}, ${arg})`
 }
+
 fn builtin_text_tail(method: Str, rt: Str, target: Str, args: List[Str], alias: Str) -> Str {
   if (method == "startsWith") { return `${alias}.HasPrefix(${target}, ${args[0]})` }
   if (method == "endsWith") { return `${alias}.HasSuffix(${target}, ${args[0]})` }
@@ -2424,6 +2547,7 @@ fn builtin_text_tail(method: Str, rt: Str, target: Str, args: List[Str], alias: 
   if (is_checked_div(method)) { return checked_div_text(method, target, args[0]) }
   return ""
 }
+
 // The total arithmetic forms (docs/arithmetic.md): the overflow tests the
 // trapping `revlAdd/revlSub/revlMul` helpers use, with the fault carried out
 // as an Err arm instead of a panic. An immediately-applied func literal
@@ -2446,6 +2570,7 @@ fn checked_arith_text(method: Str, target: Str, arg: Str) -> Str {
   }
   return `func(_a, _b int64) RevlResult[int64, string] { ${body} }(${target}, ${arg})`
 }
+
 // The total division forms (docs/arithmetic.md): the faulting quotient, but a
 // zero divisor answers Err(reason). An immediately-applied func literal
 // evaluates each operand exactly once.
@@ -2461,6 +2586,7 @@ fn checked_div_text(method: Str, target: Str, arg: Str) -> Str {
   let head = "func(_a, _b int64) RevlResult[int64, string] { if _b == 0 { return RevlResult[int64, string]{ErrV: \"revl: division by zero\"} }; "
   return `${head}${overflow_err}return RevlResult[int64, string]{OkV: ${quotient}, Ok: true} }(${target}, ${arg})`
 }
+
 // `_go_v3_optchain`: `?.field` / `?.method(..)` as `revlOptMap` over the Opt
 // payload. The closure's result type is inferred so Go can infer `B`.
 fn render_optchain(node: Any, ctx: Ctx, kind: Str) -> Str {
@@ -2487,6 +2613,7 @@ fn render_optchain(node: Any, ctx: Ctx, kind: Str) -> Str {
   if (ret_surface != "") { go_ret = go_type(ret_surface, ctx.gv) }
   return marked(`revlOptMap(${target}, func(_x ${go_payload}) ${go_ret} { return ${body} })`)
 }
+
 // `Map.empty()` (docs/stdlib-2.0.md §Map). Go infers composite literals
 // positionally, so the literal needs its expected Map type (the flow target,
 // else the annotation the frontend threaded onto the node); the reference
@@ -2500,6 +2627,7 @@ fn render_maplit(node: Any, ctx: Ctx, expected: Str) -> Str {
   }
   return "<<UNSUPPORTED-EXPR:maplit-unpinned>>"
 }
+
 // The `widen` coercion markers (docs/arithmetic.md): render the conversion the
 // reference makes visible, then dispatch the un-widened node.
 fn render_expr(node: Any, ctx: Ctx, expected: Str) -> Str {
@@ -2514,6 +2642,7 @@ fn render_expr(node: Any, ctx: Ctx, expected: Str) -> Str {
   if (w == "Int") { return `int64(${render_inner(node, ctx, expected)})` }
   return render_inner(node, ctx, expected)
 }
+
 // -------------------------------------------------------------- statements
 pub fn emit_stmts(nodes: List[Any], ctx: Ctx, indent: Int) -> Sout {
   var lines = []
@@ -2527,6 +2656,7 @@ pub fn emit_stmts(nodes: List[Any], ctx: Ctx, indent: Int) -> Sout {
   }
   return { lines: lines, ctx: c }
 }
+
 // ------------------------------------------- the code-point scan (434 (c) two)
 // A `while (i < s.length())` loop whose index starts at 0 and only steps by a
 // trailing `i = i + 1` runs exactly once per code point of `s`, so it lowers to
@@ -2539,6 +2669,7 @@ pub fn walk_nodes(node: Any) -> List[Any] {
   for (child of value_children(node)) { out = out.concat(walk_nodes(child)) }
   return out
 }
+
 fn writes_to(name: Str, node: Any) -> List[Any] {
   var out = []
   for (n of walk_nodes(node)) {
@@ -2547,11 +2678,13 @@ fn writes_to(name: Str, node: Any) -> List[Any] {
   }
   return out
 }
+
 fn is_int_lit(node: Any, v: Int) -> Bool {
   if (node_kind(node) != "lit") { return false }
   let lv = value_field(node, "value")
   return value_kind(lv) == "int" && value_int(lv) == v
 }
+
 // The name `x` for an argument-less `x.length()`, else "".
 fn len_receiver(node: Any) -> Str {
   if (node_kind(node) != "builtin" || value_str(value_field(node, "method")) != "length") { return "" }
@@ -2560,6 +2693,7 @@ fn len_receiver(node: Any) -> Str {
   if (node_kind(target) != "var") { return "" }
   return value_str(value_field(target, "name"))
 }
+
 // Whether `body` holds a `continue` bound to its OWN loop (one inside a nested
 // loop binds to that loop instead).
 fn own_continue(body: List[Any]) -> Bool {
@@ -2574,9 +2708,11 @@ fn own_continue(body: List[Any]) -> Bool {
   }
   return false
 }
+
 fn is_scan_read_method(method: Str) -> Bool {
   return method == "charCodeAt" || method == "codepoint_at" || method == "charAt"
 }
+
 // `[text, index]` when `loop` is a code-point scan, else `[]`.
 fn scan_shape(loop: Any, preceding: List[Any], fn_body: List[Any]) -> List[Str] {
   let cond = value_field(loop, "cond")
@@ -2627,6 +2763,7 @@ fn scan_shape(loop: Any, preceding: List[Any], fn_body: List[Any]) -> List[Str] 
   }
   return []
 }
+
 // `_go_v3_scan_read`: the rune already in hand for a read inside a scan loop,
 // or "" when this read is not one.
 fn scan_read(node: Any, ctx: Ctx) -> Str {
@@ -2642,6 +2779,7 @@ fn scan_read(node: Any, ctx: Ctx) -> Str {
   if (method == "charAt") { return `string(${rune})` }
   return `int64(${rune})`
 }
+
 // `_go_v3_self_rebind`: a write the frontend proved uniquely owned (item 445)
 // lowers to Go's destructive form instead of the persistent helper's copy.
 // "" when the assignment does not qualify.
@@ -2658,6 +2796,7 @@ fn self_rebind(node: Any, ctx: Ctx, name: Str) -> Str {
   if (method == "set") { return `${name}[${args[0]}] = ${args[1]}` }
   return `delete(${name}, ${args[0]})`
 }
+
 // `_go_v3_stmt`: one fn-body step -> its emitted (indented) lines and threaded
 // ctx. `t` is the assert receiver — the reference uses "t" in a fn body (there
 // is no such binding in scope, but the byte-check holds it to the reference).
@@ -2684,6 +2823,7 @@ fn concat_pieces(node: Any, name: Str) -> List[Any] {
   }
   return []
 }
+
 fn builder_candidates(node: Any, ctx: Ctx) -> List[Str] {
   var names = []
   let name = value_str(value_field(node, "name"))
@@ -2692,6 +2832,7 @@ fn builder_candidates(node: Any, ctx: Ctx) -> List[Str] {
   for (child of value_children(node)) { names = names.concat(builder_candidates(child, ctx)) }
   return names
 }
+
 fn builder_safe(node: Any, name: Str) -> Bool {
   let step = value_str(value_field(node, "step"))
   if (step == "return") { return false }
@@ -2706,6 +2847,7 @@ fn builder_safe(node: Any, name: Str) -> Bool {
   for (child of value_children(node)) { if (!builder_safe(child, name)) { return false } }
   return true
 }
+
 fn with_builders(ctx: Ctx, builders: Map[Str, Str], seq: Int) -> Ctx {
   return {
     vt: ctx.vt, fr: ctx.fr, er: ctx.er, signatures: ctx.signatures,
@@ -2718,6 +2860,7 @@ fn with_builders(ctx: Ctx, builders: Map[Str, Str], seq: Int) -> Ctx {
     et: ctx.et, keys: ctx.keys, key_i: ctx.key_i
   }
 }
+
 // A generated builder name joins the reserved set, as the reference's
 // `reserved_idents.add(builder)` does; the set outlives the function it was
 // built for, which is what an in-file test's builders see (`emit_tests`).
@@ -2733,6 +2876,7 @@ fn with_reserved(ctx: Ctx, reserved: Map[Str, Str]) -> Ctx {
     et: ctx.et, keys: ctx.keys, key_i: ctx.key_i
   }
 }
+
 fn open_builders(node: Any, ctx: Ctx, indent: Int) -> Sout {
   var c = ctx
   var out = []
@@ -2752,6 +2896,7 @@ fn open_builders(node: Any, ctx: Ctx, indent: Int) -> Sout {
   }
   return { lines: out, ctx: c }
 }
+
 fn close_builders(before: Ctx, current: Ctx, indent: Int) -> Sout {
   var out = []
   var seq = before.builder_seq
@@ -2766,6 +2911,7 @@ fn close_builders(before: Ctx, current: Ctx, indent: Int) -> Sout {
   }
   return { lines: out, ctx: with_builders(current, before.builders, current.builder_seq) }
 }
+
 fn v3_stmt(node: Any, ctx: Ctx, indent: Int, preceding: List[Any]) -> Sout {
   let step = node_step(node)
   if (step == "let") {
@@ -2908,6 +3054,7 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int, preceding: List[Any]) -> Sout {
   if (step == "continue") { return { lines: [line(indent, "continue")], ctx: ctx } }
   return { lines: [line(indent, `<<UNSUPPORTED-STEP:${step}>>`)], ctx: ctx }
 }
+
 // `_V3_TYPE_WORD.findall`: the identifier words of a surface type, in order.
 pub fn type_words(surface: Str) -> List[Str] {
   var out: List[Str] = []
@@ -2925,6 +3072,7 @@ pub fn type_words(surface: Str) -> List[Str] {
   if (word != "") { out = out.push(word) }
   return out
 }
+
 // issue #2545: an explicit list (`fn first[Elem](xs: List[Elem]) -> Elem`)
 // rides the IR as `type_params` and is used instead of the heuristic, in
 // declaration order: with one the checker turns the heuristic off. A listed
