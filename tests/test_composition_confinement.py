@@ -403,7 +403,7 @@ layer Tune for Demo {
 def test_a_pure_numeric_config_change_gets_no_token(tmp_path):
     """426 §8.7: `pool: 8 -> 16` on a component whose body never reads `pool`
     feeds no computation, so it is NOT authority-bearing and produces no
-    `config:` token — the panel stays clean on a numeric-only change. The case
+    `config:` token, so the panel stays clean on a numeric-only change. The case
     where the body DOES read the field is
     `test_a_numeric_or_bool_config_the_body_reads_prevents_clean` below."""
     doc = _panel_project(
@@ -424,7 +424,7 @@ layer Tune for Demo {
 # so it is unclassifiable and authority-bearing (§8.5 conjunct 5). Only a field
 # the body never reads is proven pure and stays token-free.
 _PAYER_EMIT = """
-service Pay { fn send(to: Str) -> Str }
+service Pay { emission[wire] fn send(to: Str) -> Str }
 extern emission fn wire(to: Str, limit: Int, live: Bool) -> Str = @py { return to }
 component Payer provides pay: Pay {
   config { limit: Int = 100, live: Bool = false }

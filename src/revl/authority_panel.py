@@ -44,8 +44,8 @@ is never proven pure; a numeric/bool field is, but only when the component body
 never reads it (`Row.config_uses`, recorded by resolution). A numeric/bool
 field the body reads may reach an emission or an extern argument (§8.4), and
 that cannot be decided header-only, so it is UNCLASSIFIABLE and authority-
-bearing — incompleteness costs noise, never silence. `reach`-bound violations
-never reach the panel — they are refused at resolution
+bearing (incompleteness costs noise, never silence). `reach`-bound violations
+never reach the panel: they are refused at resolution
 (`composition._check_reach_bounds`).
 """
 
@@ -78,8 +78,8 @@ def _authority_bearing(field: str, value: object, reach: dict | None,
     (its host was checked at resolution). A numeric or boolean value is pure
     only when the component body never reads the field: then nothing can carry
     it to a host argument (`pool: 8`, §8.7 "pure, no token"). If the body DOES
-    read it, §8.4's question — does the value reach an emission or extern
-    argument, or only pure computation? — cannot be decided header-only, so it
+    read it, §8.4's question (does the value reach an emission or extern
+    argument, or only pure computation?) cannot be decided header-only, so it
     is UNCLASSIFIABLE and therefore treated as authority-bearing (§8.5
     conjunct 5, the load-bearing one). A string or structured value with no
     declared bound is unclassifiable for the same reason, read or not.
