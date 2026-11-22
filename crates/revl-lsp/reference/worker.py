@@ -28,14 +28,31 @@ Any failure answers `{"ok": false, "error": "..."}` rather than a plausible
 empty result: the server turns that into a visible engine diagnostic, never
 into a clean document (the missing-squiggle rule).
 
-The worker is embedded in the rust binary as a string and run with `-c`, so it
-has no install step and no path to resolve at runtime.
+The worker is embedded in the rust binary as a string and run with `-c` (with
+`-P`, PYTHONSAFEPATH, on the launch that is not already isolated, issue #3158,
+the regression of #317), so it has no install step and no path to resolve at
+runtime.
 """
 
-from __future__ import annotations
+import sys
+
+# issue #3158 (the regression of #317): `python -c` puts the inherited working
+# directory at `sys.path[0]` unless the interpreter was given `-P`
+# (PYTHONSAFEPATH). The engine passes `-P`; this keeps the worker safe when it
+# is driven directly with `-c`, where that flag is not ours to give. Drop the
+# `-c` entry BEFORE `import json`, so a `json.py` in the repository an editor
+# opened cannot run as the developer. Only `sys.path[0]` is touched, and only
+# the `-c` spelling: a working directory the user put on `PYTHONPATH` themselves
+# is deliberate and is left alone.
+#
+# NOTHING may run before this but `import sys` (a builtin, already loaded by the
+# interpreter): every other import, `from __future__ import ...` included, is a
+# real module import and would resolve from the workspace first. That is why
+# this file carries no `__future__` import; its annotations do not need one.
+if not sys.flags.safe_path and sys.path and sys.path[0] == "":
+    del sys.path[0]
 
 import json
-import sys
 
 
 def _dispatch(request: dict):

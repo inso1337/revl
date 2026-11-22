@@ -745,20 +745,20 @@ def test_v3_match_bind_inside_loop_runs_on_wasmtime(tmp_path):
     assert invoke("for_sum") == 107          # 2 + 100 + 5
 
 
-def test_v3_list_indexof_rejected_by_tier():
-    """DELIBERATE BOUNDARY: `List.indexOf` is still not lowerable on this tier —
-    the per-element comparison (str_eq per slot for List[Str], i64 compare for
-    List[Int]) is the reader shape the harness never reaches. `Str.indexOf`
-    DOES lower now (see the execution test below); List does not, and a
-    boundary that silently started emitting would be as much a regression as a
-    miscompile."""
+def test_v3_list_indexof_lowers_for_comparable_elements_only():
+    """`List.indexOf` lowers where the element has a comparison on this tier
+    (Str by bytes, Int/Int32/Bool by slot) and stays a named refusal for an
+    element that has none (a record, a nested list). Issue #3145; executed in
+    `test_list_index_str_cmp_empty_3145.py`."""
     emit = _emitter()
-    for src in (
-        'fn f(xs: List[Int]) -> Int { return xs.indexOf(3) }',
-        'fn f(xs: List[Str]) -> Int { return xs.indexOf("a") }',
-    ):
-        with pytest.raises(emit.EmitError, match="indexOf is not lowerable"):
-            emit.emit(compile_source(src))
+    wat = emit.emit(compile_source(
+        'fn f(xs: List[Int]) -> Int { return xs.indexOf(3) }\n'
+        'fn g(xs: List[Str]) -> Int { return xs.indexOf("a") }'))["functions"]
+    assert "(func $list_index_of_slot" in wat
+    assert "(func $list_index_of_str" in wat
+    with pytest.raises(emit.EmitError, match="indexOf is not lowerable"):
+        emit.emit(compile_source(
+            'fn f(xs: List[List[Int]]) -> Int { return xs.indexOf([1]) }'))
 
 
 def test_v3_str_reader_builtins_emit():
@@ -1081,6 +1081,42 @@ def test_v3_test_block_strings_are_pooled_and_run_on_wasmtime(tmp_path):
         capture_output=True, text=True, timeout=60)
     assert out.returncode == 0, out.stderr
     # 1 = every assert held (a failed assert traps before the tail)
+    assert int(out.stdout.strip().splitlines()[-1]) == 1
+
+
+@_needs_wasmtime
+def test_v3_total_arithmetic_runs_on_wasmtime(tmp_path):
+    """The total `+ - *` forms answer Ok in range and Err at the i64 edge on
+    the wasm tier, with no trap anywhere: `Int.MIN * -1` is named before the
+    readback division, and the zero case never reaches it. The block runs on
+    real wasmtime rather than being asserted from the emitted text alone."""
+    import subprocess
+
+    _wasmtime_or_fail()
+    src = (
+        "fn hi() -> Int { return 9223372036854775807 }\n"
+        "fn lo() -> Int { return 0 - 9223372036854775807 - 1 }\n"
+        "fn ca(a: Int, b: Int) -> Result[Int, Str] { return a.checked_add(b) }\n"
+        "fn cs(a: Int, b: Int) -> Result[Int, Str] { return a.checked_sub(b) }\n"
+        "fn cm(a: Int, b: Int) -> Result[Int, Str] { return a.checked_mul(b) }\n"
+        "test \"total arithmetic\" {\n"
+        "  assert match ca(1, 2) { Ok(v) => v == 3, Err(e) => false }\n"
+        "  assert match ca(hi(), 1) { Ok(v) => false, Err(e) => e == \"revl: Int overflow\" }\n"
+        "  assert match cs(5, 7) { Ok(v) => v == 0 - 2, Err(e) => false }\n"
+        "  assert match cs(lo(), 1) { Ok(v) => false, Err(e) => true }\n"
+        "  assert match cm(6, 7) { Ok(v) => v == 42, Err(e) => false }\n"
+        "  assert match cm(hi(), 2) { Ok(v) => false, Err(e) => true }\n"
+        "  assert match cm(lo(), 0 - 1) { Ok(v) => false, Err(e) => true }\n"
+        "  assert match cm(0 - 1, lo()) { Ok(v) => false, Err(e) => true }\n"
+        "}"
+    )
+    module = _emitter().emit(compile_source(src))["functions"]
+    wat = tmp_path / "checked_arith.wat"
+    wat.write_text(module, encoding="utf-8")
+    out = subprocess.run(
+        ["wasmtime", "--invoke", "revl_test_total_arithmetic", str(wat)],
+        capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
     assert int(out.stdout.strip().splitlines()[-1]) == 1
 
 

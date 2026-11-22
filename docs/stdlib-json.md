@@ -54,7 +54,7 @@ each emitter refuses an extern that has no body for its tier):
 | rs | `Value::new(serde_json::from_str(&s))` | `serde_json::to_string(v.downcast())` | **runs** (item 140): `Any` erases to `cordis::Value` (a cloneable `Arc<dyn Any>`); the body boxes a parsed `serde_json::Value` into it and recovers it to re-encode (`serde_json` is already pinned in the emitted crate). A structured document survives `stringify∘parse`; `cargo test` runs the round-trip (backends/rust/scenarios/jsonwire.rvl → golden jsonwire.rs). Reading a parsed value into a typed binding for field access is still the erased-`Value` boundary. |
 | java | — | — | the tier refuses with `extern `json_parse` has no @java body — not portable to this backend`; a provider's Jackson/Gson plugs in here when one is on the `javac` classpath |
 | go | `json.Unmarshal([]byte(s), &v)` | `json.NewEncoder` with `SetEscapeHTML(false)` | **runs** (item 140): `Any` erases to Go's `any`; the @go body reaches `encoding/json` through `//revl:import` directives the emitter hoists into the module's import block. Encodes compact with `<`/`>`/`&` raw for the canonical form (item 385). `go test` runs the round-trip (backends/go/scenarios/emitted/jsonwire/). Record caveat: unexported struct fields marshal to `{}` — see the canonical-form section. |
-| wasm | — | — | the substrate value model (Int/Bool/Str/List) cannot hold Float/Map/records, so a JSON value has no representation there |
+| wasm | — | — | the tier has no dynamic `Any`/`Value` representation (it carries Int/Int32/Float/Bool/Str/List/record values natively, and Map is a stated limit), so a JSON value cannot be erased there |
 
 The refusal message is the built-in honesty gate, the same shape the
 conformance corpus's three bodyless externs already ride (docs/conformance.md):
@@ -107,9 +107,14 @@ from `bigint.toString()`, **not** via a `Number()` cast: a cast would silently
 round any value past `Number.MAX_SAFE_INTEGER` (2^53), and revl `Int` is i64, so
 values up to `9223372036854775807` are in range and must round-trip exactly.
 Mechanically, the replacer parks each bigint behind a quoted sentinel
-(`"@@revlBigInt:<n>@@"`) and the enclosing body then strips those quotes, which
-is how the digits land unquoted; with no bigint in the value the body returns
-the builtin result unchanged. Regression: `backends/typescript/tests/
+(`"@@revlBigInt<zeros>:<n>@@"`) and the enclosing body then strips those quotes,
+which is how the digits land unquoted; with no bigint in the value the body
+returns the builtin result unchanged. The rewrite runs over the finished text,
+so the body counts the sentinel prefix in the output: if the caller's own
+strings or object keys spell it (the count exceeds the bigints parked), it
+serializes once more under a prefix whose run of `0`s has a length no spelling
+in the first output has. That is at most two passes whatever the data holds, and
+user text is never rewritten. Regression: `backends/typescript/tests/
 fr3_json_int.test.ts` (runtime, under vitest) cross-checked against the py tier
 in `tests/test_json_stdlib.py::test_ts_int_serialization_matches_py_tier`,
 covering a small, a negative, and a beyond-2^53 `Int`.

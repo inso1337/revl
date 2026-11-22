@@ -55,8 +55,9 @@ a repair path while making changed-content anchors a visible finding rather
 than silently blessing the wrong line.
 
 ADVISORY. `tools/pre_pr.sh` runs this check but does not fail the pre-PR on
-it; CI does not run it at all yet. It becomes a hard check once the ledger is
-small and the tree is used to it.
+it, and the CI lint job runs it with `continue-on-error`, so a finding shows
+in the log without reddening the job. It becomes a hard check once the ledger
+is small and the tree is used to it.
 
 Usage:
     python3 tools/check_doc_refs.py                 # report only

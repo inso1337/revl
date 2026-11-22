@@ -702,13 +702,16 @@ export type TimerMode = 'every' | 'after'
 export type TimerState = 'live' | 'cancelled' | 'done'
 
 let timerCounter = 0
+// The live handles only, arm order (issue #3377): cancelling a handle, or an
+// `after` firing, releases it, so a host that swaps for hours neither scans
+// dead handles on every advance nor keeps the generation that armed them.
 const timers: TimerHandle[] = []
 
 export class TimerHandle {
   readonly serial: number
   readonly mode: TimerMode
   readonly intervalMs: number
-  private readonly body: () => void
+  private body: (() => void) | null
   private status: TimerState = 'live'
   nextAt: number
   fired = 0
@@ -741,34 +744,48 @@ export class TimerHandle {
   cancel(): boolean {
     if (this.status !== 'live') return false
     this.status = 'cancelled'
+    this.release()
     liveResources.delete(this.label)
     record(`${this.label}.cancel`)
     return true
+  }
+
+  /** Leave the clock's live list and drop the body (issue #3377). */
+  private release(): void {
+    const at = timers.indexOf(this)
+    if (at >= 0) timers.splice(at, 1) // absent: an `after` body cancelled itself
+    this.body = null
   }
 
   /** @internal — driven only by Clock.advance. */
   fire(now: number): void {
     this.fired += 1
     clockFirings.push([this.serial, now])
+    if (clockFirings.length > CLOCK_FIRINGS_CAP) clockFirings.shift()
     record(`${this.label}.fire #${this.fired} at ${now}ms`)
-    this.body()
+    this.body?.()
     if (this.mode === 'after') {
       // a one-shot's schedule is spent once it fires; release it through the
       // same path as cancel so `liveResources` clears and the teardown's own
       // `handle.cancel()` is a clean no-op.
       this.status = 'done'
+      this.release()
       liveResources.delete(this.label)
       record(`${this.label}.cancel`)
     }
   }
 }
 
+/** How many of the most recent firings `Clock.firings()` keeps (issue #3377).
+ *  The log is a test aid; a host that runs for hours never reads it. */
+const CLOCK_FIRINGS_CAP = 1024
 const clockFirings: Array<[number, number]> = []
 let clockNow = 0
 
 /** The clock coeffect (item 57): time advances only when the harness calls
  *  `advance`, so timer firings are deterministic timeline steps. */
 export const Clock = {
+  FIRINGS_CAP: CLOCK_FIRINGS_CAP,
   now(): number {
     return clockNow
   },
@@ -808,9 +825,24 @@ export const Clock = {
   },
   /** Live timers — a teardown that abandons one leaves this > 0. */
   pending(): number {
-    return timers.filter((t) => t.state() === 'live').length
+    return timers.length
   },
-  /** The recorded firing log: `[timerSerial, firedAtMs]` in order. */
+  /** Milliseconds from `now()` until the earliest live timer is due, or null
+   *  with no live timer. A host pumping `advance` from a real monotonic source
+   *  sleeps this long, then advances by it, so a timer fires on its tick
+   *  rather than on a fixed slice (issue #3377). */
+  nextDue(): number | null {
+    if (timers.length === 0) return null
+    let earliest = timers[0].nextAt
+    for (const t of timers) if (t.nextAt < earliest) earliest = t.nextAt
+    return earliest - clockNow
+  },
+  /** @internal test aid: how many handles the clock holds (live ones only). */
+  _held(): number {
+    return timers.length
+  },
+  /** The recorded firing log: `[timerSerial, firedAtMs]` in order, the most
+   *  recent `FIRINGS_CAP` firings only. */
   firings(): Array<[number, number]> {
     return clockFirings.map((f) => [f[0], f[1]])
   },
@@ -940,6 +972,31 @@ export class MapHandle {
     this.data.clear()
     liveResources.delete(this.label)
     record(`${this.label}.drop`)
+  }
+
+  // -- state hand-off protocol (item 53, docs/state-handoff.md) --------------
+  //
+  // A Map *is* a provider's state: its entries. These are the ts peers of
+  // `backends/python/runtime.py`'s `Map.__revl_state__`/`__revl_restore__`, so
+  // the same declared `handoff` contract crosses a swap on both tiers: a swap
+  // snapshots the live predecessor through this pair, then seats the snapshot
+  // in the successor it just loaded. A resource carrying neither (a `Pool`,
+  // whose checkouts are transient) migrates as a fresh equivalent, with only
+  // its type pinned, exactly as on py.
+
+  /** Snapshot this Map's state: its entries, in insertion order. A copy, so
+   *  the snapshot outlives this Map's teardown. */
+  __revl_state__(): [any, any][] {
+    this.assertLive('__revl_state__')
+    return [...this.data.entries()]
+  }
+
+  /** Seat a captured snapshot in this (fresh) Map, replacing whatever it
+   *  acquired at activation. */
+  __revl_restore__(state: [any, any][]): void {
+    this.assertLive('__revl_restore__')
+    this.data.clear()
+    for (const [key, value] of state) this.data.set(key, value)
   }
 }
 
@@ -1333,6 +1390,14 @@ export class Frame {
   /** issue #1369: the runs failed UI transaction units performed, newest
    * last, as py's `ui_transaction_runs`. */
   readonly uiTransactionRuns: UiTransactionRun[] = []
+  /** item 53: the stateful host resources this activation acquired, in
+   * acquisition order, the ts analog of py's `Frame._resources`. The carrier
+   * of a declared `handoff` (docs/state-handoff.md): a swap snapshots this
+   * vector from the live predecessor and seats it in the successor. Only a
+   * component that declares a `handoff` has its resource acquisitions emitted
+   * with `track()`, so this stays empty for every other program and the
+   * pre-item-53 emission is byte-identical. */
+  readonly resources: any[] = []
 
   constructor(ctx: Context, name: string) {
     this.ctx = ctx
@@ -1345,18 +1410,81 @@ export class Frame {
     _frameByCtx.set(ctx, this)
   }
 
+  /** item 53: attribute a freshly-acquired stateful host resource to this
+   * activation, so a declared `handoff` can carry it across a swap. Emitted
+   * only inside a component that declares a `handoff`; returns the resource so
+   * it can be written as `const m = $revl_frame.track(host.Map.new())` or as a
+   * standalone line after the acquisition. */
+  track<R>(resource: R): R {
+    this.resources.push(resource)
+    return resource
+  }
+
   private nextSeq(): number {
     this.seqCounter += 1
     return this.seqCounter
   }
 
+  /** Render a thrown value as the residue schema's `{type, message}`. A host
+   *  may throw anything, including `Object.create(null)` (which has no
+   *  `String()` conversion at all) or an object whose `toString` throws;
+   *  recording a residue must never throw out of the unwind loop, so every step
+   *  falls back (#3235). */
   private static errorOf(err: unknown): { type: string; message: string } {
-    if (err instanceof Error) return { type: err.constructor.name, message: err.message }
-    return { type: 'Error', message: String(err) }
+    const fallback = { type: 'Error', message: '<unprintable>' }
+    try {
+      if (err instanceof Error) {
+        try {
+          return { type: err.constructor.name, message: err.message }
+        } catch {
+          return fallback
+        }
+      }
+      try {
+        return { type: 'Error', message: String(err) }
+      } catch {
+        return fallback
+      }
+    } catch {
+      return fallback
+    }
+  }
+
+  /** One argument of a residue referent as text. `Int` is a `bigint` on this
+   *  tier and `JSON.stringify` THROWS on one, so a bigint renders as its
+   *  decimal digits (no `n`, no quotes: the text the config echo and the other
+   *  tiers write), at any depth. Anything the encoder still cannot render
+   *  falls back to `String(...)`, so recording a residue never throws. */
+  private static showArg(value: unknown, seen: Set<object> = new Set()): string {
+    try {
+      if (typeof value === 'bigint') return value.toString()
+      if (value !== null && typeof value === 'object') {
+        // a circular argument used to recurse until the stack overflowed: a
+        // value already on the current path renders as a marker instead, and
+        // the set is unwound after the branch so a shared (non-cyclic) value
+        // still renders in full
+        if (seen.has(value)) return '<circular>'
+        seen.add(value)
+        try {
+          if (Array.isArray(value)) {
+            return `[${value.map((v) => Frame.showArg(v, seen)).join(',')}]`
+          }
+          if (Object.getPrototypeOf(value) === Object.prototype) {
+            const o = value as Record<string, unknown>
+            return `{${Object.keys(o).map((k) => `${JSON.stringify(k)}:${Frame.showArg(o[k], seen)}`).join(',')}}`
+          }
+        } finally {
+          seen.delete(value)
+        }
+      }
+      return JSON.stringify(value) ?? String(value)
+    } catch {
+      try { return String(value) } catch { return '<unprintable>' }
+    }
   }
 
   private static referentOf(crossing: Crossing): string {
-    const args = crossing.args.map((a) => JSON.stringify(a)).join(', ')
+    const args = crossing.args.map((a) => Frame.showArg(a)).join(', ')
     return `${crossing.key}.${crossing.method}(${args})`
   }
 
@@ -1953,6 +2081,394 @@ export class Frame {
 }
 
 // ---------------------------------------------------------------------------
+// Verified provider state hand-off on hot-swap (item 53, docs/state-handoff.md)
+//
+// The ts peer of the py tier's `Session._capture_provider_state` /
+// `_restore_provider_state` + `_abort_swap`. A swap replaces one live
+// provider's fiber with a successor's, carrying the declared `handoff` state
+// across so the successor starts WARM instead of cold:
+//
+//   1. capture, while the predecessor is still live and its world still
+//      exists, the ts analog of py's `frame._resources`, the vector
+//      `Frame.track` accumulated in acquisition order;
+//   2. check the whole vector, then apply, one incompatible resource
+//      rejects with nothing half-written;
+//   3. on any failure past the teardown, roll the whole swap back: dispose the
+//      half-loaded successor, reload the predecessor and re-seat its captured
+//      state, so the composition is exactly as if the swap had never been
+//      attempted.
+//
+// Admission (`compile_source` with the running manifest) proves the DECLARED
+// shapes §5-compatible (`admission._handoff_compatible`) before a candidate
+// module exists. This tier has no MCP session engine and no trusted-proposal
+// path, so the caller contract is the same one every emit has: the successor
+// was admitted against the running manifest. The runtime check here is
+// stricter and narrower than py's: it cannot re-run the §5 relation, so
+// `swapProvider` requires the two declared hand-off types to be IDENTICAL and
+// refuses any difference before teardown (a widened acceptor that admission
+// would allow is refused at runtime too). Below the declared type it checks
+// the vector structurally, length and each resource's host class, the same
+// defence in depth py's session performs. A host that loads a successor it
+// did not admit is outside this check. See docs/state-handoff.md.
+
+export interface HandoffDecl {
+  /** The provided key whose state crosses. */
+  key: string
+  /** The declared state shape as rendered in the IR (e.g. `Map[Str, Str]`).
+   *  Carried for the report and diagnostics; the accept-vs-export §5 relation
+   *  is admission's, computed in the compiler, not on this tier. */
+  type?: string
+}
+
+/** An emitted component that may declare a `handoff` (the emitter writes the
+ *  declaration onto the component object when the IR carries one). */
+export interface HandoffComponent extends RealmComponent {
+  handoff?: HandoffDecl
+}
+
+/** One resource's captured state: the vector's type pin plus the snapshot the
+ *  resource's `__revl_state__` answered, or `null` when it carries none (a
+ *  `Pool`, whose checkouts are transient). */
+export interface CapturedResource {
+  type: string
+  state: any
+}
+
+/** What the swap reports per provided key (the `handoff` block py's
+ *  `Session.swap` returns). */
+export interface HandoffEntry {
+  component: string
+  migrated: boolean
+  /** The resources whose state actually crossed (not merely type-pinned). */
+  resources: number
+  /** Why a declared hand-off started cold (`migrated: false`): `realm` when
+   *  the hand-off key was placed in another realm, `placement` when another
+   *  key of the component's placement differs. The same words py reports. */
+  reason?: 'realm' | 'placement'
+  /** A plain-language note for a cold entry. */
+  note?: string
+}
+
+/** A swap the ts tier refused: either the successor could not load or its
+ *  state vector does not match the predecessor's. By the time this is thrown
+ *  the swap has been rolled back and the predecessor is serving again. */
+export class SwapRejected extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'SwapRejected'
+  }
+}
+
+/** A swap that failed AND whose rollback failed too: the predecessor is not
+ *  serving. Any half-restored predecessor fiber was disposed, so nothing serves
+ *  the key until the caller loads a provider. */
+export class SwapRollbackFailed extends SwapRejected {
+  constructor(message: string) {
+    super(message)
+    this.name = 'SwapRollbackFailed'
+  }
+}
+
+/** A captured state vector that cannot migrate onto the successor, the
+ *  runtime-shape half of the hand-off gate. Admission has already checked the
+ *  DECLARED shapes; this is defence in depth. */
+export class StateIncompatible extends SwapRejected {
+  constructor(message: string) {
+    super(message)
+    this.name = 'StateIncompatible'
+  }
+}
+
+function resourceType(resource: any): string {
+  const ctor = resource?.constructor
+  return typeof ctor === 'function' && ctor.name ? ctor.name : typeof resource
+}
+
+/** Snapshot a live provider's state vector, keyed by acquisition order (the
+ *  order the successor reproduces deterministically, that is what makes the
+ *  positional restore sound). Empty for a component that declares no
+ *  `handoff`, whose acquisitions are not tracked. */
+export function captureProviderState(fiber: Fiber): CapturedResource[] {
+  const frame = frameForCtx(fiber.ctx)
+  if (frame === undefined) return []
+  return frame.resources.map((resource) => ({
+    type: resourceType(resource),
+    state: typeof resource?.__revl_state__ === 'function'
+      ? resource.__revl_state__()
+      : null,
+  }))
+}
+
+/** Check a captured vector against the successor's, without mutating
+ *  anything: same length, same type at each position, and a state-carrying
+ *  resource must have a restore entry point. Kept separate from the apply so
+ *  a whole cohort can be checked before any of it is written. */
+function checkProviderState(
+  key: string,
+  resources: any[],
+  captured: CapturedResource[],
+): void {
+  if (resources.length !== captured.length) {
+    throw new StateIncompatible(
+      `provider of ${JSON.stringify(key)} held ${captured.length} stateful ` +
+      `resource(s); the successor acquires ${resources.length}, state ` +
+      `cannot migrate without dropping or inventing a resource`)
+  }
+  for (let pos = 0; pos < resources.length; pos++) {
+    const now = resourceType(resources[pos])
+    if (now !== captured[pos].type) {
+      throw new StateIncompatible(
+        `provider of ${JSON.stringify(key)}: resource #${pos} was ` +
+        `${captured[pos].type}, the successor acquires ${now}, retyped ` +
+        `state cannot migrate`)
+    }
+    if (captured[pos].state != null
+        && typeof resources[pos]?.__revl_restore__ !== 'function') {
+      throw new StateIncompatible(
+        `provider of ${JSON.stringify(key)}: resource #${pos} ` +
+        `(${captured[pos].type}) captured state but has no ` +
+        `__revl_restore__; state cannot migrate`)
+    }
+  }
+}
+
+/** Seat an already-checked captured vector in the successor. Returns how many
+ *  resources actually carried state across (the honest count py reports). */
+function applyProviderState(
+  resources: any[],
+  captured: CapturedResource[],
+): number {
+  let migrated = 0
+  for (let pos = 0; pos < resources.length; pos++) {
+    const state = captured[pos].state
+    if (state == null) continue
+    resources[pos].__revl_restore__(state)
+    migrated += 1
+  }
+  return migrated
+}
+
+export interface ProviderSwap {
+  /** The component the live fiber was loaded from: its `handoff` declaration
+   *  says which key can cross, and the rollback reloads it. */
+  from: HandoffComponent
+  /** The live predecessor fiber being replaced. */
+  fiber: Fiber
+  /** The predecessor's config, replayed if the swap must roll back. */
+  fromConfig?: any
+  /** The successor to load in its place. */
+  to: HandoffComponent
+  /** The successor's config. */
+  toConfig?: any
+}
+
+export interface ProviderSwapResult {
+  /** The loaded successor fiber (also a thenable while activating). */
+  fiber: Fiber & PromiseLike<Fiber>
+  /** The hand-off block, keyed by provided key. Absent when no hand-off is in
+   *  play (a successor that declares none, or another key). Present with
+   *  `migrated: true` when state crossed (`resources: 0` when only type-pinned
+   *  resources did), and with `migrated: false` and a `reason` when both sides
+   *  declared the key but the successor sits in another placement and so
+   *  starts cold. */
+  handoff?: Record<string, HandoffEntry>
+}
+
+/** Replace a live provider with a successor, carrying a compatible declared
+ *  `handoff` state across and rolling the whole swap back if the successor
+ *  cannot hold it. Returns the loaded successor fiber and the hand-off
+ *  report. */
+export async function swapProvider(
+  ctx: Context,
+  swap: ProviderSwap,
+): Promise<ProviderSwapResult> {
+  const accepts = swap.to.handoff
+  const exported = swap.from.handoff
+  const name = JSON.stringify(swap.to.name ?? '?')
+  // State crosses only when both sides declare a hand-off on the SAME provided
+  // key. A successor that declares none opts out of inheriting it (cold, no
+  // refusal: the author's explicit choice) and a key the predecessor never
+  // exported has nothing to carry.
+  const sameKey = accepts !== undefined && exported !== undefined
+    && exported.key === accepts.key
+  // A successor placed in another realm is a different provider there, so its
+  // store starts cold rather than inheriting another realm's entries. The
+  // report names why, in py's words.
+  const placed = sameKey && samePlacement(swap.from.isolate, swap.to.isolate)
+  const key = placed ? accepts!.key : null
+
+  // Everything below up to the teardown refuses with nothing torn down and the
+  // predecessor still serving.
+  if (key !== null && exported!.type !== accepts!.type) {
+    // The compiler's admission relates the declared shapes (`compatible`); the
+    // ts runtime cannot re-run that relation, so it holds the strict line: the
+    // declared types must be identical. A successor that admission accepted as
+    // a widened acceptor is refused here until a host admits it as a cold swap.
+    throw new StateIncompatible(
+      `swap of ${name}: the successor accepts \`${accepts!.type}\` but the ` +
+      `running provider exports \`${exported!.type}\`; the declared hand-off ` +
+      `types differ, so the state cannot migrate. Nothing was torn down and ` +
+      `the predecessor is still serving`)
+  }
+
+  // Capture BEFORE teardown, while the predecessor's world still exists. A
+  // resource that cannot answer its state protocol refuses the swap here.
+  let captured: CapturedResource[]
+  try {
+    captured = captureProviderState(swap.fiber)
+  } catch (error) {
+    throw new SwapRejected(
+      `swap of ${name}: the predecessor's state could not be captured ` +
+      `(${describeError(error)}); nothing was torn down and it is still serving`)
+  }
+  if (key !== null && captured.length === 0) {
+    // A declared hand-off over a vector with no tracked resource cannot carry
+    // anything: the state lives where the emitter did not record it, and a
+    // swap would drop it while reporting a migration. Refuse it instead.
+    throw new StateIncompatible(
+      `swap of ${name}: the running provider declares a hand-off on ` +
+      `${JSON.stringify(key)} but holds no tracked Map or Pool, so there is ` +
+      `no state to carry across and a swap would drop whatever it keeps ` +
+      `elsewhere. Nothing was torn down and the predecessor is still serving`)
+  }
+
+  let successor: (Fiber & PromiseLike<Fiber>) | null = null
+  let migrated = 0
+  try {
+    await swap.fiber.dispose()
+    // `plug`, not `ctx.plugin`: a successor with realm placements must be
+    // isolated before its fiber exists, exactly as at boot.
+    successor = plug(ctx, swap.to, swap.toConfig)
+    await successor
+    // Post-activation health gate: `await fiber` resolves for a candidate left
+    // PENDING on an unmet inject (cordis keeps no error for it), which would
+    // otherwise install a successor that provides nothing over a torn-down
+    // predecessor. A non-ACTIVE successor is rolled back like a failed load.
+    if (fiberStateName(successor.state) !== 'ACTIVE') {
+      throw new SwapRejected(
+        `the successor of ${name} did not activate ` +
+        `(fiber state ${fiberStateName(successor.state)})`)
+    }
+    if (key !== null) {
+      // Check the whole vector first, then apply: a successor that invents or
+      // drops a resource, or retypes one, rejects with nothing half-written.
+      const resources = frameForCtx(successor.ctx)?.resources ?? []
+      checkProviderState(key, resources, captured)
+      migrated = applyProviderState(resources, captured)
+    }
+  } catch (error) {
+    try {
+      await rollBackProviderSwap(ctx, swap, successor, captured)
+    } catch (rollbackError) {
+      throw new SwapRollbackFailed(
+        `swap of ${name} failed (${describeError(error)}) and the rollback to ` +
+        `the predecessor failed too (${describeError(rollbackError)}); any ` +
+        `half-restored predecessor was disposed, so nothing serves the key now`)
+    }
+    if (error instanceof SwapRejected) throw error
+    throw new SwapRejected(
+      `swap of ${name} failed after the predecessor was torn down; it was ` +
+      `rolled back and the composition is unchanged: ${describeError(error)}`)
+  }
+  let handoff: Record<string, HandoffEntry> | undefined
+  if (key !== null) {
+    // Reported even when only type-pinned resources crossed (`resources: 0`,
+    // as py reports a Pool-only vector).
+    handoff = { [key]: { component: swap.to.name ?? '', migrated: true, resources: migrated } }
+  } else if (sameKey) {
+    const sameRealm = swap.from.isolate?.[accepts!.key] === swap.to.isolate?.[accepts!.key]
+    handoff = {
+      [accepts!.key]: {
+        component: swap.to.name ?? '',
+        migrated: false,
+        resources: 0,
+        reason: sameRealm ? 'placement' : 'realm',
+        note: sameRealm
+          ? 'another key of the component is placed differently, so the ' +
+            'successor starts cold'
+          : 'the hand-off key is placed in another realm, so the successor ' +
+            'starts cold',
+      },
+    }
+  }
+  return { fiber: successor, handoff }
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/** True when two components are placed in the same realms: the same keys are
+ *  isolated, in the same named realm. Both are loaded on the same context, so
+ *  inherited placement is equal by construction; only the component's own
+ *  `isolate` map can differ. */
+function samePlacement(
+  left: Record<string, string> | undefined,
+  right: Record<string, string> | undefined,
+): boolean {
+  const a = left ?? {}
+  const b = right ?? {}
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)])
+  for (const key of keys) if (a[key] !== b[key]) return false
+  return true
+}
+
+/** The rollback py's `_abort_swap` performs for a provider: drop the
+ *  half-loaded successor (if it got that far), reload the predecessor on its
+ *  own code and re-seat the captured state, so nothing is dropped and nothing
+ *  is left half-migrated. A reload that is not ACTIVE, or whose state cannot be
+ *  re-seated, is disposed again so no half-restored fiber is left plugged. */
+async function rollBackProviderSwap(
+  ctx: Context,
+  swap: ProviderSwap,
+  successor: (Fiber & PromiseLike<Fiber>) | null,
+  captured: CapturedResource[],
+): Promise<void> {
+  // A teardown of the predecessor that threw part way may have left the first
+  // fiber still providing the key. Dispose it again (cordis disposal is
+  // idempotent, so this is a no-op when the teardown completed) before the
+  // reload plugs a second provider next to it.
+  try {
+    await swap.fiber.dispose()
+  } catch {
+    // Nothing more can be done for a fiber that will not tear down; the reload
+    // below reports loudly if the key is still taken.
+  }
+  if (successor !== null) {
+    try {
+      await successor.dispose()
+    } catch {
+      // A failed teardown of the rejected successor must not stop the
+      // predecessor from coming back; the reload below is what restores
+      // service.
+    }
+  }
+  const reloaded = plug(ctx, swap.from, swap.fromConfig)
+  try {
+    await reloaded
+    if (fiberStateName(reloaded.state) !== 'ACTIVE') {
+      throw new Error(
+        `the reloaded predecessor did not activate ` +
+        `(fiber state ${fiberStateName(reloaded.state)})`)
+    }
+    const frameKey = swap.from.handoff?.key ?? '?'
+    const resources = frameForCtx(reloaded.ctx)?.resources ?? []
+    // The predecessor is the code that captured the vector, so this cannot
+    // reject in practice; it is checked so a reload that came up with a
+    // different shape is a loud rollback failure rather than a silent loss.
+    checkProviderState(frameKey, resources, captured)
+    if (captured.length > 0) applyProviderState(resources, captured)
+  } catch (error) {
+    try {
+      await reloaded.dispose()
+    } catch {
+      // nothing more can be done for a fiber that will not tear down
+    }
+    throw error
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Adapter glue
 
 export interface ConfigFieldSpec {
@@ -2545,23 +3061,30 @@ function _jsonTypeOk(value: unknown, jsonType: string): boolean {
  *  `_json_schema_error`: primitive `type`, `const`, `enum`, `nullable`,
  *  `properties`/`required`/`additionalProperties` (bool or schema), `items`, and
  *  a discriminated `oneOf`. No `$ref` (cyclic types are refused), so the walk is
- *  finite. */
+ *  finite.
+ *
+ *  Every membership test is an OWN-key test (`Object.hasOwn`), matching the
+ *  python mirror's dict membership. `in` walks the prototype chain, so an item
+ *  key named like an `Object.prototype` member (`constructor`, `__proto__`,
+ *  `toString`, ...) would be found in a schema's `properties` though the schema
+ *  never declared it, slip past `additionalProperties: false`, and a `required`
+ *  property with such a name would be satisfied by inheritance. */
 function _jsonSchemaError(value: unknown, schema: unknown, path = '$'): string | null {
   if (typeof schema !== 'object' || schema === null) return null
   const s = schema as Record<string, unknown>
 
-  if ('const' in s) {
+  if (Object.hasOwn(s, 'const')) {
     return value === s.const ? null
       : `${path}: expected const ${JSON.stringify(s.const)}, got ${JSON.stringify(value)}`
   }
 
-  if ('enum' in s) {
+  if (Object.hasOwn(s, 'enum')) {
     const arms = (s.enum as unknown[]) ?? []
     return arms.some((a) => a === value) ? null
       : `${path}: ${JSON.stringify(value)} is not one of ${JSON.stringify(arms)}`
   }
 
-  if ('oneOf' in s) {
+  if (Object.hasOwn(s, 'oneOf')) {
     const arms = (s.oneOf as unknown[]) ?? []
     const matches = arms.filter((arm) => _jsonSchemaError(value, arm, path) === null)
     if (matches.length === 1) return null
@@ -2584,11 +3107,11 @@ function _jsonSchemaError(value: unknown, schema: unknown, path = '$'): string |
     const obj = value as Record<string, unknown>
     const props = (s.properties as Record<string, unknown>) ?? {}
     for (const name of (s.required as string[]) ?? []) {
-      if (!(name in obj)) return `${path}: missing required property ${JSON.stringify(name)}`
+      if (!Object.hasOwn(obj, name)) return `${path}: missing required property ${JSON.stringify(name)}`
     }
-    const extra = 'additionalProperties' in s ? s.additionalProperties : true
+    const extra = Object.hasOwn(s, 'additionalProperties') ? s.additionalProperties : true
     for (const key of Object.keys(obj)) {
-      if (key in props) {
+      if (Object.hasOwn(props, key)) {
         const err = _jsonSchemaError(obj[key], props[key], `${path}.${key}`)
         if (err !== null) return err
       } else if (extra === false) {

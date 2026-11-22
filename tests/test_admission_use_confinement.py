@@ -355,6 +355,123 @@ def test_the_bridge_still_admits_a_clean_candidate():
     assert verdict["admitted"] == ["Extra"]
 
 
+# ------------------------ caller-named source directories are not import roots
+#
+# Issue #3152: the bridge gate admits a candidate handed in as JSON, keyed by
+# paths the caller wrote. A plain relative `use` stays "inside the admitting
+# directory", and for this door that directory is whatever the caller named.
+# Resolving it there let a caller of the service make the gate host open, parse
+# and quote a file it never supplied, and the refusal said whether the file
+# existed and what its first token was. The admitting directory here is the
+# caller's, so it is not an import root: a relative `use` resolves only out of
+# the supplied sources and the operator's installed search path.
+
+_GATED = 'use "{path}" {{ Leak }}\ncomponent X {{ }}\n'
+_SECRET = "SECRET_TOKEN_hunter2 this is not revl\n"
+
+
+def _gate_verdict(gate, sources):
+    return json.loads(getattr(gate_service, gate)(json.dumps(sources), ""))
+
+
+@pytest.mark.parametrize("gate", ["admit", "admit_structured"])
+@pytest.mark.parametrize("named", ["hostfile.rvl", "sub/hostfile.rvl"])
+def test_a_relative_use_never_opens_a_file_beside_a_caller_named_source(
+        gate, named, tmp_path):
+    """The issue's reproduction, on both bridge entry points: a supplied source
+    at a caller-chosen path names a sibling file holding text that is not revl.
+    Its first token must never come back in the verdict."""
+    caller_dir = tmp_path / "caller"
+    (caller_dir / "sub").mkdir(parents=True)
+    (caller_dir / named).write_text(_SECRET, encoding="utf-8")
+    verdict = _gate_verdict(gate, {
+        str(caller_dir / "x.rvl"): _GATED.format(path=named)})
+    assert verdict["ok"] is False, verdict
+    diagnostic = verdict["diagnostic"]
+    assert "SECRET_TOKEN" not in diagnostic, (gate, named, diagnostic)
+    assert "expected a top-level declaration" not in diagnostic, (
+        gate, named, diagnostic)
+
+
+@pytest.mark.parametrize("gate", ["admit", "admit_structured"])
+def test_a_relative_use_is_not_an_existence_oracle_in_the_caller_directory(
+        gate, tmp_path):
+    """Present and absent siblings give the same refusal modulo the name the
+    caller itself wrote, so the verdict says nothing about what sits there."""
+    caller_dir = tmp_path / "caller"
+    caller_dir.mkdir()
+    (caller_dir / "present.rvl").write_text(_SECRET, encoding="utf-8")
+
+    def diagnostic(named):
+        return _gate_verdict(gate, {
+            str(caller_dir / "x.rvl"): _GATED.format(path=named)})["diagnostic"]
+
+    present = diagnostic("present.rvl")
+    absent = diagnostic("absent.rvl")
+    assert "SECRET_TOKEN" not in present
+    assert present.replace("present.rvl", "X") == absent.replace("absent.rvl", "X"), (
+        present, absent)
+
+
+def test_a_relative_use_from_a_supplied_module_is_confined_too(tmp_path):
+    """The importer need not be the admitted root: a module supplied beside it
+    is caller-written as well, and its sibling import must not read disk."""
+    caller_dir = tmp_path / "caller"
+    caller_dir.mkdir()
+    (caller_dir / "hostfile.rvl").write_text(_SECRET, encoding="utf-8")
+    verdict = _gate_verdict("admit", {
+        str(caller_dir / "x.rvl"): 'use "lib.rvl" { helper }\ncomponent X { }\n',
+        str(caller_dir / "lib.rvl"):
+            'use "hostfile.rvl" { Leak }\n'
+            "pub fn helper() -> Int { return 1 }\n",
+    })
+    assert verdict["ok"] is False, verdict
+    assert "SECRET_TOKEN" not in verdict["diagnostic"], verdict
+
+
+def test_the_gate_reads_no_file_beside_a_caller_named_source(tmp_path, monkeypatch):
+    """The disk read itself is gone, not just its text: the loader's read seam
+    is never reached for the caller-chosen directory."""
+    caller_dir = tmp_path / "caller"
+    caller_dir.mkdir()
+    (caller_dir / "hostfile.rvl").write_text(_SECRET, encoding="utf-8")
+
+    def _boom(path, *a, **k):
+        raise AssertionError(f"the gate read {path} from disk")
+
+    monkeypatch.setattr(_compiler, "_read_module_text", _boom)
+    verdict = _gate_verdict("admit", {
+        str(caller_dir / "x.rvl"): _GATED.format(path="hostfile.rvl")})
+    assert verdict["ok"] is False, verdict
+
+
+def test_a_sibling_supplied_in_memory_still_resolves_for_the_gate(tmp_path):
+    """What keeps working: the composition's own files, handed in beside the
+    candidate and resolved out of the sources map with no filesystem read."""
+    caller_dir = tmp_path / "caller"
+    caller_dir.mkdir()
+    verdict = _gate_verdict("admit", {
+        str(caller_dir / "x.rvl"): 'use "lib.rvl" { helper }\ncomponent X { }\n',
+        str(caller_dir / "lib.rvl"): "pub fn helper() -> Int { return 1 }\n",
+    })
+    assert verdict["ok"] is True, verdict
+
+
+def test_the_installed_search_path_still_resolves_for_the_gate(tmp_path, monkeypatch):
+    """The search-path spelling of an installed module is the operator's, not
+    the caller's, and stays reachable (the issue's suggested fix allows it)."""
+    caller_dir = tmp_path / "caller"
+    caller_dir.mkdir()
+    install = tmp_path / "install"
+    install.mkdir()
+    (install / "lib.rvl").write_text(
+        "pub fn helper() -> Int { return 1 }\n", encoding="utf-8")
+    monkeypatch.setenv("REVL_IMPORT_PATH", str(install))
+    verdict = _gate_verdict("admit", {
+        str(caller_dir / "x.rvl"): 'use "lib.rvl" { helper }\ncomponent X { }\n'})
+    assert verdict["ok"] is True, verdict
+
+
 # ------------------------------------------ the live per-turn door
 
 @needs_cordis

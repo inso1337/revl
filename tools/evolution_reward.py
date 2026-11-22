@@ -83,7 +83,8 @@ owns. None of them is a new gate, and none of them reads a candidate's prose:
     artifact-stability    tools/regen_goldens.py --all --check
     formal                formal/scripts/{nonvacuity,layering}_gate.py, PLUS a
                           read of the theorem ledger against `base`
-    scope                 the changed-file set against the declared scope
+    scope                 the changed-file set against the declared scope AND
+                          the operator's allow set
     documentation         tools/docgen.py --check, tools/check_roadmap_claims.py
     reach                 tools/promotion_evidence.py: the audit of every
                           conformance case at `base` and at head, put through
@@ -146,7 +147,7 @@ gate rather than read one.
 
 USAGE
 -----
-    python3 tools/evolution_reward.py --candidate candidate.json
+    python3 tools/evolution_reward.py --candidate candidate.json --allow 'src/**,tests/**'
     python3 tools/evolution_reward.py --candidate candidate.json --json out.json
 
 The candidate record is a JSON object. Exactly three keys are read:
@@ -159,7 +160,29 @@ reader of the scorecard can see that the candidate's narrative was present and
 was not consulted. The held-out seed is NOT a record key: it arrives in
 `REVL_HELDOUT_SEED_FILE`, the path to an owner-only file outside the candidate
 tree, because a candidate that could name its own seed would choose the draw it
-is judged on. Exit status is 0 only when the trajectory is retained.
+is judged on.
+
+THE EDITABLE SET IS THE OPERATOR'S, NOT THE CANDIDATE'S
+-------------------------------------------------------
+The candidate declares a `scope`, and until issue #2803 that declaration was
+the whole bound: a scope of `**` bounded nothing and verified. The editable set
+now also has to come from whoever starts the run, as `--allow` (repeatable, or a
+comma-separated list) or in `REVL_EDIT_ALLOW`, and NEVER as a record key. The
+two check different things:
+
+  * the declared scope is the candidate's claim about its own work;
+  * the operator's allow set is the grant that claim is checked against.
+
+`probe_scope` verifies only when every measured path matches BOTH, and it refuses
+by name when no allow set was supplied at all. That is default deny: a run with
+no grant names nothing as editable, so it can retain nothing. A declared scope
+that names a fenced evaluator path, or that admits every path in the tree (`**`,
+`***`, `**/**`), is a declaration that bounds nothing and is refused too. The
+measured diff is fenced as well: a change to an evaluator file is refused even
+when a directory glob in the grant covers it, because the grant names the
+subject and the fence is the judge.
+
+Exit status is 0 only when the trajectory is retained.
 """
 
 from __future__ import annotations
@@ -172,6 +195,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -230,6 +254,51 @@ HELDOUT_DRAW = 200
 # owner-readable only; the scorer checks both properties and refuses otherwise.
 HELDOUT_SEED_FILE_ENV = "REVL_HELDOUT_SEED_FILE"
 
+# The operator's editable set, and NOT a record key. `RECORD_KEYS` is the
+# whitelist that keeps a candidate from naming what it may edit; this arrives on
+# the command line (`--allow`) or in this variable, so it belongs to whoever
+# starts the run. A run with neither supplies no grant at all, and a missing
+# grant is a failed `scope` verdict, never a default of "anything".
+ALLOW_ENV = "REVL_EDIT_ALLOW"
+
+# The operator's comparison base, and NOT a record key either. A base the record
+# chose could be the candidate's own last commit, and then only what is still
+# uncommitted is measured. The base arrives on the command line (`--base`) or in
+# this variable as a FULL COMMIT ID: a ref name lives in state the candidate can
+# rewrite (`git update-ref` in its own tree), a commit id does not. The record's
+# `base` stays a required key and is now a claim that is checked against it.
+BASE_ENV = "REVL_EDIT_BASE"
+
+# The files that decide what the reward measures, taken from the SAME single
+# enumeration the controller and the held-out scorer use (issue #2802):
+# `EVALUATOR_PATHS` in `src/revl/kernel_boundary.py`, through its `authority`
+# and `held_out` views. Resolved lazily through `_evaluator_protocol()` so
+# importing this module never pulls in `revl/__init__.py` (and with it the
+# compiler). A declared scope that NAMES one of them (an exact path in the
+# list, not merely a directory that contains it) is refused by name before the
+# diff is read: a candidate that says it may edit its own judge has said
+# enough. The measured diff is checked against the same set with a
+# segment-prefix match, as `kernel_boundary` and the controller match it. This
+# is not the deny list the operator allow set replaces; it is the
+# declaration-side and measured-diff check on the candidate's own footprint.
+def evaluator_fence(name: str) -> tuple:
+    """One view of the evaluator enumeration, without importing `revl`."""
+    return _evaluator_protocol().evaluator_fence(name)
+
+
+def _evaluator_fence() -> tuple:
+    """`AUTHORITY_FENCE + HELD_OUT_FENCE`, de-duplicated, in order."""
+    protocol = _evaluator_protocol()
+    return tuple(dict.fromkeys(
+        protocol.AUTHORITY_FENCE + protocol.HELD_OUT_FENCE))
+
+
+def __getattr__(name: str):
+    """Lazy `EVALUATOR_FENCE` so import never loads the compiler."""
+    if name == "EVALUATOR_FENCE":
+        return _evaluator_fence()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 # The census baseline. `probe_no_new_false_admits` reads this file on both sides
 # of the candidate's change, which is the half of the item's "can only shrink in
 # a diff somebody reads" that no tool performed.
@@ -276,7 +345,50 @@ def verified(component: str, reason: str, evidence=()) -> Verdict:
 # The ONLY keys read off a candidate record. The whitelist is the mechanism that
 # makes "no component reads the candidate's prose" structural rather than a
 # convention: a key that is not here never reaches a probe, whatever it says.
+# `allow` is deliberately NOT here: the editable set belongs to the operator.
 RECORD_KEYS = ("tree", "base", "scope")
+
+
+def parse_allow(entries) -> tuple:
+    """The operator's allow set, normalised into path globs.
+
+    Accepts a string, a comma-separated string, or a sequence of either, so the
+    CLI (``--allow`` may repeat) and the environment variable (one string) use
+    the same reader. Empty pieces are dropped rather than treated as "the whole
+    tree": an empty grant is no grant, and `probe_scope` refuses that by name.
+    """
+    if entries is None:
+        return ()
+    if isinstance(entries, str):
+        entries = [entries]
+    out = []
+    for entry in entries:
+        for part in str(entry).split(","):
+            part = part.strip().replace("\\", "/").strip("/")
+            while part.startswith("./"):
+                part = part[2:]
+            if part:
+                out.append(part)
+    return tuple(out)
+
+
+def allow_from_env() -> tuple:
+    """The allow set in `ALLOW_ENV`, or `()` when the operator set none."""
+    return parse_allow(os.environ.get(ALLOW_ENV, ""))
+
+
+def base_from_args(cli_value) -> tuple:
+    """`(pin, source)`: the operator's base and where it came from.
+
+    `--base` wins over `BASE_ENV`; neither set is `("", "")`, which `scope` and
+    the controller's `authority` refuse by name. The source is recorded on the
+    scorecard and the verdict so a reader can tell a pinned run from an
+    unpinned one.
+    """
+    if cli_value:
+        return str(cli_value).strip(), "--base"
+    env = os.environ.get(BASE_ENV, "").strip()
+    return (env, BASE_ENV) if env else ("", "")
 
 
 @dataclass(frozen=True)
@@ -286,14 +398,26 @@ class Candidate:
     tree: Path
     base: str
     scope: tuple = ()
+    allow: tuple = ()
     prose_ignored: tuple = ()
+    #: The operator's comparison base (a full commit id) and where it came
+    #: from. Not record keys: see `BASE_ENV`.
+    base_pin: str = ""
+    base_source: str = ""
 
 
-def load_candidate(record: dict) -> Candidate:
+def load_candidate(record: dict, allow=(), base_pin: str = "",
+                   base_source: str = "") -> Candidate:
     """Build a `Candidate` from a record, dropping every other key by name.
 
     Refuses rather than guesses: a record with no `tree`, no `base` or no `scope`
     cannot be scored, and an unscorable candidate is not a passing one.
+
+    `allow` is the OPERATOR's grant and is passed in by the caller, never read
+    off the record. A record carrying an `allow` key is reported under
+    `prose_ignored` like any other key the candidate tried to supply. The
+    operator's base (`base_pin`, `base_source`) is passed in the same way; the
+    record's own `base` is only a claim that `scope` checks against it.
     """
     missing = [k for k in RECORD_KEYS if k not in record]
     if missing:
@@ -306,7 +430,10 @@ def load_candidate(record: dict) -> Candidate:
         tree=Path(record["tree"]),
         base=str(record["base"]),
         scope=tuple(str(s) for s in scope),
+        allow=parse_allow(allow),
         prose_ignored=tuple(sorted(k for k in record if k not in RECORD_KEYS)),
+        base_pin=str(base_pin or "").strip(),
+        base_source=str(base_source or ""),
     )
 
 
@@ -372,7 +499,7 @@ def run_git(candidate: Candidate, args, timeout: int = 120):
     try:
         proc = subprocess.run(
             ["git", "-C", str(candidate.tree)] + [str(a) for a in args],
-            timeout=timeout, capture_output=True, text=True, env=candidate_env())
+            timeout=timeout, capture_output=True, text=True, env=_read_env())
     except (subprocess.TimeoutExpired, OSError) as exc:
         return False, f"git {' '.join(str(a) for a in args)} failed: {exc}"
     if proc.returncode != 0:
@@ -406,17 +533,320 @@ def changed_files(candidate: Candidate):
     """`(ok, paths_or_error)`: the candidate's changed-file set against `base`.
 
     Committed and uncommitted changes both count, because a trajectory is scored
-    on the tree it produced and not on how tidily it was committed.
+    on the tree it produced and not on how tidily it was committed. The read
+    itself is `measured_paths`, shared with `tools/evolution_controller.py`'s
+    `measured_diff` so the two cannot drift apart.
     """
-    ok, out = run_git(candidate, ["diff", "--name-only", candidate.base])
+    return measured_paths(candidate.tree, candidate.base)
+
+
+#: Git configuration forced on for the reads that list the measured set. Each
+#: key is one the candidate could set in its own `.git/config` to change what
+#: git reports: a sparse checkout marks entries skip-worktree, `fsmonitor`
+#: replaces the stat check with a command, and `core.worktree` and `core.bare`
+#: move or remove the working tree.
+_MEASURE_CONFIG = (
+    "core.fsmonitor=false", "core.untrackedCache=false",
+    "core.sparseCheckout=false", "core.sparseCheckoutCone=false",
+    "core.bare=false",
+)
+
+
+def _read_env() -> dict:
+    """`candidate_env()` plus the switch that turns replace refs off.
+
+    `git replace <base> <own-commit>` writes a ref in the candidate's own tree
+    and makes every read of `<base>` return the candidate's commit instead, so
+    every read of the base commit runs with replacement off.
+    """
+    env = candidate_env()
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    return env
+
+
+def _git_z(tree: Path, args, env, timeout: int):
+    """`(ok, [paths])` from a NUL-separated git listing, or `(False, error)`."""
+    ok, raw = _git_bytes(tree, args, env, timeout)
     if not ok:
-        return False, out
-    paths = {line.strip() for line in out.splitlines() if line.strip()}
-    ok, out = run_git(candidate, ["ls-files", "--others", "--exclude-standard"])
+        return False, raw
+    return True, [p.decode("utf-8", "surrogateescape").rstrip("/")
+                  for p in raw.split(b"\0") if p]
+
+
+def _git_bytes(tree: Path, args, env, timeout: int):
+    cmd = ["git", "-C", str(tree), "--work-tree", str(tree)]
+    for item in _MEASURE_CONFIG:
+        cmd += ["-c", item]
+    cmd += [str(a) for a in args]
+    try:
+        proc = subprocess.run(cmd, timeout=timeout, capture_output=True,
+                              env=env)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return False, f"git {' '.join(str(a) for a in args)} failed: {exc}"
+    if proc.returncode != 0:
+        return False, (proc.stderr.decode("utf-8", "replace").strip()
+                       or f"git exited {proc.returncode}")
+    return True, proc.stdout
+
+
+def _base_ignore_rules(tree: Path, base: str, env, timeout: int):
+    """`(ok, {path: bytes})`: every `.gitignore` blob in the base commit."""
+    ok, names = _git_z(tree, ["ls-tree", "-r", "-z", "--name-only",
+                              "--end-of-options", base + "^{tree}"], env, timeout)
     if not ok:
-        return False, out
-    paths |= {line.strip() for line in out.splitlines() if line.strip()}
-    return True, sorted(paths)
+        return False, names
+    rules = {}
+    for name in names:
+        if name.rsplit("/", 1)[-1] != ".gitignore":
+            continue
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(tree), "show", f"{base}:{name}"],
+                timeout=timeout, capture_output=True, env=env)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            return False, f"git show {base}:{name} failed: {exc}"
+        if proc.returncode != 0:
+            return False, (f"git show {base}:{name} failed: "
+                           + proc.stderr.decode("utf-8", "replace").strip())
+        rules[name] = proc.stdout
+    return True, rules
+
+
+def _filter_ignored(paths, rules, env, timeout: int):
+    """`(ok, kept)`: `paths` minus the ones the BASE's `.gitignore` files hide.
+
+    The ignore rules are replayed in a scratch repository holding only the
+    base's `.gitignore` blobs and one empty placeholder per untracked path, so
+    the rules that apply are the ones the base commit carries and not whatever
+    the candidate wrote into its own `.gitignore`, `.git/info/exclude` or
+    `core.excludesFile`. A rule the candidate adds or edits is itself a changed
+    path, and does not hide anything from this read.
+
+    A path is dropped only when the replay NAMES it as ignored. One whose
+    placeholder could not be created (a file where the base has a directory, or
+    two names that collide on a case-insensitive filesystem) is never named, so
+    it is kept: the failure direction is a path counted as changed.
+    """
+    if not rules or not paths:
+        return True, list(paths)
+    with tempfile.TemporaryDirectory(prefix="evolution-ignore-") as scratch:
+        root = Path(scratch)
+        try:
+            subprocess.run(["git", "init", "-q", str(root)], timeout=timeout,
+                           capture_output=True, check=True, env=env)
+            for name, blob in rules.items():
+                target = root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(blob)
+        except (subprocess.SubprocessError, OSError) as exc:
+            return False, f"the base's ignore rules could not be replayed: {exc}"
+        for path in paths:
+            target = root / path
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.touch(exist_ok=False)
+            except OSError:
+                continue
+        ok, ignored = _git_z(root, ["ls-files", "-z", "--others", "--ignored",
+                                    "--exclude-per-directory=.gitignore"],
+                             env, timeout)
+        if not ok:
+            return False, ignored
+    named = set(ignored)
+    return True, [p for p in paths if p not in named]
+
+
+def _blob_id(data_len: int, chunks, algo: str) -> str:
+    digest = hashlib.new(algo)
+    digest.update(b"blob %d\0" % data_len)
+    for chunk in chunks:
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _chunks(path: Path):
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(1 << 20)
+            if not chunk:
+                return
+            yield chunk
+
+
+def _tracked_changes(tree: Path, env, timeout: int):
+    """`(ok, [paths])`: the base's tracked paths whose worktree state differs.
+
+    Compared here and not by `git diff`, because `git diff` runs the
+    candidate's own clean filters and attributes (`.git/info/attributes` plus
+    `filter.<name>.clean` can print the base content for an edited file), its
+    submodule `ignore` settings and its stat-skipping flags. The worktree bytes
+    are hashed as they are on disk, as a git blob, and compared with the id the
+    fresh index holds; a symlink is its target, an executable bit is part of
+    the comparison, and a path that is missing, not a regular file, or the
+    wrong kind is changed.
+    """
+    ok, raw = _git_bytes(tree, ["ls-files", "-s", "-z"], env, timeout)
+    if not ok:
+        return False, raw
+    changed = []
+    for entry in raw.split(b"\0"):
+        if not entry:
+            continue
+        meta, _, name = entry.partition(b"\t")
+        mode, sha, _stage = meta.decode("ascii").split(" ")
+        rel = name.decode("utf-8", "surrogateescape")
+        path = tree / os.fsdecode(name)
+        algo = "sha256" if len(sha) == 64 else "sha1"
+        try:
+            st = os.lstat(path)
+        except OSError:
+            changed.append(rel)
+            continue
+        if mode == "160000":
+            if not stat.S_ISDIR(st.st_mode):
+                changed.append(rel)
+                continue
+            ok, head = run_git(_Probe(path), ["rev-parse", "--verify",
+                                              "--quiet", "HEAD"])
+            if not ok or head.strip() != sha:
+                changed.append(rel)
+        elif mode == "120000":
+            if not stat.S_ISLNK(st.st_mode):
+                changed.append(rel)
+                continue
+            target = os.fsencode(os.readlink(path))
+            if _blob_id(len(target), [target], algo) != sha:
+                changed.append(rel)
+        else:
+            executable = bool(st.st_mode & 0o111)
+            if (not stat.S_ISREG(st.st_mode)
+                    or executable != (mode == "100755")):
+                changed.append(rel)
+                continue
+            try:
+                same = _blob_id(st.st_size, _chunks(path), algo) == sha
+            except OSError:
+                same = False
+            if not same:
+                changed.append(rel)
+    return True, changed
+
+
+def measured_paths(tree, base: str, timeout: int = 120):
+    """`(ok, paths_or_error)`: what changed in `tree` against `base`.
+
+    The grant is default deny over THIS set, so the candidate must not be able
+    to shrink it, and nothing here asks the candidate's git configuration what
+    it thinks changed:
+
+      * the base is read with replace refs off, so `git replace` cannot make
+        the base commit mean the candidate's own;
+      * the index is a fresh temporary one read from `base`, so
+        `update-index --assume-unchanged` and `--skip-worktree` flags (which
+        live on index entries), a sparse checkout and a removed index entry
+        hide nothing;
+      * a tracked path counts as changed when its bytes on disk, hashed as
+        they are, differ from the base blob (`_tracked_changes`), so a clean
+        filter, attributes, `core.autocrlf` or `core.fileMode` cannot hide an
+        edit;
+      * untracked files are listed with no exclude source at all, and then
+        filtered by the `.gitignore` files of `base` alone, so
+        `.git/info/exclude`, `core.excludesFile` and a `.gitignore` the
+        candidate wrote cannot hide a file.
+
+    A move is a deleted path and an untracked one, and both are listed, which
+    is what `--no-renames` did for the diff this replaced. The cost is that
+    local excludes (`.git/info/exclude`) no longer hide editor and OS droppings:
+    an honest run leaves the tree clean, or its allow set covers them.
+    """
+    tree = Path(tree)
+    env = _read_env()
+    with tempfile.TemporaryDirectory(prefix="evolution-index-") as scratch:
+        env["GIT_INDEX_FILE"] = str(Path(scratch) / "index")
+        ok, out = _git_z(tree, ["read-tree", "--end-of-options",
+                                base + "^{tree}"], env, timeout)
+        if not ok:
+            return False, out
+        ok, tracked = _tracked_changes(tree, env, timeout)
+        if not ok:
+            return False, tracked
+        ok, untracked = _git_z(tree, ["ls-files", "-z", "--others"], env,
+                               timeout)
+        if not ok:
+            return False, untracked
+        env_rules = dict(env)
+        env_rules.pop("GIT_INDEX_FILE", None)
+        ok, rules = _base_ignore_rules(tree, base, env_rules, timeout)
+        if not ok:
+            return False, rules
+        ok, visible = _filter_ignored(untracked, rules, env_rules, timeout)
+        if not ok:
+            return False, visible
+    return True, sorted(set(tracked) | set(visible))
+
+
+def resolve_commit(tree, ref: str):
+    """The full commit id `ref` names in `tree`, or `None`."""
+    ok, out = run_git(_Probe(Path(tree)), ["rev-parse", "--verify", "--quiet",
+                                           "--end-of-options", ref + "^{commit}"])
+    return out.strip() if ok and out.strip() else None
+
+
+@dataclass(frozen=True)
+class _Probe:
+    """The one attribute `run_git` reads, for callers that hold a bare tree."""
+
+    tree: Path
+
+
+_COMMIT_ID = re.compile(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?\Z")
+
+
+def check_base(tree, record_base: str, pin: str, source: str = ""):
+    """`(code, reason, commit)`: the record's `base` against the operator's.
+
+    `code` is `""` when they agree, `NO_BASE` when no usable operator base was
+    supplied, and `BASE_MOVED` when the record names a different commit. Either
+    refusal is by name, and either is reached before the diff is read: a diff
+    against a base the candidate picked proves nothing about the grant.
+
+    `commit` is the operator's commit when it resolved (it is what the
+    scorecard and the verdict record), else `None`.
+    """
+    if not pin:
+        return ("NO_BASE",
+                f"no operator base was supplied (--base or {BASE_ENV}), so "
+                "nothing fixes what the change set is measured against. The "
+                "record's own `base` is the candidate's choice, and a "
+                "candidate that commits its edits and names that commit as "
+                "its base is measured as having changed nothing", None)
+    if not _COMMIT_ID.match(pin):
+        return ("NO_BASE",
+                f"the operator base `{pin}` is not a full commit id. A ref "
+                "name lives in state the candidate can rewrite; give "
+                "`git rev-parse <ref>` of a commit the operator trusts", None)
+    commit = resolve_commit(tree, pin)
+    if commit is None or commit != pin.lower():
+        return ("NO_BASE",
+                f"the operator base `{pin}` does not name a commit in the "
+                "candidate tree, so there is nothing to compare against", None)
+    claimed = resolve_commit(tree, record_base)
+    if claimed == commit:
+        return "", "", commit
+    detail = ""
+    if claimed is not None:
+        ok, paths = _git_z(Path(tree), ["diff", "--no-renames", "--name-only",
+                                        "-z", commit, claimed],
+                           _read_env(), 120)
+        if ok and paths:
+            detail = (f"; the {len(paths)} path(s) between the two are hidden "
+                      "from the measurement: " + ", ".join(paths[:6]))
+    return ("BASE_MOVED",
+            f"the record's base `{record_base}` is "
+            + (f"commit {claimed}" if claimed else "not a commit in the tree")
+            + f", not the operator base {commit}" + (f" ({source})" if source else "")
+            + ". A record cannot move the base off the one the operator "
+            "fixed" + detail, commit)
 
 
 def _sha256(path: Path) -> str:
@@ -615,36 +1045,172 @@ def probe_documentation(candidate: Candidate) -> Verdict:
 
 
 def probe_scope(candidate: Candidate) -> Verdict:
-    """The changed-file set against the declared scope.
+    """The measured change set against the declared scope AND the operator grant.
 
-    Fail-closed in three directions. An empty scope declaration cannot be
-    satisfied, because a candidate that declares nothing has not constrained
-    itself. An empty change set cannot be satisfied either: there is no work to
-    retain. And a path matching no declared glob fails, listing the paths, so the
-    verdict is readable without re-running git.
+    The declared scope is the candidate's claim about its own work; the operator
+    allow set (`--allow` / `ALLOW_ENV`) is the grant that claim is checked
+    against. A probe that read only the claim would let a candidate declare
+    `**` and bound nothing, which is issue #2803. Fail-closed in six
+    directions:
+
+      * no operator allow set: nothing is named as editable, and default deny
+        is not a pass;
+      * no declared scope: a candidate that declares nothing has not
+        constrained itself;
+      * a declared scope that NAMES a fenced evaluator path: a candidate that
+        declares it may edit its own judge is refused before the diff is read;
+      * no change at all: there is no work to retain;
+      * a measured path outside the operator grant or the declared scope:
+        refused and listed, so the verdict is readable without re-running git;
+      * a measured path that CHANGES a fenced evaluator: refused even when the
+        declaration and the grant both admit the directory, because the grant
+        names the subject and the fence is the judge.
+
+    A declared whole-tree scope is refused by name too: the check tests whether
+    the scope admits a fixed set of probe paths, so `***` and `**/**` are
+    refused with the literal `**`. That is a test of those paths and not an
+    exact one: a scope such as `??*/**` plus `*` admits the real tree without
+    admitting every sentinel and is not refused as whole-tree. The operator
+    grant is the bound that holds in that case. It is checked after the measured
+    grant so that when a whole-tree candidate's diff ALSO leaves the grant, the
+    verdict names the path rather than only the pattern: the declaration fails
+    either way, and the path is the actionable reason.
+
+    The diff is the MEASURED one. A declared change set is never consulted, for
+    the same reason the controller refuses one: it is the candidate's account
+    of itself.
     """
     name = "scope"
+    fence = _evaluator_fence()
+    if not candidate.allow:
+        return failed(
+            name,
+            f"no operator allow set was supplied (--allow or {ALLOW_ENV}), so "
+            "nothing names what this candidate may edit. Default deny is not a "
+            "pass: the editable set belongs to whoever starts the run")
     if not candidate.scope:
         return failed(name, "the candidate declared no scope, so nothing bounds it")
+    fenced = _declared_fence(candidate.scope)
+    if fenced:
+        return failed(
+            name,
+            "the declared scope names fenced evaluator path(s): "
+            + ", ".join(fenced)
+            + ". A candidate that declares it may edit its own judge is "
+            "refused before the diff is read",
+            ["fence=" + ";".join(fence)])
     refusal = base_refusal(candidate)
     if refusal:
         return failed(name, refusal)
+    code, why, base_commit = check_base(
+        candidate.tree, candidate.base, candidate.base_pin,
+        candidate.base_source)
+    if code:
+        return failed(name, f"{code}: {why}",
+                      ["base_source=" + (candidate.base_source or "none")])
     ok, paths = changed_files(candidate)
     if not ok:
         return failed(name, f"the changed-file set could not be read: {paths}")
     if not paths:
         return failed(name, f"no file changed against {candidate.base}")
+    outside_allow = [p for p in paths if not _in_scope(p, candidate.allow)]
+    if outside_allow:
+        return failed(
+            name,
+            f"{len(outside_allow)} changed path(s) outside the operator allow "
+            f"set ({';'.join(candidate.allow)}): "
+            + ", ".join(outside_allow[:6]),
+            [f"git diff --no-renames --name-only {candidate.base}",
+             "allow=" + ";".join(candidate.allow)])
+    measured_fence = [p for p in paths
+                      if any(_under(p, prefix) for prefix in fence)]
+    if measured_fence:
+        return failed(
+            name,
+            f"{len(measured_fence)} measured change(s) reach fenced evaluator "
+            "path(s): " + ", ".join(measured_fence[:6])
+            + ". The operator grant names the subject; the fence is the judge, "
+            "and a change to it is refused even when a directory glob in the "
+            "grant covers it",
+            [f"git diff --no-renames --name-only {candidate.base}",
+             "fence=" + ";".join(fence)])
+    if _whole_tree(candidate.scope):
+        return failed(
+            name,
+            "the declared scope ("
+            + ";".join(candidate.scope)
+            + ") admits every path this check probes for, so it is a whole-tree "
+            "declaration and bounds nothing. Spelling it `**`, `***` or "
+            "`**/**` does not change that. The operator allow set is the bound "
+            "now, and a declaration that does not narrow it is refused by name",
+            [f"git diff --no-renames --name-only {candidate.base}",
+             "scope=" + ";".join(candidate.scope)])
     stray = [p for p in paths if not _in_scope(p, candidate.scope)]
     if stray:
         return failed(
             name,
             f"{len(stray)} changed path(s) outside the declared scope: "
             + ", ".join(stray[:6]),
-            [f"git diff --name-only {candidate.base}"])
+            [f"git diff --no-renames --name-only {candidate.base}"])
     return verified(
         name,
-        f"{len(paths)} changed path(s), all inside the declared scope",
-        [f"git diff --name-only {candidate.base}", "scope=" + ";".join(candidate.scope)])
+        f"{len(paths)} changed path(s), all inside the declared scope and the "
+        "operator allow set",
+        [f"git diff --no-renames --name-only {candidate.base}",
+         f"base={base_commit} ({candidate.base_source})",
+         "scope=" + ";".join(candidate.scope),
+         "allow=" + ";".join(candidate.allow)])
+
+
+def _norm_pattern(pattern) -> str:
+    """One glob in the shape `_in_scope` and the declaration checks compare."""
+    norm = str(pattern).strip().replace("\\", "/").strip("/")
+    while norm.startswith("./"):
+        norm = norm[2:]
+    return norm
+
+
+def _under(path: str, prefix: str) -> bool:
+    """Segment-wise prefix match, so `formal` does not match `formalise.py`.
+
+    The same match `kernel_boundary` and the controller use for the evaluator
+    enumeration: an entry like `crates/revl-gate` covers the whole tree beneath
+    it, not only the directory itself.
+    """
+    return path == prefix or path.startswith(prefix.rstrip("/") + "/")
+
+
+def _declared_fence(scope):
+    """The fenced evaluator paths a declared scope NAMES, in order.
+
+    Exact entries only: `tools/**` names the subject directory and is the
+    operator's to grant or withhold through the allow set, while
+    `tools/evolution_reward.py` names the judge itself.
+    """
+    fence = set(_evaluator_fence())
+    return sorted({_norm_pattern(p) for p in scope} & fence)
+
+
+#: Paths a declared scope must admit if it is to be refused as covering the
+#: whole tree. They are all NESTED on purpose: `**/**` admits every nested path
+#: without admitting a top-level file, and the literal `**`, `***` and `**/**`
+#: all tie on this set, which is the property the refusal is about. A
+#: top-level-only wildcard such as `*` still bounds the nested tree and is not
+#: this rule's target.
+WHOLE_TREE_SENTINELS = ("a/b", "a/b/c", ".github/x", "x/y/z")
+
+
+def _whole_tree(scope) -> bool:
+    """Whether a declared scope admits every path this check probes for.
+
+    Comparing the string `**` misses other spellings that cover the same paths:
+    `***` compiles to a pattern that matches everything, and `**/**` covers
+    every nested path. Test the property rather than the spelling. The property
+    is tested on `WHOLE_TREE_SENTINELS` only, so this is not an exact decision
+    that a scope covers the tree: a scope built to miss a sentinel (`??*/**`
+    plus `*`) passes it. The operator allow set bounds that case.
+    """
+    return all(_in_scope(path, scope) for path in WHOLE_TREE_SENTINELS)
 
 
 def _glob_to_regex(pattern: str):
@@ -1533,7 +2099,9 @@ def probe_reach(candidate: Candidate) -> Verdict:
             name,
             f"{len(diff)} conformance case(s) audited at {candidate.base} and "
             f"at head, {crossings} crossing(s) unchanged, none added, no reach "
-            "bound loosened and no capability scope widened"
+            "bound loosened, no capability scope widened, no backend body "
+            "added, no recovery dropped or weakened and no register floor "
+            "weakened"
             + _unmeasured_note(unmeasured),
             ["tools/promotion_evidence.py measure --kind audit"])
 
@@ -1799,7 +2367,15 @@ class Scorecard:
             "components": [v.as_dict() for v in self.verdicts],
             "prose_ignored": list(self.candidate.prose_ignored),
             "base": self.candidate.base,
+            # Issue #3359. The commit the measured set was taken against and
+            # where the operator gave it, so a reader can tell a run whose
+            # base the operator fixed from one that took the record's word.
+            "base_commit": resolve_commit(self.candidate.tree,
+                                          self.candidate.base),
+            "base_pin": self.candidate.base_pin or None,
+            "base_source": self.candidate.base_source or None,
             "scope": list(self.candidate.scope),
+            "allow": list(self.candidate.allow),
             # Issue #2802. The scorer's own protocol identity, taken from THIS
             # checkout and not the candidate's: a scorecard from two rounds that
             # carry the same digest names the same scorer, component list and
@@ -1820,6 +2396,12 @@ class Scorecard:
     def render(self) -> str:
         lines = [f"evolution reward over {self.candidate.tree}",
                  f"base {self.candidate.base}",
+                 "operator base " + (
+                     f"{self.candidate.base_pin} ({self.candidate.base_source})"
+                     if self.candidate.base_pin
+                     else "(none: the record's base is not trusted)"),
+                 "allow " + (";".join(self.candidate.allow)
+                             if self.candidate.allow else "(none: default deny)"),
                  f"protocol {self._protocol_identity() or 'unavailable'}", ""]
         for v in self.verdicts:
             mark = "ok  " if v.verified else "FAIL"
@@ -1877,7 +2459,19 @@ def main(argv=None) -> int:
     ap.add_argument("--candidate", type=Path, required=True,
                     help="JSON record with tree/base/scope; every other key is ignored")
     ap.add_argument("--json", type=Path, help="write the scorecard here")
+    ap.add_argument("--allow", action="append", metavar="GLOB", default=None,
+                    help="a path glob the operator allows the candidate to "
+                         "edit; repeatable or comma-separated, and falls back "
+                         f"to {ALLOW_ENV}. No allow set fails `scope`")
+    ap.add_argument("--base", metavar="COMMIT", default=None,
+                    help="the full commit id the change set is measured "
+                         f"against; falls back to {BASE_ENV}. The record's "
+                         "own `base` must name the same commit, and no "
+                         "operator base fails `scope`")
     args = ap.parse_args(argv)
+    allow = (parse_allow(args.allow) if args.allow is not None
+             else allow_from_env())
+    base_pin, base_source = base_from_args(args.base)
 
     try:
         record = json.loads(args.candidate.read_text(encoding="utf-8"))
@@ -1885,7 +2479,8 @@ def main(argv=None) -> int:
         print(f"evolution_reward: cannot read {args.candidate}: {exc}", file=sys.stderr)
         return 1
     try:
-        candidate = load_candidate(record)
+        candidate = load_candidate(record, allow=allow, base_pin=base_pin,
+                                   base_source=base_source)
     except ValueError as exc:
         print(f"evolution_reward: {exc}", file=sys.stderr)
         return 1

@@ -1,0 +1,11 @@
+// G1 access coverage (issue #2744): an activation `emit` AFTER a `provide`
+// block. The checker accepts this order, and its lowering loop opens the
+// provide scope before it visits the activation statement, so the harness
+// must compare the walk in `Body.scopes` order (activation first), or this
+// correct walk prints `fail` on both scopes.
+service Res { emission fn ping(msg: Str) -> Int }
+service Ops { fn run(x: Int) -> Int }
+component Mgr requires res: Res provides ops: Ops {
+  provide ops { fn run(x) { return x } }
+  emit res.ping("hi") compensate res.ping("bye")
+}

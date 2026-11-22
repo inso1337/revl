@@ -15,22 +15,28 @@ running composition) — only the *reach* changes: in-process extern → bridge
 provider.
 
 `admit` is a *pure* function of (candidate sources, running manifest): with the
-sources supplied in memory it reads no disk and writes none, so the extern that
-wraps it is `pure`, and the `Gate.admit` operation stays `async fn` with
-value-typed (`Str`) parameters — i.e. **transport-safe** by the
+sources supplied in memory it opens no caller-chosen file and writes none, so
+the extern that wraps it is `pure`, and the `Gate.admit` operation stays
+`async fn` with value-typed (`Str`) parameters — i.e. **transport-safe** by the
 docs/interop-bridge.md §4 verdict, which is exactly what lets it cross a
 process seam. A gate marked `emission` (as truc's in-process one is) would be
-address-space-bound and could not be a bridge service; that the compile is
-genuinely effect-free is what makes Path A possible.
+address-space-bound and could not be a bridge service; that the compile
+reaches no caller-chosen effect is what makes Path A possible.
 
 The candidate arrives from another tier, so it is admitted under the
 untrusted-author profile (`AdmissionProfile.untrusted_author`), the same profile
-`Session.admit` applies to source that crosses the in-process admission door:
-its `use` imports resolve out of the supplied in-memory `sources` (and the
-installed search path), never the admitting process's filesystem. That is what
-keeps the "reads no disk" claim above true of a `use` the candidate wrote — a
-`use "<path>"` followed to disk would make the compile a filesystem read, and
-the diagnostic returned to the consumer a report of what is on the host.
+`Session.admit` applies to source that crosses the in-process admission door.
+Its `use` imports resolve out of the supplied in-memory `sources` and the
+operator's installed search path, never from a path relative to a caller-named
+source key. The source keys are paths the CALLER wrote, so the directory a key
+names is the caller's, not the operator's admitting directory: it is not an
+import root. The compile is told so (`disk_relative_use=False`), which keeps a
+`use` off any path beside a caller-named key; an installed search-path module
+is still read, as the operator's own input. A `use "<path>"` followed to disk
+would make the compile read a file the candidate chose, and the diagnostic
+returned to the consumer a report of what is on the host (issue #3152: a
+plain relative sibling used to be read from beside the caller-named key, and
+the refusal quoted its first token).
 
 The JSON contract (values only, so it crosses the wire by copy):
 
@@ -67,7 +73,8 @@ def admit(sources_json: str, manifest_json: str) -> str:
     paths = list(sources.keys())
     try:
         ir = compile_files(paths, manifest=running, sources=sources,
-                           profile=AdmissionProfile.untrusted_author(()))
+                           profile=AdmissionProfile.untrusted_author(()),
+                           disk_relative_use=False)
     except RevlError as error:
         return json.dumps({
             "ok": False,
@@ -120,7 +127,8 @@ def admit_structured(sources_json: str, manifest_json: str) -> str:
     paths = list(sources.keys())
     try:
         ir = compile_files(paths, manifest=running, sources=sources,
-                           profile=AdmissionProfile.untrusted_author(()))
+                           profile=AdmissionProfile.untrusted_author(()),
+                           disk_relative_use=False)
     except RevlError as error:
         record = diagnostics.classify(error)
         code = record.get("code")
@@ -186,7 +194,9 @@ def admit_case(case_name: str) -> str:
     The verdict JSON is identical in shape to `admit`'s."""
     from revl.compiler import compile_files  # noqa: PLC0415
 
-    running_ir = compile_files(list(_RUNNING_SOURCES), sources=_RUNNING_SOURCES)
+    running_ir = compile_files(list(_RUNNING_SOURCES),
+                               sources=_RUNNING_SOURCES,
+                               disk_relative_use=False)
     running = json.dumps({
         "manifest": running_ir.get("manifest") or {},
         "services": running_ir.get("services") or {},

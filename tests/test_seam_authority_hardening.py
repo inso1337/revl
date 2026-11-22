@@ -100,7 +100,8 @@ service GenSvc { async fn getg() -> ConnG[Socket] }
 service ValSvc { async fn getp() -> ValRec }
 service Ctl { async fn go() -> Str }
 component C provides t: TopSvc {
-  provide t { async fn top() = open_sock() }
+  let sock = effect open_sock() undo close_sock(0)
+  provide t { async fn top() = sock }
 }
 """
 
