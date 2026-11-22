@@ -871,6 +871,9 @@ _G2403 = "fn g(b: Box[Int]) -> Int { return b.v }\n"
 
 
 ACCEPTED_PROGRAMS = [
+    # issue #3485: `emission[fs.ingest]` names the one crossing `emit fs.ingest`
+    ("issue 3485: key dot verb narrows the emission scope",
+     (ROOT / "examples" / "g4_required_verb_token.rvl").read_text(encoding="utf-8")),
     # Issue #2834: a local that shadows an emission extern's name is the local,
     # not the extern, in both compilers.
     # Each method shadows an emission name its own way; the program is admitted
@@ -2236,6 +2239,23 @@ boot component B2 provides e2: Env2 {
      _fixture("t14_optional_chain_on_nonoptional"), "T1"),
     ("g4 emission not declared", _fixture("g4_emission_not_declared"), "G4"),
     ("g4 capability not declared", _fixture("g4_capability_not_declared"), "G4"),
+    # issue #3485: a crossing `emit fs.ingest(...)` is covered by `fs` or by
+    # `fs.ingest`, never by the token `Store.ingest` itself declares
+    ("g4 dotted capability key", _fixture("g4_dotted_capability_key"), "G4"),
+    ("g4 key dot verb covers only the verb it names", """
+service Store { emission[fs.write] fn ingest(row: Str) -> Int
+                emission[fs.write] fn purge() -> Int }
+service Task { emission[fs.ingest] fn go() -> Int }
+component Worker requires fs: Store provides task: Task {
+  provide task {
+    fn go() {
+      emit fs.ingest("row")
+      emit fs.purge()
+      return 0
+    }
+  }
+}
+""", "G4"),
     ("g4 unmarked emission", _fixture("g4_unmarked_emission"), "G4"),
     ("a1 async extern in sync method",
      _fixture("a1_async_extern_sync_method"), "A1"),

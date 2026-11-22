@@ -7252,6 +7252,36 @@ fn field_check(target: Expr, marked: Bool, cx: Ctx, a: Ac) -> Ac {
 
 // ================================================================ verdicts
 
+// issue #3485: a crossing `emit k.m(...)` through required key `k` is covered
+// by `k` or by `k.m`, the key followed by the verb it calls, and by nothing
+// else. A key is covered one verb at a time when every one of its crossing
+// labels (`k.m`) is declared; `*` and a key with no crossing label stay.
+// Mirrors emission_analysis.py's `_admit_required_scopes`.
+fn verb_covered(cap: Str, labels: List[Str], caps: List[Str]) -> Bool {
+  if (cap == "*") { return false }
+  let pre = cap.concat(".")
+  var seen = false
+  var i = 0
+  while (i < labels.length()) {
+    if (starts_with(labels[i], pre)) {
+      if (!contains(caps, labels[i])) { return false }
+      seen = true
+    }
+    i += 1
+  }
+  return seen
+}
+
+fn drop_verb_covered(extra: List[Str], labels: List[Str], caps: List[Str]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < extra.length()) {
+    if (!verb_covered(extra[i], labels, caps)) { out = out.push(extra[i]) }
+    i += 1
+  }
+  return out
+}
+
 // The G4 upper-bound verdict for one provision method (lower.py's provider
 // check). "" = admitted.
 fn g4_verdict(svcName: Str, mname: Str, decl: MSig, a: Ac) -> Str {
@@ -7261,7 +7291,8 @@ fn g4_verdict(svcName: Str, mname: Str, decl: MSig, a: Ac) -> Str {
       .concat(quote_join(a.labels))
   }
   if (decl.isEm && decl.caps.length() > 0) {
-    let extra = sort_strs(minus_list(a.ecaps, decl.caps))
+    let extra = sort_strs(drop_verb_covered(minus_list(a.ecaps, decl.caps),
+                                            a.labels, decl.caps))
     if (extra.length() > 0) {
       var msg = "`".concat(svcName).concat(".").concat(mname)
         .concat("` is declared `emission[").concat(comma_join(decl.caps))

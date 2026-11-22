@@ -396,30 +396,23 @@ def _capability_hint(service: str, method: str, declared, extra: list[str],
 
 
 def _admit_required_scopes(extra: list[str], declared, scopes: dict) -> list[str]:
-    """The capabilities an `emission[...]` declaration still fails to cover,
-    once a crossing through a required key may be named by the scoped tokens
-    its verbs declare (issue #3485).
+    """The capabilities an `emission[...]` / `witnessed[...]` declaration
+    still fails to cover, once a crossing through a required key may be named
+    one verb at a time (issue #3485).
 
     `extra` is `used - declared`, where a required key appears as the key. A
-    key whose every reached verb is scoped (`scopes[key]` a set) is covered
-    when all of those tokens are declared: `emission[wire.take]` covers
-    `emit wire.take(...)` because `Wire.take` declares `emission[wire.take]`.
-    It never widens: a reached token the method did not declare leaves the
-    key uncovered, and when the declaration names some of the key's tokens
-    the missing ones are reported in its place, so the refusal names the
-    verb's token rather than the binding. An unscoped crossing stays the key."""
+    crossing `emit k.m(...)` is covered by `k` or by `k.m` (the key followed by
+    the verb it calls), and by nothing else: not by the token the verb itself
+    declares, which names a boundary of some other component
+    (docs/capabilities.md, "What is not transitive"). So a key whose every
+    crossing is a plain verb call (`scopes[key]` a set of `k.m` names) is
+    covered when all of those names are declared, and otherwise stays
+    uncovered and is reported as the key, exactly as before. A key with any
+    crossing the walk could not name this way (an alias carry, an unknown
+    verb; `scopes[key]` is None) stays the key."""
     declared = set(declared)
-    out: set = set()
-    for cap in extra:
-        tokens = scopes.get(cap)
-        if not tokens:
-            out.add(cap)
-            continue
-        missing = set(tokens) - declared
-        if not missing:
-            continue
-        out.update(missing if set(tokens) & declared else {cap})
-    return sorted(out)
+    return sorted(cap for cap in extra
+                  if not scopes.get(cap) or set(scopes[cap]) - declared)
 
 
 def _witnessed_hint(service: str, method: str) -> str:
@@ -556,10 +549,10 @@ def _method_emissions(body: list, env: "Env",
     reversible.
 
     `scopes_out` (optional, filled in place, issue #3485) maps each require
-    key the walk crossed to the union of the scoped tokens its reached verbs
-    declare (`wire` -> {`wire.take`}), or to None when any crossing through
-    that key is not scoped (a bare `emission` verb, an unknown verb, an alias
-    carry, a token not qualified by the key). `_admit_required_scopes` reads it; the returned pair is unchanged."""
+    key the walk crossed to the set of `key.verb` names of its crossings
+    (`wire` -> {`wire.take`, `wire.say`}), or to None when any crossing
+    through that key cannot be named that way (an alias carry, an unknown
+    verb). `_admit_required_scopes` reads it; the returned pair is unchanged."""
     found: list[str] = []
     seen: set = set()
     caps: set = set()
@@ -646,23 +639,22 @@ def _method_emissions(body: list, env: "Env",
         return result
 
     def record_scope(local: str | None, method: str | None) -> None:
-        """Note the tokens `local.method` declares for `scopes_out`. Only a
-        token qualified by the key itself (`wire.take` under `wire`) is a
-        name for this crossing: an unqualified one (`emission[db] fn put` on
-        a service bound as `cache`) names the provider's own downstream
-        boundary, which stays the provider's (test_capabilities.py's
-        local-key rule), so the crossing keeps the key."""
+        """Note the crossing `local.method` for `scopes_out`: the key
+        followed by the verb it calls is the one name narrower than the key
+        that may stand for it (`wire.take` under `wire`). What the verb
+        itself declares (`emission[db] fn put` on a service bound as `cache`)
+        names the provider's own downstream boundary and is not recorded
+        (test_capabilities.py's local-key rule). A carried alias or a verb
+        the required service does not declare leaves the key unnameable."""
         if scopes_out is None or local is None:
             return
         carry_map = getattr(env, "require_carry", None) or {}
         service = env.services.get(env.requires.get(local) or "")
         decl = service.methods.get(method) if service is not None else None
-        tokens = getattr(decl, "capabilities", None) if decl is not None else None
-        if (carry_map.get(local) or not tokens
-                or not all(t.startswith(f"{local}.") for t in tokens)):
+        if carry_map.get(local) or decl is None:
             scopes_out[local] = None
         elif scopes_out.get(local, set()) is not None:
-            scopes_out.setdefault(local, set()).update(tokens)
+            scopes_out.setdefault(local, set()).add(f"{local}.{method}")
 
     # issues #1682 and #1508: a crossing through a resolved receiver (a spawn
     # handle, an alias, a service-typed local or parameter), recorded by the

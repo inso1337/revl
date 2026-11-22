@@ -14609,12 +14609,43 @@ fn field_check(target: Expr, marked: bool, cx: Ctx__m2, a: Ac) -> Ac {
 };
 }
 
+fn verb_covered(cap: &str, labels: &[String], caps: &[String]) -> bool {
+    if (cap == "*") {
+        return false;
+    }
+    let pre = cap.revl_concat(".");
+    let mut seen = false;
+    let mut i = 0i64;
+    while (i < labels.revl_length()) {
+        if starts_with__m2(&(labels)[(i) as usize], &pre) {
+            if (!contains__m2(caps, &(labels)[(i) as usize])) {
+                return false;
+            }
+            seen = true;
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return seen;
+}
+
+fn drop_verb_covered(extra: &[String], labels: &[String], caps: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let mut i = 0i64;
+    while (i < extra.revl_length()) {
+        if (!verb_covered(&(extra)[(i) as usize], labels, caps)) {
+            out.push((extra)[(i) as usize].clone());
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
 fn g4_verdict(svcName: &str, mname: &str, decl: MSig, a: Ac) -> String {
     if (((!decl.isEm) && (decl.caps.revl_length() == 0i64)) && (a.labels.revl_length() > 0i64)) {
         return ((((String::from("`").revl_concat(&svcName)).revl_concat(".")).revl_concat(&mname)).revl_concat("` is declared plain, but this implementation reaches ")).revl_concat(&quote_join(&a.labels));
     }
     if (decl.isEm && (decl.caps.revl_length() > 0i64)) {
-        let extra = sort_strs(&minus_list(&a.ecaps, &decl.caps));
+        let extra = sort_strs(&drop_verb_covered(&minus_list(&a.ecaps, &decl.caps), &a.labels, &decl.caps));
         if (extra.revl_length() > 0i64) {
             let mut msg = (((((String::from("`").revl_concat(&svcName)).revl_concat(".")).revl_concat(&mname)).revl_concat("` is declared `emission[")).revl_concat(&comma_join(&decl.caps))).revl_concat("]`, but this implementation emits through ");
             let mut i = 0i64;
