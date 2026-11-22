@@ -66,6 +66,10 @@ IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 #: a slot always holds the same 8 bytes whichever way it is read.
 _SLOT = 8
 
+# The List element types `indexOf` can compare on this tier: a Str by its bytes,
+# an Int/Int32/Bool by the i64 pattern its slot holds.
+_INDEX_OF_ELEMS = ("Str", "Int", "Int32", "Bool")
+
 # The placeholder a confidential witness is framed as instead of the value, when
 # the author declared the witness position `Secret[T]`. Must equal
 # `revl.taint.REDACTED_SECRET` / `confidential.REDACTED`: it is part of the WAL's
@@ -74,14 +78,19 @@ _SLOT = 8
 # addressing the wrong referent and reporting the miss as a clean rollback.
 _REDACTED_SECRET = "<redacted:secret>"
 
-# The total, value-returning division forms (docs/arithmetic.md): same
-# rounding as the faulting operations, Err(reason) at a zero divisor.
+# The total, value-returning forms (docs/arithmetic.md): same value as the
+# faulting operations where it fits, Err(reason) instead of the fault
+# otherwise. `checked_add/sub/mul` answer the overflow; the division forms
+# answer a zero divisor too (and the one overflowing quotient).
+_CHECKED_ARITH = ("checked_add", "checked_sub", "checked_mul")
 _CHECKED_DIVS = ("checked_div_trunc", "checked_div_floor",
                  "checked_div_euclid", "checked_mod")
+_CHECKED_FORMS = _CHECKED_ARITH + _CHECKED_DIVS
 _DIV_ZERO_MSG = "revl: division by zero"
-#: The reason a `checked_*` quotient does not fit (`Int.MIN / -1` is 2^63, one
-#: past Int.MAX). Spelled exactly as the other five tiers spell it: the total
-#: forms answer it as a VALUE, where the faulting operations trap.
+#: The reason an `Int` result does not fit (an overflowing `+`/`-`/`*`, or
+#: `Int.MIN / -1` = 2^63, one past Int.MAX). Spelled exactly as the other
+#: five tiers spell it: the total forms answer it as a VALUE, where the
+#: faulting operations trap.
 _INT_OVERFLOW_MSG = "revl: Int overflow"
 
 
@@ -1328,6 +1337,7 @@ class _ComponentEmitter:
         self.v3._reset_tmp_pool()
         self.v3._arrows = {}
         self.v3._arrow_counter = 0
+        self.v3._flowed_lists = {}
         self.v3._match_counter = 0
         self.v3._cdiv_counter = 0
         self.v3._loop_counter = 0
@@ -2986,6 +2996,12 @@ class _ComponentEmitter:
             # splits/joins/searches keeps a byte-identical helper preamble.
             if "$str_index_of" in rendered:
                 lines.append(self.v3._helper_str_index_of())
+            # Str ordering and List.indexOf (issue #3145), same demand rule.
+            for token, helper in (("$str_cmp", self.v3._helper_str_cmp),
+                                  ("$list_index_of_str", self.v3._helper_list_index_of_str),
+                                  ("$list_index_of_slot", self.v3._helper_list_index_of_slot)):
+                if token in rendered:
+                    lines.append(helper())
             if "$str_split" in rendered:
                 lines.append(self.v3._helper_str_split())
             if "$str_join" in rendered:
@@ -3288,6 +3304,13 @@ def _refuse_cross_module_compound(key: str, op: str, param_types: list,
             f"a compound value as an address, so the other side would read its "
             f"own memory at that address (issue #1601). Pass scalars, keep the "
             f"compound value inside one component, or use a hosted backend")
+
+
+def _is_untyped_empty_list(node: Any) -> bool:
+    """An itemless list literal no annotation pinned (`let xs = []`)."""
+    return (isinstance(node, dict) and node.get("kind") == "list"
+            and not (node.get("items") or [])
+            and not _is_list_type(node.get("expected")))
 
 
 def _is_unit_type(ty: str | None) -> bool:
@@ -3722,14 +3745,15 @@ class _V3Emitter:
             if isinstance(node, dict):
                 if node.get("kind") == "lit" and isinstance(node.get("value"), str):
                     seen.setdefault(node["value"], None)
-                if node.get("method") in _CHECKED_DIVS:
-                    # the total division forms carry their Err reasons from
-                    # the emitter, not from a literal in the source — pool them
+                if node.get("method") in _CHECKED_FORMS:
+                    # the total forms carry their Err reasons from the
+                    # emitter, not from a literal in the source — pool them
                     # here so `_str_ptr` can name them at lowering time. The
-                    # three quotient forms carry a second one: `Int.MIN / -1`
-                    # has no representable quotient, and they answer that as a
-                    # value rather than trapping the way `/` does.
-                    seen.setdefault(_DIV_ZERO_MSG, None)
+                    # division forms carry a second one for `Int.MIN / -1`,
+                    # which has no representable quotient; the arithmetic
+                    # forms carry only the overflow reason.
+                    if node.get("method") in _CHECKED_DIVS:
+                        seen.setdefault(_DIV_ZERO_MSG, None)
                     if node.get("method") != "checked_mod":
                         seen.setdefault(_INT_OVERFLOW_MSG, None)
                 if node.get("kind") == "interp":
@@ -4794,6 +4818,80 @@ class _V3Emitter:
     # (py/ts): index/count in *code points*, JS-shape split (trailing empties
     # kept, `""` → per-code-point pieces), and `List[Str].join(sep)`.
 
+    def _helper_str_cmp(self) -> str:
+        # Str ordering: -1/0/1 over the two byte strings. UTF-8 is built so that
+        # comparing bytes as unsigned values orders strings by code point, which
+        # is the order every other tier gives (docs/stdlib-2.0.md, #458 Str
+        # ordering); a shorter string that is a prefix of the other sorts first.
+        return """  (func $str_cmp (param $a i32) (param $b i32) (result i32)
+    (local $na i32) (local $nb i32) (local $n i32) (local $i i32)
+    (local $ca i32) (local $cb i32)
+    (local.set $na (i32.load (local.get $a)))
+    (local.set $nb (i32.load (local.get $b)))
+    (local.set $n
+      (select (local.get $na) (local.get $nb) (i32.lt_u (local.get $na) (local.get $nb))))
+    (local.set $i (i32.const 0))
+    (block $done
+      (loop $loop
+        (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+        (local.set $ca
+          (i32.load8_u (i32.add (i32.add (local.get $a) (i32.const 4)) (local.get $i))))
+        (local.set $cb
+          (i32.load8_u (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $i))))
+        (if (i32.ne (local.get $ca) (local.get $cb))
+          (then
+            (return
+              (select (i32.const -1) (i32.const 1)
+                      (i32.lt_u (local.get $ca) (local.get $cb))))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $loop)))
+    (if (i32.lt_u (local.get $na) (local.get $nb)) (then (return (i32.const -1))))
+    (if (i32.gt_u (local.get $na) (local.get $nb)) (then (return (i32.const 1))))
+    (i32.const 0))"""
+
+    def _helper_list_index_of_str(self) -> str:
+        # List[Str].indexOf(needle): the index of the first slot whose Str equals
+        # the needle (`$str_eq`, byte equality), else -1. The i32 result is
+        # sign-extended at the call site so -1 crosses to the tier's Int as -1.
+        return """  (func $list_index_of_str (param $l i32) (param $x i32) (result i32)
+    (local $n i32) (local $i i32)
+    (local.set $n (i32.load (local.get $l)))
+    (local.set $i (i32.const 0))
+    (block $done
+      (loop $loop
+        (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+        (if (call $str_eq
+              (i32.wrap_i64
+                (i64.load
+                  (i32.add (local.get $l)
+                    (i32.add (i32.const 8) (i32.mul (local.get $i) (i32.const 8))))))
+              (local.get $x))
+          (then (return (local.get $i))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $loop)))
+    (i32.const -1))"""
+
+    def _helper_list_index_of_slot(self) -> str:
+        # List[Int|Int32|Bool].indexOf(needle): the slot holds the value's i64
+        # pattern (Int as is, Int32/Bool zero-extended), so equality of the
+        # element is equality of the slot and the needle in the same encoding.
+        return """  (func $list_index_of_slot (param $l i32) (param $x i64) (result i32)
+    (local $n i32) (local $i i32)
+    (local.set $n (i32.load (local.get $l)))
+    (local.set $i (i32.const 0))
+    (block $done
+      (loop $loop
+        (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+        (if (i64.eq
+              (i64.load
+                (i32.add (local.get $l)
+                  (i32.add (i32.const 8) (i32.mul (local.get $i) (i32.const 8)))))
+              (local.get $x))
+          (then (return (local.get $i))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $loop)))
+    (i32.const -1))"""
+
     def _helper_str_index_of(self) -> str:
         # Str.indexOf(needle): a byte substring scan; on a hit, the byte offset
         # is converted to the *code-point* index (the reference tiers return a
@@ -5212,9 +5310,13 @@ class _V3Emitter:
             # named refusal.
             if target_ty in ("Str", "Bytes"):
                 return "Int"
+            if _is_list_type(target_ty) and _list_elem(target_ty) in _INDEX_OF_ELEMS:
+                return "Int"
             raise EmitError(
                 "indexOf is not lowerable on this tier yet for List — the "
-                "element comparison has no representation here; use a hosted backend")
+                "element comparison has no representation here for "
+                f"{target_ty!r} (only List[Str]/List[Int]/List[Int32]/"
+                "List[Bool] have one); use a hosted backend")
         if method == "split":
             # Str.split(sep) → List[Str] (docs/stdlib-2.0.md §split).
             if target_ty not in ("Str", "Bytes"):
@@ -5233,9 +5335,15 @@ class _V3Emitter:
 
     def _record_type(self, node: dict, scope: _Scope, expected: str | None) -> str:
         fields: list[tuple[str, str]] = []
+        # Where the literal flows into a record type (a return, a typed local,
+        # a field of an outer record), that type's own field types are the
+        # `expected` of each value, so `{ ok: false, params: [] }` pins its
+        # empty list to the declared `List[Str]` exactly as `_record_expr` does
+        # when it lowers the field.
+        declared = self._record_fields(expected) if expected is not None else None
         for raw_name, raw_value in node.get("fields") or []:
             name = _ident(raw_name, "record field")
-            ftype = self._infer_type(raw_value, scope)
+            ftype = self._infer_type(raw_value, scope, (declared or {}).get(name))
             if ftype is None or ftype == "Unit":
                 raise EmitError(f"record field {name!r} has void type")
             fields.append((name, ftype))
@@ -5258,6 +5366,11 @@ class _V3Emitter:
             pinned = node.get("expected")
             if _is_list_type(pinned):
                 return pinned
+            # An unannotated `let xs = []` typed from how its block uses it
+            # (`_flow_empty_list`), kept off the shared IR node.
+            flowed = self._flowed_lists.get(id(node))
+            if flowed is not None:
+                return flowed
         items = node.get("items") or []
         if not items:
             raise EmitError("an untyped empty list literal needs an expected List type")
@@ -5477,9 +5590,19 @@ class _V3Emitter:
             suffix = {"==": "eq", "===": "eq", "!=": "ne", "!==": "ne",
                       "<": "lt", ">": "gt", "<=": "le", ">=": "ge"}[op]
             return _E(f"{left}\n      {right}\n      (f64.{suffix})", "Bool")
+        if op in ("<", ">", "<=", ">=") and left_ty == "Str" and right_ty == "Str":
+            # Str ordering is code-point order on every tier; byte order over
+            # UTF-8 is the same order, so `$str_cmp` (-1/0/1) is compared to 0.
+            left = self._expr(left_node, scope, where, "Str")
+            right = self._expr(right_node, scope, where, "Str")
+            suffix = {"<": "lt_s", ">": "gt_s", "<=": "le_s", ">=": "ge_s"}[op]
+            return _E(f"{left.wat}\n      {right.wat}\n      (call $str_cmp)\n"
+                      f"      (i32.const 0)\n      (i32.{suffix})", "Bool")
         if op in ("<", ">", "<=", ">=") and not (
                 left_ty == right_ty and left_ty in ("Int", "Int32")):
-            raise EmitError(f"{where}: relational operator {op!r} is only lowerable for Int/Int32")
+            raise EmitError(
+                f"{where}: relational operator {op!r} is only lowerable for "
+                f"Int/Int32/Float/Str")
         if op in ("&&", "||") and (left_ty != "Bool" or right_ty != "Bool"):
             raise EmitError(f"{where}: logical operator {op!r} is only lowerable for Bool")
         if op in ("&&", "||") and not self._trap_free(right_node, scope):
@@ -5657,12 +5780,12 @@ class _V3Emitter:
         target_node = node.get("target")
         target_ty = self._infer_type(target_node, scope)
         args = node.get("args") or []
-        # The total forms (docs/arithmetic.md): same quotient as the faulting
-        # operation, but a zero divisor yields Err(reason) instead of the
-        # `i64.div_s` trap — `fail` is refused in a pure fn, so the error
-        # travels as a value. Both operands are evaluated once into scratch
-        # slots; each branch allocates its own tagged cell.
-        if method in _CHECKED_DIVS:
+        # The total forms (docs/arithmetic.md): same value as the faulting
+        # operation where it fits, Err(reason) instead of the trap otherwise
+        # — `fail` is refused in a pure fn, so the error travels as a value.
+        # Both operands are evaluated once into scratch slots; each branch
+        # allocates its own tagged cell.
+        if method in _CHECKED_FORMS:
             ty = expected if self._tagged_layout(expected) is not None else "Result[Int, Str]"
             if self._tagged_layout(ty) is None:
                 raise EmitError(f"{where}: {ty!r} is not a tagged union")
@@ -5673,10 +5796,60 @@ class _V3Emitter:
             tmp_b = f"cdiv_{node['_cdiv']}_b"
             self._declare_local(tmp_a, "Int", where)
             self._declare_local(tmp_b, "Int", where)
-            dividend = self._expr(target_node, scope, where, "Int")
-            divisor = self._expr(args[0], scope, where, "Int")
+            left = self._expr(target_node, scope, where, "Int")
+            right = self._expr(args[0], scope, where, "Int")
             read_a = f"(local.get ${tmp_a})"
             read_b = f"(local.get ${tmp_b})"
+            if method in _CHECKED_ARITH:
+                # The value is computed first, then the same overflow test the
+                # trapping `$int_add/$int_sub/$int_mul` helpers run decides
+                # between the Ok and Err cells. For multiply the test must not
+                # divide when the left operand is zero (that traps), so the
+                # zero case is branched out before the readback; `Int.MIN * -1`
+                # is named before it for the same reason `$int_mul` names it.
+                tmp_r = f"cdiv_{node['_cdiv']}_r"
+                self._declare_local(tmp_r, "Int", where)
+                read_r = f"(local.get ${tmp_r})"
+                value = {
+                    "checked_add": f"(i64.add {read_a} {read_b})",
+                    "checked_sub": f"(i64.sub {read_a} {read_b})",
+                    "checked_mul": f"(i64.mul {read_a} {read_b})",
+                }[method]
+                ok_cell = self._make_tagged(
+                    ty, "Ok", {"kind": "__wat", "wat": read_r, "ty": "Int"},
+                    scope, where)
+                err_cell = self._make_tagged(
+                    ty, "Err",
+                    {"kind": "lit", "value": _INT_OVERFLOW_MSG},
+                    scope, where)
+                if method == "checked_add":
+                    overflow = (f"(i64.lt_s (i64.and (i64.xor {read_a} {read_r}) "
+                                f"(i64.xor {read_b} {read_r})) (i64.const 0))")
+                elif method == "checked_sub":
+                    overflow = (f"(i64.lt_s (i64.and (i64.xor {read_a} {read_b}) "
+                                f"(i64.xor {read_a} {read_r})) (i64.const 0))")
+                else:
+                    overflow = (f"(if (result i32)\n"
+                                f"          (i32.or (i64.eqz {read_a}) (i64.eqz {read_b}))\n"
+                                f"          (then (i32.const 0))\n"
+                                f"          (else (if (result i32)\n"
+                                f"            (i32.or\n"
+                                f"              (i32.and (i64.eq {read_a} "
+                                f"(i64.const -9223372036854775808)) "
+                                f"(i64.eq {read_b} (i64.const -1)))\n"
+                                f"              (i32.and (i64.eq {read_a} (i64.const -1)) "
+                                f"(i64.eq {read_b} (i64.const -9223372036854775808))))\n"
+                                f"            (then (i32.const 1))\n"
+                                f"            (else (i64.ne (i64.div_s {read_r} {read_b}) "
+                                f"{read_a})))))")
+                wat = (f"{left.wat}\n      (local.set ${tmp_a})\n"
+                       f"      {right.wat}\n      (local.set ${tmp_b})\n"
+                       f"      {value}\n      (local.set ${tmp_r})\n"
+                       f"      (if (result i32)\n"
+                       f"        {overflow}\n"
+                       f"        (then {err_cell.wat})\n"
+                       f"        (else {ok_cell.wat}))")
+                return _E(wat, ty)
             quotient = {
                 "checked_div_trunc": f"(i64.div_s {read_a} {read_b})",
                 "checked_div_floor": f"(call $int_div_floor {read_a} {read_b})",
@@ -5711,8 +5884,8 @@ class _V3Emitter:
                          f"          (i64.eq {read_b} (i64.const -1)))\n"
                          f"        (then {overflow_cell.wat})\n"
                          f"        (else {ok_cell.wat}))")
-            wat = (f"{dividend.wat}\n      (local.set ${tmp_a})\n"
-                   f"      {divisor.wat}\n      (local.set ${tmp_b})\n"
+            wat = (f"{left.wat}\n      (local.set ${tmp_a})\n"
+                   f"      {right.wat}\n      (local.set ${tmp_b})\n"
                    f"      (if (result i32)\n"
                    f"        (i64.eqz {read_b})\n"
                    f"        (then {err_cell.wat})\n"
@@ -5853,10 +6026,30 @@ class _V3Emitter:
             # Byte-scan the haystack for the needle; `$str_index_of` returns a
             # code-point index (or -1), matching py/ts. The i32 result is
             # sign-extended so -1 crosses to the tier's Int as -1.
+            if _is_list_type(target_ty) and _list_elem(target_ty) in _INDEX_OF_ELEMS:
+                # List.indexOf: the first slot equal to the needle, by the
+                # element's own equality (Str bytes, or the slot's i64 pattern
+                # for Int/Int32/Bool); -1 when absent.
+                elem = _list_elem(target_ty)
+                target = self._expr(target_node, scope, where, target_ty)
+                arg = self._expr(args[0], scope, where, elem)
+                if arg.ty != elem:
+                    raise EmitError(
+                        f"{where}: indexOf needle is {arg.ty!r} but the List "
+                        f"carries {elem!r}")
+                if elem == "Str":
+                    return _E(f"{target.wat}\n      {arg.wat}\n      "
+                              f"(call $list_index_of_str)\n      (i64.extend_i32_s)",
+                              "Int")
+                return _E(f"{target.wat}\n      {self._slot_value(arg.wat, elem)}\n      "
+                          f"(call $list_index_of_slot)\n      (i64.extend_i32_s)",
+                          "Int")
             if target_ty not in ("Str", "Bytes"):
                 raise EmitError(
                     f"{where}: indexOf is not lowerable on this tier yet for List — "
-                    f"the element comparison has no representation here; use a hosted backend")
+                    f"the element comparison has no representation here for "
+                    f"{target_ty!r} (only List[Str]/List[Int]/List[Int32]/"
+                    f"List[Bool] have one); use a hosted backend")
             target = self._expr(target_node, scope, where, target_ty)
             arg = self._expr(args[0], scope, where, "Str")
             return _E(f"{target.wat}\n      {arg.wat}\n      (call $str_index_of)\n      (i64.extend_i32_s)", "Int")
@@ -6144,15 +6337,19 @@ class _V3Emitter:
                 self._collect_match_locals(value, binds, scruts)
 
     def _collect_cdiv_locals(self, node: Any, names: list) -> None:
-        """Mint the i64 operand locals each total-division form needs, in the
-        order the bodies are lowered — the same pre-pass `_collect_match_locals`
-        does for match scratch, since both live in expression position."""
+        """Mint the i64 locals each total form needs, in the order the bodies
+        are lowered — the same pre-pass `_collect_match_locals` does for match
+        scratch, since both live in expression position. The arithmetic forms
+        need a third local for the computed value, whose sign is part of the
+        overflow test."""
         if isinstance(node, dict):
-            if node.get("method") in _CHECKED_DIVS and "_cdiv" not in node:
+            if node.get("method") in _CHECKED_FORMS and "_cdiv" not in node:
                 self._cdiv_counter += 1
                 node["_cdiv"] = self._cdiv_counter
                 names.extend([f"cdiv_{self._cdiv_counter}_a",
                               f"cdiv_{self._cdiv_counter}_b"])
+                if node.get("method") in _CHECKED_ARITH:
+                    names.append(f"cdiv_{self._cdiv_counter}_r")
             for value in node.values():
                 self._collect_cdiv_locals(value, names)
         elif isinstance(node, list):
@@ -6308,9 +6505,86 @@ class _V3Emitter:
                     "step inside a while/for body "
                     "(docs/design/379-break-continue.md)")
 
+    def _flow_empty_list(self, name: str, rest: list, scope: _Scope,
+                         expected_return: str | None) -> str | None:
+        """The `List[T]` an unannotated `let xs = []` is used as, read off what
+        the rest of its block does with it (the evidence the checker's
+        unification used, and what the Go tier reads too): the first
+        `xs = xs.push(e)` / `xs = xs.concat(l)` fixes `T` from `e` / `l`; a
+        `return xs` takes the declared return type. A wasm list slot is
+        uniform, so the element type never changes the code, only which
+        helpers and field reads the later uses lower to. Returns None when the
+        block gives no evidence, or conflicting evidence (the caller then keeps
+        the named refusal).
+
+        Inference runs over a scratch scope that follows the block's own
+        bindings and nested blocks, so a pushed value that mentions a loop
+        variable or a `let` declared after `xs` types as it will at emit time.
+        """
+        def infer(node: Any, sc: _Scope) -> str | None:
+            try:
+                return self._infer_type(node, sc)
+            except EmitError:
+                return None
+
+        def is_name(node: Any) -> bool:
+            return (isinstance(node, dict) and node.get("kind") == "var"
+                    and node.get("name") == name)
+
+        found: list[str] = []
+
+        def walk(stmts: list, sc: _Scope) -> None:
+            for st in stmts or []:
+                step = st.get("step")
+                value = st.get("value")
+                if step == "assign" and st.get("name") == name \
+                        and isinstance(value, dict) \
+                        and value.get("kind") == "builtin" \
+                        and is_name(value.get("target")):
+                    method, vargs = value.get("method"), value.get("args") or []
+                    if method == "push" and vargs:
+                        elem = infer(vargs[0], sc)
+                        if elem is not None and not _is_unit_type(elem):
+                            found.append(f"List[{elem}]")
+                    elif method == "concat" and vargs:
+                        other = infer(vargs[0], sc)
+                        if _is_list_type(other):
+                            found.append(other)
+                elif step == "assign" and st.get("name") == name and is_name(value):
+                    continue
+                elif step == "return" and is_name(st.get("expr")):
+                    if _is_list_type(expected_return):
+                        found.append(expected_return)
+                elif step in ("let", "assign") and isinstance(st.get("name"), str):
+                    if step == "let" and isinstance(value, dict) \
+                            and value.get("kind") == "arrow":
+                        continue
+                    if st["name"] != name:
+                        ty = infer(value, sc)
+                        if ty is not None and not _is_unit_type(ty):
+                            sc.types[st["name"]] = ty
+                            sc.slots[st["name"]] = f"(local.get $l_{st['name']})"
+                elif step in ("if", "while"):
+                    for key in ("then", "else", "body"):
+                        walk(st.get(key) or [], _Scope(dict(sc.slots), dict(sc.types)))
+                elif step == "for":
+                    iter_ty = infer(st.get("iterable"), sc)
+                    inner = _Scope(dict(sc.slots), dict(sc.types))
+                    if _is_list_type(iter_ty) and isinstance(st.get("bind"), str):
+                        inner.types[st["bind"]] = _list_elem(iter_ty)
+                        inner.slots[st["bind"]] = f"(local.get $l_{st['bind']})"
+                    walk(st.get("body") or [], inner)
+
+        walk(rest, _Scope(dict(scope.slots), dict(scope.types)))
+        # Every use must agree: a program whose pushes disagree (the checker is
+        # lax about it) keeps the named refusal rather than emitting a list the
+        # wasm validator rejects.
+        return found[0] if found and all(t == found[0] for t in found) else None
+
     def _emit_stmts(self, stmts: list, scope: _Scope, where: str, expected_return: str | None) -> list[str]:
         out: list[str] = []
-        for stmt in stmts or []:
+        stmts = stmts or []
+        for position, stmt in enumerate(stmts):
             step = stmt.get("step")
             if step in ("let", "assign"):
                 name = _ident(stmt.get("name"), f"{where}: binding")
@@ -6328,6 +6602,11 @@ class _V3Emitter:
                         out.append(f"(local.set $cap_{c}_{aid})")
                     continue
                 if step == "let":
+                    if _is_untyped_empty_list(value_node):
+                        flowed = self._flow_empty_list(
+                            name, stmts[position + 1:], scope, expected_return)
+                        if flowed is not None:
+                            self._flowed_lists[id(value_node)] = flowed
                     value_ty = self._infer_type(stmt.get("value"), scope)
                 else:
                     if name not in scope.types:
@@ -6598,6 +6877,9 @@ class _V3Emitter:
         self._for_temps: list[str] = []
         self._arrows: dict = {}
         self._arrow_counter = 0
+        # `{id(list literal node): List[T]}` for an unannotated empty list typed
+        # from its block's later uses (`_flow_empty_list`).
+        self._flowed_lists: dict[int, str] = {}
         self._local_types = {}
         self._collect_locals(fn.get("body") or [], local_names)
         for lname in sorted(local_names):
@@ -6711,6 +6993,11 @@ class _V3Emitter:
         # actually calls one, so every split/join/indexOf-free module stays
         # byte-identical to before.
         uses_index_of = any("$str_index_of" in block for block in all_blocks)
+        uses_str_cmp = any("$str_cmp" in block for block in all_blocks)
+        uses_list_index_of_str = any("$list_index_of_str" in block
+                                     for block in all_blocks)
+        uses_list_index_of_slot = any("$list_index_of_slot" in block
+                                      for block in all_blocks)
         uses_split = any("$str_split" in block for block in all_blocks)
         uses_join = any("$str_join" in block for block in all_blocks)
         uses_code_point = any("$str_of_code_point" in block
@@ -6726,6 +7013,12 @@ class _V3Emitter:
                 lines.append(self._helper_f64_mod())
             if uses_index_of:
                 lines.append(self._helper_str_index_of())
+            if uses_str_cmp:
+                lines.append(self._helper_str_cmp())
+            if uses_list_index_of_str:
+                lines.append(self._helper_list_index_of_str())
+            if uses_list_index_of_slot:
+                lines.append(self._helper_list_index_of_slot())
             if uses_split:
                 lines.append(self._helper_str_split())
             if uses_join:

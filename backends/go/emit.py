@@ -1298,9 +1298,9 @@ def _go_comp_match_tuple(node, env: _Env, expected, st, is_opt, is_result,
     err_arm = next((a for a in arms if a.get("pattern") in ("None", "Err")), None)
     wild = next((a for a in arms if a.get("pattern") == "_"), None)
     if scrut_node.get("kind") == "builtin" \
-            and scrut_node.get("method") in _GO_CHECKED_DIV:
-        # the total division forms: the stc-go Result tuple, multi-value
-        scrutinee = _comp_checked_div_expr(scrut_node, env)
+            and scrut_node.get("method") in _GO_CHECKED_FORMS:
+        # the total forms: the stc-go Result tuple, multi-value
+        scrutinee = _comp_checked_expr(scrut_node, env)
     else:
         scrutinee = _expr(scrut_node, env, st)
     saved_types = dict(env.var_types)
@@ -1801,6 +1801,8 @@ def _comp_builtin(method, recv_surface, target, args):
     # or an out-of-range value, so the range is checked first.
     if method == "to_char":
         return "%s(%s)" % (_GO_TO_CHAR, target)
+    if method in _GO_CHAR_CLASS:
+        return _go_char_class(method, target)
     # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith).
     if method == "startsWith":
         return "strings.HasPrefix(%s, %s)" % (target, args[0])
@@ -1870,13 +1872,13 @@ def _comp_builtin(method, recv_surface, target, args):
     if method == "remove":
         _COMP_NEEDS_MAP = True
         return "revlMapRemove(%s, %s)" % (target, args[0])
-    if method in _GO_CHECKED_DIV:
-        # The total division forms answer a Result, which the stc-go world
-        # carries as a (T, E, bool) tuple — only valid in the two positions
-        # that accept a multi-value expression: a `match` scrutinee and a
-        # `return` against a Result-typed method. A bare value use would
-        # emit Go that cannot compile, so it is refused here with the way
-        # out named (mirrors the Opt tuple convention on this tier).
+    if method in _GO_CHECKED_FORMS:
+        # The total forms answer a Result, which the stc-go world carries as a
+        # (T, E, bool) tuple — only valid in the two positions that accept a
+        # multi-value expression: a `match` scrutinee and a `return` against a
+        # Result-typed method. A bare value use would emit Go that cannot
+        # compile, so it is refused here with the way out named (mirrors the
+        # Opt tuple convention on this tier).
         raise EmitError(
             f"{method} is only lowerable on the cordis-go tier as a `match` "
             f"scrutinee or in a Result-returning `return` (Result is a "
@@ -1884,18 +1886,20 @@ def _comp_builtin(method, recv_surface, target, args):
     raise EmitError("unknown stdlib method: %r" % (method,))
 
 
-def _comp_checked_div_expr(node, env: _Env) -> str:
-    """The total division forms (docs/arithmetic.md) as the stc-go tier's
-    Result tuple `(T, E, bool)`: an immediately-applied func literal that
-    evaluates each operand once, returns `(0, reason, false)` on a zero
-    divisor (and on the Int.MIN / -1 overflow for the truncating form), else
-    the quotient. Only valid where a multi-value expression is: a `match`
-    scrutinee or a Result-returning `return`."""
+def _comp_checked_expr(node, env: _Env) -> str:
+    """The total forms (docs/arithmetic.md) as the stc-go tier's Result tuple
+    `(T, E, bool)`: an immediately-applied func literal that evaluates each
+    operand once, returns `(0, reason, false)` on the fault (an overflow for
+    `checked_add/sub/mul`, a zero divisor or the one overflowing quotient for
+    the division forms), else the value. Only valid where a multi-value
+    expression is: a `match` scrutinee or a Result-returning `return`."""
     method = node.get("method")
     target = _expr(node.get("target"), env)
     args = [_expr(a, env) for a in node.get("args") or []]
     if len(args) != 1:
-        raise EmitError(f"{method} takes exactly one divisor")
+        raise EmitError(f"{method} takes exactly one argument")
+    if method in _GO_CHECKED_ARITH:
+        return _comp_checked_arith_expr(method, target, args[0])
     if method != "checked_div_trunc":
         # revlDivFloor / revlDivEuclid / revlMod live in the pure-tier
         # int-arith preamble, which the stc-go component path does not emit —
@@ -1910,8 +1914,42 @@ def _comp_checked_div_expr(node, env: _Env) -> str:
         f"var _a, _b int64; _a, _b = {target}, {args[0]}; "
         f'if _b == 0 {{ return 0, "{_GO_DIV_ZERO_MSG}", false }}; '
         "if _a == (-9223372036854775807 - 1) && _b == -1 "
-        '{ return 0, "revl: Int overflow", false }; '
+        f'{{ return 0, "{_GO_INT_OVERFLOW_MSG}", false }}; '
         f"return ({quotient}), \"\", true }}()"
+    )
+
+
+def _comp_checked_arith_expr(method: str, target: str, arg: str) -> str:
+    """The total arithmetic forms as the stc-go tier's `(T, E, bool)` tuple.
+    The overflow tests are the ones the trapping `revlAdd/revlSub/revlMul`
+    helpers use, with the fault carried out as the third tuple value instead
+    of a panic. `checked_mul` names `Int.MIN * -1` explicitly: Go defines
+    `Int.MIN / -1` as `Int.MIN`, so the readback check cannot see that
+    product (docs/arithmetic.md)."""
+    if method == "checked_add":
+        body = ("_r := _a + _b; "
+                "if (_a > 0 && _b > 0 && _r < 0) || "
+                "(_a < 0 && _b < 0 && _r >= 0) "
+                '{ return 0, "revl: Int overflow", false }; '
+                'return _r, "", true')
+    elif method == "checked_sub":
+        body = ("_r := _a - _b; "
+                "if (_b < 0 && _r < _a) || (_b > 0 && _r > _a) "
+                '{ return 0, "revl: Int overflow", false }; '
+                'return _r, "", true')
+    else:
+        body = ('if _a == 0 || _b == 0 { return 0, "", true }; '
+                "if (_a == (-9223372036854775807 - 1) && _b == -1) || "
+                "(_a == -1 && _b == (-9223372036854775807 - 1)) "
+                '{ return 0, "revl: Int overflow", false }; '
+                "_r := _a * _b; "
+                "if _r/_b != _a "
+                '{ return 0, "revl: Int overflow", false }; '
+                'return _r, "", true')
+    return (
+        "func() (int64, string, bool) { "
+        f"var _a, _b int64; _a, _b = {target}, {arg}; "
+        f"{body} }}()"
     )
 
 
@@ -2564,11 +2602,11 @@ def _emit_return(expr, ret_surface, env: _Env, out, pad):
         return
     if rs.startswith("Result[") and isinstance(expr, dict) \
             and expr.get("kind") == "builtin" \
-            and expr.get("method") in _GO_CHECKED_DIV:
-        # The total division forms answer a Result, carried on this tier as
-        # the (T, E, bool) tuple: the multi-value IIFE returns straight into
-        # the method's tuple signature.
-        out.append("%sreturn %s" % (pad, _comp_checked_div_expr(expr, env)))
+            and expr.get("method") in _GO_CHECKED_FORMS:
+        # The total forms answer a Result, carried on this tier as the
+        # (T, E, bool) tuple: the multi-value IIFE returns straight into the
+        # method's tuple signature.
+        out.append("%sreturn %s" % (pad, _comp_checked_expr(expr, env)))
         return
     out.append("%sreturn %s" % (pad, _expr(expr, env, ret_surface)))
 
@@ -3938,9 +3976,19 @@ def _wal_referent(ext: dict) -> str:
     Decided HERE, at the one point that writes the record, off a stamp the
     compiler put in the IR — not at each reader of the log. A tier with no
     value-registry of its own needs no registry for this: the confidentiality is
-    positional and known before the program runs."""
+    positional and known before the program runs.
+
+    The stamp covers only a witness the author declared `Secret[...]`. A witness
+    that merely QUOTES a registered value (a lease id built from a key, a path
+    built from a token) carries no stamp, so in secret mode the stringified
+    witness also reads through the registry (`revlRedactText`) before it is
+    stored, the way the java and rust WAL sinks scrub every descriptor argument
+    and the py tier's `confidential.redact_args` does by value. A program that
+    declares no `Secret[T]` has no registry and emits the call byte-identically."""
     if ext.get("secret_witness"):
         return _go_string(_REDACTED_SECRET)
+    if _SECRET_MODE:
+        return 'revlRedactText(fmt.Sprintf("%v", result))'
     return 'fmt.Sprintf("%v", result)'
 
 
@@ -6801,6 +6849,9 @@ class _V3GoCtx:
         self.case_adt: dict[str, str | None] = {}
         self.case_payload: dict[str, str | None] = {}
         self.record_by_fields: dict[tuple, str | None] = {}
+        # every declared record per field-set, for a literal the field-set
+        # alone does not name (see `resolve_record`)
+        self.records_with_fields: dict[tuple, list[str]] = {}
         self.ret_type: str | None = None
         # `{binding: declared type}` the current body hands each local on to;
         # see `_v3_flow_hints`.
@@ -6840,6 +6891,7 @@ class _V3GoCtx:
                 self.record_by_fields[key] = (
                     name if key not in self.record_by_fields else None
                 )
+                self.records_with_fields.setdefault(key, []).append(name)
             elif spec.get("kind") == "variant":
                 for case in spec.get("cases") or []:
                     cname = case.get("name")
@@ -6848,22 +6900,74 @@ class _V3GoCtx:
                         None if cname in self.case_adt else name
                     )
 
-    def record_type_for_fields(self, fields: list) -> str:
+    def find_record(self, fields: list, expected=None) -> str | None:
+        """`resolve_record`, or None where it would refuse."""
+        try:
+            return self.resolve_record(fields, expected)
+        except EmitError:
+            return None
+
+    def resolve_record(self, fields: list, expected=None) -> str:
+        """The RAW name of the record a literal with these fields builds.
+
+        A field-set one record owns names it. When several records share the
+        field-set it is the declared target type the literal flows into (a
+        `return`, an assignment, an argument, a field of a known record), and
+        only a target whose field-set matches exactly counts; with none the
+        literal is refused rather than guessed."""
         key = tuple(sorted(fields))
+        candidates = self.records_with_fields.get(key, [])
+        if isinstance(expected, str) and expected in candidates:
+            return expected
         name = self.record_by_fields.get(key)
         if name is None:
+            if len(candidates) > 1:
+                raise EmitError(
+                    "cannot infer Go struct type for record literal with "
+                    f"fields {sorted(fields)!r}: {', '.join(candidates)} share "
+                    "them and no declared target type picks one"
+                )
             raise EmitError(
                 "cannot infer Go struct type for record literal with fields "
                 f"{sorted(fields)!r} — no unique record has exactly those fields"
             )
-        return _v3_ident(name, "type name")
+        return name
+
+    def record_type_for_fields(self, fields: list, expected=None) -> str:
+        return _v3_ident(self.resolve_record(fields, expected), "type name")
 
 
-# The total, value-returning division forms (docs/arithmetic.md): same
-# rounding as the faulting operations, Err(reason) at a zero divisor.
+# The total, value-returning forms (docs/arithmetic.md): same value as the
+# faulting operations where it fits, Err(reason) instead of the fault
+# otherwise. `checked_add/sub/mul` answer the overflow; the division forms
+# answer a zero divisor too.
+_GO_CHECKED_ARITH = ("checked_add", "checked_sub", "checked_mul")
 _GO_CHECKED_DIV = ("checked_div_trunc", "checked_div_floor",
                    "checked_div_euclid", "checked_mod")
+_GO_CHECKED_FORMS = _GO_CHECKED_ARITH + _GO_CHECKED_DIV
 _GO_DIV_ZERO_MSG = "revl: division by zero"
+_GO_INT_OVERFLOW_MSG = "revl: Int overflow"
+
+
+# Single-character ASCII classification (item 233, docs/stdlib-2.0.md
+# §Str.is_alnum), the same contract the python tier lowers inline: `0`-`9`,
+# `a`-`z`/`A`-`Z`, their union, and space/tab/LF/CR. Go compares strings
+# bytewise, and byte order IS code-point order for ASCII, so the chained
+# comparison matches python's. It stays total as python's does: an empty
+# receiver compares less than "0", so it is false rather than a fault, and
+# multi-character input (outside the per-character contract) never panics.
+# An immediately-applied func literal evaluates the receiver exactly once.
+_GO_CHAR_CLASS = {
+    "is_digit": '"0" <= _rc && _rc <= "9"',
+    "is_alpha": '("a" <= _rc && _rc <= "z") || ("A" <= _rc && _rc <= "Z")',
+    "is_alnum": ('("0" <= _rc && _rc <= "9") || ("a" <= _rc && _rc <= "z") '
+                 '|| ("A" <= _rc && _rc <= "Z")'),
+    "is_space": '_rc == " " || _rc == "\\t" || _rc == "\\n" || _rc == "\\r"',
+}
+
+
+def _go_char_class(method: str, target: str) -> str:
+    return f"func(_rc string) bool {{ return {_GO_CHAR_CLASS[method]} }}({target})"
 
 
 # Int.to_char (issue #2285, docs/stdlib-2.0.md §Int.to_char) as a closure
@@ -6889,11 +6993,10 @@ def _v3_builtin_ret_type(method, recv_type):
     if method == "to_int32":
         return "Int32"
     # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith).
-    if method in ("startsWith", "endsWith"):
+    if method in ("startsWith", "endsWith") or method in _GO_CHAR_CLASS:
         return "Bool"
     # The total forms (docs/arithmetic.md) produce a Result value.
-    if method in ("checked_div_trunc", "checked_div_floor",
-                  "checked_div_euclid", "checked_mod"):
+    if method in _GO_CHECKED_FORMS:
         return "Result[Int, Str]"
     if method in ("charAt", "repeat", "join"):
         return "Str"
@@ -7211,48 +7314,108 @@ def _v3_flow_hints(body, ret_type, ctx) -> dict:
     each binding renamed to its own key (`_v3_binding_keys`)."""
     body, keys = _v3_binding_keys(body, ctx.var_types)
     hints = _FlowHints(body, keys)
-    for node in _v3_walk_nodes(body):
-        if node.get("step") == "return" and ret_type:
-            expr = node.get("expr")
-            if isinstance(expr, dict) and expr.get("kind") == "var":
-                hints.offer(expr.get("name"), ret_type)
-        if node.get("kind") == "call":
-            callee = node.get("callee") or {}
-            name = callee.get("name") if callee.get("kind") == "var" else None
-            params = (ctx.function_params.get(name)
-                      or ctx.extern_params.get(name) or [])
-            generic = _go_v3_generic_call(name, node.get("args") or [], ctx,
-                                          node.get("expected"))
-            if generic is not None:
-                # issue #2495: a generic callee's `T` is no flow target; the
-                # instantiation the other arguments bind is
-                params = generic[0]
-            for arg, declared in zip(node.get("args") or [], params):
-                if (isinstance(arg, dict) and arg.get("kind") == "var"
-                        and isinstance(declared, str)):
-                    hints.offer(arg.get("name"), declared)
-        if node.get("kind") == "record":
-            # `{ texts: texts }` hands `texts` to the record's declared field
-            fields = node.get("fields") or []
-            raw = ctx.record_by_fields.get(tuple(sorted(k for k, _ in fields)))
-            declared = (ctx.types.get(raw) or {}).get("fields") or {} if raw else {}
-            for key, value in fields:
-                if _local_ref(value) and isinstance(declared.get(key), str):
-                    hints.offer(_local_ref(value), declared[key])
-    _flow_through_assigns(body, hints)
-    saved = ctx.var_types
-    ctx.var_types = dict(saved)
-    try:
-        _push_evidence(body, hints, lambda n: _go_v3_infer_type(n, ctx),
-                       ctx.var_types)
-    finally:
-        ctx.var_types = saved
+    # `{id(record literal): declared type}` for a literal a declared type
+    # names: the returned one, a call argument, a field of a record already
+    # resolved. A field-set several records share is read through it.
+    targets: dict = {}
+
+    def walk() -> None:
+        for node in _v3_walk_nodes(body):
+            if node.get("step") == "return" and ret_type:
+                expr = node.get("expr")
+                if isinstance(expr, dict) and expr.get("kind") == "var":
+                    hints.offer(expr.get("name"), ret_type)
+                elif isinstance(expr, dict) and expr.get("kind") == "record":
+                    targets[id(expr)] = ret_type
+            if node.get("kind") == "call":
+                callee = node.get("callee") or {}
+                name = callee.get("name") if callee.get("kind") == "var" else None
+                params = (ctx.function_params.get(name)
+                          or ctx.extern_params.get(name) or [])
+                generic = _go_v3_generic_call(name, node.get("args") or [], ctx,
+                                              node.get("expected"))
+                if generic is not None:
+                    # issue #2495: a generic callee's `T` is no flow target; the
+                    # instantiation the other arguments bind is
+                    params = generic[0]
+                for arg, declared in zip(node.get("args") or [], params):
+                    if (isinstance(arg, dict) and arg.get("kind") == "var"
+                            and isinstance(declared, str)):
+                        hints.offer(arg.get("name"), declared)
+                    elif (isinstance(arg, dict) and arg.get("kind") == "record"
+                            and isinstance(declared, str)):
+                        targets[id(arg)] = declared
+            if node.get("kind") == "adt":
+                # a literal handed to a variant case is built as its payload
+                payload = ctx.case_payload.get(node.get("case"))
+                args = node.get("args") or []
+                if (isinstance(payload, str) and len(args) == 1
+                        and isinstance(args[0], dict)
+                        and args[0].get("kind") == "record"):
+                    targets[id(args[0])] = payload
+            if node.get("kind") == "record":
+                # `{ texts: texts }` hands `texts` to the record's declared field
+                fields = node.get("fields") or []
+                raw = ctx.find_record([k for k, _ in fields], targets.get(id(node)))
+                declared = (ctx.types.get(raw) or {}).get("fields") or {} if raw else {}
+                for key, value in fields:
+                    if _local_ref(value) and isinstance(declared.get(key), str):
+                        hints.offer(_local_ref(value), declared[key])
+                    elif (isinstance(value, dict) and value.get("kind") == "record"
+                            and isinstance(declared.get(key), str)):
+                        targets[id(value)] = declared[key]
+            if node.get("step") == "let" and _is_record_literal(node.get("value")):
+                # a literal bound to a local takes the one record that local
+                # is handed on to; a local handed to two is left unnamed
+                offered = hints.targets.get(node.get("name"), [])
+                if (len(offered) == 1 and isinstance(offered[0], str)
+                        and id(node["value"]) not in targets):
+                    targets[id(node["value"])] = offered[0]
+
+    def flows() -> None:
+        _flow_through_assigns(body, hints)
+        saved = ctx.var_types
+        ctx.var_types = dict(saved)
+        try:
+            _push_evidence(body, hints, lambda n: _go_v3_infer_type(n, ctx),
+                           ctx.var_types, ctx.types)
+        finally:
+            ctx.var_types = saved
+
+    def size() -> int:
+        return sum(len(v) for v in hints.targets.values()) + len(hints.pushed)
+
+    # A hand-on can appear only once an outer literal is named, and that
+    # naming can itself rest on an earlier hand-on, so read the body until no
+    # new offer appears, then name every literal again from the settled hints:
+    # a local that ends up handed to two records must not keep the first.
+    # The offers only grow and are bounded (locals times declared types), and
+    # each pass settles at least one more level of nesting, so the loop ends
+    # after at most one pass per node of the body; a body that runs past that
+    # is refused rather than named from unsettled facts.
+    passes = sum(1 for _ in _v3_walk_nodes(body)) + 2
+    for _ in range(passes):
+        before = size()
+        walk()
+        flows()
+        if size() == before:
+            break
+    else:
+        raise EmitError(
+            "the record hand-ons of this function do not settle; name the "
+            "record each literal builds")
+    targets.clear()
+    walk()
     return hints
 
 
 def _is_empty_list(node) -> bool:
     return (isinstance(node, dict) and node.get("kind") == "list"
             and not node.get("items"))
+
+
+def _is_record_literal(node) -> bool:
+    return isinstance(node, dict) and node.get("kind") == "record"
 
 
 def _list_pin(node):
@@ -7262,7 +7425,7 @@ def _list_pin(node):
     return pin if isinstance(pin, str) and pin.startswith("List[") else None
 
 
-def _push_evidence(body, hints, infer, scratch) -> None:
+def _push_evidence(body, hints, infer, scratch, types) -> None:
     """Record in `hints.pushed` what each `acc = acc.push(x)` pushes: a List
     of `x`'s type; and offer the type of any other value assigned to a
     binding (`out = xs`) as one of its declared targets. The body's locals are typed forward in document order (a
@@ -7272,6 +7435,13 @@ def _push_evidence(body, hints, infer, scratch) -> None:
     question being answered."""
     for node in _v3_walk_nodes(body):
         step = node.get("step")
+        if (node.get("kind") == "builtin" and node.get("method") == "push"
+                and len(node.get("args") or []) == 1
+                and _local_ref(node["args"][0])):
+            # `xs.push(row)` hands a local to `xs`'s declared element type
+            elem = _v3_push_elem(node, infer, types)
+            if elem is not None:
+                hints.offer(_local_ref(node["args"][0]), elem)
         if step == "for" and isinstance(node.get("bind"), str):
             it = infer(node.get("iterable"))
             if isinstance(it, str) and it.startswith("List[") and it.endswith("]"):
@@ -7333,9 +7503,10 @@ def _flow_through_assigns(body, hints) -> None:
     goes, and Go assigns only between identical types, so `res` is declared
     as `out` is (stdlib `list_sort` builds each pass in `res` and rebinds
     `out` to it). Iterated, since a chain can be written in any order."""
+    # `let ps = xs` is the same hand-on: `ps` takes whatever type `xs` has
     aliases = [(n.get("name"), _local_ref(n.get("value")), False)
                for n in _v3_walk_nodes(body)
-               if n.get("step") == "assign" and _local_ref(n.get("value"))]
+               if n.get("step") in ("assign", "let") and _local_ref(n.get("value"))]
     # `out = out.concat(more)` hands `more` on as `out` is
     aliases += [(n.get("name"), _local_ref(_self_concat(n)), False)
                 for n in _v3_walk_nodes(body) if _local_ref(_self_concat(n))]
@@ -7374,7 +7545,8 @@ def _method_flow_hints(body, ret_surface, env) -> dict:
     saved = env.var_types
     env.var_types = dict(saved)
     try:
-        _push_evidence(body, hints, lambda n: _comp_infer(n, env), env.var_types)
+        _push_evidence(body, hints, lambda n: _comp_infer(n, env), env.var_types,
+                       _V3_TYPES or {})
     finally:
         env.var_types = saved
     return hints
@@ -7913,8 +8085,8 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
 
     if kind == "record":
         fields = node.get("fields") or []
-        type_name = ctx.record_type_for_fields([k for k, _ in fields])
-        raw_type = ctx.record_by_fields[tuple(sorted(k for k, _ in fields))]
+        raw_type = ctx.resolve_record([k for k, _ in fields], expected)
+        type_name = _v3_ident(raw_type, "type name")
         field_types = ctx.types[raw_type].get("fields") or {}
         body = ", ".join(
             f"{_v3_field_ident(k)}: {_go_v3_expr(v, ctx, field_types.get(k))}"
@@ -8030,7 +8202,11 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         target = _go_v3_expr(target_node, ctx)
         if target_node.get("kind") not in _V3_GO_ATOMIC:
             target = f"({target})"
-        args = [_go_v3_expr(a, ctx) for a in node.get("args") or []]
+        # `xs.push({..})` hands the element to `xs`'s declared element type,
+        # which names a record literal two records share the fields of
+        arg_expected = _v3_push_elem(
+            node, lambda n: _go_v3_infer_type(n, ctx), ctx.types)
+        args = [_go_v3_expr(a, ctx, arg_expected) for a in node.get("args") or []]
         return _go_v3_builtin(ctx, node.get("method"), target_node, target, args)
 
     if kind == "interp":
@@ -8081,6 +8257,20 @@ def _infer_arrow_param(name, body, ctx):
 
     walk_any(body)
     return found[0] if found else None
+
+
+def _v3_push_elem(node, infer, types):
+    """The element type of `xs` in `xs.push(x)` when it is a declared record,
+    else None: the target a record-literal argument is built for. `infer`
+    types the receiver, `types` is the document's declared types."""
+    if node.get("method") != "push" or len(node.get("args") or []) != 1:
+        return None
+    recv = infer(node.get("target"))
+    if not (isinstance(recv, str) and recv.startswith("List[")
+            and recv.endswith("]")):
+        return None
+    elem = recv[5:-1]
+    return elem if (types.get(elem) or {}).get("kind") == "record" else None
 
 
 def _go_v3_builtin(ctx, method, target_node, target, args):
@@ -8136,6 +8326,8 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
     # §Int.to_char), the same closure as the component tier.
     if method == "to_char":
         return f"{_GO_TO_CHAR}({target})"
+    if method in _GO_CHAR_CLASS:
+        return _go_char_class(method, target)
     # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith):
     # HasPrefix/HasSuffix compare bytes, and a code-point prefix of a UTF-8
     # string is exactly a byte prefix.
@@ -8202,11 +8394,41 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
         helper = {"div_floor": "revlDivFloor", "div_euclid": "revlDivEuclid",
                   "mod": "revlMod"}[method]
         return f"{helper}({target}, {args[0]})"
-    # The total forms (docs/arithmetic.md): same quotient as the faulting
-    # operation, but a zero divisor yields Err(reason) instead of panicking —
-    # `fail` is refused in a pure fn, so the error travels as a value. An
-    # immediately-applied func literal evaluates each operand exactly once;
-    # the Ok/Err arms are the two-value RevlResult struct (item 434 (d)).
+    # The total arithmetic forms (docs/arithmetic.md): the overflow tests the
+    # trapping `revlAdd/revlSub/revlMul` helpers use, with the fault carried
+    # out as an Err arm instead of a panic. An immediately-applied func
+    # literal evaluates each operand exactly once; the Ok/Err arms are the
+    # two-value RevlResult struct (item 434 (d)).
+    if method in _GO_CHECKED_ARITH:
+        if method == "checked_add":
+            body = ("_r := _a + _b; "
+                    "if (_a > 0 && _b > 0 && _r < 0) || "
+                    "(_a < 0 && _b < 0 && _r >= 0) { "
+                    'return RevlResult[int64, string]{ErrV: "revl: Int overflow"} }; '
+                    "return RevlResult[int64, string]{OkV: _r, Ok: true}")
+        elif method == "checked_sub":
+            body = ("_r := _a - _b; "
+                    "if (_b < 0 && _r < _a) || (_b > 0 && _r > _a) { "
+                    'return RevlResult[int64, string]{ErrV: "revl: Int overflow"} }; '
+                    "return RevlResult[int64, string]{OkV: _r, Ok: true}")
+        else:
+            body = ('if _a == 0 || _b == 0 { '
+                    "return RevlResult[int64, string]{OkV: 0, Ok: true} }; "
+                    "if (_a == (-9223372036854775807 - 1) && _b == -1) || "
+                    "(_a == -1 && _b == (-9223372036854775807 - 1)) { "
+                    'return RevlResult[int64, string]{ErrV: "revl: Int overflow"} }; '
+                    "_r := _a * _b; "
+                    "if _r/_b != _a { "
+                    'return RevlResult[int64, string]{ErrV: "revl: Int overflow"} }; '
+                    "return RevlResult[int64, string]{OkV: _r, Ok: true}")
+        return (f'func(_a, _b int64) RevlResult[int64, string] {{ {body} }}'
+                f'({target}, {args[0]})')
+    # The total division forms (docs/arithmetic.md): same quotient as the
+    # faulting operation, but a zero divisor yields Err(reason) instead of
+    # panicking — `fail` is refused in a pure fn, so the error travels as a
+    # value. An immediately-applied func literal evaluates each operand
+    # exactly once; the Ok/Err arms are the two-value RevlResult struct
+    # (item 434 (d)).
     if method in _GO_CHECKED_DIV:
         if method != "checked_div_trunc":
             ctx.needs_int_arith = True
@@ -9017,7 +9239,9 @@ def _go_v3_self_rebind(node: dict, ctx: _V3GoCtx, name: str):
     target = value.get("target") or {}
     if method not in _V3_LINEAR_WRITE_METHODS or target.get("name") != raw:
         return None
-    args = [_go_v3_expr(a, ctx) for a in value.get("args") or []]
+    arg_expected = _v3_push_elem(
+        value, lambda n: _go_v3_infer_type(n, ctx), ctx.types)
+    args = [_go_v3_expr(a, ctx, arg_expected) for a in value.get("args") or []]
     if method == "push":
         return f"{name} = append({name}, {args[0]})"
     if method == "set":
@@ -9128,6 +9352,19 @@ def _empty_list_type(name, hints, body, fallback, appends) -> str:
         f"annotate it (`var {label}: List[T] = []`)")
 
 
+def _shares_fields(node, ctx) -> bool:
+    """Is `node` a record literal whose field-set several declared records
+    share, or a list literal with one such item?"""
+    if not isinstance(node, dict):
+        return False
+    if node.get("kind") == "list":
+        return any(_shares_fields(item, ctx) for item in node.get("items") or [])
+    if node.get("kind") != "record":
+        return False
+    key = tuple(sorted(k for k, _ in node.get("fields") or []))
+    return len(ctx.records_with_fields.get(key, [])) > 1
+
+
 def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=None) -> None:
     pad = "\t" * indent
     step = node.get("step")
@@ -9148,6 +9385,14 @@ def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=Non
                 and not value_node.get("items"):
             inferred = _empty_list_type(key, ctx.flow_hints,
                                         ctx.flow_hints.body, "List[any]", True)
+        # A literal two records share the fields of (or a list of them) takes
+        # the type the binding is handed on to (`xs.push(pair)`, `return
+        # pair`), but only when every hand-on agrees: a binding handed to two
+        # records is refused below rather than given whichever came first.
+        if inferred is None and _shares_fields(value_node, ctx):
+            offered = ctx.flow_hints.targets.get(key, [])
+            if len(offered) == 1 and isinstance(offered[0], str):
+                inferred = offered[0]
         if inferred is not None:
             ctx.var_types[node.get("name")] = inferred
         value = _go_v3_expr(node.get("value"), ctx, inferred)
@@ -12301,9 +12546,10 @@ def _emit_v3_go(ir: dict, package: str) -> str:
                                              "size", "keys", "remove"))
     if used_map:
         used_opt = True
-    # The total division forms produce a Result value without the source ever
+    # The total forms produce a Result value without the source ever
     # spelling `Result[` — their method names put Result in the module too.
-    used_result = ("Result[" in blob) or ("checked_div_" in blob) or ("checked_mod" in blob)
+    used_result = ("Result[" in blob) or any(
+        f'"method": "{m}"' in blob for m in _GO_CHECKED_FORMS)
     # A `Some(literal)` / `None` / `Ok`/`Err` with no `Opt[`/`Result[` spelled
     # in the IR (element type recovered from the argument, item 280) still
     # emits the sealed types — scan the rendered body so the matching preamble
@@ -13752,7 +13998,8 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
                                              "size", "keys", "remove"))
     if used_map:
         used_opt = True
-    used_result = ("Result[" in blob) or ("checked_div_" in blob) or ("checked_mod" in blob)
+    used_result = ("Result[" in blob) or any(
+        f'"method": "{m}"' in blob for m in _GO_CHECKED_FORMS)
     # the Map SUBSCRIPT helper (issue #957), gated on its own like above
     body_blob = "\n".join(body)
     used_map_index = "revlMapIndex(" in body_blob

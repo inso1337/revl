@@ -44,6 +44,12 @@ and what is implemented here, is the other half of the same argument:
     precondition, so the measured stages are never read for it. The declared
     scope stays the candidate's claim; the allow set is the grant that claim is
     checked against, and no grant is default deny (issue #2803);
+  * the comparison base is the operator's too (`--base` or `BASE_ENV`, a full
+    commit id). The record's `base` must name the same commit, so a candidate
+    that commits its edits and names that commit as its base is refused at
+    `authority` by name instead of being measured as having changed nothing,
+    and the measured diff is read through a fresh temporary index with no
+    exclude source from the tree (issue #3359);
   * the verdict and every scorecard carry `protocol_digest`, the evaluator's
     identity from the scorer's own checkout (issue #2802). A stage record from
     a different checkout is refused rather than read, so the two rounds cannot
@@ -116,6 +122,8 @@ failure with a NAMED code:
     an evolution proposal asking for a
     stage past the proposal                -> MODE_REFUSES_ACTIVATION
     a granted decider service              -> FORBIDDEN_GRANT
+    no operator base (a full commit id)    -> NO_BASE
+    the record's base is not the operator's -> BASE_MOVED
     the diff could not be measured         -> DIFF_UNVERIFIED
     the declared diff understates the tree -> DIFF_DISAGREES
     no operator allow set declared         -> NO_ALLOW_SET
@@ -221,6 +229,11 @@ USAGE
 falls back to `ALLOW_ENV`. With no allow set the `authority` precondition
 refuses, because the editable set belongs to whoever starts the run.
 
+`--base COMMIT` is the full commit id the diff is measured against; it falls
+back to `BASE_ENV`. With no operator base `authority` refuses (`NO_BASE`), and a
+record whose `base` names another commit is `BASE_MOVED`. The verdict carries
+`base_commit`, `base_pin` and `base_source`.
+
 Exit status: 0 PROMOTE, 1 ROLL_BACK, 2 REFUSE, 3 proposal-recorded.
 """
 
@@ -247,7 +260,8 @@ from revl.promotion_barrier import AUTHORITY_AXES  # noqa: E402
 # it; it does not restate it. See `Verdict`.
 from evolution_reward import Verdict as ComponentVerdict  # noqa: E402
 from evolution_reward import (  # noqa: E402
-    ALLOW_ENV, _in_scope, allow_from_env, parse_allow)
+    ALLOW_ENV, BASE_ENV, _in_scope, allow_from_env, base_from_args,
+    check_base, measured_paths, parse_allow, resolve_commit)
 
 # The modes of work item 520 splits the lifecycle's subject into. The mode is
 # declared by the caller, so it is not an intent the controller can verify:
@@ -579,6 +593,8 @@ class Candidate:
     scope: tuple = ()
     allow: tuple = ()
     prose_ignored: tuple = ()
+    base_pin: str = ""
+    base_source: str = ""
 
 
 @dataclass(frozen=True)
@@ -613,7 +629,8 @@ class Proposal:
         return self.candidate.base
 
 
-def load_proposal(record: dict, allow=()) -> Proposal:
+def load_proposal(record: dict, allow=(), base_pin: str = "",
+                  base_source: str = "") -> Proposal:
     """Build a `Proposal`, dropping every key outside `RECORD_KEYS` by name.
 
     Refuses rather than guesses. A record with no `tree`, `base` or `scope`
@@ -636,7 +653,10 @@ def load_proposal(record: dict, allow=()) -> Proposal:
 
     `allow` is the operator's editable set, passed in by the caller. A record
     that carries an `allow` key has it dropped like any other non-whitelisted
-    key: the proposal may not name the paths it is allowed to edit.
+    key: the proposal may not name the paths it is allowed to edit. The
+    comparison base is the operator's too (`base_pin`, a full commit id, and
+    `base_source` for where it came from); the record's own `base` is a claim
+    that `judge_authority` checks against it.
     """
     missing = [k for k in CANDIDATE_KEYS if k not in record]
     if missing:
@@ -670,6 +690,8 @@ def load_proposal(record: dict, allow=()) -> Proposal:
         scope=tuple(str(s) for s in scope),
         allow=parse_allow(allow),
         prose_ignored=tuple(sorted(k for k in record if k not in RECORD_KEYS)),
+        base_pin=str(base_pin or "").strip(),
+        base_source=str(base_source or ""),
     )
     return Proposal(
         candidate=candidate,
@@ -709,7 +731,10 @@ def measured_diff(proposal: Proposal):
 
     Committed and uncommitted changes both count, because a proposal is judged
     on the tree it produced and not on how tidily it was committed. This is the
-    same read `tools/evolution_reward.py` performs for its `scope` component.
+    same read `tools/evolution_reward.py` performs for its `scope` component,
+    and it is that module's `measured_paths`: a fresh temporary index, no exclude
+    source from the tree, so the candidate's index flags, `.git/info/exclude`
+    and `core.excludesFile` cannot shrink what is measured (#3359).
 
     `--no-renames` so a move is reported under BOTH of its paths. Rename
     detection on would list only the destination, and a file moved out of the
@@ -720,15 +745,7 @@ def measured_diff(proposal: Proposal):
     tree = proposal.tree
     if not (tree / ".git").exists():
         return False, f"{tree} is not a git tree, so its diff cannot be measured"
-    ok, out = _git(tree, ["diff", "--no-renames", "--name-only", proposal.base])
-    if not ok:
-        return False, out
-    paths = {line.strip() for line in out.splitlines() if line.strip()}
-    ok, out = _git(tree, ["ls-files", "--others", "--exclude-standard"])
-    if not ok:
-        return False, out
-    paths |= {line.strip() for line in out.splitlines() if line.strip()}
-    return True, sorted(paths)
+    return measured_paths(tree, proposal.base)
 
 
 def _under(path: str, prefix: str) -> bool:
@@ -1145,6 +1162,20 @@ def judge_authority(proposal: Proposal) -> Verdict:
     if not ok:
         return record
 
+    # The base comes first: a diff against a base the record chose measures
+    # whatever the record let it see (#3359).
+    # A tree that is not a git tree has no base to check; `measured_diff`
+    # refuses it by its own name below.
+    code, why, base_commit = (
+        check_base(proposal.tree, proposal.base, proposal.candidate.base_pin,
+                   proposal.candidate.base_source)
+        if (proposal.tree / ".git").exists() else ("", "", None))
+    if code:
+        return failed("authority", code, why,
+                      (f"tree={proposal.tree}",
+                       "base_source=" + (proposal.candidate.base_source
+                                         or "none")))
+
     ok, measured = measured_diff(proposal)
     declared = proposal.declared_changed
     if not ok:
@@ -1247,6 +1278,8 @@ def judge_authority(proposal: Proposal) -> Verdict:
         f"{len(measured)} measured path(s), all inside the operator allow set "
         f"and none in the fence or the kernel",
         base.evidence + (f"git diff --no-renames --name-only {proposal.base}",
+                         f"base={base_commit} "
+                         f"({proposal.candidate.base_source})",
                          "allow=" + ";".join(allow),
                          f"axes={';'.join(AUTHORITY_AXES)}"))
 
@@ -1318,6 +1351,12 @@ class LifecycleVerdict:
                       if isinstance(self.proposal.tests, (list, tuple))
                       else self.proposal.tests),
             "base": self.proposal.base,
+            # Issue #3359: the commit the measured diff was taken against and
+            # where the operator gave it.
+            "base_commit": resolve_commit(self.proposal.tree,
+                                          self.proposal.base),
+            "base_pin": self.proposal.candidate.base_pin or None,
+            "base_source": self.proposal.candidate.base_source or None,
             "scope": list(self.proposal.candidate.scope),
             "applies_to": (None if self.proposal.applies_to is None
                            else self.proposal.applies_to.as_dict()),
@@ -1329,8 +1368,12 @@ class LifecycleVerdict:
         }
 
     def render(self) -> str:
+        pin = self.proposal.candidate.base_pin
         lines = [f"evolution controller over {self.proposal.tree}",
                  f"base {self.proposal.base}",
+                 "operator base " + (
+                     f"{pin} ({self.proposal.candidate.base_source})" if pin
+                     else "(none: the record's base is not trusted)"),
                  f"mode {self.proposal.mode}",
                  f"protocol {self.protocol or 'unavailable'}"]
         if self.proposal.applies_to is not None:
@@ -1520,9 +1563,15 @@ def main(argv=None) -> int:
                     help="a path glob the operator allows the proposal to "
                          "edit; repeatable or comma-separated, and falls back "
                          f"to {ALLOW_ENV}. No allow set refuses at `authority`")
+    ap.add_argument("--base", metavar="COMMIT", default=None,
+                    help="the full commit id the diff is measured against; "
+                         f"falls back to {BASE_ENV}. The record's own `base` "
+                         "must name the same commit; no operator base refuses "
+                         "at `authority`")
     args = ap.parse_args(argv)
     allow = (parse_allow(args.allow) if args.allow is not None
              else allow_from_env())
+    base_pin, base_source = base_from_args(args.base)
 
     try:
         record = json.loads(args.proposal.read_text(encoding="utf-8"))
@@ -1531,7 +1580,8 @@ def main(argv=None) -> int:
               file=sys.stderr)
         return REFUSE
     try:
-        proposal = load_proposal(record, allow=allow)
+        proposal = load_proposal(record, allow=allow, base_pin=base_pin,
+                                 base_source=base_source)
     except ValueError as exc:
         print(f"evolution_controller: {exc}", file=sys.stderr)
         return REFUSE

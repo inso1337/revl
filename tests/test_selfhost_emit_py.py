@@ -127,6 +127,7 @@ CORPUS = [
     "optionals.rvl",   # optional-call chaining (opt receiver)
     "mixed.rvl",       # a cross-section of the above in three functions
     "user_names_like_temps.rvl",  # user locals spelled like emitter temporaries (issue #2913)
+    "chains.rvl",  # long one-operator chains written flat, both renderers (issue #3403)
     # component/service documents (slice 2, item 185)
     "services_basic.rvl",    # SERVICES table, req/provide, effect accumulator, a provide method
     "services_timers.rvl",   # every/after timers -> schedule_* import + cancel inverses
@@ -367,6 +368,7 @@ CORPUS = [
     # port's `py_type` `Value` arm was unreached by all 70 prior documents,
     # which is what the line-coverage ledger reported.
     "keyword_config_value_field.rvl",
+    "keyword_provision_key_3538.rvl",  # issue #3538: a keyword provision key is read by getattr
     "services_method_effects.rvl",  # method-body `effect` + saga `emit ... compensate`: the `_revl_frame.adopt` accumulator + `_label`/`_effect_N`/`_emit_N` counter
     "method_effect_coalesce.rvl",  # issue #3304: `adopt_bracket` for an absolute table inverse, `adopt` for a computed key
     # item 383 / 391 (self-host port) — the `.map`/`.filter`/`.reduce` transforms
@@ -405,6 +407,11 @@ CORPUS = [
     # lowered these as `builtin` nodes — the gap was emission-only, and invisible
     # for the same reason: nothing in the corpus divided totally.
     "checked_div.rvl",
+    # docs/arithmetic.md's total checked_add/sub/mul: the per-form helper
+    # and the Result they build, on every tier that holds this document.
+    "checked_arith.rvl",
+    # The same forms bound by a `let` and matched, with no `Result` in a signature.
+    "checked_arith_read.rvl",
     # item 189: the Value dot-accessors. Byte-identical BY CONSTRUCTION on this
     # tier (the redirect happens in the frontend, so the emitter sees a plain
     # call) — the document is here so the emit oracle pins that property, while

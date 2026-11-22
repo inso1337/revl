@@ -608,6 +608,80 @@ def test_over_http_a_caller_cannot_cast_for_another_operator(serving, fresh, tmp
 
 
 @needs_cordis
+def test_over_http_the_hatch_cannot_cast_for_another_operator(serving, fresh, tmp_path):
+    """Issue #3125: `revl_verbs` with `name` and `args` is the verb it names,
+    so the rule that a caller casts only as itself holds through it."""
+    _load_shout(fresh, quorum=True)
+    transport = serving()
+    port = _port(transport)
+    sink = str(tmp_path / "q.log")
+    asked = _payload(port, "alice", "revl_call",
+                     {"key": "ops", "method": "shout", "args": [sink, "q"]})
+    ticket_hash = asked["ticket"]["hash"]
+    for verb in ("revl_approve", "revl_revoke", "revl_escalate", "revl_override"):
+        forged = _payload(port, "bob", "revl_verbs",
+                          {"name": verb,
+                           "args": {"hash": ticket_hash, "asToken": "carol",
+                                    "asSecret": SECRETS["carol"]}})
+        assert forged["ok"] is False, verb
+        assert "casts only as itself" in forged["diagnostics"][0]["message"], verb
+    padded = _payload(port, "bob", "revl_verbs",
+                      {"name": " revl_approve ",
+                       "args": {"hash": ticket_hash, "asToken": "carol",
+                                "asSecret": SECRETS["carol"]}})
+    assert padded["ok"] is False
+    assert "casts only as itself" in padded["diagnostics"][0]["message"]
+    assert [r for r in _wal(fresh) if r.get("record") == "quorum-vote"] == []
+    # casting as itself through the hatch still reaches the quorum code
+    own = _payload(port, "bob", "revl_verbs",
+                   {"name": "revl_approve", "args": {"hash": ticket_hash}})
+    assert own["ok"] is True
+    votes = [r for r in _wal(fresh) if r.get("record") == "quorum-vote"]
+    assert [(v["voter"], v["boundBy"]) for v in votes] == [("bob", "transport")]
+
+
+def test_resolved_call_sees_through_the_hatch():
+    from revl.mcp.disclosure import resolved_call
+
+    direct = {"name": "revl_approve", "arguments": {"hash": "h", "asToken": "x"}}
+    assert resolved_call(direct) == ("revl_approve", direct["arguments"])
+    hatch = {"name": "revl_verbs",
+             "arguments": {"name": "revl_approve", "args": {"asToken": "x"}}}
+    assert resolved_call(hatch) == ("revl_approve", {"asToken": "x"})
+    lookup = {"name": "revl_verbs", "arguments": {"topic": "ops"}}
+    assert resolved_call(lookup) == ("revl_verbs", {"topic": "ops"})
+    # a malformed hatch stays the discovery call: the server refuses it by name
+    bad = {"name": "revl_verbs", "arguments": {"name": "revl_approve"}}
+    assert resolved_call(bad) == ("revl_verbs", {"name": "revl_approve"})
+    assert resolved_call(None) == (None, None)
+    # the name is stripped exactly as `_hatch_call` strips it
+    padded = {"name": "revl_verbs",
+              "arguments": {"name": " revl_approve ", "args": {"asToken": "x"}}}
+    assert resolved_call(padded) == ("revl_approve", {"asToken": "x"})
+    # a nested hatch stays the discovery call: the server refuses it
+    nested = {"name": "revl_verbs", "arguments": {
+        "name": "revl_verbs", "args": {"name": "revl_approve", "args": {}}}}
+    assert resolved_call(nested)[0] == "revl_verbs"
+    listy = {"name": "revl_verbs",
+             "arguments": {"name": "revl_approve", "args": []}}
+    assert resolved_call(listy)[0] == "revl_verbs"
+
+
+def test_a_hatch_estop_is_an_estop_for_the_profile_gate():
+    from revl.mcp.live_profile import is_estop
+
+    def call(arguments):
+        return {"method": "tools/call",
+                "params": {"name": "revl_verbs", "arguments": arguments}}
+
+    assert is_estop(call({"name": "revl_estop", "args": {}})) is True
+    assert is_estop(call({"name": "revl_estop"})) is False
+    assert is_estop(call({"name": "revl_export", "args": {}})) is False
+    assert is_estop({"method": "tools/call",
+                     "params": {"name": "revl_estop"}}) is True
+
+
+@needs_cordis
 def test_the_cast_label_is_the_only_difference_from_stdio(fresh, serving, tmp_path,
                                                           monkeypatch):
     """stdio records `boundBy: "session"`, HTTP records `"transport"`, and every

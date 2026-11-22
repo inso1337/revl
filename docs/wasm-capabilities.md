@@ -72,7 +72,7 @@ Float comparison reads as a wasm trap there as any failed assertion does.
 than an unimplemented case. The tier's values are canonical-ABI cells: a u32
 count then one 8-byte slot per element, addressed positionally, with no
 representable key hash, no persistent-tree node, and no per-key comparison an
-untagged slot could perform (`List.indexOf` is refused for the same reason).
+untagged slot could perform (`List.indexOf` over a List of records, lists or Floats is refused for the same reason).
 A persistent map therefore needs a new value model (key equality, hashing and
 structural sharing), not just another slot encoding. Components that need one
 should use a hosted backend (or express the state through coeffects on this
@@ -85,8 +85,8 @@ ABI model. The substrate's rule: **`length`, `push`, `concat`, `slice`,
 `charAt`, `charCodeAt`, plus the reader builtins `split`, `join` and `Str`'s
 `indexOf`, `startsWith`, `endsWith`, `codepoint_at` (and the
 arithmetic/rendering builtins) lower; `repeat`, the `Map` operations,
-`List.indexOf` and the four ASCII classifiers (`is_digit`, `is_alpha`,
-`is_alnum`, `is_space`) do not.**
+`List.indexOf` over a List of records/lists/Float and the four ASCII
+classifiers (`is_digit`, `is_alpha`, `is_alnum`, `is_space`) do not.**
 
 | builtin | on | wasm? | notes / exact refusal |
 |---|---|---|---|
@@ -101,7 +101,8 @@ arithmetic/rendering builtins) lower; `repeat`, the `Map` operations,
 | `div_trunc` / `div_floor` / `div_euclid` / `mod` | Int | ✅ | named integer ops, same result every tier |
 | `checked_div_trunc` / `_floor` / `_euclid` / `checked_mod` | Int | ✅ | total forms: zero divisor → `Err(...)`, no trap |
 | `indexOf(v)` | Str | ✅ | `$str_index_of`: byte substring scan, returns the **code-point index** of the match (or `-1`), matching py/ts |
-| `indexOf(v)` | List | ❌ | `indexOf is not lowerable on this tier yet for List — the element comparison has no representation here; use a hosted backend` |
+| `indexOf(v)` | List[Str], List[Int], List[Int32], List[Bool] | ✅ | `$list_index_of_str` (byte equality, `$str_eq`) / `$list_index_of_slot` (the slot's i64 pattern); the first matching index, or `-1`. Pulled in on demand like the other reader helpers |
+| `indexOf(v)` | List of any other element | ❌ | `indexOf is not lowerable on this tier yet for List — the element comparison has no representation here for 'List[...]' (only List[Str]/List[Int]/List[Int32]/List[Bool] have one); use a hosted backend` |
 | `split(sep)` | Str | ✅ | `$str_split` → `List[Str]`: JS-shape (trailing empties kept, `""` → per-code-point pieces) |
 | `join(sep)` | List[Str] | ✅ | `$str_join`: elements joined by `sep` over the bump heap; `[]` → `""` |
 | `repeat(n)` | Str | ❌ | `unsupported builtin method 'repeat'` |
@@ -113,11 +114,24 @@ linear-memory `Str`/`List` ABI, closing the gap the concat-built **writer**
 (`log_line`) already crossed. The three reader helpers are pulled into a module
 only on demand (like `$f64_to_str`), so a component that never splits/joins/
 searches keeps a byte-identical helper preamble. What still does **not** run on
-the substrate is `repeat`, the `Map` operations, `List.indexOf` (the
-per-element comparison the harness's wire protocol never reaches) and the four
+the substrate is `repeat`, the `Map` operations, `List.indexOf` over a List of
+records, lists or Floats (a List of Str/Int/Int32/Bool is fine) and the four
 ASCII classifiers `is_digit` / `is_alpha` / `is_alnum` / `is_space`
 (`unsupported builtin method 'is_digit'`); those are emitted as compile-time
 refusals, so a wasm target never silently degrades.
+
+Two language-surface forms the module-function lowering also takes (issue #3145):
+
+- **`Str` ordering.** `<`, `<=`, `>`, `>=` over two `Str` call `$str_cmp`, a byte
+  comparison that is code-point order for valid UTF-8 (a prefix sorts first),
+  the order every other tier gives. Pulled in on demand.
+- **Untyped empty lists.** `var out = []` takes its element type from how the
+  rest of its block uses it: the first `out = out.push(e)` / `out.concat(l)`
+  (typed in the scope that binding sees, so a loop variable or a later `let`
+  resolves), else a `return out` against the declared return type. A record
+  literal field takes its declared field type, so `{ ok: false, params: [] }`
+  returned as that record pins `params`. A list nothing types is still refused
+  by name (`an untyped empty list literal needs an expected List type`).
 
 ## The service boundary
 
@@ -471,7 +485,7 @@ A harness-shaped component that must also run on the substrate:
 
 1. **Most string work lowers** — `length`/`push`/`concat`/`slice`/`charAt`/
    `charCodeAt`, plus the reader trio `split`/`join`/`Str.indexOf`. Only
-   `repeat` and `List.indexOf` still need expressing with the others (or moving
+   `repeat` and `List.indexOf` over records/lists/Floats still need expressing with the others (or moving
    into a `fn` that stays on hosted tiers).
 2. **Return Str/List/record/Opt/Result from services is fine** (linear-memory
    boundary), and `Float` is a native f64 value everywhere; avoid `Map` values

@@ -89,6 +89,18 @@ def _raiser_list(tokens) -> str:
     return ", ".join(_raiser_name(t) for t in sorted(tokens))
 
 
+def _drain_driver_residue(driver) -> list:
+    """Take the driver's unreported compensation residue (`NotReversed`
+    records of disposed frames, `_Driver._compensation_residue`) and empty
+    it, so a long-lived session does not keep every record (issue #3381)."""
+    held = getattr(driver, "_compensation_residue", None)
+    if not held:
+        return []
+    taken = list(held)
+    held.clear()
+    return taken
+
+
 class SessionError(RuntimeError):
     """The session cannot do what was asked (no runtime, nothing loaded…).
 
@@ -850,6 +862,21 @@ def _activation_error():
     from ..run import ActivationError  # noqa: PLC0415 — lazy: run imports cordis
 
     return ActivationError
+
+
+def _component_config(ir: dict, config: dict, name: str) -> dict:
+    """`run.component_config`: a component's composition row config under the
+    host-supplied table (issue #3484)."""
+    from ..run import component_config  # noqa: PLC0415 (lazy: run imports cordis)
+
+    return component_config(ir or {}, config, name)
+
+
+def _configure_rows_from_host(ir: dict, config: dict | None) -> dict:
+    """`composition.configure_rows_from_host` (issue #3484)."""
+    from ..composition import configure_rows_from_host  # noqa: PLC0415
+
+    return configure_rows_from_host(ir, config)
 
 
 def _capturing_driver_class():
@@ -1630,6 +1657,10 @@ class Session:
                 f"implementation, so it may never enter a running composition; "
                 f"`revl_check` lists them (docs/holes.md)")
         self._enforce_environment_contract(ir, config)
+        # issue #3484: a host table for a row's component is a value change to
+        # that row (426 §3.1 level 3), typed and recorded in the rows IR, so
+        # what the manifest and the audit report is what runs
+        ir = _configure_rows_from_host(ir, config)
         self._enforce_sandbox(ir)
         self._enforce_evidence(ir)
         # item 246, Slice 2: the policy-owned `requires approval` gate. A component
@@ -2250,16 +2281,24 @@ class Session:
         self._refuse_if_halted("swap")   # item 443
         checkpoint = _LoadCheckpoint(self)
         try:
+            ir = _configure_rows_from_host(ir, self.config)
             plan = self._plan_swap(driver, ir, migrate, agent_authored)
         except BaseException as exc:
             checkpoint.restore(self)
             _name_the_candidate(exc, ir)
             raise
         try:
-            return self._cut_over(driver, ir, origin, plan)
+            said = self._cut_over(driver, ir, origin, plan)
         except ApprovalRequired as exc:
             _name_the_candidate(exc, ir)
             raise
+        # Issue #3381: the frames disposed at this swap may have left
+        # `NotReversed` records (an `undo` that did not put a key back). The
+        # answer names them, in `unload`'s `compensationResidue` shape, and
+        # the driver's list is drained: a reported record is not kept, and one
+        # that no answer read is what `unload` reports.
+        said["compensationResidue"] = _drain_driver_residue(driver)
+        return said
 
     def _plan_swap(self, driver, ir: dict, migrate: str,
                    agent_authored: bool) -> "_SwapPlan":
@@ -4014,7 +4053,7 @@ class Session:
             "componentStates": states,
         }
 
-    async def _plug(self, name: str, module) -> None:
+    async def _plug(self, name: str, module, ir: dict) -> None:
         """Bring one component up from `module`, awaiting an async body exactly
         as `run._Driver._load` does for the whole composition."""
         driver = self._driver
@@ -4023,7 +4062,8 @@ class Session:
             raise SessionError(
                 f"the composition has no component `{name}` to load — the plan "
                 "artifact is inconsistent with its resulting IR")
-        fiber = driver.root.plugin(body, driver.config.get(name, {}))
+        fiber = driver.root.plugin(body,
+                                   _component_config(ir, driver.config, name))
         driver.fibers[name] = fiber
         await driver._flush()
         if fiber.state == driver.FiberState.LOADING:
@@ -4045,7 +4085,7 @@ class Session:
             return {"name": name, "absent": name not in driver.fibers,
                     "state": None, "providedKeys": self._provided_keys()}
         if op["op"] == "load":
-            self._run(self._plug(name, module))
+            self._run(self._plug(name, module, driver.ir))
             fiber = driver.fibers.get(name)
             state = driver.FiberState(fiber.state).name if fiber is not None else None
             return {"name": name, "absent": fiber is None, "state": state,
@@ -4092,7 +4132,7 @@ class Session:
                 # reported through `_restore_entry` like a FAILED fiber.
                 state: str | None = None
                 try:
-                    self._run(self._plug(name, running_module))
+                    self._run(self._plug(name, running_module, running_ir))
                     fiber = driver.fibers.get(name)
                     state = (driver.FiberState(fiber.state).name
                              if fiber is not None else None)
@@ -4211,7 +4251,8 @@ class Session:
     def restore(self, snap: dict, profile=None,
                 report: dict | None = None, *,
                 gate_reads: dict[str, str] | None = None,
-                agent_supplied: bool = False) -> dict:
+                agent_supplied: bool = False,
+                compile_profile=None) -> dict:
         """Re-admit a snapshot into this (empty) session by replaying
         admission — compile through the gate, then boot. A component the
         current checker rejects fails loudly and loads nothing. `profile` is
@@ -4223,7 +4264,21 @@ class Session:
         from .persist import restore as _restore  # noqa: PLC0415 — lazy
 
         return _restore(self, snap, profile=profile, report=report,
-                        gate_reads=gate_reads, agent_supplied=agent_supplied)
+                        gate_reads=gate_reads, agent_supplied=agent_supplied,
+                        compile_profile=compile_profile)
+
+    def rehold_compensation_residue(self, *answers) -> None:
+        """Put back the `compensationResidue` of answers a caller does not
+        return to its client (issue #3381). A swap or rollback answer drains
+        the driver's records into itself; a caller that discards that answer
+        hands its records back here, so the next answer or the boundary report
+        names them and none is lost."""
+        held = getattr(self._driver, "_compensation_residue", None)
+        if held is None:
+            return
+        for answer in answers:
+            if isinstance(answer, dict):
+                held.extend(answer.get("compensationResidue") or ())
 
     def unload(self) -> dict:
         """Tear down and report the residue checks — R4 from inside the
@@ -5654,10 +5709,16 @@ class Session:
 
         Called BEFORE the `prompts` snapshot and `_reset`, once the frames'
         Phase-2 drain and the owner's `finalize_abort` have run."""
-        if owner is None:
-            return []
-        residue = owner.collect_compensation_residue()
-        owner.prompts["residue"] += len(residue)
+        residue = ([] if owner is None
+                   else owner.collect_compensation_residue())
+        # Issue #3381: records left by frames disposed at an earlier swap are
+        # no longer in the owner's registry; the driver holds them until an
+        # answer reports them. Merged by identity, then drained.
+        seen = {id(rec) for rec in residue}
+        residue += [rec for rec in _drain_driver_residue(self._driver)
+                    if id(rec) not in seen]
+        if owner is not None:
+            owner.prompts["residue"] += len(residue)
         return residue
 
     def _teardown_report(self, driver, residue=()) -> dict:
@@ -6063,8 +6124,9 @@ class Session:
         async def _plug() -> None:
             for comp in turn_components:
                 name = comp["name"]
-                fiber = runtime_mod.plug(driver.root, getattr(module, name),
-                                         driver.config.get(name, {}))
+                fiber = runtime_mod.plug(
+                    driver.root, getattr(module, name),
+                    _component_config(driver.ir, driver.config, name))
                 driver.fibers[name] = fiber
                 await driver._flush()
                 if fiber.state == driver.FiberState.LOADING:

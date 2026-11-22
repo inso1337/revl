@@ -250,7 +250,8 @@ def test_ts_tier_emits_bigint_aware_json(consumer_ir):
     # `Int` field is JS `bigint`, which the builtin throws on) rather than
     # returning the builtin result bare.
     assert "JSON.stringify(v, (_k, x) =>" in out
-    assert '"@@revlBigInt:"' in out
+    assert '"@@revlBigInt"' in out
+    assert ".split(prefix)" in out  # the count check that guards the rewrite
 
 
 def test_rust_tier_emits_json_bodies(consumer_ir):

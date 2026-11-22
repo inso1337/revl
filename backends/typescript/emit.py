@@ -2690,6 +2690,36 @@ def _await_statement(expr: dict, ctx: "_Ctx") -> str:
     return "await " + rendered
 
 
+#: Host acquisitions that create a resource a `handoff` state vector carries,
+#: the ts peers of py's `_Closable`: a `Map` (its entries ARE the state) and a
+#: `Pool` (state `null`, its type pinned). Emitted with `track()` only inside a
+#: component that declares a `handoff`, so every other program is unchanged.
+_HANDOFF_RESOURCE_FNS = {"Map.new", "Pool.open"}
+
+
+def _handoff_resource(component: dict, step: dict) -> Optional[str]:
+    """The IR bind name of a bound `let-effect` acquisition that belongs to the
+    component's declared `handoff` state vector (item 53), or None.
+
+    Py's `_Closable` resources register themselves on the activating frame;
+    this tier's resources are plain runtime objects, so the emitter tells the
+    frame explicitly (`$revl_frame.track(<bind>)`), keeping the captured vector
+    in acquisition order, the order the successor reproduces, which is what
+    makes the positional restore sound."""
+    if step.get("step") != "let-effect":
+        return None
+    handoff = component.get("handoff")
+    if not isinstance(handoff, dict) or not handoff.get("key"):
+        return None
+    acquire = step.get("acquire")
+    if not isinstance(acquire, dict) or acquire.get("kind") != "host":
+        return None
+    if acquire.get("fn") not in _HANDOFF_RESOURCE_FNS:
+        return None
+    bind = step.get("bind")
+    return bind if isinstance(bind, str) else None
+
+
 def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
                     indent: str, lines: list[str], frame_var: Optional[str]) -> None:
     """One step of the activation body, appended to `lines`.
@@ -2764,6 +2794,15 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
                     lines.append(f"{indent}const {bind_name} = {acquire}")
                 else:
                     lines.append(f"{indent}{_asi_safe(acquire)}")
+            # item 53: a component that declares a `handoff` carries its
+            # stateful resources on the activation frame, so a swap can capture
+            # them from the live provider before teardown and seat them in the
+            # successor (runtime.ts `swapProvider`). `tracked` is only non-None
+            # for a bound let-effect of a resource, whose emitted local
+            # `bind_name` the branches above just bound.
+            tracked = _handoff_resource(component, step)
+            if tracked is not None and frame_var is not None:
+                lines.append(f"{indent}{frame_var}.track({bind_name})")
             undo = _expr(step["undo"], ctx)
             acquire_node = step.get("acquire") or {}
             b_key = step.get("bind") or _acquire_method_name(acquire_node)
@@ -3133,6 +3172,19 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
     if provides:
         keys = ", ".join(_string(_host_key(k)) for k in provides)
         lines.append(f"  provide: [{keys}],")
+    handoff = component.get("handoff")
+    if isinstance(handoff, dict) and handoff.get("key"):
+        # item 53: the declared state contract, carried onto the emitted
+        # component so a swap engine can correlate predecessor and successor
+        # by the key they provide and capture its live state before teardown
+        # (docs/state-handoff.md; runtime.ts `swapProvider`). Additive: a
+        # component with no `handoff` emits exactly as before. The key takes
+        # the same host spelling the `provide` row above uses.
+        decl = f"{{ key: {_string(_host_key(handoff['key']))}"
+        if handoff.get("type"):
+            decl += f", type: {_string(handoff['type'])}"
+        decl += " }"
+        lines.append(f"  handoff: {decl},")
 
     # item 131: a body containing an `await` step (or an async-flagged
     # `effect`/`let-effect`/`emit` — an awaited acquisition or emission) compiles
@@ -3204,8 +3256,16 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
     # WeakMap), so teardown behaviour is unchanged for those components except
     # that a raising inverse is now caught instead of starving every
     # earlier-registered entry.
+    # item 53: a component that declares a `handoff` always builds the Frame,
+    # it is where `track()` records the state vector a swap captures, even if
+    # an acquisition shape `_has_bracket` does not see (the emitted `track` is
+    # itself conditional on the acquisition, so this only guarantees the frame).
     needs_frame = _needs_frame(component, doc_ctx)
-    frame_var = "$revl_frame" if (needs_frame or _has_bracket(component)) else None
+    declares_handoff = (isinstance(component.get("handoff"), dict)
+                        and bool(component["handoff"].get("key")))
+    frame_var = ("$revl_frame"
+                 if (needs_frame or _has_bracket(component) or declares_handoff)
+                 else None)
     if frame_var is not None:
         lines.append(f"    const {frame_var} = new Frame(ctx, {_string(name)})")
 
@@ -3679,6 +3739,8 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx",
         return f"{_TS_INT_ARITH[method]}({target}, {args[0]})"
     if method in _TS_CHECKED_DIV:
         return f"{_TS_CHECKED_DIV[method]}({target}, {args[0]})"
+    if method in _TS_CHECKED_ARITH:
+        return f"{_TS_CHECKED_ARITH[method]}({target}, {args[0]})"
     # Int/Int32 width conversions (docs/arithmetic.md). Int is a bigint and
     # Int32 a number: widening is `BigInt(...)`, narrowing goes through
     # `revlI32(Number(...))`, which re-imposes the 32-bit bound and traps.
@@ -4430,6 +4492,15 @@ _TS_CHECKED_DIV = {
     "checked_mod": "revlCheckedMod",
 }
 
+# The total arithmetic forms (docs/arithmetic.md): BigInt is arbitrary
+# precision, so the value is exact and only the i64 bound check decides
+# between Ok and Err("revl: Int overflow").
+_TS_CHECKED_ARITH = {
+    "checked_add": "revlCheckedAdd",
+    "checked_sub": "revlCheckedSub",
+    "checked_mul": "revlCheckedMul",
+}
+
 # The receiver type a builtin reached through `?.` has: an `optcall` IR node
 # carries no `recv` tag (unlike a `builtin` node, which lowering annotates for
 # exactly this reason), so the one lowering that dispatches on it — `to_int`,
@@ -4577,17 +4648,47 @@ function revlCheckedMod(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | {
   return { kind: "Ok", value: ((a % m) + m) % m }
 }"""
 
+# The total arithmetic forms (docs/arithmetic.md): BigInt computes the exact
+# value, so an i64 bound check on the result is the whole overflow test.
+_REVL_CHECKED_ARITH_HELPER = """function revlCheckedAdd(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | { kind: "Err"; value: string } {
+  const r = a + b
+  if (r < REVL_I64_MIN || r > REVL_I64_MAX) return { kind: "Err", value: 'revl: Int overflow' }
+  return { kind: "Ok", value: r }
+}
+function revlCheckedSub(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | { kind: "Err"; value: string } {
+  const r = a - b
+  if (r < REVL_I64_MIN || r > REVL_I64_MAX) return { kind: "Err", value: 'revl: Int overflow' }
+  return { kind: "Ok", value: r }
+}
+function revlCheckedMul(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | { kind: "Err"; value: string } {
+  const r = a * b
+  if (r < REVL_I64_MIN || r > REVL_I64_MAX) return { kind: "Err", value: 'revl: Int overflow' }
+  return { kind: "Ok", value: r }
+}"""
+
 
 def _uses_int_arith(node) -> bool:
     """Does anything in this IR call a named integer division or modulo?
-    The total (`checked_*`) forms count too: they route through the same
-    helpers' tier (and need `revlI64` for the one overflowing quotient)."""
+    The total division (`checked_*`) forms count too: they route through the
+    same helpers' tier (and need `revlI64` for the one overflowing quotient)."""
     if isinstance(node, dict):
         if node.get("method") in _TS_INT_ARITH or node.get("method") in _TS_CHECKED_DIV:
             return True
         return any(_uses_int_arith(v) for v in node.values())
     if isinstance(node, (list, tuple)):
         return any(_uses_int_arith(v) for v in node)
+    return False
+
+
+def _uses_checked_arith(node) -> bool:
+    """Does this IR call one of the total `+`/`-`/`*` forms? They need only
+    the i64 bound constants (`_REVL_I64_HELPER`), not the division helpers."""
+    if isinstance(node, dict):
+        if node.get("method") in _TS_CHECKED_ARITH:
+            return True
+        return any(_uses_checked_arith(v) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_uses_checked_arith(v) for v in node)
     return False
 
 
@@ -4763,7 +4864,7 @@ def _revl_helpers(ir: dict) -> list[str]:
         out.extend([_REVL_EQ_HELPER, ""])
     if _uses_assert(ir):
         out.extend([_REVL_SHOW_HELPER, ""])
-    if _uses_bounded_int(ir) or _uses_int_arith(ir):
+    if _uses_bounded_int(ir) or _uses_int_arith(ir) or _uses_checked_arith(ir):
         out.extend([_REVL_I64_HELPER, ""])
     # issue #2147: the result-side coercion of a verbatim `@ts` body declared
     # `Int`. Gated by the same predicate the wrapper itself uses.
@@ -4773,6 +4874,8 @@ def _revl_helpers(ir: dict) -> list[str]:
         out.extend([_REVL_I32_HELPER, ""])
     if _uses_int_arith(ir):
         out.extend([_REVL_INT_ARITH_HELPER, ""])
+    if _uses_checked_arith(ir):
+        out.extend([_REVL_CHECKED_ARITH_HELPER, ""])
     if _uses_str_methods(ir):
         out.extend([_REVL_STR_HELPER, ""])
     if _uses_split(ir):

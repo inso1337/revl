@@ -133,8 +133,9 @@ name. This is the Go analog of the Rust backend's `_revl_realm` fix.
   `confidential.REDACTED` so a polyglot composition redacts to the same marker).
   The whole block is emitted ONLY under `_SECRET_MODE`, so a secret-free
   document stays byte-identical.
-- **Still rejected with a clear `EmitError`**: the four ASCII classifiers
-  (`unknown v3 builtin method 'is_digit'`).
+- **ASCII classifiers** (`is_digit`, `is_alpha`, `is_alnum`, `is_space`): a
+  chained string comparison in a func literal that binds the receiver once,
+  total on the empty string.
 
 ## Tier-fidelity fixes (fuzzer-found, E5 exit test)
 

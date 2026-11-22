@@ -794,9 +794,14 @@ placement run.
 
 `revl deploy` drives one participant process per deploy-map process, each with
 its own WAL, and writes ONE durable decision next to its deploy state
-(`<wal-dir>/deploy/<map-stem>/0/decision.jsonl`). A conductor killed after
-deciding and before telling a peer leaves that record, and the stranded
-participant is settled against it, not against a guess:
+(`<wal-dir>/deploy/<map-stem>/0/decision.jsonl`). The record is written once
+the run has decided: an abort when a commit fails, before any abort message
+goes out, and an approval only after every participant has applied (and, for
+`revl federation-apply`, its health probes). A conductor
+killed after an abort decision and before telling a peer leaves that record,
+and the stranded participant is settled against it, not against a guess. A
+conductor killed earlier leaves only the pending record, which reads as no
+decision:
 
 ```
 revl recover --wal <participant>.wal --decision decision.jsonl

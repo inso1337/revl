@@ -692,7 +692,8 @@ service Pool { async fn lease() -> Sock }
 service App { async fn run() -> Str }
 
 component Backend provides pool: Pool {
-  provide pool { async fn lease() = open_sock() }
+  let sock = effect open_sock() undo close_sock(0)
+  provide pool { async fn lease() = sock }
 }
 component Worker requires pool: Pool provides app: App {
   provide app { async fn run() = "ok" }
@@ -703,7 +704,7 @@ component Worker requires pool: Pool provides app: App {
 # the identical swap must ADMIT (guards against over-refusal).
 _INBOUND_VAL_APP = _INBOUND_RES_APP.replace(
     "async fn lease() -> Sock", "async fn lease() -> Str"
-).replace("async fn lease() = open_sock()", 'async fn lease() = "s"')
+).replace("async fn lease() = sock", 'async fn lease() = "s"')
 
 _INBOUND_PLACEMENT = """
 [processes.backend]
@@ -1039,8 +1040,9 @@ service Cache {
 service ApiSvc { async fn hit() -> Sock }
 
 component MemCache provides cache: Cache {
+  let sock = effect open_sock() undo close_sock(0)
   provide cache {
-    async fn get(k) = open_sock()
+    async fn get(k) = sock
     async fn put(k, v) = v
   }
 }
