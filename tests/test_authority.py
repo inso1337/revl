@@ -11,8 +11,12 @@ import os
 import subprocess
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+import pytest
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _legacy_emission_ir import value_rule_off  # noqa: E402
 from revl import authority as authority_graph  # noqa: E402
 from revl import query  # noqa: E402
 from revl.compiler import compile_files, compile_source  # noqa: E402
@@ -243,9 +247,7 @@ def test_a_role_that_steers_the_unnameable_may_reach_any_capability():
 
 
 def test_an_unknown_capability_still_names_the_roles_that_may_reach_it():
-    source = HOST.replace("emission[payments.charge] fn charge_host",
-                          "emission[payments.charge] fn charge_host")
-    miss = _source(source, "nothing.here")
+    miss = _source(HOST, "nothing.here")
     assert miss["ok"] is False
     # the role reaches `*` (the component's provided emission is unscoped)
     assert [row["role"] for row in miss["unnameableRoles"]] == ["analyst"]
@@ -255,9 +257,6 @@ def test_an_unknown_capability_still_names_the_roles_that_may_reach_it():
 def test_a_first_class_dispatch_is_an_unnameable_reach():
     """An IR from before issue #2842 can still carry a first-class dispatch.
     The audit lists it as `*`; the graph keeps it rather than dropping it."""
-    sys.path.insert(0, os.path.join(ROOT, "tests"))
-    from _legacy_emission_ir import value_rule_off  # noqa: PLC0415
-
     source = (
         "model role analyst on_device reaches [*]\n"
         "extern emission[payments.charge] fn charge(n: Str) -> Str "
@@ -424,3 +423,54 @@ def test_an_unchanged_composition_reports_no_change():
     delta = _source(HOST, previous=previous)["diff"]
     assert delta["added"] == delta["removed"] == delta["changed"] == []
     assert delta["widened"] is False
+
+
+# ----------------------------- a `previous` the client supplied is not trusted
+
+
+@pytest.mark.parametrize("previous, where", [
+    # an edge record missing `from`, `kind` or `to`
+    ({"graph": {"edges": [{}]}}, "graph.edges[0]"),
+    ({"graph": {"edges": [{"from": "a", "to": "b"}]}}, "graph.edges[0]"),
+    ({"graph": {"edges": [{"from": "a", "kind": "k", "to": 3}]}},
+     "graph.edges[0]"),
+    # an edge that is not an object
+    ({"graph": {"edges": ["role:r --routes--> component:C"]}},
+     "graph.edges[0]"),
+    ({"graph": {"edges": [None]}}, "graph.edges[0]"),
+    # a role node without a name, and a node that is not an object
+    ({"graph": {"nodes": [{"kind": "role"}]}}, "graph.nodes[0]"),
+    ({"graph": {"nodes": [{"kind": "role", "name": "r"}, 7]}},
+     "graph.nodes[1]"),
+    # a role whose `reaches` is not a list of strings
+    ({"graph": {"nodes": [{"kind": "role", "name": "r", "reaches": [[1]]}]}},
+     "graph.nodes[0].reaches"),
+    ({"graph": {"edges": {"from": "a"}}}, "graph.edges"),
+    ({"graph": []}, "graph"),
+])
+def test_a_previous_with_a_malformed_record_is_refused_not_raised(previous,
+                                                                  where):
+    result = _authority([MESH], previous=previous)
+    assert result["ok"] is False
+    assert result["error"].startswith("not an authority graph document")
+    assert where in result["error"]
+
+
+def test_a_malformed_previous_is_refused_through_the_mcp_tool():
+    response = server.handle({
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": {"name": "revl_query_authority",
+                   "arguments": {"files": [MESH], "target": "payments.charge",
+                                 "previous": {"graph": {"edges": [{}]}}}}})
+    result = response["result"]
+    assert result["isError"] is True
+    assert "graph.edges[0]" in result["structuredContent"]["error"]
+
+
+def test_a_previous_without_precision_still_diffs():
+    """`precision` is optional in a supplied edge: a missing one is not a
+    loosening and not a crash."""
+    previous = _authority([MESH])
+    for edge in previous["graph"]["edges"]:
+        edge.pop("precision")
+    assert _authority([MESH], previous=previous)["diff"]["added"] == []

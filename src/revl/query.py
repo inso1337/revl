@@ -991,7 +991,7 @@ _ASSUMPTION_AUTHORITY_JOIN = (
 
 
 def authority(ir: dict, capability: str, previous: dict = None) -> dict:
-    """which model roles can reach a capability? — the authority graph, built
+    """which model roles can reach a capability? The authority graph, built
     by joining the audit's boundary surface with the declared model routes and
     secret bindings. `previous` is a previously emitted `authority` result;
     with it the answer also reports what a pending update adds and changes.
@@ -1033,12 +1033,16 @@ def authority(ir: dict, capability: str, previous: dict = None) -> dict:
         secrets=authority_graph.secrets_of(graph, capability),
     )
     if previous is not None:
-        if (not isinstance(previous, dict)
-                or not isinstance(previous.get("graph"), dict)):
+        problem = ("`graph` object is missing"
+                   if not isinstance(previous, dict)
+                   or not isinstance(previous.get("graph"), dict)
+                   else authority_graph.graph_problem(previous["graph"]))
+        if problem:
             return {"ok": False, "query": "authority",
                     "error": "not an authority graph document: expected the "
                              "`--json` result of `revl query authority`, "
-                             "whose `graph` object this diff reads"}
+                             "whose `graph` object this diff reads; "
+                             + problem}
         result["diff"] = authority_graph.diff(previous["graph"], graph)
     return result
 

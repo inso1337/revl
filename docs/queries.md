@@ -1,6 +1,6 @@
 # Composition queries — ask the audit, don't just read it
 
-**Status:** implemented — `revl query {emits-to,withdraw,depends-on,reaches,drift,authority}`,
+**Status:** implemented: `revl query {emits-to,withdraw,depends-on,reaches,drift,authority}`,
 `src/revl/query.py`, MCP tools `revl_query_*` (`src/revl/mcp/query_tools.py`).
 Tests: `tests/test_query.py` over `tests/fixtures/query_mesh.rvl`; the
 authority graph has its own `tests/test_authority.py` over
@@ -339,7 +339,7 @@ distinguished these worlds, so adding modes needed no second vocabulary: a
 result says which world it answers for, and an agent reading it knows whether
 it holds a proof, a may-analysis, or a log.
 
-## 10. `authority` — which model role can reach a capability?
+## 10. `authority`: which model role can reach a capability?
 
 The per-composition queries answer what a component reaches. The operator of
 several compositions has a different question: **who** can reach a capability,
@@ -420,7 +420,7 @@ predicted behaviour:
 - Which compositions a federation pin joins is not modelled yet (the second
   slice of issue #2702).
 
-### 10.1 `--diff` — which pending update widens authority?
+### 10.1 `--diff`: which pending update widens authority?
 
 Adding authority is the direction that needs review. `--diff PREV.json` takes
 a previous `authority` result and reports the edges the new generation adds

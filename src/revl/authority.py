@@ -49,6 +49,8 @@ two runs produce byte-identical JSON.
 
 from __future__ import annotations
 
+import collections
+
 from .audit_diff import audit_report
 
 # Edge precisions, the same two words every query uses (docs/queries.md §2).
@@ -319,54 +321,42 @@ def capabilities(graph: dict) -> list[str]:
                    if node.get("kind") == "capability"})
 
 
-def _adjacency(graph: dict, skip: tuple = ()) -> dict[str, list[str]]:
-    out: dict[str, list[str]] = {}
+def _adjacency(graph: dict, skip: tuple = ()) -> dict[str, list[dict]]:
+    """`node -> [edge record]`, sorted by `(to, kind)` so a search is stable.
+    The records are the edges themselves: a path is a list of edges, so two edge
+    kinds between one pair of nodes are never confused."""
+    out: dict[str, list[dict]] = {}
     for edge in graph.get("edges") or []:
-        if edge["kind"] in skip:
-            continue
-        out.setdefault(edge["from"], []).append(edge["to"])
+        if edge["kind"] not in skip:
+            out.setdefault(edge["from"], []).append(edge)
     for source in out:
-        out[source] = sorted(set(out[source]))
+        out[source].sort(key=lambda edge: (edge["to"], edge["kind"]))
     return out
 
 
 def _shortest_path(adjacency: dict, start: str, goal: str):
-    """The lexicographically smallest shortest path, or None."""
+    """The shortest path from `start` to `goal` as a list of edge records, ties
+    broken by `(to, kind)`, or None. A path to the start itself is empty."""
     if start == goal:
-        return [start]
+        return []
     seen = {start}
-    queue = [[start]]
+    queue = collections.deque([[]])
     while queue:
-        path = queue.pop(0)
-        for nxt in adjacency.get(path[-1], ()):
-            if nxt in seen:
+        path = queue.popleft()
+        here = path[-1]["to"] if path else start
+        for edge in adjacency.get(here, ()):
+            if edge["to"] in seen:
                 continue
-            if nxt == goal:
-                return path + [nxt]
-            seen.add(nxt)
-            queue.append(path + [nxt])
+            if edge["to"] == goal:
+                return path + [edge]
+            seen.add(edge["to"])
+            queue.append(path + [edge])
     return None
 
 
-def _edges_by_pair(graph: dict) -> dict:
-    return {(edge["from"], edge["to"]): edge
-            for edge in graph.get("edges") or []}
-
-
-def _path_precision(graph: dict, path: list[str]) -> str:
-    by_pair = _edges_by_pair(graph)
-    precisions = {by_pair[(path[i], path[i + 1])]["precision"]
-                  for i in range(len(path) - 1)
-                  if (path[i], path[i + 1]) in by_pair}
+def _path_precision(edges: list[dict]) -> str:
+    precisions = {edge["precision"] for edge in edges}
     return APPROX if APPROX in precisions or not precisions else EXACT
-
-
-def _hops(graph: dict, path: list[str]) -> list[dict]:
-    """The edge records along `path`, so a witness says HOW each step holds
-    (which extern, which route) and not only which nodes it visits."""
-    by_pair = _edges_by_pair(graph)
-    return [by_pair[(path[i], path[i + 1])] for i in range(len(path) - 1)
-            if (path[i], path[i + 1]) in by_pair]
 
 
 def _witness(graphs: list, start: str, goal: str):
@@ -414,9 +404,9 @@ def roles_reaching(graph: dict, capability: str) -> list[dict]:
         entry = {"role": node["name"],
                  "residence": node.get("residence"),
                  "opaque": bool(node.get("opaque")),
-                 "path": path,
-                 "hops": _hops(graph, path),
-                 "precision": _path_precision(graph, path)}
+                 "path": [start] + [edge["to"] for edge in path],
+                 "hops": list(path),
+                 "precision": _path_precision(path)}
         if unnameable:
             entry["unnameable"] = True
         out.append(entry)
@@ -433,6 +423,38 @@ def secrets_of(graph: dict, capability: str) -> list[str]:
                   and edge["kind"] == "binds")
 
 
+def graph_problem(graph) -> str | None:
+    """Why `graph` is not a graph this module's own `build_graph` would emit, or
+    None. `diff` reads a document a client supplied, so every record it indexes
+    is checked here and the refusal names the first one that is wrong."""
+    if not isinstance(graph, dict):
+        return "`graph` is not an object"
+    for field, required in (("edges", ("from", "kind", "to")),
+                            ("nodes", ("kind", "name"))):
+        records = graph.get(field)
+        if records is None:
+            continue
+        if not isinstance(records, list):
+            return f"`graph.{field}` is not a list"
+        for index, record in enumerate(records):
+            if (not isinstance(record, dict)
+                    or not all(isinstance(record.get(name), str)
+                               for name in required)):
+                names = ", ".join(f"`{name}`" for name in required)
+                return (f"`graph.{field}[{index}]` is not an object with "
+                        f"string {names}")
+            if field == "edges" and "precision" in record and not isinstance(
+                    record["precision"], str):
+                return f"`graph.edges[{index}].precision` is not a string"
+            reaches = record.get("reaches", [])
+            if field == "nodes" and record["kind"] == "role" and not (
+                    isinstance(reaches, list)
+                    and all(isinstance(item, str) for item in reaches)):
+                return (f"`graph.nodes[{index}].reaches` is not a list of "
+                        "strings")
+    return None
+
+
 def _edge_key(edge: dict) -> str:
     return f"{edge['from']} --{edge['kind']}--> {edge['to']}"
 
@@ -446,7 +468,8 @@ def _changed_edges(before: dict, after: dict) -> list[dict]:
     """Edges present on both sides whose precision moved."""
     out = []
     for key in sorted(before.keys() & after.keys()):
-        old, new = before[key]["precision"], after[key]["precision"]
+        old = before[key].get("precision")
+        new = after[key].get("precision")
         if old != new:
             out.append({"what": "edge", "id": key, "field": "precision",
                         "before": old, "after": new,
