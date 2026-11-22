@@ -828,6 +828,7 @@ class _ModuleLoader:
                 if use.names is not None:
                     for name in use.names:
                         self._import_named(module, used, name, use.line)
+                    self._refuse_import_declared_locally(module, used, use)
                 else:
                     if use.alias in module.aliases:
                         raise RevlError(abs_path, use.line,
@@ -839,6 +840,31 @@ class _ModuleLoader:
         except Exception:
             self._stack.pop()
             raise
+
+    def _refuse_import_declared_locally(self, importer: _LoadedModule,
+                                        used: _LoadedModule, use) -> None:
+        """Issue #3364: a name in a `use` list that is a fn or extern of the
+        used module may not also be declared by the importing module. Two
+        declarations of one name in a file are a duplicate; an import and a
+        declaration are the same collision, and the compiler used to pick the
+        local one without a word, so every call in the module reached it and
+        the imported one was unreachable. Refused at the local declaration, the
+        way a duplicate is. `use ... as alias` lists no names and is not
+        affected."""
+        imported = [name for name in use.names
+                    if name in used.public_fns or name in used.public_externs]
+        if not imported:
+            return
+        local = sorted(
+            (decl.line, decl.name)
+            for decl in list(importer.program.fn_decls) + list(importer.program.externs)
+            if decl.name in imported)
+        if local:
+            line, name = local[0]
+            raise RevlError(
+                importer.path, line,
+                f"`{name}` is imported from {use.path} on line {use.line} and "
+                f"declared on line {line}; rename one of them")
 
     def _import_named(self, importer: _LoadedModule, used: _LoadedModule,
                       name: str, line: int) -> None:

@@ -6,7 +6,32 @@ the guarantee it enforces and, where possible, suggests the fix.
 
 from __future__ import annotations
 
+import re
+
 from .why import WhyTrace, render as render_why
+
+# The module-privacy pass (`compiler._apply_module_privacy`) renames a top-level
+# name that two modules share to `<name>__m<N>`, an internal spelling the author
+# never wrote. A diagnostic shows the name as written (issue #3364).
+_MODULE_SUFFIX = re.compile(r"(?<=[A-Za-z0-9_])__m\d+(?![A-Za-z0-9_])")
+
+
+def source_spelling(text: str | None) -> str | None:
+    """`text` with every `__m<N>` module suffix removed from the names in it."""
+    if not text or "__m" not in text:
+        return text
+    return _MODULE_SUFFIX.sub("", text)
+
+
+def _source_spelling_deep(value):
+    """`source_spelling` applied to every string inside a structured field."""
+    if isinstance(value, str):
+        return source_spelling(value)
+    if isinstance(value, dict):
+        return {key: _source_spelling_deep(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_source_spelling_deep(item) for item in value]
+    return value
 
 
 class RevlError(Exception):
@@ -17,6 +42,16 @@ class RevlError(Exception):
                  fix: str | None = None, repair: dict | None = None,
                  acquire: dict | None = None, declared_class: dict | None = None,
                  repairs: list[dict] | None = None):
+        message = source_spelling(message)
+        hint = source_spelling(hint)
+        expected = source_spelling(expected)
+        actual = source_spelling(actual)
+        fix = source_spelling(fix)
+        navigate = _source_spelling_deep(navigate)
+        repair = _source_spelling_deep(repair)
+        acquire = _source_spelling_deep(acquire)
+        declared_class = _source_spelling_deep(declared_class)
+        repairs = _source_spelling_deep(repairs)
         self.filename = filename
         self.line = line
         self.message = message
@@ -60,7 +95,7 @@ class RevlError(Exception):
         trace = render_why(why)
         if trace:
             rendered += "\n" + trace
-        super().__init__(rendered)
+        super().__init__(source_spelling(rendered))
 
 
 class RevlErrors(RevlError):

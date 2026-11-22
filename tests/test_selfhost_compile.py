@@ -1561,6 +1561,36 @@ _IMPORT_REFUSED = {
             "event Placed(key: id) { id: Str }\n\n"
             "pub service Store { fn put(x: Int) -> Str }\n"),
     }),
+    # Issue #3364: a fn or extern a `use` list imports may not also be declared
+    # by the importer, refused at the local declaration (line 11 of `doc.rvl`).
+    "a_fn_declared_locally": (
+        "`dice` is imported from ./lib.rvl on line 1 and declared on line 11; "
+        "rename one of them", {
+            "sub/doc.rvl": ('use "./lib.rvl" { Store, dice }\n\n' + _STORE_COMPONENT % "1"
+                            + "\nfn dice(a: Int) -> Int { return a }\n"),
+            "sub/lib.rvl": (
+                "pub fn dice(x: Int, z: Int) -> Int { return x + z }\n\n"
+                "pub service Store { fn put(x: Int) -> Str }\n"),
+        }),
+    "an_extern_declared_locally": (
+        "`raw` is imported from ./lib.rvl on line 1 and declared on line 11; "
+        "rename one of them", {
+            "sub/doc.rvl": ('use "./lib.rvl" { Store, raw }\n\n' + _STORE_COMPONENT % "1"
+                            + "\nextern pure fn raw(x: Int) -> Int = @py { return x }\n"),
+            "sub/lib.rvl": (
+                "pub extern pure fn raw(x: Int) -> Int = @py { return x }\n\n"
+                "pub service Store { fn put(x: Int) -> Str }\n"),
+        }),
+    "a_pub_fn_declared_locally_in_a_used_module": (
+        "`dice` is imported from ./inner.rvl on line 1 and declared on line 3; "
+        "rename one of them", {
+            "sub/doc.rvl": _STORE_DOC % "1",
+            "sub/lib.rvl": (
+                'use "./inner.rvl" { dice }\n\n'
+                "pub fn dice(a: Int) -> Int { return a }\n\n"
+                "pub service Store { fn put(x: Int) -> Str }\n"),
+            "sub/inner.rvl": "pub fn dice(x: Int, z: Int) -> Int { return x + z }\n",
+        }),
     # One `use` further down: the reference checks the names `lib.rvl` imports
     # too, though nothing of `inner.rvl` is carried.
     "a_private_fn_two_uses_away": ("`hidden` is module-private in", {
