@@ -932,6 +932,17 @@ answers with the roster of known ones rather than with nothing.
 
 ## Drive a live session
 
+One session runs at a time per process. The Python runtime keeps the running
+session's owner and host trace once for the whole process, so two sessions
+driven from two threads take turns: a `revl_load`, `revl_swap`, `revl_call` or
+any other verb that runs a session's code waits while another session's verb
+runs on another thread. After 30 s of waiting it fails with a `SESSION_BUSY`
+error naming the session and thread that hold the turn. A verb of a second
+session started on the thread that holds the turn (from inside a method body)
+fails at once, since waiting there would never end. `revl_estop` does not wait.
+Each session still gets a thread of its own; the price is that one session's
+step can delay another's by up to its own length.
+
 ### `revl_load`
 
 Boot a composition IN MEMORY and hold it live. Nothing is written to disk, so a
