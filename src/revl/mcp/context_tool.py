@@ -52,16 +52,18 @@ CONTEXT_TOOL = {
     "description":
         "WHAT CAN THIS COMPONENT SEE? The service declarations a component "
         "must provide and may require, cut verbatim from the source with no "
-        "provider body: operations, types, `emission` markers, the "
-        "`requires`/`provides` clause to write, the `use` line when the "
-        "service lives in another module, and a `hash` that moves on a "
-        "signature edit and never on a doc edit. Read it instead of the "
-        "composition before writing a component. Builds from the parse, so a "
-        "component whose body does not check yet still grounds. `budget` "
-        "shrinks the pack in a fixed order (docs off, then collapse, from the "
-        "last service backwards) and never drops a service. `tokens` gives "
-        "the pack beside the files it was cut from: on a tiny file the raw "
-        "file can be the cheaper read.",
+        "provider body: operations, the `type` declarations their signatures "
+        "name, `emission` markers, the `requires`/`provides` clause to write, "
+        "the `use` line when the service lives in another module, and a "
+        "`hash` that moves on a signature or type-field edit and never on a "
+        "doc edit. Read it instead of the composition before writing a "
+        "component. Builds from the parse, so a component whose body does not "
+        "check yet still grounds (a parse or load error, such as a missing "
+        "`use` or `asset` file, still stops it). `budget` shrinks the pack in "
+        "a fixed order (docs off, then collapse, from the last service "
+        "backwards) and never drops a service. `tokens` gives the pack beside "
+        "the files it was cut from: on a tiny file the raw file can be the "
+        "cheaper read.",
     "inputSchema": {
         "type": "object",
         "properties": {

@@ -137,7 +137,10 @@ def test_budget_sheds_docs_then_collapses_from_the_last_service_back():
     record = context([path], component="NotesConsole", budget=200)
     budget = record["budget"]
     assert budget["fits"] and record["tokens"]["pack"] <= 200
-    assert budget["steps"] == ["docs off: Ranker", "docs off: NotesConsoleRpc",
+    # WebUI's own doc sits above `type Asset`, which stands between the two,
+    # so its docs step is the type's doc block
+    assert budget["steps"] == ["docs off: Ranker", "docs off: WebUI",
+                               "docs off: NotesConsoleRpc",
                                "collapsed: Ranker", "collapsed: WebUI",
                                "collapsed: NotesConsoleRpc"]
     for name in order:  # every service stays named, with its clause and hash
@@ -344,3 +347,190 @@ def test_a_header_ending_in_a_duration_is_cut_at_its_suffix(tail):
               "component C requires s: S provides p: P " + tail)
     header = context(["d.rvl"], sources={"d.rvl": source}, component="C")["header"]
     assert header == "component C requires s: S provides p: P " + tail.split(" {")[0]
+
+
+# ----- the types a signature names are cut beside the service and hashed
+
+NOTES = """\
+// a note
+pub type Note = {{ id: Str, {fields} }}
+type Tag = Hot | Cold(Note)
+type Tags = List[Tag]
+type Unused = {{ x: Int }}
+service NoteStore {{
+  fn get(id: Str) -> Opt[Note]
+  fn tags() -> Tags
+}}
+service Other {{
+  fn note() -> Note
+  fn notes() -> List[Note]
+}}
+component MemoryStore provides store: NoteStore requires other: Other {{
+  provide store {{
+    fn get(id) = None
+    fn tags() = []
+  }}
+}}
+"""
+
+
+def _notes(fields: str = "title: Str", **kwargs) -> dict:
+    return context(["n.rvl"], sources={"n.rvl": NOTES.format(fields=fields)},
+                   component="MemoryStore", **kwargs)
+
+
+def test_a_type_a_signature_names_is_cut_beside_it_and_moves_its_hash():
+    record = _notes()
+    store = next(e for e in record["services"] if e["service"] == "NoteStore")
+    assert [t["name"] for t in store["types"]] == ["Note", "Tags", "Tag"]
+    assert "// a note\npub type Note = { id: Str, title: Str }" in record["pack"]
+    assert "type Tag = Hot | Cold(Note)" in record["pack"]
+    assert "type Tags = List[Tag]" in record["pack"]
+    assert "Unused" not in record["pack"]  # no signature names it
+    assert _body_keywords(record["pack"]) == []
+    # the record's fields are what the author needed, and editing one moves the
+    # hash of every service that shows the type
+    edited = _notes("title: Int, extra: Bool")
+    assert "pub type Note = { id: Str, title: Int, extra: Bool }" in edited["pack"]
+    for name in ("NoteStore", "Other"):
+        before = next(e for e in record["services"] if e["service"] == name)
+        after = next(e for e in edited["services"] if e["service"] == name)
+        assert before["hash"] != after["hash"], name
+    # a type nothing shown names does not move a hash
+    unrelated = context(["n.rvl"], component="MemoryStore", sources={
+        "n.rvl": NOTES.format(fields="title: Str").replace("x: Int", "x: Str")})
+    assert [e["hash"] for e in unrelated["services"]] == [
+        e["hash"] for e in record["services"]]
+
+
+def test_a_type_doc_or_layout_edit_leaves_the_hash_alone():
+    plain = _notes()
+    reflowed = context(["n.rvl"], component="MemoryStore", sources={"n.rvl": NOTES.format(
+        fields="title: Str").replace("// a note\n", "// the note, reworded\n").replace(
+        "{ id: Str, title: Str }", "{\n  id:    Str,   // key\n  title: Str\n}")})
+    assert [e["hash"] for e in plain["services"]] == [
+        e["hash"] for e in reflowed["services"]]
+
+
+def test_a_type_two_services_name_is_cut_once():
+    pack = _notes()["pack"]
+    assert pack.count("pub type Note =") == 1
+    assert pack.index("pub type Note =") > pack.index("service NoteStore")
+
+
+def test_collapse_prints_no_type_and_docs_off_takes_the_type_docs(monkeypatch):
+    full = _notes()
+    docs_off = _notes(budget=count_tokens(full["pack"]) - 3)
+    assert docs_off["budget"]["steps"][0].startswith("docs off")
+    assert "// a note" not in docs_off["pack"] and "pub type Note" in docs_off["pack"]
+    collapsed = _notes(budget=1)
+    assert "type Note" not in collapsed["pack"]
+    assert collapsed["budget"]["fits"] is False
+    assert all(e["hash"] for e in collapsed["services"])
+
+
+def test_a_type_from_another_module_carries_its_use_line(tmp_path):
+    (tmp_path / "lib.rvl").write_text(
+        "pub type Row = { id: Int }\n"
+        "pub service Reader {\n  fn read() -> Row\n}\n")
+    app = tmp_path / "app.rvl"
+    app.write_text('use "lib.rvl" { Reader }\n\n'
+                   "component C requires r: Reader {\n}\n")
+    record = context([str(app)], component="C")
+    reader = record["services"][0]
+    assert [(t["name"], t["use"]) for t in reader["types"]] == [
+        ("Row", 'use "lib.rvl" { Row }')]
+    assert 'use "lib.rvl" { Row }\npub type Row = { id: Int }' in record["pack"]
+    assert sorted(Path(p).name for p in record["tokens"]["rawFiles"]) == [
+        "app.rvl", "lib.rvl"]
+
+
+def test_an_event_a_signature_names_is_cut_as_written():
+    src = ("event Ping(key: id) { id: Str, at: Int }\n"
+           "service S {\n  fn last() -> Opt[Ping]\n}\n")
+    record = _one(src)
+    assert record["services"][0]["types"][0]["text"] == (
+        "event Ping(key: id) { id: Str, at: Int }")
+
+
+def test_the_cli_prints_a_structured_diagnostic_for_a_load_error(tmp_path):
+    bad = tmp_path / "bad.rvl"
+    bad.write_text("service S {\n  fn f( -> Int\n}\n")
+    run = [sys.executable, "-P", "-m", "revl", "context", str(bad)]
+    as_json = subprocess.run(run + ["--json"], capture_output=True, text=True)
+    assert as_json.returncode == 1
+    assert json.loads(as_json.stdout)["diagnostics"][0]["line"] == 2
+    plain = subprocess.run(run, capture_output=True, text=True)
+    assert plain.returncode == 1 and plain.stdout == ""
+    assert plain.stderr.startswith("error: ")
+
+
+def test_a_service_naming_no_type_keeps_the_hash_it_always_had():
+    # pinned: the sha256 prefix of the service's token list alone
+    assert _one("service S {\n  fn f(x: Int) -> Int\n}\n")["services"][0][
+        "hash"] == "952fd11fabfec2fc"
+
+
+def test_a_cyclic_or_self_referential_type_is_cut_once():
+    src = ("type Tree = { kids: Forest, next: Opt[Tree] }\n"
+           "type Forest = { trees: List[Tree] }\n"
+           "service S {\n  fn root() -> Tree\n}\n")
+    types = _one(src)["services"][0]["types"]
+    assert sorted(t["name"] for t in types) == ["Forest", "Tree"]
+
+
+def test_pub_on_a_type_moves_the_hash_but_pub_on_a_service_does_not():
+    def hash_of(src: str) -> str:
+        return _one(src)["services"][0]["hash"]
+
+    body = "service S {\n  fn f() -> T\n}\n"
+    assert hash_of("type T = { a: Int }\n" + body) != hash_of(
+        "pub type T = { a: Int }\n" + body)
+    assert hash_of("type T = { a: Int }\n" + body) == hash_of(
+        "type T = { a: Int }\npub " + body)
+
+
+def test_a_private_type_gets_no_use_line_and_a_transitive_one_none_either(tmp_path):
+    (tmp_path / "lib.rvl").write_text(
+        "type Inner = { n: Int }\n"
+        "pub type Row = { inner: Inner }\n"
+        "pub service Reader {\n  fn read() -> Row\n}\n")
+    app = tmp_path / "app.rvl"
+    app.write_text('use "lib.rvl" { Reader }\n\ncomponent C requires r: Reader {\n}\n')
+    record = context([str(app)], component="C")
+    types = {t["name"]: t["use"] for t in record["services"][0]["types"]}
+    assert types == {"Row": 'use "lib.rvl" { Row }', "Inner": None}
+    assert "use \"lib.rvl\" { Inner }" not in record["pack"]
+    assert "type Inner = { n: Int }" in record["pack"]
+
+
+def test_an_unrelated_type_named_like_a_builtin_is_not_pulled_in(tmp_path):
+    (tmp_path / "lib.rvl").write_text(
+        "pub service Reader {\n  fn read() -> Opt[Int]\n}\n")
+    app = tmp_path / "app.rvl"
+    app.write_text('use "lib.rvl" { Reader }\n\ntype Opt = { x: Int }\n\n'
+                   "component C requires r: Reader {\n}\n")
+    assert context([str(app)], component="C")["services"][0]["types"] == []
+
+
+def test_docs_off_on_one_service_leaves_the_type_another_shows_alone():
+    src = ("// the row\ntype Row = { id: Int }\n"
+           "service A {\n  fn a() -> Row\n  fn b() -> Row\n}\n"
+           "service B {\n  fn c() -> Row\n  fn d() -> Row\n}\n"
+           "component C requires a: A, b: B {\n}\n")
+    full = _one(src, component="C")
+    assert full["pack"].count("// the row") == 1
+    # the last service's docs step finds nothing of its own to shed
+    record = _one(src, component="C", budget=count_tokens(full["pack"]) - 1)
+    assert "docs off: B" not in record["budget"]["steps"]
+    collapsed = _one(src, component="C", budget=1)
+    assert "type Row" not in collapsed["pack"]
+
+
+def test_a_documented_event_named_through_another_type_is_cut_whole():
+    src = ("// a ping\nevent Ping(key: id) { id: Str, at: Int }\n"
+           "type Wrap = { ping: Ping }\n"
+           "service S {\n  fn last() -> Wrap\n}\n")
+    types = _one(src)["services"][0]["types"]
+    assert [t["name"] for t in types] == ["Wrap", "Ping"]
+    assert types[1]["text"] == "// a ping\nevent Ping(key: id) { id: Str, at: Int }"

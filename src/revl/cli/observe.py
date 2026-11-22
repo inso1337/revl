@@ -51,7 +51,12 @@ def _run_context(args) -> int:
     try:
         record = context(args.files, component=args.component, budget=args.budget)
     except RevlError as error:
-        print(f"error: {error}", file=sys.stderr)
+        if args.json:
+            # the structured diagnostic the MCP verb answers with
+            from ..diagnostics import report
+            print(json.dumps(report(error), indent=2))
+        else:
+            print(f"error: {error}", file=sys.stderr)
         return 1
     if args.json:
         print(json.dumps(record, indent=2))
