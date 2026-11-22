@@ -197,6 +197,8 @@ def test_a_waiting_thread_gives_up_after_the_timeout_naming_the_holder(
 
 
 def test_estop_does_not_wait_for_the_turn(hook):
+    """A guard, not a red on base: there it fails only through the
+    AttributeError on `_TURN_HOLDER`, which does not exist before #3380."""
     first = _loaded(hook.ir)
     second = _loaded(hook.ir)
     release, entered = threading.Event(), threading.Event()
@@ -233,4 +235,71 @@ def test_the_offloaded_teardown_completes_beside_a_call(hook):
         thread.join()
     assert result["settled"] is True
     assert out == {"result": id(first._owner)}
+    first.unload()
+
+
+def test_an_unload_on_another_thread_never_clears_a_running_calls_owner(hook):
+    """`_reset` clears the owner slot. It takes the turn, so a call that is
+    mid-method on another thread never sees None (review of #3610). The
+    unload's `_reset` waits (up to 0.5 s) for the other session's call to be
+    inside its method; on 0029ec7e8 it got there and cleared the slot."""
+    first = _loaded(hook.ir)
+    second = _loaded(hook.ir)
+    unloading, entered, cleared = (threading.Event(), threading.Event(),
+                                   threading.Event())
+
+    def fn():
+        entered.set()
+        cleared.wait(0.5)        # head: the reset waits for the turn instead
+        return _owner_id()
+
+    def reset():
+        unloading.set()
+        entered.wait(0.5)        # head: the unload holds the turn, no entry
+        try:
+            Session._reset(second)
+        finally:
+            cleared.set()
+
+    second._reset = reset
+    unloader = threading.Thread(target=second.unload)
+    unloader.start()
+    try:
+        assert unloading.wait(30)
+        hook.fn = fn
+        said = _owner_call(first)
+    finally:
+        hook.fn = _owner_id
+        entered.set()
+        unloader.join()
+    assert said == id(first._owner)
+    assert not second.loaded
+    first.unload()
+
+
+def test_a_refused_unload_or_abort_leaves_the_session_as_it_was(hook):
+    first = _loaded(hook.ir)
+    second = _loaded(hook.ir)
+    owner = second._owner
+    caught = []
+
+    def fn():
+        for verb in (second.unload, second.abort):
+            try:
+                verb()
+            except SessionError as exc:
+                caught.append(exc.code)
+        return _owner_id()
+
+    hook.fn = fn
+    try:
+        assert _owner_call(first) == id(first._owner)
+    finally:
+        hook.fn = _owner_id
+    assert caught == ["SESSION_BUSY", "SESSION_BUSY"]
+    assert second.loaded and second._owner is owner
+    assert owner._verdict is None
+    assert not any(getattr(f, "_aborting", False) for f in owner._registry)
+    assert _owner_call(second) == id(owner)
+    second.unload()
     first.unload()

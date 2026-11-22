@@ -111,7 +111,9 @@ class _SessionTurn:
 
 def _one_turn(method):
     """Hold the process's session turn for the whole of `method` (issue #3380):
-    the methods that set the runtime's session owner and clear it again."""
+    the methods that set or clear the runtime's session owner, and the verbs
+    that change session state before their first drive, so a refusal leaves
+    that state as it was."""
     @functools.wraps(method)
     def held(self, *args, **kwargs):
         with _SessionTurn(self):
@@ -1664,16 +1666,19 @@ class Session:
                 self._loop = None
                 loop.close()
             return
-        self._loop = None
-        try:
-            for task in pending:
-                task.cancel()
-            if pending:
-                loop.run_until_complete(
-                    asyncio.gather(*pending, return_exceptions=True))
-            loop.run_until_complete(loop.shutdown_asyncgens())
-        finally:
-            loop.close()
+        # issue #3380: the drain runs the session's tasks, so it takes the turn
+        # like any other drive (a no-op inside `_reset` or `load`, which hold it)
+        with _SessionTurn(self):
+            self._loop = None
+            try:
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True))
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            finally:
+                loop.close()
 
     @property
     def loaded(self) -> bool:
@@ -4377,6 +4382,7 @@ class Session:
             if isinstance(answer, dict):
                 held.extend(answer.get("compensationResidue") or ())
 
+    @_one_turn
     def unload(self) -> dict:
         """Tear down and report the residue checks — R4 from inside the
         protocol, so an agent can prove its component leaves nothing.
@@ -4912,6 +4918,7 @@ class Session:
             manifest["actions"] = [dict(a) for a in self._actions]
         return manifest
 
+    @_one_turn
     def commit_confirm(self, manifest_hash: str) -> dict:
         """Execute the approved commit — step 2 (Decision 3/4). The durable
         record order is exactly: `commit-approved`, then each `flushed`, then the
@@ -4943,6 +4950,7 @@ class Session:
                 "flushResidue": flush["flushResidue"], "discharged": discharged,
                 "prompts": prompts, "compensationResidue": residue, **report}
 
+    @_one_turn
     def abort(self) -> dict:
         """Abort the session (Decision 5): mark every live frame aborting BEFORE
         any teardown starts, drop the deferral queue (zero cost, zero crossings),
@@ -5899,6 +5907,7 @@ class Session:
         if wal is not None and getattr(wal, "is_open", True):
             wal.close()
 
+    @_one_turn
     def _reset(self) -> None:
         if self._driver is not None:
             self._driver.runtime.clear_session_owner()
