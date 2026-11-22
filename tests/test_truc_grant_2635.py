@@ -310,6 +310,7 @@ def test_cli_assemble_refuses_a_grant_removed_after_add(tmp_path):
     assert "not in the granted set" in r.stdout
     assert "db" in r.stdout
 
+
 @pytest.mark.skipif(not CORDIS_PY.exists(),
                     reason="cordis-py runtime not installed "
                            "(run `sh backends/python/setup.sh`)")
@@ -326,3 +327,93 @@ def test_cli_declaring_two_grants_before_either_add_does_not_deadlock(tmp_path):
     r = _truc(proj, "add", "pg_database")
     assert r.returncode == 0, r.stdout + r.stderr
     assert _truc(proj, "assemble").returncode == 0
+
+
+def _lock_text(proj: Path) -> str:
+    return (proj / "truc.lock").read_text(encoding="utf-8")
+
+
+def _widen(proj: Path, old: str, new: str) -> None:
+    toml = proj / "truc.toml"
+    text = toml.read_text(encoding="utf-8")
+    assert old in text, text
+    toml.write_text(text.replace(old, new))
+
+
+@pytest.mark.skipif(not CORDIS_PY.exists(),
+                    reason="cordis-py runtime not installed "
+                           "(run `sh backends/python/setup.sh`)")
+def test_cli_widening_the_grant_after_add_changes_the_lock_at_assemble(tmp_path):
+    """The grant is the operator's authority and lives in `truc.toml`, so a
+    widening is accepted there; `assemble` rewrites the lock's `granted` from
+    the grant now in force, so the widening shows in the lock diff and cannot
+    bypass review. `assemble --check` is a dry run and writes nothing."""
+    proj = _project(tmp_path,
+                    f'{REQUIRING} = {{ registry = "local", grant = ["db"] }}')
+    assert _truc(proj, "add", REQUIRING).returncode == 0
+    assert _truc(proj, "assemble").returncode == 0
+    assert _lock_row(proj)["granted"] == ["db"]
+    before = _lock_text(proj)
+
+    _widen(proj, 'grant = ["db"]', 'grant = ["db", "cache"]')
+
+    # the dry run reports valid and leaves the lock alone
+    r = _truc(proj, "assemble", "--check")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _lock_text(proj) == before
+
+    r = _truc(proj, "assemble")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _lock_row(proj)["granted"] == ["cache", "db"]
+    after = json.loads(_lock_text(proj))
+    # only `granted` moved: the pins and the admission record are untouched
+    prior = json.loads(before)
+    for row in (after, prior):
+        for entry in row["trucs"]:
+            entry.pop("granted")
+    assert after == prior
+
+
+@pytest.mark.skipif(not CORDIS_PY.exists(),
+                    reason="cordis-py runtime not installed "
+                           "(run `sh backends/python/setup.sh`)")
+def test_cli_a_refused_assemble_leaves_the_lock_alone(tmp_path):
+    """The lock follows an admitted assembly only: narrowing the grant makes
+    `assemble` refuse, and the refusal writes nothing, lock included."""
+    proj = _project(tmp_path,
+                    f'{REQUIRING} = {{ registry = "local", grant = ["db"] }}')
+    assert _truc(proj, "add", REQUIRING).returncode == 0
+    before = _lock_text(proj)
+
+    _widen(proj, 'grant = ["db"]', "grant = []")
+    r = _truc(proj, "assemble")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert _lock_text(proj) == before
+
+
+@pytest.mark.skipif(not CORDIS_PY.exists(),
+                    reason="cordis-py runtime not installed "
+                           "(run `sh backends/python/setup.sh`)")
+def test_cli_rm_ignores_a_sibling_declared_but_not_yet_added(tmp_path):
+    """A row's `[trucs]` entry is declared before its add (that is where its
+    grant lives), so `rm` must gather only the rows actually vendored, as `add`
+    does. `assemble` still refuses the declared-but-unvendored row by name."""
+    proj = _project(
+        tmp_path,
+        f'{REQUIRING} = {{ registry = "local", grant = ["db"] }}\n'
+        'pg_database = { registry = "local" }')
+    assert _truc(proj, "add", REQUIRING).returncode == 0
+    assert _truc(proj, "add", "pg_database").returncode == 0
+    toml = proj / "truc.toml"
+    toml.write_text(toml.read_text(encoding="utf-8").rstrip("\n")
+                    + '\nmysql_database = { registry = "local" }\n')
+
+    r = _truc(proj, "assemble")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "mysql_database" in r.stdout + r.stderr
+    assert "not vendored" in r.stdout + r.stderr
+
+    r = _truc(proj, "rm", REQUIRING)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "removed" in r.stdout
+    assert not (proj / "trucs" / REQUIRING).exists()

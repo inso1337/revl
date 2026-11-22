@@ -15,15 +15,16 @@ use "../externs.rvl" { json_parse, json_stringify, sha256_hex, host_wiring }
 
 // `grant` is the `requires` keys the row's `[trucs]` entry allows, the same
 // vocabulary `apply`'s grant uses. A missing entry or a missing key parses as
-// [] — fail-closed: a vendored row's reach is bounded to what the operator
+// [], which is fail-closed: a vendored row's reach is bounded to what the operator
 // granted it, and an entry that grants nothing admits nothing that requires a
 // service (issue #2635).
 type Truc      = { name: Str, registry: Str, grant: List[Str] }
 type Manifest  = { name: Str, registry: Str, entry: List[Str], trucs: List[Truc] }
-// `skip_missing` lets `add` gather the rows that are actually vendored: an
-// operator declares the `[trucs]` entry (with its grant) before the first add,
-// so at add time a declared sibling may have no vendored file yet. Every other
-// verb reads every declared row and refuses a missing one by name.
+// `skip_missing` lets `add` and `rm` gather the rows that are actually
+// vendored: an operator declares the `[trucs]` entry (with its grant) before
+// the first add, so a declared sibling may have no vendored file yet.
+// `assemble` and `assemble --check` read every declared row and refuse a
+// missing one by name, because the project cannot assemble without it.
 type Spec      = { entry: List[Str], trucs: List[Str], skip_missing: Bool }
 type EntryFile = { path: Str, source: Str }
 type Vendored  = { name: Str, path: Str, source: Str }
@@ -102,7 +103,7 @@ fn plan_assemble_spec(mj: Str) -> Str {
 // candidate. The candidate is admitted from the fetched entry appended by
 // `ordered_with_candidate`, and its `[trucs]` entry may already be declared
 // (that is where its grant lives) while nothing is vendored under `trucs/`
-// yet — so including it here would ask for a file the add has not written.
+// yet, so including it here would ask for a file the add has not written.
 // Siblings declared ahead of their own add are skipped for the same reason
 // (`skip_missing`): without that, declaring two grants before adding either
 // would make each add refuse the other and no order would work.
@@ -122,7 +123,8 @@ fn plan_add_spec(mj: Str, name: Str) -> Str {
 // Same gathering spec as `assemble`, but with one truc excluded — the set the
 // *remainder* must still admit after a `rm`. `rm` proves the assembly stays
 // whole by admitting exactly this (§8.1: the inverse minus the gate, then run
-// the admit chain once over what is left).
+// the admit chain once over what is left). A sibling declared ahead of its own
+// add has nothing vendored yet and is skipped, as `add` skips it (`skip_missing`).
 fn plan_rm_spec(mj: Str, name: Str) -> Str {
   let m: Manifest = json_parse(mj)
   var names: List[Str] = []
@@ -132,7 +134,7 @@ fn plan_rm_spec(mj: Str, name: Str) -> Str {
     }
   }
   let fixed = names
-  let s: Spec = { entry: m.entry, trucs: fixed, skip_missing: false }
+  let s: Spec = { entry: m.entry, trucs: fixed, skip_missing: true }
   return json_stringify(s)
 }
 

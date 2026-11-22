@@ -416,11 +416,11 @@ def read_sources(project_dir: str, spec_json: str) -> str:
     *which* names to read was made by the pure planner and arrives in `spec`.
     Returns `{sources: {abspath: text}, vendored: [{name, path, source}]}`.
 
-    `skip_missing` is set by `add`: an operator declares a row's `[trucs]`
-    entry (with its grant) before the first add, so a declared sibling may
-    have no vendored file yet and add must gather only what is on disk. Every
-    other verb reads every declared row and a missing one is a refusal by
-    name, not a traceback (issue #2635).
+    `skip_missing` is set by `add` and `rm`: an operator declares a row's
+    `[trucs]` entry (with its grant) before the first add, so a declared
+    sibling may have no vendored file yet and they gather only what is on
+    disk. `assemble` and `assemble --check` read every declared row and a
+    missing one is a refusal by name, not a traceback (issue #2635).
     """
     spec = json.loads(spec_json)
     skip_missing = bool(spec.get("skip_missing"))
@@ -708,6 +708,37 @@ def admit_all(ordered_json: str, lock_json: str = "",
     })
 
 
+def _sync_lock_grants(project_dir: str) -> None:
+    """Rewrite each lock row's `granted` from the `[trucs]` grant now in force.
+
+    `assemble` admits every vendored row under the grant `truc.toml` declares
+    today, not the one recorded when the row was added, so the lock must show
+    what this assembly was admitted under: a widened grant then appears in the
+    lock diff beside the capabilities and emissions it re-reports (issue
+    #2635). The grant is the operator's authority and stays in `truc.toml`; the
+    lock is provenance. Only rows `truc.toml` names are touched, and the lock
+    is rewritten only when a row actually changed."""
+    lock_path = pathlib.Path(project_dir, "truc.lock")
+    if not lock_path.exists() or not lock_path.read_text(encoding="utf-8").strip():
+        return
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    rows = lock.get("trucs") if isinstance(lock, dict) else None
+    if not isinstance(rows, list):
+        return
+    current = {t["name"]: sorted(t.get("grant") or [])
+               for t in json.loads(toml_manifest(project_dir)).get("trucs") or []}
+    changed = False
+    for row in rows:
+        if not isinstance(row, dict) or row.get("name") not in current:
+            continue
+        granted = current[row["name"]]
+        if row.get("granted") != granted:
+            row["granted"] = granted
+            changed = True
+    if changed:
+        _write_lock(project_dir, lock)
+
+
 def write_assembly(project_dir: str, manifest_json: str) -> str:
     """Write the admitted composition manifest to `build/assembly.json` — what
     a reviewer reads to see the wiring the gate accepted. An empty
@@ -723,6 +754,9 @@ def write_assembly(project_dir: str, manifest_json: str) -> str:
     out = pathlib.Path(project_dir, "build")
     if out.is_symlink():
         raise _symlink_refusal(out, "build")
+    # the gate admitted the assembly under the CURRENT grants, so the lock
+    # shows them (issue #2635); a dry run never reaches here
+    _sync_lock_grants(project_dir)
     out.mkdir(parents=True, exist_ok=True)
     data = json.loads(manifest_json)
     _write_no_follow(out / "assembly.json", json.dumps(data, indent=2),

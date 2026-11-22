@@ -128,7 +128,8 @@ applies. The flag is read from the command line
 only, never from the environment or `truc.toml`. `add` records how the row was
 admitted in its `truc.lock` entry, `admitted.admission`: `profiled`, or
 `trusted-host-code` when only the flag admitted it, plus `granted`: the
-`requires` keys the entry allowed. That record is bound to the
+`requires` keys the entry grants (`assemble` rewrites it from the current
+grant, so widening a grant shows in the lock diff). That record is bound to the
 row's pinned `sourceHash`, so a later `assemble` admits exactly those bytes
 without the flag. A lock row with no record (written before this rule) is
 admitted under the current rule; if it needs host code, re-add it with the

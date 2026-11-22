@@ -351,10 +351,12 @@ not exist and is not worth building for a machine-only file.
   `assemble --check` reports the same drift without writing (drift is a
   refusal, not a warning: the `registry.verify` regenerate-or-red
   discipline, `src/revl/registry.py:194`, applied to the vendor dir).
-- `granted`: the `requires` keys the `[trucs]` entry granted this row when it
-  was added (issue #2635), so the reach bound the gate applied is visible in
-  review. `assemble` and `rm` re-read the declaration from `truc.toml`; the
-  record is what was admitted, not a second authority.
+- `granted`: the `requires` keys the `[trucs]` entry grants this row (issue
+  #2635). `add` writes it, and `assemble` rewrites it from the grant `truc.toml`
+  declares now, as it re-reports capabilities and emissions, so a widened
+  grant shows in the lock diff. The grant is the operator's authority and
+  lives in `truc.toml`; the lock records what the assembly was admitted under.
+  It is provenance, not a signature. `assemble --check` writes nothing.
 - `capabilities`/`emissions`: the authority the assembly accepted when it
   admitted this truc. `assemble` re-reports the totals so a lockfile diff
   in review *shows authority growth*: the least-authority ranking of
