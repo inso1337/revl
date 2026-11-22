@@ -20,10 +20,12 @@ from __future__ import annotations
 import asyncio
 import copy
 import dataclasses
+import functools
 import hashlib
 import io
 import pickle
 import sys
+import threading
 import weakref
 from fnmatch import fnmatchcase
 
@@ -43,6 +45,78 @@ from .approval import ApprovalRequired
 from .undo_record import undo_cold_start_note, undo_dropped_state_note
 from .approval import UnencodableTicketArgs
 from .approval import _args_digest
+
+
+# Issue #3380: one Session runs at a time per process. The Python runtime keeps
+# the running session's owner (`runtime._SESSION_OWNER`), its host trace and
+# other module slots once for the whole process, so a verb of one session on one
+# thread and a verb of another on a second thread interleaved with the wrong
+# owner in the slot. Every verb that sets those slots, and every drive of a
+# session's loop, takes this turn. Another thread waits for it, up to
+# `_TURN_TIMEOUT` seconds, then gets a SessionError naming the holder. On the
+# thread that holds it, only the same session's own nested steps pass; any other
+# entry (a second session, or this session re-entered from inside its running
+# loop) is refused at once, because waiting there would never end. `estop`
+# takes no turn: it must reach a session whose call is stuck.
+_TURN_LOCK = threading.Lock()
+_TURN_TIMEOUT = 30.0
+_TURN_HOLDER: dict = {"session": None, "thread": None, "label": ""}
+
+
+def _turn_label(session) -> str:
+    return (f"session {id(session):#x} on thread "
+            f"{threading.current_thread().name!r}")
+
+
+class _SessionTurn:
+    """The process's session turn for one session (issue #3380)."""
+
+    __slots__ = ("session", "nested")
+
+    def __init__(self, session) -> None:
+        self.session = session
+        self.nested = False
+
+    def __enter__(self):
+        held = _TURN_HOLDER
+        me = threading.get_ident()
+        if held["thread"] == me:
+            loop = self.session._loop
+            if held["session"] is self.session and not (
+                    loop is not None and loop.is_running()):
+                self.nested = True
+                return self
+            raise SessionError(
+                f"{_turn_label(self.session)} cannot run: {held['label']} holds "
+                "the process's session turn on this same thread. One session "
+                "runs at a time per process (issue #3380), and waiting here "
+                "would never end", code="SESSION_BUSY")
+        timeout = _TURN_TIMEOUT
+        if not _TURN_LOCK.acquire(timeout=timeout):
+            holder = held["label"] or "another session"
+            raise SessionError(
+                f"{_turn_label(self.session)} waited {timeout:g} s for the "
+                f"process's session turn, held by {holder}. One session runs "
+                "at a time per process (issue #3380)", code="SESSION_BUSY")
+        held.update(session=self.session, thread=me,
+                    label=_turn_label(self.session))
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        if not self.nested:
+            _TURN_HOLDER.update(session=None, thread=None, label="")
+            _TURN_LOCK.release()
+        return False
+
+
+def _one_turn(method):
+    """Hold the process's session turn for the whole of `method` (issue #3380):
+    the methods that set the runtime's session owner and clear it again."""
+    @functools.wraps(method)
+    def held(self, *args, **kwargs):
+        with _SessionTurn(self):
+            return method(self, *args, **kwargs)
+    return held
 
 
 
@@ -1083,7 +1157,16 @@ def _handoff_back_pairs(old_ir: dict, new_ir: dict) -> dict[str, str]:
 
 
 class Session:
-    """One live composition, driven step by step."""
+    """One live composition, driven step by step.
+
+    One session runs at a time per process (issue #3380). The Python runtime
+    keeps the running session's owner and host trace in process-wide slots, so
+    sessions on different threads take turns: a `load`, `swap`, `call` or any
+    other step that drives the session's loop waits while another session's
+    step runs on another thread, and fails with a `SessionError` (code
+    ``SESSION_BUSY``) naming the holder after 30 s. A step of a second session
+    started on the thread that holds the turn (from inside a method body, say)
+    fails at once. `estop` does not wait."""
 
     def __init__(self) -> None:
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -1526,14 +1609,25 @@ class Session:
     # -- plumbing ----------------------------------------------------------
 
     def _run(self, coro):
-        if self._loop is None:
-            self._loop = asyncio.new_event_loop()
-            # a session dropped while still loaded never reaches `_reset`;
-            # close its loop when it is collected rather than leave that to
-            # the loop's own finalizer and its ResourceWarning (issue #1720)
-            weakref.finalize(self, _close_abandoned_loop, self._loop)
-        self._own_host_trace()
-        return self._loop.run_until_complete(coro)
+        turn = _SessionTurn(self)
+        try:
+            turn.__enter__()
+        except SessionError:
+            close = getattr(coro, "close", None)
+            if close is not None:
+                close()        # refused before it ran: never awaited, by design
+            raise
+        try:
+            if self._loop is None:
+                self._loop = asyncio.new_event_loop()
+                # a session dropped while still loaded never reaches `_reset`;
+                # close its loop when it is collected rather than leave that to
+                # the loop's own finalizer and its ResourceWarning (issue #1720)
+                weakref.finalize(self, _close_abandoned_loop, self._loop)
+            self._own_host_trace()
+            return self._loop.run_until_complete(coro)
+        finally:
+            turn.__exit__(None, None, None)
 
     def _own_host_trace(self) -> None:
         """Route the host stubs' trace to THIS session's driver while it runs
@@ -1601,6 +1695,7 @@ class Session:
 
     # -- lifecycle ---------------------------------------------------------
 
+    @_one_turn
     def load(self, ir: dict, config: dict | None = None,
              record: bool = False, origin: dict | None = None, *,
              agent_authored: bool | None = None) -> dict:
@@ -2412,6 +2507,7 @@ class Session:
                          pre_pending=pre_pending, policy=migrate,
                          handoff_carry=handoff_carry)
 
+    @_one_turn
     def _cut_over(self, driver, ir: dict, origin: dict | None,
                   plan: "_SwapPlan") -> dict:
         """Tear the running generation down and boot the successor in its place.
@@ -2746,6 +2842,7 @@ class Session:
                 "resources": sum(len(cap) for _, cap in pairs)}
         return report
 
+    @_one_turn
     def _abort_swap(self, old_ir: dict, pre: dict,
                     saved_previous: dict | None,
                     saved_previous_origin: dict | None,
@@ -4596,8 +4693,12 @@ class Session:
         def _drive() -> None:
             driver._settlement_ledger = ledger
             try:
-                self._own_host_trace()             # issue #1859
-                self._loop.run_until_complete(driver._dispose_all(self.ir))
+                # issue #3380: the worker thread takes the process's session
+                # turn like any other drive; a refusal or a timeout is recorded
+                # as the attempt's failure below, never read as a release.
+                with _SessionTurn(self):
+                    self._own_host_trace()         # issue #1859
+                    self._loop.run_until_complete(driver._dispose_all(self.ir))
                 disposal["returned"] = True
             except asyncio.CancelledError:
                 disposal["cancelled"] = True
@@ -6013,6 +6114,7 @@ class Session:
             self._wire_turn(turn_doc, bundle=turn_bundle)
         return AdmitVerdict(True, handle=AdmitHandle(self, keys), keys=keys)
 
+    @_one_turn
     def _wire_turn(self, turn_doc: dict, *,
                    bundle: dict | None = None) -> tuple[str, ...]:
         """Plug an admitted turn's components into the LIVE driver with the
@@ -6380,6 +6482,7 @@ class Session:
 
     # -- interaction -------------------------------------------------------
 
+    @_one_turn
     def call(self, key: str, method: str, args: list | None = None,
              *, raw: bool = False) -> dict:
         """Invoke a provided service operation on the running composition —
