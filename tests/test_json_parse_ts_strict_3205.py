@@ -17,7 +17,6 @@ import json
 import shutil
 import subprocess
 import sys
-import tempfile
 import types
 from pathlib import Path
 
@@ -71,8 +70,7 @@ ACCEPTED = [
 ]
 
 
-def _compile() -> dict:
-    d = Path(tempfile.mkdtemp())
+def _compile(d: Path) -> dict:
     (d / "stdlib").mkdir()
     (d / "stdlib" / "json.rvl").write_text(
         (ROOT / "stdlib" / "json.rvl").read_text(encoding="utf-8"),
@@ -98,7 +96,7 @@ def _emit(backend: str, ir: dict) -> str:
         sys.path.remove(path)
 
 
-def _py_verdicts(ir: dict, docs: list) -> list:
+def _py_verdicts(ir: dict, docs: list, fn: str) -> list:
     code = _emit("python", ir)
     stub = types.ModuleType("runtime")
     stub.__getattr__ = lambda name: (lambda *a, **k: None)  # PEP 562
@@ -115,24 +113,27 @@ def _py_verdicts(ir: dict, docs: list) -> list:
     out = []
     for doc in docs:
         try:
-            out.append(["accept", ns["roundtrip"](doc)])
+            out.append(["accept", ns[fn](doc)])
         except Exception:  # noqa: BLE001 - any refusal is the verdict
             out.append(["refuse", None])
     return out
 
 
-def _ts_verdicts(ir: dict, docs: list) -> list:
+def _ts_verdicts(ir: dict, docs: list, fn: str, d: Path) -> list:
     code = _emit("typescript", ir)
-    d = Path(tempfile.mkdtemp())
     (d / "runtime.ts").write_text("export const host: any = {};\n",
                                   encoding="utf-8")
     pkg = d / "pkg"
     pkg.mkdir()
+    # `fn` is json_parse for the refusal verdict (a NaN must be refused by the
+    # parse itself, not by a later json_stringify) and roundtrip for the
+    # valid-document comparison.
     tail = (
         f"const docs: string[] = {json.dumps(docs)};\n"
         "const out: any[] = [];\n"
         "for (const doc of docs) {\n"
-        "  try { out.push(['accept', roundtrip(doc)]); }\n"
+        f"  try {{ const r: any = {fn}(doc); "
+        "out.push(['accept', typeof r === 'string' ? r : null]); }\n"
         "  catch (e) { out.push(['refuse', null]); }\n"
         "}\n"
         "console.log(JSON.stringify(out));\n")
@@ -144,26 +145,29 @@ def _ts_verdicts(ir: dict, docs: list) -> list:
 
 
 @pytest.fixture(scope="module")
-def ir():
-    return _compile()
+def ir(tmp_path_factory):
+    return _compile(tmp_path_factory.mktemp("json3205_src"))
 
 
 def test_py_tier_refuses_the_malformed_documents(ir):
     """The reference verdict the ts tier is held to."""
-    assert [v[0] for v in _py_verdicts(ir, REFUSED)] == ["refuse"] * len(REFUSED)
+    verdicts = _py_verdicts(ir, REFUSED, "json_parse")
+    assert [v[0] for v in verdicts] == ["refuse"] * len(REFUSED)
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
-def test_ts_tier_refuses_what_the_py_tier_refuses(ir):
-    verdicts = _ts_verdicts(ir, REFUSED)
+def test_ts_tier_refuses_what_the_py_tier_refuses(ir, tmp_path):
+    # json_parse itself, not roundtrip: json_stringify refuses a non-finite
+    # Float, which would hide a NaN the parser let through
+    verdicts = _ts_verdicts(ir, REFUSED, "json_parse", tmp_path)
     accepted = [d for d, v in zip(REFUSED, verdicts) if v[0] == "accept"]
     assert not accepted, f"the ts json_parse accepted malformed JSON: {accepted!r}"
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
-def test_ts_tier_still_agrees_with_py_on_valid_documents(ir):
-    py = _py_verdicts(ir, ACCEPTED)
-    ts = _ts_verdicts(ir, ACCEPTED)
+def test_ts_tier_still_agrees_with_py_on_valid_documents(ir, tmp_path):
+    py = _py_verdicts(ir, ACCEPTED, "roundtrip")
+    ts = _ts_verdicts(ir, ACCEPTED, "roundtrip", tmp_path)
     assert [v[0] for v in py] == ["accept"] * len(ACCEPTED)
     # float spelling is json_stringify's business (py `1e-05`, ts `0.00001`),
     # so compare the decoded documents, not the text
