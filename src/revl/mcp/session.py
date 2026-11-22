@@ -29,6 +29,7 @@ import pickle
 import re
 import sys
 import threading
+import types
 import weakref
 from fnmatch import fnmatchcase
 
@@ -1025,7 +1026,9 @@ def _declares_slo(text: str) -> bool:
     a line starting `slo` followed by `{`, the clause head the parser reads
     (issue #3597). A cheap pre-check, never the answer: a file that passes is
     still parsed, and a file that fails it holds no `slo` block. A file that
-    only names `slow` or `slot` fails it."""
+    only names `slow` or `slot` fails it. The clause head must start a line, as
+    the owner's direction says, so a whole composition written on one line is
+    not found by this pre-check."""
     return bool(_SLO_COMPOSITION_LINE.search(text)
                 and _SLO_CLAUSE_HEAD.search(text))
 
@@ -1396,6 +1399,9 @@ class Session:
         # the fact. All inert for a composition that declares no `slo` block.
         self._slo_ir: dict | None = None      # the document the contract is read off
         self._slo_composition: str | None = None  # the document a divert re-resolves
+        # issue #3597: the contract was named by `configure_slo`, so `load` and
+        # `swap` do not look for another
+        self._slo_explicit = False
         self._slo_latch: str | None = None    # where a pause/halt is written
         self._slo_signer: str | None = None   # the receipt's `signer` member
         self._slo_last: dict | None = None    # the last verdict this session took
@@ -2538,6 +2544,8 @@ class Session:
         had a key (a document that cannot be keyed is not kept)."""
         if not isinstance(source, str):
             raise SessionError("offer_render: `source` must be the module text")
+        if code is not None and not isinstance(code, types.CodeType):
+            raise SessionError("offer_render: `code` must be a code object")
         emit = _backend()[0]
         key = _RenderCache.key(emit, ir)
         if code is None:
@@ -3670,7 +3678,8 @@ class Session:
         signed receipt rather than pretending to a stop it did not perform.
         """
         if composition is not None:
-            self._slo_bind(composition, root)
+            if self._slo_bind(composition, root):
+                self._slo_explicit = True
         if latch is not None:
             self._slo_latch = latch
         if signer is not None:
@@ -3727,11 +3736,11 @@ class Session:
         substring pre-check keeps a load that has no contract to find from
         re-parsing its own sources.
         """
-        if self._slo_composition is not None:
+        if self._slo_explicit:
             return          # issue #3597: `configure_slo` already bound one
         for path in (origin or {}).get("files") or []:
             try:
-                with open(path, encoding="utf-8") as handle:
+                with open(path, encoding="utf-8-sig") as handle:
                     if not _declares_slo(handle.read()):
                         continue
                 if self._slo_bind(path):
@@ -4023,8 +4032,11 @@ class Session:
         }
         if agent_authored is not None:
             entry["agentAuthored"] = bool(agent_authored)
-        if self._render_offered is not None:
-            entry["renderOffered"] = self._render_offered
+        # consumed here: a generation recorded without a `_prepare_module`
+        # (an apply) must not carry the previous generation's digest
+        offered, self._render_offered = self._render_offered, None
+        if offered is not None:
+            entry["renderOffered"] = offered
         self._history.append(entry)
         # bounded retention: the oldest generations age out. `undo --to` below
         # the floor is refused (see `undo`) instead of reaching for one gone.
@@ -6238,6 +6250,7 @@ class Session:
         self._slo_last = None
         self._slo_ir = None
         self._slo_composition = None
+        self._slo_explicit = False
         # the surface epoch resets with the generation: a fresh (unloaded) session
         # is at 0, and the next `load` moves it to 1 alongside the generation
         # (design 460 §3).

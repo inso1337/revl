@@ -100,6 +100,16 @@ def _host_build(text: str):
 
 
 @needs_runtime
+def test_control_a_load_with_no_offer_renders_and_compiles_once(
+        counts, session):
+    """Without this the `(0, 0)` assertions below could pass because the
+    counters never fire."""
+    session.load(compile_source(DOC), origin={"source": DOC})
+    assert (counts.render, counts.compile) == (1, 1)
+    assert "renderOffered" not in session._history[-1]
+
+
+@needs_runtime
 def test_an_offered_pair_is_loaded_without_a_render_or_a_compile(
         counts, session):
     ir, source, code = _host_build(DOC)
@@ -137,6 +147,16 @@ def test_the_next_swap_to_the_offered_document_uses_it(counts, session):
                  agent_authored=False)
     assert (counts.render, counts.compile) == (0, 0)
     assert session.call("counter", "next")["result"] == 2
+    assert "renderOffered" in session._history[-1]
+    # an undo and a swap back onto the offered document use it again, and
+    # the generation that ran it says so
+    session.swap(compile_source(_doc(1)), origin={"source": _doc(1)},
+                 agent_authored=False)
+    assert "renderOffered" not in session._history[-1]
+    session.swap(compile_source(_doc(2)), origin={"source": _doc(2)},
+                 agent_authored=False)
+    assert counts.render == 0       # _doc(1) was rendered by the load
+    assert "renderOffered" in session._history[-1]
 
 
 @needs_runtime
@@ -148,6 +168,12 @@ def test_the_generation_record_carries_the_digest_of_the_offered_source(
     assert reply["renderOffered"] == digest
     session.load(compile_source(DOC), origin={"source": DOC})
     assert session._history[-1]["renderOffered"] == digest
+    # consumed by the record, so a generation recorded without a render of its
+    # own (an apply) cannot carry it
+    assert session._render_offered is None
+    session._record_generation(readmittable=False)
+    assert "renderOffered" not in session._history[-1]
+    session._history.pop()
     doc = session.history_document()
     assert doc["generations"][-1]["renderOffered"] == digest
     # a generation that rendered its own text carries no such member
@@ -208,6 +234,14 @@ def test_a_document_with_no_key_is_not_kept(counts, session):
     assert len(session._renders) == 0
 
 
+@needs_runtime
+def test_code_that_is_not_a_code_object_is_refused(session):
+    ir, source, _ = _host_build(DOC)
+    with pytest.raises(SessionError, match="code object"):
+        session.offer_render(ir, source, "not code")
+    assert len(session._renders) == 0
+
+
 # ------------------------------------------------------- SLO discovery
 
 
@@ -217,6 +251,7 @@ def test_a_file_that_only_names_slow_or_slot_is_not_a_candidate():
                              "let slot = slow\n")
     assert not _declares_slo("slo { p95_latency: 250ms }\n")   # no composition
     assert not _declares_slo("composition c {\n}\n")           # no slo clause
+    assert not _declares_slo("composition c {\n  slow { }\n}\n")
 
 
 def test_the_clause_head_the_parser_reads_is_a_candidate():
@@ -224,6 +259,7 @@ def test_the_clause_head_the_parser_reads_is_a_candidate():
     assert _declares_slo("composition c {\n  slo {\n    availability: 99.9%\n"
                          "  }\n}\n")
     assert _declares_slo("composition c {\n\tslo\n\t{\n  }\n}\n")
+    assert _declares_slo("composition c {\r\n  slo {\r\n  }\r\n}\r\n")
 
 
 @pytest.fixture
@@ -259,8 +295,8 @@ def test_discovery_parses_only_the_file_that_declares_a_contract(
                                        files["slo"]]})
     assert parses == [files["slo"]]
     assert session._slo_composition == files["slo"]
-    assert "p95_latency" in str(session._slo_contract()) or \
-        session._slo_contract()
+    assert list(session._slo_contract()) == ["p95_latency_ms"]
+    assert session._slo_contract()["p95_latency_ms"]["target"] == 250
 
 
 @needs_runtime
@@ -295,3 +331,72 @@ def test_a_parse_that_raises_leaves_the_session_with_no_contract(
     assert parses == [str(broken)]
     assert session._slo_composition is None
     assert session._slo_contract() == {}
+
+
+def _slo_file(tmp_path, name, p95):
+    doc = tmp_path / f"{name}.rvl"
+    doc.write_text(f'composition {name} {{\n  slo {{ p95_latency: {p95}ms }}\n'
+                   f'  row @a from "slow.rvl" provides a\n}}\n')
+    return str(doc)
+
+
+def _target(session):
+    return session._slo_contract()["p95_latency_ms"]["target"]
+
+
+@needs_runtime
+def test_a_swap_rediscovers_the_contract_of_its_own_files(
+        session, parses, tmp_path):
+    first = _slo_file(tmp_path, "first", 250)
+    second = _slo_file(tmp_path, "second", 900)
+    session.load(compile_source(_doc(1)), origin={"files": [first]})
+    assert _target(session) == 250
+    session.swap(compile_source(_doc(2)), origin={"files": [second]},
+                 agent_authored=False)
+    assert session._slo_composition == second
+    assert _target(session) == 900
+
+
+@needs_runtime
+def test_a_contract_named_by_configure_slo_survives_a_swap(
+        session, parses, tmp_path):
+    named = _slo_file(tmp_path, "named", 250)
+    other = _slo_file(tmp_path, "other", 900)
+    session.configure_slo(composition=named)
+    session.load(compile_source(_doc(1)), origin={"files": [other]})
+    session.swap(compile_source(_doc(2)), origin={"files": [other]},
+                 agent_authored=False)
+    assert session._slo_composition == named
+    assert _target(session) == 250
+    # unloading forgets the explicit binding, so the next load discovers
+    session.unload()
+    session.load(compile_source(_doc(1)), origin={"files": [other]})
+    assert session._slo_composition == other
+    assert _target(session) == 900
+
+
+@needs_runtime
+def test_a_failed_load_leaves_nothing_for_the_next_load_to_inherit(
+        session, parses, tmp_path):
+    failed = _slo_file(tmp_path, "failed", 250)
+    good = _slo_file(tmp_path, "good", 900)
+    broken = compile_source(DOC)
+    broken["components"] = "not a list"        # refused after discovery ran
+    with pytest.raises(Exception):  # noqa: B017 - any refusal will do
+        session.load(broken, origin={"files": [failed]})
+    assert not session.loaded
+    session.load(compile_source(DOC), origin={"files": [good]})
+    assert session._slo_composition == good
+    assert _target(session) == 900
+
+
+@needs_runtime
+def test_a_file_with_a_byte_order_mark_is_still_found(
+        session, parses, tmp_path):
+    doc = tmp_path / "bom.rvl"
+    doc.write_bytes(b"\xef\xbb\xbf" + (
+        'composition bom {\n  slo { p95_latency: 250ms }\n'
+        '  row @a from "slow.rvl" provides a\n}\n').encode())
+    session.load(compile_source(DOC), origin={"files": [str(doc)]})
+    assert session._slo_composition == str(doc)
+    assert _target(session) == 250
