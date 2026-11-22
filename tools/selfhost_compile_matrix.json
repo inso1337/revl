@@ -1,6 +1,7 @@
 {
  "schema": 1,
  "digest": "017dc3a11daf7dd0025a88537cee724131b890a6cb112ee6c3d9cc27f3edd212",
+ "digest": "f2f0905f08058fbc464ec9ffd73342d380aa6b23f76960053127eb028b4ff992",
  "tiers": [
   "python",
   "typescript",
@@ -39,21 +40,22 @@
    },
    "java": {
     "kind": "refused",
-    "message": "record literal with fields ['name', 'ty'] is ambiguous between Bind, ParamN, RecField"
+    "message": "a declared function type ((T) -> U) is not lowerable on the Java tier. A Java lambda needs a *nominal* target type, and the JDK's functional interfaces are neither generic over arity nor usable with primitives without boxing: `(Int) -> Int` is `IntUnaryOperator`, `(Int, Str) -> Bool` has no JDK interface at all, and arity 3+ needs a generated one per shape. Generating those interfaces is a coherent design; guessing one is not. Arrows bound to a local `let` and called in the same body still lower \u2014 they are beta-reduced at the call site (see \"arrows\" below) \u2014 so this refusal is only for a function type *written in a declaration*. See docs/function-types.md."
    },
    "wasm": {
     "kind": "refused",
     "message": "compat_tt: parameter tt: type 'Map[Str, TySpec]' is not lowerable \u2014 this tier supports Int/Bool/Str/Bytes/List/record/variant/Opt/Result values"
    },
    "go": {
-    "kind": "refused",
-    "message": "cannot infer Go struct type for record literal with fields ['name', 'ty'] \u2014 no unique record has exactly those fields"
+    "kind": "ok",
+    "bytes": 235431
    }
   },
   "compile.rvl": {
    "python": {
     "kind": "ok",
     "bytes": 3575561
+    "bytes": 3525237
    },
    "typescript": {
     "kind": "refused",
@@ -132,6 +134,7 @@
    "python": {
     "kind": "ok",
     "bytes": 197513
+    "bytes": 216178
    },
    "typescript": {
     "kind": "refused",
@@ -246,22 +249,23 @@
     "bytes": 49002
    },
    "java": {
-    "kind": "refused",
-    "message": "unknown builtin method 'is_digit'"
+    "kind": "ok",
+    "bytes": 42398
    },
    "wasm": {
     "kind": "refused",
-    "message": "an untyped empty list literal needs an expected List type"
+    "message": "unsupported builtin method 'is_alnum'"
    },
    "go": {
-    "kind": "refused",
-    "message": "unknown v3 builtin method 'is_digit'"
+    "kind": "ok",
+    "bytes": 35354
    }
   },
   "lower.rvl": {
    "python": {
     "kind": "ok",
     "bytes": 2151517
+    "bytes": 2096037
    },
    "typescript": {
     "kind": "refused",
@@ -270,6 +274,7 @@
    "rust": {
     "kind": "ok",
     "bytes": 1764283
+    "bytes": 1801096
    },
    "java": {
     "kind": "refused",
@@ -277,7 +282,7 @@
    },
    "wasm": {
     "kind": "refused",
-    "message": "indexOf is not lowerable on this tier yet for List \u2014 the element comparison has no representation here; use a hosted backend"
+    "message": "ty_word_char: unsupported builtin method 'is_alpha'"
    },
    "go": {
     "kind": "refused",
@@ -298,16 +303,16 @@
     "bytes": 105522
    },
    "java": {
-    "kind": "refused",
-    "message": "record literal with fields ['i', 'e'] is ambiguous between PR, AtExpr"
+    "kind": "ok",
+    "bytes": 139670
    },
    "wasm": {
     "kind": "refused",
-    "message": "an untyped empty list literal needs an expected List type"
+    "message": "is_digit: unsupported builtin method 'is_digit'"
    },
    "go": {
-    "kind": "refused",
-    "message": "cannot infer Go struct type for record literal with fields ['e', 'i'] \u2014 no unique record has exactly those fields"
+    "kind": "ok",
+    "bytes": 74968
    }
   },
   "types.rvl": {
@@ -329,7 +334,7 @@
    },
    "wasm": {
     "kind": "refused",
-    "message": "is_upper1: relational operator '>=' is only lowerable for Int/Int32"
+    "message": "unify: parameter subst: type 'Map[Str, Str]' is not lowerable \u2014 this tier supports Int/Int32/Float/Bool/Str/Bytes/List/record/variant/Opt/Result values"
    },
    "go": {
     "kind": "ok",

@@ -1,14 +1,9 @@
 {
  "gaps": [
   {
-   "cell": "checker.rvl::go",
-   "reason": "record literal fields ['name', 'ty'] matches no unique record",
-   "issue": 3144
-  },
-  {
    "cell": "checker.rvl::java",
-   "reason": "record literal with fields ['name', 'ty'] is ambiguous",
-   "issue": 3144
+   "reason": "a declared function type needs a nominal Java interface per shape",
+   "out_of_scope": "#2899 records function-typed values on Java as a design question, not a fix (docs/function-types.md)"
   },
   {
    "cell": "checker.rvl::wasm",
@@ -186,19 +181,9 @@
    "out_of_scope": "#2899 records Any in the value representation as a design question, not a fix"
   },
   {
-   "cell": "lexer.rvl::go",
-   "reason": "unknown builtin method 'is_digit'",
-   "issue": 3144
-  },
-  {
-   "cell": "lexer.rvl::java",
-   "reason": "unknown builtin method 'is_digit'",
-   "issue": 3144
-  },
-  {
    "cell": "lexer.rvl::wasm",
-   "reason": "an untyped empty list literal needs an expected List type",
-   "issue": 3145
+   "reason": "unsupported builtin method 'is_alnum'",
+   "issue": 3619
   },
   {
    "cell": "lower.rvl::go",
@@ -217,23 +202,13 @@
   },
   {
    "cell": "lower.rvl::wasm",
-   "reason": "List indexOf is not lowerable",
-   "issue": 3145
-  },
-  {
-   "cell": "parser.rvl::go",
-   "reason": "record literal fields ['e', 'i'] matches no unique record",
-   "issue": 3144
-  },
-  {
-   "cell": "parser.rvl::java",
-   "reason": "record literal with fields ['i', 'e'] is ambiguous",
-   "issue": 3144
+   "reason": "unsupported builtin method 'is_alpha'",
+   "issue": 3619
   },
   {
    "cell": "parser.rvl::wasm",
-   "reason": "an untyped empty list literal needs an expected List type",
-   "issue": 3145
+   "reason": "unsupported builtin method 'is_digit'",
+   "issue": 3619
   },
   {
    "cell": "types.rvl::java",
@@ -242,8 +217,8 @@
   },
   {
    "cell": "types.rvl::wasm",
-   "reason": "relational '>=' is lowerable only for Int and Int32",
-   "issue": 3145
+   "reason": "the wasm value representation has no Map",
+   "out_of_scope": "#2899 records Map in the value representation as a design question, not a fix"
   }
  ]
 }

@@ -3,6 +3,8 @@
 
     python3 tools/selfhost_matrix.py --measure   # re-measure, write the ledger
     python3 tools/selfhost_matrix.py --check     # the cheap staleness and acknowledgement gate
+    python3 tools/selfhost_matrix.py --check     # the cheap acknowledgement gate
+    python3 tools/selfhost_matrix.py --check --base origin/main   # + the branch gate
     python3 tools/selfhost_matrix.py --json      # the committed ledger
 
 `selfhost/*.rvl` is the largest revl program in the tree (about 82,000 lines), so
@@ -47,19 +49,61 @@ The digest deliberately does not cover `src/revl/`: a frontend change does not
 change what an emitter does with a given IR, and the tiers' own suites cover
 the frontend. A change that DOES move this table through the frontend is caught
 by the next `--measure`.
+THE MOVED DIGEST IS A FACT, NOT A REFUSAL
+-----------------------------------------
+The ledger records a `digest` over every self-host source, every stdlib source
+and every tier emitter it was measured against. When those sources move on and
+the ledger is not re-measured, the ledger no longer describes the current tree
+exactly, but a merge that changes no cell has broken nothing. Refusing it would
+red main on every commit that touches a self-host source, an emitter or a
+stdlib file (a large share of the history), and would force every unrelated pull
+request to re-measure for minutes and then conflict on the digest line.
 
 WHAT --CHECK CANNOT SEE. The digest covers the measurement's INPUTS, not its
 cells, so a hand-edited ledger whose digest still matches is indistinguishable
 from a measured one, and the frontend exclusion above is the one fail-silent
 path. Coverage and acknowledgement are gated; truth is not, and a cell that
 looks wrong is settled by running `--measure` again.
+So `--check` REPORTS a moved digest on stdout and exits 0, the support table
+says which measurement it shows (the recorded digest), and `--measure` refreshes
+the ledger in the change that has a reason to: one that moves a cell. A cell that
+changed state shows up as a diff of the ledger at that refresh, and the table
+text names the digest it was measured at, so a reader can see how old it is.
+
+THE BRANCH THAT MOVES AN INPUT MUST RE-MEASURE. The table CAN lag main by design:
+a merge that touches an input without changing a cell leaves it stale and
+nothing refuses. But the branch that edits a measured input is the one with a
+reason to look, so `--check --base REF` (run by `tools/pre_merge.sh` with
+`origin/main`) refuses when the branch's own diff against the merge base touches
+an input and the recorded digest no longer matches the tree. Main stays
+protected from unrelated reds; a branch that edits an emitter, a stdlib module
+or a self-host source answers for the table before it merges.
+
+WHAT THE DIGEST COVERS: `selfhost/*.rvl`, `stdlib/*.rvl`, every
+`backends/<tier>/emit*.py` (the emitter and its sibling emit modules, such as the
+TypeScript Temporal rendering) and `backends/wasm/canonical.py`. It does NOT cover
+`src/revl/` (the frontend, IR producer and the shared host-body, UI and
+parallelism helpers the emitters call into), the tier runtimes, or other helpers
+in a backend directory: those can change what `emit()` does without moving the
+digest, and the tiers' own suites cover them. A change that does move this table
+through them is caught by the next `--measure`.
+
+WHAT --CHECK CANNOT SEE. It does not re-measure, so it cannot tell a measured
+ledger from a hand-edited one or notice that a cell has changed state since the
+recorded digest. It reads no network state either: an acknowledgement that cites
+an issue stays valid to the check after that issue is closed, so a fix that lands
+on main for a cited issue is only noticed by the next `--measure`, which then
+reports the entry as stale. Coverage and acknowledgement are gated; truth is not, and a
+cell that looks wrong is settled by running `--measure` again.
 """
 
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -79,23 +123,63 @@ def tiers() -> tuple[str, ...]:
     return tuple(conformance.TIERS)
 
 
+#: The paths a measurement reads, as glob patterns relative to the repository
+#: root. Shared by `digest` and the branch gate so the two cannot disagree about
+#: what counts as an input.
+INPUT_PATTERNS = (
+    "selfhost/*.rvl",
+    "stdlib/*.rvl",
+    "backends/*/emit*.py",
+    "backends/wasm/canonical.py",
+)
+
+
 def sources(root: Path | None = None) -> list[Path]:
     return sorted((root or ROOT).glob("selfhost/*.rvl"))
+
+
+def input_paths(root: Path | None = None) -> list[Path]:
+    """Every file the digest hashes, in a stable order."""
+    base = root or ROOT
+    found: set[Path] = set()
+    for pattern in INPUT_PATTERNS:
+        found.update(path for path in base.glob(pattern) if path.is_file())
+    return sorted(found)
 
 
 def digest(root: Path | None = None) -> str:
     """A fingerprint of everything a measurement reads: corpus and emitters."""
     base = root or ROOT
     hasher = hashlib.sha256()
-    paths = (sources(base)
-             + sorted(base.glob("stdlib/*.rvl"))
-             + sorted(base.glob("backends/*/emit.py")))
-    for path in paths:
+    for path in input_paths(base):
         hasher.update(path.relative_to(base).as_posix().encode("utf-8"))
         hasher.update(b"\0")
         hasher.update(path.read_bytes())
         hasher.update(b"\0")
     return hasher.hexdigest()
+
+
+def touched_inputs(changed: list[str]) -> list[str]:
+    """The changed repository paths that are inputs of the measurement."""
+    return sorted(path for path in changed
+                  if any(fnmatch.fnmatchcase(path, pattern)
+                         for pattern in INPUT_PATTERNS))
+
+
+def changed_paths(base_ref: str, root: Path | None = None) -> list[str]:
+    """Paths this branch changes against `base_ref`: committed, staged or not.
+
+    The committed part is the diff from the merge base, so commits that landed on
+    main since the branch point are not this branch's changes.
+    """
+    cwd = str(root or ROOT)
+    found: set[str] = set()
+    for args in (["git", "diff", "--name-only", f"{base_ref}...HEAD"],
+                 ["git", "diff", "--name-only", "HEAD"]):
+        out = subprocess.run(args, cwd=cwd, capture_output=True, text=True,
+                             check=True).stdout
+        found.update(line for line in out.splitlines() if line)
+    return sorted(found)
 
 
 def _first_line(exc: BaseException) -> str:
@@ -177,6 +261,39 @@ def tier_counts(data: dict | None, tier: str) -> tuple[int, int] | None:
 def problems(data: dict | None = None, gaps: list[dict] | None = None,
              expected_digest: str | None = None) -> list[str]:
     """Every reason the committed ledger may not be published as it stands."""
+def digest_moved(data: dict | None, current: str | None = None) -> bool:
+    """True when the sources a measurement reads have moved since it was taken.
+
+    A fact about how old the ledger is, not a defect: nothing here refuses on it.
+    """
+    if not data:
+        return False
+    return data.get("digest") != (digest() if current is None else current)
+
+
+def branch_problems(data: dict | None, changed: list[str],
+                    current: str | None = None) -> list[str]:
+    """Why a branch that edits a measured input may not merge without re-measuring.
+
+    Refuses only when the branch itself touches an input AND the recorded digest
+    no longer matches the tree: a branch that touches no input is never refused
+    for a ledger that main alone let go stale.
+    """
+    touched = touched_inputs(changed)
+    if not touched or not digest_moved(data, current):
+        return []
+    shown = ", ".join(touched[:4]) + (" ..." if len(touched) > 4 else "")
+    return [f"this branch changes a measured input ({shown}) and "
+            f"{LEDGER.name} was measured at a different source digest; run "
+            "`python3 tools/selfhost_matrix.py --measure` and commit the ledger"]
+
+
+def problems(data: dict | None = None, gaps: list[dict] | None = None) -> list[str]:
+    """Every reason the committed ledger may not be published as it stands.
+
+    These are properties of the ledger and its acknowledgements alone. A moved
+    source digest is reported by `digest_moved`, never refused here.
+    """
     data = load() if data is None else data
     gaps = load_gaps() if gaps is None else gaps
     if data is None:
@@ -227,8 +344,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check", action="store_true",
                         help="fail if the ledger is stale, a non-emitting cell is "
                              "unacknowledged, or an acknowledgement is stale")
+                        help="fail if a non-emitting cell is unacknowledged or an "
+                             "acknowledgement is stale; a moved source digest is "
+                             "reported, not refused")
+    parser.add_argument("--base", metavar="REF",
+                        help="with --check: also refuse when this branch's diff "
+                             "against REF touches a measured input and the ledger "
+                             "digest is stale (the pre-merge branch gate)")
     parser.add_argument("--json", action="store_true", help="print the ledger")
     args = parser.parse_args(argv)
+    if args.base and not args.check:
+        parser.error("--base only applies to --check")
 
     if args.measure:
         data = measure()
@@ -240,11 +366,25 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if found else 0
     if args.check:
         found = problems()
+        data = load()
+        if args.base:
+            try:
+                found += branch_problems(data, changed_paths(args.base))
+            except (subprocess.CalledProcessError, OSError) as error:
+                # Never pass the branch gate because the diff could not be read.
+                found.append(f"cannot read this branch's diff against "
+                             f"{args.base}: {error}")
         for problem in found:
             print(problem, file=sys.stderr)
         if found:
             return 1
         print(f"{LEDGER.name} is current and every gap is acknowledged.")
+        print(f"{LEDGER.name}: every non-emitting cell is acknowledged.")
+        if digest_moved(data):
+            print(f"note: it was measured at source digest {data['digest'][:12]}, "
+                  f"the tree is at {digest()[:12]}; re-measure with "
+                  "`python3 tools/selfhost_matrix.py --measure` when a change "
+                  "needs the table to show the current sources.")
         return 0
     data = load()
     if data is None:
