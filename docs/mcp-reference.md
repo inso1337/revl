@@ -1946,6 +1946,18 @@ Another operator sending the byte-identical call after a yes gets its own ticket
 A quorum yes covers the operator who asked the question it answers. With no
 operator profile there is one identity, and the behaviour is unchanged.
 
+A standing grant is not bound that way. It is session-scoped and is not bound to
+any operator: the grant is keyed by the capability and the reach closure, so it
+covers every class-(c) call that reaches that capability under the same closure
+(differing arguments included), from any operator the profile lets `call` it,
+until its `uses` run out or its TTL lapses. It does not record or check who
+asked, and it is not limited to the operator whose ticket it was minted from.
+The single-use `hash` approval is the operator-bound shape. To limit who can
+reach the capability under a grant, scope the `call` verb in the operator
+profile, with `may not call on <subject>` for the operators that must stay out
+([operator-capabilities.md](operator-capabilities.md)); the grant itself does
+not do it.
+
 The ticket carries `ceilings` (issue #1755): for each class-(c) capability it
 asks about, the crossing component's item-260 crossing ceiling, read from
 `revl audit`'s cardinality analysis
