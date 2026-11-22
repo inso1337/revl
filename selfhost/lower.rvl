@@ -1201,6 +1201,14 @@ fn async_params_of(ps: List[ParamN]) -> List[Str] {
   return out
 }
 
+// An op's declared scope as the crossing's capability set: `*` for a bare op.
+// A call, so a record literal that reads the same field twice (its scope and,
+// for `unnamed`, the field itself) passes it by reference both times; an inline
+// ternary branch moves it (the rust emitter's E0382 on the regenerated crate).
+fn scope_or_star(caps: List[Str]) -> List[Str] {
+  return caps.length() > 0 ? caps : ["*"]
+}
+
 fn union_into(xs: List[Str], ys: List[Str]) -> List[Str] {
   var out = xs
   var i = 0
@@ -6330,7 +6338,7 @@ fn handle_emit(h: Str, key: Str, op: Str, args: List[Expr], marked: Bool,
       Some(sv) => sv, None => "" }
     na = { msg: na.msg, tag: na.tag,
            labels: union_into(na.labels, [svcName.concat(".").concat(op)]),
-           ecaps: union_into(na.ecaps, decl.caps.length() > 0 ? decl.caps : ["*"]),
+           ecaps: union_into(na.ecaps, scope_or_star(decl.caps)),
            areach: na.areach, aops: na.aops, avals: na.avals,
            unnamed: union_into(na.unnamed, decl.caps) }
   }
@@ -7744,7 +7752,7 @@ fn svc_recv_note(recv: Expr, op: Str, cx: Ctx, a: Ac) -> Ac {
   if (decl.name == "" || !decl.isEm) { return a }
   let label = parse_head(infer(recv, cx.svcTys)).concat(".").concat(op)
   return { msg: a.msg, tag: a.tag, labels: union_into(a.labels, [label]),
-           ecaps: union_into(a.ecaps, decl.caps.length() > 0 ? decl.caps : ["*"]),
+           ecaps: union_into(a.ecaps, scope_or_star(decl.caps)),
            areach: a.areach, aops: a.aops, avals: a.avals,
            unnamed: union_into(a.unnamed, decl.caps) }
 }

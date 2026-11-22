@@ -1924,7 +1924,7 @@ and the census total are built on.
 | `agree-intercept` | printed by the gate | informational |
 | `agree-prelude` | printed by the gate | informational |
 | `formal-found-other` | 0 | **FATAL** |
-| `formal-strict` | 0 | **FATAL** |
+| `formal-strict` | 1 | **FATAL** |
 | `missed-A1` | 0 | **FATAL** |
 | `missed-A2` | 0 | **FATAL** |
 | `missed-A6` | 0 | **FATAL** |
@@ -1957,6 +1957,11 @@ holds equal to its bucket in both directions; `python3
 formal/harness/diff_corpus.py --show-ledger` prints them, sorted,
 without running the corpus. A list here put two pull requests that each
 added a name next to the other's in conflict (issue #1768).
+
+The files in a FATAL bucket, which is empty on every run that passes the
+gate:
+
+- `formal-strict`: `examples/g4_required_verb_token.rvl`
 
 `agree-G5` says which row saw the crossing: the `U5` registration count,
 or the `G` row refusing the component through the marker rule.

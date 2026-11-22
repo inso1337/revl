@@ -9964,6 +9964,10 @@ fn async_params_of(ps: &[ParamN]) -> Vec<String> {
     return out;
 }
 
+fn scope_or_star(caps: Vec<String>) -> Vec<String> {
+    return if (caps.revl_length() > 0i64) { caps.clone() } else { vec![String::from("*")] };
+}
+
 fn union_into(xs: Vec<String>, ys: &[String]) -> Vec<String> {
     let mut out = xs;
     let mut i = 0i64;
@@ -14026,7 +14030,7 @@ fn handle_emit(h: String, key: &str, op: &str, args: &[Expr], marked: bool, cx: 
     None => String::from(""),
     _ => unreachable!(),
 };
-        na = Ac { msg: na.msg.clone(), tag: na.tag.clone(), labels: union_into(na.labels.clone(), &(vec![(svcName.revl_concat(".")).revl_concat(&op)])), ecaps: union_into(na.ecaps.clone(), &(if (decl.caps.revl_length() > 0i64) { decl.caps } else { vec![String::from("*")] })), areach: na.areach.clone(), aops: na.aops.clone(), avals: na.avals.clone(), unnamed: union_into(na.unnamed.clone(), &decl.caps) };
+        na = Ac { msg: na.msg.clone(), tag: na.tag.clone(), labels: union_into(na.labels.clone(), &(vec![(svcName.revl_concat(".")).revl_concat(&op)])), ecaps: union_into(na.ecaps.clone(), &scope_or_star(decl.caps.clone())), areach: na.areach.clone(), aops: na.aops.clone(), avals: na.avals.clone(), unnamed: union_into(na.unnamed.clone(), &decl.caps) };
     }
     if (decl.isAsync && (!cx.underArrow)) {
         na = Ac { msg: String::from(""), tag: String::from(""), labels: na.labels.clone(), ecaps: na.ecaps.clone(), areach: na.areach.clone(), aops: union_into(na.aops.clone(), &(vec![(((h.revl_concat(".")).revl_concat(&key)).revl_concat(".")).revl_concat(&op)])), avals: na.avals.clone(), unnamed: na.unnamed.clone() };
@@ -14999,7 +15003,7 @@ fn svc_recv_note(recv: Expr, op: &str, cx: Ctx__m2, a: Ac) -> Ac {
         return a;
     }
     let label = (parse_head(infer(recv.clone(), cx.svcTys.clone())).revl_concat(".")).revl_concat(&op);
-    return Ac { msg: a.msg.clone(), tag: a.tag.clone(), labels: union_into(a.labels.clone(), &(vec![label])), ecaps: union_into(a.ecaps.clone(), &(if (decl.caps.revl_length() > 0i64) { decl.caps } else { vec![String::from("*")] })), areach: a.areach.clone(), aops: a.aops.clone(), avals: a.avals.clone(), unnamed: union_into(a.unnamed.clone(), &decl.caps) };
+    return Ac { msg: a.msg.clone(), tag: a.tag.clone(), labels: union_into(a.labels.clone(), &(vec![label])), ecaps: union_into(a.ecaps.clone(), &scope_or_star(decl.caps.clone())), areach: a.areach.clone(), aops: a.aops.clone(), avals: a.avals.clone(), unnamed: union_into(a.unnamed.clone(), &decl.caps) };
 }
 
 fn ctx_svc(cx: Ctx__m2, tys: Vec<Bind>) -> Ctx__m2 {
