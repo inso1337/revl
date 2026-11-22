@@ -24575,6 +24575,44 @@ fn tk_destructure_msg(ty: String) -> String {
     return (String::from("record destructuring requires a record, but `").revl_concat(&tk_render(ty))).revl_concat("` is not a record");
 }
 
+fn tk_letpat_field_msg(name: &str, ty: String) -> String {
+    return (((String::from("record destructuring names `").revl_concat(&name)).revl_concat("`, which is not a field of `")).revl_concat(&tk_render(ty))).revl_concat("`");
+}
+
+fn fb_letpat_table(vt: String, env: &[Bind]) -> bool {
+    if (vt == "") {
+        return false;
+    }
+    if tk_is_struct(&vt) {
+        return true;
+    }
+    if tk_generic_record(&vt, env) {
+        return (tenv_get(env, &(String::from("gpar ").revl_concat(&vt.revl_slice(0i64, vt.revl_index_of("["))))) != "");
+    }
+    return tk_record_base(vt, env);
+}
+
+fn fb_letpat_has(vt: &str, name: &str, env: &[Bind]) -> bool {
+    if tk_is_struct(vt) {
+        return (tk_struct_field(vt, name) != "");
+    }
+    if tk_generic_record(vt, env) {
+        let head = vt.revl_slice(0i64, vt.revl_index_of("["));
+        return (tenv_get(env, &(((String::from("gfld ").revl_concat(&head)).revl_concat(".")).revl_concat(&name))) != "");
+    }
+    return (tenv_get(env, &(((String::from("field ").revl_concat(&vt)).revl_concat(".")).revl_concat(&name))) != "");
+}
+
+fn fb_letpat_missing(names: &[String], i: i64, vt: &str, env: &[Bind]) -> String {
+    if (i >= names.revl_length()) {
+        return String::from("");
+    }
+    if (!fb_letpat_has(vt, &(names)[(i) as usize], env)) {
+        return (names)[(i) as usize].clone();
+    }
+    return fb_letpat_missing(names, (i).checked_add(1i64).expect("revl: Int overflow"), vt, env);
+}
+
 fn tk_nonrecord_head(h: &str) -> bool {
     return (((((((((((((h == "Str") || (h == "Int")) || (h == "Int32")) || (h == "Bool")) || (h == "Float")) || (h == "Bytes")) || (h == "Unit")) || (h == "List")) || (h == "Map")) || (h == "Opt")) || (h == "Result")) || (h == "Criterion")) || (h == "Guard"));
 }
@@ -24618,6 +24656,12 @@ fn fb_walk(steps: &[FbStep], i: i64, scope: Vec<Bind>, tys: Vec<Bind>, ret: Stri
         let vt = infer(s.value.clone(), tys.clone());
         if tk_nonrecord_value(vt.clone(), &tys) {
             return fb_type_refuse(tagged("TYPE", &tk_destructure_msg(vt)), s.line, scope, tys);
+        }
+        if fb_letpat_table(vt.clone(), &tys) {
+            let miss = fb_letpat_missing(&names, 0i64, &vt, &tys);
+            if (miss != "") {
+                return fb_type_refuse(tagged("TYPE", &tk_letpat_field_msg(&miss, vt)), s.line, scope, tys);
+            }
         }
         return fb_clean(scope, tys);
     }
