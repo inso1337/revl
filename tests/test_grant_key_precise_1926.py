@@ -258,3 +258,51 @@ def test_a_service_with_no_tokens_keeps_the_old_text(services):
     assert _refusal(services) == (
         "admission refused: component `B` reaches service `JobOps` "
         "(via `requires jops`), and no grant names `B.jops`")
+
+
+def test_a_mixed_service_also_names_its_unbounded_emission():
+    services = {"JobOps": {"methods": {
+        **_JOB_OPS["JobOps"]["methods"],
+        "go": {"params": [], "returns": "Int", "emission": True}}}}
+    assert "(emission tokens: audit, jobs, and an unbounded emission) " \
+           "via `requires jops`" in _refusal(services)
+
+
+_JOB_SOURCE = """
+service JobOps {
+  emission[jobs] fn start(x: Int) -> Int
+  emission[audit] fn stop() -> Int
+  fn peek() -> Int
+}
+component B requires jops: JobOps {
+}
+"""
+
+
+@pytest.mark.parametrize("granted,tail", [
+    ({"JobOps"}, "and no grant names `B.jops`"),
+    ({"Other"}, "which is not in the granted set"),
+], ids=["key-precise", "ungranted-service"])
+def test_compiled_source_names_its_tokens_in_both_refusals(granted, tail):
+    """Built from real source, so an IR shape change is caught. Both R2
+    refusals name the tokens: a service granted to another key, and a
+    service not granted at all."""
+    from revl.compiler import compile_source
+    document = compile_source(_JOB_SOURCE, "c.rvl")
+    profile = AdmissionProfile.untrusted_author(granted,
+                                                requires={("A", "jops")})
+    with pytest.raises(RevlError) as exc:
+        check_allowlist(document, profile)
+    assert exc.value.message == (
+        "admission refused: component `B` reaches service `JobOps` "
+        "(emission tokens: audit, jobs) via `requires jops`, " + tail)
+
+
+def test_an_ungranted_service_with_no_tokens_keeps_the_old_text():
+    profile = AdmissionProfile.untrusted_author({"Other"})
+    with pytest.raises(RevlError) as exc:
+        check_allowlist(_document({"name": "B", "requires": {"jops": "JobOps"}}),
+                        profile)
+    assert exc.value.message == (
+        "admission refused: component `B` reaches service `JobOps` "
+        "(via `requires jops`), which is not in the granted set")
