@@ -8,9 +8,13 @@ declarations is where its grounding tokens go. `context` hands it exactly the
 declarations, cut verbatim from the source, and nothing else.
 
 The pack is built from PARSED modules, never lowered ones, so a component whose
-body does not check yet still grounds: only a parse error stops it. Every
-service carries a `hash` over its lexed tokens. The lexer drops comments, so a
-doc edit or a reflow leaves the hash where it was and a signature edit moves it.
+body does not check yet still grounds. What does stop it is the module loader's
+own errors: a parse error, a `use` that cannot be resolved or is not public,
+and the file checks the loader makes at load time (an `asset` or a host-body
+file that is not there). Every `type` a service signature names, transitively,
+is cut beside it. Every service carries a `hash` over its lexed tokens and
+those of its types. The lexer drops comments, so a doc edit or a reflow leaves
+the hash where it was and a signature or a field edit moves it.
 
 A pack for one component ends with `IDIOMS`, a short compiled illustration of
 how a provider body is written. Declarations alone lost rounds-to-green: a
@@ -38,6 +42,7 @@ import re
 from .compiler import _ModuleLoader, _load_root
 from .errors import RevlError
 from .lexer import lex
+from .parser import Parser
 from ._paths import relpath_or_abs
 
 # the BPE-shaped proxy `bench/tokens.py` scores tokens-to-green with, so a
@@ -50,6 +55,11 @@ _PRETOKEN = re.compile(
 # what may head a declaration before its keyword (parser.py's top-level loop)
 _SERVICE_PREFIX = {"pub", "commutative"}
 _COMPONENT_PREFIX = {"boot"}
+_TYPE_PREFIX = {"pub"}
+
+# a type name inside a rendered type (`Opt[Note]`, `(Int) -> Row`): the way
+# the compiler reads the types a service names (compiler._service_type_closure)
+_TYPE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def count_tokens(text: str) -> int:
@@ -79,6 +89,9 @@ class _Source:
         self.tokens = lex(text, path)
         self.rank: list[int] = []
         self.keywords: dict[tuple, list[int]] = {}
+        self.path = path
+        self._heads: dict[tuple, int] | None = None
+        self._parser: Parser | None = None
         seen: dict[tuple, int] = {}
         for x, t in enumerate(self.tokens):
             spelled = (t.line, str(t.value))
@@ -86,6 +99,31 @@ class _Source:
             seen[spelled] = self.rank[-1] + 1
             if t.kind == "kw":
                 self.keywords.setdefault((t.line, t.value), []).append(x)
+
+    def head(self, line: int, name: str) -> int:
+        """The token that opens `type NAME` (or `event NAME`) on `line`."""
+        if self._heads is None:
+            self._heads = {}
+            for x, t in enumerate(self.tokens[:-1]):
+                opens = (t.kind == "kw" and t.value == "type") or (
+                    t.kind == "ident" and t.value == "event")
+                nxt = self.tokens[x + 1]
+                if opens and nxt.kind == "ident":
+                    self._heads.setdefault((t.line, nxt.value), x)
+        return self._heads[(line, name)]
+
+    def declaration_end(self, i: int) -> int:
+        """The last token of the `type` or `event` declaration opened at token
+        `i`, where the parser itself stops reading it: a type has no closing
+        mark of its own (a variant or an alias just ends)."""
+        if self._parser is None:
+            self._parser = Parser(self.text, self.path)
+        self._parser.pos = i
+        if self.tokens[i].kind == "kw":
+            self._parser.type_decl()
+        else:
+            self._parser.event_decl()
+        return self._parser.pos - 1
 
 
 def _spelling(token, bounded: bool) -> str:
@@ -208,6 +246,19 @@ def _block(src: _Source, line: int, nth: int) -> str:
     return "\n".join([*doc, piece])
 
 
+def _type_block(src: _Source, line: int, name: str) -> str:
+    """A `type` (or `event`) declaration with its `pub` and its doc, cut the
+    way `_block` cuts a service. Where it ends is the parser's call."""
+    tokens = src.tokens
+    i = src.head(line, name)
+    j = src.declaration_end(i)
+    while i > 0 and tokens[i - 1].kind == "kw" and tokens[i - 1].value in _TYPE_PREFIX:
+        i -= 1
+    piece, alone = _cut(src, i, j)
+    doc = _doc_above(src.lines, tokens[i].line) if alone else []
+    return "\n".join([*doc, piece])
+
+
 def _header(src: _Source, line: int, nth: int) -> str:
     """A component's header, `component X requires ... provides ...`, as
     written: from its keyword (and a `boot` before it) up to the `{` that opens
@@ -227,16 +278,26 @@ def _strip_docs(block: str) -> str:
     return "\n".join(l for l in block.split("\n") if not l.strip().startswith("//"))
 
 
-def _hash(block: str) -> str:
+def _hash(block: str, types: list[str] = ()) -> str:
+    """The hash of a service's tokens and, after them, the tokens of each type
+    declaration its signatures name (transitively), so a changed field moves
+    the hash of every service that shows it."""
+    def spelled(text: str, drop_pub: bool):
+        lexed = _spelled(text)
+        if lexed is None:
+            # a cut that does not lex on its own (it never should): hash what
+            # it says without its docs, so two such blocks never share one hash
+            return _strip_docs(text)
+        return [t for t in lexed if not (drop_pub and t == ("kw", "pub"))]
+
     # `pub` on a service is documentation (services are pub by default), so it
-    # is not part of what a consumer compiles against
-    lexed = _spelled(block)
-    if lexed is None:
-        # a cut that does not lex on its own (it never should): hash what it
-        # says without its docs, so two such blocks never share one hash
-        return hashlib.sha256(_strip_docs(block).encode()).hexdigest()[:16]
-    spelled = repr([t for t in lexed if t != ("kw", "pub")])
-    return hashlib.sha256(spelled.encode()).hexdigest()[:16]
+    # is not part of what a consumer compiles against; on a type it is, since
+    # it decides whether a `use` may name the type
+    parts = [spelled(block, True), *(spelled(t, False) for t in types)]
+    # a service naming no type keeps the hash it had before types were hashed
+    payload = parts[0] if len(parts) == 1 else parts
+    payload = payload if isinstance(payload, str) else repr(payload)
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
 def _nth_on_line(decls: list, decl) -> int:
@@ -254,6 +315,9 @@ class _Closure:
         self.modules = dict(self.loader._cache)
         self.texts = {**self.loader.disk_reads, **virtual}
         self._sources: dict[str, _Source] = {}
+        self._types: dict[tuple, dict] = {}
+        self._refs_of: dict[tuple, list[tuple]] = {}
+        self._home: dict[int, str] = {}
 
     def source(self, path: str) -> _Source:
         if path not in self._sources:
@@ -291,6 +355,77 @@ class _Closure:
                 if decl.name == name:
                     return candidate, decl
         return None
+
+    def type_decl(self, module, name: str):
+        """Resolve a type name the way `module` sees it, as the compiler does:
+        its own declaration, then the module a `use ... { name }` of it names.
+        `None` for a builtin (`Str`, `Opt`) or a name nothing in scope
+        declares. Never a same-named type of some unrelated loaded module."""
+        for decl in module.program.type_decls:
+            if decl.name == name:
+                return module, decl
+        for use in module.program.uses:
+            if not use.names or name not in use.names:
+                continue
+            target = self._imported(module, use)
+            decl = next((d for d in target.program.type_decls
+                         if d.name == name), None) if target else None
+            if decl is not None:
+                return target, decl
+        return None
+
+    def types_named(self, owner, decl) -> list[dict]:
+        """Every `type` declaration the signatures of service `decl` (declared
+        in `owner`) name, and those declarations name in turn, in the order
+        they are first met. One dict per declaration for the whole pack."""
+        pending: list[tuple] = []
+        for method in decl.methods.values():
+            names = [t for _p, t in method.params] + [method.returns]
+            pending += [(owner, n) for t in names
+                        for n in _TYPE_NAME.findall(t or "")]
+        pending.reverse()
+        found: list[dict] = []
+        seen: set[tuple] = set()
+        while pending:
+            module, name = pending.pop()
+            resolved = self.type_decl(module, name)
+            if resolved is None:
+                continue
+            home, tdecl = resolved
+            key = (home.path, tdecl.name, tdecl.line)
+            if key not in self._types:
+                self._refs_of[key] = self._refs(home, tdecl)
+                self._types[key] = {
+                    "name": tdecl.name,
+                    "module": relpath_or_abs(home.path),
+                    "line": tdecl.line,
+                    # only a `pub` type can be named in a `use`; one reached through
+                    # another type needs no import line at all
+                    "use": (self.use_line(home, tdecl.name)
+                            if tdecl.public else None),
+                    "text": _type_block(self.source(home.path), tdecl.line,
+                                        tdecl.name),
+                }
+                self._home[id(self._types[key])] = home.path
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append(self._types[key])
+            pending += reversed(self._refs_of[key])
+        return found
+
+    def type_paths(self, types: list[dict]) -> set[str]:
+        return {self._home[id(t)] for t in types}
+
+    @staticmethod
+    def _refs(home, tdecl) -> list[tuple]:
+        written = [f.type for f in tdecl.fields or ()]
+        written += [c.payload for c in tdecl.cases or () if c.payload]
+        if len(tdecl.cases or ()) == 1 and tdecl.cases[0].payload is None:
+            written.append(tdecl.cases[0].name)  # an alias spells its target
+        own = set(tdecl.params or ())
+        return [(home, n) for t in written for n in _TYPE_NAME.findall(t or "")
+                if n not in own and n != tdecl.name]
 
     def use_line(self, owner, name: str) -> str | None:
         """The `use` a root writes to see `name` from a non-root module, as
@@ -405,18 +540,25 @@ def context(paths: list[str], *, sources: dict[str, str] | None = None,
         drawn.add(owner.path)
         text = _block(closure.source(owner.path), decl.line,
                       _nth_on_line(owner.program.services, decl))
+        types = closure.types_named(owner, decl)
+        drawn.update(closure.type_paths(types))
+        hashed = _hash(text, [t["text"] for t in types])
+        # each service holds its own copies, so shedding the docs beside one
+        # service never changes what another shows
+        types = [dict(t) for t in types]
         clause_key = key if role != "declared" else (
             entry["providers"][0]["key"] if entry["providers"] else None)
         entries.append({
             **entry, "declared": True,
             "module": relpath_or_abs(owner.path),
             "line": decl.line,
-            "hash": _hash(text),
+            "hash": hashed,
             "clause": (f"{'provides' if role == 'provides' else 'requires'} "
                        f"{clause_key}: {service}") if clause_key else None,
             "use": closure.use_line(owner, decl.name),
             "operations": len(decl.methods),
             "text": text,
+            "types": types,
         })
 
     if component is not None:
@@ -442,10 +584,11 @@ def context(paths: list[str], *, sources: dict[str, str] | None = None,
 def _fit(entries: list[dict], header: str | None, component: str | None,
          budget: int | None, idioms: bool) -> tuple[list[str], bool]:
     """Shrink `entries` in place until the rendered pack fits `budget`: docs
-    off from the last service backwards, then the illustration, then collapse
-    from the last service backwards. A step that would not make its service
-    shorter is skipped. Returns the steps taken, in order, and whether the
-    illustration stayed."""
+    off from the last service backwards (the docs of the types shown beside
+    it go with it), then the illustration, then collapse from the last
+    service backwards (a collapsed service shows no operations, so no types).
+    A step that would not make the pack shorter is undone and skipped.
+    Returns the steps taken, in order, and whether the illustration stayed."""
     steps: list[str] = []
     if budget is None:
         return steps, idioms
@@ -456,26 +599,36 @@ def _fit(entries: list[dict], header: str | None, component: str | None,
             idioms = False
             steps.append("idioms off")
         for entry in reversed(shown):
-            if count_tokens(render(entries, header, component, idioms)) <= budget:
+            before = count_tokens(render(entries, header, component, idioms))
+            if before <= budget:
                 return steps, idioms
+            saved = (entry["text"], [t["text"] for t in entry["types"]])
             if stage == "docs":
-                shorter = _strip_docs(entry["text"])
+                entry["text"] = _strip_docs(entry["text"])
+                for t in entry["types"]:
+                    t["text"] = _strip_docs(t["text"])
                 label = "docs off"
             else:
-                shorter = (f"service {entry['service']} "
-                           f"{{ /* {entry['operations']} operation(s), "
-                           f"collapsed */ }}")
+                entry["text"] = (f"service {entry['service']} "
+                                 f"{{ /* {entry['operations']} operation(s), "
+                                 f"collapsed */ }}")
                 label = "collapsed"
-            if count_tokens(shorter) < count_tokens(entry["text"]):
-                entry["text"] = shorter
-                entry["collapsed"] = entry.get("collapsed", False) or stage == "collapse"
+            was = entry.get("collapsed", False)
+            entry["collapsed"] = was or stage == "collapse"
+            if count_tokens(render(entries, header, component, idioms)) < before:
                 steps.append(f"{label}: {entry['service']}")
+            else:
+                entry["text"], texts = saved
+                for t, text in zip(entry["types"], texts):
+                    t["text"] = text
+                if "collapsed" in entry and not was:
+                    del entry["collapsed"]
     return steps, idioms
 
 
 def render(entries: list[dict], header: str | None, component: str | None,
            idioms: bool = False) -> str:
-    out = []
+    out, shown = [], set()
     if header is not None:
         out += [f"// context for component {component}: declarations only", header, ""]
     for e in entries:
@@ -491,6 +644,14 @@ def render(entries: list[dict], header: str | None, component: str | None,
         if e["use"]:
             out.append(e["use"])
         out += [e["text"], ""]
+        # the types a service names stand beside it; one that two services
+        # name is cut once, beside the first that still shows its operations
+        for t in () if e.get("collapsed") else e["types"]:
+            if (t["module"], t["line"]) not in shown:
+                shown.add((t["module"], t["line"]))
+                if t["use"]:
+                    out.append(t["use"])
+                out += [t["text"], ""]
     if idioms:
         out += [IDIOMS]
     return "\n".join(out).rstrip() + "\n"
