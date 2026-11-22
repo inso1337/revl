@@ -192,7 +192,7 @@ if str(ROOT / "tools") not in sys.path:
 # (`code`) that neither of these two carries. A component answer that
 # serialises differently from the components it is scored beside is exactly the
 # translation layer the controller's own docstring says not to introduce.
-from evolution_reward import Verdict  # noqa: E402
+from evolution_reward import Verdict, measured_paths  # noqa: E402
 
 # ---------------------------------------------------------------- artifacts
 
@@ -858,15 +858,13 @@ def compare(base_readings: dict, head_readings: dict, counters=None) -> list:
 def changed_paths(tree: Path, base: str):
     """Every path that differs between `base` and the tree as it stands.
 
-    `--no-renames` so a file moved out of an instrument directory is reported
-    under its OLD name too; with rename detection on, `--name-only` prints only
-    the destination and the move would look like an addition somewhere else.
+    The one read the reward's `scope` probe and the controller's `authority`
+    precondition use, `evolution_reward.measured_paths`: a move is reported
+    under both of its paths, and nothing the candidate's own git state says
+    (index flags, exclude files, filters) can shrink the set (#3359).
     """
-    diff = _git(tree, ["diff", "--no-renames", "--name-only", base])
-    untracked = _git(tree, ["ls-files", "--others", "--exclude-standard"])
-    if diff is None or untracked is None:
-        return None
-    return frozenset(line for line in (diff + untracked).splitlines() if line)
+    ok, paths = measured_paths(tree, base)
+    return frozenset(paths) if ok else None
 
 
 def _table_blanked(source: str | None, keep):

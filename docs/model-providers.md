@@ -120,7 +120,8 @@ Fields every provider accepts:
 | `api_key_env` | the NAME of the environment variable holding the credential, in upper case (`[A-Z_][A-Z0-9_]*`, at most 64 characters) | none (required for `anthropic` and `gemini`) |
 | `max_tokens` | output token cap | 1024 |
 | `temperature` | sampling temperature | 0 |
-| `timeout` | seconds per request | 120 |
+| `timeout` | seconds for one request: the deadline for the whole call, and the limit on each connect step | 120 |
+| `max_reply_bytes` | the most bytes of a reply that are read; a larger reply is refused | 8388608 (8 MiB) |
 | `residence` | `off_device` to narrow a loopback endpoint (see below) | derived from the endpoint |
 | `reaches` | capability tokens the endpoint's model can reach on its own | `[]` |
 | `structured_output` | how a `validated` operation's grammar is attached (see "Structured output") | per provider |
@@ -185,6 +186,16 @@ machine while the residence still read `on_device` (issue #3109). To route a
 model call through a forwarding proxy you run, bind the role to that proxy's
 URL and declare its residence, as with any other endpoint; revl contacts that
 URL directly.
+
+A reply is bounded in size and in time (issue #3111), because the endpoint may
+be a shared server or a compromised proxy. At most `max_reply_bytes` of a reply
+are read; a larger one, declared by `Content-Length` or counted as it arrives,
+is refused without being held in memory. `timeout` is the deadline for the
+whole call, so a server that answers a byte at a time is cut off when it
+passes; each connect step (name lookup, connect, the TLS handshake) is also
+limited to `timeout` on its own. A reply that is not usable (undecodable JSON,
+an integer of thousands of digits, nesting too deep, or a `message` of the
+wrong type) is a `ProviderError` naming the role, never a raw exception.
 
 ## Residence of an endpoint
 

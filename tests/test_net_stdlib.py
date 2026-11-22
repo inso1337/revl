@@ -386,6 +386,9 @@ def test_py_tier_emits_the_shared_engine(tmp_path):
     ("rust", "`host_request` has no @rs body"),
     ("java", "`host_request` has no @java body"),
     ("go", "`host_request` has no @go body"),
+    # http.rvl lowers on wasm since #3145 (its untyped empty lists are typed
+    # from how they are used), so wasm now reaches the missing-body refusal.
+    ("wasm", "`host_request` has no @wasm body"),
 ])
 def test_tiers_without_a_body_refuse_by_name(tmp_path, capsys, backend, named):
     out = tmp_path / f"net.{backend}"
@@ -393,27 +396,6 @@ def test_tiers_without_a_body_refuse_by_name(tmp_path, capsys, backend, named):
     assert rc != 0
     assert named in capsys.readouterr().err
     assert not out.exists()
-
-
-def test_wasm_refuses_at_lowering_before_this_module_is_the_reason(tmp_path,
-                                                                  capsys):
-    """Honest limit, pinned rather than hidden.
-
-    The module imports stdlib/http.rvl for the shared `Header` record, and
-    http.rvl itself does not lower on wasm today (an untyped empty list literal
-    in its own constructors, a pre-existing frontend limit unrelated to this
-    slice). So wasm is refused, but by lowering, before the missing-body
-    refusal can name `host_request`. A later wasm lowering of http.rvl moves
-    this test to the parametrized case above; it is not a claim that wasm can
-    run the client."""
-    out = tmp_path / "net.wasm"
-    rc = main(["emit", "--backend", "wasm", str(STDLIB), "-o", str(out)])
-    assert rc != 0
-    assert not out.exists()
-    # the refusal that DOES happen names the pre-existing http.rvl lowering
-    # limit in front of it, not this module; on the base commit the module is
-    # missing and the error is a `was not found` resolution failure instead.
-    assert "empty list literal" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------

@@ -88,8 +88,9 @@ service Database {
 service Cache { fn get(key: Str) -> Sock }
 
 component PgDatabase provides db: Database {
+  let sock = effect open_sock() undo close_sock(0)
   provide db {
-    fn query(sql) = open_sock()
+    fn query(sql) = sock
     fn execute(sql) = 1
   }
 }

@@ -70,18 +70,21 @@ export function latchPath(
  *  A latch that EXISTS but does not parse still reads as HALTED. Failing open
  *  on a malformed emergency stop is the one failure mode this feature exists
  *  to prevent, so every reader — the py runtime seam, the CLI, the conductor,
- *  and now this — applies the same rule. A latch the OS refuses to open at all
- *  (a missing file, a permission error) reads as absent, matching
- *  `estop.py::read_latch` (`FileNotFoundError`/`OSError` -> None). */
+ *  and now this — applies the same rule. The same reasoning covers a latch this
+ *  process cannot READ (EACCES, EISDIR, EMFILE): it is an existing but
+ *  unreadable latch, so it reads as HALTED. Only a genuinely absent latch
+ *  (ENOENT) reads as not-halted, matching `estop.py::read_latch`
+ *  (`FileNotFoundError` -> None, every other `OSError` -> unreadable). */
 export function readLatch(path: string | null): LatchRecord | null {
   if (!path) return null
   let text: string
   try {
     text = fs.readFileSync(path, 'utf8')
-  } catch {
-    // ENOENT or any other OS-level read failure: the latch is not readable, so
-    // it is not a halt. (A malformed BUT readable latch is handled below.)
-    return null
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return null
+    // Any other read failure: a halt no reader can inspect must never be
+    // mistaken for the absence of a halt.
+    return unreadable()
   }
   let record: unknown
   try {

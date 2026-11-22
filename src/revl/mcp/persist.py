@@ -404,7 +404,7 @@ def _refuse_policy_downgrade(session, meta: dict) -> None:
 def restore(session, snap: dict, profile=None,
             report: dict | None = None, *,
             gate_reads: dict[str, str] | None = None,
-            agent_supplied: bool = False) -> dict:
+            agent_supplied: bool = False, compile_profile=None) -> dict:
     """Re-admit a snapshot into `session`, replaying admission.
 
     Refuses if a composition is already loaded. Refuses a snapshot taken under an
@@ -454,7 +454,12 @@ def restore(session, snap: dict, profile=None,
     if report is None:
         report = {}
     try:
-        ir = recompile_snapshot(snap, profile=profile, report=report)
+        # issue #3510: `compile_profile` is what the text compiles under (the
+        # trust plus the operator's realm bindings); `profile` stays the
+        # trust itself, which the `profile is None` checks below read
+        ir = recompile_snapshot(
+            snap, profile=compile_profile if compile_profile is not None
+            else profile, report=report)
     except RevlError as error:
         # the load-bearing failure: a snapshot whose component the current
         # checker refuses does not load — it fails here, with the diagnostic

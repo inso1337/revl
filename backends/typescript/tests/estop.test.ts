@@ -128,6 +128,33 @@ describe('the ts E-Stop latch reader (item 443)', () => {
     expect(estopEngaged(arr)).toBe(true)
   })
 
+  it('FAILS CLOSED: a latch that exists but cannot be read still halts', () => {
+    // matching estop.py::read_latch: only a genuinely absent latch (ENOENT)
+    // reads as not halted; EISDIR, ENOTDIR and EACCES read as unreadable.
+    const dirLatch = path.join(tmpdir(), 'dir.estop')
+    fs.mkdirSync(dirLatch)
+    const record = readLatch(dirLatch)
+    expect(record).not.toBeNull()
+    expect(record!.halted).toBe(true)
+    expect(record!.reason).toBe('operator halt (unreadable latch)')
+    expect(estopEngaged(dirLatch)).toBe(true)
+
+    const file = path.join(tmpdir(), 'plain')
+    fs.writeFileSync(file, '{}')
+    expect(estopEngaged(path.join(file, 'halt.estop'))).toBe(true)
+
+    const locked = path.join(tmpdir(), 'locked.estop')
+    fs.writeFileSync(locked, '{"halted":true}')
+    fs.chmodSync(locked, 0o000)
+    let readable = true
+    try {
+      fs.readFileSync(locked, 'utf8')
+    } catch {
+      readable = false
+    }
+    if (!readable) expect(estopEngaged(locked)).toBe(true)
+  })
+
   it('derives the latch path: explicit, then <wal>.estop, then the env', () => {
     expect(latchPath('/a/b.estop')).toBe('/a/b.estop')
     expect(latchPath(null, '/run/session.wal')).toBe('/run/session.wal.estop')

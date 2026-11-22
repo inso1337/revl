@@ -1,6 +1,7 @@
 # Float math and the conversion to Int: a proposal
 
-**Status: proposed. Nothing in this document is implemented.** It answers
+**Status: proposed, design approved (names, slices and the semantics below).
+Nothing in this document is implemented.** It answers
 issue #3319. The names and the split into slices are a design decision; this
 file exists so they can be settled before any tier changes. When a slice lands,
 its semantics move into `docs/arithmetic.md` (next to the integer division
@@ -56,9 +57,11 @@ against the builtin method table, no import and no host extern.
 Choices worth reviewing:
 
 - **`round` is ties away from zero** (C `round`, Rust `round`, Go `Round`). It is
-  not JS `Math.round` (ties toward `+inf`), not Python `round` (ties to even)
-  and not wasm `f64.nearest` (ties to even), so no tier can use its host
-  rounding unwrapped. The wasm form is `t = trunc(x)`, then `t + copysign(1, x)`
+  not JS `Math.round` (ties toward `+inf`), not Python `round` (ties to even),
+  not Java `Math.round` (ties toward `+inf`, and it returns a `long`) and not
+  wasm `f64.nearest` (ties to even). **The python, typescript, java and wasm
+  tiers therefore need a wrapper; rust and go use their native `round`.** The
+  same wrapper serves `to_int_round` in slice 2. The wasm form is `t = trunc(x)`, then `t + copysign(1, x)`
   when `abs(x - t) >= 0.5`; `x - t` is exact, so this is also right at
   `0.49999999999999994`, where `floor(abs(x) + 0.5)` is wrong.
 - **`sqrt` of a negative is NaN**, the IEEE answer. The extern quoted in the

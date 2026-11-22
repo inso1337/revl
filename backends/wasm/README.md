@@ -63,7 +63,7 @@ boundary shapes the substrate carries, with the exact refusal each emits — is
 | host builtins (`Pool`, `Map`; `Job` outside `await`) | different host namespace | express state through coeffects |
 | method-time effects / compensation | the accumulator is fixed at activation | hosted backends |
 | `Map` / function-typed values (any position) | `Map` needs a keyed persistent value model the canonical ABI does not carry (a stated design decision, docs/wasm-capabilities.md); function values need closures/references, absent from wasm MVP | hosted backends / WIT tier |
-| `repeat` builtin, `List.indexOf` | `repeat` and the List per-element search not lowered yet (`Str.split`/`join`/`indexOf` now DO lower — the reader trio, `$str_split`/`$str_join`/`$str_index_of`) | hosted backends |
+| `repeat` builtin, `List.indexOf` over records/lists/Floats | `repeat` and the List per-element search over an element with no comparison here are not lowered yet (List[Str]/Int/Int32/Bool lower: `$list_index_of_str`/`$list_index_of_slot`) (`Str.split`/`join`/`indexOf` now DO lower — the reader trio, `$str_split`/`$str_join`/`$str_index_of`) | hosted backends |
 | non-scalar instance-accessor payloads (`spawn`) | a pointer would cross into memory the spawner does not own | hosted backends |
 
 ## Now supported (v2 + typed v3)

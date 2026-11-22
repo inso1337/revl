@@ -77,6 +77,45 @@ func TestGoEstopFailsClosedOnMalformedLatch(t *testing.T) {
 	}
 }
 
+func TestGoEstopFailsClosedOnALatchItCannotRead(t *testing.T) {
+	// An existing latch no reader can open must halt, not read as absent:
+	// matching estop.py::read_latch (only FileNotFoundError is "absent").
+	dirLatch := filepath.Join(t.TempDir(), "dir.estop")
+	if err := os.Mkdir(dirLatch, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	record := ReadLatch(dirLatch)
+	if record == nil || record["halted"] != true || record["reason"] != "operator halt (unreadable latch)" {
+		t.Fatalf("a latch that is a directory must read as unreadable-halted: %v", record)
+	}
+	if !EstopEngagedAt(dirLatch) {
+		t.Fatalf("a directory latch must engage the E-Stop")
+	}
+
+	// A path under a regular file (ENOTDIR) is not "not found" either.
+	file := filepath.Join(t.TempDir(), "plain")
+	if err := os.WriteFile(file, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !EstopEngagedAt(filepath.Join(file, "halt.estop")) {
+		t.Fatalf("a latch under a regular file must engage the E-Stop")
+	}
+
+	// A mode-0 file (EACCES); skipped when this user can read it anyway.
+	locked := filepath.Join(t.TempDir(), "locked.estop")
+	if err := os.WriteFile(locked, []byte(`{"halted":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.ReadFile(locked); err != nil {
+		if !EstopEngagedAt(locked) {
+			t.Fatalf("a latch the runner cannot open must engage the E-Stop")
+		}
+	}
+}
+
 func TestGoEstopLatchPathPrecedence(t *testing.T) {
 	if LatchPath("/a/b.estop", "", true) != "/a/b.estop" {
 		t.Fatalf("explicit latch path must win")

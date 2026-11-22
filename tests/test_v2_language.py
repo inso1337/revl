@@ -485,7 +485,7 @@ def test_bad_field_destructure_is_a_clean_error_not_a_crash():
     from revl.errors import RevlError
     import pytest
 
-    with pytest.raises(RevlError, match=r"`bogus` is not a field of record `Row`"):
+    with pytest.raises(RevlError, match=r"record destructuring names `bogus`, which is not a field of `Row`"):
         compile_source(
             "type Row = { id: Int, name: Str }\n"
             "fn f(r: Row) -> Int { let { id, bogus } = r return id }\n"
