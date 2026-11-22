@@ -25,7 +25,7 @@ What is wired and runs live (wherever the cordis-wasm runtime is present):
   coeffect table ``rt.table`` empty — the substrate mirror of the py driver's
   ``registry.size``/``reflect.store`` check). ``NO-RESIDUE`` is printed only when
   that holds.
-* **confinement** — the boundary policy's wasm component limits (fuel, linear
+* **confinement**: the boundary policy's wasm component limits (fuel, linear
   memory, wall clock) and the byte-level import check apply to the RUN path
   (issue #3189), not only to the quarantine path: the driver resolves the
   ceilings, the harness applies them to every store before any module is
@@ -495,6 +495,7 @@ def run_wasm(ir: dict, config: dict, files, once: bool = False,
 
     tmp = Path(tempfile.mkdtemp(prefix="revl_run_wasm_"))
     wal_handle = None
+    proc = None
     drained_seqs: list[int] = []
     try:
         proof = OnceProof("run")
@@ -631,6 +632,14 @@ def run_wasm(ir: dict, config: dict, files, once: bool = False,
                       f"recover treats this run as not complete", file=sys.stderr)
                 return 1
     finally:
+        # issue #3189: the harness is its own session leader, so it no longer
+        # shares the terminal's group and a Ctrl-C (or any exception between
+        # the Popen and the wait, such as a broken pipe in `proof.send`) would
+        # interrupt only this driver and leave it running. Whatever way this
+        # block is left, a harness that is still alive is killed with its group.
+        if proc is not None and proc.poll() is None:
+            _kill_process_group(proc)
+            proc.wait()
         if wal_handle is not None:
             wal_handle.close()
         shutil.rmtree(tmp, ignore_errors=True)

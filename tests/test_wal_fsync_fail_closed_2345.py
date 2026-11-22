@@ -312,6 +312,9 @@ class _FakeHarness:
         self.waited = True
         return 0
 
+    def poll(self):
+        return 0
+
 
 def _wasm_run_fixture(tmp_path, monkeypatch, fail_after: int):
     """Wire `run_wasm` to a fake harness and fail every fsync after the first

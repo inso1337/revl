@@ -207,3 +207,67 @@ def test_an_import_outside_the_tier_namespaces_is_refused(monkeypatch):
 
 def test_a_structural_seam_import_is_confined(monkeypatch):
     _check(monkeypatch, "host", "job_run")
+
+
+# --------------------------------------------------------------------------- #
+# the harness is its own session leader: an interrupt must still kill it
+# --------------------------------------------------------------------------- #
+
+class _InterruptedHarness:
+    """A harness process whose first wait is interrupted (a Ctrl-C reaches the
+    driver; the harness, a session leader, never sees the terminal's SIGINT)."""
+
+    pid = 4242
+
+    class _Stdin:
+        def write(self, text):
+            pass
+
+        def flush(self):
+            pass
+
+        def close(self):
+            pass
+
+    def __init__(self):
+        self.stdin = self._Stdin()
+        self.stdout = iter(())
+        self.waits = 0
+        self.alive = True
+
+    def wait(self, timeout=None):
+        self.waits += 1
+        if self.waits == 1:
+            raise KeyboardInterrupt
+        return -9
+
+    def poll(self):
+        return None if self.alive else -9
+
+
+def test_an_interrupt_between_start_and_wait_kills_the_harness_group(monkeypatch):
+    from revl import run_wasm as module  # noqa: PLC0415
+
+    ir = compile_source((ROOT / "examples" / "counter_pair.rvl").read_text(
+        encoding="utf-8"), "counter_pair.rvl")
+    harness = _InterruptedHarness()
+    killed = []
+
+    def kill(proc):
+        killed.append(proc)
+        proc.alive = False
+
+    monkeypatch.setattr(module, "wasm_runtime_reason", lambda: None)
+    monkeypatch.setattr(module, "_check_emitted_imports",
+                        lambda ir, modules: None)
+    monkeypatch.setattr(module, "_cordis_wasm_python", lambda: "python")
+    monkeypatch.setattr(module._childproc, "popen", lambda *a, **k: harness)
+    monkeypatch.setattr(module, "_kill_process_group", kill)
+
+    with pytest.raises(KeyboardInterrupt):
+        module.run_wasm(ir, {}, [], once=True)
+
+    # on main nothing killed it: the process would have run on, unowned
+    assert killed == [harness]
+    # and the driver reaped it after the kill
+    assert harness.waits == 2

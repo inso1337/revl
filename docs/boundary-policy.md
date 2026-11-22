@@ -240,7 +240,9 @@ The JSON form parses to the same policy:
   epoch deadline before any module is plugged. A composition that hits a
   ceiling traps and the run exits nonzero (`note raised` names the reason); a
   harness that outlives the wall ceiling plus a startup grace is killed with
-  its whole process group. The emitted modules' import sections are read back
+  its whole process group. The wall ceiling runs from the moment each
+  component is plugged, so it bounds the whole boot-to-teardown round trip of
+  a composition, not each component's own execution. The emitted modules' import sections are read back
   from the bytes the harness compiles and held to the same byte-level check. A
   runtime or wasmtime that cannot apply a ceiling makes the harness refuse
   rather than run unconfined.
