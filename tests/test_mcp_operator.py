@@ -468,6 +468,118 @@ def test_adding_an_allowed_realm_to_a_component_outside_it_is_refused():
     assert labels["TenantBCache"].was == frozenset({"TenantBCache", "tenant_b"})
 
 
+# ---------------- issue #3188, remainder: a realm grant must cover EVERY realm
+#
+# A component isolated into tenant_a and tenant_b serves both tenants. A grant
+# on `tenant_a*` alone selects a component by realm only when every realm it
+# is isolated into is matched by some allow subject of that operator for the
+# verb; a grant on the component's name selects it regardless of its realms.
+# `may not` stays any-of: one denied realm is enough to refuse.
+
+MULTI_REALM = TWO_REALM.replace(
+    'component TenantBCache provides cb: Cache {\n  isolate cb in realm("tenant_b")',
+    'component TenantBCache requires ca: Cache provides cb: Cache {\n'
+    '  isolate cb in realm("tenant_b")\n  isolate ca in realm("tenant_a")')
+
+ALL_OF_PROFILE = """
+operator alice may swap on tenant_a*
+operator dana may swap on tenant_a*
+operator dana may swap on tenant_b*
+operator erin may swap on TenantB*
+operator carol may swap on *
+operator carol may not swap on tenant_b
+operator fred may swap on tenant_a*, tenant_b*
+operator fred may not swap on tenant_a
+"""
+
+
+def _swap_multi_b():
+    # a body-only change to the component that serves both tenants
+    return MULTI_REALM.replace("provide cb { fn get(k) = s.get(k)\n               fn size() = 0 }",
+                               "provide cb { fn get(k) = s.get(k)\n               fn size() = 42 }")
+
+
+def test_multi_realm_fixture_puts_the_component_in_both_realms():
+    labels = dict(op._changed_targets(compile_source(MULTI_REALM),
+                                      compile_source(_swap_multi_b())))
+    assert set(labels) == {"TenantBCache"}
+    assert labels["TenantBCache"].name == "TenantBCache"
+    assert labels["TenantBCache"].realms == frozenset({"tenant_a", "tenant_b"})
+    assert labels["TenantBCache"].was.realms == frozenset({"tenant_a", "tenant_b"})
+
+
+def test_a_grant_on_one_realm_does_not_cover_a_component_serving_two():
+    # the issue's remainder: TenantBCache also serves tenant_b, so alice's
+    # `may swap on tenant_a*` must not let her rewrite it
+    alice = parse_profile(ALL_OF_PROFILE).get("alice")
+    sess = _FakeSession(compile_source(MULTI_REALM), alice)
+    d = decide(sess, "revl_swap", {"source": _swap_multi_b()})
+    assert d.gated and not d.allowed
+    assert "TenantBCache" in d.message
+    assert "tenant_b" in d.message
+
+
+def test_grants_covering_every_realm_admit_the_component():
+    dana = parse_profile(ALL_OF_PROFILE).get("dana")
+    sess = _FakeSession(compile_source(MULTI_REALM), dana)
+    d = decide(sess, "revl_swap", {"source": _swap_multi_b()})
+    assert d.gated and d.allowed
+    assert d.subjects == ("TenantBCache",)
+
+
+def test_a_name_grant_covers_a_multi_realm_component():
+    erin = parse_profile(ALL_OF_PROFILE).get("erin")
+    sess = _FakeSession(compile_source(MULTI_REALM), erin)
+    d = decide(sess, "revl_swap", {"source": _swap_multi_b()})
+    assert d.gated and d.allowed
+    assert d.subjects == ("TenantBCache",)
+
+
+@pytest.mark.parametrize("who", ["carol", "fred"])
+def test_a_deny_on_one_realm_still_refuses_a_multi_realm_component(who):
+    # deny controls: `may not` is any-of, whether the allow was `*` (carol) or
+    # named every realm (fred)
+    operator = parse_profile(ALL_OF_PROFILE).get(who)
+    sess = _FakeSession(compile_source(MULTI_REALM), operator)
+    d = decide(sess, "revl_swap", {"source": _swap_multi_b()})
+    assert d.gated and not d.allowed
+    assert "TenantBCache" in d.message
+    assert "may not swap" in d.message
+
+
+def test_single_realm_components_still_select_as_before():
+    # the fixture change must not disturb the single-realm cases: alice may
+    # still swap TenantACache, and still may not swap a tenant_b-only one
+    alice = parse_profile(ALL_OF_PROFILE).get("alice")
+    sess = _FakeSession(compile_source(TWO_REALM), alice)
+    assert decide(sess, "revl_swap", {"source": _swap_a()}).allowed
+    assert not decide(sess, "revl_swap", {"source": _swap_b()}).allowed
+
+
+def test_allows_selects_by_name_or_by_every_realm():
+    # the unit: name match, all realms, some realms, no realm
+    dana = parse_profile(ALL_OF_PROFILE).get("dana")
+    alice = parse_profile(ALL_OF_PROFILE).get("alice")
+    erin = parse_profile(ALL_OF_PROFILE).get("erin")
+    both = op.TargetLabels("TenantBCache", {"tenant_a", "tenant_b"})
+    assert dana.allows("swap", both)[0]
+    assert not alice.allows("swap", both)[0]
+    assert erin.allows("swap", both)[0]
+    # a component with no realm is selected by its name or by `*` only
+    bare = op.TargetLabels("tenant_a_cache", ())
+    assert alice.allows("swap", bare)[0]  # `tenant_a*` matches the NAME
+    assert not alice.allows("swap", op.TargetLabels("Other", ()))[0]
+    carol = parse_profile(ALL_OF_PROFILE).get("carol")
+    assert carol.allows("swap", op.TargetLabels("Other", ()))[0]
+    # a plain label set (no name/realm split, e.g. the quarantine bypass's
+    # component names) is still any-of
+    assert alice.allows("swap", frozenset({"Other", "tenant_a_x"}))[0]
+    # the running side is checked the same way: a component that served only
+    # tenant_a and now also serves tenant_b is not selected by `tenant_a*`
+    changed = op.ChangedLabels(both, deny=(), was=op.TargetLabels("TenantBCache", {"tenant_a"}))
+    assert not alice.allows("swap", changed, changed.deny, changed.was)[0]
+
+
 def test_adding_an_allowed_realm_refuses_before_the_handler(_profiled_session):
     running = compile_source(TWO_REALM)
     server.SESSION.ir = running

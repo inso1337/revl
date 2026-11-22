@@ -262,7 +262,9 @@ class Grant:
     ``allow`` is True for ``may`` (a capability the operator holds), False for
     ``may not`` (a prohibition that refuses regardless of any allow — deny
     wins, exactly as in the boundary policy). A subject glob matches a target's
-    component *name* or any *realm* it is isolated into.
+    component *name* or a *realm* it is isolated into; how the labels of one
+    target combine (a `may not` on any of them, an allow on the name or on
+    every realm) is :meth:`Operator.allows`'s business, not the glob's.
     """
 
     verbs: tuple[str, ...]
@@ -272,18 +274,17 @@ class Grant:
     def covers_verb(self, verb: str) -> bool:
         return any(fnmatchcase(verb, pat) for pat in self.verbs)
 
-    def covers_subject(self, labels: frozenset[str]) -> bool:
+    def covers_label(self, label: str) -> bool:
         # a `*` subject grant covers anything, including the unnameable WHOLE;
         # a named glob covers WHOLE only if it is literally `*`.
-        for pat in self.subjects:
-            for label in labels:
-                if label == WHOLE:
-                    if pat == WHOLE:
-                        return True
-                    continue
-                if fnmatchcase(label, pat):
-                    return True
-        return False
+        if label == WHOLE:
+            return WHOLE in self.subjects
+        return any(fnmatchcase(label, pat) for pat in self.subjects)
+
+    def covers_subject(self, labels: frozenset[str]) -> bool:
+        """Any-of over a label set: the reading of a `may not`, and of a plain
+        label set that keeps no name apart from realms."""
+        return any(self.covers_label(label) for label in labels)
 
 
 # ------------------------------------------- what an operator may MINT
@@ -452,7 +453,9 @@ class Operator:
         of a change, so a candidate cannot add a realm its grant matches to a
         component the grant does not already cover (issue #3188). An added
         component has no running side; a removed one is matched on the only
-        side it has."""
+        side it has. On each side the allow is read by
+        :meth:`_selecting_allow`: by the component's name, or by every realm
+        it is isolated into."""
         deny_on = labels if deny_labels is None else deny_labels
         for grant in self.grants:
             if not grant.allow and grant.covers_verb(verb) \
@@ -461,17 +464,38 @@ class Operator:
         sides = (labels,) if was_labels is None else (labels, was_labels)
         chosen: Grant | None = None
         for side in sides:
-            on_side = next(
-                (grant for grant in self.grants
-                 if grant.allow and grant.covers_verb(verb)
-                 and grant.covers_subject(side)),
-                None,
-            )
+            on_side = self._selecting_allow(verb, side)
             if on_side is None:
                 return False, None  # no allow selects it on this side
             if chosen is None:
                 chosen = on_side
         return True, chosen
+
+    def _selecting_allow(self, verb: str, labels: frozenset[str]) -> Grant | None:
+        """The allow that selects one side of a target, or None.
+
+        A :class:`TargetLabels` keeps the component's name apart from its
+        realms. An allow subject matching the NAME selects it; otherwise EVERY
+        realm it is isolated into must be matched by some allow subject of this
+        operator for the verb, so an operator scoped to `tenant_a*` does not get
+        a component that also serves tenant_b (issue #3188). A component with
+        no realm is selected by its name or by `*` only. A plain label set (the
+        quarantine bypass's component names) is any-of."""
+        allows = [grant for grant in self.grants
+                  if grant.allow and grant.covers_verb(verb)]
+        if not isinstance(labels, TargetLabels):
+            return next((g for g in allows if g.covers_subject(labels)), None)
+        by_name = next((g for g in allows if g.covers_label(labels.name)), None)
+        if by_name is not None or not labels.realms:
+            return by_name
+        chosen: Grant | None = None
+        for realm in sorted(labels.realms):
+            on_realm = next((g for g in allows if g.covers_label(realm)), None)
+            if on_realm is None:
+                return None  # one realm the grants do not reach is enough
+            if chosen is None:
+                chosen = on_realm
+        return chosen
 
 
 @dataclass(frozen=True)
@@ -999,11 +1023,33 @@ class Decision:
     disk_reads: dict | None = None
 
 
-def _labels_for(ir: dict, name: str, realms) -> frozenset[str]:
-    return frozenset({name}) | frozenset(realms)
+class TargetLabels(frozenset):
+    """The labels of one target component: its name and the realms it is
+    isolated into, kept apart (issue #3188).
+
+    As a set it is the name plus the realms: what a `may not` is matched
+    against (any one of them) and what a refusal names. An allow reads the two
+    parts separately (:meth:`Operator._selecting_allow`): a subject matching
+    the name selects the component; otherwise every realm must be matched.
+    Folding the two into one flat set let `may swap on tenant_a*` select a
+    component that also serves tenant_b."""
+
+    name: str
+    realms: frozenset[str]
+
+    def __new__(cls, name: str, realms):
+        realms = frozenset(realms)
+        self = super().__new__(cls, {name} | realms)
+        self.name = name
+        self.realms = realms
+        return self
 
 
-class ChangedLabels(frozenset):
+def _labels_for(ir: dict, name: str, realms) -> TargetLabels:
+    return TargetLabels(name, realms)
+
+
+class ChangedLabels(TargetLabels):
     """The labels of a component a swap changes (issue #3188).
 
     As a set it is the labels an ALLOW is matched against on the candidate
@@ -1023,12 +1069,12 @@ class ChangedLabels(frozenset):
     where it was."""
 
     deny: frozenset[str]
-    was: frozenset[str] | None
+    was: TargetLabels | None
 
-    def __new__(cls, labels, deny, was=None):
-        self = super().__new__(cls, labels)
+    def __new__(cls, labels: TargetLabels, deny, was: TargetLabels | None = None):
+        self = super().__new__(cls, labels.name, labels.realms)
         self.deny = frozenset(deny) | self
-        self.was = None if was is None else frozenset(was)
+        self.was = was
         return self
 
 
@@ -1447,6 +1493,10 @@ def _refusal(operator: Operator, verb: str,
              offender: tuple[str, frozenset[str]], grant: Grant | None,
              ) -> tuple[WhyTrace, str]:
     name, labels = offender
+    realms = labels.realms if isinstance(labels, TargetLabels) else frozenset()
+    was = was_labels_of(labels)
+    if isinstance(was, TargetLabels):
+        realms = realms | was.realms
     if isinstance(labels, ChangedLabels):
         # name every side of the change, whether a deny matched or an allow
         # failed: the realm the component was in is part of the target too
@@ -1459,6 +1509,9 @@ def _refusal(operator: Operator, verb: str,
     else:
         head = (f"operator `{operator.token}` may not `{verb}` `{subject}` "
                 f"— no grant in its profile permits `{verb}` there")
+        if realms:
+            head += (f": an allow must name `{subject}` or cover every realm "
+                     f"it is isolated into ({', '.join(sorted(realms))})")
     message = (head + f" (operator capabilities, item 55; subject labels "
                f"[{', '.join(named)}])")
     why = WhyTrace(
