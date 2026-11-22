@@ -16,10 +16,19 @@ is cut beside it. Every service carries a `hash` over its lexed tokens and
 those of its types. The lexer drops comments, so a doc edit or a reflow leaves
 the hash where it was and a signature or a field edit moves it.
 
+A pack for one component ends with `IDIOMS`, a short compiled illustration of
+how a provider body is written. Declarations alone lost rounds-to-green: a
+model that never sees a body writes a bare `match`, puts `emission` on a
+provider method, or drops an `emit` or a `return`, which the raw composition
+had shown it by example (bench/context_arm.py, docs/context.md). The
+illustration is the same text for every pack and carries nothing of the
+sources.
+
 `budget` shrinks the pack in a fixed order instead of truncating it: first the
-doc comments go, from the last service backwards, then whole services collapse
-to their header line, again from the last one backwards. Every service stays
-named, with its clause and its hash, at every step.
+doc comments go, from the last service backwards, then the illustration, then
+whole services collapse to their header line, again from the last one
+backwards. Every service stays named, with its clause and its hash, at every
+step.
 """
 
 from __future__ import annotations
@@ -430,8 +439,63 @@ class _Closure:
         return None
 
 
+#: How a provider body is written, appended to a component's pack. It is the
+#: text the rounds-to-green run measured, and tests/test_context.py compiles it
+#: as it stands, so an idiom here is one the checker accepts.
+IDIOMS = """\
+// How a provider body is written: a compiled illustration, not part of
+// these sources. Its names (Log, Kv, Example) mean nothing here.
+extern emission fn write_line(line: Str) = @py { pass }
+service Log { emission[write_line] fn record(line: Str) -> Int }
+service Kv {
+  fn get(k: Str) -> Opt[Str]
+  fn find(k: Str) -> Result[Str, Str]
+  emission[log] fn put(k: Str, v: Str)
+  emission[log] fn tag(k: Str) -> Str
+}
+component Example requires log: Log provides kv: Kv {
+  // activation: runs once at load; `effect ... undo ...` is revertible state
+  let store = effect Map.new() undo store.drop()
+
+  provide kv {
+    // a method is a plain `fn`, never `emission fn`: the service declares that
+    fn get(k) = store.get(k)
+
+    // `match` is an expression: return it, or bind it with `let`
+    fn find(k) {
+      return match store.get(k) {
+        Some(v) => Ok(v),
+        None    => Err("no entry for " + k),
+      }
+    }
+
+    // a mutation pairs `effect` with its `undo`; a call to an emission
+    // needs `emit`, even inside another emission
+    fn put(k, v) {
+      effect store.insert(k, v)
+      undo   store.remove(k)
+      emit log.record(`put ${k}`)
+    }
+
+    // an emission's value is the `emit` expression itself: bind it or
+    // return it, never call the emission a second time to get it; a block
+    // body that returns a value ends with `return`
+    fn tag(k) {
+      let line = emit log.record(k)
+      return `tag:${k} at ${line}`
+    }
+  }
+}
+"""
+
+
 def context(paths: list[str], *, sources: dict[str, str] | None = None,
-            component: str | None = None, budget: int | None = None) -> dict:
+            component: str | None = None, budget: int | None = None,
+            idioms: bool | None = None) -> dict:
+    """`idioms` appends `IDIOMS` to the pack; by default it does when a
+    component is named, the case where a body is about to be written."""
+    if idioms is None:
+        idioms = component is not None
     closure = _Closure(paths, sources)
     components = {c.name: (root, c)
                   for root in closure.roots for c in root.program.components}
@@ -500,14 +564,15 @@ def context(paths: list[str], *, sources: dict[str, str] | None = None,
     if component is not None:
         drawn.add(components[component][0].path)
     raw = sum(count_tokens(closure.texts[p]) for p in drawn)
-    steps = _fit(entries, header, component, budget)
-    pack = render(entries, header, component)
+    steps, idioms = _fit(entries, header, component, budget, idioms)
+    pack = render(entries, header, component, idioms)
     return {
         "ok": True,
         "component": component,
         "header": header,
         "services": entries,
         "pack": pack,
+        "idioms": idioms,
         "tokens": {"pack": count_tokens(pack), "raw": raw,
                    "rawFiles": sorted(relpath_or_abs(p) for p in drawn)},
         "budget": None if budget is None else {
@@ -517,22 +582,26 @@ def context(paths: list[str], *, sources: dict[str, str] | None = None,
 
 
 def _fit(entries: list[dict], header: str | None, component: str | None,
-         budget: int | None) -> list[str]:
+         budget: int | None, idioms: bool) -> tuple[list[str], bool]:
     """Shrink `entries` in place until the rendered pack fits `budget`: docs
     off from the last service backwards (the docs of the types shown beside
-    it go with it), then collapse from the last service backwards (a
-    collapsed service shows no operations, so no types). A step that would not
-    make the pack shorter is undone and skipped. Returns the steps taken, in
-    order."""
+    it go with it), then the illustration, then collapse from the last
+    service backwards (a collapsed service shows no operations, so no types).
+    A step that would not make the pack shorter is undone and skipped.
+    Returns the steps taken, in order, and whether the illustration stayed."""
     steps: list[str] = []
     if budget is None:
-        return steps
+        return steps, idioms
     shown = [e for e in entries if e.get("text")]
     for stage in ("docs", "collapse"):
+        if stage == "collapse" and idioms and count_tokens(
+                render(entries, header, component, idioms)) > budget:
+            idioms = False
+            steps.append("idioms off")
         for entry in reversed(shown):
-            before = count_tokens(render(entries, header, component))
+            before = count_tokens(render(entries, header, component, idioms))
             if before <= budget:
-                return steps
+                return steps, idioms
             saved = (entry["text"], [t["text"] for t in entry["types"]])
             if stage == "docs":
                 entry["text"] = _strip_docs(entry["text"])
@@ -546,7 +615,7 @@ def _fit(entries: list[dict], header: str | None, component: str | None,
                 label = "collapsed"
             was = entry.get("collapsed", False)
             entry["collapsed"] = was or stage == "collapse"
-            if count_tokens(render(entries, header, component)) < before:
+            if count_tokens(render(entries, header, component, idioms)) < before:
                 steps.append(f"{label}: {entry['service']}")
             else:
                 entry["text"], texts = saved
@@ -554,10 +623,11 @@ def _fit(entries: list[dict], header: str | None, component: str | None,
                     t["text"] = text
                 if "collapsed" in entry and not was:
                     del entry["collapsed"]
-    return steps
+    return steps, idioms
 
 
-def render(entries: list[dict], header: str | None, component: str | None) -> str:
+def render(entries: list[dict], header: str | None, component: str | None,
+           idioms: bool = False) -> str:
     out, shown = [], set()
     if header is not None:
         out += [f"// context for component {component}: declarations only", header, ""]
@@ -582,4 +652,6 @@ def render(entries: list[dict], header: str | None, component: str | None) -> st
                 if t["use"]:
                     out.append(t["use"])
                 out += [t["text"], ""]
+    if idioms:
+        out += [IDIOMS]
     return "\n".join(out).rstrip() + "\n"

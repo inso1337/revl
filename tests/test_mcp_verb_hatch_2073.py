@@ -4,7 +4,7 @@
 `tools/list` advertises `disclosure.CORE`, and the authoring harness builds the
 model's tool list from exactly that:
 
-    tools = bridge.openai_schemas() + FILE_TOOLS        # 15 MCP verbs + 3
+    tools = bridge.openai_schemas() + FILE_TOOLS        # 16 MCP verbs + 3
 
 A function-calling model emits a call for a tool it was SHOWN and for no other,
 so a schema `revl_verbs` returns as text is a document, not a tool. Measured
@@ -20,8 +20,9 @@ verb's OWN name, so it runs the whole pipeline and returns what a direct call
 returns — the same jail, the same authoring and operator gates, the same
 runtime gate, the same handler, the same `disk` divergence field, the same
 `sessionState` footer. It adds no listed verb by itself: #2625 listed
-`revl_export` (the tier is 15 now) because the prompt that taught the hatch cost
-more than the schema, and the hatch still reaches every verb outside the tier.
+`revl_export` because the prompt that taught the hatch cost more than the
+schema, the rounds-to-green run listed `revl_context` (the tier is 16 now), and
+the hatch still reaches every verb outside the tier.
 
 The claim in `disclosure.py` — "every verb stays callable by name, listed or
 not" — was true of the transport and false of the model's interface. These
@@ -116,11 +117,11 @@ def test_the_hatch_is_in_the_tool_list_the_model_is_given():
 
 
 def test_the_hatch_does_not_grow_the_tier_or_add_a_verb():
-    """The budget decision: `CORE` is 15 since #2625 promoted `revl_export`,
-    and the listed set is still exactly `CORE`. The hatch is `revl_verbs`'
-    second form, so by itself it adds no verb to gate, to plan, to give a topic
-    or to count."""
-    assert len(disclosure.CORE) <= 15
+    """The budget decision: `CORE` is 16 since #2625 promoted `revl_export`
+    and the rounds-to-green run promoted `revl_context`, and the listed set is
+    still exactly `CORE`. The hatch is `revl_verbs`' second form, so by itself
+    it adds no verb to gate, to plan, to give a topic or to count."""
+    assert len(disclosure.CORE) <= 16
     assert disclosure.CORE[-1] == disclosure.DISCOVERY
     names = [t["name"] for t in _list()]
     assert len(names) == len(PRESENT_CORE)

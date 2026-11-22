@@ -258,8 +258,10 @@ edit ([context.md](context.md)).
 - `FILES` - the composition's `.rvl` files, required.
 - `--component NAME` - ground this component. Without it, every service the
   files load. An unknown name exits 1 and lists the components.
-- `--budget TOKENS` - shrink the pack to fit: docs off, then collapse, from the
-  last service backwards. Every service stays named; `fits: false` when even
+- `--no-idioms` - leave out the compiled illustration of how a provider body
+  is written, which a pack for a `--component` otherwise ends with.
+- `--budget TOKENS` - shrink the pack to fit: docs off, then the illustration,
+  then collapse, from the last service backwards. Every service stays named; `fits: false` when even
   the collapsed pack is over.
 - `--json` - the rows, the pack, and its token size beside the raw files.
 

@@ -912,6 +912,8 @@ _MARKED_VERBS = [
     ("revl_query_drift", {"service": "Cache"}),
     ("revl_plan", {}),
     ("revl_context", {"component": "C"}),
+    # the held form passes the verb's own options through
+    ("revl_context", {"component": "C", "idioms": False}),
 ]
 
 
