@@ -168,7 +168,11 @@ def _lend_turn():
     of its own, retired when the block ends, so a copy that outlives the block
     lends nothing. On exit the runtime's owner slot and host trace go back to
     the lender's; a borrower still running then is an error (join it inside the
-    block). Outside a held turn it lends nothing."""
+    block). On that orphan path the lock passes to the borrower, the lender's
+    thread is refused at once until the borrower's step ends, and the rest of
+    that step runs with the runtime owner slot cleared: the lender's `call`
+    clears it in its `finally`. The lender recovers on its next call. Outside a
+    held turn it lends nothing."""
     held = _TURN_HOLDER
     me = threading.get_ident()
     with _TURN_BORROW:
@@ -191,7 +195,8 @@ def _lend_turn():
         _TURN_LENT.reset(reset)
         with _TURN_BORROW:
             outlived = held["borrowed"] or held["thread"] != me
-            held.update(lend=None, lender=None)
+            # an orphan keeps `lender`, so this thread is refused at once
+            held.update(lend=None, lender=me if outlived else None)
         if outlived:
             raise SessionError(
                 f"{held['label']} still runs under the session turn "

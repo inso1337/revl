@@ -476,3 +476,61 @@ def test_a_borrower_that_raises_gives_the_lender_its_slots_back(hook):
     assert seen["trace"] == first._driver._on_host
     seen["second"].unload()
     first.unload()
+
+
+def test_a_borrower_that_outlives_the_lend_inherits_the_lock(monkeypatch):
+    """The orphan handoff: the lend block ends while its borrower is still in
+    a step. `_lend_turn` raises, the lock stays taken and passes to the
+    borrower, the lender's thread is refused at once meanwhile, and the
+    borrower frees the lock when its step ends."""
+    import contextvars
+
+    monkeypatch.setattr(session_mod, "_TURN_TIMEOUT", 0.5)
+    held = session_mod._TURN_HOLDER
+    borrowed, release = threading.Event(), threading.Event()
+
+    def borrower():
+        with session_mod._SessionTurn(Session()):
+            borrowed.set()
+            assert release.wait(30)
+
+    def refused_at_once():
+        started = time.monotonic()
+        with pytest.raises(SessionError) as info:
+            session_mod._SessionTurn(Session()).__enter__()
+        assert info.value.code == "SESSION_BUSY"
+        assert time.monotonic() - started < 0.2
+        return str(info.value)
+
+    thread = None
+    try:
+        with pytest.raises(SessionError) as ended:
+            with session_mod._SessionTurn(Session()):
+                try:
+                    with _lend():
+                        context = contextvars.copy_context()
+                        thread = threading.Thread(target=context.run,
+                                                  args=(borrower,))
+                        thread.start()
+                        assert borrowed.wait(30)
+                except SessionError:
+                    # between the raise and the lender's exit
+                    assert "lent its session turn" in refused_at_once()
+                    raise
+        assert ended.value.code == "SESSION_BUSY"
+        assert "must be joined inside the lend" in str(ended.value)
+        # the lender's turn ended; the lock passed to the running borrower
+        assert session_mod._TURN_LOCK.locked()
+        assert held["orphaned"] is True
+        assert held["thread"] == thread.ident
+        assert "lent its session turn" in refused_at_once()
+    finally:
+        release.set()
+        if thread is not None:
+            thread.join()
+    assert held["thread"] is None and held["orphaned"] is False
+    assert held["lender"] is None and held["lend"] is None
+    assert not session_mod._TURN_LOCK.locked()
+    with session_mod._SessionTurn(Session()):
+        assert held["thread"] == threading.get_ident()
+    assert not session_mod._TURN_LOCK.locked()
