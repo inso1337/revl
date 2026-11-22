@@ -1,6 +1,6 @@
 # 3341. Sharing a sequence between two methods of a component
 
-Issue #3341. **Status: proposed, not implemented.** This document picks one of
+Issue #3341. **Status: option A chosen by the owner on PR #3566; not implemented.** This document picks one of
 the two shapes the issue names, states the rules it would carry and lists what
 is still open. No compiler change comes with it.
 
@@ -159,9 +159,12 @@ The module `fn` receives the handle and calls it.
 
 ## Slices
 
-1. Parser and the reference lowering, with the checks of rules 1 to 7, the
-   reference tier and the recorder test for the step names (value form
-   included).
+1. Parser and the places a new component-body statement form must land: the
+   parser, `grammar/revl.lark`, `grammar/revl.ebnf`, `grammar/revl.gbnf`,
+   `src/revl/formatter.py` and the self-host parser (`selfhost/parser.rvl`).
+   Then the reference lowering with the checks of rules 1 to 7, the reference
+   tier and the recorder test for the step names (value form included). The
+   lexer's keyword set does not change (`fn` is already a keyword).
 2. The self-host lowering and checker, and the `emit_py_corpus` fixture that
    makes both agree.
 3. docs/syntax-2.0.md, and the playground's three `Gate` sequences as the
