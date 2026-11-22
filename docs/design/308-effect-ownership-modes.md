@@ -11,10 +11,10 @@ and slice 3b is admitted by the parser and built on the reference tier (PR
 #698), with the S1 spec below complete. TRANSFER's first surface is DECIDED in
 TR1 below: a resource-typed `handoff` across a same-realm swap, where the
 closing duty of the handle moves from predecessor to successor through a
-swap transit ledger. TR1 is design only, with one question (OQ-T1, how the receiving
-binding obtains the handle) left open for the owner; its implementation
-slice is next, and the acquire-head reservation in `src/revl/parser.py` is
-the placeholder it replaces. PRODUCT-VISION, 243-261 arc.
+swap transit ledger. TR1 is design only and decided, including OQ-T1 (the
+receiving binding is seeded from the ledger and its own acquire does not
+run); its implementation slice is next, and the acquire-head reservation in
+`src/revl/parser.py` is the placeholder it replaces. PRODUCT-VISION, 243-261 arc.
 Companion docs: [243-witnessed-externs.md](243-witnessed-externs.md),
 [teardown-contract.md](teardown-contract.md),
 [247-compensate.md](247-compensate.md),
@@ -800,9 +800,9 @@ accepts for a hung activation, not a new one shared introduces).
 
 ## TR1: transfer, the decided first surface (resource-typed handoff)
 
-Status: DECIDED design, with one question left OPEN on purpose (OQ-T1,
-below). Implementation not started; no grammar and no runtime change has
-landed for it. The acquire-head reservation in `src/revl/parser.py`
+Status: DECIDED design, including OQ-T1 (the owner chose option B, see
+"Decision and open questions"). Implementation not started; no grammar and
+no runtime change has landed for it. The acquire-head reservation in `src/revl/parser.py`
 (slice 3a, PR #503) is the placeholder TR1 replaces. The language reference
 gains `transfer` when the implementation slice lands; documenting an
 unimplemented spelling there would promise syntax the compiler refuses.
@@ -1222,8 +1222,8 @@ so a swap moves all its marked slots or none.
   ordinary running predecessor, exactly as for an unmarked bracket. A kill
   AFTER the successor's `activation-complete` is an ordinary completed
   activation holding an ordinary handle. Only the window between them,
-  where the successor's opening has not completed, is new: under option B
-  the successor's acquire never runs, so that opening would have no acquire
+  where the successor's opening has not completed, is new: the successor's
+  acquire never runs, so that opening would have no acquire
   record for the handle, and recovery would roll it back without owing the
   handle that the predecessor's complete opening no longer reports. TR1
   therefore requires that the claim in step 3 appends an ordinary `effect`
@@ -1234,15 +1234,14 @@ so a swap moves all its marked slots or none.
   the window; the before-lift and after-completion cases are guards that the
   report equals an unmarked bracket's.
 
-### Open questions
+### Decision and open questions
 
-- **OQ-T1: how does the receiving binding obtain the handle? OPEN, put to
-  the owner.** The protocol above specifies option B: the successor's
-  binding is SEEDED from the ledger and its acquire does not run (step 3).
-  The alternative, option A, runs the successor's acquire first and
-  releases the fresh handle at adoption, so the transferred handle replaces
-  it. The evidence, so the choice can be made on the facts and not
-  re-derived:
+- **OQ-T1: how does the receiving binding obtain the handle? DECIDED by
+  the owner (PR #3325, 2026-11-22): option B.** On adoption the successor's
+  binding is SEEDED from the transit ledger and its own acquire does not
+  run (step 3). The rejected alternative, option A, runs the successor's
+  acquire first and releases the fresh handle at adoption, so the
+  transferred handle replaces it. The evidence behind the decision:
   - A fails for an exclusive resource. The fresh acquire runs while the
     predecessor's handle is still open (in transit or on a frame), so a
     bound port or a lock refuses it and the motivating case rolls back.
@@ -1260,12 +1259,12 @@ so a swap moves all its marked slots or none.
   - B's WAL consequence: the successor's opening has no acquire record of
     its own, which is why the recovery requirement above has to add one.
     A would write it naturally.
-  TR1 is written for B because it is the only option that serves both
-  adoption and rollback with one mechanism. If the owner chooses A, steps 3
-  and 5 change (an acquire-then-release adoption, and a rollback that
-  cannot keep an exclusive handle's state), T6's runtime half and the
-  recovery requirement relax, and every exit test below marked (B) changes
-  or becomes a refusal test.
+  B is the only option that serves both adoption and rollback with one
+  mechanism, and it is fail-closed: T6 refuses statically a successor whose
+  acquire callee, arguments or `undo` differ from the predecessor's, a
+  config value that differs at load fails the claim and rolls back, and the
+  claim appends an ordinary acquire `effect` record so `revl recover` sees
+  the handle. Option A is not carried forward.
 - **OQ-T2: a quiesce point.** T4 refuses async components because the swap
   has no point where in-flight calls are known to have finished. A
   quiesce step in `_plan_swap` would lift T4; it is separate work.
@@ -1307,18 +1306,17 @@ cases on the py trace harness. Rule for every refusal test: it asserts the
 specific T-id and message text, not merely that a `RevlError` is raised
 (the marker is a parse error on main today, so a bare "raises" assertion
 would pass there), and it is paired with a repaired program that is
-admitted. Tests marked (B) depend on OQ-T1 option B.
+admitted.
 
 - **Move and close.** A same-realm provider holding a `Sock` is swapped;
   the successor closes it exactly once, the predecessor never does, and the
-  trace shows the close in the successor's frame. (B)
+  trace shows the close in the successor's frame.
 - **Exclusive resource.** A successor of a provider whose handle is an
   exclusive resource (a host stub that fails a second open) swaps and keeps
-  serving; the successor's `call` is not invoked. (B; under option A this
-  is the refusal test.)
+  serving; the successor's `call` is not invoked.
 - **LIFO position.** A successor that acquires its own resources around the
   transferred binding closes them in its own reverse program order, the
-  transferred handle at its acquire position, once. (B)
+  transferred handle at its acquire position, once.
 - **Renamed successor.** The successor is a differently-named component
   that re-provides the key; the claim succeeds through the route table.
 - **Predecessor undo touches the moved handle.** T2: a transferred binding
@@ -1327,7 +1325,7 @@ admitted. Tests marked (B) depend on OQ-T1 option B.
 - **Moved inverse needs predecessor context.** T3: an `undo` naming another
   binding, a config field or activation state is refused.
 - **Double swap.** A to B to C moves the duty twice; the close runs once,
-  in C, and the stranded inventory after a halt in C names one duty. (B)
+  in C, and the stranded inventory after a halt in C names one duty.
 - **Accept rule.** T5: a successor with no handoff, an unmarked one (of a
   non-resource type: an unmarked resource-typed handoff cannot lower under
   B1 clause 7), a different field set, a `Map`-typed export shape, and two
@@ -1343,7 +1341,7 @@ admitted. Tests marked (B) depend on OQ-T1 option B.
   `Map`-typed running export it is refused by T5 before teardown.
 - **Same acquisition.** T6: a successor whose callee, argument expressions
   or `undo` differ is refused statically; one whose config value differs at
-  load fails the claim and rolls back. (B)
+  load fails the claim and rolls back.
 - **Cold path.** A marked component's first load, a `respawn` rollback and
   a `--watch` reload each acquire normally and close once at teardown.
 - **Agent-authored, template, async.** T7 and T4 each refuse with the
@@ -1360,42 +1358,42 @@ admitted. Tests marked (B) depend on OQ-T1 option B.
   after claiming: the handle is not closed during the unwind (the claimed
   duty returns itself to the ledger), the reloaded predecessor serves with
   the same live handle (identity, not a copy), nothing is closed twice and
-  nothing leaks. (B)
+  nothing leaks.
 - **Failure after the health gate.** The successor activates and claims,
   then `_restore_provider_state` or `_reconcile_instances` raises
   `StateIncompatible` and, separately, some other exception: the first
   rolls back with the live handle intact, the second reaches the finalizer,
   which closes the handle once and records a failed inverse as
   `bracket-fault`; neither leaves a live successor with a claimed,
-  never-closed duty. (B)
+  never-closed duty.
 - **The predecessor's teardown raises.** `_dispose_all` of the predecessor
   raising after the lift reaches the finalizer: each in-transit duty is
-  closed exactly once. (B)
+  closed exactly once.
 - **Rollback when the reload fails.** The reload raising, and the reload
   FAILING without raising (item 372), each leave the ledger disposed once:
   every remaining inverse runs once in reverse lift order and a failure is
-  recorded as `bracket-fault`. (B)
+  recorded as `bracket-fault`.
 - **Unclaimed duty at commit.** A successor that never calls
   `transferable` for a transferred name (it is gone from its source, which
   T5 catches before teardown, so this is the runtime defence) fails the
-  commit and rolls back with the handle intact. (B)
+  commit and rolls back with the handle intact.
 - **Halt during the successor's load.** A halt after the lift and before
   the commit leaves every duty registered, not run, not dropped, each in
   `estop_residue()` exactly once, whether the duty is in transit or
   claimed on the successor, including when the successor frame has already
-  been disposed. (B)
+  been disposed.
 - **Halt before the lift.** A halt that arrives, then a swap that proceeds:
   the lift refuses, the predecessor's duties stay stranded exactly as the
-  halt recorded them, and no duty appears twice. (B)
+  halt recorded them, and no duty appears twice.
 - **`_guard` under halt.** A unit test on `_guard`: an inert
   `_TransferEntry` records nothing; a claimed one neither runs nor strands
   its duty; an entry whose frame holds the duty outside a ledger strands it
-  once. (B)
+  once.
 - **Crash in a recorded session.** A kill in the window, after the lift and
   before the successor's `activation-complete`, rolls back with the handle
   reported outstanding while its referent persists, through the acquire
   record the claim appends; the test pins the exact report and that no new
-  record kind appears. (B) A kill before the lift and a kill after the
+  record kind appears. A kill before the lift and a kill after the
   successor's `activation-complete` report exactly what an unmarked bracket
   reports; those two are guards, not evidence.
 - **Marker parsing.** The marker parses after `handoff <key>:`, and a
@@ -1499,7 +1497,7 @@ from its undo contract. Per mode:
 | no resource in teardown-phase positions | writable; compensations are use-after-close by phase order | refused (B1 clause 5) |
 | no borrow seated in another activation | writable via spawn config and handoff | refused (B1 clauses 6, 7) |
 | shared teardown exactly once | no shared notion at all | S1 completed and landed (PR #698): 294 counted-grant ledger, orderly last-release as an ordinary bracket, whole-process crash via `revl recover` + `reclaim` residue, no wall-clock inverse |
-| a handle can move with its closing duty | not expressible: the owner and its bracket stay together | DECIDED (TR1): a resource-typed `handoff` across a same-realm swap moves the closing duty from predecessor to successor through a swap transit ledger (OQ-T1 open); implementation next |
+| a handle can move with its closing duty | not expressible: the owner and its bracket stay together | DECIDED (TR1): a resource-typed `handoff` across a same-realm swap moves the closing duty from predecessor to successor through a swap transit ledger (OQ-T1 decided: option B); implementation next |
 | owned cannot cross a seam | refused (363/F1) | unchanged, mode-named diagnostic |
 
 Relation to the arc: G5 is untouched in v1 (checker-only, no new
@@ -1695,8 +1693,8 @@ the transfer slice adds its marker, the carrier and the transit protocol).
     until the ownership-dialect slice ports the flow walk (the slice-2
     deferral in "Self-host note" extends to S1 unchanged; S1 is checker/
     recover surface, no new grammar).
-- **Slice 3c: transfer (TR1 decided above, OQ-T1 open; implementation
-  next).** TR1 is the whole design: the marker at the handoff state type
+- **Slice 3c: transfer (TR1 decided above, including OQ-T1;
+  implementation next).** TR1 is the whole design: the marker at the handoff state type
   and its parse rule, the transferred vector and its carrier, the refusal
   table T1-T9, the three-holder protocol with its E-Stop and G7 placement,
   the realm and process-seam refusals, and the exit tests listed there. No
@@ -1705,18 +1703,18 @@ the transfer slice adds its marker, the carrier and the transit protocol).
   type only, adds the carrier to the py tier and refuses the marker on the
   other tiers; the self-hosted lexer's keyword set is untouched because
   `transfer` stays contextual, and the self-host ports stay out of scope.
-  OQ-T1 is settled by the owner before this slice starts.
+  OQ-T1 is decided (option B), so this slice can start.
 - **Seam re-pin (any slice): owned crosses seam refused.** Already green
   today via `resource_crossing_refusal`; re-pin with the mode-named
   diagnostic text so the message upgrade cannot regress silently.
 
 ## Open questions (left deliberately)
 
-0. **Transfer: OQ-T1, OQ-T2 and OQ-T3 live in TR1, "Open questions".**
-   OQ-T1 (how the receiving binding obtains the handle) is the one the
-   owner decides before the transfer implementation slice starts; OQ-T2 (a
-   quiesce point) and OQ-T3 (a two-holder log in the formalization) are
-   follow-on work that lifts a first-slice refusal.
+0. **Transfer: OQ-T2 and OQ-T3 live in TR1, "Decision and open
+   questions".** OQ-T1 (how the receiving binding obtains the handle) is
+   decided there (option B). OQ-T2 (a quiesce point) and OQ-T3 (a
+   two-holder log in the formalization) are follow-on work that lifts a
+   first-slice refusal.
 
 1. **Early release: CLOSED (F9). See "F9, decided".** The count is zero
    general method-scope acquires; the form is already refused, so option
