@@ -23,6 +23,7 @@ import dataclasses
 import hashlib
 import io
 import pickle
+import re
 import sys
 import weakref
 from fnmatch import fnmatchcase
@@ -703,6 +704,9 @@ class _Rendered:
     source: str
     code: object = None
     key: tuple | None = None
+    # issue #3597: the sha256 of `source` when a host offered it
+    # (`Session.offer_render`) and this session did not render it
+    offered: str | None = None
 
 
 class _RenderCache:
@@ -723,7 +727,7 @@ class _RenderCache:
 
     def __init__(self, size: int = RENDER_CACHE_SIZE) -> None:
         self.size = size
-        self._entries: list[tuple[tuple, str, object]] = []
+        self._entries: list[tuple[tuple, str, object, str | None]] = []
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -736,22 +740,40 @@ class _RenderCache:
         return (hashlib.sha256(document).digest(), emitter,
                 getattr(emitter, "emit", None))
 
-    def get(self, key: tuple | None) -> tuple[str, object] | None:
+    def get(self, key: tuple | None) -> tuple[str, object, str | None] | None:
         if key is None:
             return None
-        for index, (held, source, code) in enumerate(self._entries):
+        for index, (held, source, code, offered) in enumerate(self._entries):
             if _same_key(held, key):
                 self._entries.append(self._entries.pop(index))
-                return source, code
+                return source, code, offered
         return None
 
-    def put(self, key: tuple | None, source: str, code) -> None:
+    def put(self, key: tuple | None, source: str, code,
+            offered: str | None = None) -> None:
+        """Keep `source` and `code` under `key`. `offered` is the sha256 of
+        `source` when a host handed it in (issue #3597); it stays with the
+        entry for as long as the entry is kept."""
         if key is None or code is None:
             return
         self._entries = [entry for entry in self._entries
                          if not _same_key(entry[0], key)]
-        self._entries.append((key, source, code))
+        self._entries.append((key, source, code, offered))
         del self._entries[:-self.size]
+
+
+_SLO_COMPOSITION_LINE = re.compile(r"^[ \t]*composition\b", re.MULTILINE)
+_SLO_CLAUSE_HEAD = re.compile(r"^[ \t]*slo\s*\{", re.MULTILINE)
+
+
+def _declares_slo(text: str) -> bool:
+    """Whether `text` can declare a contract: a line starting `composition` and
+    a line starting `slo` followed by `{`, the clause head the parser reads
+    (issue #3597). A cheap pre-check, never the answer: a file that passes is
+    still parsed, and a file that fails it holds no `slo` block. A file that
+    only names `slow` or `slot` fails it."""
+    return bool(_SLO_COMPOSITION_LINE.search(text)
+                and _SLO_CLAUSE_HEAD.search(text))
 
 
 def _same_key(held: tuple, key: tuple) -> bool:
@@ -1091,6 +1113,9 @@ class Session:
         # issue #3383: the rendered text and compiled code of the last few
         # documents loaded or swapped in, so a swap back onto one skips both
         self._renders = _RenderCache()
+        # issue #3597: the sha256 of the offered text the generation being
+        # booted runs, for `_record_generation`; None when it rendered its own
+        self._render_offered: str | None = None
         # item 457: the emitted module of the live generation (set at load), so a
         # caller can rebuild native ADT/Result case instances from the canonical
         # wire encoding. None until a composition is loaded.
@@ -2187,9 +2212,43 @@ class Session:
         key = _RenderCache.key(driver.emit, ir)
         held = self._renders.get(key)
         if held is not None:
-            source, code = held
-            return _Rendered(source=source, code=code, key=key)
+            source, code, offered = held
+            return _Rendered(source=source, code=code, key=key,
+                             offered=offered)
         return _Rendered(source=self._render_or_refuse(driver, ir), key=key)
+
+    def offer_render(self, ir: dict, source: str, code=None) -> dict:
+        """Hand this session the text (and code) a host already built for `ir`,
+        so the next load or swap of that document skips the render (and, with
+        `code`, the compile too) (issue #3597).
+
+        The pair is kept under the key `_render_cached` reads: the document's
+        digest plus THIS session's own emitter, so a pair offered for another
+        document, or read by a session with another emitter, is never used.
+        Nothing else changes: every admission gate still runs on the load or
+        swap that picks it up, and each generation still gets its own module.
+        `code`, when None, is `source` compiled here; a source that does not
+        compile is refused and nothing is kept.
+
+        The host vouches that `source` is what the py emitter renders for `ir`;
+        the session keys it on the document but does not re-render to check.
+        The generation that runs it records `renderOffered`, the sha256 of
+        `source`, in its history entry. Returns that digest and whether `ir`
+        had a key (a document that cannot be keyed is not kept)."""
+        if not isinstance(source, str):
+            raise SessionError("offer_render: `source` must be the module text")
+        emit = _backend()[0]
+        key = _RenderCache.key(emit, ir)
+        if code is None:
+            try:
+                code = compile(source, "<revl-run offered>", "exec")
+            except (SyntaxError, ValueError) as exc:
+                raise SessionError(
+                    f"offer_render: the offered source does not compile "
+                    f"({exc})") from exc
+        digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        self._renders.put(key, source, code, digest)
+        return {"renderOffered": digest, "kept": key is not None}
 
     def _prepare_module(self, ir: dict, rendered: _Rendered | None = None):
         """Emit the module and, when recording, instrument it before load.
@@ -2210,7 +2269,11 @@ class Session:
             module = self._emit_or_refuse(driver, ir, rendered.source,
                                           rendered.code)
             self._renders.put(rendered.key, rendered.source,
-                              getattr(driver, "emitted_code", None))
+                              getattr(driver, "emitted_code", None),
+                              rendered.offered)
+        # issue #3597: the generation `_record_generation` records next ran a
+        # text the host offered, or did not (every call settles it afresh)
+        self._render_offered = None if rendered is None else rendered.offered
         if self.recorder is not None:
             filename, source = driver.emitted
             self.recorder.register_source(filename, source)
@@ -3361,10 +3424,12 @@ class Session:
         substring pre-check keeps a load that has no contract to find from
         re-parsing its own sources.
         """
+        if self._slo_composition is not None:
+            return          # issue #3597: `configure_slo` already bound one
         for path in (origin or {}).get("files") or []:
             try:
                 with open(path, encoding="utf-8") as handle:
-                    if "slo" not in handle.read():
+                    if not _declares_slo(handle.read()):
                         continue
                 if self._slo_bind(path):
                     return
@@ -3655,6 +3720,8 @@ class Session:
         }
         if agent_authored is not None:
             entry["agentAuthored"] = bool(agent_authored)
+        if self._render_offered is not None:
+            entry["renderOffered"] = self._render_offered
         self._history.append(entry)
         # bounded retention: the oldest generations age out. `undo --to` below
         # the floor is refused (see `undo`) instead of reaching for one gone.
@@ -3756,7 +3823,11 @@ class Session:
                  # and `revl plan`'s E4 reads THESE bytes rather than a second
                  # derivation of them.
                  **({"sloReceipt": e["sloReceipt"]}
-                    if e.get("sloReceipt") is not None else {})}
+                    if e.get("sloReceipt") is not None else {}),
+                 # issue #3597: the sha256 of the host-offered module text the
+                 # generation ran. Additive and omit-by-default.
+                 **({"renderOffered": e["renderOffered"]}
+                    if e.get("renderOffered") is not None else {})}
                 for e in self._history
             ],
         }
