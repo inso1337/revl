@@ -44,6 +44,12 @@ component Plain provides echo: Echo {{
 """
 
 
+def _lend():
+    """The internal lend (`lend_turn` before the review of #3610)."""
+    lend = getattr(session_mod, "_lend_turn", None)
+    return (lend or session_mod.lend_turn)()
+
+
 def _owner_id() -> int:
     """The runtime's own look: the session it says is running."""
     owner = sys.modules["runtime"]._SESSION_OWNER
@@ -307,7 +313,7 @@ def test_a_refused_unload_or_abort_leaves_the_session_as_it_was(hook):
 
 def test_a_lent_turn_runs_a_joined_workers_session_and_comes_back(hook):
     """`truc ship` boots a scratch session on a worker thread it joins from
-    inside its own session's method. `lend_turn` lets that worker run under the
+    inside its own session's method. `_lend_turn` lets that worker run under the
     held turn, and gives the lender its owner slot back afterwards."""
     import concurrent.futures
     import contextvars
@@ -326,7 +332,7 @@ def test_a_lent_turn_runs_a_joined_workers_session_and_comes_back(hook):
         if threading.current_thread() is not main:
             return _owner_id()
         started = time.monotonic()
-        with session_mod.lend_turn():
+        with _lend():
             context = contextvars.copy_context()
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 pool.submit(context.run, worker).result()
@@ -341,7 +347,132 @@ def test_a_lent_turn_runs_a_joined_workers_session_and_comes_back(hook):
     assert inner["said"] == inner["owner"]
     assert inner["waited"] < 5.0
     assert said == id(first._owner)
-    with session_mod.lend_turn():   # this thread holds no turn: lends nothing
+    with _lend():   # this thread holds no turn: lends nothing
         pass
     assert session_mod._TURN_HOLDER["thread"] is None
+    first.unload()
+
+
+def test_a_context_copied_in_a_lend_lends_nothing_after_it(hook, monkeypatch):
+    """Each lend has a token of its own, retired when the block ends: a worker
+    run later in a context copied inside the block waits like any other
+    thread, and the lender's owner slot stays the lender's."""
+    import contextvars
+
+    monkeypatch.setattr(session_mod, "_TURN_TIMEOUT", 0.3)
+    first = _loaded(hook.ir)
+    main = threading.current_thread()
+    seen = {}
+
+    def worker():
+        started = time.monotonic()
+        try:
+            late = _loaded(hook.ir)
+        except SessionError as exc:
+            seen["refused"] = (exc.code, time.monotonic() - started)
+        else:
+            seen["loaded"] = True
+            late.unload()
+
+    def fn():
+        if threading.current_thread() is not main:
+            return _owner_id()
+        with _lend():
+            stale = contextvars.copy_context()
+        thread = threading.Thread(target=stale.run, args=(worker,))
+        thread.start()
+        thread.join()
+        return _owner_id()
+
+    hook.fn = fn
+    try:
+        said = _owner_call(first)
+    finally:
+        hook.fn = _owner_id
+    assert "loaded" not in seen
+    assert seen["refused"][0] == "SESSION_BUSY"
+    assert seen["refused"][1] >= 0.25
+    assert said == id(first._owner)
+    first.unload()
+
+
+def test_a_second_borrower_and_the_lender_are_refused_at_once(monkeypatch):
+    import contextvars
+
+    monkeypatch.setattr(session_mod, "_TURN_TIMEOUT", 0.5)
+    borrowed, release = threading.Event(), threading.Event()
+    refusals = {}
+
+    def borrower():
+        with session_mod._SessionTurn(Session()):
+            borrowed.set()
+            assert release.wait(30)
+
+    def refused(name):
+        started = time.monotonic()
+        try:
+            session_mod._SessionTurn(Session()).__enter__()
+        except SessionError as exc:
+            refusals[name] = (exc.code, time.monotonic() - started, str(exc))
+
+    with session_mod._SessionTurn(Session()):
+        with _lend():
+            context = contextvars.copy_context()
+            first = threading.Thread(target=context.copy().run,
+                                     args=(borrower,))
+            first.start()
+            try:
+                assert borrowed.wait(30)
+                second = threading.Thread(target=context.copy().run,
+                                          args=(refused, "second"))
+                second.start()
+                second.join()
+                refused("lender")
+            finally:
+                release.set()
+                first.join()
+    assert session_mod._TURN_HOLDER["thread"] is None
+    for name in ("second", "lender"):
+        code, waited, message = refusals[name]
+        assert code == "SESSION_BUSY", message
+        assert waited < 0.2, (name, waited)
+    assert "already borrowed" in refusals["second"][2]
+    assert "lent its session turn" in refusals["lender"][2]
+
+
+def test_a_borrower_that_raises_gives_the_lender_its_slots_back(hook):
+    import concurrent.futures
+    import contextvars
+
+    first = _loaded(hook.ir)
+    main = threading.current_thread()
+    runtime = sys.modules["runtime"]
+    seen = {}
+
+    def worker():
+        seen["second"] = _loaded(hook.ir)
+        raise RuntimeError("the borrower failed")
+
+    def fn():
+        if threading.current_thread() is not main:
+            return _owner_id()
+        try:
+            with _lend():
+                context = contextvars.copy_context()
+                with concurrent.futures.ThreadPoolExecutor(1) as pool:
+                    pool.submit(context.run, worker).result()
+        except RuntimeError as exc:
+            seen["raised"] = str(exc)
+        seen["trace"] = runtime._trace
+        return _owner_id()
+
+    hook.fn = fn
+    try:
+        said = _owner_call(first)
+    finally:
+        hook.fn = _owner_id
+    assert seen["raised"] == "the borrower failed"
+    assert said == id(first._owner)
+    assert seen["trace"] == first._driver._on_host
+    seen["second"].unload()
     first.unload()

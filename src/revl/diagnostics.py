@@ -275,14 +275,13 @@ OTHER_CODES = {
     },
     "SESSION_BUSY": {
         "category": "session",
-        "guarantee": "one session runs at a time per process (issue #3380)",
+        "guarantee": "one session runs at a time per process",
         "meaning": "another session's step held the process's session turn: "
                    "on another thread for longer than the wait (30 s), or on "
-                   "this same thread, where waiting would never end",
+                   "this same thread, where waiting would never end "
+                   "(issue #3380)",
         "fix": "drive each session's steps one at a time, and keep a session "
-               "step out of another session's method body (a host body that "
-               "boots one on a worker thread it joins wraps that in "
-               "`revl.mcp.session.lend_turn()`)",
+               "step out of another session's method body",
     },
     "STALE_ARTIFACT": {
         "category": "session",

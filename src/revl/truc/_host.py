@@ -1560,7 +1560,7 @@ def gauntlet_evidence(source: str, source_path: str = "") -> str:
     import contextvars  # noqa: PLC0415
 
     from revl.mcp import gauntlet  # noqa: PLC0415 — in-process, like the gate
-    from revl.mcp.session import Session, lend_turn  # noqa: PLC0415
+    from revl.mcp.session import Session, _lend_turn  # noqa: PLC0415
 
     # The gauntlet boots the candidate in a scratch Session, which drives its
     # own asyncio loop. ship runs this from *inside* truc's own running Session
@@ -1583,7 +1583,7 @@ def gauntlet_evidence(source: str, source_path: str = "") -> str:
     # issue #3380: truc's own Session holds the process's session turn while
     # this host body runs; lend it to the worker, which this thread joins, or
     # the scratch boot would wait for a turn its own caller holds.
-    with lend_turn():
+    with _lend_turn():
         caller_context = contextvars.copy_context()
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             dossier = pool.submit(caller_context.run, _grade).result()

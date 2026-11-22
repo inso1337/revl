@@ -63,8 +63,9 @@ from .approval import _args_digest
 _TURN_LOCK = threading.Lock()
 _TURN_TIMEOUT = 30.0
 _TURN_HOLDER: dict = {"session": None, "thread": None, "label": "",
-                      "token": None, "borrowed": False}
-_TURN_BORROW = threading.Lock()   # guards a borrow of a lent turn
+                      "lend": None, "lender": None, "borrowed": False,
+                      "orphaned": False}
+_TURN_BORROW = threading.Lock()   # guards a lend and its borrow
 _TURN_LENT: contextvars.ContextVar = contextvars.ContextVar(
     "revl_session_turn_lent", default=None)
 
@@ -72,6 +73,13 @@ _TURN_LENT: contextvars.ContextVar = contextvars.ContextVar(
 def _turn_label(session) -> str:
     return (f"session {id(session):#x} on thread "
             f"{threading.current_thread().name!r}")
+
+
+def _busy(session, why: str) -> SessionError:
+    return SessionError(
+        f"{_turn_label(session)} cannot run: {why}. One session runs at a "
+        "time per process (issue #3380), and waiting here would never end",
+        code="SESSION_BUSY")
 
 
 class _SessionTurn:
@@ -93,20 +101,22 @@ class _SessionTurn:
                     loop is not None and loop.is_running()):
                 self.nested = True
                 return self
-            raise SessionError(
-                f"{_turn_label(self.session)} cannot run: {held['label']} holds "
-                "the process's session turn on this same thread. One session "
-                "runs at a time per process (issue #3380), and waiting here "
-                "would never end", code="SESSION_BUSY")
+            raise _busy(self.session, f"{held['label']} holds the process's "
+                        "session turn on this same thread")
         token = _TURN_LENT.get()
-        if token is not None:
-            with _TURN_BORROW:
-                if token is held["token"] and not held["borrowed"]:
-                    # the holder lent its turn to this thread (`lend_turn`)
-                    self.lent = (held["session"], held["thread"], held["label"])
-                    held.update(session=self.session, thread=me,
-                                label=_turn_label(self.session), borrowed=True)
-                    return self
+        with _TURN_BORROW:
+            if held["lender"] == me:
+                raise _busy(self.session, "this thread lent its session turn "
+                            f"to {held['label']}, which it is joining")
+            if token is not None and token is held["lend"]:
+                if held["borrowed"]:
+                    raise _busy(self.session, "the lent session turn is "
+                                f"already borrowed by {held['label']}")
+                # the holder lent its turn to this thread (`_lend_turn`)
+                self.lent = (held["session"], held["thread"], held["label"])
+                held.update(session=self.session, thread=me,
+                            label=_turn_label(self.session), borrowed=True)
+                return self
         timeout = _TURN_TIMEOUT
         if not _TURN_LOCK.acquire(timeout=timeout):
             holder = held["label"] or "another session"
@@ -115,27 +125,36 @@ class _SessionTurn:
                 f"process's session turn, held by {holder}. One session runs "
                 "at a time per process (issue #3380)", code="SESSION_BUSY")
         held.update(session=self.session, thread=me,
-                    label=_turn_label(self.session), token=object(),
-                    borrowed=False)
+                    label=_turn_label(self.session), lend=None, lender=None,
+                    borrowed=False, orphaned=False)
         return self
 
     def __exit__(self, *exc) -> bool:
         if self.nested:
             return False
-        if self.lent is not None:
-            session, thread, label = self.lent
-            with _TURN_BORROW:
-                _TURN_HOLDER.update(session=session, thread=thread,
-                                    label=label, borrowed=False)
-            return False
-        _TURN_HOLDER.update(session=None, thread=None, label="", token=None,
-                            borrowed=False)
+        held = _TURN_HOLDER
+        with _TURN_BORROW:
+            if self.lent is not None:
+                if not held["orphaned"]:
+                    session, thread, label = self.lent
+                    held.update(session=session, thread=thread, label=label,
+                                borrowed=False)
+                    return False
+                # the lender's turn ended while this borrow ran: the lock
+                # passed to this borrower, which releases it now
+            elif held["borrowed"]:
+                # a borrower outlived the lend (`_lend_turn` raised for it):
+                # hand it the lock rather than release it under its feet
+                held["orphaned"] = True
+                return False
+            held.update(session=None, thread=None, label="", lend=None,
+                        lender=None, borrowed=False, orphaned=False)
         _TURN_LOCK.release()
         return False
 
 
 @contextlib.contextmanager
-def lend_turn():
+def _lend_turn():
     """Lend the session turn this thread holds to a worker it joins (#3380).
 
     For a host body that must boot a scratch Session from inside a running
@@ -144,23 +163,40 @@ def lend_turn():
     worker would wait for the turn this thread holds while this thread waits for
     the worker. Inside the block, a session step on a thread whose context was
     copied from this one (`contextvars.copy_context()` taken inside the block)
-    runs under the lent turn, one borrower at a time. The lender must not drive
-    its own session until the block ends; it is joining the worker. On exit the
-    runtime's owner slot and host trace go back to the lender's. Outside a held
-    turn it lends nothing."""
+    runs under the lent turn, one borrower at a time; a second borrower, and
+    this thread driving a session, are refused at once. Each lend has a token
+    of its own, retired when the block ends, so a copy that outlives the block
+    lends nothing. On exit the runtime's owner slot and host trace go back to
+    the lender's; a borrower still running then is an error (join it inside the
+    block). Outside a held turn it lends nothing."""
     held = _TURN_HOLDER
-    if held["thread"] != threading.get_ident():
+    me = threading.get_ident()
+    with _TURN_BORROW:
+        lending = (held["thread"] == me and held["lend"] is None
+                   and not held["borrowed"])
+        if lending:
+            token = object()
+            held.update(lend=token, lender=me)
+    if not lending:
         yield
         return
     lender = held["session"]
     driver = lender._driver
     runtime = driver.runtime if driver is not None else None
     owner = runtime.session_owner() if runtime is not None else None
-    reset = _TURN_LENT.set(held["token"])
+    reset = _TURN_LENT.set(token)
     try:
         yield
     finally:
         _TURN_LENT.reset(reset)
+        with _TURN_BORROW:
+            outlived = held["borrowed"] or held["thread"] != me
+            held.update(lend=None, lender=None)
+        if outlived:
+            raise SessionError(
+                f"{held['label']} still runs under the session turn "
+                f"{_turn_label(lender)} lent it: a borrower must be joined "
+                "inside the lend (issue #3380)", code="SESSION_BUSY")
         if runtime is not None:
             if owner is not None:
                 runtime.set_session_owner(owner)
@@ -1229,7 +1265,7 @@ class Session:
     ``SESSION_BUSY``) naming the holder after 30 s. A step of a second session
     started on the thread that holds the turn (from inside a method body, say)
     fails at once; a host body that boots one on a worker thread it joins
-    wraps that in `lend_turn()`. `estop` does not wait."""
+    lends it the turn (`_lend_turn`). `estop` does not wait."""
 
     def __init__(self) -> None:
         self._loop: asyncio.AbstractEventLoop | None = None
