@@ -5937,6 +5937,29 @@ def _emit_py_ref_thunk(name: str, params: str, ext: dict, ref: dict) -> "_Lines"
 _GATED_EXTERN_CLASSES = frozenset({"emission", "witnessed", "acquire"})
 
 
+def _inline_extern_param(ext: dict, pname: str) -> str:
+    """The Python spelling of a parameter of an extern with an inline `@py`
+    body (issue #3604). The body is host text copied verbatim and names its
+    parameters itself, so they keep their spelling: no builtin rung (a
+    parameter `max` was emitted `max_` while its body read the builtin `max`)
+    and no temporary rung. A spelling Python cannot bind as a parameter (a
+    keyword or soft keyword), or one in the emitter's `_revl*` scaffolding
+    namespace (`_revl_config`, `_revl_secret`, bound in the same body), cannot
+    keep it, so it is refused at emit naming the extern, the parameter and the
+    tier rather than renamed away from the body's spelling. A parameter
+    spelled like a host root (`Map`, `Pool`, `self`) is no longer refused: it
+    is local to the host text and shadows nothing the emitter writes."""
+    if keyword.iskeyword(pname) or keyword.issoftkeyword(pname):
+        why = "is a Python keyword"
+    elif pname.startswith("_") and pname.lstrip("_").startswith("revl"):
+        why = "is in the emitter's scaffolding namespace"
+    else:
+        return pname
+    raise EmitError(
+        f"extern `{ext['name']}` parameter {pname!r} {why}, so the py tier cannot "
+        "keep the spelling its inline @py body uses: rename the parameter")
+
+
 def _emit_externs(externs: list, crossings: dict | None = None,
                   gated: bool = True) -> "_Lines":
     out = _Lines()
@@ -6004,8 +6027,11 @@ def _emit_externs(externs: list, crossings: dict | None = None,
         # spelling; only the `@py ref` thunk, which binds `_f`/`_r` beside them,
         # lifts one off an emitter temporary (issue #2913).
         thunk = "py" in (ext.get("refs") or {}) and "py" not in (ext.get("bodies") or {})
-        params = ", ".join(_ident(p["name"], "extern parameter name", temps=thunk)
-                           for p in ext["params"])
+        inline = "py" in (ext.get("bodies") or {})
+        params = ", ".join(
+            _inline_extern_param(ext, p["name"]) if inline
+            else _ident(p["name"], "extern parameter name", temps=thunk)
+            for p in ext["params"])
         bodies = ext.get("bodies") or {}
         refs = ext.get("refs") or {}
         # issue #2688: the declared-ceiling tag the runtime backstop reads. A
