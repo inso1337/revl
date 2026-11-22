@@ -18,6 +18,8 @@ call — between tool calls the composition is simply idle.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import copy
 import dataclasses
 import functools
@@ -60,7 +62,11 @@ from .approval import _args_digest
 # takes no turn: it must reach a session whose call is stuck.
 _TURN_LOCK = threading.Lock()
 _TURN_TIMEOUT = 30.0
-_TURN_HOLDER: dict = {"session": None, "thread": None, "label": ""}
+_TURN_HOLDER: dict = {"session": None, "thread": None, "label": "",
+                      "token": None, "borrowed": False}
+_TURN_BORROW = threading.Lock()   # guards a borrow of a lent turn
+_TURN_LENT: contextvars.ContextVar = contextvars.ContextVar(
+    "revl_session_turn_lent", default=None)
 
 
 def _turn_label(session) -> str:
@@ -71,11 +77,12 @@ def _turn_label(session) -> str:
 class _SessionTurn:
     """The process's session turn for one session (issue #3380)."""
 
-    __slots__ = ("session", "nested")
+    __slots__ = ("session", "nested", "lent")
 
     def __init__(self, session) -> None:
         self.session = session
         self.nested = False
+        self.lent = None
 
     def __enter__(self):
         held = _TURN_HOLDER
@@ -91,6 +98,15 @@ class _SessionTurn:
                 "the process's session turn on this same thread. One session "
                 "runs at a time per process (issue #3380), and waiting here "
                 "would never end", code="SESSION_BUSY")
+        token = _TURN_LENT.get()
+        if token is not None:
+            with _TURN_BORROW:
+                if token is held["token"] and not held["borrowed"]:
+                    # the holder lent its turn to this thread (`lend_turn`)
+                    self.lent = (held["session"], held["thread"], held["label"])
+                    held.update(session=self.session, thread=me,
+                                label=_turn_label(self.session), borrowed=True)
+                    return self
         timeout = _TURN_TIMEOUT
         if not _TURN_LOCK.acquire(timeout=timeout):
             holder = held["label"] or "another session"
@@ -99,14 +115,58 @@ class _SessionTurn:
                 f"process's session turn, held by {holder}. One session runs "
                 "at a time per process (issue #3380)", code="SESSION_BUSY")
         held.update(session=self.session, thread=me,
-                    label=_turn_label(self.session))
+                    label=_turn_label(self.session), token=object(),
+                    borrowed=False)
         return self
 
     def __exit__(self, *exc) -> bool:
-        if not self.nested:
-            _TURN_HOLDER.update(session=None, thread=None, label="")
-            _TURN_LOCK.release()
+        if self.nested:
+            return False
+        if self.lent is not None:
+            session, thread, label = self.lent
+            with _TURN_BORROW:
+                _TURN_HOLDER.update(session=session, thread=thread,
+                                    label=label, borrowed=False)
+            return False
+        _TURN_HOLDER.update(session=None, thread=None, label="", token=None,
+                            borrowed=False)
+        _TURN_LOCK.release()
         return False
+
+
+@contextlib.contextmanager
+def lend_turn():
+    """Lend the session turn this thread holds to a worker it joins (#3380).
+
+    For a host body that must boot a scratch Session from inside a running
+    session's method (`truc ship` re-running the gauntlet): asyncio refuses a
+    second loop on this thread, so the scratch runs on a worker thread, and the
+    worker would wait for the turn this thread holds while this thread waits for
+    the worker. Inside the block, a session step on a thread whose context was
+    copied from this one (`contextvars.copy_context()` taken inside the block)
+    runs under the lent turn, one borrower at a time. The lender must not drive
+    its own session until the block ends; it is joining the worker. On exit the
+    runtime's owner slot and host trace go back to the lender's. Outside a held
+    turn it lends nothing."""
+    held = _TURN_HOLDER
+    if held["thread"] != threading.get_ident():
+        yield
+        return
+    lender = held["session"]
+    driver = lender._driver
+    runtime = driver.runtime if driver is not None else None
+    owner = runtime.session_owner() if runtime is not None else None
+    reset = _TURN_LENT.set(held["token"])
+    try:
+        yield
+    finally:
+        _TURN_LENT.reset(reset)
+        if runtime is not None:
+            if owner is not None:
+                runtime.set_session_owner(owner)
+            else:
+                runtime.clear_session_owner()
+            lender._own_host_trace()
 
 
 def _one_turn(method):
@@ -1168,7 +1228,8 @@ class Session:
     step runs on another thread, and fails with a `SessionError` (code
     ``SESSION_BUSY``) naming the holder after 30 s. A step of a second session
     started on the thread that holds the turn (from inside a method body, say)
-    fails at once. `estop` does not wait."""
+    fails at once; a host body that boots one on a worker thread it joins
+    wraps that in `lend_turn()`. `estop` does not wait."""
 
     def __init__(self) -> None:
         self._loop: asyncio.AbstractEventLoop | None = None

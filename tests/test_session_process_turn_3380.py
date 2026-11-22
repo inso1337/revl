@@ -303,3 +303,45 @@ def test_a_refused_unload_or_abort_leaves_the_session_as_it_was(hook):
     assert _owner_call(second) == id(owner)
     second.unload()
     first.unload()
+
+
+def test_a_lent_turn_runs_a_joined_workers_session_and_comes_back(hook):
+    """`truc ship` boots a scratch session on a worker thread it joins from
+    inside its own session's method. `lend_turn` lets that worker run under the
+    held turn, and gives the lender its owner slot back afterwards."""
+    import concurrent.futures
+    import contextvars
+
+    first = _loaded(hook.ir)
+    main = threading.current_thread()
+    inner = {}
+
+    def worker():
+        second = _loaded(hook.ir)
+        inner["said"] = _owner_call(second)
+        inner["owner"] = id(second._owner)
+        second.unload()
+
+    def fn():
+        if threading.current_thread() is not main:
+            return _owner_id()
+        started = time.monotonic()
+        with session_mod.lend_turn():
+            context = contextvars.copy_context()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                pool.submit(context.run, worker).result()
+        inner["waited"] = time.monotonic() - started
+        return _owner_id()      # the lender's owner, put back
+
+    hook.fn = fn
+    try:
+        said = _owner_call(first)
+    finally:
+        hook.fn = _owner_id
+    assert inner["said"] == inner["owner"]
+    assert inner["waited"] < 5.0
+    assert said == id(first._owner)
+    with session_mod.lend_turn():   # this thread holds no turn: lends nothing
+        pass
+    assert session_mod._TURN_HOLDER["thread"] is None
+    first.unload()

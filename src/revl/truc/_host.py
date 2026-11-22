@@ -1560,7 +1560,7 @@ def gauntlet_evidence(source: str, source_path: str = "") -> str:
     import contextvars  # noqa: PLC0415
 
     from revl.mcp import gauntlet  # noqa: PLC0415 — in-process, like the gate
-    from revl.mcp.session import Session  # noqa: PLC0415
+    from revl.mcp.session import Session, lend_turn  # noqa: PLC0415
 
     # The gauntlet boots the candidate in a scratch Session, which drives its
     # own asyncio loop. ship runs this from *inside* truc's own running Session
@@ -1580,9 +1580,13 @@ def gauntlet_evidence(source: str, source_path: str = "") -> str:
     # this command) would silently become the process default there. Carry
     # the caller's context into the thread so the files form is judged by the
     # same rule as every other compile `truc` runs.
-    caller_context = contextvars.copy_context()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        dossier = pool.submit(caller_context.run, _grade).result()
+    # issue #3380: truc's own Session holds the process's session turn while
+    # this host body runs; lend it to the worker, which this thread joins, or
+    # the scratch boot would wait for a turn its own caller holds.
+    with lend_turn():
+        caller_context = contextvars.copy_context()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            dossier = pool.submit(caller_context.run, _grade).result()
     lifecycle = ((dossier.get("tested") or {}).get("lifecycle")) or {}
     admission = ((dossier.get("proved") or {}).get("admission")) or {}
     return json.dumps({
