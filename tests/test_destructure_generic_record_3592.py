@@ -42,3 +42,35 @@ def test_generic_destructure_of_declared_fields_still_compiles():
     compile_source(BOX + "fn f(b: Box[Int]) -> Int { let { v } = b; return v }\n")
     compile_source("type Pair[A, B] = { a: A, b: B }\n"
                    "fn g(p: Pair[Int, Str]) -> Str { let { b, a } = p; return b }\n")
+
+
+# The issue's second half: a record with NO fields drew the hint `fields: ` with
+# nothing after it, under both the destructuring and the record update refusal.
+# It now says that the record has no fields; a non-empty list reads as before.
+
+def test_destructuring_an_empty_record_says_it_has_no_fields():
+    src = "fn f() -> Int { let r = {}; let { zz } = r; return 0 }\n"
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(src)
+    msg = str(excinfo.value)
+    assert "record destructuring names `zz`, which is not a field of `{}`" in msg
+    assert "`{}` has no fields" in msg
+    assert "fields: " not in msg
+
+
+@pytest.mark.parametrize("base", ["r", "{}"])
+def test_updating_an_empty_record_says_it_has_no_fields(base):
+    src = f"fn f() -> Int {{ let r = {{}}; let c = {{ {base} | z = 1 }}; return 0 }}\n"
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(src)
+    msg = str(excinfo.value)
+    assert "record update names `z`, which is not a field of `{}`" in msg
+    assert "`{}` has no fields" in msg
+    assert "fields: " not in msg
+
+
+def test_non_empty_field_list_hint_is_unchanged():
+    src = "fn f() -> Int { let r = { x: 1 }; let c = { r | z = 1 }; return 0 }\n"
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(src)
+    assert "fields: `x`" in str(excinfo.value)

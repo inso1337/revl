@@ -68,6 +68,7 @@ from .typecheck import (
     infer_ir_memo,
     infer_ir_memo_active,
     infer_ir,
+    fields_hint,
     mismatch,
     nominal_record_fields,
     pin_hole,
@@ -7315,7 +7316,7 @@ def _lower_let_pattern_stmt(stmt: LetPatternStmt, scope: dict, callables: set, a
                         filename, pattern.line,
                         f"record destructuring names `{name}`, which is not a field of "
                         f"`{render_type(value_type)}`",
-                        hint=f"fields: {', '.join(f'`{f}`' for f in sorted(fields))}",
+                        hint=fields_hint(fields, value_type),
                     )
         elif value_type is not None and parse_type(value_type)[0] in _BUILTIN_NONRECORD:
             raise RevlError(
