@@ -1,0 +1,1211 @@
+// The cordis-go EMITTER, part 2 of 4: the pure path's module assembly. Split
+// out of selfhost/emit_go.rvl (issue #3098); see the header of that file for
+// the layout.
+//
+// It holds the generic-variant and user-type emission, the extern import
+// directive and hoisting rules, `emit_externs` / `emit_functions` /
+// `emit_tests`, the flag collection, and every runtime preamble the pure path
+// prepends (`stdlib_preamble`, `overflow_preamble`, ...). It uses only
+// selfhost/emit_go_core.rvl.
+use "../stdlib/value.rvl" {
+  value_kind, value_is_null, value_field, value_list, value_str, value_bool,
+  value_keys
+}
+use "../stdlib/str.rvl" { rstrip, trim }
+use "../stdlib/list.rvl" { list_sort, list_contains }
+use "./emit_go_core.rvl" {
+  Fout, TypeTables, collect_reserved, emit_stmts, flow_hints, go_string,
+  go_type, gv_of, is_addsubmul, is_word_char, json_tag, line,
+  listed_type_params, newline, node_kind, node_op, node_operands, num_str,
+  replace_all, set_fh, set_scan, tab, type_words, v3_field_ident, v3_ident
+}
+
+// `_emit_v3_go_types`: user `type` decls as Go items. A record is a `struct`
+// whose fields are EXPORTED + json-tagged (item 390: `_v3_field_ident` = camel,
+// plus `json:"<source>"` — `encoding/json` ignores unexported fields, so this is
+// what makes `json_stringify(record)` non-empty and byte-identical to py/ts); a
+// variant is a sealed interface (`isX()` seal) plus one struct per case (nullary
+// `struct{}`, payload `struct { Value T }`) with the seal method. Each decl is
+// followed by a blank line, exactly as the reference does.
+// `_emit_v3_go_generic_variant`: a generic user variant as Go generics (issue
+// #2471): the interface and every case struct take the variant's type
+// parameters, and the marker method names them, so `MbJj[int64]` is an
+// `Mb[int64]` and not an `Mb[string]`.
+fn emit_generic_variant(gname: Str, spec: Any, gv: Map[Str, Str]) -> List[Str] {
+  var params: List[Str] = []
+  for (p of value_list(value_field(spec, "params"))) { params = params.push(v3_ident(value_str(p))) }
+  var decls: List[Str] = []
+  for (p of params) { decls = decls.push(`${p} any`) }
+  let decl = decls.join(", ")
+  let uses = params.join(", ")
+  let marker = `is${gname}`
+  var out = [`// ${gname} is a sealed generic sum type (revl ADT); ${marker}() seals it.`,
+             `type ${gname}[${decl}] interface { ${marker}(${uses}) }`]
+  for (case of value_list(value_field(spec, "cases"))) {
+    let cstruct = `${gname}${value_str(value_field(case, "name"))}`
+    let payload = value_field(case, "payload")
+    if (value_is_null(payload)) { out = out.push(`type ${cstruct}[${decl}] struct{}`) }
+    else { out = out.push(`type ${cstruct}[${decl}] struct { Value ${go_type(payload, gv)} }`) }
+    out = out.push(`func (${cstruct}[${uses}]) ${marker}(${uses}) {}`)
+  }
+  out = out.push("")
+  return out
+}
+pub fn emit_v3_types(types: Any) -> List[Str] {
+  var out = []
+  let gv = gv_of(types)
+  for (name of value_keys(types)) {
+    let spec = value_field(types, name)
+    let kind = value_str(value_field(spec, "kind"))
+    let gname = v3_ident(name)
+    if (kind == "record") {
+      out = out.push(`type ${gname} struct {`)
+      let fields = value_field(spec, "fields")
+      for (field of value_keys(fields)) {
+        out = out.push(line(1, `${v3_field_ident(field)} ${go_type(value_field(fields, field), gv)} ${json_tag(field)}`))
+      }
+      out = out.push("}")
+      out = out.push("")
+    } else {
+      if (kind == "variant") {
+        let params = value_list(value_field(spec, "params"))
+        if (params.length() > 0) {
+          out = out.concat(emit_generic_variant(gname, spec, gv))
+        } else {
+          let marker = `is${gname}`
+          out = out.push(`// ${gname} is a sealed sum type (revl ADT); ${marker}() seals it.`)
+          out = out.push(`type ${gname} interface { ${marker}() }`)
+          for (case of value_list(value_field(spec, "cases"))) {
+            let cname = value_str(value_field(case, "name"))
+            let cstruct = `${gname}${cname}`
+            let payload = value_field(case, "payload")
+            if (value_is_null(payload)) { out = out.push(`type ${cstruct} struct{}`) }
+            else { out = out.push(`type ${cstruct} struct { Value ${go_type(payload, gv)} }`) }
+            out = out.push(`func (${cstruct}) ${marker}() {}`)
+          }
+          out = out.push("")
+        }
+      } else {
+        out = out.push(`<<UNSUPPORTED-TYPE:${kind}>>`)
+      }
+    }
+  }
+  return out
+}
+// `_emit_v3_go_externs`: each extern as a Go `func` carrying its verbatim `@go`
+// body, blank-line separated, in declaration order and BEFORE the free functions.
+//
+// item 421 F6 (ported per item 429(d)): an extern whose DECLARED return was
+// `Secret[T]` is the ORIGIN end of a declared marking — where a confidential
+// value enters the value world. `taint.py` strips the `Secret[...]` qualifier
+// before lowering, so `secret_return` is the only surviving record of it. The
+// verbatim `@go` body owns its own `return` statements, so it moves into an
+// inner `revlSecret_<name>` and the DECLARED name becomes a one-line
+// `revlSecretResult(..)` wrapper: every call site is covered without the body
+// being rewritten. Emitted only for an extern that carries the stamp, so every
+// other extern is byte-identical to the plain form.
+//
+// The `config` schema (item 378 Stage 5) and the `//revl:import` hoist are
+// ported: a config extern binds `_revl_config` as its first body line, with the
+// scaffold emitted once ahead of the externs, and a directive line leaves the
+// body for the module import block. Two shapes keep a loud marker: an extern
+// with no `@go` body (the reference RAISES, a portability boundary), and a body
+// carrying a line break Python `splitlines()` honours that a plain
+// `split("\n")` does not, since the two would cut the body differently.
+// Every code point Python `str.splitlines()` breaks on that a plain
+// `split("\n")` does not: VT, FF, CR, the three file/group/record separators,
+// NEL, and the two Unicode line/paragraph separators.
+pub fn is_extra_linebreak(code: Int) -> Bool {
+  if (code >= 11 && code <= 13) { return true }
+  if (code >= 28 && code <= 30) { return true }
+  if (code == 133) { return true }
+  return code == 8232 || code == 8233
+}
+pub fn has_extra_linebreak(s: Str) -> Bool {
+  let n = s.length()
+  var i = 0
+  while (i < n) {
+    if (is_extra_linebreak(s.charCodeAt(i))) { return true }
+    i = i + 1
+  }
+  return false
+}
+// The reference's `_go_literal`, over a config default. The frontend only
+// admits a scalar literal there (a `null` default marks the field required and
+// never reaches this), so the reference's list and record arms, which serve its
+// component tier, are not mirrored and answer by name.
+pub fn go_literal(v: Any) -> Str {
+  let shape = value_kind(v)
+  if (shape == "bool") { return value_bool(v) ? "true" : "false" }
+  if (shape == "str") { return go_string(v) }
+  if (shape == "int" || shape == "float") { return num_str(v) }
+  return `<<UNSUPPORTED-CONFIG-DEFAULT:${shape}>>`
+}
+fn has_config(ext: Any) -> Bool { return value_list(value_field(ext, "config")).length() > 0 }
+// `_go_extern_config_bind`: the `_revl_config := ..` first body line of a
+// config extern, from its schema's required names and defaults.
+fn config_bind(ext: Any) -> Str {
+  var required = []
+  var defaults = []
+  for (f of value_list(value_field(ext, "config"))) {
+    let fname = value_str(value_field(f, "name"))
+    let d = value_field(f, "default")
+    if (value_is_null(d)) { required = required.push(go_string(fname)) }
+    else { defaults = defaults.push(`${go_string(fname)}: ${go_literal(d)}`) }
+  }
+  let name = go_string(value_str(value_field(ext, "name")))
+  return `_revl_config := _revlExternConfig(${name}, []string{${required.join(", ")}}, map[string]any{${defaults.join(", ")}})`
+}
+// Only ever handed one character of a line. The whitespace Python's `\s` and
+// `strip()` read, not only ASCII: the C0 separators (28-31), NEL, NBSP, Ogham
+// space, U+2000-U+200A, U+2028/2029, U+202F, U+205F and U+3000. A line break
+// among them never reaches here: `has_extra_linebreak` marks that extern first.
+fn is_ws_char(ch: Str) -> Bool {
+  let c = ch.charCodeAt(0)
+  return c == 32 || (c >= 9 && c <= 13) || (c >= 28 && c <= 31) || c == 133 || c == 160
+    || c == 5760 || (c >= 8192 && c <= 8202) || c == 8232 || c == 8233 || c == 8239
+    || c == 8287 || c == 12288
+}
+// `_GO_IMPORT_DIRECTIVE_WORD` (`^//revl:import(?:\s|$)` on the stripped line):
+// whether a body line is a `//revl:import` directive, that is whether its first
+// whitespace-separated word is the directive's name. A longer word
+// (`//revl:imported`) is an ordinary comment.
+pub fn is_import_directive(l: Str) -> Bool {
+  let words = ws_words(l)
+  return words.length() > 0 && words[0] == "//revl:import"
+}
+// The whitespace-separated words of `s`.
+fn ws_words(s: Str) -> List[Str] {
+  var out: List[Str] = []
+  var word = ""
+  var i = 0
+  while (i < s.length()) {
+    let ch = s.charAt(i)
+    if (is_ws_char(ch)) {
+      if (word != "") { out = out.push(word) }
+      word = ""
+    } else { word = word.concat(ch) }
+    i = i + 1
+  }
+  if (word != "") { out = out.push(word) }
+  return out
+}
+// `[A-Za-z_]\w*|\.`: an import alias. `is_word_char` is ASCII only, so a
+// non-ASCII alias is refused here where Python's `\w` would take it.
+fn is_import_alias(w: Str) -> Bool {
+  var all_word = w != ""
+  var i = 0
+  while (i < w.length()) {
+    all_word = all_word && is_word_char(w.charAt(i))
+    i = i + 1
+  }
+  let first = w == "" ? 0 : w.charCodeAt(0)
+  return w == "." || (all_word && !(first >= 48 && first <= 57))
+}
+// `"[^"\s]+"|[^"\s]+`: an import path, quoted or bare (a word has no space).
+fn is_import_path(w: Str) -> Bool {
+  let quoted = w.startsWith("\"")
+  let inner = quoted && w.length() >= 2 ? w.slice(1, w.length() - 1) : w
+  return w != "" && (!quoted || (w.length() >= 3 && w.endsWith("\""))) && inner.indexOf("\"") < 0
+}
+// `_GO_LANGUAGE_KEYWORDS`: none can name an import.
+fn is_go_language_keyword(w: Str) -> Bool {
+  return list_contains(["break", "case", "chan", "const", "continue", "default",
+    "defer", "else", "fallthrough", "for", "func", "go", "goto", "if", "import",
+    "interface", "map", "package", "range", "return", "select", "struct",
+    "switch", "type", "var"], w)
+}
+// `_go_import_spec`: the Go import spec (`"time"`, `tm "time"`, `. "strings"`)
+// a directive line asks for, as `[spec]`; `[]` for a line the reference
+// refuses with an EmitError (it does not parse as `//revl:import [alias]
+// <path>`, or its alias is a Go keyword).
+pub fn import_spec(l: Str) -> List[Str] {
+  let words = ws_words(l)
+  let n = words.length() - 1
+  let one = n == 1 && is_import_path(words[1])
+  let two = n == 2 && is_import_alias(words[1]) && is_import_path(words[2]) && !is_go_language_keyword(words[1])
+  let path = n == 2 ? words[2] : (n == 1 ? words[1] : "")
+  let quoted = path.startsWith("\"") ? path : `"${path}"`
+  let spec = one ? quoted : (two ? `${words[1]} ${quoted}` : "")
+  return spec == "" ? [] : [spec]
+}
+// `_go_import_name`: the file-scope name an import spec binds: its alias, else
+// the last element of its path.
+pub fn import_name(spec: Str) -> Str {
+  let t = trim(spec)
+  let sp = t.indexOf(" ")
+  if (sp >= 0) { return t.slice(0, sp) }
+  var path = t
+  while (path.startsWith("\"")) { path = path.slice(1, path.length()) }
+  while (path.endsWith("\"")) { path = path.slice(0, path.length() - 1) }
+  let parts = path.split("/")
+  return parts[parts.length() - 1]
+}
+// `_go_refuse_extern_alias_clash`: the alias of a hoisted aliased spec that the
+// module's import block already binds to a different spec (one the preamble
+// imports, or another directive's), else "". The same spec twice is one import.
+// `preamble` holds the block's lines so far, indented, the hoisted specs
+// included (`hoisted` is the list of them, to pick the aliased ones).
+pub fn import_alias_clash(preamble: List[Str], hoisted: List[Str]) -> Str {
+  var specs: List[Str] = []
+  for (l of preamble) { if (trim(l) != "") { specs = specs.push(trim(l)) } }
+  for (spec of list_sort(hoisted)) {
+    if (spec.indexOf(" ") >= 0) {
+      let alias = import_name(spec)
+      if (alias != "_" && alias != ".") {
+        for (other of list_sort(specs)) {
+          if (other != spec && import_name(other) == alias) { return alias }
+        }
+      }
+    }
+  }
+  return ""
+}
+type Hoisted = { kept: List[Str], specs: List[Str], bad: Bool }
+// `_hoist_go_imports`: the body lines a Go extern keeps, and the import specs
+// its `//revl:import` directives hoist. `bad` when a directive is one the
+// reference refuses.
+fn hoist_imports(body: Str) -> Hoisted {
+  var kept: List[Str] = []
+  var specs: List[Str] = []
+  var bad = false
+  if (body != "") {
+    for (bl of body.split(newline())) {
+      if (is_import_directive(bl)) {
+        let spec = import_spec(bl)
+        if (spec.length() == 0) { bad = true } else { specs = specs.push(spec[0]) }
+      } else { kept = kept.push(bl) }
+    }
+  }
+  return { kept: kept, specs: specs, bad: bad }
+}
+pub type Eout = { lines: List[Str], imports: List[Str] }
+pub fn emit_externs(externs: List[Any], gv: Map[Str, Str]) -> Eout {
+  var out = []
+  var imports = []
+  var any_config = false
+  for (ext of externs) { if (has_config(ext)) { any_config = true } }
+  if (any_config) { out = out.concat(extern_config_scaffold()) }
+  for (ext of externs) {
+    let raw_name = value_str(value_field(ext, "name"))
+    var name = v3_ident(raw_name)
+    var ps = []
+    var args = []
+    for (p of value_list(value_field(ext, "params"))) {
+      let pname = v3_ident(value_str(value_field(p, "name")))
+      ps = ps.push(`${pname} ${go_type(value_field(p, "type"), gv)}`)
+      args = args.push(pname)
+    }
+    let params = ps.join(", ")
+    let arg_list = args.join(", ")
+    let ret = go_type(value_field(ext, "returns"), gv)
+    var sigret = ""
+    if (ret != "") { sigret = " ".concat(ret) }
+    let bodies = value_field(ext, "bodies")
+    let go_body = value_field(bodies, "go")
+    if (value_is_null(go_body)) {
+      out = out.push(`<<UNSUPPORTED-EXTERN-NO-GO-BODY:${name}>>`)
+      out = out.push("")
+    } else {
+      let body = trim(value_str(go_body))
+      if (has_extra_linebreak(body)) {
+        out = out.push(`<<UNSUPPORTED-EXTERN-linebreak:${name}>>`)
+        out = out.push("")
+      } else {
+        let scan = hoist_imports(body)
+        if (scan.bad) {
+          out = out.push(`<<UNSUPPORTED-EXTERN-IMPORT-DIRECTIVE:${name}>>`)
+          out = out.push("")
+        } else {
+          // The wrapper needs a result to hand back, so a `Unit` extern takes no
+          // marking (the reference gates on `ret` too).
+          if (value_bool(value_field(ext, "secret_return")) && ret != "") {
+            out = out.push(`func ${name}(${params})${sigret} {`)
+            out = out.push(line(1, `return revlSecretResult(revlSecret_${name}(${arg_list}))`))
+            out = out.push("}")
+            out = out.push("")
+            name = "revlSecret_".concat(name)
+          }
+          out = out.push(`func ${name}(${params})${sigret} {`)
+          if (has_config(ext)) { out = out.push(line(1, config_bind(ext))) }
+          let kept = scan.kept
+          imports = imports.concat(scan.specs)
+          if (kept.length() == 0) {
+            out = out.push(line(1, "// (empty extern body)"))
+          } else {
+            for (bl of kept) { out = out.push(tab().concat(rstrip(bl))) }
+          }
+          out = out.push("}")
+          out = out.push("")
+        }
+      }
+    }
+  }
+  return { lines: out, imports: imports }
+}
+// `_v3_fn_type_params` (issue #2495): the type parameters of a function
+// signature, in first-use order. The IR carries the author's spelling
+// (`fn id[T](x: T) -> T` arrives as params typed `T`, with no parameter
+// list), so the emitter applies the checker's implicit rule: a single
+// uppercase name that no `type` declares is a type parameter.
+fn fn_type_params(fnode: Any, tnames: List[Str]) -> List[Str] {
+  var found: List[Str] = []
+  var surfaces: List[Str] = []
+  for (p of value_list(value_field(fnode, "params"))) { surfaces = surfaces.push(value_str(value_field(p, "type"))) }
+  surfaces = surfaces.push(value_str(value_field(fnode, "returns")))
+  let listed = listed_type_params(fnode, surfaces)
+  if (listed.given) { return listed.names }
+  for (surface of surfaces) {
+    for (word of type_words(surface)) {
+      if (word.length() == 1 && "ABCDEFGHIJKLMNOPQRSTUVWXYZ".indexOf(word) >= 0 && !list_contains(tnames, word) && !list_contains(found, word)) {
+        found = found.push(word)
+      }
+    }
+  }
+  return found
+}
+// `_emit_v3_go_functions`: each module fn as a Go `func`, blank-line separated.
+// A generic function carries its type parameters as Go type parameters,
+// `func id[T any](x T) T` (issue #2495).
+pub fn emit_functions(functions: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t: TypeTables, signatures: List[Any], strings_alias: Str) -> Fout {
+  var out = []
+  var uses_strings = false
+  var last_reserved: Map[Str, Str] = Map.empty()
+  for (fnode of functions) {
+    let name = v3_ident(value_str(value_field(fnode, "name")))
+    let params = value_list(value_field(fnode, "params"))
+    var vt: Map[Str, Str] = Map.empty()
+    for (p of params) { vt = vt.set(value_str(value_field(p, "name")), value_str(value_field(p, "type"))) }
+    let rt = value_str(value_field(fnode, "returns"))
+    let reserved = collect_reserved(fnode, Map.empty())
+    let body = value_list(value_field(fnode, "body"))
+    let ctx0 = {
+      vt: vt, fr: fr, er: er, signatures: signatures,
+      ca: t.ca, cp: t.cp, rbf: t.rbf, rf: t.rf, variants: t.variants, tnames: t.tnames,
+      gv: t.gv, rt: rt, builders: Map.empty(), builder_seq: 0,
+      reserved: reserved, strings_alias: strings_alias,
+      sc: Map.empty(), scan_seq: 0, body: body, tn: "",
+      fh: Map.empty(),
+      et: Map.empty(), keys: [], key_i: 0
+    }
+    let scan = flow_hints(body, rt, ctx0)
+    let ctx = set_scan(set_fh(ctx0, scan.hints), scan)
+    var ps = []
+    for (p of params) {
+      ps = ps.push(`${v3_ident(value_str(value_field(p, "name")))} ${go_type(value_field(p, "type"), t.gv)}`)
+    }
+    let ret = go_type(value_field(fnode, "returns"), t.gv)
+    var sigret = ""
+    if (ret != "") { sigret = " ".concat(ret) }
+    var type_params = ""
+    let tparams = fn_type_params(fnode, t.tnames)
+    if (tparams.length() > 0) {
+      var items: List[Str] = []
+      for (tp of tparams) { items = items.push(`${tp} any`) }
+      type_params = `[${items.join(", ")}]`
+    }
+    out = out.push(`func ${name}${type_params}(${ps.join(", ")})${sigret} {`)
+    let r = emit_stmts(body, ctx, 1)
+    if (r.ctx.builder_seq > 0) { uses_strings = true }
+    last_reserved = r.ctx.reserved
+    out = out.concat(r.lines)
+    out = out.push("}")
+    out = out.push("")
+  }
+  return { lines: out, uses_strings: uses_strings, reserved: last_reserved }
+}
+// `_go_v3_test_name`: `Test` + each alphanumeric run of the test's name with
+// its first character upper-cased, numbered on a clash.
+fn test_name(name: Str, used: List[Str]) -> Str {
+  var base = "Test"
+  var part = ""
+  var i = 0
+  while (i <= name.length()) {
+    let ch = i < name.length() ? name.charAt(i) : ""
+    if (ch != "" && is_alnum_ascii(ch)) { part = part.concat(ch) }
+    else {
+      if (part != "") { base = base.concat(upper_first(part)) }
+      part = ""
+    }
+    i = i + 1
+  }
+  if (base == "Test") { base = "TestCase" }
+  var candidate = base
+  var n = 1
+  while (list_contains(used, candidate)) {
+    n = n + 1
+    candidate = `${base}${n}`
+  }
+  return candidate
+}
+fn is_alnum_ascii(ch: Str) -> Bool {
+  let c = ch.charCodeAt(0)
+  return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+}
+pub fn upper_first(part: Str) -> Str {
+  let c = part.charCodeAt(0)
+  if (c >= 97 && c <= 122) {
+    return "ABCDEFGHIJKLMNOPQRSTUVWXYZ".charAt(c - 97).concat(part.slice(1, part.length()))
+  }
+  return part
+}
+// `_emit_v3_go_tests`: each in-file `test` as a `func TestX(revlT *testing.T)`,
+// whose asserts fail through the receiver. The ctx carries no parameters and
+// no return type; the reserved names and the strings alias are the ones the
+// last function left behind, exactly as the reference's shared ctx does.
+pub fn emit_tests(tests: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t: TypeTables, signatures: List[Any], strings_alias: Str, reserved: Map[Str, Str]) -> Fout {
+  var out = []
+  var used = []
+  var uses_strings = false
+  var res = reserved
+  for (tcase of tests) {
+    let tname = test_name(value_str(value_field(tcase, "name")), used)
+    used = used.push(tname)
+    let body = value_list(value_field(tcase, "body"))
+    let ctx0 = {
+      vt: Map.empty(), fr: fr, er: er, signatures: signatures,
+      ca: t.ca, cp: t.cp, rbf: t.rbf, rf: t.rf, variants: t.variants, tnames: t.tnames,
+      gv: t.gv, rt: "", builders: Map.empty(), builder_seq: 0,
+      reserved: res, strings_alias: strings_alias,
+      sc: Map.empty(), scan_seq: 0, body: body, tn: "revlT",
+      fh: Map.empty(),
+      et: Map.empty(), keys: [], key_i: 0
+    }
+    let scan = flow_hints(body, "", ctx0)
+    let ctx = set_scan(set_fh(ctx0, scan.hints), scan)
+    // `revlT` (not `t`) so a user binding named `t` can't shadow it.
+    out = out.push(`func ${tname}(revlT *testing.T) {`)
+    let r = emit_stmts(body, ctx, 1)
+    if (r.ctx.builder_seq > 0) { uses_strings = true }
+    res = r.ctx.reserved
+    out = out.concat(r.lines)
+    out = out.push("}")
+    out = out.push("")
+  }
+  return { lines: out, uses_strings: uses_strings, reserved: res }
+}
+// ------------------------------------------------------------- feature flags
+// Which runtime preambles the pure path prepends is a deterministic function of
+// the IR: the reference sets each flag while RENDERING a node, and every node in
+// a function body (arrow bodies included) is rendered, so a structural pass over
+// the IR sees exactly the same set. `_go_string`-escaping and type spellings set
+// no flag; only these do, in-slice. The `fmt`/`strconv` IMPORT flags are NOT
+// here: since item 434 (f) an interpolation picks between them from the operand
+// types it infers as it renders, so `emit_go_src` reads them off the rendered
+// lines instead of re-deriving that inference structurally.
+type Flags = { fdiv: Bool, ovf: Bool, ovf32: Bool }
+fn flags_or(a: Flags, b: Flags) -> Flags {
+  return { fdiv: a.fdiv || b.fdiv, ovf: a.ovf || b.ovf, ovf32: a.ovf32 || b.ovf32 }
+}
+fn flag_walk(node: Any, acc: Flags) -> Flags {
+  var f = acc
+  if (value_kind(node) == "record") {
+    let k = node_kind(node)
+    if (k == "bin") {
+      let op = node_op(node)
+      let opnd = node_operands(node)
+      if (op == "/") { f = { fdiv: true, ovf: f.ovf, ovf32: f.ovf32 } }
+      if (is_addsubmul(op) && opnd == "Int") { f = { fdiv: f.fdiv, ovf: true, ovf32: f.ovf32 } }
+      if (is_addsubmul(op) && opnd == "Int32") { f = { fdiv: f.fdiv, ovf: f.ovf, ovf32: true } }
+    }
+    if (k == "un" && node_op(node) == "-") {
+      let opnd = node_operands(node)
+      if (opnd == "Int") { f = { fdiv: f.fdiv, ovf: true, ovf32: f.ovf32 } }
+      if (opnd == "Int32") { f = { fdiv: f.fdiv, ovf: f.ovf, ovf32: true } }
+    }
+  }
+  for (c of value_children(node)) { f = flag_walk(c, f) }
+  return f
+}
+pub fn collect_flags(functions: List[Any]) -> Flags {
+  var f = { fdiv: false, ovf: false, ovf32: false }
+  for (fnode of functions) { f = flag_walk(fnode, f) }
+  return f
+}
+// ------------------------------------------------------------- runtime preambles
+// The trapping Int arithmetic trio (docs/arithmetic.md): Go has no checked
+// arithmetic, so the helpers detect overflow. Built line-by-line to match the
+// reference's `out.append(...)` sequence byte-for-byte.
+pub fn overflow_preamble() -> List[Str] {
+  var o = []
+  o = o.push("func revlAdd(a, b int64) int64 {")
+  o = o.push(line(1, "s := a + b"))
+  o = o.push(line(1, "if (a > 0 && b > 0 && s < 0) || (a < 0 && b < 0 && s >= 0) {"))
+  o = o.push(line(2, `panic("revl: Int overflow")`))
+  o = o.push(line(1, "}"))
+  o = o.push(line(1, "return s"))
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("func revlSub(a, b int64) int64 {")
+  o = o.push(line(1, "d := a - b"))
+  o = o.push(line(1, "if (b < 0 && d < a) || (b > 0 && d > a) {"))
+  o = o.push(line(2, `panic("revl: Int overflow")`))
+  o = o.push(line(1, "}"))
+  o = o.push(line(1, "return d"))
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("func revlMul(a, b int64) int64 {")
+  o = o.push(line(1, "if a == 0 || b == 0 {"))
+  o = o.push(line(2, "return 0"))
+  o = o.push(line(1, "}"))
+  // `p/b != a` cannot see Int.MIN * -1: the product wraps back to Int.MIN and
+  // Go DEFINES `Int.MIN / -1` as Int.MIN, so the readback equals `a`.
+  o = o.push(line(1, "if a == (-9223372036854775807 - 1) && b == -1 {"))
+  o = o.push(line(2, `panic("revl: Int overflow")`))
+  o = o.push(line(1, "}"))
+  o = o.push(line(1, "p := a * b"))
+  o = o.push(line(1, "if p/b != a {"))
+  o = o.push(line(2, `panic("revl: Int overflow")`))
+  o = o.push(line(1, "}"))
+  o = o.push(line(1, "return p"))
+  o = o.push("}")
+  o = o.push("")
+  return o
+}
+// The Int32 trap block: each op is computed in int64 and range-checked before
+// narrowing (Go's int32 wraps). Mirrors the reference append sequence.
+pub fn overflow32_preamble() -> List[Str] {
+  var o = []
+  o = o.push("func revlAddI32(a, b int32) int32 { return revlToI32(int64(a) + int64(b)) }")
+  o = o.push("func revlSubI32(a, b int32) int32 { return revlToI32(int64(a) - int64(b)) }")
+  o = o.push("func revlMulI32(a, b int32) int32 { return revlToI32(int64(a) * int64(b)) }")
+  o = o.push("func revlToI32(v int64) int32 {")
+  o = o.push(line(1, "if v < -2147483648 || v > 2147483647 {"))
+  o = o.push(line(2, `panic("revl: Int32 overflow")`))
+  o = o.push(line(1, "}"))
+  o = o.push(line(1, "return int32(v)"))
+  o = o.push("}")
+  o = o.push("")
+  return o
+}
+// ------------------------------------------- the stdlib / Opt / Result / Map
+// The reference's preamble constants, line for line (a constant appended as one
+// element of the module's line list joins exactly as its own lines do). The two
+// that spell `strings.` take the module's strings alias at assembly, by the same
+// whole-text replace the reference makes.
+pub fn stdlib_preamble(alias: Str) -> List[Str] {
+  var out = []
+  for (l of stdlib_preamble_raw()) { out = out.push(replace_all(l, "strings.", alias.concat("."))) }
+  return out
+}
+pub fn ftoa_helper(alias: Str) -> List[Str] {
+  var out = []
+  for (l of ftoa_helper_raw()) { out = out.push(replace_all(l, "strings.", alias.concat("."))) }
+  return out
+}
+// The integer-division helpers (`div_trunc`/`div_floor`/`div_euclid`/`mod` and
+// the total forms built on them), in the reference's append order.
+pub fn int_arith_preamble() -> List[Str] {
+  return [
+    "func revlDivTrunc(a, b int64) int64 {",
+    line(1, "if a == (-9223372036854775807 - 1) && b == -1 {"),
+    line(2, "panic(\"revl: Int overflow\")"),
+    line(1, "}"),
+    line(1, "return a / b"),
+    "}",
+    "",
+    "func revlDivFloor(a, b int64) int64 {",
+    line(1, "if a == (-9223372036854775807 - 1) && b == -1 {"),
+    line(2, "panic(\"revl: Int overflow\")"),
+    line(1, "}"),
+    line(1, "q := a / b"),
+    line(1, "if a%b != 0 && ((a < 0) != (b < 0)) {"),
+    line(2, "q--"),
+    line(1, "}"),
+    line(1, "return q"),
+    "}",
+    "",
+    "func revlDivEuclid(a, b int64) int64 {",
+    line(1, "q := revlDivTrunc(a, b)"),
+    line(1, "if a%b < 0 {"),
+    line(2, "if b > 0 {"),
+    line(3, "q--"),
+    line(2, "} else {"),
+    line(3, "q++"),
+    line(2, "}"),
+    line(1, "}"),
+    line(1, "return q"),
+    "}",
+    "",
+    "func revlMod(a, b int64) int64 {",
+    line(1, "m := b"),
+    line(1, "if m < 0 {"),
+    line(2, "m = -m"),
+    line(1, "}"),
+    line(1, "r := a % m"),
+    line(1, "if r < 0 {"),
+    line(2, "r += m"),
+    line(1, "}"),
+    line(1, "return r"),
+    "}",
+    ""
+  ]
+}
+// `_V3_OPT_PREAMBLE`
+pub fn opt_preamble() -> List[Str] {
+  return [
+    "// ---- built-in Opt as a two-value struct (item 434 (d)) ----------------",
+    "// A present-flag + value struct, not a sealed interface: a Some carrying a",
+    "// non-pointer payload no longer heap-boxes to satisfy an interface, so an Opt",
+    "// that escapes a function or lands in a collection costs no allocation. `Ok`",
+    "// discriminates; `None` is the zero value (Ok == false), matching the (T, bool)",
+    "// return shape the component (v1/v2) tier already uses.",
+    "type RevlOpt[T any] struct {",
+    line(1, "Value T"),
+    line(1, "Ok    bool"),
+    "}",
+    "",
+    "func revlOptMap[A any, B any](o RevlOpt[A], f func(A) B) RevlOpt[B] {",
+    line(1, "if o.Ok {"),
+    line(2, "return RevlOpt[B]{Value: f(o.Value), Ok: true}"),
+    line(1, "}"),
+    line(1, "return RevlOpt[B]{}"),
+    "}",
+    "",
+    "func revlOptOr[T any](o RevlOpt[T], d T) T {",
+    line(1, "if o.Ok {"),
+    line(2, "return o.Value"),
+    line(1, "}"),
+    line(1, "return d"),
+    "}",
+    ""
+  ]
+}
+// `_V3_PARSE_INT_HELPER`
+pub fn parse_int_helper() -> List[Str] {
+  return [
+    "// ---- Str.to_int (FR-9, docs/stdlib-2.0.md §Str.to_int) ----------------",
+    "func revlParseInt(s string) RevlOpt[int64] {",
+    line(1, "if s == \"\" {"),
+    line(2, "return RevlOpt[int64]{}"),
+    line(1, "}"),
+    line(1, "neg := false"),
+    line(1, "i := 0"),
+    line(1, "if s[0] == '-' {"),
+    line(2, "neg = true"),
+    line(2, "i = 1"),
+    line(2, "if len(s) == 1 {"),
+    line(3, "return RevlOpt[int64]{}"),
+    line(2, "}"),
+    line(1, "}"),
+    line(1, "const lim = uint64(9223372036854775808) // Int.MAX + 1"),
+    line(1, "var n uint64"),
+    line(1, "for ; i < len(s); i++ {"),
+    line(2, "c := s[i]"),
+    line(2, "if c < '0' || c > '9' {"),
+    line(3, "return RevlOpt[int64]{}"),
+    line(2, "}"),
+    line(2, "d := uint64(c - '0')"),
+    line(2, "if n > (lim-d)/10 {"),
+    line(3, "return RevlOpt[int64]{}"),
+    line(2, "}"),
+    line(2, "n = n*10 + d"),
+    line(1, "}"),
+    line(1, "if neg {"),
+    line(2, "if n == lim {"),
+    line(3, "return RevlOpt[int64]{Value: -9223372036854775807 - 1, Ok: true}"),
+    line(2, "}"),
+    line(2, "return RevlOpt[int64]{Value: -int64(n), Ok: true}"),
+    line(1, "}"),
+    line(1, "if n == lim {"),
+    line(2, "return RevlOpt[int64]{}"),
+    line(1, "}"),
+    line(1, "return RevlOpt[int64]{Value: int64(n), Ok: true}"),
+    "}",
+    ""
+  ]
+}
+// `_V3_RESULT_PREAMBLE`
+pub fn result_preamble() -> List[Str] {
+  return [
+    "// ---- built-in Result as a two-value struct (item 434 (d)) -------------",
+    "// An Ok/Err-flag + two payload struct, not a sealed interface: an Ok or Err",
+    "// carrying a non-pointer payload no longer heap-boxes to satisfy an interface,",
+    "// so a Result that escapes a function or lands in a collection costs no",
+    "// allocation (the same argument, and the same shape, as the Opt conversion",
+    "// above). `Ok` discriminates; `OkV` holds the Ok payload and `ErrV` the Err",
+    "// payload, each the zero value on the other arm. reflect.DeepEqual stays a",
+    "// correct value equality: two Ok values compare their `OkV` (matching `ErrV`",
+    "// zero), an Ok and an Err differ on `Ok`.",
+    "type RevlResult[T any, E any] struct {",
+    line(1, "OkV  T"),
+    line(1, "ErrV E"),
+    line(1, "Ok   bool"),
+    "}",
+    ""
+  ]
+}
+// `_V3_MAP_PREAMBLE`
+pub fn map_preamble() -> List[Str] {
+  return [
+    "// ---- Map value type (docs/stdlib-2.0.md §Map): persistent Go maps -----",
+    "func revlMapSet[K comparable, V any](m map[K]V, k K, v V) map[K]V {",
+    line(1, "out := make(map[K]V, len(m)+1)"),
+    line(1, "for kk, vv := range m {"),
+    line(2, "out[kk] = vv"),
+    line(1, "}"),
+    line(1, "out[k] = v"),
+    line(1, "return out"),
+    "}",
+    "",
+    "func revlMapGet[K comparable, V any](m map[K]V, k K) RevlOpt[V] {",
+    line(1, "if v, ok := m[k]; ok {"),
+    line(2, "return RevlOpt[V]{Value: v, Ok: true}"),
+    line(1, "}"),
+    line(1, "return RevlOpt[V]{}"),
+    "}",
+    "",
+    "func revlMapHas[K comparable, V any](m map[K]V, k K) bool {",
+    line(1, "_, ok := m[k]"),
+    line(1, "return ok"),
+    "}",
+    "",
+    "func revlMapRemove[K comparable, V any](m map[K]V, k K) map[K]V {",
+    line(1, "out := make(map[K]V, len(m))"),
+    line(1, "for kk, vv := range m {"),
+    line(2, "if kk != k {"),
+    line(3, "out[kk] = vv"),
+    line(2, "}"),
+    line(1, "}"),
+    line(1, "return out"),
+    "}",
+    "",
+    "// revlMapKeys yields the keys in ascending canonical Str order (UTF-8 byte",
+    "// lexicographic, which go `string <` is exactly, and slices.Sort orders",
+    "// []string by `<`, so the emitted order is identical to the hand-rolled",
+    "// insertion sort this replaced). Map.keys() IS the iteration surface for Map",
+    "// (docs/stdlib-2.0.md §Map), so it sits on the path of every map traversal a",
+    "// program does: O(n log n), not the O(n^2) the \"keys come in small sets\"",
+    "// premise assumed (roadmap item 434 (h)).",
+    "func revlMapKeys[V any](m map[string]V) []string {",
+    line(1, "keys := make([]string, 0, len(m))"),
+    line(1, "for k := range m {"),
+    line(2, "keys = append(keys, k)"),
+    line(1, "}"),
+    line(1, "slices.Sort(keys)"),
+    line(1, "return keys"),
+    "}",
+    ""
+  ]
+}
+// `_V3_MAP_INDEX_HELPER`
+pub fn map_index_helper() -> List[Str] {
+  return [
+    "// revlMapIndex is the Map subscript `m[k]`: a miss FAULTS (#957), where",
+    "// `m.lookup(k)` is the total form that answers Opt.",
+    "func revlMapIndex[K comparable, V any](m map[K]V, k K) V {",
+    line(1, "v, ok := m[k]"),
+    line(1, "if !ok {"),
+    line(2, "panic(\"revl: map index: no entry for key\")"),
+    line(1, "}"),
+    line(1, "return v"),
+    "}",
+    ""
+  ]
+}
+// `_V3_ANY_INDEX_HELPER`
+pub fn any_index_helper() -> List[Str] {
+  return [
+    "// revlAnyIndex is the subscript `v[k]` where `v` is statically `Any` (issue",
+    "// #1356). Go's index operator is type-directed and an interface value has",
+    "// none, so the read goes through reflection, exactly as python and typescript",
+    "// read a value whose shape only the runtime knows. A miss, an out-of-range",
+    "// position and a value that is not indexable all FAULT, which is the answer",
+    "// the same subscript gives on every other tier.",
+    "func revlAnyIndex(v any, k any) any {",
+    line(1, "rv := reflect.ValueOf(v)"),
+    line(1, "switch rv.Kind() {"),
+    line(1, "case reflect.Map:"),
+    line(2, "kv := reflect.ValueOf(k)"),
+    line(2, "if kv.IsValid() && kv.Type().ConvertibleTo(rv.Type().Key()) {"),
+    line(3, "if e := rv.MapIndex(kv.Convert(rv.Type().Key())); e.IsValid() {"),
+    line(4, "return e.Interface()"),
+    line(3, "}"),
+    line(2, "}"),
+    line(2, "panic(\"revl: map index: no entry for key\")"),
+    line(1, "case reflect.Slice, reflect.Array:"),
+    line(2, "i, ok := k.(int64)"),
+    line(2, "if !ok {"),
+    line(3, "panic(\"revl: list index: position is not an Int\")"),
+    line(2, "}"),
+    line(2, "if i < 0 || i >= int64(rv.Len()) {"),
+    line(3, "panic(\"revl: list index: out of range\")"),
+    line(2, "}"),
+    line(2, "return rv.Index(int(i)).Interface()"),
+    line(1, "}"),
+    line(1, "panic(\"revl: index: value is not indexable\")"),
+    "}",
+    ""
+  ]
+}
+// `_V3_FTOA_HELPER` (`strings.` spelled raw; see `ftoa_helper`)
+fn ftoa_helper_raw() -> List[Str] {
+  return [
+    "// revlFtoa renders a Float as ECMAScript Number::toString does (the canonical",
+    "// cross-tier Float -> Str form, docs/strings.md): shortest round-trip digits,",
+    "// \"1e+21\"/\"NaN\"/\"Infinity\", a whole-number float as \"0\", negative zero as \"0\".",
+    "func revlFtoa(x float64) string {",
+    line(1, "if math.IsNaN(x) {"),
+    line(2, "return \"NaN\""),
+    line(1, "}"),
+    line(1, "if math.IsInf(x, 1) {"),
+    line(2, "return \"Infinity\""),
+    line(1, "}"),
+    line(1, "if math.IsInf(x, -1) {"),
+    line(2, "return \"-Infinity\""),
+    line(1, "}"),
+    line(1, "if x == 0 {"),
+    line(2, "return \"0\""),
+    line(1, "}"),
+    line(1, "sign := \"\""),
+    line(1, "if x < 0 {"),
+    line(2, "sign = \"-\""),
+    line(2, "x = -x"),
+    line(1, "}"),
+    line(1, "s := strconv.FormatFloat(x, 'e', -1, 64) // shortest mantissa: d[.ddd]e±dd"),
+    line(1, "mant := s"),
+    line(1, "exp := 0"),
+    line(1, "if e := strings.IndexByte(s, 'e'); e >= 0 {"),
+    line(2, "mant = s[:e]"),
+    line(2, "exp, _ = strconv.Atoi(s[e+1:])"),
+    line(1, "}"),
+    line(1, "intpart := mant"),
+    line(1, "frac := \"\""),
+    line(1, "if d := strings.IndexByte(mant, '.'); d >= 0 {"),
+    line(2, "intpart = mant[:d]"),
+    line(2, "frac = mant[d+1:]"),
+    line(1, "}"),
+    line(1, "digits := intpart + frac"),
+    line(1, "point := len(intpart) + exp"),
+    line(1, "i := 0"),
+    line(1, "for i < len(digits)-1 && digits[i] == '0' {"),
+    line(2, "i++"),
+    line(2, "point--"),
+    line(1, "}"),
+    line(1, "digits = digits[i:]"),
+    line(1, "j := len(digits)"),
+    line(1, "for j > 1 && digits[j-1] == '0' {"),
+    line(2, "j--"),
+    line(1, "}"),
+    line(1, "digits = digits[:j]"),
+    line(1, "if digits == \"0\" {"),
+    line(2, "return \"0\""),
+    line(1, "}"),
+    line(1, "k := len(digits)"),
+    line(1, "n := point"),
+    line(1, "var body string"),
+    line(1, "switch {"),
+    line(1, "case k <= n && n <= 21:"),
+    line(2, "body = digits + strings.Repeat(\"0\", n-k)"),
+    line(1, "case 0 < n && n <= 21:"),
+    line(2, "body = digits[:n] + \".\" + digits[n:]"),
+    line(1, "case -6 < n && n <= 0:"),
+    line(2, "body = \"0.\" + strings.Repeat(\"0\", -n) + digits"),
+    line(1, "default:"),
+    line(2, "e := n - 1"),
+    line(2, "m := digits"),
+    line(2, "if k > 1 {"),
+    line(3, "m = digits[:1] + \".\" + digits[1:]"),
+    line(2, "}"),
+    line(2, "esign := \"+\""),
+    line(2, "if e < 0 {"),
+    line(3, "esign = \"-\""),
+    line(3, "e = -e"),
+    line(2, "}"),
+    line(2, "body = m + \"e\" + esign + strconv.Itoa(e)"),
+    line(1, "}"),
+    line(1, "return sign + body"),
+    "}"
+  ]
+}
+// `_V3_LIST_INDEX_OF_EQ`
+pub fn list_index_of_eq() -> List[Str] {
+  return [
+    "func revlListIndexOfEq[T any](xs []T, x T) int64 {",
+    line(1, "for i, v := range xs {"),
+    line(2, "if revlEq(v, x) {"),
+    line(3, "return int64(i)"),
+    line(2, "}"),
+    line(1, "}"),
+    line(1, "return -1"),
+    "}"
+  ]
+}
+// `_V3_STDLIB_PREAMBLE` (`strings.` spelled raw; see `stdlib_preamble`)
+fn stdlib_preamble_raw() -> List[Str] {
+  return [
+    "// ---- stdlib builtins (docs/stdlib-2.0.md); positions are code-point based",
+    "func revlStrLen(s string) int64 { return int64(utf8.RuneCountInString(s)) }",
+    "",
+    "// revlStrSlice walks to the byte offsets of code points a and b and returns",
+    "// the substring between them. A Go substring shares the receiver's bytes, so",
+    "// the slice itself allocates nothing (item 434 (g): the `[]rune(s)` form",
+    "// measured 2 allocs / 328 B against 0 / 0 for the hand-written byte walk).",
+    "// Code-point indexing and clamping are unchanged: `[]rune(s)` and this walk",
+    "// both count one index per invalid byte, so the offsets agree. Only the",
+    "// CONTENT of an invalid byte differs — `[]rune` substitutes U+FFFD — so an",
+    "// invalid byte inside the requested range falls back to the old materializing",
+    "// form and answers exactly what it always did.",
+    "func revlStrSlice(s string, a, b int64) string {",
+    line(1, "n := int64(utf8.RuneCountInString(s))"),
+    line(1, "// JS/Python slice semantics (docs/stdlib-2.0.md §slice): a negative bound"),
+    line(1, "// counts from the end, then both bounds clamp into range; never panics."),
+    line(1, "if a < 0 {"),
+    line(2, "a += n"),
+    line(1, "}"),
+    line(1, "if a < 0 {"),
+    line(2, "a = 0"),
+    line(1, "}"),
+    line(1, "if a > n {"),
+    line(2, "a = n"),
+    line(1, "}"),
+    line(1, "if b < 0 {"),
+    line(2, "b += n"),
+    line(1, "}"),
+    line(1, "if b < 0 {"),
+    line(2, "b = 0"),
+    line(1, "}"),
+    line(1, "if b > n {"),
+    line(2, "b = n"),
+    line(1, "}"),
+    line(1, "if b < a {"),
+    line(2, "b = a"),
+    line(1, "}"),
+    line(1, "lo, hi, i := len(s), len(s), int64(0)"),
+    line(1, "for off := 0; off < len(s); {"),
+    line(2, "if i == a {"),
+    line(3, "lo = off"),
+    line(2, "}"),
+    line(2, "if i == b {"),
+    line(3, "hi = off"),
+    line(3, "break"),
+    line(2, "}"),
+    line(2, "r, w := utf8.DecodeRuneInString(s[off:])"),
+    line(2, "if r == utf8.RuneError && w == 1 && i >= a {"),
+    line(3, "return string([]rune(s)[a:b])"),
+    line(2, "}"),
+    line(2, "off += w"),
+    line(2, "i++"),
+    line(1, "}"),
+    line(1, "return s[lo:hi]"),
+    "}",
+    "",
+    "// revlStrIndexOf answers the code-point index of sub in s. Valid UTF-8 is",
+    "// self-synchronizing — the first byte of a valid needle is never a",
+    "// continuation byte — so a byte match found by strings.Index always starts on",
+    "// a code-point boundary and answers the same question as the code-point scan,",
+    "// with no copy and with the standard library's search instead of the naive",
+    "// O(n*m) one (item 434 (g): 1 alloc / 320 B before, 0 / 0 hand-written).",
+    "// Invalid UTF-8 on either side keeps the old `[]rune` scan, where each invalid",
+    "// byte compares as U+FFFD.",
+    "func revlStrIndexOf(s, sub string) int64 {",
+    line(1, "if sub == \"\" {"),
+    line(2, "return 0"),
+    line(1, "}"),
+    line(1, "if utf8.ValidString(s) && utf8.ValidString(sub) {"),
+    line(2, "b := strings.Index(s, sub)"),
+    line(2, "if b < 0 {"),
+    line(3, "return -1"),
+    line(2, "}"),
+    line(2, "return int64(utf8.RuneCountInString(s[:b]))"),
+    line(1, "}"),
+    line(1, "rs := []rune(s)"),
+    line(1, "rn := []rune(sub)"),
+    line(1, "if len(rn) > len(rs) {"),
+    line(2, "return -1"),
+    line(1, "}"),
+    line(1, "for i := 0; i+len(rn) <= len(rs); i++ {"),
+    line(2, "ok := true"),
+    line(2, "for j := range rn {"),
+    line(3, "if rs[i+j] != rn[j] {"),
+    line(4, "ok = false"),
+    line(4, "break"),
+    line(3, "}"),
+    line(2, "}"),
+    line(2, "if ok {"),
+    line(3, "return int64(i)"),
+    line(2, "}"),
+    line(1, "}"),
+    line(1, "return -1"),
+    "}",
+    "",
+    "func revlStrConcat(a, b string) string { return a + b }",
+    "",
+    "// revlStrSplit's empty-separator branch walks bytes and hands out substrings,",
+    "// which share s's bytes, instead of materializing `[]rune(s)` and allocating a",
+    "// fresh one-code-point string per element (item 434 (g)). An invalid byte",
+    "// still yields U+FFFD, exactly as `[]rune(s)` did.",
+    "func revlStrSplit(s, sep string) []string {",
+    line(1, "if sep == \"\" {"),
+    line(2, "out := make([]string, 0, utf8.RuneCountInString(s))"),
+    line(2, "for off := 0; off < len(s); {"),
+    line(3, "r, w := utf8.DecodeRuneInString(s[off:])"),
+    line(3, "if r == utf8.RuneError && w == 1 {"),
+    line(4, "out = append(out, string(utf8.RuneError))"),
+    line(3, "} else {"),
+    line(4, "out = append(out, s[off:off+w])"),
+    line(3, "}"),
+    line(3, "off += w"),
+    line(2, "}"),
+    line(2, "return out"),
+    line(1, "}"),
+    line(1, "return strings.Split(s, sep)"),
+    "}",
+    "",
+    "func revlStrRepeat(s string, n int64) string {",
+    line(1, "if n < 0 {"),
+    line(2, "n = 0"),
+    line(1, "}"),
+    line(1, "return strings.Repeat(s, int(n))"),
+    "}",
+    "",
+    "// revlStrCharAt / revlStrCharCodeAt walk to the code point at index i with",
+    "// utf8.DecodeRuneInString instead of materializing `[]rune(s)`. Both are",
+    "// code-point indexed exactly as before (docs/strings.md); the difference is",
+    "// that one read no longer allocates a copy of the whole string, so a scan loop",
+    "// stops being quadratic in bytes (item 434 (c): a 780-code-point scan measured",
+    "// 781 allocs / 2,496,127 B, one whole-string rune copy per character, against",
+    "// 0 / 0 for the hand-written `for _, r := range s`). An out-of-range index",
+    "// falls through to the `[]rune(s)[i]` it always was, so it panics with the",
+    "// same Go index-out-of-range error on exactly the same inputs.",
+    "func revlStrCharAt(s string, i int64) string {",
+    line(1, "if i >= 0 {"),
+    line(2, "t := s"),
+    line(2, "for j := int64(0); len(t) > 0; j++ {"),
+    line(3, "r, w := utf8.DecodeRuneInString(t)"),
+    line(3, "if j == i {"),
+    line(4, "if r == utf8.RuneError && w == 1 {"),
+    line(5, "// invalid encoding: []rune(s) substitutes U+FFFD, so"),
+    line(5, "// answer the replacement character, not the raw byte"),
+    line(5, "return string(utf8.RuneError)"),
+    line(4, "}"),
+    line(4, "return t[:w] // a substring shares s's bytes: no allocation"),
+    line(3, "}"),
+    line(3, "t = t[w:]"),
+    line(2, "}"),
+    line(1, "}"),
+    line(1, "return string([]rune(s)[i])"),
+    "}",
+    "",
+    "func revlStrCharCodeAt(s string, i int64) int64 {",
+    line(1, "if i >= 0 {"),
+    line(2, "t := s"),
+    line(2, "for j := int64(0); len(t) > 0; j++ {"),
+    line(3, "r, w := utf8.DecodeRuneInString(t)"),
+    line(3, "if j == i {"),
+    line(4, "return int64(r)"),
+    line(3, "}"),
+    line(3, "t = t[w:]"),
+    line(2, "}"),
+    line(1, "}"),
+    line(1, "return int64([]rune(s)[i])"),
+    "}",
+    "",
+    "func revlJoin(xs []string, sep string) string { return strings.Join(xs, sep) }",
+    "",
+    "func revlListLen[T any](xs []T) int64 { return int64(len(xs)) }",
+    "",
+    "func revlListSlice[T any](xs []T, a, b int64) []T {",
+    line(1, "n := int64(len(xs))"),
+    line(1, "// JS/Python slice semantics (docs/stdlib-2.0.md §slice): a negative bound"),
+    line(1, "// counts from the end, then both bounds clamp into range; never panics."),
+    line(1, "if a < 0 {"),
+    line(2, "a += n"),
+    line(1, "}"),
+    line(1, "if a < 0 {"),
+    line(2, "a = 0"),
+    line(1, "}"),
+    line(1, "if a > n {"),
+    line(2, "a = n"),
+    line(1, "}"),
+    line(1, "if b < 0 {"),
+    line(2, "b += n"),
+    line(1, "}"),
+    line(1, "if b < 0 {"),
+    line(2, "b = 0"),
+    line(1, "}"),
+    line(1, "if b > n {"),
+    line(2, "b = n"),
+    line(1, "}"),
+    line(1, "if b < a {"),
+    line(2, "b = a"),
+    line(1, "}"),
+    line(1, "out := make([]T, b-a)"),
+    line(1, "copy(out, xs[a:b])"),
+    line(1, "return out"),
+    "}",
+    "",
+    "func revlListConcat[T any](a, b []T) []T {",
+    line(1, "out := make([]T, 0, len(a)+len(b))"),
+    line(1, "out = append(out, a...)"),
+    line(1, "out = append(out, b...)"),
+    line(1, "return out"),
+    "}",
+    "",
+    "func revlListPush[T any](xs []T, x T) []T {",
+    line(1, "out := make([]T, 0, len(xs)+1)"),
+    line(1, "out = append(out, xs...)"),
+    line(1, "out = append(out, x)"),
+    line(1, "return out"),
+    "}",
+    "",
+    "func revlListIndexOf[T comparable](xs []T, x T) int64 {",
+    line(1, "for i, v := range xs {"),
+    line(2, "if v == x {"),
+    line(3, "return int64(i)"),
+    line(2, "}"),
+    line(1, "}"),
+    line(1, "return -1"),
+    "}",
+    ""
+  ]
+}
+// `_GO_EXTERN_CONFIG_SCAFFOLD`
+fn extern_config_scaffold() -> List[Str] {
+  return [
+    "var _REVL_EXTERN_CONFIG = map[string]map[string]any{}",
+    "",
+    "func _revlExternConfig(name string, required []string, defaults map[string]any) map[string]any {",
+    line(1, "out := map[string]any{}"),
+    line(1, "for k, v := range defaults {"),
+    line(2, "out[k] = v"),
+    line(1, "}"),
+    line(1, "cfg, ok := _REVL_EXTERN_CONFIG[name]"),
+    line(1, "if !ok {"),
+    line(2, "if len(required) > 0 {"),
+    line(3, "msg := \"\""),
+    line(3, "for i, f := range required {"),
+    line(4, "if i > 0 {"),
+    line(5, "msg += \", \""),
+    line(4, "}"),
+    line(4, "msg += f"),
+    line(3, "}"),
+    line(3, "panic(\"config extern `\" + name + \"` called before plug-time \" +"),
+    line(4, "\"configuration was installed (required config: \" + msg + \"); \" +"),
+    line(4, "\"configure it through the run driver's config seam\")"),
+    line(2, "}"),
+    line(2, "return out"),
+    line(1, "}"),
+    line(1, "missing := \"\""),
+    line(1, "n := 0"),
+    line(1, "for _, f := range required {"),
+    line(2, "if _, present := cfg[f]; !present {"),
+    line(3, "if n > 0 {"),
+    line(4, "missing += \", \""),
+    line(3, "}"),
+    line(3, "missing += f"),
+    line(3, "n++"),
+    line(2, "}"),
+    line(1, "}"),
+    line(1, "if n > 0 {"),
+    line(2, "panic(\"config extern `\" + name + \"` called before plug-time \" +"),
+    line(3, "\"configuration was installed (missing required config: \" + missing + \")\")"),
+    line(1, "}"),
+    line(1, "for k, v := range cfg {"),
+    line(2, "out[k] = v"),
+    line(1, "}"),
+    line(1, "return out"),
+    "}",
+    ""
+  ]
+}
