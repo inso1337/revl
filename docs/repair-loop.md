@@ -112,9 +112,9 @@ runtime. Shape:
   "incident":    {component, status, unattended, swapped, note},
   "fault":       {chain, root, oracle},          # item 27 (+ the 27 oracle)
   "slice":       {bisect | unavailable},          # item 40
-  "eligibility": {eligible, by, note, candidate?},  # self-repair policy
+  "eligibility": {eligible, by, byRunning?, note, candidate?},  # self-repair policy
   "candidate":   {origin: regenerated|reused, reuse},  # item 49
-  "verdicts":    {gauntlet, policy, mayTouch, widening},  # 31 / 33 / self / 21
+  "verdicts":    {gauntlet, policy, mayTouch, widening, eligibility?},  # 31 / 33 / self / 21
   "remediation": {strategy, applied, swap, canaryFollowOn},  # item 23
   "authority":   {authority, unattended, operator, why},     # item 55
   "dossier":     {steps: [ {stage, roadmapItem, reached, detail} ... ]}

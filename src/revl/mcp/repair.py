@@ -629,15 +629,18 @@ def _run_gates(session, candidate_arg: dict, running_ir: dict | None,
     candidate_rule = policy.eligible(component, candidate_realms)
     unselected = policy.unselected_realms(component, running_realms,
                                           candidate_realms)
+    eligible = candidate_rule is not None and not unselected
     verdicts["eligibility"] = {
-        "eligible": candidate_rule is not None and not unselected,
+        "eligible": eligible,
         "realms": sorted(candidate_realms),
         "unselectedRealms": unselected,
+        # a refusal names no rule: the one that selected a realm does not
+        # authorize the realm the candidate added
         "by": ({"scope": candidate_rule.scope,
                 "selector": candidate_rule.selector}
-               if candidate_rule else None),
+               if eligible else None),
     }
-    if not verdicts["eligibility"]["eligible"]:
+    if not eligible:
         return verdicts, {"blocked": True, "reason": "eligibility"}
 
     candidate_audit = audit_diff.audit_report(candidate_ir)

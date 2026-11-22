@@ -58,6 +58,23 @@ TO_EDGE2 = VAULT.replace('realm("edge")', 'realm("edge2")')
 NO_PLACEMENT = VAULT.replace('  isolate kv in realm("edge")\n', "")
 CHANGED_BODY = VAULT.replace("    fn get(k) = store.get(k)",
                              "    // repaired\n    fn get(k) = store.get(k)")
+TWO_PLACEMENTS = '''service Kv {
+  fn get(k: Str) -> Opt[Str]
+}
+
+component Vault provides kv: Kv, lg: Kv {
+  isolate kv in realm("edge")
+  isolate lg in realm("edge")
+  provide kv {
+    fn get(k) = None
+  }
+  provide lg {
+    fn get(k) = None
+  }
+}
+'''
+ADDS_PAYMENTS = TWO_PLACEMENTS.replace('isolate lg in realm("edge")',
+                                       'isolate lg in realm("payments")')
 GLOB_POLICY = {"eligible": [{"realm": "edge*"}], "mayTouch": ["*"],
                "ackOnWiden": False}
 
@@ -167,3 +184,21 @@ def test_component_rule_does_not_depend_on_the_realm(loaded):
     result = _run(TO_PAYMENTS, COMPONENT_POLICY, trusted=True)
     assert result["incident"]["status"] == repair_mod.STATUS_REPAIRED, result
     assert _realms() == {"kv": "payments"}
+
+
+@pytest.mark.parametrize("trusted", [True, False], ids=["cli", "transport"])
+def test_candidate_keeping_edge_that_adds_an_unselected_realm_is_refused(
+        clean_session, trusted):
+    path = clean_session / "vault.rvl"
+    path.write_text(TWO_PLACEMENTS)
+    assert _call("revl_load", {"files": [str(path)]})["ok"] is True
+    assert _realms() == {"kv": "edge", "lg": "edge"}
+    result = _run(ADDS_PAYMENTS, EDGE_POLICY, trusted=trusted)
+    assert result["incident"]["status"] == repair_mod.STATUS_INELIGIBLE, result
+    assert result["incident"]["swapped"] is False, result
+    verdict = result["verdicts"]["eligibility"]
+    assert verdict["realms"] == ["edge", "payments"], verdict
+    assert verdict["unselectedRealms"] == ["payments"], verdict
+    assert verdict["eligible"] is False and verdict["by"] is None, verdict
+    assert result["eligibility"]["candidate"]["by"] is None, result
+    assert _realms() == {"kv": "edge", "lg": "edge"}
