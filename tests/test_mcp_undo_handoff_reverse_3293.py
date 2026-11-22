@@ -1,0 +1,486 @@
+"""Issue #3293: an undo carries live state back across a compatible `handoff`.
+
+A forward swap threads a provider's state onto its successor when the
+successor's declared `handoff` accepts the running provider's (item 53). An
+undo used to re-admit the restored generation cold even when both generations
+declared the same hand-off, dropping exactly the state the undo exists to
+keep. Now the undo runs the same capture/restore in the restore direction: the
+running generation exports, the restored generation accepts. A shape that does
+not accept the running state in that direction still starts cold, and the
+dossier names it (issue #2346).
+
+These drive a live composition, so they need the cordis-py runtime; the gate
+is a per-test marker.
+"""
+
+import importlib.util
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from revl.mcp.server import handle  # noqa: E402
+
+needs_runtime = pytest.mark.skipif(
+    importlib.util.find_spec("cordis") is None,
+    reason="an undo drives a live composition; install the runtime with "
+           "`sh backends/python/setup.sh`")
+
+
+SERVICE = (
+    "service Meter { fn log(label: Str)\n"
+    "                fn get(label: Str) -> Opt[Str]\n"
+    "                fn version() -> Int }\n")
+
+
+def _book(version: int, handoff: str | None = "Map[Str, Str]", *,
+          name: str = "MeterBook") -> str:
+    """The `MeterBook` component alone, the text a `replace` takes. `handoff`
+    is the whole declared state shape, or None for no hand-off."""
+    line = f"  handoff meter: {handoff}\n" if handoff else ""
+    return (
+        f"component {name} provides meter: Meter {{\n"
+        f"{line}"
+        "  let store = effect Map.new() undo store.drop()\n"
+        "  provide meter {\n"
+        "    fn log(label) { effect store.insert(label, label) "
+        "undo store.remove(label) }\n"
+        "    fn get(label) = store.get(label)\n"
+        f"    fn version() = {version}\n"
+        "  }\n"
+        "}\n")
+
+
+def _meter(version: int, handoff: str | None = "Map[Str, Str]") -> str:
+    return SERVICE + _book(version, handoff)
+
+
+SEEDED = (
+    "service Audit { fn touched() -> Int }\n"
+    "component SeededAudit provides audit: Audit {\n"
+    "  let store = effect Map.new() undo store.drop()\n"
+    "  effect store.insert(\"boot\", \"1\") undo store.remove(\"boot\")\n"
+    "  provide audit { fn touched() = 1 }\n"
+    "}\n")
+
+
+def _call(tool: str, arguments: dict) -> dict:
+    response = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                       "params": {"name": tool, "arguments": arguments}})
+    return response["result"]["structuredContent"]
+
+
+def _meter_call(method: str, *args) -> dict:
+    return _call("revl_call", {"key": "meter", "method": method,
+                               "args": list(args)})
+
+
+@pytest.fixture(autouse=True)
+def _fresh_server_session():
+    from revl.mcp import server as server_mod
+
+    server_mod.UNDO_STACK.clear()
+    authoring = server_mod.AUTHORING
+    yield
+    server_mod.AUTHORING = authoring
+    if server_mod.SESSION.loaded:
+        server_mod.SESSION.unload()
+    server_mod.UNDO_STACK.clear()
+
+
+def _swapped_with_state() -> dict:
+    """Load generation 1, record four labels, commit a `replace` swap whose
+    successor carries them through the same declared `handoff`."""
+    loaded = _call("revl_load", {"source": _meter(1)})
+    assert loaded["ok"] is True, loaded
+    for label in ("l1", "l2", "l3", "l4"):
+        assert _meter_call("log", label)["ok"] is True
+    changed = _call("revl_change", {
+        "commit": True,
+        "replace": {"component": "MeterBook", "source": _book(2)}})
+    assert changed["ok"] is True and changed.get("committed") is True, changed
+    assert _meter_call("version")["result"] == 2
+    return changed
+
+
+@needs_runtime
+def test_undo_carries_the_live_state_back_across_a_compatible_handoff():
+    changed = _swapped_with_state()
+    assert changed["handoff"]["meter"]["migrated"] is True
+    # the forward swap's advice has nothing to warn about: the undo carries it
+    assert "undoNote" not in changed, changed
+    assert changed["undo"] == {"tool": "revl_undo", "arguments": {"to": 1}}
+
+    undone = _call(changed["undo"]["tool"], changed["undo"]["arguments"])
+    assert undone["ok"] is True and undone["undone"] is True, undone
+    # the restored generation runs with the labels the undo exists to keep
+    assert _meter_call("version")["result"] == 1
+    assert _meter_call("get", "l1")["result"] == "l1"
+    assert _meter_call("get", "l4")["result"] == "l4"
+    # the dossier reports the carry, not a drop
+    dropped = undone["dossier"]["stateDropped"]
+    assert dropped["components"] == [], dropped
+    assert dropped["carried"] == ["MeterBook"], dropped
+    assert "note" not in dropped, dropped
+    assert undone["handoff"]["meter"]["migrated"] is True
+    assert undone["handoff"]["meter"]["resources"] == 1
+
+
+@needs_runtime
+def test_step_back_carries_the_state_back_too():
+    """`revl_step_back` runs the recorded `revl_undo`, so it inherits the
+    restore-direction carry."""
+    _swapped_with_state()
+    stepped = _call("revl_step_back", {})
+    assert stepped["ok"] is True and stepped["steppedBack"] is True, stepped
+    assert _meter_call("version")["result"] == 1
+    assert _meter_call("get", "l1")["result"] == "l1"
+
+
+@needs_runtime
+def test_undo_stays_cold_when_the_restored_shape_cannot_accept_in_reverse():
+    """The forward swap widened `Str` to `Opt[Str]` and was admitted; the undo
+    runs the same §5 relation the other way (`Str` must accept `Opt[Str]`) and
+    it does not, so the provider starts cold and the dossier says so."""
+    loaded = _call("revl_load", {"source": _meter(1, "Map[Str, Str]")})
+    assert loaded["ok"] is True, loaded
+    for label in ("l1", "l2"):
+        assert _meter_call("log", label)["ok"] is True
+    changed = _call("revl_change", {
+        "commit": True,
+        "replace": {"component": "MeterBook",
+                    "source": _book(2, "Map[Str, Opt[Str]]")}})
+    assert changed["ok"] is True and changed.get("committed") is True, changed
+    assert changed["handoff"]["meter"]["migrated"] is True
+    assert _meter_call("get", "l1")["result"] == "l1"
+    # the forward swap already warns that this undo cannot carry it back
+    note = changed.get("undoNote")
+    assert note and "MeterBook" in note and "would be dropped" in note, changed
+
+    undone = _call("revl_undo", {})
+    assert undone["ok"] is True and undone["undone"] is True, undone
+    assert _meter_call("version")["result"] == 1
+    assert _meter_call("get", "l1")["result"] is None   # cold, as before
+    dropped = undone["dossier"]["stateDropped"]
+    assert dropped["components"] == ["MeterBook"], dropped
+    assert "carried" not in dropped, dropped
+    assert "MeterBook" in dropped["note"] and "cold" in dropped["note"]
+    # the undo's own hand-off report names the reason, not a silent drop
+    assert undone["handoff"]["meter"]["migrated"] is False
+    assert undone["handoff"]["meter"]["reason"] == "incompatible"
+
+
+@needs_runtime
+def test_undo_carries_state_back_to_a_renamed_provider():
+    """Providers correlate by the key they provide, not their component name:
+    a swap that renames the provider (`replacing`) still carries its state
+    back, and the running component the target withdraws is not reported as
+    dropped because its state crosses."""
+    loaded = _call("revl_load", {"source": _meter(1)})
+    assert loaded["ok"] is True, loaded
+    for label in ("l1", "l2"):
+        assert _meter_call("log", label)["ok"] is True
+    swapped = _call("revl_swap", {
+        "source": _meter(2).replace("component MeterBook ",
+                                    "component MeterBook2 "),
+        "replacing": ["MeterBook"]})
+    assert swapped["ok"] is True, swapped
+    assert swapped["handoff"]["meter"] == {
+        "component": "MeterBook2", "migrated": True, "resources": 1}
+    assert _meter_call("get", "l1")["result"] == "l1"
+
+    undone = _call("revl_undo", {})
+    assert undone["ok"] is True and undone["undone"] is True, undone
+    assert _meter_call("version")["result"] == 1
+    assert _meter_call("get", "l1")["result"] == "l1"
+    dropped = undone["dossier"]["stateDropped"]
+    assert dropped["components"] == [], dropped
+    assert dropped["carried"] == ["MeterBook2"], dropped
+    assert undone["handoff"]["meter"]["migrated"] is True
+
+
+@needs_runtime
+def test_the_forward_undo_advice_names_only_the_state_the_undo_drops():
+    """Two providers hold live state after the swap; only one declares a
+    compatible hand-off on both sides. The forward advice names the one whose
+    state the undo will really drop."""
+    source = _meter(1) + SEEDED
+    assert _call("revl_load", {"source": source})["ok"] is True
+    assert _meter_call("log", "l1")["ok"] is True
+    changed = _call("revl_change", {
+        "commit": True,
+        "replace": {"component": "MeterBook", "source": _book(2)}})
+    assert changed["ok"] is True, changed
+    note = changed.get("undoNote")
+    assert note and "SeededAudit" in note, changed
+    assert "the live state held by SeededAudit would be dropped" in note, note
+    assert "this undo carries MeterBook back" in note, note
+
+    undone = _call("revl_undo", {})
+    assert undone["ok"] is True, undone
+    assert _meter_call("get", "l1")["result"] == "l1"    # carried back
+    dropped = undone["dossier"]["stateDropped"]
+    assert dropped["components"] == ["SeededAudit"], dropped
+    assert dropped["carried"] == ["MeterBook"], dropped
+    assert "SeededAudit" in dropped["note"], dropped
+    assert "carries MeterBook back" in dropped["note"], dropped
+
+
+def _two_store_book(version: int, handoff: str | None = "Map[Str, Str]") -> str:
+    """`MeterBook` holding a second `Map` beside its store: the declared
+    hand-off type is the same, the resource vector is one longer."""
+    return _book(version, handoff).replace(
+        "  provide meter {\n",
+        "  let spare = effect Map.new() undo spare.drop()\n  provide meter {\n")
+
+
+def _running_two_stores_with_state() -> None:
+    """Generation 1 holds one store; generation 3 holds two under the same
+    declared `handoff`. Generation 2 declares no hand-off, so neither swap
+    carried anything, and the label logged on generation 3 is live state."""
+    loaded = _call("revl_load", {"source": _meter(1)})
+    assert loaded["ok"] is True, loaded
+    for version, handoff in ((2, None), (3, "Map[Str, Str]")):
+        changed = _call("revl_change", {"commit": True, "replace": {
+            "component": "MeterBook",
+            "source": _two_store_book(version, handoff)}})
+        assert changed["ok"] is True and changed.get("committed") is True, \
+            changed
+    assert _meter_call("version")["result"] == 3
+    assert _meter_call("log", "l2")["ok"] is True
+
+
+@needs_runtime
+def test_undo_starts_cold_when_the_resource_vector_differs():
+    """The declared hand-off types match in the restore direction, but the
+    running provider holds two resources and the restored one acquires one.
+    A forward swap refuses that (below); an undo is the escape hatch, so the
+    slot starts cold, the report says why, and the undo completes."""
+    _running_two_stores_with_state()
+    undone = _call("revl_undo", {"to": 1})
+    assert undone["ok"] is True and undone["undone"] is True, undone
+    assert _meter_call("version")["result"] == 1
+    assert _meter_call("get", "l2")["result"] is None   # cold
+    entry = undone["handoff"]["meter"]
+    assert entry["migrated"] is False, entry
+    assert entry["reason"] == "resources", entry
+    assert "2 stateful resource(s)" in entry["note"], entry
+    # the completed undo's dossier says what really happened: dropped
+    dropped = undone["dossier"]["stateDropped"]
+    assert dropped["components"] == ["MeterBook"], dropped
+    assert "carried" not in dropped, dropped
+    assert "MeterBook is dropped" in dropped["note"], dropped
+
+
+@needs_runtime
+def test_forward_swap_still_refuses_a_differing_resource_vector():
+    """The control for the undo above: the same move as a forward swap is
+    still rejected whole, and the running state is intact."""
+    _running_two_stores_with_state()
+    changed = _call("revl_change", {"commit": True, "replace": {
+        "component": "MeterBook", "source": _book(1)}})
+    assert changed.get("committed") is not True, changed
+    text = str(changed)
+    assert "hand-off state cannot cross" in text, changed
+    assert "the successor acquires 1" in text, changed
+    assert _meter_call("version")["result"] == 3
+    assert _meter_call("get", "l2")["result"] == "l2"
+
+
+MIXED_SERVICE = (
+    "service Kv {\n  fn get(k: Str) -> Opt[Str]\n  fn set(k: Str, v: Str)\n"
+    "  fn unset(k: Str)\n}\n\n"
+    "component TenantAApp requires kv: Kv {\n"
+    '  isolate kv in realm("tenant_a")\n'
+    '  effect kv.set("who", "alice") undo kv.unset("who")\n'
+    "}\n")
+SECRET = ("tenant_a_secret", "s3cr3t")
+
+
+def _mixed(board_reads: str, realm: str = 'realm("tenant_a")') -> str:
+    """One frame spanning two realms: `secret` serves `kv` in `realm`,
+    `open` serves the shared `board`, and the hand-off is on `board`."""
+    return (
+        "component Mixed provides kv: Kv, board: Kv {\n"
+        f"  isolate kv in {realm}\n"
+        "  handoff board: Map[Str, Str]\n"
+        "  let secret = effect Map.new() undo secret.drop()\n"
+        "  let open = effect Map.new() undo open.drop()\n"
+        "  provide kv {\n"
+        "    fn get(k) = secret.get(k)\n"
+        "    fn set(k, v) { effect secret.insert(k, v) undo secret.remove(k) }\n"
+        "    fn unset(k) = secret.remove(k)\n"
+        "  }\n"
+        "  provide board {\n"
+        f"    fn get(k) = {board_reads}.get(k)\n"
+        "    fn set(k, v) { effect open.insert(k, v) undo open.remove(k) }\n"
+        "    fn unset(k) = open.remove(k)\n"
+        "  }\n"
+        "}\n")
+
+
+def _secret_store():
+    from revl.mcp import server as server_mod
+
+    session = server_mod.SESSION
+    return session._frame_resources(session._driver.fibers.get("Mixed"))[0]
+
+
+@needs_runtime
+def test_undo_to_an_agent_authored_generation_keeps_the_multi_realm_rule(
+        tmp_path, monkeypatch):
+    """Generation 2 is agent-authored (a `replace` over the transport, host
+    code trusted so the realm literal is admitted): it points the shared
+    `board` at the tenant_a store, and the forward swap to it starts the
+    multi-realm frame cold. Generation 3 runs the original wiring again and
+    holds a tenant_a secret. An undo to generation 2 restores that
+    agent-authored code, so it gets the same multi-realm refusal the forward
+    swap did: the secret never reaches the shared `board`."""
+    from revl.mcp import server as server_mod
+
+    server_mod.set_authoring_trust(host_code=True)
+    monkeypatch.chdir(tmp_path)
+    running = tmp_path / "running.rvl"
+    running.write_text(MIXED_SERVICE + _mixed("open"), encoding="utf-8")
+    assert _call("revl_load", {"files": [str(running)]})["ok"] is True
+    forward = _call("revl_change", {"commit": True, "replace": {
+        "component": "Mixed", "source": _mixed("secret")}})
+    assert forward["ok"] is True and forward.get("committed") is True, forward
+    assert forward["handoff"]["board"]["reason"] == "multi-realm", forward
+    back = _call("revl_change", {"commit": True, "replace": {
+        "component": "Mixed", "source": _mixed("open")}})
+    assert back["ok"] is True and back.get("committed") is True, back
+    _secret_store().insert(*SECRET)
+
+    undone = _call("revl_undo", {"to": 2})
+    assert undone["ok"] is True and undone["undone"] is True, undone
+    read = _call("revl_call", {"key": "board", "method": "get",
+                               "args": [SECRET[0]]})
+    assert read["ok"] is True and read.get("result") != SECRET[1], read
+    assert _secret_store().data.get(SECRET[0]) is None
+    assert undone["handoff"]["board"] == forward["handoff"]["board"], undone
+    _assert_dossier_dropped(undone, "Mixed")
+
+
+def _assert_dossier_dropped(undone: dict, component: str) -> None:
+    """A slot the completed undo started cold is reported as dropped, not as
+    carried: the dossier settles the plan against the `handoff` report."""
+    dropped = undone["dossier"]["stateDropped"]
+    assert component in dropped["components"], dropped
+    assert component not in (dropped.get("carried") or []), dropped
+    assert f"{component} is dropped" in dropped["note"], dropped
+
+
+def _assert_no_leak(undone: dict) -> None:
+    assert undone["ok"] is True and undone["undone"] is True, undone
+    assert undone["handoff"]["board"]["migrated"] is False, undone
+    assert undone["handoff"]["board"]["reason"] == "multi-realm", undone
+    read = _call("revl_call", {"key": "board", "method": "get",
+                               "args": [SECRET[0]]})
+    assert read["ok"] is True and read.get("result") != SECRET[1], read
+    _assert_dossier_dropped(undone, "Mixed")
+
+
+@needs_runtime
+def test_a_rollback_generation_keeps_the_authorship_of_the_code_it_restores(
+        tmp_path, monkeypatch):
+    """`revl_rollback` restores the agent-authored generation 2's code, so
+    the generation it makes is agent-authored too: an undo to it later gets
+    the multi-realm cold start, not the operator's warm one."""
+    from revl.mcp import server as server_mod
+
+    server_mod.set_authoring_trust(host_code=True)
+    monkeypatch.chdir(tmp_path)
+    running = tmp_path / "running.rvl"
+    running.write_text(MIXED_SERVICE + _mixed("open"), encoding="utf-8")
+    assert _call("revl_load", {"files": [str(running)]})["ok"] is True
+    for board_reads in ("secret", "open"):
+        changed = _call("revl_change", {"commit": True, "replace": {
+            "component": "Mixed", "source": _mixed(board_reads)}})
+        assert changed["ok"] is True and changed.get("committed"), changed
+    rolled = _call("revl_rollback", {})
+    assert rolled["ok"] is True, rolled
+    history = server_mod.SESSION._history
+    assert history[-1]["agentAuthored"] is True, history[-1]
+    rollback_generation = history[-1]["generation"]
+    changed = _call("revl_change", {"commit": True, "replace": {
+        "component": "Mixed", "source": _mixed("open")}})
+    assert changed["ok"] is True and changed.get("committed"), changed
+    _secret_store().insert(*SECRET)
+
+    _assert_no_leak(_call("revl_undo", {"to": rollback_generation}))
+
+
+@needs_runtime
+def test_an_inline_load_is_agent_authored_for_a_later_undo(
+        tmp_path, monkeypatch):
+    """Inline source over the transport is agent text at `revl_load` as at a
+    forward swap, so an undo back to generation 1 keeps the multi-realm rule."""
+    from revl.mcp import server as server_mod
+
+    server_mod.set_authoring_trust(host_code=True)
+    monkeypatch.chdir(tmp_path)
+    loaded = _call("revl_load", {"source": MIXED_SERVICE + _mixed("secret")})
+    assert loaded["ok"] is True, loaded
+    assert server_mod.SESSION._history[-1]["agentAuthored"] is True
+    changed = _call("revl_change", {"commit": True, "replace": {
+        "component": "Mixed", "source": _mixed("open")}})
+    assert changed["ok"] is True and changed.get("committed"), changed
+    _secret_store().insert(*SECRET)
+
+    _assert_no_leak(_call("revl_undo", {"to": 1}))
+
+
+@needs_runtime
+def test_a_history_entry_without_authorship_reads_as_agent_authored(
+        tmp_path, monkeypatch):
+    """Fail closed: a generation recorded without `agentAuthored` (a load
+    made by a caller that has no compile report) is undone to as
+    agent-authored code."""
+    from revl.mcp import server as server_mod
+
+    server_mod.set_authoring_trust(host_code=True)
+    monkeypatch.chdir(tmp_path)
+    running = tmp_path / "running.rvl"
+    running.write_text(MIXED_SERVICE + _mixed("secret"), encoding="utf-8")
+    assert _call("revl_load", {"files": [str(running)]})["ok"] is True
+    server_mod.SESSION._history[-1].pop("agentAuthored", None)
+    changed = _call("revl_change", {"commit": True, "replace": {
+        "component": "Mixed", "source": _mixed("open")}})
+    assert changed["ok"] is True and changed.get("committed"), changed
+    _secret_store().insert(*SECRET)
+
+    _assert_no_leak(_call("revl_undo", {"to": 1}))
+
+
+@needs_runtime
+def test_control_an_operator_file_load_still_carries_back_warm(
+        tmp_path, monkeypatch):
+    """The control for the fail-closed rules: an operator file under
+    untrusted host code is the operator's own text, so an undo to it carries
+    the multi-realm frame back warm, as before."""
+    from revl.mcp import server as server_mod
+
+    server_mod.set_authoring_trust(host_code=False)
+    monkeypatch.chdir(tmp_path)
+    running = tmp_path / "running.rvl"
+    running.write_text(MIXED_SERVICE + _mixed("open"), encoding="utf-8")
+    assert _call("revl_load", {"files": [str(running)]})["ok"] is True
+    assert server_mod.SESSION._history[-1]["agentAuthored"] is False
+    successor = tmp_path / "successor.rvl"
+    successor.write_text(MIXED_SERVICE + _mixed("open").replace(
+        "fn unset(k) = open.remove(k)", "fn unset(key) = open.remove(key)"),
+        encoding="utf-8")
+    swapped = _call("revl_swap", {"files": [str(successor)],
+                                  "replacing": ["Mixed"]})
+    assert swapped["ok"] is True and swapped.get("swapped"), swapped
+    _secret_store().insert(*SECRET)
+
+    undone = _call("revl_undo", {"to": 1})
+    assert undone["ok"] is True and undone["undone"] is True, undone
+    assert undone["handoff"]["board"]["migrated"] is True, undone
+    assert _secret_store().data.get(SECRET[0]) == SECRET[1]
+    assert undone["dossier"]["stateDropped"]["carried"] == ["Mixed"]

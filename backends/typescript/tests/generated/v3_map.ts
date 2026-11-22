@@ -32,7 +32,7 @@ function revlEq(a: unknown, b: unknown): boolean {
 const REVL_I64_MIN = -(2n ** 63n)
 const REVL_I64_MAX = 2n ** 63n - 1n
 function revlI64(v: bigint): bigint {
-  if (v < REVL_I64_MIN || v > REVL_I64_MAX) throw new RangeError('revl: Int overflow')
+  if (BigInt.asIntN(64, v) !== v) throw new RangeError('revl: Int overflow')
   return v
 }
 
@@ -109,7 +109,8 @@ export function put(m: Map<string, bigint>, k: string, v: bigint): Map<string, b
 }
 
 export function get(m: Map<string, bigint>, k: string): bigint {
-    return (m.get(k) ?? revlI64(0n - 1n))
+    let $revl_i64 = 0n
+    return (m.get(k) ?? (BigInt.asIntN(64, $revl_i64 = 0n - 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64)))
 }
 
 export function member(m: Map<string, bigint>, k: string): boolean {
@@ -117,11 +118,12 @@ export function member(m: Map<string, bigint>, k: string): boolean {
 }
 
 export function build(pairs: string[]): Map<string, bigint> {
+    let $revl_i64 = 0n
     let m = new Map()
     let i = 0n
     while ((i < revlLen(pairs))) {
       m = (<K, V>(_m: Map<K, V>, _k: K, _v: V) => { const _c = new Map(_m); _c.set(_k, _v); return _c })(m, revlIndex(pairs, Number(i)), revlLen(revlIndex(pairs, Number(i))))
-      i = revlI64(i + 1n)
+      i = (BigInt.asIntN(64, $revl_i64 = i + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
     }
     return m
 }

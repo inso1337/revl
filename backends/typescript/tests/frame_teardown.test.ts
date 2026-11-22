@@ -220,6 +220,68 @@ describe('Frame — bracket / transactional / compensation on one LIFO stack', (
     expect(outstanding[0].referent).toBe('k.g(5, [6], {"n":9})')
   })
 
+  it('a compensation that throws a bare object or a throwing toString still records its residue (#3235)', async () => {
+    // A host may throw anything. `Object.create(null)` has no String()
+    // conversion at all, and an object whose `toString` throws gives none; both
+    // used to throw out of the unwind loop from `errorOf`, so the residue was
+    // lost and older compensations never ran.
+    const thrown: Array<() => unknown> = [
+      () => Object.create(null),
+      () => ({ toString() { throw new Error('no text') } }),
+    ]
+    for (const make of thrown) {
+      const frame = new Frame(ctx, 'CompFailureBare')
+      const ran: string[] = []
+      const yields: Array<() => unknown> = []
+      yields.push(frame.begin)
+      yields.push(
+        frame.compensation({ key: 'k', method: 'g', args: [], site: 's#1' }, 'g', [], () =>
+          ran.push('older-compensation'),
+        ),
+      )
+      yields.push(
+        frame.compensation({ key: 'k', method: 'g', args: [], site: 's#2' }, 'g', [], () => {
+          throw make()
+        }),
+      )
+
+      await disposeLifo(yields)
+
+      expect(ran).toEqual(['older-compensation'])
+      const outstanding = frame.report().outstanding
+      expect(outstanding).toHaveLength(1)
+      expect(outstanding[0].kind).toBe('compensation-residue')
+      expect(outstanding[0].error).toEqual({ type: 'Error', message: '<unprintable>' })
+    }
+  })
+
+  it('a circular compensation argument records a residue instead of overflowing the stack (#3235)', async () => {
+    const frame = new Frame(ctx, 'CompFailureCircular')
+    const circular: unknown[] = [1]
+    circular.push(circular)
+    const ran: string[] = []
+    const yields: Array<() => unknown> = []
+    yields.push(frame.begin)
+    yields.push(
+      frame.compensation({ key: 'k', method: 'g', args: [], site: 's#1' }, 'g', [], () =>
+        ran.push('older-compensation'),
+      ),
+    )
+    yields.push(
+      frame.compensation({ key: 'k', method: 'g', args: [circular], site: 's#2' }, 'g', [], () => {
+        throw new Error('host failed')
+      }),
+    )
+
+    await disposeLifo(yields)
+
+    expect(ran).toEqual(['older-compensation'])
+    const outstanding = frame.report().outstanding
+    expect(outstanding).toHaveLength(1)
+    expect(outstanding[0].kind).toBe('compensation-residue')
+    expect(outstanding[0].referent).toBe('k.g([1,<circular>])')
+  })
+
   it('the between-compensation deadline check skips remaining Phase-2 entries and records each as not-attempted', async () => {
     process.env.REVL_COMPENSATION_BUDGET_MS = '1000'
     const frame = new Frame(ctx, 'Deadline')

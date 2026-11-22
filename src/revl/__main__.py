@@ -529,6 +529,31 @@ def _run_audit(args, ir: dict) -> int:
     else:
         participant_surface = None
     runtime_ceilings = None
+    spec_results = None
+    if getattr(args, "spec_results", None):
+        if getattr(args, "policy", None) or getattr(args, "diff", None):
+            print("error: `--spec-results` lists recorded function-spec checks "
+                  "in the plain audit report and cannot be combined with "
+                  "`--policy` or `--diff`", file=sys.stderr)
+            return 2
+        # issue #2705: the audit is static, so the result of checking a
+        # function's `ensures` spec is a RECORDED fact. Read the `function_specs`
+        # section of the last `revl test --report json` run; anything else is
+        # refused rather than silently read as "never run".
+        from .audit_diff import spec_results_from_report  # noqa: PLC0415
+
+        try:
+            with open(args.spec_results, encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, ValueError) as error:
+            print(f"error: cannot read spec results {args.spec_results}: {error}",
+                  file=sys.stderr)
+            return 2
+        if not isinstance(payload, dict):
+            print(f"error: spec results {args.spec_results} is not a "
+                  "`revl test --report json` document", file=sys.stderr)
+            return 2
+        spec_results = spec_results_from_report(payload)
     if getattr(args, "wal", None):
         if not args.json or getattr(args, "policy", None) or getattr(args, "diff", None):
             print("error: `--wal` requires the plain `revl audit --json` report "
@@ -619,6 +644,7 @@ def _run_audit(args, ir: dict) -> int:
     boundary = _boundary(ir)
     from .distribute import distributability  # noqa: PLC0415 - lazy, issue #2196
     distribution = distributability(ir)
+    from .audit_diff import extern_backends  # noqa: PLC0415
     from .cardinality import cardinality  # noqa: PLC0415
     card = cardinality(ir)
     manifest = ir.get("manifest") or {}
@@ -628,11 +654,9 @@ def _run_audit(args, ir: dict) -> int:
          # `unknown` included, so a consumer never reads "no fact" as "no field".
          # Must match `audit_report`'s entry key-for-key.
          "inverse": inverse_class(ext),
-         # item 396: a ref-only extern has no `bodies` key but DOES cross on its
-         # ref tier, so union the ref backends in — otherwise a ref-only extern
-         # would audit as "no bodies" while emitting fine.
-         "backends": sorted(set(ext.get("bodies") or {})
-                            | set(ext.get("refs") or {})),
+         # item 396: a ref-only extern crosses on its ref tier, so the shared
+         # helper unions the ref backends in (`audit_report` calls the same one).
+         "backends": extern_backends(ext),
          # item 373: carry the reach onto the audit extern entry so the surface
          # can name what a crossing is bounded to. Absent unless declared, so the
          # `--json` audit of every existing composition is byte-identical.
@@ -666,8 +690,9 @@ def _run_audit(args, ir: dict) -> int:
         # audit_report; the interchange body must carry them too so it stays the
         # byte-for-byte unstamped audit report (test_version_is_additive_body_unchanged).
         from .audit_diff import (  # noqa: PLC0415
-            _capability_registers, _env_surface, _generated_surface,
-            _recovery_surface, _retention_surface, _secrets_surface)
+            _capability_registers, _env_surface, _function_specs_surface,
+            _generated_surface, _recovery_surface, _retention_surface,
+            _secrets_surface)
         from .cardinality import cardinality  # noqa: PLC0415
         document = stamp(
             {"manifest": manifest, "boundary": boundary,
@@ -697,7 +722,12 @@ def _run_audit(args, ir: dict) -> int:
              **_retention_surface(ir),
              # issue #1896: the model digest behind each generated types file;
              # must match audit_report byte-for-byte, so it is the same call.
-             **_generated_surface(ir)})
+             **_generated_surface(ir),
+             # issue #2705: the functions that state an `ensures` spec, with
+             # the last recorded check. Must match audit_report byte-for-byte
+             # when no recorded run is supplied (the additive-body test does
+             # not pass --spec-results), so it is the same call.
+             **_function_specs_surface(ir, spec_results)})
         if runtime_ceilings is not None:
             document["runtime_ceilings"] = runtime_ceilings
         if participant_surface is not None:
@@ -713,11 +743,21 @@ def _run_audit(args, ir: dict) -> int:
     for row in ir.get("generated_from") or []:
         print(f"generated: {row['file']} from {row['model']} "
               f"(sha256 {row['sha256'][:12]}, checked against the model)")
+    # issue #2705: the functions that state an `ensures` spec, with the result
+    # of the last recorded check. "unrun" is not a failure: the audit is a
+    # static surface, so a spec no recorded `revl test --report json` run has
+    # checked yet says exactly that (docs/function-specs.md).
+    from .audit_diff import _env_table, function_specs_table  # noqa: PLC0415
+    specs = function_specs_table(ir, spec_results)
+    if specs:
+        print("\nfunction specs (last recorded result):")
+        for row in specs:
+            print(f"  fn {row['function']} ensures {row['spec']}  "
+                  f"(last result: {row['last_result']})")
     # item 350: the environment contract, printed before the components — it is
     # what the host must inject BEFORE any of them can load. Name, type,
     # requiredness and the author-written bound only; a value never reaches the
     # audit (it arrives at `revl run --env` time and never enters the IR).
-    from .audit_diff import _env_table  # noqa: PLC0415
     contract = _env_table(ir)
     if contract:
         print(f"\nenvironment contract (boot component {contract['component']}):")
@@ -1585,6 +1625,9 @@ def _dispatch(args) -> int:
     if args.command == "deploy-admit":
         from .deploy import deploy_admit_command  # noqa: PLC0415 — lazy
         return deploy_admit_command(args)
+    if args.command == "federation-apply":
+        from .federation_apply import federation_apply_command  # noqa: PLC0415 (lazy)
+        return federation_apply_command(args)
     if args.command == "composition":
         return _run_composition(args)
     if args.command == "analyze":
@@ -1634,6 +1677,12 @@ def _dispatch(args) -> int:
     if args.command == "pool":
         from .peer_pool import pool_command  # noqa: PLC0415 — lazy
         return pool_command(args)
+    # issue #2757: export and verify signed action-receipt chains. Routed
+    # before the shared compile step because both verbs read a JSON document,
+    # not `.rvl` sources.
+    if args.command == "receipts":
+        from .cli.receipts import _run_receipts  # noqa: PLC0415
+        return _run_receipts(args)
     if args.command == "attest":
         return _run_attest(args)
     if args.command == "dash":
@@ -1663,6 +1712,9 @@ def _dispatch(args) -> int:
         return _run_import(args)
     if args.command == "gen-types":
         return _run_gen_types(args)
+    if args.command == "docs":
+        from .cli.docs import _run_docs  # noqa: PLC0415 — lazy
+        return _run_docs(args)
     if args.command == "export":
         return _run_export(args)
     if args.command == "sourcemap":

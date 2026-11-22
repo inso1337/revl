@@ -485,7 +485,7 @@ def test_bad_field_destructure_is_a_clean_error_not_a_crash():
     from revl.errors import RevlError
     import pytest
 
-    with pytest.raises(RevlError, match=r"`bogus` is not a field of record `Row`"):
+    with pytest.raises(RevlError, match=r"record destructuring names `bogus`, which is not a field of `Row`"):
         compile_source(
             "type Row = { id: Int, name: Str }\n"
             "fn f(r: Row) -> Int { let { id, bogus } = r return id }\n"
@@ -655,5 +655,45 @@ def test_python_backend_runs_checked_division():
         assert module.qe(0 - 7, 0 - 2).value == 4
         assert module.qm(0 - 7, 3).value == 2
         assert type(module.lit()).__name__ == "Err"   # literal zero accepted
+    finally:
+        sys.path.remove(str(backend_dir))
+
+
+def test_python_backend_runs_checked_arithmetic():
+    """The total arithmetic forms (docs/arithmetic.md): Ok(value) in range,
+    Err("revl: Int overflow") at the 64-bit edge — executed on the reference
+    backend. The default `+`/`-`/`*` are unchanged and still trap."""
+    import types
+
+    backend_dir = ROOT / "backends" / "python"
+    sys.path.insert(0, str(backend_dir))
+    try:
+        from _backend_import import backend_emitter
+        from revl.compiler import compile_source
+        emit = backend_emitter("python")
+
+        src = (
+            "pub fn hi() -> Int { return 9223372036854775807 }\n"
+            "pub fn lo() -> Int { return 0 - 9223372036854775807 - 1 }\n"
+            "pub fn ca(a: Int, b: Int) -> Result[Int, Str] "
+            "{ return a.checked_add(b) }\n"
+            "pub fn cs(a: Int, b: Int) -> Result[Int, Str] "
+            "{ return a.checked_sub(b) }\n"
+            "pub fn cm(a: Int, b: Int) -> Result[Int, Str] "
+            "{ return a.checked_mul(b) }\n"
+        )
+        module = types.ModuleType("t")
+        exec(compile(emit.emit(compile_source(src)), "<t>", "exec"), module.__dict__)
+        ok = module.ca(1, 2)
+        assert type(ok).__name__ == "Ok" and ok.value == 3
+        err = module.ca(module.hi(), 1)
+        assert type(err).__name__ == "Err"
+        assert err.value == "revl: Int overflow"
+        assert type(module.cs(module.lo(), 1)).__name__ == "Err"
+        assert module.cs(5, 7).value == 0 - 2
+        assert type(module.cm(module.hi(), 2)).__name__ == "Err"
+        assert type(module.cm(module.lo(), 0 - 1)).__name__ == "Err"
+        assert type(module.cm(0 - 1, module.lo())).__name__ == "Err"
+        assert module.cm(6, 7).value == 42
     finally:
         sys.path.remove(str(backend_dir))

@@ -406,8 +406,8 @@ def test_frontend_keeps_all_three_python_versions_whole():
 def test_the_frontend_gates_run_once_per_python_version_not_once_per_shard():
     job = _jobs()["frontend"]
     gates = [s for s in job["steps"]
-             if re.search(r"tools/\w+\.py\s+--check", str(s.get("run", "")))]
-    assert len(gates) == 5, [s["run"] for s in gates]
+             if re.search(r"tools/\w+\.py\s+--check|revl docs check", str(s.get("run", "")))]
+    assert len(gates) == 6, [s["run"] for s in gates]
     for step in gates:
         cond = step["if"]
         assert "matrix.shard == 1" in cond, step["run"]

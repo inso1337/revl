@@ -1,6 +1,6 @@
 # 439: the A2A Task lifecycle binding, and the first slice
 
-**Roadmap:** item 439 · **Issue:** #118 · **Reasoning of record for the landed slices:** docs/design/439-a2a-transport-binding.md (the importer, `through a2a` / `through a2a_rest`, terminal-only `message/send`, `FilePart`, `Untrusted[T]` tainting) · **Status:** DECISION, 2026-09-08 (decision 3's G8 and trust rows revised 2026-09-13, slice B1; the four ops bound over HTTP+JSON/REST 2026-09-14; the reply's shape gates and the T2 / durable-task-id re-verification 2026-09-14)
+**Roadmap:** item 439 · **Issue:** #118 · **Reasoning of record for the landed slices:** docs/design/439-a2a-transport-binding.md (the importer, `through a2a` / `through a2a_rest`, terminal-only `message/send`, `FilePart`, `Untrusted[T]` tainting) · **Status:** DECISION, 2026-09-08 (decision 3's G8 and trust rows revised 2026-09-13, slice B1; the four ops bound over HTTP+JSON/REST 2026-09-14; the reply's shape gates and the T2 / durable-task-id re-verification 2026-09-14; the T3 dependency re-verified 2026-11-07)
 
 ## What this note decides
 
@@ -208,13 +208,40 @@ terminal and the task forms need it.
 ## Decision 5: push notifications are a routed endpoint
 
 A push notification is inbound: the peer calls us. That is a provision, not a
-client call, and revl now has the right primitive for it: an endpoint (docs/
-design/457-endpoint-one-definition.md). A `route post "/a2a/notify/{task}"`
-operation with a `Bearer` parameter carrying the push token, validated
-explicitly by the handler against the token the start call configured, feeds
-the same `TaskEvent` shape into the consumer. Deferred behind 457 S1. Polling
-stays the canonical feed; push is an optimisation that must not change what the
-consumer sees.
+client call, and the primitive is the item 457 `route` clause. **T3 LANDED**: a
+`long_running` `through a2a` / `through a2a_rest` row synthesizes a receiver
+service with `route post "/a2a/notify/<label>/{task}"`, keyed by the row label
+so two long-running A2A rows in one composition serve two distinct templates.
+`_start` mints a local push id and a token and rides an A2A
+`pushNotificationConfig` on the `message/send` it already makes: the URL is
+that route under `REVL_A2A_PUSH_BASE` (unset means push off), the token is the
+minted one, and the authentication is a Bearer scheme carrying it. The receiver
+checks the token exact-match and in constant time (`401` feeds nothing),
+shape-checks the A2A `StreamResponse` arm (`400` feeds nothing), checks the
+payload's task id against the push id's entry, and deposits `Untrusted` into a
+bounded per-task inbox (`429` when full, never a silent drop). `_poll` drains
+the inbox before crossing; a pushed terminal is confirmed by one `tasks/get`,
+and only the confirmed event is returned. Polling stays the canonical feed;
+push is an optimisation that must not change what the consumer sees.
+
+Delivery is at-least-once and no exactly-once promise is made. A replayed
+`message` (same `messageId`) is acknowledged and delivered once; a status or
+artifact repeat is idempotent for the consumer, and a `message` with no
+`messageId` cannot be told from a new one. A push that lands before the
+`_start` reply binds the entry to the task id it carried; if the reply names
+another task, those events are discarded rather than drained as this task's.
+
+The registry entry lives from `_start` to the task's confirmed terminal (the
+peer's own answer, never the push), the consumer's `_cancel`, or a `_start`
+that faults, including on the shape gates after the reply; after that the token
+no longer verifies and the inbox is freed. The inbox and the token registry are
+in-process: the receiver and the poll must be served by the same composition
+process (`revl serve --http`), and a restart drops the registered entries, so
+polling is the recovery path. A consumer that abandons a task without a
+terminal, a cancel or a fault keeps its entry until the process ends. `revl
+import a2a` still records `capabilities.pushNotifications` as NOT projected,
+because the importer writes its own module and does not yet synthesize the
+receiver.
 
 ## Decision 6: an E-Stop leaves the remote task running, and says so
 
@@ -268,7 +295,7 @@ are still working somewhere else.
 | **T0** | `TransportFault` to withdrawal in the activation runtime | py | none | a fake peer that stops answering withdraws the synthesized provider; the consumer deactivates reactively with a no-residue proof; under `on_failure(result)` the same fault is the `Err` and the provider stays wired |
 | **T1** | `stdlib/a2a.rvl`; the four-op projection on both entry points; `compensate` emitted for `_start`; `Faulted` synthesised on deadline; `Untrusted` on every return | py | T0 | against the fake A2A server used by `tests/test_439_a2a_transport.py`: `_start` returns a `TaskRef`; `_poll` walks `Working` to `Done`; a peer that answers `input-required` yields the event and `_reply` advances it; an owner abort issues exactly one `tasks/cancel` and records it; a peer that stops answering yields `Faulted` and withdraws; a `Done` payload reaching a shell sink is refused without `endorse` |
 | **T2** | the stream form over the same crossings; SSE listener where the card claims streaming | py | 130's stream-valued service operation; T1 | `every ev in sub` sees the same event sequence T1's poll saw; unload closes the listener before the start's compensation runs (LIFO); a silently dead peer resolves the parked `next` as `Faulted` (130 exit tests 4 and 5 against a remote) |
-| **T3** | push notifications as a routed endpoint | py, then ts | 457 S1; T1 | a pushed event and a polled event produce byte-identical `TaskEvent`s; a push without the configured token is `401` and feeds nothing |
+| **T3** | push notifications as a routed endpoint | py, then ts | 457 S1 (landed); T1 | a pushed event and a polled event produce byte-identical `TaskEvent`s; a push without the configured token is `401` and feeds nothing |
 
 T0 and T1 are the first implementable slice for #118. They close the
 load-bearing question with a surface that exists on today's language, keep

@@ -430,6 +430,50 @@ This goes in the compiler spec, not the runtimes.
     The self-hosted `selfhost/emit_ts.rvl` does not port the rule yet (pinned
     by `tests/test_selfhost_emit_ts.py::
     test_local_helper_rename_is_a_recorded_port_divergence`).
+  - **temporal target: CLOSED (issue #3187).** The emitted workflow module binds
+    its own scaffolding at module scope (`proxyActivities`,
+    `ApplicationFailure`, `setHandler`, `defineQuery`, the retry policies, the
+    `recordResidue` sink, the residue types and redaction helpers,
+    `RevlActivities`, and each component's workflow function and residue query).
+    Nothing reserved those names for `--target temporal`: an emission extern
+    named `recordResidue` was destructured over the abort sink and became the
+    residue sink itself, and one named `ApplicationFailure` or `proxyActivities`
+    shadowed the SDK import (a hijacked `create` call or a temporal-dead-zone
+    load error). A component binding named `saga` or `input` shadowed the
+    generated compensation stack or config object in the same block.
+    `backends/typescript/emit_temporal.py` now refuses, before rendering (lists
+    beside the template, `TEMPORAL_MODULE_RESERVED` and
+    `TEMPORAL_BODY_RESERVED`), any extern, derived activity name or
+    component-derived `{name}Residue` that would collide with that module scope
+    or with the activation body's own names (`saga`/`residue`/`input`/`step`;
+    an activity is destructured at module scope but called inside the workflow
+    function, where the generated `const saga`, `const residue` and `input`
+    parameter shadow it), any component that would collide with the module
+    scope, and any binding spelled one of the body names. Only value names are
+    reserved: the module's type-only names (`SagaStep`, `Residue`, `SagaReport`,
+    the `RevlActivities` interface, and the TS lib `Record`) live in the type
+    namespace, which a value binding never shadows, so an activity or component
+    may take them. The module scope also covers the host globals the scaffolding
+    reads as values (`Date.now()` in the abort path,
+    `String`/`Set`/`Array`/`Object` in the redaction helpers, `undefined`, and
+    `Promise`, which the async functions read once compiled below ES2017):
+    exactly those are reserved there too (`TEMPORAL_GLOBALS_READ`), since an
+    extern destructured as `Date` made the abort path throw before any
+    compensation ran. The check depends on how the module uses the name. A name
+    it binds (an emission extern, destructured as an activity, and a component)
+    is checked against that module scope, so `fetch` or `process` stays a legal
+    activity or component name. A name it reads free (a pure, acquire, witnessed
+    or local extern, called through `_mangle` of its name, so the name itself
+    unless it is a JS keyword such as `class`, which becomes `class__`, and
+    never declared) is also checked against the globals listed in
+    `JS_GLOBAL_RESERVED`, since `undo fetch(h)` would otherwise call the host's
+    `fetch`. The check covers every extern in the program, used by a component
+    or not, which fails safe. Known limit: that list is not every host global,
+    so a free-read extern named, for example, `setImmediate`, `Headers` or
+    `navigator` still reaches the host's own value, because the module binds no
+    non-emission extern. A config field stays allowed: it is only a property key
+    (`input.<field>`), never a bare identifier, so it cannot shadow the
+    scaffolding.
   - **java — SAFE.** The frame/undo scaffolding names (`config`/`fx`/`frame`/
     `undos`/`ctx`/`root`) are already refused by `_EMITTER_RESERVED`; the
     flagged `bind`/`require` (and rust's `borrow`/`type_id`) are not scaffolding

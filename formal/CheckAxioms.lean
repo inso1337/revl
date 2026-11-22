@@ -219,6 +219,14 @@ import RevL
 #print axioms RevL.A8.crash_cut_witness
 #print axioms RevL.A8.commit_witness
 #print axioms RevL.A8.mixed_disposition_admitted
+#print axioms RevL.A8.abort_drops_deferred
+#print axioms RevL.A8.abort_run_drops_deferred
+#print axioms RevL.A8.commit_discharges_deferred
+#print axioms RevL.A8.commit_run_queue_empty
+#print axioms RevL.A8.commit_run_discharges_deferred
+#print axioms RevL.A8.deferred_abort_run
+#print axioms RevL.A8.deferred_commit_run
+#print axioms RevL.A8.deferred_commit_run_from_queued
 #print axioms RevL.A8.revert_witness
 #print axioms RevL.A8.revert_witness_restores
 
@@ -485,6 +493,28 @@ import RevL
 #print axioms RevL.G9Coverage.coversB_refuses_a_walk_that_seeds_a_trusted_param
 #print axioms RevL.G9Coverage.coversB_refuses_a_scope_the_body_does_not_have
 #print axioms RevL.G9Coverage.g9Coverage_not_vacuous
+-- Issue #2744: G1 DECLARED-ACCESS COVERAGE. The `GA`/`G1` row decides the rule
+-- over a component's access roots; this states that the walk which resolves
+-- those roots (the lowering walk) visits every scope, as many statements of
+-- each scope as it declares, and every declared parameter of each scope. See
+-- RevL/Theorems/G1Coverage.lean.
+#print axioms RevL.G1Coverage.coversAccessB_iff
+#print axioms RevL.G1Coverage.scopeParamNames_eq
+#print axioms RevL.G1Coverage.coversAccessBodyB_iff
+#print axioms RevL.G1Coverage.coversAccessB_self
+#print axioms RevL.G1Coverage.walk_covers
+#print axioms RevL.G1Coverage.reachIn_callSvc
+#print axioms RevL.G1Coverage.scope_param_names_keep_every_qualifier
+#print axioms RevL.G1Coverage.witnessBody_scopes
+#print axioms RevL.G1Coverage.witnessBody_is_admitted
+#print axioms RevL.G1Coverage.walkOf_is_the_walk
+#print axioms RevL.G1Coverage.coversAccessB_admits_the_full_walk
+#print axioms RevL.G1Coverage.coversAccessB_refuses_a_walk_that_drops_the_activation_scope
+#print axioms RevL.G1Coverage.coversAccessB_refuses_a_shortened_walk
+#print axioms RevL.G1Coverage.coversAccessB_refuses_a_walk_that_strips_a_param
+#print axioms RevL.G1Coverage.coversAccessB_refuses_a_walk_that_seeds_an_extra_param
+#print axioms RevL.G1Coverage.coversAccessB_refuses_a_scope_the_body_does_not_have
+#print axioms RevL.G1Coverage.g1Coverage_not_vacuous
 -- Issue #1811 group 3: G-RETAIN. The retention rule is decided by the oracle's
 -- `RETAIN` row on the sink, scope and TWO INSTANTS the CHECKER reports — the
 -- harness pins the instant (`REVL_RETENTION_AS_OF`) so the verdict is

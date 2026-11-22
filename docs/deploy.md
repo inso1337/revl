@@ -116,6 +116,66 @@ trust = deploy.TrustStore(keys={key_id: verify_key}, backend="python",
                           require_gauntlet=True, require_conformance=True)
 ```
 
+### Setting the receiver's rules on the far host
+
+`TrustStore` is the receiver's, so the far host sets these rules on its OWN
+command line, never in a request (design S2.4). `revl deploy-admit` accepts one
+flag per rule, and all of them are opt-in:
+
+| flag | `TrustStore` field | refuses |
+| --- | --- | --- |
+| `--max-age SECONDS` | `evidence_ttl_seconds` | `evidence-stale` when the signed timestamp is more than SECONDS old |
+| `--not-before INSTANT` | `not_before` | `evidence-stale` when the attestation predates INSTANT (a unix timestamp or an ISO-8601 instant), typically the last deploy this host accepted |
+| `--capability-ceiling NAME` | `capability_ceiling` | `capability-ceiling` when the staged composition reaches a capability outside the repeated names |
+| `--revoked-key KEY_ID` | `revoked` | `signer-untrusted` when the signer's key is listed; repeatable, so one signer is revoked while the other key files stay in force |
+| `--recheck-source` | `recheck_source` | `source-or-ir-hash` unless the host's own frontend admits the staged source and reproduces the staged IR |
+
+A runner that names none of them keeps Slice 1's behaviour: the rules default
+to off, and an unconfigured host still admits what a trusted key signed.
+
+Two checks run when the runner starts. `--max-age` and `--not-before` each take
+one value, so giving either one twice is refused with a message naming the flag
+(a repeat would otherwise let the later value quietly replace the earlier one).
+`--revoked-key` refuses an empty id and an id that matches no key loaded with
+`--key`, so a typo cannot leave the signer trusted without a signal.
+
+Behind `via = ssh`, the same flags arrive through the deploy map's `extra_args`
+(the allowlist there is exactly the runner's own flags):
+
+```toml
+[processes.worker.deploy]
+via             = "ssh"
+host            = "deploy@edge"
+known_hosts     = "/etc/revl/known_hosts"
+host_key        = "/etc/revl/edge-receipt.key"
+remote_bundle   = "/srv/revl/app.revlbundle"
+extra_args      = ["--key", "/etc/revl/deploy/trust.key",
+                   "--max-age", "604800",
+                   "--not-before", "2026-01-01T00:00:00+00:00"]
+```
+
+That map is the conductor's file. A conductor the host does not control can
+leave these flags out, and the far runner then starts with none of the rules
+set. A host that needs its rules to hold whatever the conductor sends pins them
+itself: an sshd forced command (`command=` on the conductor's key in
+`authorized_keys`, or `ForceCommand`) or a host-side wrapper script that runs
+`revl deploy-admit` with the flags already on its command line. A rule the
+wrapper does not carry stays off.
+
+A wrapper must not forward the conductor's arguments to `revl deploy-admit`.
+Most of the runner's flags can be repeated or replaced, so forwarded arguments
+can widen a `--capability-ceiling`, add a trusted `--key` or replace
+`--host-key`. If a wrapper has to forward any, it filters them down to the
+switches that only tighten the rules: `--require-gauntlet`,
+`--require-conformance` and `--recheck-source`. The startup refusal of a
+repeated `--max-age` or `--not-before` covers those two flags only; it is not a
+guard for the others.
+
+The local `revl deploy --bundle` check (`admit_bundle_chain`) is the conductor
+verifying a bundle on its own disk; it takes the keys, the backend and the two
+`--require-*` floors, and none of the receiver-side rules above. Those belong to
+the host that will run the bytes, which is the `revl deploy-admit` runner.
+
 ### The ceiling is measured off the IR, not off `policy.json`
 
 `policy.json` is a **projection**: `build_bundle` derives it from the IR with
@@ -432,17 +492,80 @@ verdict = deploy.federation_admission(
 
 ### Settling a stranded participant
 
-`settle_stranded(wal_path, decision_path)` applies `recovery.py`'s rule
-verbatim; it decides nothing on its own.
+`settle_stranded(wal_path, decision_path)` lets the durable decision choose
+the direction and has `recovery.recover` perform it. The verdict is computed
+against a model world unless a composition binds the real one
+(`revl recover --composition`), so a `rolled-back` verdict does not rewrite
+the participant's own boundary state.
 
 * durable `federation-commit-approved` present: the federation committed. The
   participant's WAL is given the `commit-approved` marker recovery already keys
   roll-forward off, and `recovery.recover` rolls it forward.
-* absent, or an explicit abort decision: `recovery.recover` reads the WAL
-  unchanged and rolls back LIFO, reporting residue exactly as today.
+* absent, pending, or an explicit abort decision: `recovery.recover` reads the
+  WAL unchanged and applies its own rule, rolling back LIFO and reporting
+  residue exactly as today, or rolling forward a WAL that reached
+  `activation-complete`.
+* a `revl federation-apply` decision (its records carry
+  `"writer": "federation-apply"`) that is pending or an abort rolls back even a
+  WAL that reached `activation-complete`: the marker says the participant
+  finished its own slice, not that the federation committed, and an apply uses
+  its generation directory once, so the marker cannot be an earlier run's. This
+  rule applies to `federation-apply` only. `revl deploy` reuses one WAL across
+  runs, where the marker may be an earlier approved run's, so its
+  completed-participant case keeps recovery's rule and is tracked in issue
+  #3147.
 * unreadable: **fails closed** with `unresolved` and settles nothing. Guessing
   between roll-forward and roll-back is precisely the split-brain the durable
   record exists to prevent.
+* the decision file's directory holds a `lock` that another process holds (a
+  `revl federation-apply` still running): `unresolved`, nothing settled.
+
+### The written plan, the command and the prior-generation restore
+
+Issue #2718. The admission rule and the coordinated protocol above were
+reachable only from Python. `revl federation-apply PLAN` and
+`src/revl/federation_apply.py` add the written form without adding a protocol:
+
+```toml
+federation = "shop"
+generation = 2
+
+[compositions.app]
+source = "app.revl"
+prior = "app-v1.revl"
+health_probe = ["python3", "probe_app.py"]
+allow_capabilities = ["net"]
+
+[[contracts]]
+surface = "app.surface.json"
+provider = "billing"
+```
+
+Admission compiles each new source, checks every contract with
+`federation.check`, runs the irreversible-crossing rule, and compares each
+composition's derived capability surface with the one it names in `prior`. The
+comparison is the receiver ceiling's own surface (`deploy.capability_surface`),
+so the plan check and the trust-store ceiling cannot disagree. A capability the
+new generation reaches and the old one does not is reported in the verdict and
+refused unless that composition's `allow_capabilities` names it.
+
+A refusal happens before any participant is spawned, so the whole update stays
+on its prior generation. The apply then locks its generation's state directory
+and refuses one that already holds a decision record, writes the
+`federation-decision-pending` record before the first launch (issue #2725's
+rule), and writes `federation-commit-approved` only after every participant
+committed and every declared health probe passed. A probe that fails, times
+out or raises writes the durable abort decision first and then asks every
+committed participant to run its own local LIFO unwind, the same roll-back a
+stranded participant gets from `revl recover --decision`. Each generation has its own state directory (the
+command's default is `<wal-dir>/federation/<federation>/<generation>`), so
+restoring the prior generation is observable: the failed generation's
+directory unwinds to empty while the previous generation's directory is
+byte-identical.
+
+This is still the co-located case only. Two-phase commit across hosts, with
+partial failure and coordinator crash, remains undefined, and every participant
+here is the conductor's own child on one kernel.
 
 ## 5. The deploy map, and the boundary a deploy may cross
 

@@ -61,9 +61,12 @@ pub fn latch_path(latch: Option<&str>, wal: Option<&str>, env: bool) -> Option<S
 /// A latch that EXISTS but does not parse still reads as HALTED. Failing open on
 /// a malformed emergency stop is the one failure mode this feature exists to
 /// prevent, so every reader — the py runtime seam, the CLI, the conductor, the
-/// ts tier and now this — applies the same rule. A latch the OS refuses to open
-/// at all (missing file, permission error) reads as absent, matching
-/// `estop.py::read_latch` (FileNotFoundError/OSError -> None).
+/// ts tier and now this — applies the same rule. The same reasoning covers a
+/// latch this process cannot READ (EACCES, EISDIR, EMFILE): it is an existing
+/// but unreadable latch, so it reads as HALTED. Only a genuinely absent latch
+/// (`ErrorKind::NotFound`) reads as not-halted, matching
+/// `estop.py::read_latch` (FileNotFoundError -> None, every other OSError ->
+/// unreadable).
 pub fn read_latch(path: Option<&str>) -> Option<Value> {
     let path = path?;
     if path.is_empty() {
@@ -71,9 +74,10 @@ pub fn read_latch(path: Option<&str>) -> Option<Value> {
     }
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
-        // ENOENT or any other OS-level read failure: the latch is not readable,
-        // so it is not a halt. (A malformed BUT readable latch is handled below.)
-        Err(_) => return None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        // Any other read failure: a halt no reader can inspect must never be
+        // mistaken for the absence of a halt.
+        Err(_) => return Some(unreadable()),
     };
     match serde_json::from_str::<Value>(&text) {
         Ok(v) if v.is_object() => Some(v),
@@ -277,6 +281,36 @@ mod tests {
 
         let arr = tmp("arr", "[1, 2, 3]");
         assert!(estop_engaged_at(Some(&arr)));
+    }
+
+    #[test]
+    fn fails_closed_on_a_latch_that_cannot_be_read() {
+        // A latch path that is a directory is an existing latch no reader can
+        // open (EISDIR): it must halt, not read as absent.
+        let dir = std::env::temp_dir().join(format!("revl_estop_rs_{}_dirlatch", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.to_string_lossy().into_owned();
+        let record = read_latch(Some(&p)).expect("an unreadable latch must still halt");
+        assert_eq!(record["halted"], true);
+        assert_eq!(record["reason"], "operator halt (unreadable latch)");
+        assert!(estop_engaged_at(Some(&p)));
+
+        // A path under a regular file (ENOTDIR) is not "not found" either.
+        let file = tmp("notdir", "{}");
+        let under = format!("{file}/halt.estop");
+        assert!(estop_engaged_at(Some(&under)));
+
+        // A mode-0 file (EACCES); skipped when the runner can read it anyway.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = tmp("locked", r#"{"halted":true}"#);
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+            if std::fs::read_to_string(&locked).is_err() {
+                let record = read_latch(Some(&locked)).expect("an unreadable latch must still halt");
+                assert_eq!(record["reason"], "operator halt (unreadable latch)");
+            }
+        }
     }
 
     #[test]

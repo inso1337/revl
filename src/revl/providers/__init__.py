@@ -78,15 +78,15 @@ def bind_for_run(ir, files, config_path, environ=None) -> dict:
     if missing:
         raise ProviderError(
             "the provider configuration names credential variable(s) that are "
-            "not set: " + ", ".join(f"`{env}` (role `{role}`)"
-                                    for role, env in missing))
+            "not set: " + ", ".join(
+                f"the one named in `api_key_env` (role `{role}`)"
+                for role, _ in missing))
     return hosts
 
 
-#: The longest the plan waits on any one network operation (the connect, or
-#: one read of the answer) when asking a server what it holds, in seconds.
-#: It is a per-read socket timeout, not a deadline for the whole answer: a
-#: server that keeps sending a byte at a time can hold the plan longer. A
+#: The longest the plan waits when asking a server what it holds, in seconds.
+#: It is the deadline for the whole call (`request_json`'s `timeout`), so a
+#: server that keeps sending a byte at a time cannot hold the plan longer. A
 #: completion timeout (default 120s) is sized for generating text; this
 #: question is a listing, and a plan that waits on it blocks every host.
 PLAN_PROBE_TIMEOUT = 10.0
@@ -220,8 +220,13 @@ def describe_hosts(hosts) -> list:
     for key, host in sorted(hosts.items()):
         for method, (op, adapter) in sorted(host._revl_routes.items()):
             b = adapter.binding
-            cred = (f", credential from ${b.api_key_env}" if b.api_key_env
-                    else "")
+            # the name only once it is known to be set: an unset one may be a
+            # pasted key
+            cred = ""
+            if b.api_key_env:
+                cred = (f", credential from ${b.api_key_env}"
+                        if adapter._lookup(b.api_key_env)
+                        else ", credential variable not set")
             load = (f", loaded by revl on the scheduled device of "
                     f"{', '.join(b.device_names())}" if b.managed else "")
             lines.append(f"  {key}.{method} -> role {op.role}: {b.provider} "

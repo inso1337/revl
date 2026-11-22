@@ -303,7 +303,8 @@ extern acquire fn open_sock() -> Sock undo close_sock(0) = @py { return {"fd": 1
 service Db { async fn run() -> Sock }
 service Ctl { async fn go() -> Str }
 component Store provides db: Db {
-  provide db { async fn run() = open_sock() }
+  let sock = effect open_sock() undo close_sock(0)
+  provide db { async fn run() = sock }
 }
 component Front requires db: Db provides ctl: Ctl {
   provide ctl { async fn go() = "z" }
