@@ -110,6 +110,18 @@ CONSUMED_PATHS: dict[tuple, tuple[str, str]] = {
     ("boundary", _STAR, "capabilities"): ("audit_diff", "_capability_scopes"),
     ("externs", _STAR, "backends"): ("audit_diff", "diff_backends"),
     ("externs", _STAR, "inverse"): ("audit_diff", "diff_inverses"),
+    # the per-component copy of the same two facts: `boundary[*].externs[*]`
+    # repeats each reached extern's effect `class` and derived `inverse`, from the
+    # same declaration as the top-level entry `diff_inverses` reads. A move shows
+    # in both places, so the copy is consumed with it rather than listed twice.
+    # (The top-level `externs[*].class` stays unlisted on purpose: a class move
+    # that leaves the inverse rank alone is not an inverse change, and the guard
+    # is the one place that still reports it.) A baseline recorded before
+    # `inverse` existed has no such leaf; `diff_inverses` skips an extern whose
+    # entry lacks it on either side, so the field appearing is a schema change,
+    # not a move, and nothing reports it.
+    ("boundary", _STAR, "externs", _STAR, "inverse"): ("audit_diff", "diff_inverses"),
+    ("boundary", _STAR, "externs", _STAR, "class"): ("audit_diff", "diff_inverses"),
     ("recovery_surface",): ("audit_diff", "diff_recovery"),
     ("capability_registers",): ("audit_diff", "diff_registers"),
     ("cardinality",): ("audit_diff", "diff_cardinality"),
