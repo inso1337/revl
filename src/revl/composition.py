@@ -443,11 +443,18 @@ def _row_value_type(value: object, declared: str | None) -> str | None:
 
 
 def _check_config(row: RowDecl, header: _Header, doc: str,
-                  rel: str) -> dict[str, object]:
+                  rel: str, *, rowless: bool = False) -> dict[str, object]:
     """A config value that does not fit the declared type does not admit, and
     the refusal names the field and the declared type (426 §3.2). Same shape as
-    `_lower_lifecycle_config` (lower.py:4197), one tier up."""
+    `_lower_lifecycle_config` (lower.py:4197), one tier up.
+
+    `rowless` (issue #3535): `row` stands for a host table of a component no
+    composition row places. Its fields are typed the same way and the refusal
+    names the component instead of a row; required-ness stays with the
+    runtime's own check, as it was for such a component."""
     given: dict[str, object] = {}
+    owner = (f"component `{header.name}`" if rowless
+             else f"row `@{row.label}`")
     for name, value, line in row.config:
         cfg = header.config.get(name)
         if cfg is None:
@@ -455,17 +462,21 @@ def _check_config(row: RowDecl, header: _Header, doc: str,
             raise RevlError(
                 doc, line,
                 f"`{name}` is not a config field of `{header.name}` "
-                f"(row `@{row.label}`)",
+                f"({'host config' if rowless else owner})",
                 hint=f"config fields of `{header.name}` in `{rel}`: {known}")
         actual = _row_value_type(value, cfg.type)
         if actual is not None and not compatible(cfg.type, actual):
             raise RevlError(
                 doc, line,
-                f"config field `{name}` of row `@{row.label}` is declared "
-                f"`{cfg.type}` but the composition supplies `{actual}`",
+                f"config field `{name}` of {owner} is declared "
+                f"`{cfg.type}` but the "
+                f"{'host config' if rowless else 'composition'} supplies "
+                f"`{actual}`",
                 hint="a config typo is a refusal here, not a runtime surprise "
                      "(426 §3.2)")
         given[name] = value
+    if rowless:
+        return given
     missing = [name for name, cfg in header.config.items()
                if cfg.default is None and name not in given]
     if missing:
@@ -2507,14 +2518,32 @@ def configure_rows_from_host(document: dict, config: dict | None,
     by `_check_config`, wins over the row's own value, and is recorded in the
     row's provenance as `(3, "<host>", "configure")`. The rows IR and the
     manifest's copy of it then say what the component runs with. A table for a
-    component no row places is left to the runtime, as before. Returns
+    component no row places is typed by the same check (issue #3535), so a
+    wrongly typed or undeclared field is refused here too, and otherwise left
+    to the runtime as before. A swap's successor must therefore still declare
+    every field the session's host config sets; to drop one, unload and load
+    again with a host config that no longer names it. Returns
     `document` itself when nothing changes, otherwise a copy (the caller's
     document is never mutated)."""
     table = (document or {}).get("rows") or {}
     rows = table.get("rows") or []
-    if not config or not rows:
+    if not config:
         return document
-    by_name = {c["name"]: c for c in document.get("components") or []}
+    by_name = {c["name"]: c for c in (document or {}).get("components") or []}
+    # issue #3535: a table for a component no row places is typed against the
+    # component's declared config by the same check, before any runtime starts
+    placed = {row.get("component") for row in rows}
+    for name, supplied in config.items():
+        component = by_name.get(name)
+        if component is None or name in placed or not isinstance(supplied, dict):
+            continue
+        decl = RowDecl(label=name, path="", claims=[], line=1, component=name,
+                       config=[(n, v, 1) for n, v in supplied.items()])
+        _check_config(decl, _IRHeader(component), where,
+                      component.get("source") or "<module>",
+                      rowless=True)
+    if not rows:
+        return document
     changed = False
     out_rows = []
     for row in rows:

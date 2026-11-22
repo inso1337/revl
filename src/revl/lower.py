@@ -4274,7 +4274,10 @@ def _refuse_effect_position_bound_externs_in_fn_body(
     deferred/witnessed/acquire rules but do not participate in the #2842
     module-function check; component values are resolved in
     `_lower_component_pure_expr`, where lexical scope is available."""
-    from .parser import ExprArrow, ExprCall, ExprVar
+    from .parser import (
+        ExprArrow, ExprBlockArm, ExprCall, ExprMatch, ExprVar, ForStmt,
+        LetPatternStmt, LetStmt,
+    )
 
     witnessed = _witnessed_extern_names(program)
     acquire_undo = {
@@ -4292,7 +4295,8 @@ def _refuse_effect_position_bound_externs_in_fn_body(
 
     def _walk(node, where: str, in_arrow: bool = False, calls: bool = True,
               check_emission_values: bool = True,
-              check_acquire_values: bool = False):
+              check_acquire_values: bool = False,
+              filename: str = filename, bound: frozenset = frozenset()):
         nonlocal first_witnessed, first_teardown, first_emission_value
         nonlocal first_acquire_value
         if isinstance(node, ExprArrow):
@@ -4303,11 +4307,14 @@ def _refuse_effect_position_bound_externs_in_fn_body(
             first_teardown = _deferred_value_refusal(node.name, where,
                                                      filename, node.line)
         if check_emission_values and isinstance(node, ExprVar) \
-                and node.name in emission_values and first_emission_value is None:
+                and node.name in emission_values and node.name not in bound \
+                and first_emission_value is None:
             # A callable that reaches an irreversible extern cannot escape as
             # a value: the eventual dispatch has no named `emit` call site.
             # Direct call heads are skipped below, so ordinary calls retain
-            # their existing treatment and `emit send(...)` stays valid.
+            # their existing treatment and `emit send(...)` stays valid. A
+            # parameter, `let`, `for` variable, match binding or lambda
+            # parameter in scope (`bound`) shadows the extern (issue #3354).
             first_emission_value = _emission_value_refusal(
                 node.name, emission_values[node.name], filename, node.line)
         if check_emission_values and isinstance(node, ExprArrow) \
@@ -4319,14 +4326,18 @@ def _refuse_effect_position_bound_externs_in_fn_body(
                 first_emission_value = _emission_arrow_refusal(
                     hit[0], emission_values[hit[0]], filename, node.line)
         if check_acquire_values and isinstance(node, ExprVar) \
-                and node.name in acquire_undo and first_acquire_value is None:
+                and node.name in acquire_undo and node.name not in bound \
+                and first_acquire_value is None:
             # Issue #2972: the acquire class follows the value, exactly as the
             # emission class does above. The direct call in a `fn` body is
             # refused below (item 399) because the teardown accumulator that
             # registers the declared `undo` does not exist there; a value has
             # the same problem with no call site at all. Callee positions are
             # skipped by the walk (the `callee` field is not visited), so a
-            # real call keeps its own refusal above.
+            # real call keeps its own refusal above. A name the body binds in
+            # scope at the read (a parameter, a `let`, a `for` or arrow
+            # binder, a match payload) is that binding, not the extern
+            # (issue #2985).
             first_acquire_value = _acquire_value_refusal(
                 node.name, f"in {where}", filename, node.line)
         if calls and isinstance(node, ExprCall) and isinstance(node.callee, ExprVar):
@@ -4369,23 +4380,46 @@ def _refuse_effect_position_bound_externs_in_fn_body(
                          "from there (docs/design/245-session-commit.md)",
                     code="G4", category="deferred",
                 )
-        if hasattr(node, "__dataclass_fields__"):
+        def _sub(child, inner=bound):
+            _walk(child, where, in_arrow, calls, check_emission_values,
+                  check_acquire_values, filename, inner)
+
+        if isinstance(node, ExprArrow):
+            _sub(node.body, bound | set(node.params))
+        elif isinstance(node, ExprMatch):
+            _sub(node.scrutinee)
+            for _pattern, bind, body in node.arms:
+                _sub(body, bound | {bind} if bind else bound)
+        elif isinstance(node, ForStmt):
+            _sub(node.iterable)
+            _sub(node.body, bound | {node.bind})
+        elif isinstance(node, ExprBlockArm):
+            _sub(node.stmts + [node.tail])
+        elif hasattr(node, "__dataclass_fields__"):
             for f in type(node).__dataclass_fields__:
                 child = getattr(node, f)
                 if f == "callee" and isinstance(node, ExprCall) \
                         and isinstance(child, ExprVar):
                     continue  # the callee position is a CALL, judged above
-                _walk(child, where, in_arrow, calls, check_emission_values,
-                      check_acquire_values)
+                _sub(child)
         elif isinstance(node, (list, tuple)):
+            # a statement list is a block: a `let` binds from the next
+            # statement to the block's end (issue #3354)
+            inner = bound
             for x in node:
-                _walk(x, where, in_arrow, calls, check_emission_values,
-                      check_acquire_values)
+                _sub(x, inner)
+                if isinstance(x, LetStmt):
+                    inner = inner | {x.name}
+                elif isinstance(x, LetPatternStmt):
+                    inner = inner | set(_pattern_binds(x.pattern))
 
     for fn in program.fn_decls:
-        for stmt in fn.body:
-            _walk(stmt, f"the body of fn `{fn.name}`",
-                  check_acquire_values=True)
+        # the diagnostic names the file the fn is in, not the compile's first
+        # file, and its parameters shadow a same-named extern (issue #3354)
+        _walk(fn.body, f"the body of fn `{fn.name}`",
+              check_acquire_values=True,
+              filename=getattr(fn, "source", "") or filename,
+              bound=frozenset(p.name for p in fn.params))
     for test in program.tests:
         for stmt in test.body:
             _walk(stmt, f"the body of test `{test.name}`",
@@ -4471,6 +4505,29 @@ def _acquire_value_refusal(name: str, where: str, filename: str,
         f"declared `undo` teardown would be dropped, leaving the acquisition "
         f"irreversible (G4)",
         hint=hint,
+        code="G4", category="acquire",
+    )
+
+
+def _acquire_call_refusal(name: str, filename: str, line: int) -> RevlError:
+    """A plain call of an `acquire` extern inside a provide-method body (issue
+    #2985), the call twin of `_acquire_value_refusal`.
+
+    The call is not the root of an `effect`/`let-effect` bracket, so no step is
+    built and the `undo` the declaration asserts is never registered. The
+    bracketed acquisition is itself refused in this position ("only `spawn` may
+    be acquired"), so the unbracketed call must not be the spelling that gets
+    through. An arrow whose body makes the call reaches here too: its body is
+    lowered in the method's environment."""
+    return RevlError(
+        filename, line,
+        f"`acquire` extern `{name}` cannot be called inside a provide-method "
+        f"body, where only `spawn` may be acquired; its declared `undo` "
+        f"teardown would be dropped, leaving the acquisition irreversible (G4)",
+        hint="the acquisition belongs in the component's activation body, "
+             "where the teardown accumulator registers its declared `undo`; "
+             "bind the handle there and use it in the method, or use `spawn` "
+             "for a request-scoped instance (docs/design-v2-instances.md)",
         code="G4", category="acquire",
     )
 
@@ -7215,17 +7272,29 @@ def _lower_let_pattern_stmt(stmt: LetPatternStmt, scope: dict, callables: set, a
                                      "only one is live.)")
         value_type = _expr_static_type(stmt.value, type_env, types)
         spec = types.get(value_type or "")
-        if spec is not None:
+        # A structural value (an anonymous record literal, or a name bound to
+        # one) is checked against its own shape, the same way a record update
+        # on it is (issue #3536): naming a field it lacks used to compile.
+        struct = structural_fields(value_type) if value_type else None
+        fields = None
+        if struct is not None:
+            fields = struct
+        elif spec is not None:
             if spec.get("kind") != "record":
                 raise RevlError(
                     filename, stmt.line,
                     f"record destructuring requires a record, but `{render_type(value_type)}` is not a record",
                 )
             fields = spec.get("fields", {})
+        if fields is not None:
             for name in names:
                 if name not in fields:
-                    raise RevlError(filename, pattern.line,
-                                    f"`{name}` is not a field of record `{render_type(value_type)}`")
+                    raise RevlError(
+                        filename, pattern.line,
+                        f"record destructuring names `{name}`, which is not a field of "
+                        f"`{render_type(value_type)}`",
+                        hint=f"fields: {', '.join(f'`{f}`' for f in sorted(fields))}",
+                    )
         elif value_type is not None and parse_type(value_type)[0] in _BUILTIN_NONRECORD:
             raise RevlError(
                 filename, stmt.line,
@@ -7234,8 +7303,8 @@ def _lower_let_pattern_stmt(stmt: LetPatternStmt, scope: dict, callables: set, a
         value_ir = _lower_pure_expr(stmt.value, scope, callables, alias_fns, filename, type_env, types)
         for name in names:
             scope[name] = stmt.mutable
-            if spec is not None:
-                type_env[name] = spec.get("fields", {})[name]
+            if spec is not None and struct is None:
+                type_env[name] = fields[name]
         body.append({
             "step": "let_pattern",
             "pattern": "record",
@@ -8343,17 +8412,33 @@ def _component_header_stub(comp: ComponentDecl, filename: str) -> dict:
     topology complete from the parts available BEFORE body lowering — the
     `requires`/`provides` clauses on the `component` declaration — and mark it
     `poisoned` so the body-walking post-passes (taint, spawn bounds/attenuation,
-    holes) skip it. `isolate`/`routes` are body statements, so a stub carries
-    none: its provisions sit in the shared realm, which is exactly enough to
-    stop the route-check fabrication and keep G2/G3 sound over its keys."""
-    return {
+    holes) skip it. `isolate` is a body statement, so a stub carries none: its
+    provisions sit in the shared realm, which is exactly enough to stop the
+    route-check fabrication and keep G2/G3 sound over its keys.
+
+    A multi-realm route over a REQUIRED key is carried (issue #3360): it is
+    what makes a component that requires and provides one key a router rather
+    than a self-cycle, so a stub without it fabricated a G3 refusal next to the
+    real one (an unknown strategy, say). Only the realm set travels; a route
+    over a key the header does not require is the body's own refusal."""
+    from .parser import RouteStmt
+    requires = {local for local, _svc, _line in comp.requires}
+    stub = {
         "name": comp.name,
         "source": comp.source or filename,
-        "requires": {local for local, _svc, _line in comp.requires},
+        "requires": requires,
         "provides": {key for key, _svc, _line in comp.provides},
         "body": [],
         "poisoned": True,
     }
+    routes: dict = {}
+    for stmt in comp.body or ():
+        if isinstance(stmt, RouteStmt) and stmt.key in requires \
+                and stmt.key not in routes:
+            routes[stmt.key] = {"realms": list(stmt.realms), "strategy": None}
+    if routes:
+        stub["routes"] = routes
+    return stub
 
 
 def _raise_collected(errors: list[RevlError], program: Program) -> None:
@@ -10819,6 +10904,21 @@ def _lower_component_pure_expr_node(expr, env: Env, scope: dict[str, str],
                 # caller bracketed with `_acquire_position`.
                 if expr is not getattr(env, "_host_acquire_root", None):
                     _refuse_unpositioned_witnessed_call(name, env, filename, line)
+                    # issue #2985: the acquire class follows the CALL as well
+                    # as the value. Inside a provide-method body the bracketed
+                    # acquisition is refused outright, so the plain call
+                    # (`let h = open_sock()`, `return open_sock().fd`, or the
+                    # body of an arrow) cannot buy the reach the bracket does
+                    # not have: no effect step is built, so the declared
+                    # `undo` is never registered.
+                    # A teardown slot (`undo`) or an `emit` expression lowers
+                    # under its own mode and keeps its own rules (item 308,
+                    # the re-mint refusal), as the witnessed rule above does.
+                    if (getattr(env, "in_provide_method", False)
+                            and getattr(env, "_expr_mode", "setup") == "setup"
+                            and (getattr(env, "extern_class", None) or {})
+                            .get(name) == "acquire"):
+                        raise _acquire_call_refusal(name, filename, line)
                 return node
         if isinstance(expr.callee, ExprField) and expr.callee.name in _BUILTIN_METHODS:
             method = expr.callee.name

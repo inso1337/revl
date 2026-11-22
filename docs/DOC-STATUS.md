@@ -50,7 +50,7 @@ regenerated rather than edited.
 | doc | status | em-dashes | tier-limit notes |
 |---|---|---|---|
 | README.md | needs-work | 0 |  |
-| analyze-liveness.md | needs-work | 15 |  |
+| analyze-liveness.md | needs-work | 0 |  |
 | apply.md | needs-work | 19 |  |
 | arithmetic.md | needs-work | 5 |  |
 | attested-result-delivery.md | needs-work | 0 |  |
@@ -62,7 +62,7 @@ regenerated rather than edited.
 | backend-ir-v1.md | needs-work | 16 |  |
 | backend-ir-v3.md | needs-work | 0 |  |
 | backend-ir.md | needs-work | 11 |  |
-| backends-roadmap.md | needs-work | 41 |  |
+| backends-roadmap.md | needs-work | 40 |  |
 | bench-selfhost.md | live-owned (not audited) | 49 |  |
 | boundary-policy.md | needs-work | 27 |  |
 | bundle.md | needs-work | 0 |  |
@@ -95,7 +95,7 @@ regenerated rather than edited.
 | fault-tests.md | needs-work | 71 |  |
 | federation.md | current | 16 |  |
 | fix-code.md | needs-work | 10 |  |
-| fmt.md | needs-work | 12 |  |
+| fmt.md | needs-work | 1 |  |
 | frontend-assets.md | needs-work | 13 |  |
 | function-specs.md | needs-work | 0 |  |
 | function-types.md | needs-work | 31 |  |
@@ -165,7 +165,7 @@ regenerated rather than edited.
 | service-compat.md | needs-work | 17 |  |
 | signals-and-queries.md | needs-work | 44 |  |
 | stability.md | needs-work | 0 |  |
-| state-handoff.md | needs-work | 22 |  |
+| state-handoff.md | needs-work | 21 |  |
 | stdlib-2.0.md | current | 0 | yes |
 | stdlib-json.md | needs-work | 56 |  |
 | stdlib-list.md | current | 14 |  |

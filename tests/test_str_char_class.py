@@ -22,10 +22,9 @@ Checked here:
     empty/multi-char safe, and evaluates a side-effecting receiver once;
   * the python lowering emits its documented inline shape (no fn call).
 
-Other tiers (rust/java/ts/wasm/go) are deferred — py is the bench tier this
-item targets, and nothing outside selfhost/lexer.rvl (py-emitted) uses these
-yet, so no other backend is exercised with them (per-tier note in
-docs/stdlib-2.0.md §Str.is_alnum).
+The other tiers are checked beside their emitters (ts and rust: their own
+suites; go and java: tests/test_char_class_record_target_go_java_3144.py; wasm
+still refuses them, per-tier note in docs/stdlib-2.0.md §Str.is_alnum).
 """
 
 import importlib.util

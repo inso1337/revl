@@ -518,3 +518,76 @@ def test_a_lone_surrogate_never_reaches_utf8_bytes(tier):
     assert status == "pass", (
         f"{tier} let an unpaired surrogate reach str_utf8_bytes (the pre-fix py "
         f"tier spelled it {WTF8_BYTES}, i.e. WTF-8 rather than UTF-8): {message}")
+
+
+# ------------------------------------- user text that spells the ts sentinel
+
+# The ts tier parks each bigint behind a quoted sentinel and rewrites the
+# finished text. User strings and object keys that spell the sentinel must come
+# through unchanged, as they do on py: the rewrite may only touch sentinels the
+# call wrote itself. `qty: 5` makes the document hold a bigint, so the rewrite
+# runs (with no bigint the ts tier returns the builtin result untouched).
+#: `@@revlBigInt` + a run of `0`s of every length 0..59 + `:`, then the digit
+#: salted forms `@@revlBigInt0:` .. `@@revlBigInt59:`
+_MANY_PREFIXES = "".join(f"@@revlBigInt{'0' * k}:" for k in range(60)) + \
+    "".join(f"@@revlBigInt{k}:" for k in range(60))
+
+SENTINEL_LOOKALIKES = [
+    # the original prefix, an index in range of the one bigint
+    ("string_in_range",
+     'type Rec = { qty: Int, role: Str }\n'
+     'fn v() -> Rec { return { qty: 5, role: "@@revlBigInt:0@@" } }',
+     r'{"qty":5,"role":"@@revlBigInt:0@@"}'),
+    # an index no bigint owns used to become the word `undefined`
+    ("string_out_of_range",
+     'type Rec = { qty: Int, role: Str }\n'
+     'fn v() -> Rec { return { qty: 5, role: "@@revlBigInt:7@@" } }',
+     r'{"qty":5,"role":"@@revlBigInt:7@@"}'),
+    # a prefix with a salt, so a fix that only moves to the next prefix once
+    # is not enough
+    ("string_salted_prefixes",
+     'type Rec = { qty: Int, a: Str, b: Str }\n'
+     'fn v() -> Rec { return { qty: 5, a: "@@revlBigInt0:0@@", '
+     'b: "@@revlBigInt1:0@@" } }',
+     r'{"qty":5,"a":"@@revlBigInt0:0@@","b":"@@revlBigInt1:0@@"}'),
+    # inside a list, next to more than one bigint
+    ("string_in_list_with_bigints",
+     'fn v() -> Any { return json_parse('
+     '"[1,\\"@@revlBigInt:1@@\\",2,\\"@@revlBigInt:0@@\\"]") }',
+     r'[1,"@@revlBigInt:1@@",2,"@@revlBigInt:0@@"]'),
+    # an object key used to lose its quotes
+    ("key",
+     'fn v() -> Any { return json_parse("{\\"@@revlBigInt:0@@\\":1}") }',
+     r'{"@@revlBigInt:0@@":1}'),
+    ("key_salted",
+     'fn v() -> Any { return json_parse("{\\"@@revlBigInt0:0@@\\":1}") }',
+     r'{"@@revlBigInt0:0@@":1}'),
+    # a string that carries the quoted form of a sentinel
+    ("string_with_quoted_sentinel",
+     'type Rec = { qty: Int, note: Str }\n'
+     'fn v() -> Rec { return { qty: 5, note: "x\\"@@revlBigInt:0@@\\"y" } }',
+     r'{"qty":5,"note":"x\"@@revlBigInt:0@@\"y"}'),
+    # one string spelling a long run of prefixes, so no fixed number of retries
+    # (and no sequential walk through them) would be enough
+    ("string_with_many_prefixes",
+     'type Rec = { qty: Int, role: Str }\n'
+     'fn v() -> Rec { return { qty: 5, role: "' + _MANY_PREFIXES + '" } }',
+     '{"qty":5,"role":"' + _MANY_PREFIXES + '"}'),
+    # a real bigint beside a lookalike still lands as a bare number
+    ("two_bigints_and_a_lookalike",
+     'type Rec = { a: Int, role: Str, b: Int }\n'
+     'fn v() -> Rec { return { a: 9007199254740993, '
+     'role: "@@revlBigInt:1@@", b: -3 } }',
+     r'{"a":9007199254740993,"role":"@@revlBigInt:1@@","b":-3}'),
+]
+
+
+@pytest.mark.parametrize("name,decl,expected", SENTINEL_LOOKALIKES,
+                         ids=[c[0] for c in SENTINEL_LOOKALIKES])
+@pytest.mark.parametrize("tier", ["py", "ts"])
+def test_user_text_spelling_the_ts_sentinel_is_written_unchanged(
+        tier, name, decl, expected):
+    status, message = _run(tier, decl, expected)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier} rewrote user text in {name!r}: {message}"
