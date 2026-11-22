@@ -3383,7 +3383,11 @@ def run_command(args, hold_once: bool = False) -> int:
             return asyncio.run(driver.withdraw_once())
         if getattr(args, "watch", False):
             return asyncio.run(driver.watch(args.files))
-        return asyncio.run(driver.hold_repl(once=hold_once))
+        # #3435: the command line's `--once` reaches the py path like every
+        # other tier, so a script or a supervisor whose stdin stays open does
+        # not wait on the prompt. `revl dev` still passes `hold_once` itself.
+        return asyncio.run(driver.hold_repl(
+            once=hold_once or bool(getattr(args, "once", False))))
     except refusals(emit) as exc:
         # issue #1393: an emit-time refusal is an ANSWER, not a crash. The py
         # emitter refuses a document it cannot lower rather than silently
