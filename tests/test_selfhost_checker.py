@@ -1054,6 +1054,25 @@ component Worker requires fs: Store provides task: Task {
 """,
      "`Task.go` is declared `emission[fs.ingest]`, but this implementation emits "
      "through `fs` (reaching `fs.ingest`, `fs.purge`)"),
+    # a key reached through a fn whose extern declares that key has no verb to
+    # name it by: `emission[wire.take]` covers `emit wire.take(...)` and nothing else
+    ("g4 key dot verb does not cover a key reached through a fn", """
+extern emission[wire] fn host_poke(n: Int) -> Int = @py { return 1 }
+fn helper(n: Int) -> Int { return host_poke(n) }
+service Wire { emission fn take(most: Int) -> Int }
+service Beat { emission[wire.take] fn beat() -> Int }
+component Game requires wire: Wire provides b: Beat {
+  provide b {
+    fn beat() -> Int {
+      let knocks = emit wire.take(512)
+      let x = emit helper(1)
+      return 0
+    }
+  }
+}
+""",
+     "`Beat.beat` is declared `emission[wire.take]`, but this implementation emits "
+     "through `wire` (reaching `wire.take`, `helper()`)"),
     ("g4 unmarked emission",
      _fixture("g4_unmarked_emission.rvl"),
      "call to emission `db.execute` must be marked `emit` (G4)"),

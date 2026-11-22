@@ -656,6 +656,17 @@ def _method_emissions(body: list, env: "Env",
         elif scopes_out.get(local, set()) is not None:
             scopes_out.setdefault(local, set()).add(f"{local}.{method}")
 
+    def unname(tokens) -> None:
+        """A capability reached any way other than a plain `k.m` call on a
+        required key (a reached fn whose extern declares `emission[wire]`, a
+        resolved-receiver crossing whose op declares `emission[wire]`, a
+        function value) has no verb to name it by, so if its token is also a
+        required key that key stays unnameable: `emission[wire.take]` covers
+        `emit wire.take(...)` and nothing else (issue #3485)."""
+        if scopes_out is not None:
+            for token in tokens:
+                scopes_out[token] = None
+
     # issues #1682 and #1508: a crossing through a resolved receiver (a spawn
     # handle, an alias, a service-typed local or parameter), recorded by the
     # body walk (`lower._resolved_crossings`): the op's declared scope,
@@ -681,6 +692,7 @@ def _method_emissions(body: list, env: "Env",
                         and not crossing[2]):
                     note(crossing[0])
                     caps.update(crossing[1])
+                    unname(crossing[1])
             through_resolved = id(node.get("expr")) in resolved_crossings
             if node.get("step") == "emit" and not through_resolved:
                 expr = node.get("expr") or {}
@@ -746,6 +758,7 @@ def _method_emissions(body: list, env: "Env",
                 note(f"{name}()",
                      evidence.chain_steps(name) if evidence is not None else None)
                 caps.update(env.emitting_caps.get(name) or {"*"})
+                unname(env.emitting_caps.get(name) or ())
             # a first-class reference to an emitting callable: the value may
             # be dispatched by whoever receives it (an arrow-typed parameter,
             # a stored binding), so the method reaches code no bound can
@@ -755,6 +768,7 @@ def _method_emissions(body: list, env: "Env",
                 note(f"{name} (passed as a function value)",
                      evidence.chain_steps(name) if evidence is not None else None)
                 caps.update(env.emitting_caps.get(name) or set())
+                unname(env.emitting_caps.get(name) or ())
                 caps.add("*")
             for value in node.values():
                 walk(value, False)

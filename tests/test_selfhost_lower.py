@@ -2256,6 +2256,41 @@ component Worker requires fs: Store provides task: Task {
   }
 }
 """, "G4"),
+    # a key reached any other way (a fn whose extern declares it, a resolved
+    # receiver whose op declares it) has no verb to name it by
+    ("g4 key dot verb does not cover a key reached through a fn", """
+extern emission[wire] fn host_poke(n: Int) -> Int = @py { return 1 }
+fn helper(n: Int) -> Int { return host_poke(n) }
+service Wire { emission fn take(most: Int) -> Int }
+service Beat { emission[wire.take] fn beat() -> Int }
+component Game requires wire: Wire provides b: Beat {
+  provide b {
+    fn beat() -> Int {
+      let knocks = emit wire.take(512)
+      let x = emit helper(1)
+      return 0
+    }
+  }
+}
+""", "G4"),
+    ("g4 key dot verb does not cover a key reached through a spawned receiver", """
+service Wire { emission fn take(most: Int) -> Int }
+service Task { emission[wire] fn run(p: Str) -> Int }
+component Worker provides task: Task {
+  provide task { fn run(p: Str) = 1 }
+}
+service Beat { emission[wire.take] fn beat() -> Int }
+component Game requires wire: Wire provides b: Beat {
+  provide b {
+    fn beat() -> Int {
+      let knocks = emit wire.take(512)
+      let w = effect spawn Worker with { } undo w.dispose()
+      let r = emit w.task.run("x")
+      return 0
+    }
+  }
+}
+""", "G4"),
     ("g4 unmarked emission", _fixture("g4_unmarked_emission"), "G4"),
     ("a1 async extern in sync method",
      _fixture("a1_async_extern_sync_method"), "A1"),

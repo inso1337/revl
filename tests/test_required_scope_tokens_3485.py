@@ -194,6 +194,61 @@ def test_witnessed_narrows_to_the_verb_the_same_way():
     compile_source(WITNESSED.replace("DECL", "witnessed[j]"), "wit.rvl")
 
 
+HELPER_EXTERN = '''\
+use "stdlib/wire.rvl" { Wire, Knock }
+extern emission[wire] fn host_poke(n: Int) -> Int = @py { return 1 }
+fn helper(n: Int) -> Int { return host_poke(n) }
+service Beat { emission[wire.take] fn beat() -> Int }
+component Game requires wire: Wire provides b: Beat {
+  provide b {
+    fn beat() -> Int {
+      let knocks = emit wire.take(512)
+      let x = emit helper(1)
+      return 0
+    }
+  }
+}
+'''
+
+RESOLVED_RECEIVER = '''\
+use "stdlib/wire.rvl" { Wire, Knock }
+service Task { emission[wire] fn run(p: Str) -> Int }
+component Worker provides task: Task {
+  provide task { fn run(p: Str) = 1 }
+}
+service Beat { emission[wire.take] fn beat() -> Int }
+component Game requires wire: Wire provides b: Beat {
+  provide b {
+    fn beat() -> Int {
+      let knocks = emit wire.take(512)
+      let w = effect spawn Worker with { } undo w.dispose()
+      let r = emit w.task.run("x")
+      return 0
+    }
+  }
+}
+'''
+
+
+@pytest.mark.parametrize("source,reached", [
+    (HELPER_EXTERN, "`wire.take`, `helper()`"),
+    (RESOLVED_RECEIVER, "`wire.take`, `Task.run`"),
+])
+def test_a_key_reached_any_other_way_stays_unnameable(tmp_path, source, reached):
+    """`emission[wire.take]` covers `emit wire.take(...)` and nothing else: a
+    reached fn whose extern declares `emission[wire]`, or a resolved-receiver
+    crossing whose op declares `emission[wire]`, puts `wire` in the method's
+    reach with no verb to name it by, so the key stays uncovered and the
+    refusal is the one origin/main gives."""
+    game = tmp_path / "game.rvl"
+    game.write_text(source, encoding="utf-8")
+    error = _refusal(game)
+    assert error.code == "G4"
+    assert ("`Beat.beat` is declared `emission[wire.take]`, but this "
+            f"implementation emits through `wire` (reaching {reached})"
+            in str(error)), str(error)
+
+
 def test_witnessed_with_a_token_that_is_not_a_verb_is_refused():
     with pytest.raises(RevlError) as caught:
         compile_source(WITNESSED.replace("DECL", "witnessed[j.other]"),

@@ -340,6 +340,7 @@ pub struct Ac {
     areach: Vec<String>,
     aops: Vec<String>,
     avals: Vec<String>,
+    unnamed: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -12584,11 +12585,11 @@ fn any_in(xs: &[String], set: &[String]) -> bool {
 }
 
 fn empty_ac() -> Ac {
-    return Ac { msg: String::from(""), tag: String::from(""), labels: vec![], ecaps: vec![], areach: vec![], aops: vec![], avals: vec![] };
+    return Ac { msg: String::from(""), tag: String::from(""), labels: vec![], ecaps: vec![], areach: vec![], aops: vec![], avals: vec![], unnamed: vec![] };
 }
 
 fn ac_refuse(a: Ac, tag: String, m: String) -> Ac {
-    return Ac { msg: m, tag: tag, labels: a.labels.clone(), ecaps: a.ecaps.clone(), areach: a.areach.clone(), aops: a.aops.clone(), avals: a.avals.clone() };
+    return Ac { msg: m, tag: tag, labels: a.labels.clone(), ecaps: a.ecaps.clone(), areach: a.areach.clone(), aops: a.aops.clone(), avals: a.avals.clone(), unnamed: a.unnamed.clone() };
 }
 
 fn find_msig(svc: SvcD, nm: &str, i: i64) -> MSig {
@@ -12645,7 +12646,7 @@ fn note_host_emission(s: Stmt, cx: Ctx__m2, a: Ac) -> Ac {
     if (!host_emit_head(s.e.clone(), cx.clone())) {
         return a;
     }
-    return Ac { msg: a.msg.clone(), tag: a.tag.clone(), labels: union_into(a.labels.clone(), &(vec![String::from("a host emission")])), ecaps: a.ecaps.clone(), areach: a.areach.clone(), aops: a.aops.clone(), avals: a.avals.clone() };
+    return Ac { msg: a.msg.clone(), tag: a.tag.clone(), labels: union_into(a.labels.clone(), &(vec![String::from("a host emission")])), ecaps: a.ecaps.clone(), areach: a.areach.clone(), aops: a.aops.clone(), avals: a.avals.clone(), unnamed: a.unnamed.clone() };
 }
 
 fn walk_one_stmt(s: Stmt, cx: Ctx__m2, a: Ac) -> Ac {
@@ -13815,7 +13816,7 @@ fn is_value_label(l: &str) -> bool {
 }
 
 fn ac_labels(a: Ac, ls: Vec<String>) -> Ac {
-    return Ac { msg: a.msg.clone(), tag: a.tag.clone(), labels: ls, ecaps: a.ecaps.clone(), areach: a.areach.clone(), aops: a.aops.clone(), avals: a.avals.clone() };
+    return Ac { msg: a.msg.clone(), tag: a.tag.clone(), labels: ls, ecaps: a.ecaps.clone(), areach: a.areach.clone(), aops: a.aops.clone(), avals: a.avals.clone(), unnamed: a.unnamed.clone() };
 }
 
 fn order_stmt_labels(before: Vec<String>, grown: &[String], step: bool) -> Vec<String> {
@@ -14025,10 +14026,10 @@ fn handle_emit(h: String, key: &str, op: &str, args: &[Expr], marked: bool, cx: 
     None => String::from(""),
     _ => unreachable!(),
 };
-        na = Ac { msg: na.msg.clone(), tag: na.tag.clone(), labels: union_into(na.labels.clone(), &(vec![(svcName.revl_concat(".")).revl_concat(&op)])), ecaps: union_into(na.ecaps.clone(), &(if (decl.caps.revl_length() > 0i64) { decl.caps } else { vec![String::from("*")] })), areach: na.areach.clone(), aops: na.aops.clone(), avals: na.avals.clone() };
+        na = Ac { msg: na.msg.clone(), tag: na.tag.clone(), labels: union_into(na.labels.clone(), &(vec![(svcName.revl_concat(".")).revl_concat(&op)])), ecaps: union_into(na.ecaps.clone(), &(if (decl.caps.revl_length() > 0i64) { decl.caps } else { vec![String::from("*")] })), areach: na.areach.clone(), aops: na.aops.clone(), avals: na.avals.clone(), unnamed: union_into(na.unnamed.clone(), &decl.caps) };
     }
     if (decl.isAsync && (!cx.underArrow)) {
-        na = Ac { msg: String::from(""), tag: String::from(""), labels: na.labels.clone(), ecaps: na.ecaps.clone(), areach: na.areach.clone(), aops: union_into(na.aops.clone(), &(vec![(((h.revl_concat(".")).revl_concat(&key)).revl_concat(".")).revl_concat(&op)])), avals: na.avals.clone() };
+        na = Ac { msg: String::from(""), tag: String::from(""), labels: na.labels.clone(), ecaps: na.ecaps.clone(), areach: na.areach.clone(), aops: union_into(na.aops.clone(), &(vec![(((h.revl_concat(".")).revl_concat(&key)).revl_concat(".")).revl_concat(&op)])), avals: na.avals.clone(), unnamed: na.unnamed.clone() };
     }
     return walk_args(args, marked, cx, na);
 }
@@ -14171,10 +14172,10 @@ fn req_call(root_: String, meth: &str, args: &[Expr], marked: bool, cx: Ctx__m2,
     }
     let mut na = a.clone();
     if (decl.isEm && marked) {
-        na = Ac { msg: String::from(""), tag: String::from(""), labels: union_into(na.labels.clone(), &(vec![(root_.revl_concat(".")).revl_concat(&meth)])), ecaps: union_into(na.ecaps.clone(), &(vec![root_.clone()])), areach: na.areach.clone(), aops: na.aops.clone(), avals: na.avals.clone() };
+        na = Ac { msg: String::from(""), tag: String::from(""), labels: union_into(na.labels.clone(), &(vec![(root_.revl_concat(".")).revl_concat(&meth)])), ecaps: union_into(na.ecaps.clone(), &(vec![root_.clone()])), areach: na.areach.clone(), aops: na.aops.clone(), avals: na.avals.clone(), unnamed: na.unnamed.clone() };
     }
     if (decl.isAsync && (!cx.underArrow)) {
-        na = Ac { msg: String::from(""), tag: String::from(""), labels: na.labels.clone(), ecaps: na.ecaps.clone(), areach: na.areach.clone(), aops: union_into(na.aops.clone(), &(vec![(root_.revl_concat(".")).revl_concat(&meth)])), avals: na.avals.clone() };
+        na = Ac { msg: String::from(""), tag: String::from(""), labels: na.labels.clone(), ecaps: na.ecaps.clone(), areach: na.areach.clone(), aops: union_into(na.aops.clone(), &(vec![(root_.revl_concat(".")).revl_concat(&meth)])), avals: na.avals.clone(), unnamed: na.unnamed.clone() };
     }
     return walk_args(args, marked, cx, na);
 }
@@ -14238,10 +14239,10 @@ fn fn_call(name: String, args: &[Expr], marked: bool, cx: Ctx__m2, a: Ac) -> Ac 
         }
     }
     if contains__m2(&cx.emittingNames, &name) {
-        na = Ac { msg: String::from(""), tag: String::from(""), labels: union_into(na.labels.clone(), &(vec![name.revl_concat("()")])), ecaps: union_into(na.ecaps.clone(), &caps_of(cx.caps.clone(), name.clone())), areach: na.areach.clone(), aops: na.aops.clone(), avals: na.avals.clone() };
+        na = Ac { msg: String::from(""), tag: String::from(""), labels: union_into(na.labels.clone(), &(vec![name.revl_concat("()")])), ecaps: union_into(na.ecaps.clone(), &caps_of(cx.caps.clone(), name.clone())), areach: na.areach.clone(), aops: na.aops.clone(), avals: na.avals.clone(), unnamed: union_into(na.unnamed.clone(), &caps_of(cx.caps.clone(), name.clone())) };
     }
     if contains__m2(&cx.colored, &name) {
-        na = Ac { msg: String::from(""), tag: String::from(""), labels: na.labels.clone(), ecaps: na.ecaps.clone(), areach: union_into(na.areach.clone(), &(vec![name.clone()])), aops: na.aops.clone(), avals: na.avals.clone() };
+        na = Ac { msg: String::from(""), tag: String::from(""), labels: na.labels.clone(), ecaps: na.ecaps.clone(), areach: union_into(na.areach.clone(), &(vec![name.clone()])), aops: na.aops.clone(), avals: na.avals.clone(), unnamed: na.unnamed.clone() };
     }
     let wa = walk_args(args, marked, cx.clone(), na.clone());
     if (wa.msg != "") {
@@ -14267,10 +14268,10 @@ fn var_check(name: String, cx: Ctx__m2, a: Ac) -> Ac {
         return ac_refuse(a, String::from("G4"), emission_value_msg(&name, &evx));
     }
     if contains__m2(&cx.emittingNames, &name) {
-        na = Ac { msg: String::from(""), tag: String::from(""), labels: union_into(na.labels.clone(), &(vec![name.revl_concat(" (passed as a function value)")])), ecaps: union_into(na.ecaps.clone(), &union_into(caps_of(cx.caps.clone(), name.clone()), &(vec![String::from("*")]))), areach: na.areach.clone(), aops: na.aops.clone(), avals: na.avals.clone() };
+        na = Ac { msg: String::from(""), tag: String::from(""), labels: union_into(na.labels.clone(), &(vec![name.revl_concat(" (passed as a function value)")])), ecaps: union_into(na.ecaps.clone(), &union_into(caps_of(cx.caps.clone(), name.clone()), &(vec![String::from("*")]))), areach: na.areach.clone(), aops: na.aops.clone(), avals: na.avals.clone(), unnamed: union_into(na.unnamed.clone(), &caps_of(cx.caps.clone(), name.clone())) };
     }
     if contains__m2(&cx.colored, &name) {
-        na = Ac { msg: String::from(""), tag: String::from(""), labels: na.labels.clone(), ecaps: na.ecaps.clone(), areach: na.areach.clone(), aops: na.aops.clone(), avals: union_into(na.avals.clone(), &(vec![name.clone()])) };
+        na = Ac { msg: String::from(""), tag: String::from(""), labels: na.labels.clone(), ecaps: na.ecaps.clone(), areach: na.areach.clone(), aops: na.aops.clone(), avals: union_into(na.avals.clone(), &(vec![name.clone()])), unnamed: na.unnamed.clone() };
     }
     if (!bare_declared(cx.clone(), &name)) {
         return g1_refuse(cx, &name, na);
@@ -14609,8 +14610,8 @@ fn field_check(target: Expr, marked: bool, cx: Ctx__m2, a: Ac) -> Ac {
 };
 }
 
-fn verb_covered(cap: &str, labels: &[String], caps: &[String]) -> bool {
-    if (cap == "*") {
+fn verb_covered(cap: &str, labels: &[String], caps: &[String], unnamed: &[String]) -> bool {
+    if ((cap == "*") || contains__m2(unnamed, cap)) {
         return false;
     }
     let pre = cap.revl_concat(".");
@@ -14628,11 +14629,11 @@ fn verb_covered(cap: &str, labels: &[String], caps: &[String]) -> bool {
     return seen;
 }
 
-fn drop_verb_covered(extra: &[String], labels: &[String], caps: &[String]) -> Vec<String> {
+fn drop_verb_covered(extra: &[String], labels: &[String], caps: &[String], unnamed: &[String]) -> Vec<String> {
     let mut out: Vec<String> = vec![];
     let mut i = 0i64;
     while (i < extra.revl_length()) {
-        if (!verb_covered(&(extra)[(i) as usize], labels, caps)) {
+        if (!verb_covered(&(extra)[(i) as usize], labels, caps, unnamed)) {
             out.push((extra)[(i) as usize].clone());
         }
         i = (i).checked_add(1i64).expect("revl: Int overflow");
@@ -14645,7 +14646,7 @@ fn g4_verdict(svcName: &str, mname: &str, decl: MSig, a: Ac) -> String {
         return ((((String::from("`").revl_concat(&svcName)).revl_concat(".")).revl_concat(&mname)).revl_concat("` is declared plain, but this implementation reaches ")).revl_concat(&quote_join(&a.labels));
     }
     if (decl.isEm && (decl.caps.revl_length() > 0i64)) {
-        let extra = sort_strs(&drop_verb_covered(&minus_list(&a.ecaps, &decl.caps), &a.labels, &decl.caps));
+        let extra = sort_strs(&drop_verb_covered(&minus_list(&a.ecaps, &decl.caps), &a.labels, &decl.caps, &a.unnamed));
         if (extra.revl_length() > 0i64) {
             let mut msg = (((((String::from("`").revl_concat(&svcName)).revl_concat(".")).revl_concat(&mname)).revl_concat("` is declared `emission[")).revl_concat(&comma_join(&decl.caps))).revl_concat("]`, but this implementation emits through ");
             let mut i = 0i64;
@@ -14998,7 +14999,7 @@ fn svc_recv_note(recv: Expr, op: &str, cx: Ctx__m2, a: Ac) -> Ac {
         return a;
     }
     let label = (parse_head(infer(recv.clone(), cx.svcTys.clone())).revl_concat(".")).revl_concat(&op);
-    return Ac { msg: a.msg.clone(), tag: a.tag.clone(), labels: union_into(a.labels.clone(), &(vec![label])), ecaps: union_into(a.ecaps.clone(), &(if (decl.caps.revl_length() > 0i64) { decl.caps } else { vec![String::from("*")] })), areach: a.areach.clone(), aops: a.aops.clone(), avals: a.avals.clone() };
+    return Ac { msg: a.msg.clone(), tag: a.tag.clone(), labels: union_into(a.labels.clone(), &(vec![label])), ecaps: union_into(a.ecaps.clone(), &(if (decl.caps.revl_length() > 0i64) { decl.caps } else { vec![String::from("*")] })), areach: a.areach.clone(), aops: a.aops.clone(), avals: a.avals.clone(), unnamed: union_into(a.unnamed.clone(), &decl.caps) };
 }
 
 fn ctx_svc(cx: Ctx__m2, tys: Vec<Bind>) -> Ctx__m2 {
