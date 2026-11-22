@@ -1637,6 +1637,27 @@ fn drop_last(ss: List[Stmt]) -> List[Stmt] {
   return out
 }
 
+// A destructuring `let` (`let { a, b } = r`, `let [h, ...t] = xs`) is read as
+// inert `skip` statements, one per name it binds, each carrying the name on its
+// `edge` as `pat:<name>`. Only the lexical acquire walk reads them (a bound name
+// shadows an `acquire` extern, lower.py `_stmt_binders`); every other walk
+// passes over a `skip` statement as before, so the pattern stays an inert read
+// for the rest of the gate.
+fn pattern_binders(ts: List[Token], lo: Int, hi: Int) -> List[Stmt] {
+  var out: List[Stmt] = [mkstmt("skip", int_lit0())]
+  var k = lo
+  while (k < hi && !atk(ts, k, "=")) {
+    let t = tkc(ts, k)
+    if (t.kind == "ident") {
+      out = out.push({ kind: "skip", e: int_lit0(), bind: "", spawnTarget: "",
+                       awaited: false, line: 0, inTimer: false, bindTy: "",
+                       edge: "pat:".concat(t.text) })
+    }
+    k += 1
+  }
+  return out
+}
+
 fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
   let t = tkc(ts, lo)
   if (t.kind == "kw" && (t.text == "let" || t.text == "var")) {
@@ -1647,7 +1668,12 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
       if (ta.ok) { ann = taint_strip(ta.ty) }
       eq = ta.i
     }
-    if (!atk(ts, eq, "=")) { return mk_srun([mkstmt("skip", int_lit0())], hi) }
+    if (!atk(ts, eq, "=")) {
+      if (atk(ts, lo + 1, "[") || atk(ts, lo + 1, "{")) {
+        return mk_srun(pattern_binders(ts, lo + 2, hi), hi)
+      }
+      return mk_srun([mkstmt("skip", int_lit0())], hi)
+    }
     let bn = tkc(ts, lo + 1).text
     var j = eq + 1
     var kd = "expr"
@@ -4066,7 +4092,10 @@ fn p_route_stmt(ts: List[Token], i: Int, end: Int, provh: List[Bind],
                        setup, iso, rts, icept, hoff, action)
   }
   if (rc.strat != "" && !contains(known_strategies(), rc.strat)) {
-    return mk_refuse(provs, setup, iso, rts,
+    // issue #3360: the route is kept, as lower.py's header stub keeps it, so
+    // the refused router is still a router and draws no G3 self-cycle
+    return mk_refuse(provs, setup, iso,
+      rts.push({ key: key, rlms: rc.rlms, strat: "" }),
       tagged("ROUTE", route_strategy_msg(rc.strat, key, cname)), ts, i)
   }
   return p_comp_body(ts, rc.i, end, provh, reqh, cname, provs, setup, iso,
@@ -6805,13 +6834,21 @@ fn acquire_extern_names(pg: Prog) -> List[Str] {
 // acquire externs), where the reference's `Env.in_provide_method` refuses it.
 type EvlR = { msg: Str, line: Int, bound: List[Str] }
 
-type EvlX = { cx: Ctx, sn: List[Str], mode: Str, aq: List[Str] }
+//
+// Issue #2985 widens the acquire mode with two things. `mode` "acquire" also
+// refuses a plain CALL of an `acquire` extern in a provide-method body (the
+// reference's `_acquire_call_refusal`; an arrow body is walked too) and the
+// direct bracketed acquisition there (item 386's "only `spawn`" rule, with the
+// item 397 lift for a result-declared verb on a host `Map`, `maps`). `mode`
+// "acquire_fn" is the module-`fn` value walk, which `where` words per fn and
+// which keeps the lexical scope the reference's fn walk now keeps.
+type EvlX = { cx: Ctx, sn: List[Str], mode: Str, aq: List[Str], where: Str,
+              maps: List[Str] }
 
 fn evl_hit(n: Str, x: EvlX, bound: List[Str]) -> Str {
-  if (x.mode == "acquire") {
+  if (evl_acq(x)) {
     if (!contains(x.aq, n) || contains(bound, n)) { return "" }
-    return acquire_value_msg(n,
-      "inside a provide-method body, where only `spawn` may be acquired")
+    return acquire_value_msg(n, x.where)
   }
   let ext = eval_of(x.cx, n)
   if (ext == "" || !contains(x.sn, n) || contains(bound, n) || contains(x.cx.colored, n)) {
@@ -6850,9 +6887,41 @@ fn evl_expr(e: Expr, x: EvlX, bound: List[Str]) -> Str {
 
 // a callee named by a bare name is a call, not a value
 fn evl_call(target: Expr, args: List[Expr], x: EvlX, bound: List[Str]) -> Str {
-  let t = dfr_callee_name(target) != "" ? "" : evl_expr(target, x, bound)
+  let callee = dfr_callee_name(target)
+  // issue #2985: in a provide-method body a call of an `acquire` extern is not
+  // an acquisition either (no bracket, no registered `undo`)
+  if (x.mode == "acquire" && callee != "" && contains(x.aq, callee)
+      && !contains(bound, callee)) {
+    return acquire_call_msg(callee)
+  }
+  let t = callee != "" ? "" : evl_expr(target, x, bound)
   if (t != "") { return t }
   return evl_list(args, 0, x, bound)
+}
+
+// The root of an `effect` bracket is its acquisition, not a value or a stray
+// call (lower.py's `_host_acquire_root`): only its arguments are read.
+fn evl_root(e: Expr, x: EvlX, bound: List[Str]) -> Str {
+  return match e {
+    Var(_) => "",
+    Call(c) => dfr_callee_name(c.target) != "" ? evl_list(c.args, 0, x, bound)
+      : evl_expr(e, x, bound),
+    _ => evl_expr(e, x, bound),
+  }
+}
+
+// lower.py `_acquire_call_refusal` (issue #2985).
+fn acquire_call_msg(n: Str) -> Str {
+  return "`acquire` extern `".concat(n)
+    .concat("` cannot be called inside a provide-method body, where only `spawn` may be acquired; its declared `undo` teardown would be dropped, leaving the acquisition irreversible (G4)")
+}
+
+// A bound `effect` in a provide-method body that is neither a `spawn` nor a
+// result-declared verb on a host `Map` (lower.py `_lower_provide`'s LetEffect
+// arm, items 386 and 397).
+fn evl_direct_acquire(kind: Str, bind: Str, target: Str, e: Expr, x: EvlX) -> Bool {
+  return x.mode == "acquire" && kind == "effect" && bind != ""
+    && target == "" && host_write_verb(e, x.maps) != "insert_if_absent"
 }
 
 fn evl_list(xs: List[Expr], i: Int, x: EvlX, bound: List[Str]) -> Str {
@@ -6893,6 +6962,51 @@ fn evl_blk(ls: List[ArmLetN], i: Int, tail: Expr, x: EvlX, bound: List[Str]) -> 
   return evl_blk(ls, i + 1, tail, x, bound.push(ls[i].name))
 }
 
+// The acquire modes keep a block arm's `let`s visible to the statement that
+// carries the `match` (issue #2985). The lets are hoisted ahead of it inside an
+// `arm_open`/`arm_close` pair, and that statement reads the arm's tail inline,
+// where the arm's own `let` is in scope in the reference. A name bound inside
+// the arm therefore leaves scope at its `arm_close` as a CARRIED name (`^name`),
+// visible to the next ordinary statement only. Within that one statement the
+// gate cannot tell which arm a read sits in, so a read in ANOTHER arm of the
+// same `match` is judged as if the arm's `let` were in scope: an under-refusal
+// the gate is allowed to give, pinned in tests/test_acquire_call_shapes_2985.py.
+fn evl_acq(x: EvlX) -> Bool {
+  return x.mode == "acquire" || x.mode == "acquire_fn" || x.mode == "acquire_undo"
+}
+
+fn evl_carry(bound: List[Str], m: Int) -> List[Str] {
+  var out = bound.slice(0, m)
+  var i = m
+  while (i < bound.length()) {
+    let n = bound[i]
+    out = out.push(n.slice(0, 1) == "^" ? n : "^".concat(n))
+    i += 1
+  }
+  return out
+}
+
+fn evl_visible(bound: List[Str]) -> List[Str] {
+  var out = bound
+  var i = 0
+  while (i < bound.length()) {
+    let n = bound[i]
+    if (n.slice(0, 1) == "^") { out = out.push(n.slice(1, n.length())) }
+    i += 1
+  }
+  return out
+}
+
+fn evl_uncarry(bound: List[Str]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < bound.length()) {
+    if (bound[i].slice(0, 1) != "^") { out = out.push(bound[i]) }
+    i += 1
+  }
+  return out
+}
+
 // `marks` holds the scope's length at each open block (`scoped`, `arm_scoped`):
 // a name bound inside leaves scope where the block ends.
 fn evl_stmts(ss: List[Stmt], i: Int, x: EvlX, bound: List[Str], marks: List[Int]) -> EvlR {
@@ -6904,20 +7018,35 @@ fn evl_stmts(ss: List[Stmt], i: Int, x: EvlX, bound: List[Str], marks: List[Int]
   }
   if ((k == "scope_close" || k == "arm_close") && marks.length() > 0) {
     // an `arm_close` carries the arm's tail, read in the arm's scope
-    let t = k == "arm_close" ? evl_expr(s.e, x, bound) : ""
+    let t = k == "arm_close" ? evl_expr(s.e, x, evl_visible(bound)) : ""
     if (t != "") { return { msg: t, line: s.line, bound: bound } }
     let m = marks[marks.length() - 1]
-    return evl_stmts(ss, i + 1, x, bound.slice(0, m), marks.slice(0, marks.length() - 1))
+    let left = k == "arm_close" && evl_acq(x) ? evl_carry(bound, m) : bound.slice(0, m)
+    return evl_stmts(ss, i + 1, x, left, marks.slice(0, marks.length() - 1))
   }
   // Issue #2972: in the acquire mode the ROOT of an effect statement is an
   // acquisition, not a value, and the reference exempts it by identity
   // (`_host_acquire_root`). Its call spelling is already skipped by
   // `evl_call`; a bare-name root (`let h = effect open_sock`) is skipped here so
   // it keeps the direct-spelling verdict the gate's own slice decides.
-  let is_acq_root = x.mode == "acquire" && k == "effect" && dfr_callee_name(s.e) != ""
-  let r = is_acq_root ? "" : evl_expr(s.e, x, bound)
+  if (k == "skip" && starts_with(s.edge, "pat:")) {
+    return evl_stmts(ss, i + 1, x, bound.push(s.edge.slice(4, s.edge.length())), marks)
+  }
+  if (evl_direct_acquire(k, s.bind, s.spawnTarget, s.e, x)) {
+    return { msg: "only `spawn` may be acquired inside a provide-method body",
+             line: s.line, bound: bound }
+  }
+  let seen = evl_acq(x) ? evl_visible(bound) : bound
+  // a teardown slot lowers under its own mode in the reference (item 308's
+  // re-mint rule judges a call there), so it is not a stray call
+  let xs: EvlX = x.mode == "acquire" && k == "undo"
+    ? { cx: x.cx, sn: x.sn, mode: "acquire_undo", aq: x.aq, where: x.where,
+        maps: x.maps } : x
+  let r = x.mode == "acquire" && k == "effect" ? evl_root(s.e, x, seen)
+    : evl_expr(s.e, xs, seen)
   if (r != "") { return { msg: r, line: s.line, bound: bound } }
-  return evl_stmts(ss, i + 1, x, s.bind == "" ? bound : bound.push(s.bind), marks)
+  let next = evl_acq(x) ? evl_uncarry(bound) : bound
+  return evl_stmts(ss, i + 1, x, s.bind == "" ? next : next.push(s.bind), marks)
 }
 
 fn evl_any(sn: List[Str], cx: Ctx, i: Int) -> Bool {
@@ -6929,7 +7058,8 @@ fn evl_any(sn: List[Str], cx: Ctx, i: Int) -> Bool {
 // The component's lexical emission-value verdict: setup first, then each
 // provide method from setup's bindings plus its own parameters.
 fn evl_component(comp: CompD, cx: Ctx) -> Verd {
-  let x: EvlX = { cx: cx, sn: cx.scopeNames, mode: "emission", aq: [] }
+  let x: EvlX = { cx: cx, sn: cx.scopeNames, mode: "emission", aq: [], where: "",
+                  maps: [] }
   if (!evl_any(x.sn, cx, 0)) { return no_verd() }
   let s = evl_stmts(comp.setup, 0, x, [], [])
   if (s.msg != "") {
@@ -6956,12 +7086,16 @@ fn evl_component(comp: CompD, cx: Ctx) -> Verd {
 // (`Env.in_provide_method`), because that is where the direct acquisition is
 // refused; the activation body admits the acquisition, so it keeps the value.
 // Setup's bindings are still in scope in every method, so they are collected
-// first (an empty `aq` makes that walk a no-op that only reports `bound`).
+// first (an empty `aq` makes that walk a no-op that only reports `bound`). The
+// walk also judges the direct acquisition, which needs no `acquire` extern.
 fn aqv_component(comp: CompD, cx: Ctx, aq: List[Str]) -> Verd {
-  if (aq.length() == 0) { return no_verd() }
-  let x0: EvlX = { cx: cx, sn: [], mode: "acquire", aq: [] }
+  let where = "inside a provide-method body, where only `spawn` may be acquired"
+  // setup is walked only for its bindings (`aq` empty): a mode that judges no
+  // statement of its own, so the activation body keeps its direct acquisition
+  let x0: EvlX = { cx: cx, sn: [], mode: "acquire_fn", aq: [], where: where, maps: [] }
   let s = evl_stmts(comp.setup, 0, x0, [], [])
-  let x: EvlX = { cx: cx, sn: [], mode: "acquire", aq: aq }
+  let x: EvlX = { cx: cx, sn: [], mode: "acquire", aq: aq, where: where,
+                  maps: map_handles(comp.setup, 0, []) }
   var pi = 0
   while (pi < comp.provs.length()) {
     let ms = comp.provs[pi].methods
@@ -6981,33 +7115,23 @@ fn aqv_component(comp: CompD, cx: Ctx, aq: List[Str]) -> Verd {
 // Issue #2972: the module-`fn` twin (lower.py's
 // `_refuse_effect_position_bound_externs_in_fn_body`): an `acquire` extern read
 // as a value in a `fn` body loses the teardown registration exactly as the
-// direct call there does, so it is refused by name. The reference's walk over a
-// `fn` body keeps no binding scope, so neither does this one, and a `let` in the
-// body named like the extern shadows it nowhere on either side. Tests are NOT
-// walked, matching the reference's `check_acquire_values`.
-// The statement walk for the fn pass: the first statement whose VALUE position
-// names an acquire extern. `col_values` is the gate's own no-scope collector
-// (the same one `_calls_in(values=...)` mirrors), so a bare call head is the
-// callee and never a value, and a `let` in the body does NOT shadow the extern
-// here, exactly as in the reference's walk.
-fn aqv_fn_stmts(ss: List[Stmt], i: Int, aq: List[Str], where: Str) -> Verd {
-  if (i >= ss.length()) { return no_verd() }
-  let hits = col_values(ss[i].e, aq, [])
-  if (hits.length() > 0) {
-    return mk_verd(tagged("G4", acquire_value_msg(hits[0], where)), ss[i].line)
-  }
-  return aqv_fn_stmts(ss, i + 1, aq, where)
-}
-
-fn aqv_fns(pg: Prog, aq: List[Str]) -> Verd {
+// direct call there does, so it is refused by name. Issue #2985: a name the body
+// binds in scope at the read (a parameter, a `let`, a `for` element, an arrow
+// parameter, a match payload) is that binding, not the extern, so the walk is
+// the same lexical one the component bodies use (`evl_stmts`, mode
+// "acquire_fn"), seeded with the fn's parameters. Tests are NOT walked,
+// matching the reference's `check_acquire_values`.
+fn aqv_fns(pg: Prog, aq: List[Str], base: Ctx) -> Verd {
   if (aq.length() == 0) { return no_verd() }
   var i = 0
   while (i < pg.fns.length()) {
     let f = pg.fns[i]
     if (!f.isEmExtern && !f.isAsyncExtern) {
-      let v = aqv_fn_stmts(f.body, 0, aq,
-                           "in the body of fn `".concat(f.name).concat("`"))
-      if (v.v != "") { return v }
+      let x: EvlX = { cx: base, sn: [], mode: "acquire_fn", aq: aq,
+                      where: "in the body of fn `".concat(f.name).concat("`"),
+                      maps: [] }
+      let r = evl_stmts(f.body, 0, x, param_names(f.params), [])
+      if (r.msg != "") { return mk_verd(tagged("G4", r.msg), r.line) }
     }
     i += 1
   }
@@ -7717,32 +7841,34 @@ fn dfr_callee_name(e: Expr) -> Str {
 // The first refusal one expression holds, or "". `calls` is false in a
 // component, whose calls carry the `emit` marker and are enqueued.
 fn dfr_expr(e: Expr, dn: List[Str], emissionValues: Map[Str, Str], where: Str,
-            inArrow: Bool, calls: Bool) -> Str {
+            inArrow: Bool, calls: Bool, bound: List[Str]) -> Str {
   return match e {
+    // issue #3354: a local in scope (`bound`) shadows an emission extern
     Var(n) => contains(dn, n) ? dfr_value_msg(n, where)
-      : (mget_str(emissionValues, n) != ""
+      : (mget_str(emissionValues, n) != "" && !contains(bound, n)
          ? emission_value_msg(n, mget_str(emissionValues, n)) : ""),
-    Call(c) => dfr_call(c.target, c.args, dn, emissionValues, where, inArrow, calls),
-    OptCall(c) => dfr_call(c.target, c.args, dn, emissionValues, where, inArrow, calls),
-    Field(f) => dfr_expr(f.target, dn, emissionValues, where, inArrow, calls),
-    OptField(f) => dfr_expr(f.target, dn, emissionValues, where, inArrow, calls),
-    Bin(b) => dfr_first(dfr_expr(b.l, dn, emissionValues, where, inArrow, calls),
-                        dfr_expr(b.r, dn, emissionValues, where, inArrow, calls)),
-    Un(u) => dfr_expr(u.e, dn, emissionValues, where, inArrow, calls),
-    Emit(u) => dfr_expr(u.e, dn, emissionValues, where, inArrow, calls),
-    Index(x) => dfr_first(dfr_expr(x.target, dn, emissionValues, where, inArrow, calls),
-                          dfr_expr(x.idx, dn, emissionValues, where, inArrow, calls)),
-    If(x) => dfr_first(dfr_expr(x.cond, dn, emissionValues, where, inArrow, calls),
-                       dfr_first(dfr_expr(x.then_, dn, emissionValues, where, inArrow, calls),
-                                 dfr_expr(x.els, dn, emissionValues, where, inArrow, calls))),
-    Lst(l) => dfr_list(l.items, 0, dn, emissionValues, where, inArrow, calls),
-    Rec(r) => dfr_inits(r.fields, 0, dn, emissionValues, where, inArrow, calls),
-    Arrow(ar) => dfr_arrow(ar.body, dn, emissionValues, where, calls),
-    Match(m) => dfr_first(dfr_expr(m.scrut, dn, emissionValues, where, inArrow, calls),
-                          dfr_arms(m.arms, 0, dn, emissionValues, where, inArrow, calls)),
-    Templ(t) => dfr_parts(t.parts, 0, dn, emissionValues, where, inArrow, calls),
-    RecUpd(r) => dfr_first(dfr_expr(r.base, dn, emissionValues, where, inArrow, calls),
-                           dfr_inits(r.upds, 0, dn, emissionValues, where, inArrow, calls)),
+    Call(c) => dfr_call(c.target, c.args, dn, emissionValues, where, inArrow, calls, bound),
+    OptCall(c) => dfr_call(c.target, c.args, dn, emissionValues, where, inArrow, calls, bound),
+    Field(f) => dfr_expr(f.target, dn, emissionValues, where, inArrow, calls, bound),
+    OptField(f) => dfr_expr(f.target, dn, emissionValues, where, inArrow, calls, bound),
+    Bin(b) => dfr_first(dfr_expr(b.l, dn, emissionValues, where, inArrow, calls, bound),
+                        dfr_expr(b.r, dn, emissionValues, where, inArrow, calls, bound)),
+    Un(u) => dfr_expr(u.e, dn, emissionValues, where, inArrow, calls, bound),
+    Emit(u) => dfr_expr(u.e, dn, emissionValues, where, inArrow, calls, bound),
+    Index(x) => dfr_first(dfr_expr(x.target, dn, emissionValues, where, inArrow, calls, bound),
+                          dfr_expr(x.idx, dn, emissionValues, where, inArrow, calls, bound)),
+    If(x) => dfr_first(dfr_expr(x.cond, dn, emissionValues, where, inArrow, calls, bound),
+                       dfr_first(dfr_expr(x.then_, dn, emissionValues, where, inArrow, calls, bound),
+                                 dfr_expr(x.els, dn, emissionValues, where, inArrow, calls, bound))),
+    Lst(l) => dfr_list(l.items, 0, dn, emissionValues, where, inArrow, calls, bound),
+    Rec(r) => dfr_inits(r.fields, 0, dn, emissionValues, where, inArrow, calls, bound),
+    Arrow(ar) => dfr_arrow(ar.body, dn, emissionValues, where, calls,
+                           union_into(bound, param_names(ar.params))),
+    Match(m) => dfr_first(dfr_expr(m.scrut, dn, emissionValues, where, inArrow, calls, bound),
+                          dfr_arms(m.arms, 0, dn, emissionValues, where, inArrow, calls, bound)),
+    Templ(t) => dfr_parts(t.parts, 0, dn, emissionValues, where, inArrow, calls, bound),
+    RecUpd(r) => dfr_first(dfr_expr(r.base, dn, emissionValues, where, inArrow, calls, bound),
+                           dfr_inits(r.upds, 0, dn, emissionValues, where, inArrow, calls, bound)),
     _ => "",
   }
 }
@@ -7751,11 +7877,14 @@ fn dfr_first(a: Str, b: Str) -> Str { return a != "" ? a : b }
 
 // An arrow whose body calls an emission callable (issue #2842) is refused at
 // the arrow, naming the first such callee by name; otherwise its body is walked.
+// `bound` already holds the arrow's own parameters. A CALL head is judged by
+// name, as the reference judges it: a body that binds a name and calls it is
+// refused by the G6 shadowing rule anyway.
 fn dfr_arrow(body: Expr, dn: List[Str], emissionValues: Map[Str, Str],
-             where: Str, calls: Bool) -> Str {
+             where: Str, calls: Bool, bound: List[Str]) -> Str {
   let hit = first_mapped(sort_strs(calls_in(body, [])), emissionValues, 0)
   if (hit != "") { return emission_arrow_msg(hit, mget_str(emissionValues, hit)) }
-  return dfr_expr(body, dn, emissionValues, where, true, calls)
+  return dfr_expr(body, dn, emissionValues, where, true, calls, bound)
 }
 
 fn first_mapped(xs: List[Str], m: Map[Str, Str], i: Int) -> Str {
@@ -7766,61 +7895,85 @@ fn first_mapped(xs: List[Str], m: Map[Str, Str], i: Int) -> Str {
 
 fn dfr_call(target: Expr, args: List[Expr], dn: List[Str],
             emissionValues: Map[Str, Str], where: Str,
-            inArrow: Bool, calls: Bool) -> Str {
+            inArrow: Bool, calls: Bool, bound: List[Str]) -> Str {
   let head = dfr_callee_name(target)
   if (head != "" && contains(dn, head)) {
     // the CALL position: refused in a fn/test body, enqueued in a component
     if (calls) { return dfr_call_msg(head, where, inArrow) }
-    return dfr_list(args, 0, dn, emissionValues, where, inArrow, calls)
+    return dfr_list(args, 0, dn, emissionValues, where, inArrow, calls, bound)
   }
-  let t = head != "" ? "" : dfr_expr(target, dn, emissionValues, where, inArrow, calls)
+  let t = head != "" ? "" : dfr_expr(target, dn, emissionValues, where, inArrow, calls, bound)
   if (t != "") { return t }
-  return dfr_list(args, 0, dn, emissionValues, where, inArrow, calls)
+  return dfr_list(args, 0, dn, emissionValues, where, inArrow, calls, bound)
 }
 
 fn dfr_list(xs: List[Expr], i: Int, dn: List[Str], emissionValues: Map[Str, Str],
             where: Str, inArrow: Bool,
-            calls: Bool) -> Str {
+            calls: Bool, bound: List[Str]) -> Str {
   if (i >= xs.length()) { return "" }
-  let r = dfr_expr(xs[i], dn, emissionValues, where, inArrow, calls)
+  let r = dfr_expr(xs[i], dn, emissionValues, where, inArrow, calls, bound)
   if (r != "") { return r }
-  return dfr_list(xs, i + 1, dn, emissionValues, where, inArrow, calls)
+  return dfr_list(xs, i + 1, dn, emissionValues, where, inArrow, calls, bound)
 }
 
 fn dfr_inits(xs: List[InitN], i: Int, dn: List[Str], emissionValues: Map[Str, Str],
              where: Str, inArrow: Bool,
-             calls: Bool) -> Str {
+             calls: Bool, bound: List[Str]) -> Str {
   if (i >= xs.length()) { return "" }
-  let r = dfr_expr(xs[i].value, dn, emissionValues, where, inArrow, calls)
+  let r = dfr_expr(xs[i].value, dn, emissionValues, where, inArrow, calls, bound)
   if (r != "") { return r }
-  return dfr_inits(xs, i + 1, dn, emissionValues, where, inArrow, calls)
+  return dfr_inits(xs, i + 1, dn, emissionValues, where, inArrow, calls, bound)
 }
 
 fn dfr_arms(xs: List[ArmN], i: Int, dn: List[Str], emissionValues: Map[Str, Str],
             where: Str, inArrow: Bool,
-            calls: Bool) -> Str {
+            calls: Bool, bound: List[Str]) -> Str {
   if (i >= xs.length()) { return "" }
-  let r = dfr_expr(xs[i].body, dn, emissionValues, where, inArrow, calls)
+  let ab = xs[i].bind == "" ? bound : bound.push(xs[i].bind)
+  let r = dfr_expr(xs[i].body, dn, emissionValues, where, inArrow, calls, ab)
   if (r != "") { return r }
-  return dfr_arms(xs, i + 1, dn, emissionValues, where, inArrow, calls)
+  return dfr_arms(xs, i + 1, dn, emissionValues, where, inArrow, calls, bound)
 }
 
 fn dfr_parts(xs: List[PartN], i: Int, dn: List[Str], emissionValues: Map[Str, Str],
              where: Str, inArrow: Bool,
-             calls: Bool) -> Str {
+             calls: Bool, bound: List[Str]) -> Str {
   if (i >= xs.length()) { return "" }
-  let r = dfr_expr(xs[i].e, dn, emissionValues, where, inArrow, calls)
+  let r = dfr_expr(xs[i].e, dn, emissionValues, where, inArrow, calls, bound)
   if (r != "") { return r }
-  return dfr_parts(xs, i + 1, dn, emissionValues, where, inArrow, calls)
+  return dfr_parts(xs, i + 1, dn, emissionValues, where, inArrow, calls, bound)
 }
 
 fn dfr_stmts(ss: List[Stmt], i: Int, dn: List[Str],
              emissionValues: Map[Str, Str], where: Str,
              calls: Bool) -> Verd {
+  return dfr_scoped(ss, i, dn, emissionValues, where, calls, [], [])
+}
+
+// `dfr_stmts` with the names in scope (issue #3354), kept as `evl_stmts` keeps
+// them: a binding statement binds from the next statement to the end of its
+// block, and `marks` holds the scope's length at each open block. Only the
+// emission-value check reads `bound`; the deferred checks stay by name, as the
+// reference's are.
+fn dfr_scoped(ss: List[Stmt], i: Int, dn: List[Str],
+              emissionValues: Map[Str, Str], where: Str,
+              calls: Bool, bound: List[Str], marks: List[Int]) -> Verd {
   if (i >= ss.length()) { return no_verd() }
-  let r = dfr_expr(ss[i].e, dn, emissionValues, where, false, calls)
-  if (r != "") { return mk_verd(tagged("G4", r), ss[i].line) }
-  return dfr_stmts(ss, i + 1, dn, emissionValues, where, calls)
+  let s = ss[i]
+  let k = s.kind
+  if (k == "scope_open" || k == "arm_open") {
+    return dfr_scoped(ss, i + 1, dn, emissionValues, where, calls, bound,
+                      marks.push(bound.length()))
+  }
+  let r = dfr_expr(s.e, dn, emissionValues, where, false, calls, bound)
+  if (r != "") { return mk_verd(tagged("G4", r), s.line) }
+  if ((k == "scope_close" || k == "arm_close") && marks.length() > 0) {
+    let m = marks[marks.length() - 1]
+    return dfr_scoped(ss, i + 1, dn, emissionValues, where, calls,
+                      bound.slice(0, m), marks.slice(0, marks.length() - 1))
+  }
+  return dfr_scoped(ss, i + 1, dn, emissionValues, where, calls,
+                    s.bind == "" ? bound : bound.push(s.bind), marks)
 }
 
 // The `test` blocks, in source order, as (name, body) pairs.
@@ -7900,8 +8053,10 @@ fn emission_value_reach_refusal(ts: List[Token], pg: Prog) -> Verd {
   while (i < pg.fns.length()) {
     let f = pg.fns[i]
     if (!f.isEmExtern && !f.isAsyncExtern) {
-      let v = dfr_stmts(f.body, 0, [], emissionValues,
-                        "the body of fn `".concat(f.name).concat("`"), false)
+      // its parameters shadow a same-named extern (issue #3354)
+      let v = dfr_scoped(f.body, 0, [], emissionValues,
+                         "the body of fn `".concat(f.name).concat("`"), false,
+                         param_names(f.params), [])
       if (v.v != "") { return v }
     }
     i += 1
@@ -21937,7 +22092,7 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   // reference decides it inside the same walk as #2842's emission values (its
   // `check_acquire_values` arm) and in the same stage, so it rides here.
   let aqNames = acquire_extern_names(pg)
-  let aqv = aqv_fns(pg, aqNames)
+  let aqv = aqv_fns(pg, aqNames, base)
   if (aqv.v != "") { return { done: true, refs: [aqv] } }
   // G4: a host acquire verb in a `fn` body a component reaches. Decided over
   // the whole program before any body is gated, exactly where `check_and_lower`

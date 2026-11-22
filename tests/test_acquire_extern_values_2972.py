@@ -24,16 +24,13 @@ identically and a reader of `--json` cannot tell which one bought the reach.
 Where the direct acquisition is ADMITTED, the value is not refused: the
 activation body keeps its bracket, and `spawn` keeps its request-scoped
 instance. A test body and a local binding named like the extern keep their own
-rules (the reference's fn walk keeps no binding scope, and the self-host's
-mirror reproduces that exactly).
+rules (a binding in scope at the read is that binding, in a method and in a
+module `fn`, on both compilers; issue #2985).
 
-The self-host difference this file pins is the DIRECT side: `selfhost/lower.rvl`
-does not implement the item-386 "only `spawn`" rule, so it admits the direct
-acquisition the value refusal inherits its category from. The value side is
-ported (the five forms below agree message for message). The pin is named
-`SELFHOST_GAPS` and it fails in BOTH directions: the day the gate learns the
-direct rule it refuses here, the entry is DELETED and the two compilers compare
-messages instead.
+The self-host gate agrees with the reference on every form below, message for
+message, including the DIRECT acquisition the value refusal inherits its category
+from (issue #2985 ported item 386's "only `spawn`" rule). The call shapes beside
+the value form are in `test_acquire_call_shapes_2985.py`.
 """
 
 import importlib.util
@@ -187,8 +184,8 @@ def test_a_method_local_named_like_the_extern_is_the_local():
 
 def test_a_test_body_keeps_its_own_rules():
     """Out of scope by design: the issue names component method bodies and the
-    module `fn`, and the fn walk (unlike a method) keeps no binding scope. A
-    test body is neither, and revl's test rules are unchanged."""
+    module `fn`. A test body is neither, and revl's test rules are
+    unchanged."""
     compile_source(
         _HOST
         + 'test "held" {\n  let f = open_sock\n  let h = f()\n}\n',
@@ -274,37 +271,13 @@ def test_the_self_host_admits_the_spawn_control(admit):
     ) == ""
 
 
-# The self-host differences this slice does NOT close, named rather than left
-# silent. Each entry is a program the reference refuses and the gate ADMITS,
-# with the reason it cannot be closed here. The convention is
-# `GENERIC_VARIANT_SILENT_ADMITS`'s in tests/test_selfhost_compile.py: keep the
-# entry, keep the test, and delete the entry the day the gap closes, so the
-# allowance only ever shrinks.
-SELFHOST_GAPS = {
-    "direct-method-acquisition":
-        "the item-386 rule (only `spawn` may be acquired inside a provide-method "
-        "body) is not ported to selfhost/lower.rvl, so the DIRECT spelling is "
-        "admitted there. The value refusal above inherits its category from "
-        "that rule and IS ported; the direct rule is a separate port (it also "
-        "needs item 397's result-declared host-verb lift, `insert_if_absent`). "
-        "Delete this entry when the direct rule lands.",
-}
-
-
-@pytest.mark.parametrize("name", sorted(SELFHOST_GAPS))
-def test_a_known_selfhost_gap_is_still_open(admit, name):
-    """The pin. It fails the day the gate refuses the direct acquisition: that
-    is a fix, not a regression, and the entry is DELETED rather than reworded.
-    The reference side is asserted first, so this can never pass by the
-    reference having changed its mind."""
-    assert name == "direct-method-acquisition"
+def test_the_self_host_refuses_the_direct_acquisition_like_the_reference(admit):
+    """The direct spelling the value refusal inherits its category from: the
+    item-386 rule, ported to the gate in issue #2985, so the two compilers
+    compare messages."""
     direct = _program("let h = effect open_sock() undo close_sock(h)\n"
                       "      return 1")
     err = _refuse(direct)
     assert err.message == ("only `spawn` may be acquired inside a "
                            "provide-method body")
-    assert admit(direct) == "", (
-        "the self-host gate now refuses the DIRECT acquisition in a "
-        "provide-method body. That closes the remaining gap: DELETE "
-        "`direct-method-acquisition` from SELFHOST_GAPS and compare the two "
-        f"messages instead ({SELFHOST_GAPS[name]!r}).")
+    assert _gate_message(admit(direct)) == err.message

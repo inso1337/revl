@@ -23,6 +23,12 @@
 // relative `.ts` specifier that resolves to a file the step was not given is an
 // error, because the page could not load it either; pass that file too.
 //
+// Three things are refused by name rather than converted or left alone: an enum
+// or a namespace that is not `declare`d, and a constructor parameter property
+// (none is erasable, so the module is no longer strip-only); and a dynamic
+// `import()` written with a template string (its specifier cannot be rewritten).
+// A `declare`d enum or namespace is erased whole and is not refused.
+//
 // Nothing is bundled: a bare specifier such as `cordis` is left for the page's
 // import map (docs/ts-runtime-contract.md, "The browser target").
 //
@@ -94,8 +100,18 @@ function rewriteSpecifiers(js, fromFile) {
       noteSpecifier(node.moduleSpecifier)
     }
     if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword &&
-        node.arguments.length === 1 && ts.isStringLiteral(node.arguments[0])) {
-      noteSpecifier(node.arguments[0])
+        node.arguments.length >= 1) {
+      const specifier = node.arguments[0]
+      if (ts.isStringLiteral(specifier)) {
+        noteSpecifier(specifier)
+      } else if (ts.isNoSubstitutionTemplateLiteral(specifier) || ts.isTemplateExpression(specifier)) {
+        // A template string is not a specifier node this step can rewrite, and
+        // leaving it would ship a `.ts` path the page cannot load.
+        throw new Error(
+          `${path.relative(process.cwd(), fromFile)}: a dynamic import written with a template ` +
+          `string (${specifier.getText(source)}) cannot be rewritten; write the specifier as a ` +
+          'plain string literal.')
+      }
     }
     ts.forEachChild(node, walk)
   }
@@ -107,8 +123,52 @@ function rewriteSpecifiers(js, fromFile) {
   return js
 }
 
+// An emitted module is strip-only TypeScript (docs/ts-runtime-contract.md,
+// rule 3): every type annotation can be deleted and nothing else changes.
+// `ts.transpileModule` is more generous than that and silently turns an enum, a
+// namespace or a parameter property into runtime code, which hides a module
+// that is no longer strip-only. Refuse each by name instead.
+function unerasable(text, fromFile) {
+  const source = ts.createSourceFile(fromFile, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  const found = []
+  const note = (node, what, advice) => {
+    const { line } = source.getLineAndCharacterOfPosition(node.getStart(source))
+    found.push(`  line ${line + 1}: ${what} is not erasable ` +
+      `TypeScript; ${advice}`)
+  }
+  const modifierFlags = ts.ModifierFlags.Public | ts.ModifierFlags.Private |
+    ts.ModifierFlags.Protected | ts.ModifierFlags.Readonly | ts.ModifierFlags.Override
+  const isDeclared = (node) =>
+    (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Ambient) !== 0
+  const walk = (node) => {
+    // An ambient declaration (`declare enum`, `declare namespace A.B`,
+    // `declare global`) is erased whole, and so is everything inside it, so the
+    // subtree is not looked at.
+    if ((ts.isEnumDeclaration(node) || ts.isModuleDeclaration(node)) && isDeclared(node)) return
+    if (ts.isEnumDeclaration(node)) {
+      note(node, `enum '${node.name.text}'`, 'use a const object and a union type.')
+    } else if (ts.isModuleDeclaration(node)) {
+      note(node, `namespace '${node.name.getText(source)}'`,
+        'use a module, or declare it with `declare` if it only types an existing value.')
+    } else if (ts.isParameter(node) && ts.isConstructorDeclaration(node.parent) &&
+               (ts.getCombinedModifierFlags(node) & modifierFlags)) {
+      note(node, `parameter property '${node.name.getText(source)}'`,
+        'declare the field and assign it in the constructor body.')
+    }
+    ts.forEachChild(node, walk)
+  }
+  walk(source)
+  return found
+}
+
 for (const input of inputs) {
   const source = fs.readFileSync(input, 'utf8')
+  const refused = unerasable(source, input)
+  if (refused.length > 0) {
+    console.error(`${input}: the module is not strip-only TypeScript, so a page cannot run it as ` +
+      `written:\n${refused.join('\n')}`)
+    process.exit(1)
+  }
   const { outputText, diagnostics } = ts.transpileModule(source, {
     fileName: path.basename(input),
     compilerOptions: {

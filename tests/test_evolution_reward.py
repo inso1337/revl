@@ -62,10 +62,20 @@ def census():
                  ROOT / "tools" / "gate_reference_census.py")
 
 
-def _candidate(mod, tree, base="origin/main", scope=("**",), allow=(), **extra):
+_AUTO = object()
+
+
+def _candidate(mod, tree, base="origin/main", scope=("**",), allow=(),
+               pin=_AUTO, **extra):
+    """A candidate whose operator base defaults to the commit its own `base`
+    names, so a case that is about something else is measured against the base
+    it says. A case about the base passes `pin` (a commit id, or `""` for none)."""
     record = {"tree": str(tree), "base": base, "scope": list(scope)}
     record.update(extra)
-    return mod.load_candidate(record, allow=allow)
+    if pin is _AUTO:
+        pin = mod.resolve_commit(tree, base) or ""
+    return mod.load_candidate(record, allow=allow, base_pin=pin,
+                              base_source="--base" if pin else "")
 
 
 def _git_env():
@@ -723,6 +733,306 @@ def test_a_base_the_tree_cannot_resolve_is_refused_by_name(
     assert verdict.verified is False
     assert "base `origin/main` does not name a commit" in verdict.reason, (
         verdict.reason)
+
+
+# --------------------------------------------------------------------------
+# The base and the read are the operator's (issue #3359): the grant bounds only
+# what the measurement can see, so neither input of the measurement may be
+# something the candidate can write.
+# --------------------------------------------------------------------------
+
+def _head(tree, rev="HEAD"):
+    return _git(tree, "rev-parse", rev).stdout.strip()
+
+
+def _commit_hidden_edits(tree):
+    """Two edits committed in the candidate tree, then one uncommitted edit
+    inside the grant: the shape the issue reproduces."""
+    (tree / "src").mkdir()
+    (tree / "src" / "secret.py").write_text("x\n")
+    (tree / "tools" / "evolution_reward.py").write_text("judge\n")
+    _git(tree, "add", "-A")
+    _git(tree, "commit", "-qm", "edits the candidate commits itself")
+    (tree / "tools" / "a.py").write_text("a\n")
+
+
+def test_a_record_base_that_names_the_candidates_own_commit_is_refused(
+        reward, tiny_repo):
+    """`base` is a record key. A candidate that commits its edits and gives that
+    commit as `base` used to be measured as having changed only what was still
+    uncommitted, and `scope` verified. The operator's base is the one the diff
+    is taken against, and the record's must name the same commit."""
+    _commit_hidden_edits(tiny_repo)
+    operator_base = _head(tiny_repo, "HEAD~1")
+    verdict = reward.probe_scope(_candidate(
+        reward, tiny_repo, base="HEAD", scope=("tools/**",),
+        allow=("tools/a.py",), pin=operator_base))
+    assert verdict.verified is False, verdict.reason
+    assert "BASE_MOVED" in verdict.reason
+    assert "src/secret.py" in verdict.reason
+    assert "tools/evolution_reward.py" in verdict.reason
+    assert operator_base in verdict.reason
+
+
+def test_the_same_record_against_the_operator_base_names_both_paths(
+        reward, tiny_repo):
+    """The control: with the record naming the operator's own base, the
+    committed edits are measured and refused by the grant."""
+    _commit_hidden_edits(tiny_repo)
+    operator_base = _head(tiny_repo, "HEAD~1")
+    verdict = reward.probe_scope(_candidate(
+        reward, tiny_repo, base="HEAD~1", scope=("tools/**",),
+        allow=("tools/a.py",), pin=operator_base))
+    assert verdict.verified is False
+    assert "src/secret.py" in verdict.reason
+    assert "tools/evolution_reward.py" in verdict.reason
+
+
+def test_no_operator_base_fails_scope_by_name(reward, tiny_repo):
+    """A run with no base supplies none, and the record's own is not a default:
+    default deny, the way a run with no allow set is."""
+    (tiny_repo / "tools" / "a.py").write_text("a\n")
+    verdict = reward.probe_scope(_candidate(
+        reward, tiny_repo, base="HEAD", scope=("tools/**",),
+        allow=("tools/**",), pin=""))
+    assert verdict.verified is False
+    assert "NO_BASE" in verdict.reason
+    assert reward.BASE_ENV in verdict.reason
+
+
+@pytest.mark.parametrize("pin", ["HEAD", "main", "abc1234", "0" * 40, "-x"])
+def test_an_operator_base_must_be_a_commit_in_the_tree(reward, tiny_repo, pin):
+    """A ref name lives in state the candidate can rewrite, a short id is not a
+    full one, and an id the tree does not hold has nothing to compare against."""
+    (tiny_repo / "tools" / "a.py").write_text("a\n")
+    verdict = reward.probe_scope(_candidate(
+        reward, tiny_repo, base="HEAD", scope=("tools/**",),
+        allow=("tools/**",), pin=pin))
+    assert verdict.verified is False
+    assert "NO_BASE" in verdict.reason, verdict.reason
+
+
+def test_the_operator_base_arrives_from_the_cli_or_the_environment(
+        reward, monkeypatch):
+    monkeypatch.delenv(reward.BASE_ENV, raising=False)
+    assert reward.base_from_args(None) == ("", "")
+    monkeypatch.setenv(reward.BASE_ENV, "a" * 40)
+    assert reward.base_from_args(None) == ("a" * 40, reward.BASE_ENV)
+    assert reward.base_from_args("b" * 40) == ("b" * 40, "--base")
+    assert reward.BASE_ENV not in reward.RECORD_KEYS
+    candidate = reward.load_candidate(
+        {"tree": "/nowhere", "base": "x", "scope": ["**"],
+         "base_pin": "c" * 40}, base_pin="d" * 40, base_source="--base")
+    assert candidate.base_pin == "d" * 40
+    assert "base_pin" in candidate.prose_ignored
+
+
+def test_a_passing_scope_records_the_resolved_base_and_its_source(
+        reward, tiny_repo):
+    (tiny_repo / "tools" / "a.py").write_text("a\n")
+    candidate = _candidate(reward, tiny_repo, base="HEAD", scope=("tools/**",),
+                           allow=("tools/**",))
+    verdict = reward.probe_scope(candidate)
+    assert verdict.verified is True, verdict.reason
+    assert f"base={_head(tiny_repo)} (--base)" in verdict.evidence
+    blob = reward.Scorecard(candidate, [], None).as_dict()
+    assert blob["base_commit"] == _head(tiny_repo)
+    assert blob["base_pin"] == _head(tiny_repo)
+    assert blob["base_source"] == "--base"
+    bare = reward.Scorecard(
+        _candidate(reward, tiny_repo, base="HEAD", pin=""), [], None).as_dict()
+    assert bare["base_pin"] is None and bare["base_source"] is None
+
+
+def _tracked_file(tree, name):
+    path = tree / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("base\n")
+    _git(tree, "add", "-A")
+    _git(tree, "commit", "-qm", f"track {name}")
+    return path
+
+
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+def test_an_index_flag_cannot_hide_a_worktree_edit(reward, tiny_repo, flag):
+    """Both flags live on the candidate's index entry and make `git diff` skip
+    the path. The measured set is read through a fresh index, so the edit is
+    in it and the grant refuses it."""
+    hidden = _tracked_file(tiny_repo, "src/hidden.py")
+    hidden.write_text("edited outside the grant\n")
+    _git(tiny_repo, "update-index", flag, "src/hidden.py")
+    assert _git(tiny_repo, "status", "--porcelain").stdout.strip() == "", \
+        "the fixture must hide the edit from the candidate's own git"
+    candidate = _candidate(reward, tiny_repo, base="HEAD", scope=("tools/**",),
+                           allow=("tools/**",))
+    ok, paths = reward.changed_files(candidate)
+    assert ok and "src/hidden.py" in paths, paths
+    verdict = reward.probe_scope(candidate)
+    assert verdict.verified is False
+    assert "src/hidden.py" in verdict.reason
+
+
+def test_an_info_exclude_pattern_cannot_hide_an_untracked_file(
+        reward, tiny_repo):
+    (tiny_repo / "src").mkdir()
+    (tiny_repo / "src" / "secret.py").write_text("x\n")
+    (tiny_repo / ".git" / "info" / "exclude").write_text("src/secret.py\n")
+    assert _git(tiny_repo, "status", "--porcelain").stdout.strip() == ""
+    candidate = _candidate(reward, tiny_repo, base="HEAD", scope=("tools/**",),
+                           allow=("tools/**",))
+    ok, paths = reward.changed_files(candidate)
+    assert ok and paths == ["src/secret.py"], paths
+    verdict = reward.probe_scope(candidate)
+    assert verdict.verified is False
+    assert "src/secret.py" in verdict.reason
+
+
+def test_a_core_excludesfile_setting_cannot_hide_an_untracked_file(
+        reward, tiny_repo, tmp_path):
+    ignore = tmp_path / "ignore-everything"
+    ignore.write_text("*\n")
+    _git(tiny_repo, "config", "core.excludesFile", str(ignore))
+    (tiny_repo / "src").mkdir()
+    (tiny_repo / "src" / "secret.py").write_text("x\n")
+    assert _git(tiny_repo, "status", "--porcelain").stdout.strip() == ""
+    ok, paths = reward.changed_files(_candidate(reward, tiny_repo, base="HEAD"))
+    assert ok and paths == ["src/secret.py"], paths
+
+
+def test_a_gitignore_the_candidate_wrote_cannot_hide_an_untracked_file(
+        reward, tiny_repo):
+    """Ignore rules are the base commit's. A `.gitignore` the candidate adds
+    is an untracked path of its own and hides nothing, itself included."""
+    (tiny_repo / "src").mkdir()
+    (tiny_repo / "src" / "secret.py").write_text("x\n")
+    (tiny_repo / ".gitignore").write_text("*\n")
+    ok, paths = reward.changed_files(_candidate(reward, tiny_repo, base="HEAD"))
+    assert ok and paths == [".gitignore", "src/secret.py"], paths
+
+
+def test_the_base_commits_own_ignore_rules_still_apply(reward, tiny_repo):
+    """The control for the three above: a build artifact the BASE ignores is
+    not an edit, so a tree that ran its tests is not refused for `__pycache__`."""
+    (tiny_repo / ".gitignore").write_text("__pycache__/\n")
+    _git(tiny_repo, "add", "-A")
+    _git(tiny_repo, "commit", "-qm", "ignore rules")
+    (tiny_repo / "tools" / "__pycache__").mkdir()
+    (tiny_repo / "tools" / "__pycache__" / "a.pyc").write_text("x")
+    (tiny_repo / "tools" / "a.py").write_text("a\n")
+    ok, paths = reward.changed_files(_candidate(reward, tiny_repo, base="HEAD"))
+    assert ok and paths == ["tools/a.py"], paths
+
+
+def test_a_sparse_checkout_and_a_removed_index_entry_cannot_hide_an_edit(
+        reward, tiny_repo):
+    hidden = _tracked_file(tiny_repo, "src/hidden.py")
+    hidden.write_text("edited\n")
+    _git(tiny_repo, "rm", "--cached", "-q", "src/hidden.py")
+    _git(tiny_repo, "config", "core.sparseCheckout", "true")
+    (tiny_repo / ".git" / "info" / "sparse-checkout").write_text("/tools/\n")
+    ok, paths = reward.changed_files(_candidate(reward, tiny_repo, base="HEAD"))
+    assert ok and "src/hidden.py" in paths, paths
+
+
+def test_a_mode_change_is_measured_even_with_filemode_off(reward, tiny_repo):
+    script = _tracked_file(tiny_repo, "src/run.sh")
+    script.chmod(0o755)
+    _git(tiny_repo, "config", "core.fileMode", "false")
+    ok, paths = reward.changed_files(_candidate(reward, tiny_repo, base="HEAD"))
+    assert ok and paths == ["src/run.sh"], paths
+
+
+def test_a_replace_ref_cannot_make_the_base_mean_the_candidates_commit(
+        reward, tiny_repo):
+    """`git replace <base> <own commit>` rewrites what every read of the base
+    returns, in the candidate's own tree. The base is read with replacement
+    off, so the committed edit is still in the measured set."""
+    base = _head(tiny_repo)
+    (tiny_repo / "src").mkdir()
+    (tiny_repo / "src" / "secret.py").write_text("x\n")
+    _git(tiny_repo, "add", "-A")
+    _git(tiny_repo, "commit", "-qm", "edit committed in the candidate tree")
+    _git(tiny_repo, "replace", base, _head(tiny_repo))
+    assert _git(tiny_repo, "diff", "--name-only", base).stdout.strip() == "", \
+        "the fixture must hide the edit from the candidate's own git"
+    ok, paths = reward.changed_files(_candidate(
+        reward, tiny_repo, base=base, pin=base))
+    assert ok and paths == ["src/secret.py"], paths
+    assert reward.resolve_commit(tiny_repo, base) == base
+
+
+def test_a_clean_filter_cannot_hide_an_edit(reward, tiny_repo):
+    """`filter.<name>.clean` runs a command of the candidate's choosing over the
+    worktree file before git compares it, so it can print the base content for
+    an edited file. The worktree bytes are hashed as they are."""
+    edited = _tracked_file(tiny_repo, "src/t.py")
+    edited.write_text("edited outside the grant\n")
+    (tiny_repo / ".git" / "info" / "attributes").write_text(
+        "src/t.py filter=lie\n")
+    _git(tiny_repo, "config", "filter.lie.clean", "printf 'base\\n'")
+    # `git diff` against a fresh index compares content through the filter, and
+    # the filter prints the base content: the diff this replaced came back empty.
+    scratch = tiny_repo.parent / "fresh-index"
+    env = dict(_git_env(), GIT_INDEX_FILE=str(scratch))
+    subprocess.run(["git", "-C", str(tiny_repo), "read-tree", "HEAD"],
+                   check=True, env=env)
+    hidden = subprocess.run(["git", "-C", str(tiny_repo), "diff", "--name-only"],
+                            capture_output=True, text=True, check=True, env=env)
+    assert hidden.stdout.strip() == "", "the fixture must reproduce the hole"
+    ok, paths = reward.changed_files(_candidate(reward, tiny_repo, base="HEAD"))
+    assert ok and paths == ["src/t.py"], paths
+
+
+def test_an_unchanged_tracked_file_and_a_crlf_setting_are_not_changes(
+        reward, tiny_repo):
+    """The control for the hash comparison: bytes equal to the base blob are not
+    a change, whatever the candidate's line-ending configuration says."""
+    kept = _tracked_file(tiny_repo, "src/keep.py")
+    _git(tiny_repo, "config", "core.autocrlf", "true")
+    ok, paths = reward.changed_files(_candidate(reward, tiny_repo, base="HEAD"))
+    assert ok and paths == [], paths
+    kept.write_bytes(b"base\r\n")
+    ok, paths = reward.changed_files(_candidate(reward, tiny_repo, base="HEAD"))
+    assert ok and paths == ["src/keep.py"], paths
+
+
+def test_a_deleted_a_symlinked_and_a_retyped_tracked_path_are_changes(
+        reward, tiny_repo):
+    _tracked_file(tiny_repo, "src/gone.py")
+    _tracked_file(tiny_repo, "src/link.py")
+    _tracked_file(tiny_repo, "src/dir.py")
+    (tiny_repo / "src" / "gone.py").unlink()
+    (tiny_repo / "src" / "link.py").unlink()
+    (tiny_repo / "src" / "link.py").symlink_to("gone.py")
+    (tiny_repo / "src" / "dir.py").unlink()
+    (tiny_repo / "src" / "dir.py").mkdir()
+    (tiny_repo / "src" / "dir.py" / "x").write_text("x\n")
+    ok, paths = reward.changed_files(_candidate(reward, tiny_repo, base="HEAD"))
+    assert ok, paths
+    assert {"src/gone.py", "src/link.py", "src/dir.py"} <= set(paths), paths
+
+
+def test_a_path_named_only_by_whitespace_is_measured(reward, tiny_repo):
+    (tiny_repo / " ").write_text("x\n")
+    ok, paths = reward.changed_files(_candidate(reward, tiny_repo, base="HEAD"))
+    assert ok and paths == [" "], paths
+
+
+def test_a_file_where_the_base_has_an_ignored_directory_is_not_lost(
+        reward, tiny_repo):
+    """The replay cannot create a placeholder for a path whose parent is a
+    `.gitignore`'s directory in the base. A path the replay never names as
+    ignored is kept, so it stays in the measured set."""
+    (tiny_repo / "x").mkdir()
+    (tiny_repo / "x" / ".gitignore").write_text("*.log\n")
+    _git(tiny_repo, "add", "-A")
+    _git(tiny_repo, "commit", "-qm", "a directory with its own ignore rules")
+    base = _head(tiny_repo)
+    _git(tiny_repo, "rm", "-rq", "x")
+    (tiny_repo / "x").write_text("now a file\n")
+    ok, paths = reward.changed_files(_candidate(
+        reward, tiny_repo, base=base, pin=base))
+    assert ok and "x" in paths and "x/.gitignore" in paths, paths
 
 
 def test_the_base_refusal_fires_only_on_a_missing_base(reward, tiny_repo):
