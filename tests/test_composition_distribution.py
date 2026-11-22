@@ -151,7 +151,7 @@ def test_a_stack_layer_from_path_outside_its_truc_is_refused(tmp_path):
     (tmp_path / "secret.rvl").write_text(_PG_COMPONENT)
     evil = tmp_path / "trucs" / "evil"
     evil.mkdir(parents=True)
-    (evil / "component.rvl").write_text(_PG_COMPONENT)
+    (evil / "component.rvl").write_text(_PG_COMPONENT, encoding="utf-8")
     (evil / "layer.rvl").write_text("""
 layer Evil for Demo {
   add row @stolen from "../../secret.rvl" provides db
@@ -175,7 +175,7 @@ def test_a_stack_layer_reading_its_own_truc_is_admitted(tmp_path):
     kit = tmp_path / "trucs" / "metrics_kit"
     kit.mkdir(parents=True)
     (kit / "services.rvl").write_text("service Metrics { fn tick() -> Int }\n")
-    (kit / "component.rvl").write_text(_KIT_COMPONENT)
+    (kit / "component.rvl").write_text(_KIT_COMPONENT, encoding="utf-8")
     (kit / "layer.rvl").write_text("""
 layer MetricsKit for Demo {
   add row @metrics from "component.rvl" provides metrics
@@ -229,7 +229,7 @@ def _evil_layer(tmp_path: Path, spelling: str, key: str = "db") -> Path:
     (tmp_path / "secret.rvl").write_text(_PG_COMPONENT)
     evil = tmp_path / "trucs" / "evil"
     evil.mkdir(parents=True)
-    (evil / "component.rvl").write_text(_PG_COMPONENT)
+    (evil / "component.rvl").write_text(_PG_COMPONENT, encoding="utf-8")
     (evil / "layer.rvl").write_text(f"""
 layer Evil for Demo {{
   add row @s from "{spelling}" provides {key} config {{ {cfg} }}

@@ -64,12 +64,13 @@ def _pin(proj: Path, name: str) -> None:
     """Pin `name` in `truc.lock` to the real hash of its vendored
     `component.rvl`, the pin `truc add` writes."""
     lock_path = proj / "truc.lock"
-    lock = json.loads(lock_path.read_text())
-    digest = _sha((proj / "trucs" / name / "component.rvl").read_text())
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    digest = _sha((proj / "trucs" / name / "component.rvl").read_text(
+        encoding="utf-8"))
     for row in lock["trucs"]:
         if row["name"] == name:
             row["sourceHash"] = digest
-    lock_path.write_text(json.dumps(lock, indent=2))
+    lock_path.write_text(json.dumps(lock, indent=2), encoding="utf-8")
 
 
 def _project(tmp_path: Path, *, stack: str = "", lock: dict | None = _PINNED,
@@ -119,7 +120,7 @@ def _add_evil_layer(proj: Path) -> None:
     (proj / "secret.rvl").write_text(_PG_COMPONENT)
     evil = proj / "trucs" / "evil"
     evil.mkdir(parents=True, exist_ok=True)
-    (evil / "component.rvl").write_text(_PG_COMPONENT)
+    (evil / "component.rvl").write_text(_PG_COMPONENT, encoding="utf-8")
     (evil / "layer.rvl").write_text(
         "layer Evil for Demo {\n"
         '  add row @stolen from "../../secret.rvl" provides db\n'
@@ -229,7 +230,8 @@ def test_apply_refuses_a_stack_truc_with_no_lock_row(tmp_path):
     row for its truc is refused as an unpinned truc."""
     proj = _records_project(
         tmp_path, site="  grant records_kit::@records with { approvals, writer }\n")
-    (proj / "truc.lock").write_text(json.dumps({"lockVersion": 1, "trucs": []}))
+    (proj / "truc.lock").write_text(json.dumps({"lockVersion": 1, "trucs": []}),
+                                    encoding="utf-8")
     report = json.loads(_host.apply(str(proj), False))
     assert report["code"] == 1
     assert "unpinned truc" in report["message"]
@@ -255,7 +257,7 @@ def test_stack_check_refuses_a_vendored_component_that_no_longer_matches_its_pin
     gate, so a drifted vendored component is refused there too."""
     proj = _project(tmp_path)
     (proj / "trucs" / "pg_database" / "component.rvl").write_text(
-        _PG_COMPONENT + "\n")
+        _PG_COMPONENT + "\n", encoding="utf-8")
     report = json.loads(_host.stack_check(str(proj)))
     assert report["code"] == 1
     assert "hash drift" in report["message"]
@@ -329,7 +331,7 @@ def _records_project(tmp_path: Path, site: str | None) -> Path:
     (tmp_path / "truc.lock").write_text(json.dumps(
         {"lockVersion": 1,
          "trucs": [{"name": "records_kit", "sourceHash": _sha(
-             (kit / "component.rvl").read_text())}]}))
+             (kit / "component.rvl").read_text(encoding="utf-8"))}]}))
     return tmp_path
 
 
