@@ -184,7 +184,7 @@ def test_the_record_is_append_only_and_names_each_task_once(tmp_path, clock):
     for task_id in ("a", "b"):
         assert runner.handle(task_at(record, NOW, task_id=task_id))["ok"]
     runner.handle(task_at(record, NOW, task_id="a"))    # refused, not written
-    lines = (tmp_path / "peer-work" / pd.SEEN_FILE).read_text().splitlines()
+    lines = (tmp_path / "peer-work" / pd.SEEN_FILE).read_text(encoding="utf-8").splitlines()
     assert [json.loads(line)["task_id"] for line in lines] == ["a", "b"]
 
 
@@ -209,7 +209,7 @@ def test_a_peer_that_cannot_record_a_task_runs_nothing(tmp_path, clock,
                                                          monkeypatch):
     _d, record, _r, _dir = base.pool_on_disk(tmp_path)
     blocker = tmp_path / "not-a-directory"
-    blocker.write_text("x")
+    blocker.write_text("x", encoding="utf-8")
     runner = runner_with_record(tmp_path, record)
     # The disk goes bad after the peer started: a record path whose parent is
     # a file cannot be written.
@@ -224,7 +224,7 @@ def test_a_peer_that_cannot_record_a_task_runs_nothing(tmp_path, clock,
 
 def test_a_peer_whose_record_cannot_be_read_does_not_start(tmp_path):
     blocker = tmp_path / "not-a-directory"
-    blocker.write_text("x")
+    blocker.write_text("x", encoding="utf-8")
     with pytest.raises(pd.DispatchError, match="cannot read"):
         pd._load_seen(blocker / pd.SEEN_FILE)
 
@@ -313,7 +313,7 @@ def _serve_once_over(monkeypatch, task):
 def test_pool_serve_with_a_workdir_remembers_across_a_restart(
         tmp_path, clock, monkeypatch, capsys):
     _d, record, _r, _dir = base.pool_on_disk(tmp_path)
-    (tmp_path / "charter.json").write_text(json.dumps(record))
+    (tmp_path / "charter.json").write_text(json.dumps(record), encoding="utf-8")
     workdir = tmp_path / "peer-work"
     args = _Args(tmp_path, workdir)
     task = task_at(record, NOW)
@@ -329,7 +329,7 @@ def test_pool_serve_with_a_workdir_remembers_across_a_restart(
 def test_pool_serve_without_a_workdir_says_it_forgets(
         tmp_path, clock, monkeypatch, capsys):
     _d, record, _r, _dir = base.pool_on_disk(tmp_path)
-    (tmp_path / "charter.json").write_text(json.dumps(record))
+    (tmp_path / "charter.json").write_text(json.dumps(record), encoding="utf-8")
     _serve_once_over(monkeypatch, task_at(record, NOW))
     assert pd.serve_command(_Args(tmp_path, None)) == 0
     assert "not remembered across a restart" in capsys.readouterr().err
@@ -338,10 +338,10 @@ def test_pool_serve_without_a_workdir_says_it_forgets(
 def test_pool_serve_exits_2_on_a_run_record_it_cannot_read(
         tmp_path, monkeypatch, capsys):
     _d, record, _r, _dir = base.pool_on_disk(tmp_path)
-    (tmp_path / "charter.json").write_text(json.dumps(record))
+    (tmp_path / "charter.json").write_text(json.dumps(record), encoding="utf-8")
     workdir = tmp_path / "peer-work"
     workdir.mkdir()
-    (workdir / pd.SEEN_FILE).write_text("garbage\n")
+    (workdir / pd.SEEN_FILE).write_text("garbage\n", encoding="utf-8")
     served = _serve_once_over(monkeypatch, {})
     assert pd.serve_command(_Args(tmp_path, workdir)) == 2
     assert served == []

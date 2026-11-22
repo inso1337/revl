@@ -962,7 +962,7 @@ def test_every_link_is_reached_at_runtime_by_this_file(tmp_path):
         policy_digest=pp.canonical_digest(record))
     reached.add(runner.handle(pd.sign_task(stale, OPERATOR_ID))["link"])
     unwritable = tmp_path / "not-a-directory"
-    unwritable.write_text("x")
+    unwritable.write_text("x", encoding="utf-8")
     keeper = pd.PeerRunner(
         charter_record=record, identity=WORKER_ID,
         operator_public=OPERATOR_ID.public(),
