@@ -1,0 +1,32 @@
+// REJECTED - G4: a provide method narrows its emission scope to `fs.ingest`
+// and reaches the key `fs` by a path that names no verb of it.
+//
+// `Task.go` is declared `emission[fs.ingest]`. Its body does cross
+// `emit fs.ingest(...)`, which that token covers, but it also calls `helper`,
+// a module fn whose body reaches the extern `emission[fs] fn host_poke`. That
+// crossing reaches the capability `fs` without naming a verb of the required
+// key, so `fs.ingest` cannot stand for it: a key reached any other way is
+// covered by the key itself (`emission[fs]`) and by nothing else.
+//
+// The companion `examples/g4_required_verb_token.rvl` is the admitted shape:
+// every crossing of the key is a call on one of its verbs.
+//
+// expected error:
+//   emits through `fs` (reaching `fs.ingest`, `helper()`)
+
+extern emission[fs] fn host_poke(n: Int) -> Int = @py { return 1 }
+
+fn helper(n: Int) -> Int { return host_poke(n) }
+
+service Store { emission[fs.write] fn ingest(row: Str) -> Int }
+service Task { emission[fs.ingest] fn go() -> Int }
+
+component Worker requires fs: Store provides task: Task {
+  provide task {
+    fn go() {
+      emit fs.ingest("row")
+      let x = emit helper(1)
+      return 0
+    }
+  }
+}

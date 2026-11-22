@@ -233,6 +233,7 @@
   "examples/rejections/g4_nested_service_emission_in_host_emit.rvl",
   "examples/rejections/g4_nested_unmarked_emission.rvl",
   "examples/rejections/g4_nested_unmarked_emission_method.rvl",
+  "examples/rejections/g4_required_verb_token_through_fn.rvl",
   "examples/rejections/g4_spawn_widens_budget.rvl",
   "examples/rejections/g4_spawn_widens_capability.rvl",
   "examples/rejections/g4_spawn_widens_parameter.rvl",
