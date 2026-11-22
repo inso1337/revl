@@ -4236,7 +4236,10 @@ def _tool_restore(arguments: dict) -> dict:
     # a restore is a cold load from a document, so it answers to the same
     # enforced lease rule `revl_load` does (`leases.FENCED`)
     if not SESSION.loaded:
-        leased = _leases.check(SESSION, "restore", arguments)
+        # issue #3509: the lease derivation compiles under the boot's realm
+        # bindings, as the operator gate's does
+        leased = _leases.check(SESSION, "restore", arguments,
+                               restore_profile=_restore_gate_profile())
         if leased is not None:
             return _refused_by_lease(leased)
     profile = AUTHORING.profile()
