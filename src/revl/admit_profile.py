@@ -1207,7 +1207,8 @@ def _refuse_ungranted_key(document: dict, comp: dict, key: str, service: str,
         comp.get("source") or document.get("filename") or "<candidate>",
         0,
         f"admission refused: component `{name}` reaches service `{service}` "
-        f"(via `requires {key}`), and no grant names `{name}.{key}`",
+        f"{_reach_clause(document, service, key)}, and no grant names "
+        f"`{name}.{key}`",
         hint=(f"`{service}` is granted only to {', '.join(holders) or 'another component'}. "
               f"A grant is key-precise: it covers the granted row's own "
               f"component under the keys it names, never another component "
@@ -1215,6 +1216,28 @@ def _refuse_ungranted_key(document: dict, comp: dict, key: str, service: str,
               f"provide `{key}` inside the turn."),
         code="R2", category="admission",
     )
+
+
+def _emission_tokens(document: dict, service: str) -> tuple[str, ...]:
+    """The capability tokens `service` declares on its emission methods
+    (`emission[jobs] fn start(...)`), sorted and deduplicated; empty when the
+    document carries no such declaration (issue #3586)."""
+    spec = (document.get("services") or {}).get(service)
+    methods = spec.get("methods") if isinstance(spec, dict) else None
+    tokens: set[str] = set()
+    for mspec in (methods or {}).values():
+        if isinstance(mspec, dict) and mspec.get("emission"):
+            tokens.update(str(t) for t in mspec.get("capabilities") or ())
+    return tuple(sorted(tokens))
+
+
+def _reach_clause(document: dict, service: str, key: str) -> str:
+    """How a refusal says the service was reached: the binding key is a local
+    name, so name the capability tokens too when the service declares any."""
+    tokens = _emission_tokens(document, service)
+    if not tokens:
+        return f"(via `requires {key}`)"
+    return f"(emission tokens: {', '.join(tokens)}) via `requires {key}`"
 
 
 def _comp_service_of(document: dict, comp_name: str, key: str):

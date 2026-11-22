@@ -217,3 +217,44 @@ def test_a_key_precise_grant_still_refuses_an_ungranted_service():
         check_allowlist(_document({"name": "A", "requires": {"w": "SourceWriter"}}),
                         profile)
     assert "not in the granted set" in str(exc.value)
+
+
+# ------------------------------------ issue #3586: name the emission tokens
+
+_JOB_OPS = {"JobOps": {"methods": {
+    "start": {"params": [{"name": "x", "type": "Int"}], "returns": "Int",
+              "emission": True, "capabilities": ["jobs", "audit"]},
+    "stop": {"params": [], "returns": "Int",
+             "emission": True, "capabilities": ["jobs"]},
+    "peek": {"params": [], "returns": "Int"}}}}
+
+
+def _refusal(services: dict | None) -> str:
+    profile = AdmissionProfile.untrusted_author({"JobOps"},
+                                                requires={("A", "jops")})
+    document = _document({"name": "B", "requires": {"jops": "JobOps"}})
+    if services is not None:
+        document["services"] = services
+    with pytest.raises(RevlError) as exc:
+        check_allowlist(document, profile)
+    assert getattr(exc.value, "code", None) == "R2"
+    return exc.value.message
+
+
+def test_the_refusal_names_the_reached_services_emission_tokens():
+    assert _refusal(_JOB_OPS) == (
+        "admission refused: component `B` reaches service `JobOps` "
+        "(emission tokens: audit, jobs) via `requires jops`, and no grant "
+        "names `B.jops`")
+
+
+@pytest.mark.parametrize("services", [
+    None,
+    {"JobOps": {"methods": {"peek": {"params": [], "returns": "Int"}}}},
+    {"JobOps": {"methods": {"go": {"params": [], "returns": "Int",
+                                   "emission": True}}}},
+], ids=["no-services", "no-emission", "unbounded-emission"])
+def test_a_service_with_no_tokens_keeps_the_old_text(services):
+    assert _refusal(services) == (
+        "admission refused: component `B` reaches service `JobOps` "
+        "(via `requires jops`), and no grant names `B.jops`")
