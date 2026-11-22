@@ -1946,6 +1946,13 @@ Another operator sending the byte-identical call after a yes gets its own ticket
 A quorum yes covers the operator who asked the question it answers. With no
 operator profile there is one identity, and the behaviour is unchanged.
 
+Under `--author-trust trusted` the ticket names the host code a yes lets run
+in `unreviewedHostCode` (and, for a ticket that replaces a running composition,
+`runningHostCode` and `newHostCode`; see docs/mcp-bridge.md). An extern backed
+by a host-module ref (`= @py ref <symbol> from "<path>"`) is listed like an
+inline body, with the ref's pinned sha256 as its digest and its `path` and
+`symbol` under `refs`, so a ref whose pin moved is new host code (issue #3347).
+
 The ticket carries `ceilings` (issue #1755): for each class-(c) capability it
 asks about, the crossing component's item-260 crossing ceiling, read from
 `revl audit`'s cardinality analysis
