@@ -77,8 +77,8 @@ def args_error(ir: dict | None, key: str, method: str, args) -> str | None:
         return (f"{where}: takes {len(named)} argument(s), got {len(args)}")
     for index, (pname, ptype) in enumerate(named):
         if index >= len(args):
-            if _is_opt(ptype):
-                continue
+            # an omitted trailing `Opt` is refused too: the method takes every
+            # parameter positionally, so it would fail with a host `TypeError`
             return f"{where}: argument {pname} is missing"
         err = _type_error(args[index], ptype, types, pname, frozenset())
         if err is not None:
@@ -86,8 +86,30 @@ def args_error(ir: dict | None, key: str, method: str, args) -> str | None:
     return None
 
 
-def _is_opt(type_name) -> bool:
-    return _parse_type(type_name)[0] == "Opt"
+def _subst(type_name: str, env: dict) -> str:
+    """`type_name` with every type parameter in `env` replaced by its argument."""
+    head, targs = _parse_type(type_name)
+    if not targs:
+        return env.get(head, type_name)
+    return f"{head}[{', '.join(_subst(a, env) for a in targs)}]"
+
+
+def _instantiate(spec: dict, targs: list):
+    """The record fields or variant cases of a (possibly generic) type with its
+    parameters bound to `targs`, or ``None`` when the argument count does not
+    match the declared parameters (nothing is then checked)."""
+    params = list(spec.get("params") or [])
+    if len(params) != len(targs):
+        return None
+    env = dict(zip(params, targs))
+    if not env:
+        return spec
+    if spec.get("kind") == "record":
+        return {**spec, "fields": {n: _subst(t, env)
+                                   for n, t in (spec.get("fields") or {}).items()}}
+    return {**spec, "cases": [
+        {**c, "payload": _subst(c["payload"], env) if c.get("payload") else
+         c.get("payload")} for c in spec.get("cases") or []]}
 
 
 def _kind(value) -> str:
@@ -128,8 +150,9 @@ def _type_error(value, type_name, types, path, seen) -> str | None:
     if head == "Map" and len(targs) == 2:
         if not isinstance(value, dict):
             return _expected(path, type_name, value)
-        for k, item in value.items():
-            err = _type_error(item, targs[1], types, f'{path}[{k!r}]', seen)
+        for n, item in enumerate(value.values()):
+            # the position, never the key: a key may be a credential
+            err = _type_error(item, targs[1], types, f"{path}[<key {n}>]", seen)
             if err is not None:
                 return err
         return None
@@ -137,15 +160,21 @@ def _type_error(value, type_name, types, path, seen) -> str | None:
         return _case_error(value, [{"name": "Ok", "payload": targs[0]},
                                    {"name": "Err", "payload": targs[1]}],
                            type_name, types, path, seen)
-    if type_name in seen:
-        return None            # a recursive nominal: the outer layers were checked
-    spec = types.get(type_name)
+    # a value that contains itself (a cycle) is checked once on the way in; a
+    # recursive TYPE over a finite value terminates by the value running out
+    mark = (type_name, id(value))
+    if mark in seen:
+        return None
+    # the head names the declaration; an instantiated generic (`Pair[Int, Str]`)
+    # is checked with its parameters bound to the arguments
+    spec = types.get(head)
+    spec = _instantiate(spec, targs) if spec else None
     if spec and spec.get("kind") == "record":
         return _record_error(value, spec, type_name, types, path,
-                             seen | {type_name})
+                             seen | {mark})
     if spec and spec.get("kind") == "variant":
         return _case_error(value, spec.get("cases") or [], type_name, types,
-                           path, seen | {type_name})
+                           path, seen | {mark})
     return None
 
 

@@ -121,7 +121,9 @@ before the method runs, and refuses a value of the wrong shape with a
 `SessionError` (code `ARGS`) that names the method, the parameter and the path of
 the first mismatch (`shapes.keep: b.h is missing`). A record must hold every
 declared field, each of the declared type; an `Int` refuses a `bool` and a
-`float`; a variant must be one of its declared cases. A type the
+`float`; a variant must be one of its declared cases; an instantiated generic
+(`Pair[Int, Str]`) is checked with its parameters bound; every parameter is
+passed, an `Opt` one as `None`. A type the
 declaration does not describe (a type parameter, an extern or opaque host type)
 is not checked. An embedder in a tight loop whose arguments are values the
 session returned passes `check=False`, and checks only the calls that take data

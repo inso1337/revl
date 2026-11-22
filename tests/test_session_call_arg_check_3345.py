@@ -117,7 +117,7 @@ def test_wrong_kind_is_refused(ir):
 def test_nested_path_is_reported(ir):
     ok = {"items": [1, 2], "note": "n", "by": {"k": 1}, "shape": {"$kind": "Dot"}}
     assert "h.items[1] expected Int" in _err(ir, "hold", {**ok, "items": [1, "z"]})
-    assert "h.by['k'] expected Int" in _err(ir, "hold", {**ok, "by": {"k": "z"}})
+    assert "h.by[<key 0>] expected Int" in _err(ir, "hold", {**ok, "by": {"k": "z"}})
     assert "h.note expected Str" in _err(ir, "hold", {**ok, "note": 5})
     assert _err(ir, "hold", {k: v for k, v in ok.items() if k != "note"}) \
         == "shapes.hold: h.note is missing"
@@ -144,6 +144,59 @@ def test_variant_cases(ir):
     assert "s.Circle expected Int" in _err(ir, "name", Circle("r"))
     assert "s.Square.h is missing" in _err(
         ir, "name", {"$kind": "Square", "$value": {"w": 1, "tag": "t"}})
+
+
+def test_a_map_key_is_never_echoed(ir):
+    ok = {"items": [1], "note": None, "by": {}, "shape": {"$kind": "Dot"}}
+    err = _err(ir, "hold", {**ok, "by": {"sk-live-SECRET": "x"}})
+    assert "SECRET" not in err
+    assert "h.by[<key 0>] expected Int" in err
+
+
+GENERIC = """
+type Pair[A, B] = { a: A, b: B }
+type Tree[A] = { v: A, kids: List[Tree[A]] }
+type Maybe[A] = Nope | Yes(A)
+service G {
+  fn takepair(p: Pair[Int, Str]) -> Int
+  fn tree(t: Tree[Int]) -> Int
+  fn maybe(m: Maybe[Pair[Int, Str]]) -> Int
+}
+component C provides g: G {
+  provide g {
+    fn takepair(p) = p.a
+    fn tree(t) = t.v
+    fn maybe(m) = 1
+  }
+}
+"""
+
+
+def test_an_instantiated_generic_is_checked_with_its_arguments():
+    gir = compile_source(GENERIC, "generic.rvl")
+
+    def err(method, arg):
+        return args_error(gir, "g", method, [arg])
+
+    assert err("takepair", {"a": 1, "b": "x"}) is None
+    assert "p expected Pair[Int, Str], got str" in err("takepair", "hello")
+    assert err("takepair", {"b": "x"}) == "g.takepair: p.a is missing"
+    assert err("takepair", {"a": "one", "b": "x"}) == \
+        "g.takepair: p.a expected Int, got str"
+    assert "p.b expected Str" in err("takepair", {"a": 1, "b": 2})
+    # a recursive generic terminates and checks every level
+    assert err("tree", {"v": 1, "kids": [{"v": 2, "kids": []}]}) is None
+    assert "t.kids[0].v expected Int" in err(
+        "tree", {"v": 1, "kids": [{"v": "x", "kids": []}]})
+    # a value that contains itself terminates
+    cyclic = {"v": 1, "kids": []}
+    cyclic["kids"].append(cyclic)
+    assert err("tree", cyclic) is None
+    # a generic variant payload is bound too
+    assert err("maybe", {"$kind": "Nope"}) is None
+    assert err("maybe", {"$kind": "Yes", "$value": {"a": 1, "b": "x"}}) is None
+    assert "m.Yes.a expected Int" in err(
+        "maybe", {"$kind": "Yes", "$value": {"a": "z", "b": "x"}})
 
 
 def test_value_is_never_echoed(ir):
@@ -185,7 +238,9 @@ component Q provides picks: Picks { provide picks { fn take(p) = 1 } }
 def test_arity(ir):
     assert _err(ir, "twice") == "shapes.twice: argument n is missing"
     assert _err(ir, "twice", 1, 2) == "shapes.twice: takes 1 argument(s), got 2"
-    assert _err(ir, "maybe") is None                       # a trailing Opt may be left off
+    # an omitted trailing Opt is refused too: the method would otherwise fail
+    # with a host TypeError for the missing positional argument
+    assert _err(ir, "maybe") == "shapes.maybe: argument n is missing"
 
 
 def test_unknown_operation_or_key_is_left_to_the_call(ir):
@@ -240,3 +295,19 @@ def test_check_args_checks_without_calling(session):
     session.check_args("shapes", "keep", [BOX])
     with pytest.raises(SessionError, match=r"shapes\.keep: b\.h is missing"):
         session.check_args("shapes", "keep", [{"w": 2, "tag": "a"}])
+
+
+@needs_cordis
+def test_call_refuses_an_ill_shaped_generic_record_and_an_omitted_opt(session):
+    gsession = Session()
+    gsession.load(compile_source(GENERIC, "generic.rvl"))
+    try:
+        assert gsession.call("g", "takepair", [{"a": 1, "b": "x"}])["result"] == 1
+        for bad in ("hello", {"b": "x"}):
+            with pytest.raises(SessionError) as info:
+                gsession.call("g", "takepair", [bad])
+            assert info.value.code == "ARGS"
+    finally:
+        gsession.unload()
+    with pytest.raises(SessionError, match=r"shapes\.maybe: argument n is missing"):
+        session.call("shapes", "maybe", [])
