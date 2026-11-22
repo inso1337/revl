@@ -644,6 +644,7 @@ def _run_audit(args, ir: dict) -> int:
     boundary = _boundary(ir)
     from .distribute import distributability  # noqa: PLC0415 - lazy, issue #2196
     distribution = distributability(ir)
+    from .audit_diff import extern_backends  # noqa: PLC0415
     from .cardinality import cardinality  # noqa: PLC0415
     card = cardinality(ir)
     manifest = ir.get("manifest") or {}
@@ -653,11 +654,9 @@ def _run_audit(args, ir: dict) -> int:
          # `unknown` included, so a consumer never reads "no fact" as "no field".
          # Must match `audit_report`'s entry key-for-key.
          "inverse": inverse_class(ext),
-         # item 396: a ref-only extern has no `bodies` key but DOES cross on its
-         # ref tier, so union the ref backends in — otherwise a ref-only extern
-         # would audit as "no bodies" while emitting fine.
-         "backends": sorted(set(ext.get("bodies") or {})
-                            | set(ext.get("refs") or {})),
+         # item 396: a ref-only extern crosses on its ref tier, so the shared
+         # helper unions the ref backends in (`audit_report` calls the same one).
+         "backends": extern_backends(ext),
          # item 373: carry the reach onto the audit extern entry so the surface
          # can name what a crossing is bounded to. Absent unless declared, so the
          # `--json` audit of every existing composition is byte-identical.
@@ -1713,6 +1712,9 @@ def _dispatch(args) -> int:
         return _run_import(args)
     if args.command == "gen-types":
         return _run_gen_types(args)
+    if args.command == "docs":
+        from .cli.docs import _run_docs  # noqa: PLC0415 — lazy
+        return _run_docs(args)
     if args.command == "export":
         return _run_export(args)
     if args.command == "sourcemap":

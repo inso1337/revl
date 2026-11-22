@@ -167,9 +167,10 @@ walks scalars and compares them **as numbers**. Both `keys()` sorts call the
 same comparator. `String.compareTo` is *not* that comparator — it is UTF-16
 code-unit order and would reintroduce the boundary fault.
 
-wasm refuses `<` on a `Str` by name (*"relational operator '<' is only
-lowerable for Int/Int32"*) and keeps refusing it. A tier that cannot match the
-reference should say so; a silent wrong answer is the worse outcome.
+wasm lowers `<`, `<=`, `>` and `>=` on two `Str` values through `$str_cmp`, a
+byte comparison over the UTF-8 form. Bytes ordered as unsigned values are
+code-point order, so it matches the reference on the boundary above (issue
+#3145); a `Str` compared with a non-`Str` is still refused by name.
 
 ### Literal syntax: two escapes, plus a triple-quoted verbatim form (item 85)
 

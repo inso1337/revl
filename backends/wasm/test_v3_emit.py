@@ -745,20 +745,20 @@ def test_v3_match_bind_inside_loop_runs_on_wasmtime(tmp_path):
     assert invoke("for_sum") == 107          # 2 + 100 + 5
 
 
-def test_v3_list_indexof_rejected_by_tier():
-    """DELIBERATE BOUNDARY: `List.indexOf` is still not lowerable on this tier —
-    the per-element comparison (str_eq per slot for List[Str], i64 compare for
-    List[Int]) is the reader shape the harness never reaches. `Str.indexOf`
-    DOES lower now (see the execution test below); List does not, and a
-    boundary that silently started emitting would be as much a regression as a
-    miscompile."""
+def test_v3_list_indexof_lowers_for_comparable_elements_only():
+    """`List.indexOf` lowers where the element has a comparison on this tier
+    (Str by bytes, Int/Int32/Bool by slot) and stays a named refusal for an
+    element that has none (a record, a nested list). Issue #3145; executed in
+    `test_list_index_str_cmp_empty_3145.py`."""
     emit = _emitter()
-    for src in (
-        'fn f(xs: List[Int]) -> Int { return xs.indexOf(3) }',
-        'fn f(xs: List[Str]) -> Int { return xs.indexOf("a") }',
-    ):
-        with pytest.raises(emit.EmitError, match="indexOf is not lowerable"):
-            emit.emit(compile_source(src))
+    wat = emit.emit(compile_source(
+        'fn f(xs: List[Int]) -> Int { return xs.indexOf(3) }\n'
+        'fn g(xs: List[Str]) -> Int { return xs.indexOf("a") }'))["functions"]
+    assert "(func $list_index_of_slot" in wat
+    assert "(func $list_index_of_str" in wat
+    with pytest.raises(emit.EmitError, match="indexOf is not lowerable"):
+        emit.emit(compile_source(
+            'fn f(xs: List[List[Int]]) -> Int { return xs.indexOf([1]) }'))
 
 
 def test_v3_str_reader_builtins_emit():

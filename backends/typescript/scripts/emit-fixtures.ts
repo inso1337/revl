@@ -196,6 +196,12 @@ export function emitFixtures(): void {
   // fixtures above.
   const emitUiTransaction = emitFixture
   emitUiTransaction('ui_transaction.ir.json', 'ui_transaction.ts')
+  // item 53: verified provider state hand-off on hot-swap. `Cache` declares
+  // `handoff cache: Map[Str, Str]` over the Map it acquires; `CacheV2` is its
+  // admitted successor (compiled against the running manifest with
+  // `replacing=("Cache",)`, fixtures/_gen_handoff_swap.py).
+  // handoff_swap.test.ts drives the warm swap and the rollback on it.
+  emitFixture('handoff_swap.ir.json', 'handoff_swap.ts')
 }
 
 // Allow running directly (`node scripts/emit-fixtures.ts`) as a standalone

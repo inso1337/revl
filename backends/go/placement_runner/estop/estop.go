@@ -26,7 +26,9 @@ package estop
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"sort"
 	"sync"
@@ -70,18 +72,23 @@ func LatchPath(latch, wal string, env bool) string {
 // A latch that EXISTS but does not parse still reads as HALTED. Failing open on
 // a malformed emergency stop is the one failure mode this feature exists to
 // prevent, so every reader — the py runtime seam, the CLI, the conductor, the
-// ts tier and now this — applies the same rule. A latch the OS refuses to open
-// at all (missing file, permission error) reads as absent, matching
-// `estop.py::read_latch` (FileNotFoundError/OSError -> None).
+// ts tier and now this — applies the same rule. The same reasoning covers a
+// latch this process cannot READ (EACCES, EISDIR, EMFILE): it is an existing
+// but unreadable latch, so it reads as HALTED. Only a genuinely absent latch
+// (`fs.ErrNotExist`) reads as not-halted, matching `estop.py::read_latch`
+// (FileNotFoundError -> None, every other OSError -> unreadable).
 func ReadLatch(path string) LatchRecord {
 	if path == "" {
 		return nil
 	}
 	text, err := os.ReadFile(path)
 	if err != nil {
-		// ENOENT or any other OS-level read failure: the latch is not readable,
-		// so it is not a halt. (A malformed BUT readable latch is handled below.)
-		return nil
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		// Any other read failure: a halt no reader can inspect must never be
+		// mistaken for the absence of a halt.
+		return unreadable()
 	}
 	var record any
 	if err := json.Unmarshal(text, &record); err != nil {

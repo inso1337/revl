@@ -772,22 +772,6 @@
     },
     {
       "sites": [
-        "tools/evolution_controller.py::measured_diff",
-        "tools/evolution_progress.py::changed_paths",
-        "tools/evolution_reward.py::changed_files"
-      ],
-      "tokens": [
-        "--exclude-standard",
-        "--name-only",
-        "--no-renames",
-        "--others",
-        "diff",
-        "ls-files"
-      ],
-      "note": "Three copies of the changed-files listing: the reward's scope probe, the controller's authority precondition and the progress counter. Each measures the diff inside its own module's error handling, but the git argument vector must stay identical or one part of the loop signs off paths another part never saw. `--no-renames` is the flag all three carry, so a move is judged under both of its paths, and a move out of a domain, a scope or the operator grant is measured."
-    },
-    {
-      "sites": [
         "tools/selfhost_coverage.py::_GENERIC_REASONS",
         "tools/selfhost_line_coverage.py::_GENERIC_REASONS"
       ],

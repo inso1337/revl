@@ -133,7 +133,7 @@ v1 documents are unaffected. The wasm tier lowers the fixed-shape builtins
 canonical-ABI string/list model, and now also the reader trio: `split`
 (`$str_split` → `List[Str]`), `join` (`$str_join`), and `Str.indexOf`
 (`$str_index_of`, code-point index out), closing the harness's reader gap.
-It still rejects `repeat` and `List.indexOf` (the per-element comparison) with
+It still rejects `repeat` and `List.indexOf` over records, lists or Floats (a List of Str/Int/Int32/Bool lowers) with
 its usual named tier error, not yet lowerable on that tier. The FR-6/FR-9
 additions (`startsWith`, `endsWith`, `to_int`)
 DO lower on wasm: byte-comparison helpers are exact for UTF-8 prefixes, and
@@ -422,12 +422,12 @@ code-point range compare. Lowered native (a chained comparison (`"0" <= x <=
 no call and no intermediate `ord`. See `docs/bench-selfhost.md` for the lexer
 before→after.
 
-**Tier status.** **py, typescript and rust** lower all four native (`char::is_ascii_*`
-on rust, a chained range compare or equality set on ts). **go, java and wasm**
-still refuse them, each with its own message (`unknown v3 builtin method
-'is_digit'` on go, `unknown builtin method 'is_digit'` on java, `unsupported
-builtin method 'is_digit'` on wasm). A tier that later adopts them lowers to its
-own ASCII test.
+**Tier status.** **py, typescript, rust, go and java** lower all four native
+(`char::is_ascii_*` on rust, a chained range compare or equality set on ts, go
+and java; go and java bind the receiver once in a func literal or lambda, so a
+side-effecting receiver is evaluated a single time). **wasm** still refuses
+them (`unsupported builtin method 'is_digit'`). A tier that later adopts them
+lowers to its own ASCII test.
 
 ### `Str.codepoint_at(i)`: codepoint-at-index scan (item 276)
 

@@ -127,11 +127,30 @@ def proposal_record(tree: Path, **over) -> dict:
     return record
 
 
-def run(record: dict, allow=("**",)) -> ec.LifecycleVerdict:
+_AUTO = object()
+
+
+def run(record: dict, allow=("**",), pin=_AUTO) -> ec.LifecycleVerdict:
     """`allow` is the OPERATOR's grant, not a record key. The cases that are
     about something else grant everything, the way their old `scope` stood in
-    for "unconstrained"; the allow-set cases pass their own set."""
-    return ec.decide(ec.load_proposal(record, allow=allow))
+    for "unconstrained"; the allow-set cases pass their own set.
+
+    `pin` is the OPERATOR's base commit. By default it is the commit the
+    record's own `base` names, so a case about something else is measured
+    against the base it says; a case about the base passes a commit id, or
+    `""` for none."""
+    if pin is _AUTO:
+        pin = resolve_commit(Path(record["tree"]), record["base"]) or ""
+    return ec.decide(ec.load_proposal(
+        record, allow=allow, base_pin=pin, base_source="--base" if pin else ""))
+
+
+def resolve_commit(tree: Path, ref: str) -> str:
+    try:
+        return _git(tree, "rev-parse", "--verify", "--quiet",
+                    ref + "^{commit}").strip()
+    except AssertionError:
+        return ""
 
 
 @pytest.fixture
@@ -685,6 +704,105 @@ def test_a_rename_cannot_move_an_ungranted_file_into_the_grant(tmp_path):
     assert "src/svc.rvl" in verdict.by_name()["authority"].reason
 
 
+# ----------------------------------- the base and the read are the operator's
+
+def _head(tree: Path, rev: str = "HEAD") -> str:
+    return _git(tree, "rev-parse", rev).strip()
+
+
+def test_a_record_base_that_names_the_candidates_own_commit_is_refused(
+        clean_tree):
+    """`base` is a record key, so a candidate that committed its edits and gave
+    that commit as `base` was measured as having changed nothing and promoted.
+    The operator's base is the one the diff is taken against."""
+    operator_base = _head(clean_tree, "HEAD~1")
+    record = proposal_record(clean_tree, base="HEAD")
+    verdict = run(record, allow=("docs/**",), pin=operator_base)
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "BASE_MOVED"
+    assert verdict.refusing_stage == "authority"
+    assert verdict.measurements_read is False
+    reason = verdict.by_name()["authority"].reason
+    assert "src/svc.rvl" in reason and operator_base in reason
+
+
+def test_the_same_record_against_the_operator_base_names_the_path(clean_tree):
+    verdict = run(proposal_record(clean_tree, base="HEAD~1"),
+                  allow=("docs/**",), pin=_head(clean_tree, "HEAD~1"))
+    assert verdict.code == "OUTSIDE_ALLOW"
+    assert "src/svc.rvl" in verdict.by_name()["authority"].reason
+
+
+def test_a_proposal_with_no_operator_base_is_refused(clean_tree):
+    verdict = run(proposal_record(clean_tree), pin="")
+    assert verdict.decision == "REFUSE"
+    assert verdict.code == "NO_BASE"
+    assert ec.BASE_ENV in verdict.by_name()["authority"].reason
+
+
+@pytest.mark.parametrize("pin", ["HEAD~1", "main", "abc1234", "0" * 40])
+def test_an_operator_base_must_be_a_full_commit_id_the_tree_holds(
+        clean_tree, pin):
+    verdict = run(proposal_record(clean_tree), pin=pin)
+    assert verdict.code == "NO_BASE", verdict.render()
+
+
+def test_the_verdict_records_the_resolved_base_and_where_it_came_from(
+        clean_tree):
+    pin = _head(clean_tree, "HEAD~1")
+    blob = run(proposal_record(clean_tree)).as_dict()
+    assert blob["base_commit"] == pin
+    assert blob["base_pin"] == pin
+    assert blob["base_source"] == "--base"
+    bare = run(proposal_record(clean_tree), pin="").as_dict()
+    assert bare["base_pin"] is None and bare["base_source"] is None
+    assert pin in run(proposal_record(clean_tree)).render()
+
+
+def test_the_operator_base_is_not_a_proposal_record_key(clean_tree):
+    assert ec.BASE_ENV not in ec.RECORD_KEYS
+    record = proposal_record(clean_tree)
+    record["base_pin"] = "0" * 40
+    proposal = ec.load_proposal(record, base_pin="1" * 40, base_source="--base")
+    assert proposal.candidate.base_pin == "1" * 40
+    assert "base_pin" in proposal.candidate.prose_ignored
+
+
+def _tracked_edit(tmp_path: Path, name: str) -> Path:
+    """A tree whose candidate commit is clean, plus one uncommitted edit to a
+    file the BASE tracks, outside the grant (`src/**` only)."""
+    tree = make_tree(tmp_path / "t", {"src/svc.rvl": "candidate\n",
+                                      name: "base\n"})
+    (tree / name).write_text("edited\n")
+    return tree
+
+
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+def test_an_index_flag_cannot_hide_an_edit_from_the_authority_diff(
+        tmp_path, flag):
+    tree = _tracked_edit(tmp_path, "docs/hidden.md")
+    _git(tree, "update-index", flag, "docs/hidden.md")
+    assert "hidden.md" not in _git(tree, "status", "--porcelain")
+    record = proposal_record(tree, base="HEAD~1")
+    ok, paths = ec.measured_diff(ec.load_proposal(
+        record, base_pin=_head(tree, "HEAD~1")))
+    assert ok and "docs/hidden.md" in paths, paths
+    verdict = run(record, allow=("src/**",), pin=_head(tree, "HEAD~1"))
+    assert verdict.code == "OUTSIDE_ALLOW"
+    assert "docs/hidden.md" in verdict.by_name()["authority"].reason
+
+
+def test_an_info_exclude_pattern_cannot_hide_an_untracked_file(tmp_path):
+    tree = make_tree(tmp_path / "t", {"src/svc.rvl": "candidate\n"})
+    (tree / "docs").mkdir()
+    (tree / "docs" / "secret.md").write_text("x\n")
+    (tree / ".git" / "info" / "exclude").write_text("docs/secret.md\n")
+    assert "secret.md" not in _git(tree, "status", "--porcelain")
+    verdict = run(proposal_record(tree, base="HEAD~1"), allow=("src/**",))
+    assert verdict.code == "OUTSIDE_ALLOW"
+    assert "docs/secret.md" in verdict.by_name()["authority"].reason
+
+
 def test_a_diff_inside_the_operator_allow_set_still_promotes(clean_tree):
     """The control: the same complete proposal promotes when the grant covers
     the measured diff, so the new precondition is not a refusal of everything."""
@@ -1125,7 +1243,8 @@ def test_the_cli_exit_status_distinguishes_the_four_decisions(
         out = tmp_path / f"verdict-{index}.json"
         src.write_text(json.dumps(record))
         assert ec.main(["--proposal", str(src), "--json", str(out),
-                        "--allow", "src/**,tests/**"]) == status
+                        "--allow", "src/**,tests/**",
+                        "--base", _head(clean_tree, "HEAD~1")]) == status
         assert json.loads(out.read_text(encoding="utf-8"))["decision"] == decision
 
 
@@ -1135,12 +1254,38 @@ def test_the_cli_reads_the_operator_allow_set(clean_tree, tmp_path, monkeypatch)
     controller refuses rather than defaulting to the tree."""
     src = tmp_path / "p.json"
     src.write_text(json.dumps(proposal_record(clean_tree)))
+    base = _head(clean_tree, "HEAD~1")
     monkeypatch.delenv(ec.ALLOW_ENV, raising=False)
-    assert ec.main(["--proposal", str(src)]) == ec.REFUSE
+    monkeypatch.delenv(ec.BASE_ENV, raising=False)
+    assert ec.main(["--proposal", str(src), "--base", base]) == ec.REFUSE
     monkeypatch.setenv(ec.ALLOW_ENV, "src/**")
-    assert ec.main(["--proposal", str(src)]) == ec.PROMOTE
+    assert ec.main(["--proposal", str(src), "--base", base]) == ec.PROMOTE
     monkeypatch.setenv(ec.ALLOW_ENV, "docs/**")
-    assert ec.main(["--proposal", str(src), "--allow", "src/**"]) == ec.PROMOTE
+    assert ec.main(["--proposal", str(src), "--allow", "src/**",
+                    "--base", base]) == ec.PROMOTE
+
+
+def test_the_cli_reads_the_operator_base(clean_tree, tmp_path, monkeypatch):
+    """The base arrives on the command line or in `BASE_ENV`, never in the
+    proposal; `--base` wins over the environment, and with neither the
+    controller refuses at `authority` by name."""
+    src = tmp_path / "p.json"
+    out = tmp_path / "v.json"
+    src.write_text(json.dumps(proposal_record(clean_tree)))
+    base = _head(clean_tree, "HEAD~1")
+    monkeypatch.delenv(ec.BASE_ENV, raising=False)
+    assert ec.main(["--proposal", str(src), "--allow", "**",
+                    "--json", str(out)]) == ec.REFUSE
+    assert json.loads(out.read_text(encoding="utf-8"))["code"] == "NO_BASE"
+    monkeypatch.setenv(ec.BASE_ENV, base)
+    assert ec.main(["--proposal", str(src), "--allow", "**",
+                    "--json", str(out)]) == ec.PROMOTE
+    blob = json.loads(out.read_text(encoding="utf-8"))
+    assert blob["base_source"] == ec.BASE_ENV and blob["base_commit"] == base
+    monkeypatch.setenv(ec.BASE_ENV, _head(clean_tree))
+    assert ec.main(["--proposal", str(src), "--allow", "**",
+                    "--base", base, "--json", str(out)]) == ec.PROMOTE
+    assert json.loads(out.read_text(encoding="utf-8"))["base_source"] == "--base"
 
 
 def test_an_unreadable_proposal_refuses(tmp_path):
@@ -1157,7 +1302,8 @@ def test_the_verdict_json_shows_that_measurements_were_not_read(
     out = tmp_path / "v.json"
     src.write_text(json.dumps(widened_record(clean_tree)))
     assert ec.main(["--proposal", str(src), "--json", str(out),
-                    "--allow", "src/**,tests/**"]) == ec.REFUSE
+                    "--allow", "src/**,tests/**",
+                    "--base", _head(clean_tree, "HEAD~1")]) == ec.REFUSE
     verdict = json.loads(out.read_text(encoding="utf-8"))
     assert verdict["measurements_read"] is False
     assert verdict["code"] == "AUTHORITY_WIDENED"
