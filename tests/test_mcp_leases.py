@@ -188,6 +188,68 @@ def test_advise_plan_derives_the_targets_from_the_candidate():
 ENFORCING = parse_policy("leases enforced")
 
 
+def _count_derivations(monkeypatch):
+    calls = []
+    real = L._swap_targets
+
+    def spy(*args, **kwargs):
+        calls.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(L, "_swap_targets", spy)
+    return calls
+
+
+def test_advise_plan_skips_the_compile_when_no_lease_is_held(monkeypatch):
+    # issue #3598: deriving the targets compiles the candidate; with an empty
+    # book, or only the caller's own minted lease, the advice is always empty,
+    # so the compile is skipped.
+    calls = _count_derivations(monkeypatch)
+    sess = _FakeSession(compile_source(TWO), Operator("alice"))
+    assert L.advise_plan(sess, {"source": _swap_user()}) == []
+    sess.leases.claim("UserCache", "alice", ttl=600)
+    assert L.advise_plan(sess, {"source": _swap_user()}) == []
+    assert calls == []
+
+
+def test_advise_plan_still_compiles_and_warns_for_another_operators_lease(
+        monkeypatch):
+    calls = _count_derivations(monkeypatch)
+    sess = _FakeSession(compile_source(TWO), Operator("alice"))
+    sess.leases.claim("UserCache", "bob", ttl=600)
+    warnings = L.advise_plan(sess, {"source": _swap_user()})
+    assert [w["leasedBy"] for w in warnings] == ["bob"]
+    assert len(calls) == 1
+
+
+def test_advise_plan_still_warns_on_a_restored_lease_naming_the_caller(
+        monkeypatch):
+    # a lease re-seated from a snapshot names alice but was not minted here,
+    # so it does not exempt her: the shortcut must not fire, the targets are
+    # derived, and the plan still warns. Catches `_exempt` regressing to a
+    # holder-only check.
+    import time
+    calls = _count_derivations(monkeypatch)
+    sess = _FakeSession(compile_source(TWO), Operator("alice"))
+    now = time.time()
+    sess.leases.reinstate("UserCache", "alice", now, now + 600, now=now)
+    warnings = L.advise_plan(sess, {"source": _swap_user()})
+    assert [w["component"] for w in warnings] == ["UserCache"]
+    assert warnings[0]["leasedBy"] == "alice"
+    assert "restored snapshot" in warnings[0]["message"]
+    assert len(calls) == 1
+
+
+def test_enforced_check_still_fails_closed_on_an_undecidable_swap():
+    # the advisory shortcut does not reach enforcement: a candidate that does
+    # not compile is undecidable, and another operator's lease refuses it.
+    sess = _FakeSession(compile_source(TWO), Operator("alice"), sandbox=ENFORCING)
+    sess.leases.claim("OtherCache", "bob", ttl=600)
+    assert L.advise_plan(sess, {"source": "component {"}) == []
+    refusal = L.check_swap(sess, {"source": "component {"})
+    assert refusal is not None and refusal.heldBy == "bob"
+
+
 def test_policy_parses_leases_enforced_in_dsl_and_json():
     assert parse_policy("leases enforced").leases_enforced is True
     assert parse_policy('{"leases": {"enforced": true}}').leases_enforced is True
