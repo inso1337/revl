@@ -202,7 +202,7 @@ def test_a_red_legacy_status_context_refuses():
 
 
 def test_a_waiver_needs_a_reason_and_is_printed():
-    roll = green_rollup() + [node("census-artifact", "FAILURE")]
+    roll = green_rollup() + [node("census-artifact", "CANCELLED")]
     gh = FakeGh(roll)
     code, out, _ = gate(gh, "merge", "7", "--merge", "--waive",
                         "ci / census-artifact=stale ref, green on main")
@@ -213,10 +213,40 @@ def test_a_waiver_needs_a_reason_and_is_printed():
     assert code == 2 and gh.merged == []
 
 
+@pytest.mark.parametrize("conclusion", ["FAILURE", "TIMED_OUT", "STARTUP_FAILURE"])
+def test_a_waiver_naming_a_failed_context_still_refuses(conclusion):
+    """The #2861 case: a failed shard is never waivable."""
+    roll = [node(SHARDS[3], conclusion) if n["name"] == SHARDS[3] else n
+            for n in green_rollup()]
+    gh = FakeGh(roll)
+    code, out, _ = gate(gh, "merge", "7", "--merge", "--waive",
+                        "ci / root-suite-affected (4)=flaky, ignore")
+    assert code == 1 and gh.merged == []
+    assert "cannot be waived" in out and "root-suite-affected (4)" in out
+    assert "waived:" not in out and "no waivable context" not in out
+
+
+def test_a_waiver_naming_a_failed_legacy_status_still_refuses():
+    roll = green_rollup() + [{"__typename": "StatusContext",
+                              "context": "ci/legacy", "state": "FAILURE"}]
+    gh = FakeGh(roll)
+    code, out, _ = gate(gh, "merge", "7", "--waive", "ci/legacy=because")
+    assert code == 1 and "cannot be waived" in out and gh.merged == []
+
+
+def test_an_unfinished_check_can_be_waived():
+    roll = green_rollup() + [node("held-out", status="IN_PROGRESS", run=101,
+                                  started="2026-11-01T11:00:00Z")]
+    gh = FakeGh(roll)
+    code, out, _ = gate(gh, "merge", "7", "--merge", "--waive",
+                        "ci / held-out=advisory job stuck on a dead runner")
+    assert code == 0 and "waived: ci / held-out" in out
+
+
 def test_a_waiver_that_matches_nothing_does_not_pass():
     gh = FakeGh(green_rollup())
     code, out, _ = gate(gh, "merge", "7", "--waive", "ci / typo=because")
-    assert code == 1 and "no offending context" in out and gh.merged == []
+    assert code == 1 and "no waivable context" in out and gh.merged == []
 
 
 @pytest.mark.parametrize("flags", [
@@ -397,11 +427,11 @@ def _stub_gh(tmp_path, rollup):
     the in-process seam."""
     log = tmp_path / "calls.log"
     script = tmp_path / "gh-stub"
-    script.write_text(textwrap.dedent(f"""\
+    script.write_text(encoding="utf-8", data=textwrap.dedent(f"""\
         #!{sys.executable}
         import json, sys
         args = sys.argv[1:]
-        open({str(log)!r}, "a").write(" ".join(args) + "\\n")
+        open({str(log)!r}, "a", encoding="utf-8").write(" ".join(args) + "\\n")
         if args[:2] == ["pr", "view"]:
             print(json.dumps({{"headRefOid": {HEAD!r}, "baseRefName": "main",
                 "state": "OPEN", "statusCheckRollup": {rollup!r}}}))
@@ -433,7 +463,7 @@ def test_cli_refuses_a_red_shard_and_never_calls_pr_merge(tmp_path):
     proc = _cli(script, "merge", "7", "--merge")
     assert proc.returncode == 1, proc.stderr
     assert "ci / root-suite-affected (4)" in proc.stdout
-    assert "pr merge" not in log.read_text()
+    assert "pr merge" not in log.read_text(encoding="utf-8")
 
 
 def test_cli_merges_when_green(tmp_path):
@@ -441,20 +471,20 @@ def test_cli_merges_when_green(tmp_path):
     proc = _cli(script, "merge", "7", "--squash")
     assert proc.returncode == 0, proc.stderr
     assert f"pr merge 7 --repo inso1337/revl --match-head-commit {HEAD} --squash" \
-        in log.read_text()
+        in log.read_text(encoding="utf-8")
 
 
 def test_cli_a_moved_base_and_a_waiver_through_the_subprocess_path(tmp_path):
-    roll = [node("census-artifact", "FAILURE")] + green_rollup()
+    roll = [node("census-artifact", "CANCELLED")] + green_rollup()
     script, log = _stub_gh(tmp_path, roll)
     proc = _cli(script, "merge", "7", "--merge")
     assert proc.returncode == 1 and "ci / census-artifact" in proc.stdout
-    assert "pr merge" not in log.read_text()
+    assert "pr merge" not in log.read_text(encoding="utf-8")
     proc = _cli(script, "merge", "7", "--merge", "--waive",
                 "ci / census-artifact=stale ref, green on main")
     assert proc.returncode == 0, proc.stderr
     assert "waived: ci / census-artifact" in proc.stdout
-    assert "pr merge 7" in log.read_text()
+    assert "pr merge 7" in log.read_text(encoding="utf-8")
 
 
 def test_the_merge_procedure_documents_the_gate():

@@ -55,16 +55,18 @@ REQUIRED contexts are green, which is exactly before the advisory shards have
 finished, so it cannot honour this rule. Wait for the checks to finish, then
 merge through this tool.
 
-WAIVERS. `--waive CONTEXT=REASON` accepts one named offending context (written
-as the verdict prints it, workflow then job: `ci / census-artifact`) that is red for a
-reason the pull request did not cause (docs/process.md, "A red check is not
-always yours"). The reason is mandatory and is printed with the verdict. A
-waiver is for one invocation; nothing persists.
+WAIVERS. `--waive CONTEXT=REASON` accepts one named context (written as the
+verdict prints it, workflow then job: `ci / census-artifact`) that is
+cancelled, unfinished or stale for a reason the pull request did not cause
+(docs/process.md, "A red check is not always yours"). A run whose conclusion
+is a FAILURE (or any other red) is NEVER waivable: that is the red-shard case
+the gate exists for, so fix it or re-run it. The reason is mandatory and is
+printed with the verdict. A waiver is for one invocation; nothing persists.
 
 USAGE.
     tools/merge_gate.py check 123
     tools/merge_gate.py merge 123 --merge
-    tools/merge_gate.py merge 123 --squash --waive 'ci / census-artifact=stale ref, re-run is green on main'
+    tools/merge_gate.py merge 123 --squash --waive 'ci / census-artifact=cancelled by a runner reclaim, re-run is queued behind it'
 
 `check` exits 0 when the merge is allowed and 1 when it is refused; both
 print the verdict. `merge` runs the gate and then
@@ -306,7 +308,13 @@ def evaluate(snap: Snapshot, waivers: dict[str, str] | None = None) -> Verdict:
                 )
         if problem is None:
             continue
-        if c.context in waivers:
+        if c.state == "red" and c.context in waivers:
+            # A failed run is never waivable: it is exactly the red-shard
+            # case this gate exists for. Consume the waiver so the refusal
+            # says why instead of also calling the name a typo.
+            waivers.pop(c.context)
+            problem += "; a failed run cannot be waived, fix it or re-run it"
+        elif c.context in waivers:
             waived.append((c.context, waivers.pop(c.context)))
             continue
         refusals.append(Refusal(c.context, problem))
@@ -314,8 +322,8 @@ def evaluate(snap: Snapshot, waivers: dict[str, str] | None = None) -> Verdict:
         # A waiver that matches nothing is a typo, and a typo must not read as
         # a waived red.
         refusals.append(Refusal(
-            ctx, "--waive names no offending context (the name is written "
-            "as the verdict prints it, workflow then job)"))
+            ctx, "--waive names no waivable context (cancelled, unfinished "
+            "or stale; written as the verdict prints it, workflow then job)"))
     if judged == 0:
         refusals.append(Refusal(
             "(no checks)",

@@ -621,11 +621,14 @@ the merge-method and message flags pass through to `gh pr merge` (`--merge`,
   contexts are green, before the advisory shards finish, so it cannot honour
   the rule; the tool refuses it, as it refuses `--admin`. Wait for the checks
   to finish, then merge through the tool.
-- **A red that is not the pull request's** (see "A red check is not always
-  yours" in `.github/github-app.yml`) is waived by name, with a reason, for one
-  invocation. The name is written as the verdict prints it, workflow then job:
-  `--waive 'ci / census-artifact=stale ref, green on main'`. The waiver is
-  printed with the verdict. Re-running the job is preferred.
+- **Only a cancelled, unfinished or stale check can be waived**, by name and
+  with a reason, for one invocation. The name is written as the verdict prints
+  it, workflow then job:
+  `--waive 'ci / census-artifact=cancelled by a runner reclaim'`. A check whose
+  conclusion is a failure is never waivable, whatever its cause: that is the
+  red-shard case the gate exists for. Re-run it (see "A red check is not always
+  yours" in `.github/github-app.yml`) and merge on the new run. The waiver is
+  printed with the verdict.
 - **This is a tool, not branch protection.** A hand-typed `gh pr merge` or the
   web button still bypasses it; the only server-side enforcement is promoting
   the contexts to required checks, which makes every merge wait for the
