@@ -346,7 +346,7 @@ def container_flags(env: dict, *, name: str, mounts: list[tuple[str, str]],
 
     Pure: no runtime is consulted, so this is the half of the driver that is
     testable everywhere and reviewable as a whole. `mounts` is the ALREADY
-    resolved mount list (path, mode) — the declared `fs` grants, this process's
+    resolved mount list (path, mode): the declared `fs` grants, this process's
     own spec and seam identity, the composition's compile-input FILES and, when
     the image does not carry it, the host runtime; every one of them is reported
     in the achieved record, so nothing the driver adds on the author's behalf is
@@ -1024,6 +1024,16 @@ class ContainerDriver:
         widening = _overbroad_host_mount(pname, host_mounts, env)
         if widening:
             return None, widening
+
+        # `-v` creates a missing host path as a DIRECTORY, so a compile input
+        # that vanished since the compile would be mounted as an empty one.
+        for path, _mode in host_mounts:
+            if not os.path.exists(path):
+                return None, (
+                    f"process {pname!r}: the compile input {path!r} no longer "
+                    f"exists, so the container driver cannot mount it (a bind "
+                    f"mount of a missing path would create an empty directory "
+                    f"there). Re-run the placement.")
 
         # PHASE 2 — the FINAL configuration. The process does not run under the
         # set phase 1 confirmed, it runs under that set plus the host mounts, so

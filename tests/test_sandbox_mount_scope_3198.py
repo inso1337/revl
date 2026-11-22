@@ -238,6 +238,7 @@ def test_the_recompile_reads_only_files_the_driver_would_mount(tmp_path):
     ONLY the mounted file set (the confined process sees nothing else) and
     require that no read falls outside it. Catches a read the report misses."""
     import builtins
+    import io
     import os
 
     files = _compile_fixture(tmp_path)
@@ -258,11 +259,13 @@ def test_the_recompile_reads_only_files_the_driver_would_mount(tmp_path):
         seen.add(os.path.abspath(os.fspath(path)))
         return real_os_open(path, *a, **k)
 
-    builtins.open, os.open = spy_open, spy_os_open
+    # `Path.read_text` goes through `io.open`, which `builtins.open` patching
+    # alone does not catch
+    builtins.open, io.open, os.open = spy_open, spy_open, spy_os_open
     try:
         compile_files([str(files["app"])])
     finally:
-        builtins.open, os.open = real_open, real_os_open
+        builtins.open, io.open, os.open = real_open, real_open, real_os_open
 
     under_project = {p for p in seen if p.startswith(str(tmp_path))}
     assert under_project, "the spy saw no project read at all"
@@ -314,3 +317,15 @@ def test_preflight_refuses_a_directory_mount_over_the_home(tmp_path, monkeypatch
 
     assert achieved is None
     assert err and "operator's home" in err
+
+
+def test_preflight_refuses_a_compile_input_that_vanished(tmp_path, monkeypatch):
+    """`-v` creates a missing host path as a directory, so a compile input that
+    disappeared between the compile and the launch would be mounted as an empty
+    directory. The driver refuses it instead."""
+    gone = tmp_path / "gone.rvl"
+
+    achieved, err = _preflight_with(tmp_path, monkeypatch, [gone])
+
+    assert achieved is None
+    assert err and str(gone) in err and "no longer exists" in err

@@ -405,7 +405,7 @@ class _ModuleLoader:
         # MCP door reads it to tell whether a compile reached a file an export
         # wrote, which `dependencies` cannot say for an install-origin path.
         self.disk_reads: dict[str, str] = {}
-        # issue #3198: every NON-module host file this compile read from disk — a
+        # issue #3198: every NON-module host file this compile read from disk: a
         # `@backend file` body, a `ref` target, an `asset`. A container-sandboxed
         # process re-compiles its roots inside the boundary (item 337), so the
         # driver has to mount exactly these files too; they are reported through
@@ -1379,8 +1379,8 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     (every module read, install-origin ones included) and, from issue #3198,
     `report["host_file_reads"]` (the NON-module files a `ref`, `asset` or
     `@backend file` body read from disk), so a caller that has to reproduce
-    this compile elsewhere — the container-sandboxed runner's item-337
-    recompile — can name its exact input set. It is never part of the returned
+    this compile elsewhere (the container-sandboxed runner's item-337
+    recompile) can name its exact input set. It is never part of the returned
     document.
 
     Under the export rule (`_export_rule`, issue #2547), on unless the MCP

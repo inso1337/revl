@@ -4350,7 +4350,7 @@ def run_placement(files, placement_path: str, once: bool = False,
         return 1
 
     # issue #3198: the exact FILES a container-sandboxed body may read to
-    # re-compile its own composition — the roots plus every file that compile
+    # re-compile its own composition: the roots plus every file that compile
     # read from disk (`use` dependencies, and every host file a ref, asset or
     # body read). The driver mounts each one read-only on its own; no directory
     # is mounted, so the body cannot read beside them (the envelope never
