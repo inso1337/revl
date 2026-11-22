@@ -1383,6 +1383,7 @@
    "oracle-reject:record destructuring naming a missing field of a declared record",
    "oracle-reject:record destructuring naming a missing field of a generic record",
    "oracle-reject:record destructuring naming a missing field of a structural record",
+   "oracle-reject:record destructuring of an applied generic variant",
    "stdlib/net.rvl",
    "stdlib/socket.rvl",
    "stdlib/wire.rvl",

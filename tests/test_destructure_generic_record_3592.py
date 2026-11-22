@@ -38,6 +38,13 @@ def test_generic_destructure_binds_the_instantiated_field_type():
         compile_source(src)
 
 
+def test_generic_variant_is_refused_as_not_a_record():
+    src = ("type M[T] = Just(T) | Nothing\n"
+           "fn f(m: M[Int]) -> Int { let { z } = m; return 0 }\n")
+    with pytest.raises(RevlError, match=r"requires a record, but `M\[Int\]` is not a record"):
+        compile_source(src)
+
+
 def test_generic_destructure_of_declared_fields_still_compiles():
     compile_source(BOX + "fn f(b: Box[Int]) -> Int { let { v } = b; return v }\n")
     compile_source("type Pair[A, B] = { a: A, b: B }\n"

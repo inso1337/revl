@@ -3622,6 +3622,16 @@ fn f(s: Status) -> Int {
     # have, against a declared record, an applied generic record (`Box[Int]`
     # is not a declared name, so the reference used to admit it) and a
     # structural one. The first missing name in pattern order is the one named.
+    # issue #3592: an APPLIED generic variant is as little a record as a bare
+    # one; the reference used to admit it (`M[Int]` is not a declared name).
+    ("record destructuring of an applied generic variant", """
+type M[T] = Just(T) | Nothing
+
+fn f(m: M[Int]) -> Int {
+  let { z } = m
+  return 0
+}
+""", "TYPE"),
     ("record destructuring naming a missing field of a declared record", """
 type P = { x: Int }
 

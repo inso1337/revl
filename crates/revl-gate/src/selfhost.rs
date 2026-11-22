@@ -24621,7 +24621,7 @@ fn tk_nonrecord_value(ty: String, env: &[Bind]) -> bool {
     if (ty == "") {
         return false;
     }
-    if (tenv_get(env, &(String::from("cases ").revl_concat(&ty))) != "") {
+    if (tenv_get(env, &(String::from("cases ").revl_concat(&parse_head(ty.clone())))) != "") {
         return true;
     }
     return tk_nonrecord_head(&parse_head(ty));

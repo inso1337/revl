@@ -7303,8 +7303,15 @@ def _lower_let_pattern_stmt(stmt: LetPatternStmt, scope: dict, callables: set, a
             # wrong arity keeps the declared field names, so a missing field
             # is still refused by name.
             head_spec = types.get(parse_type(value_type)[0] or "")
-            if isinstance(head_spec, dict) and head_spec.get("kind") == "record" \
-                    and head_spec.get("params"):
+            if isinstance(head_spec, dict) and head_spec.get("kind") != "record":
+                # An applied generic of another kind (`M[Int]` against
+                # `type M[T] = Just(T) | Nothing`) is as little a record as
+                # the bare variant is.
+                raise RevlError(
+                    filename, stmt.line,
+                    f"record destructuring requires a record, but `{render_type(value_type)}` is not a record",
+                )
+            if isinstance(head_spec, dict) and head_spec.get("params"):
                 spec = head_spec
                 fields = nominal_record_fields(value_type, types)
                 if fields is None:
