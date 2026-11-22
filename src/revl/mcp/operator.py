@@ -1405,7 +1405,7 @@ def _approve_targets(session, arguments: dict) \
         return None  # unknown hash/id / ambiguous capability — handler refuses it
     manifest = (session.ir or {}).get("manifest") or {}
     realms = component_realms(manifest, name)
-    return [(name or WHOLE, frozenset({name or WHOLE}) | frozenset(realms))]
+    return [(name, _labels_for(session.ir, name, realms))]
 
 
 def _distillation_targets(session, arguments: dict) \
@@ -1440,7 +1440,7 @@ def _distillation_targets(session, arguments: dict) \
     out = []
     for name in members:
         realms = component_realms(manifest, name)
-        out.append((name, frozenset({name}) | frozenset(realms)))
+        out.append((name, _labels_for(session.ir, name, realms)))
     return out
 
 

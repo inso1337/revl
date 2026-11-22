@@ -16,6 +16,7 @@ boots a runtime, and is skipped where it is not installed.
 
 import importlib.util
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -578,6 +579,68 @@ def test_allows_selects_by_name_or_by_every_realm():
     # tenant_a and now also serves tenant_b is not selected by `tenant_a*`
     changed = op.ChangedLabels(both, deny=(), was=op.TargetLabels("TenantBCache", {"tenant_a"}))
     assert not alice.allows("swap", changed, changed.deny, changed.was)[0]
+
+
+# approve and override scope to the crossing component and its realms, and a
+# distillation rule to the live members of its glob: the same all-of reading
+
+APPROVE_PROFILE = """
+operator alice may approve, override on tenant_a*
+operator dana may approve, override on tenant_a*, tenant_b*
+"""
+
+
+class _ApproveSession(_FakeSession):
+    """The gate's view of a session holding one outstanding ticket and one
+    distillation offer, both over the component that serves two tenants."""
+
+    def __init__(self, ir, operator):
+        super().__init__(ir, operator)
+        self._tickets = {"h1": {"component": "TenantBCache"}}
+
+    def _offer_by_id(self, offer_id):
+        if offer_id != "o1":
+            return None
+        return types.SimpleNamespace(rule=types.SimpleNamespace(component="TenantB*"))
+
+    def _glob_members(self, glob):
+        return {"TenantBCache"} if glob in ("TenantB*", "*") else set()
+
+
+APPROVE_CALLS = [
+    ("revl_approve", {"hash": "h1"}),
+    ("revl_override", {"hash": "h1"}),
+    ("revl_apply_distillation", {"offerId": "o1"}),
+    ("revl_revoke_distillation", {"offerId": "o1"}),
+]
+
+
+@pytest.mark.parametrize("tool,args", APPROVE_CALLS)
+def test_approve_on_one_realm_does_not_reach_a_component_serving_two(tool, args):
+    alice = parse_profile(APPROVE_PROFILE).get("alice")
+    sess = _ApproveSession(compile_source(MULTI_REALM), alice)
+    d = decide(sess, tool, args)
+    assert d.gated and not d.allowed
+    assert "TenantBCache" in d.message
+
+
+@pytest.mark.parametrize("tool,args", APPROVE_CALLS)
+def test_approve_granted_on_every_realm_reaches_the_component(tool, args):
+    dana = parse_profile(APPROVE_PROFILE).get("dana")
+    sess = _ApproveSession(compile_source(MULTI_REALM), dana)
+    d = decide(sess, tool, args)
+    assert d.gated and d.allowed
+    assert d.subjects == ("TenantBCache",)
+
+
+def test_approve_and_distillation_targets_keep_name_and_realms_apart():
+    sess = _ApproveSession(compile_source(MULTI_REALM), None)
+    for targets in (op._approve_targets(sess, {"hash": "h1"}),
+                    op._distillation_targets(sess, {"offerId": "o1"})):
+        [(name, labels)] = targets
+        assert name == "TenantBCache"
+        assert isinstance(labels, op.TargetLabels)
+        assert labels.realms == frozenset({"tenant_a", "tenant_b"})
 
 
 def test_adding_an_allowed_realm_refuses_before_the_handler(_profiled_session):

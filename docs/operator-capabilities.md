@@ -435,13 +435,15 @@ candidate's compile for a `load`, the snapshot's `sources` for a `restore`.
   composition (each operates on all of it).
 * **estop** (item 443) — the whole running composition too, and deliberately:
   a halt that stopped one component would not be a halt. So a subject-scoped
-  `may estop on tenant_a*` authorizes only while every live component is in
-  `tenant_a*`; an operator who must always be able to hit the button needs
+  `may estop on tenant_a*` authorizes only while every live component is
+  isolated only into `tenant_a*` realms; an operator who must always be able
+  to hit the button needs
   `may estop on *`.
 * **deploy** (item 476, issue #830) — the whole running composition, because a
   deploy reconfigures it as ONE coordinated unit across a machine boundary: a
   subject-scoped `may deploy on tenant_a*` authorizes only while every live
-  component is in `tenant_a*`. It has its own verb rather than folding into
+  component is isolated only into `tenant_a*` realms. It has its own verb
+  rather than folding into
   `swap` because a deploy crosses a machine boundary, which an operator must be
   able to authorize separately from a same-host swap: being trusted to hot-swap
   a component locally is not the same as being trusted to push the composition
