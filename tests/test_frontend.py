@@ -328,6 +328,7 @@ REJECTIONS = {
     # the position the `emit` sits in, and a marker written there is refused.
     "g4_nested_unmarked_emission.rvl": "call to emission `b.fetch` must be marked `emit` (G4)",
     "g4_nested_emit_expression.rvl": "`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)",
+    "g4_required_verb_token_through_fn.rvl": "but this implementation emits through `fs` (reaching `fs.ingest`, `helper()`)",
     # issue #1427: the same rule, on the spellings the two fixtures above do
     # not reach. Both of them nest a REQUIRED SERVICE crossing in an ACTIVATION
     # body with an UNSCOPED declaration, so three axes went unmeasured: the

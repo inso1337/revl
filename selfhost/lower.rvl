@@ -1201,6 +1201,14 @@ fn async_params_of(ps: List[ParamN]) -> List[Str] {
   return out
 }
 
+// An op's declared scope as the crossing's capability set: `*` for a bare op.
+// A call, so a record literal that reads the same field twice (its scope and,
+// for `unnamed`, the field itself) passes it by reference both times; an inline
+// ternary branch moves it (the rust emitter's E0382 on the regenerated crate).
+fn scope_or_star(caps: List[Str]) -> List[Str] {
+  return caps.length() > 0 ? caps : ["*"]
+}
+
 fn union_into(xs: List[Str], ys: List[Str]) -> List[Str] {
   var out = xs
   var i = 0
@@ -4606,16 +4614,17 @@ type Ctx = { svcs: Map[Str, SvcD], ambOps: Map[Str, AmbSvc],
 // async callables referenced as a first-class VALUE (a bare `Var` naming an
 // async extern/colored fn in value position — the `passed_async` surface).
 type Ac = { msg: Str, tag: Str, labels: List[Str], ecaps: List[Str],
-            areach: List[Str], aops: List[Str], avals: List[Str] }
+            areach: List[Str], aops: List[Str], avals: List[Str],
+            unnamed: List[Str] }
 
 fn empty_ac() -> Ac {
   return { msg: "", tag: "", labels: [], ecaps: [], areach: [], aops: [],
-           avals: [] }
+           avals: [], unnamed: [] }
 }
 
 fn ac_refuse(a: Ac, tag: Str, m: Str) -> Ac {
   return { msg: m, tag: tag, labels: a.labels, ecaps: a.ecaps,
-           areach: a.areach, aops: a.aops, avals: a.avals }
+           areach: a.areach, aops: a.aops, avals: a.avals, unnamed: a.unnamed }
 }
 
 fn find_msig(svc: SvcD, nm: Str, i: Int) -> MSig {
@@ -4744,7 +4753,8 @@ fn note_host_emission(s: Stmt, cx: Ctx, a: Ac) -> Ac {
   // unions its own evidence.
   return { msg: a.msg, tag: a.tag,
            labels: union_into(a.labels, ["a host emission"]),
-           ecaps: a.ecaps, areach: a.areach, aops: a.aops, avals: a.avals }
+           ecaps: a.ecaps, areach: a.areach, aops: a.aops, avals: a.avals,
+           unnamed: a.unnamed }
 }
 
 // ---- a crossing through a resolved receiver (issues #1261, #1508) ---------
@@ -6062,7 +6072,7 @@ fn is_value_label(l: Str) -> Bool {
 
 fn ac_labels(a: Ac, ls: List[Str]) -> Ac {
   return { msg: a.msg, tag: a.tag, labels: ls, ecaps: a.ecaps,
-           areach: a.areach, aops: a.aops, avals: a.avals }
+           areach: a.areach, aops: a.aops, avals: a.avals, unnamed: a.unnamed }
 }
 
 // `grown`'s labels reordered into the reference's order. Everything up to
@@ -6328,8 +6338,9 @@ fn handle_emit(h: Str, key: Str, op: Str, args: List[Expr], marked: Bool,
       Some(sv) => sv, None => "" }
     na = { msg: na.msg, tag: na.tag,
            labels: union_into(na.labels, [svcName.concat(".").concat(op)]),
-           ecaps: union_into(na.ecaps, decl.caps.length() > 0 ? decl.caps : ["*"]),
-           areach: na.areach, aops: na.aops, avals: na.avals }
+           ecaps: union_into(na.ecaps, scope_or_star(decl.caps)),
+           areach: na.areach, aops: na.aops, avals: na.avals,
+           unnamed: union_into(na.unnamed, decl.caps) }
   }
   // the same arrow prune the `req` path applies: an op reached only THROUGH an
   // arrow value is the leak surface's concern, not the method's own reach.
@@ -6337,7 +6348,7 @@ fn handle_emit(h: Str, key: Str, op: Str, args: List[Expr], marked: Bool,
     na = { msg: "", tag: "", labels: na.labels, ecaps: na.ecaps, areach: na.areach,
            aops: union_into(na.aops, [h.concat(".").concat(key).concat(".")
                                        .concat(op)]),
-           avals: na.avals }
+           avals: na.avals, unnamed: na.unnamed }
   }
   return walk_args(args, marked, cx, na)
 }
@@ -6608,7 +6619,7 @@ fn req_call(root: Str, meth: Str, args: List[Expr], marked: Bool,
     na = { msg: "", tag: "",
            labels: union_into(na.labels, [root.concat(".").concat(meth)]),
            ecaps: union_into(na.ecaps, [root]), areach: na.areach, aops: na.aops,
-           avals: na.avals }
+           avals: na.avals, unnamed: na.unnamed }
   }
   // a suspending service op reached only THROUGH an arrow value is the leak
   // surface's concern, not the method's own reach — `_reached_async_req_ops`
@@ -6616,7 +6627,7 @@ fn req_call(root: Str, meth: Str, args: List[Expr], marked: Bool,
   if (decl.isAsync && !cx.underArrow) {
     na = { msg: "", tag: "", labels: na.labels, ecaps: na.ecaps, areach: na.areach,
            aops: union_into(na.aops, [root.concat(".").concat(meth)]),
-           avals: na.avals }
+           avals: na.avals, unnamed: na.unnamed }
   }
   return walk_args(args, marked, cx, na)
 }
@@ -6693,11 +6704,13 @@ fn fn_call(name: Str, args: List[Expr], marked: Bool, cx: Ctx, a: Ac) -> Ac {
     // deduped, as `_method_emissions`'s `note` is — see `req_call`
     na = { msg: "", tag: "", labels: union_into(na.labels, [name.concat("()")]),
            ecaps: union_into(na.ecaps, caps_of(cx.caps, name)),
-           areach: na.areach, aops: na.aops, avals: na.avals }
+           areach: na.areach, aops: na.aops, avals: na.avals,
+           unnamed: union_into(na.unnamed, caps_of(cx.caps, name)) }
   }
   if (contains(cx.colored, name)) {
     na = { msg: "", tag: "", labels: na.labels, ecaps: na.ecaps,
-           areach: union_into(na.areach, [name]), aops: na.aops, avals: na.avals }
+           areach: union_into(na.areach, [name]), aops: na.aops, avals: na.avals,
+           unnamed: na.unnamed }
   }
   let wa = walk_args(args, marked, cx, na)
   if (wa.msg != "") { return wa }
@@ -6767,12 +6780,13 @@ fn var_check(name: Str, cx: Ctx, a: Ac) -> Ac {
            labels: union_into(na.labels,
                               [name.concat(" (passed as a function value)")]),
            ecaps: union_into(na.ecaps, union_into(caps_of(cx.caps, name), ["*"])),
-           areach: na.areach, aops: na.aops, avals: na.avals }
+           areach: na.areach, aops: na.aops, avals: na.avals,
+           unnamed: union_into(na.unnamed, caps_of(cx.caps, name)) }
   }
   if (contains(cx.colored, name)) {
     na = { msg: "", tag: "", labels: na.labels, ecaps: na.ecaps,
            areach: na.areach, aops: na.aops,
-           avals: union_into(na.avals, [name]) }
+           avals: union_into(na.avals, [name]), unnamed: na.unnamed }
   }
   if (!bare_declared(cx, name)) { return g1_refuse(cx, name, na) }
   return na
@@ -7252,6 +7266,40 @@ fn field_check(target: Expr, marked: Bool, cx: Ctx, a: Ac) -> Ac {
 
 // ================================================================ verdicts
 
+// issue #3485: a crossing `emit k.m(...)` through required key `k` is covered
+// by `k` or by `k.m`, the key followed by the verb it calls, and by nothing
+// else. A key is covered one verb at a time when every one of its crossing
+// labels (`k.m`) is declared; `*`, a key with no crossing label, and a key
+// reached any other way (`unnamed`: a reached fn's or a resolved receiver's
+// declared scope) stay. Mirrors emission_analysis.py's `_admit_required_scopes`
+// and its `unname`.
+fn verb_covered(cap: Str, labels: List[Str], caps: List[Str],
+                unnamed: List[Str]) -> Bool {
+  if (cap == "*" || contains(unnamed, cap)) { return false }
+  let pre = cap.concat(".")
+  var seen = false
+  var i = 0
+  while (i < labels.length()) {
+    if (starts_with(labels[i], pre)) {
+      if (!contains(caps, labels[i])) { return false }
+      seen = true
+    }
+    i += 1
+  }
+  return seen
+}
+
+fn drop_verb_covered(extra: List[Str], labels: List[Str], caps: List[Str],
+                     unnamed: List[Str]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < extra.length()) {
+    if (!verb_covered(extra[i], labels, caps, unnamed)) { out = out.push(extra[i]) }
+    i += 1
+  }
+  return out
+}
+
 // The G4 upper-bound verdict for one provision method (lower.py's provider
 // check). "" = admitted.
 fn g4_verdict(svcName: Str, mname: Str, decl: MSig, a: Ac) -> Str {
@@ -7261,7 +7309,8 @@ fn g4_verdict(svcName: Str, mname: Str, decl: MSig, a: Ac) -> Str {
       .concat(quote_join(a.labels))
   }
   if (decl.isEm && decl.caps.length() > 0) {
-    let extra = sort_strs(minus_list(a.ecaps, decl.caps))
+    let extra = sort_strs(drop_verb_covered(minus_list(a.ecaps, decl.caps),
+                                            a.labels, decl.caps, a.unnamed))
     if (extra.length() > 0) {
       var msg = "`".concat(svcName).concat(".").concat(mname)
         .concat("` is declared `emission[").concat(comma_join(decl.caps))
@@ -7703,8 +7752,9 @@ fn svc_recv_note(recv: Expr, op: Str, cx: Ctx, a: Ac) -> Ac {
   if (decl.name == "" || !decl.isEm) { return a }
   let label = parse_head(infer(recv, cx.svcTys)).concat(".").concat(op)
   return { msg: a.msg, tag: a.tag, labels: union_into(a.labels, [label]),
-           ecaps: union_into(a.ecaps, decl.caps.length() > 0 ? decl.caps : ["*"]),
-           areach: a.areach, aops: a.aops, avals: a.avals }
+           ecaps: union_into(a.ecaps, scope_or_star(decl.caps)),
+           areach: a.areach, aops: a.aops, avals: a.avals,
+           unnamed: union_into(a.unnamed, decl.caps) }
 }
 
 fn ctx_svc(cx: Ctx, tys: List[Bind]) -> Ctx {

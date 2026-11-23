@@ -160,7 +160,7 @@ Fact rows in (tab-separated, one fact per line):
                                              by the DECLARED boundary
   A <file> <comp> <cap>                      activation emit-step surface,
                                              named by the DECLARED boundary
-  F <file> <comp> <key> <svc> <meth> <cap> <bound>
+  F <file> <comp> <key> <svc> <meth> <cap> <bound> <via>
                                              provide-method emission reach.
                                              TWO spellings of the same
                                              crossing: `cap` is the declared
@@ -174,9 +174,19 @@ Fact rows in (tab-separated, one fact per line):
                                              emission it is the capability
                                              TOKEN the call reaches, a scoped
                                              extern's scope (issue #1455).
-                                             `A` and `K` feed the fold alone
-                                             and carry the boundary spelling
-                                             only
+                                             `via` is HOW the key was
+                                             reached: the `k.m` of a call on
+                                             a required key's verb, or `*`
+                                             when the crossing names no verb
+                                             of the key (a resolved receiver,
+                                             a host emission, a fn reaching
+                                             one). A declared `k.m` covers
+                                             the key only when every crossing
+                                             of it is such a verb (issue
+                                             #3485). One row per (crossing,
+                                             via). `A` and `K` feed the fold
+                                             alone and carry the boundary
+                                             spelling only
   S <file> <comp> <child>                    activation spawn edge
   H <file> <comp> <var> <child>              spawn handle var
   U <file> <comp> <ctx> <root> <svc> <meth>  call fact + marker context:
@@ -1110,6 +1120,7 @@ structure FRow where
   meth : String
   cap : String
   bound : String
+  via : String
 
 structure KRow where
   path : String
@@ -1423,8 +1434,8 @@ def parseA (f : List String) : Option ARow :=
 
 def parseF (f : List String) : Option FRow :=
   match f with
-  | ["F", path, comp, key, svc, meth, cap, bound] =>
-      some ⟨path, comp, key, svc, meth, cap, bound⟩
+  | ["F", path, comp, key, svc, meth, cap, bound, via] =>
+      some ⟨path, comp, key, svc, meth, cap, bound, via⟩
   | _ => none
 
 def parseK (f : List String) : Option KRow :=
@@ -1634,18 +1645,28 @@ def configDataOK (ns : List CNRow) : Bool :=
 declared bound (plain => none; any => free; scoped => the declared
 entries).
 
+`reach` is the F row's `(bound, via)` pairs. A reached key is covered when
+the declared entries hold its token, or when every crossing of it names a
+verb of the key (`via` is a `k.m`, never `*`) and the entries hold each of
+those `k.m` (issue #3485; `emission_analysis._admit_required_scopes`). A
+key reached by any path that names no verb is covered by its token alone.
+
 PRIVATE RESTATEMENT (see the header): the model states no
 declaration-versus-reach bound. -/
 def methodBoundOK (t : CapTable)
                    (bounds : List (String × String × String × List String))
-                   (svc meth : String) (caps : List String) : Bool :=
+                   (svc meth : String) (reach : List (String × String)) : Bool :=
   let b := bounds.find? (fun x => x.1 == svc && x.2.1 == meth)
   let mode := match b with | some x => x.2.2.1 | none => "plain"
   let entries := match b with | some x => x.2.2.2 | none => []
+  let keys := (reach.map (·.1)).eraseDups
   if mode == "any" then true
   else if mode == "scoped" then
-    (caps.map (capToken t)).all fun tk => entries.contains tk
-  else caps.isEmpty
+    keys.all fun k =>
+      entries.contains (capToken t k)
+        || ((reach.filter (fun r => r.1 == k)).map (·.2)).all
+             (fun via => via != "*" && entries.contains via)
+  else keys.isEmpty
 
 /-- Component -> capability set, as an association list. -/
 abbrev CapMap := List (String × List String)
@@ -3422,10 +3443,10 @@ def main (args : List String) : IO UInt32 := do
       -- P verdicts (provide-method bound) per method reach group
       let fkeys := (uf.map (fun r => (r.comp, r.key, r.svc, r.meth))).eraseDups
       for k in fkeys do
-        let caps := (uf.filter (fun r => r.comp == k.1 && r.key == k.2.1
-                                && r.svc == k.2.2.1 && r.meth == k.2.2.2))
-                    |>.map (·.bound) |>.eraseDups
-        let ok := methodBoundOK capTable bounds k.2.2.1 k.2.2.2 caps
+        let reach := (uf.filter (fun r => r.comp == k.1 && r.key == k.2.1
+                                 && r.svc == k.2.2.1 && r.meth == k.2.2.2))
+                     |>.map (fun r => (r.bound, r.via)) |>.eraseDups
+        let ok := methodBoundOK capTable bounds k.2.2.1 k.2.2.2 reach
         let pv := if ok then "ok" else "fail"
         out := out ++ s!"P\t{p}\t{k.1}\t{k.2.1}\t{k.2.2.1}\t{k.2.2.2}\tbound={pv}\n"
       -- MPV / MAV verdicts (G-MODEL-PLACE, issue #1811)
