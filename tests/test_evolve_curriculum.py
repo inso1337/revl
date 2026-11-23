@@ -62,6 +62,25 @@ def curriculum(derived):
     return tool, tool.tasks_of(derivations)
 
 
+def _without_rung(derivations, rung):
+    """The same sources with every signal and task on `rung` removed.
+
+    A staged `hard` test needs `hard` to be exactly what it stages. A source
+    that stamps both `medium` and `hard` (construct-reach does, since slice 2:
+    `compile` is one curated directory and `gate_census` is the whole census)
+    must keep feeding `medium` or the gate would red for the wrong reason, so
+    it is trimmed rather than dropped.
+    """
+    import dataclasses
+
+    tool = _tool()
+    return [dataclasses.replace(
+        d,
+        signals=tuple(s for s in d.signals if tool.tier(s) != rung),
+        tasks=tuple(t for t in d.tasks if t.tier != rung))
+        for d in derivations]
+
+
 # --------------------------------------------------------------------------- #
 # 1. Derived, not invented.                                                     #
 # --------------------------------------------------------------------------- #
@@ -312,8 +331,9 @@ def test_a_staged_probe_fills_the_hard_rung_and_removing_it_empties_it(
     and this test does not depend on a recorded bypass being absent at HEAD.
     """
     tool, live = derived
-    others = [d for d in live if d.source not in
-              ("census-bypass", "cross-tier-probes")]
+    others = _without_rung(
+        [d for d in live
+         if d.source not in ("census-bypass", "cross-tier-probes")], "hard")
     reachable = [tool.adapter_census_bypass(_staged_baseline(tmp_path, ()))]
 
     program = "examples/rejections/t13_unknown_match_case.rvl"
@@ -419,8 +439,9 @@ def test_a_recorded_bypass_fills_the_hard_rung_and_removing_it_empties_it(
     assert {t.tier for t in filled.tasks} == {"hard"}
     assert _refuses_every_named_program(filled.tasks) == len(_STAGED_BYPASSES)
 
-    others = [d for d in live
-              if d.source not in ("census-bypass", "cross-tier-probes")]
+    others = _without_rung(
+        [d for d in live
+         if d.source not in ("census-bypass", "cross-tier-probes")], "hard")
     with_entries = others + [filled]
     assert tool.populations(tool.tasks_of(with_entries))["hard"] == \
         len(_STAGED_BYPASSES)
@@ -461,6 +482,101 @@ def test_medium_tasks_name_a_dispatch_the_reference_really_has(curriculum):
                 f"{task.task_id}: {emitter} never names {value}"
             checked += 1
     assert checked > 10, "too few dispatches confirmed against the emitter source"
+
+
+def _stub_reach(tool, monkeypatch, report, recorded=None):
+    """Feed the construct-reach adapter a report this test owns.
+
+    The real `survey()` runs the census's gate over every corpus document, so a
+    test that only needs the SHAPE of a report stages one instead: it is the
+    same dict the adapter reads, and what changes between runs is one value.
+    """
+    import types
+
+    real = tool._load("_ec_reach_real", "tools/oracle_construct_reach.py")
+    stub = types.SimpleNamespace(
+        survey=lambda: report, _blind_spots=lambda: {},
+        _dispositions=lambda: recorded or {}, triage=real.triage)
+    original = tool._load
+    monkeypatch.setattr(
+        tool, "_load",
+        lambda name, rel: stub if name == "_ec_reach" else original(name, rel))
+
+
+def _staged_row(corpus, unreached, reference=("a", "b")):
+    return {"corpus": list(corpus), "reference": list(reference),
+            "reached": {}, "unreached": list(unreached)}
+
+
+def test_the_ledger_oracles_are_tasks_with_the_rung_their_own_corpus_gives(
+        derived):
+    """Slice 2 on the real tree: `compile` and `gate_census` entries.
+
+    Re-derived by a different route than the adapter takes. The adapter reads
+    `survey()`; this reads the committed ledger file, which `oracle_construct_
+    reach.py --check` holds equal to it, so a task for an entry that is not in
+    the ledger, or an entry with no task, fails here.
+    """
+    import json
+
+    tool, derivations = derived
+    ledger = json.loads((ROOT / "tests" / "fixtures"
+                         / "oracle_construct_reach_ledger.json")
+                        .read_text(encoding="utf-8"))
+    tasks = {t.task_id: t for t in tool.tasks_of(derivations)}
+    for oracle, rung in (("compile", "medium"), ("gate_census", "hard")):
+        assert ledger[oracle], f"{oracle} has no ledger entry; test is vacuous"
+        for construct in ledger[oracle]:
+            task = tasks[f"reach/{oracle}/{construct}"]
+            assert task.tier == rung, (task.task_id, task.tier)
+            assert task.artifact == "tools/oracle_construct_reach.py"
+            assert "recorded disposition" in task.gap, \
+                f"{task.task_id} hides the ledger's written decision"
+        mine = {i for i in tasks if i.startswith(f"reach/{oracle}/")}
+        assert mine == {f"reach/{oracle}/{c}" for c in ledger[oracle]}
+
+
+def test_a_ledger_oracle_that_leaves_the_report_is_refused_by_name(
+        derived, monkeypatch):
+    """The slice-2 vacuity oracle. The emitter oracles keep stamping `medium`,
+    so a report that silently dropped `compile` and `gate_census` would read as
+    two oracles with nothing unreached. It is an error instead, and `check`
+    names the source."""
+    tool, _ = derived
+    row = _staged_row(["tests/fixtures/emit_py_corpus/a.rvl"], ["tests"])
+    _stub_reach(tool, monkeypatch, {"compile": row})
+    broken = tool.derive(["construct-reach"])[0]
+    assert broken.signals == () and broken.tasks == ()
+    assert "gate_census" in broken.error and "KeyError" in broken.error
+    assert any("'construct-reach' could not be derived" in p
+               for p in tool.check([broken]))
+
+
+def test_a_ledger_oracle_row_with_nothing_unreached_still_declares_its_rung(
+        derived, monkeypatch):
+    """And the empty direction: both rows present, nothing owed. No tasks, and
+    both signals declared, so an emptied ledger is a measurement and the rung
+    stays reachable."""
+    tool, _ = derived
+    one = ["tests/fixtures/emit_py_corpus/a.rvl"]
+    many = ["examples/a.rvl", "stdlib/b.rvl"]
+    _stub_reach(tool, monkeypatch, {"compile": _staged_row(one, []),
+                                    "gate_census": _staged_row(many, [])})
+    quiet = tool.derive(["construct-reach"])[0]
+    assert quiet.tasks == () and quiet.error == ""
+    assert quiet.rungs() == {"medium", "hard"}
+
+    _stub_reach(tool, monkeypatch, {
+        "compile": _staged_row(one, ["tests"]),
+        "gate_census": _staged_row(many, ["BOOT"])},
+        recorded={"compile": {"tests": "UNPORTED."},
+                  "gate_census": {"BOOT": "OUT OF CORPUS."}})
+    owed = tool.derive(["construct-reach"])[0]
+    by_id = {t.task_id: t for t in owed.tasks}
+    assert by_id["reach/compile/tests"].tier == "medium"
+    assert by_id["reach/gate_census/BOOT"].tier == "hard"
+    assert "UNPORTED." in by_id["reach/compile/tests"].gap
+    assert owed.signals == quiet.signals          # the same measurement
 
 
 # --------------------------------------------------------------------------- #
@@ -695,11 +811,15 @@ def test_check_reds_on_a_source_that_ran_and_measured_nothing(derived):
     """
     tool, derivations = derived
     import dataclasses
+    # Every source that stamps `hard` at HEAD, read off the measurement rather
+    # than named, so a source added later that also lands on `hard` cannot make
+    # this test pass for the wrong reason (the rung staying reachable).
+    feeders = [d.source for d in derivations if "hard" in d.rungs()]
+    assert {"census-bypass", "cross-tier-probes"} <= set(feeders), feeders
     blinded = [dataclasses.replace(d, signals=(), tasks=())
-               if d.source in ("census-bypass", "cross-tier-probes") else d
-               for d in derivations]
+               if d.source in feeders else d for d in derivations]
     problems = tool.check(blinded)
-    for source in ("census-bypass", "cross-tier-probes"):
+    for source in feeders:
         assert any(f"'{source}' ran and measured no signal" in p
                    for p in problems), problems
     assert any("tier 'hard' is unreachable" in p for p in problems), problems

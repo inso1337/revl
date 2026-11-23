@@ -239,15 +239,36 @@ _REACH_SUBJECT = {
                  "tests/test_selfhost_lower_ir.py"),
 }
 
+# The two oracles no per-tier emitter table covers (design slice 2). They are
+# read through the SAME report and the SAME shrink-only ledger as the rest, so a
+# task here is exactly an entry `tools/oracle_construct_reach.py --check` holds
+# the tree to, and closing the task deletes the entry. What differs is the
+# subject and the measured signal: `compile` runs one curated fixture directory
+# (breadth 1, medium), while `gate_census` re-decides every document of the
+# census's eight directories (breadth 8, hard). The rung is therefore read off
+# each oracle's own corpus and is not declared for slice 2 as a whole.
+#
+#   oracle -> (reference subject, port, mechanism, what a document reaches)
+_REACH_LEDGER_ORACLES = {
+    "compile": ("src/revl/compiler.py", "selfhost/compile.rvl",
+                "tests/test_selfhost_compile.py", "the IR section"),
+    "gate_census": ("tests/test_selfhost_lower.py", "selfhost/lower.rvl",
+                    "tests/test_oracle_construct_reach.py",
+                    "a refusal under the guarantee tag"),
+}
+
 
 def adapter_construct_reach() -> Derivation:
     reach = _load("_ec_reach", "tools/oracle_construct_reach.py")
     coverage = _load("_ec_coverage", "tools/selfhost_coverage.py")
     report = reach.survey()
+    decided = reach._blind_spots()
+    recorded = reach._dispositions()
     tasks: list[Task] = []
     signals: list[Signal] = []
     for oracle in sorted(report):
         unreached = report[oracle]["unreached"]
+        reaches = None
         if oracle.startswith("emit_"):
             tier_key = oracle[len("emit_"):]
             if tier_key not in coverage.TIERS:
@@ -262,25 +283,47 @@ def adapter_construct_reach() -> Derivation:
             subject, port, test = _REACH_SUBJECT[oracle]
             corpus = [str(p.relative_to(ROOT))
                       for p in coverage.corpus_documents("py")]
+        elif oracle in _REACH_LEDGER_ORACLES:
+            subject, port, test, reaches = _REACH_LEDGER_ORACLES[oracle]
+            # The report names its own corpus, so the breadth is the one the
+            # ledger is measured over and not a second reading of it.
+            corpus = report[oracle]["corpus"]
         else:
-            # `compile` and `gate_census` have no per-tier byte-agreement
-            # oracle behind them; the design doc's slice 2 owns them.
             continue
         if not (ROOT / subject).is_file() or not (ROOT / port).is_file():
+            if reaches is not None:
+                # The emitter oracles can lose one tier's files and still have
+                # the others to measure. These two have no sibling to fall back
+                # on, so a moved subject or port is the source failing to read
+                # its artifact and is refused by name rather than skipped.
+                raise FileNotFoundError(
+                    f"{oracle}: {subject} or {port} is not in the tree")
             continue
         # Measured before the instances are looked at: this oracle's corpus is
         # in the tree whether or not it currently leaves a dispatch unreached.
         signal = Signal(impls=(REFERENCE, SELFHOST), breadth=breadth_of(corpus))
         signals.append(signal)
         for construct in unreached:
+            if reaches is None:
+                gap = (f"no document in the {oracle} corpus reaches the "
+                       f"reference dispatch {construct} in {subject}, so "
+                       f"{port} has never been made to agree about it")
+            else:
+                gap = (f"no document in the {oracle} corpus reaches {reaches} "
+                       f"{construct} ({subject}), so {port} has never been "
+                       "made to agree about it")
+                disposition = reach.triage(oracle, construct, decided, recorded)
+                if disposition is not None:
+                    # The ledger carries a written decision for every entry; a
+                    # task that hid it would send the doer to re-derive it.
+                    gap += ("; the ledger's recorded disposition: "
+                            + " ".join(disposition[1].split()))
             tasks.append(_task(
                 task_id=f"reach/{oracle}/{construct}",
                 source="known gaps",
                 artifact="tools/oracle_construct_reach.py",
                 locator=f"{oracle}.unreached[{construct!r}]",
-                gap=(f"no document in the {oracle} corpus reaches the reference "
-                     f"dispatch {construct} in {subject}, so {port} has never "
-                     f"been made to agree about it"),
+                gap=gap,
                 subject=f"{subject} + {port} (via a new corpus document)",
                 mechanism=test,
                 verify=("python3 tools/oracle_construct_reach.py --json - "
@@ -288,6 +331,14 @@ def adapter_construct_reach() -> Derivation:
                         f"python3 -m pytest {test}"),
                 signal=signal,
             ))
+    absent = sorted(set(_REACH_LEDGER_ORACLES) - set(report))
+    if absent:
+        # A report that stopped naming `compile` or `gate_census` reads as
+        # "nothing unreached there", which is the empty rung this module must
+        # not mistake for finished work. The other oracles still stamp
+        # `medium`, so only an error can make `check` name this.
+        raise KeyError("the construct-reach report no longer names the "
+                       + ", ".join(absent) + " oracle(s)")
     return Derivation("construct-reach", tuple(dict.fromkeys(signals)),
                       tuple(tasks))
 
