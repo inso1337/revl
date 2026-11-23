@@ -227,10 +227,11 @@ def test_a_component_holding_a_kernel_token_is_still_refused_as_the_kernel():
     assert "admission kernel's authority" in excinfo.value.message
 
 
-def test_the_check_is_inert_for_every_program_that_declares_no_evaluator_token():
-    """The gate is a scan of the declarations, so the ordinary compile pays
-    nothing and records nothing. Held on the shipped examples: not one of them
-    spells the namespace."""
+def test_no_shipped_example_spells_the_reserved_namespace():
+    """The namespace is reserved, so no program on the tree may already use it.
+    Held on the shipped examples: not one of them spells it, which is what makes
+    the refusal a no-op for them. The inertness of the check itself (no pass, no
+    record) is `test_the_gate_is_closed_when_nothing_spells_the_namespace`."""
     for path in sorted((ROOT / "examples").glob("*.rvl")):
         assert "evaluator." not in path.read_text(encoding="utf-8"), path
 
@@ -337,9 +338,9 @@ def test_the_gate_is_closed_when_nothing_spells_the_namespace():
 # --------------------------------------- 5. one enumeration, three consumers
 
 def test_the_namespace_reads_the_same_enumeration_the_fences_are_views_of():
-    """The members are DERIVED from `EVALUATOR_PATHS`, not a second list. Adding
-    an evaluator path with no member turns
-    `test_every_non_kernel_evaluator_path_is_stood_for_by_exactly_one_member`
-    red, so the capability cannot silently fall behind the diff check."""
+    """The kernel's members and the evaluator's members together cover exactly
+    `EVALUATOR_PATHS`: there is no second list beside it. The per-path checks
+    above say which path is owned by whom; this is the whole-set statement, so
+    the capability cannot silently fall behind the diff check."""
     assert set(p for c in kb.EVALUATOR_CAPS for p in c.paths) \
         | set(kb.KERNEL_PATHS) == set(kb.EVALUATOR_PATHS)

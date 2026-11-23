@@ -367,11 +367,15 @@ them here too would add a second refusal for the same reach that names the
 evaluator where the kernel is already the stronger statement.
 
 **Item 519's product record is read the way the kernel reads it.**
-`model_reach[].effective` contributes to a component's ceiling, so a model role
-that reaches an `evaluator.*` token is refused with the component it steers. The
-gate that decides whether the fold runs scans the declarations and the rows, so
-a composition that spells the namespace nowhere compiles with no extra pass and
-no extra record.
+`model_reach[].effective` contributes to a component's ceiling, so a row that
+spells an `evaluator.*` token is refused with the component it belongs to. On
+`main` item 519 refuses a role reaching past its component first (G-MODEL-PLACE),
+and a component that holds the token is refused by the held set, so the row arm
+is reached only through the seam itself, which the test injects. It is kept for
+parity with the kernel arm, so the two reads of the product record cannot
+diverge. The gate that decides whether the fold runs scans the declarations and
+the rows, so a composition that spells the namespace nowhere compiles with no
+extra pass and no extra record.
 
 **Non-vacuity.** `tests/test_evaluator_capability_2802.py` compiles one corpus
 twice, as section 6 does: once with `_check_evaluator_boundary` neutralised and
