@@ -191,6 +191,19 @@ means the check needs no whole-program fixed point over the service graph,
 and it matches what a reader of one component can verify. `revl audit`
 composes the chain back together across the whole composition (§5).
 
+The one name narrower than the key is the key followed by the verb it calls.
+A crossing `emit wire.take(...)` through `requires wire: Wire` is covered by
+`emission[wire]` or by `emission[wire.take]`, and by nothing else, so a method
+that only reads and speaks on the wire may declare
+`emission[wire.take, wire.say] fn beat()` instead of the whole key or a bare
+`emission`. Both halves of `wire.take` are read off this component alone
+(`requires wire`, `emit wire.take`); what `Wire.take` itself declares does not
+enter. `emission[fs.write]` on a method that emits `fs.ingest` is therefore
+still refused (`examples/rejections/g4_dotted_capability_key.rvl`): `fs.write`
+is `Store.ingest`'s own boundary, not a name for the `fs.ingest` crossing. The
+same spelling works for `witnessed[wire.take]`. A verb the method does not
+declare leaves the key uncovered, and the refusal names the key.
+
 ### The reversible class: `witnessed[C]` (item 562)
 
 A service operation may also be declared `witnessed[C]`:

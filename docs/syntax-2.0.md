@@ -76,6 +76,13 @@ A file is a module. `use` imports **pure** declarations only: types,
 functions, services. Components are never imported: they are *composed*, by
 the linker, over a manifest. This keeps the two composition mechanisms from
 blurring: `use` is compile-time and pure; the manifest is runtime and stateful.
+An importer does not lower or check a used module's components, so a type or
+requirement error in a component body there does not break the importer
+(`tests/test_consumer_declarations_only.py`). The module is still parsed and
+resolved whole, though (syntax, `asset` files, refs, host body files): the
+importer needs its source, and a syntax error or a missing asset anywhere in
+it, a component body included, breaks the importer. revl has no compile
+against a dependency's service declarations alone.
 
 ```revl sketch
 use "./tokens.rvl" { Token, TokenKind, keyword_set }
