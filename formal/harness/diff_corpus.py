@@ -5396,7 +5396,7 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
     # the shape of one activation's stack and the verdict it unwound under
     # (`teardown_scenario_rows`). Both sides read them from this same TSV.
     return (cap_decomposition_rows(caps_seen) + tsv + teardown_scenario_rows()
-            + recovery_scenario_rows(),
+            + recovery_scenario_rows() + split_scenario_rows(),
             file_facts, {
         "files": files, "components": comps, "statements": stmts,
         "refusals": refusals, "componentless": componentless,
@@ -5721,7 +5721,22 @@ _WAL_DEPTH = 2
 #: then roll back. `aborted` is not a decision — it is the in-process abort's
 #: COMPLETION record, which is what tells a completed abort from a crashed one
 #: for a fenced inverse (item 309 follow-up).
-_WAL_TRAILERS = ("none", "aborted", "complete", "approved", "forkfrozen")
+_WAL_TRAILERS = ("none", "aborted", "complete", "approved", "both",
+                 "forkfrozen")
+
+#: The trailers after which a queued emission can have a flush outcome: only a
+#: session that was approved flushes its queue, so `commit-approved` is the
+#: point after which each fire leaves a `flushed` record (its host body
+#: returned), a `flush-residue` record (it raised), or nothing (the process
+#: died first). `both` is the whole commit: approved, the flush, then the
+#: terminal marker. `complete` alone carries no approval, so its queue was
+#: never flushed and is dropped.
+_WAL_FLUSH_TRAILERS = ("approved", "both")
+
+#: What one queued emission's flush left behind: nothing, `flushed`, or
+#: `flush-residue`. One letter per `deferred-emission` record in the log, in
+#: queue order, is part of the scenario's name.
+_WAL_FLUSH_STATES = "nfr"
 
 
 def _wal_logs() -> list:
@@ -5742,17 +5757,39 @@ def _wal_logs() -> list:
             base = [(shape[1], seq) for shape, seq in zip(content, seqs)]
             failing = [seq for shape, seq in zip(content, seqs)
                        if shape[0] == _WAL_FAILING_SHAPE]
+            queued = [seq for shape, seq in zip(content, seqs)
+                      if shape[0] == "dq"]
             code = "".join(shape[0] for shape in content)
             for dis_name, dis in (("d0", ()), ("d1", (seqs[:1],)), ("dA", (seqs,))):
                 for fen_name, fen in (("f0", ()), ("fA", tuple(seqs))):
                     for trailer in _WAL_TRAILERS:
-                        records = list(base)
-                        records += [(("discharge", tuple(d)), None) for d in dis]
-                        records += [(("fence",), s) for s in fen]
-                        if trailer != "none":
-                            records.append((("marker", trailer), None))
-                        name = f"a8r4/{code}/{dis_name}/{fen_name}/{trailer}"
-                        out.append((name, records, failing))
+                        # a flush outcome exists only after an approval, and
+                        # only for a queued emission: every other scenario
+                        # carries one state, `n` per queued emission
+                        flushed_after = trailer in _WAL_FLUSH_TRAILERS
+                        states = (itertools.product(_WAL_FLUSH_STATES,
+                                                    repeat=len(queued))
+                                  if flushed_after and queued
+                                  else [("n",) * len(queued)])
+                        for state in states:
+                            records = list(base)
+                            records += [(("discharge", tuple(d)), None) for d in dis]
+                            records += [(("fence",), s) for s in fen]
+                            if trailer in _WAL_FLUSH_TRAILERS:
+                                records.append((("marker", "approved"), None))
+                            for flush, seq in zip(state, queued):
+                                if flush == "f":
+                                    records.append((("flushed",), seq))
+                                elif flush == "r":
+                                    records.append((("flushresidue",), seq))
+                            if trailer == "both":
+                                records.append((("marker", "complete"), None))
+                            elif trailer not in ("none", "approved"):
+                                records.append((("marker", trailer), None))
+                            flush_name = "".join(state) or "-"
+                            name = (f"a8r4/{code}/{dis_name}/{fen_name}/"
+                                    f"{flush_name}/{trailer}")
+                            out.append((name, records, failing))
     return out
 
 
@@ -5771,6 +5808,10 @@ def recovery_scenario_rows() -> list:
                             f"{int(spec[2])}\t{int(spec[3])}")
             elif kind == "deferred":
                 rows.append(f"L\t{name}\tdeferred\t{seq}")
+            elif kind == "flushed":
+                rows.append(f"L\t{name}\tflushed\t{seq}")
+            elif kind == "flushresidue":
+                rows.append(f"L\t{name}\tflushresidue\t{seq}")
             elif kind == "discharge":
                 rows.append(f"L\t{name}\tdischarge\t"
                             + ",".join(str(s) for s in spec[1]))
@@ -5859,6 +5900,12 @@ def _wal_record_json(spec: tuple, seq) -> dict:
         return {"record": "deferred-emission", "seq": seq,
                 "call": {"receiver": f"r{seq}", "method": "fire", "args": []},
                 "origin": {"key": f"k{seq}", "method": str(seq), "args": []}}
+    if kind == "flushed":
+        return {"record": "flushed", "seq": seq}
+    if kind == "flushresidue":
+        return {"record": "flush-residue", "seq": seq,
+                "error": {"type": "RuntimeError",
+                          "message": "the host body raised at flush"}}
     if kind == "discharge":
         return {"record": "discharge", "discharged": list(spec[1])}
     if kind == "fence":
@@ -5884,9 +5931,52 @@ _WAL_VERDICTS = {"rolled-back": "rolledBack", "rolled-forward": "rolledForward",
 _RECOVERY_MARKS: dict = {}
 
 
+def _recover_records(records: list, world: "_ProbeWorld") -> dict:
+    """Write `records` as a real WAL and run `revl.recovery.recover` over it
+    against `world`; return recover's report. Nothing here decides anything."""
+    handle, path = tempfile.mkstemp(suffix=".wal", prefix="revl-oracle-")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as out:
+            out.write(json.dumps({"record": "header", "walVersion": WAL_VERSION,
+                                  "generation": 1,
+                                  "guarantee": WAL_GUARANTEE}) + "\n")
+            for spec, seq in records:
+                out.write(json.dumps(_wal_record_json(spec, seq)) + "\n")
+        return recovery.recover(path, world=world)
+    finally:
+        os.unlink(path)
+
+
+def _rolled_back_residue(report: dict, name: str) -> list:
+    """The seq of every record in a roll-back's `residue.outstanding`, read off
+    the merged residue schema's own `crossing.method`."""
+    residue = []
+    for rec in report["residue"]["outstanding"]:
+        seq = (rec.get("crossing") or {}).get("method")
+        if seq is None:  # pragma: no cover, every record carries a crossing
+            raise SystemExit(
+                f"differential oracle: unnamed residue record in {name}")
+        residue.append(int(seq))
+    return residue
+
+
+def _flush_reading(report: dict) -> tuple:
+    """The roll-forward's reading of the deferral queue, as `(flushed seqs,
+    owed seqs)` in the order recover lists them: the activation-complete route
+    carries them under `deferrals`, the approved-window route under `flushed` /
+    `owedFlushes`. Both walk the `deferred-emission` records in log order."""
+    deferrals = report.get("deferrals")
+    if deferrals is not None:
+        flushed, owed = deferrals["flushed"], deferrals["owed"]
+    else:
+        flushed, owed = report["flushed"], report["owedFlushes"]
+    return ([int(e["seq"]) for e in flushed], [int(e["seq"]) for e in owed])
+
+
 def recovery_observation(name: str, records: list, failing: list) -> tuple:
     """Write one scenario's records as a real WAL and run `revl.recovery`
-    over it; report `(outcome, applied seqs, residue seqs)`.
+    over it; report `(outcome, applied seqs, residue seqs, flushed seqs, owed
+    seqs)`.
 
     Nothing here decides anything. The outcome is recover's own verdict, the
     applied set is what it actually put through `World.apply_inverse` /
@@ -5896,39 +5986,26 @@ def recovery_observation(name: str, records: list, failing: list) -> tuple:
 
     The residue column is `None` for a verdict other than `rolled-back`:
     `RevL.Lemmas.reported` models the ROLL-BACK path's surface and R4 is
-    stated under `outcome L = .rolledBack`, so the roll-forward window's
-    `flush-residue` is a surface neither side claims and is not compared.
+    stated under `outcome L = .rolledBack`. The flushed and owed columns are
+    the roll-forward's own surface, the reading of the deferral queue
+    (`RevL.Lemmas.deferralView`), so they are `None` outside a roll-forward.
     """
-    handle, path = tempfile.mkstemp(suffix=".wal", prefix="revl-oracle-")
-    try:
-        with os.fdopen(handle, "w", encoding="utf-8") as out:
-            out.write(json.dumps({"record": "header", "walVersion": WAL_VERSION,
-                                  "generation": 1,
-                                  "guarantee": WAL_GUARANTEE}) + "\n")
-            for spec, seq in records:
-                out.write(json.dumps(_wal_record_json(spec, seq)) + "\n")
-        world = _ProbeWorld(failing)
-        report = recovery.recover(path, world=world)
-    finally:
-        os.unlink(path)
+    world = _ProbeWorld(failing)
+    report = _recover_records(records, world)
 
     verdict = _WAL_VERDICTS.get(report["verdict"])
-    if verdict is None:  # pragma: no cover — the corpus supplies no session
+    if verdict is None:  # pragma: no cover, the corpus supplies no session
         raise SystemExit(
             f"differential oracle: recover returned {report['verdict']!r} for "
             f"{name}, which is outside the model's three outcomes")
-    residue = None
-    if verdict == "rolledBack":
-        residue = []
-        for rec in report["residue"]["outstanding"]:
-            seq = (rec.get("crossing") or {}).get("method")
-            if seq is None:  # pragma: no cover — every record carries a crossing
-                raise SystemExit(
-                    f"differential oracle: unnamed residue record in {name}")
-            residue.append(int(seq))
+    residue = (_rolled_back_residue(report, name)
+               if verdict == "rolledBack" else None)
+    flushed = owed = None
+    if verdict == "rolledForward":
+        flushed, owed = _flush_reading(report)
     _RECOVERY_MARKS[name] = _recovery_marks(report, world, records)
-    return verdict, sorted(world.applied), (None if residue is None
-                                            else sorted(residue))
+    return (verdict, sorted(world.applied),
+            None if residue is None else sorted(residue), flushed, owed)
 
 
 def _recovery_marks(report: dict, world: "_ProbeWorld", records: list) -> frozenset:
@@ -5954,6 +6031,20 @@ def _recovery_marks(report: dict, world: "_ProbeWorld", records: list) -> frozen
         marks.add("moot")
     if report.get("droppedDeferred"):
         marks.add("dropped")
+    if report["verdict"] == "rolled-forward":
+        deferrals = report.get("deferrals")
+        owed = (deferrals["owed"] if deferrals is not None
+                else report.get("owedFlushes") or [])
+        flushed = (deferrals["flushed"] if deferrals is not None
+                   else report.get("flushed") or [])
+        if flushed:
+            marks.add("flush-confirmed")
+        if any(o.get("outcome") == "failed" for o in owed):
+            marks.add("flush-raised")
+        if any(o.get("outcome") == "not-attempted" for o in owed):
+            marks.add("flush-unattempted")
+        if deferrals is not None and deferrals["dropped"]:
+            marks.add("flush-dropped")
     if report.get("compensationsReissued"):
         marks.add("compensation-reissued")
     marks |= {f"residue:{k}" for k in kinds if k}
@@ -6003,7 +6094,7 @@ def recovery_coverage(observed: dict) -> list[str]:
         row = observed.get(name)
         if row is None:
             return [f"recovery coverage: no observation for {name}"]
-        outcome, applied, _residue = row
+        outcome, applied, _residue, _flushed, _owed = row
         seen_outcomes.add(outcome)
         seen_marks |= _RECOVERY_MARKS.get(name, frozenset())
         if outcome == "rolledForward":
@@ -6015,9 +6106,10 @@ def recovery_coverage(observed: dict) -> list[str]:
     if seen_outcomes != want_outcomes:
         findings.append(f"recovery coverage: outcomes {sorted(seen_outcomes)} "
                         f"!= {sorted(want_outcomes)}")
-    if forward_routes != {"complete", "approved"}:
+    if forward_routes != {"complete", "approved", "both"}:
         findings.append("recovery coverage: roll-forward routes "
-                        f"{sorted(forward_routes)} != ['approved', 'complete']")
+                        f"{sorted(forward_routes)} != "
+                        "['approved', 'both', 'complete']")
     if empty_rollback is None:
         findings.append("recovery coverage: NO roll-back that applied nothing "
                         "over a non-empty log — the row would agree vacuously")
@@ -6026,6 +6118,8 @@ def recovery_coverage(observed: dict) -> list[str]:
         "abort-resolved", "moot", "dropped", "compensation-reissued",
         "clean-abort", "residue:unreconstructible", "residue:fenced-residue",
         "residue:restore-residue", "residue:compensation-residue",
+        # issue #2740: the roll-forward's reading of the deferral queue
+        "flush-confirmed", "flush-raised", "flush-unattempted", "flush-dropped",
     }
     for mark in sorted(want_marks - seen_marks):
         findings.append(f"recovery coverage: NO witness of `{mark}` — the row "
@@ -6034,6 +6128,198 @@ def recovery_coverage(observed: dict) -> list[str]:
         print(f"recovery coverage: {len(observed)} WAL scenarios, all 3 outcomes "
               f"x 2 roll-forward routes x {len(want_marks)} reference "
               f"behaviours; empty-rollback={empty_rollback}")
+    return findings
+
+
+# --------------------------------------- A8 split-step crash cuts (issue #2740)
+#
+# `RevL.Lemmas.SemStep.witnessed` appends the descriptor and creates the
+# referent in one step. The runtime does not: the emitted call site runs the
+# forward extern and only on its `Ok` branch registers the inverse, and
+# `Frame.transactional` writes the discharge-descriptor
+# (`backends/python/emit.py` `_witnessed_step`, `runtime.py`). Between the two
+# there is a window in which the mutation is in the world and no record names
+# it. `RevL.Lemmas.SplitStep` splits the step into `mutate` then `record`, and
+# every crash cut of a split run is one configuration of it.
+#
+# The corpus is therefore not a list of logs somebody chose: it is every crash
+# cut of every body over `W` (a witnessed mutation with a declared-idempotent
+# inverse), `U` (the same, undeclared) and `E` (an emission), up to three
+# steps. The model side runs `splitRun` for `cut` steps. The reference side
+# performs the same actions in the order the runtime performs them against a
+# `DictWorld` that survives the crash, writes the records that reached the log
+# into a real WAL, and runs `revl.recovery.recover` over it.
+
+#: The step codes a split body is spelled in, and the longest body.
+_SPLIT_STEPS = ("W", "U", "E")
+_SPLIT_DEPTH = 3
+
+#: What the REFERENCE was seen to do, per split scenario, for the non-vacuity
+#: ratchet. Evidence the row BITES, not a claim either side makes.
+_SPLIT_MARKS: dict = {}
+
+#: The order the reference performs a witnessed step in: `runtime` (the extern
+#: returns, then the descriptor is written, as the emitted call site orders
+#: them) or `record-first`, the MUTANT in which the descriptor is written ahead
+#: of the extern. `REVL_FORMAL_SPLIT_ORDER=record-first sh formal/scripts/
+#: run_gate.sh` runs the whole differential with the mutant reference, which is
+#: how the SK row is shown to fail: the model's `SplitStep` is the real order,
+#: so the two sides disagree at every cut inside a window.
+_SPLIT_ORDER = os.environ.get("REVL_FORMAL_SPLIT_ORDER", "runtime")
+if _SPLIT_ORDER not in ("runtime", "record-first"):  # pragma: no cover
+    raise SystemExit("REVL_FORMAL_SPLIT_ORDER must be `runtime` or `record-first`")
+
+
+def _split_actions(codes: tuple, order: str = "") -> list:
+    """The actions of one split body, in the order the runtime performs them.
+
+    A witnessed step is two actions: the forward extern returns (the referent
+    is in the world) and then the descriptor is written. An emission is one:
+    the crossing and its `effect` record. `order="record-first"` is the
+    MUTANT, the descriptor written ahead of the extern, which is what the
+    window would be if the runtime logged first. It is only ever chosen on
+    purpose, by an explicit argument or `REVL_FORMAL_SPLIT_ORDER`, so a test
+    or a run can show the row tells the two orders apart. This function does
+    not run the runtime: the order is anchored to the emitted call site by
+    `tests/test_formal_split_window_2740.py`, and what the row compares is the
+    MODEL's split run against what `recover` does over the cut."""
+    order = order or _SPLIT_ORDER
+    actions: list = []
+    for index, code in enumerate(codes):
+        seq = index + 1
+        if code in ("W", "U"):
+            record = ("record", ("descriptor", "transactional", code == "W"), seq)
+            mutate = ("mutate", seq)
+            actions += [record, mutate] if order == "record-first" \
+                else [mutate, record]
+        elif code == "E":
+            actions.append(("emit", seq))
+        else:  # pragma: no cover, the step table is closed
+            raise SystemExit(f"differential oracle: unknown split step {code!r}")
+    return actions
+
+
+def _split_scenarios() -> list:
+    """Every crash cut of every split body: `(name, step codes, cut)`. A cut of
+    `k` is the process dying after the first `k` actions, so `0` is a crash
+    before anything ran and the full length is a crash after the last record
+    and before any teardown."""
+    out: list = []
+    for depth in range(1, _SPLIT_DEPTH + 1):
+        for codes in itertools.product(_SPLIT_STEPS, repeat=depth):
+            for cut in range(len(_split_actions(codes)) + 1):
+                out.append((f"a8split/{''.join(codes)}/{cut}", codes, cut))
+    return out
+
+
+def split_scenario_rows() -> list:
+    """The SK fact rows: one per crash cut. Nothing decided."""
+    return [f"SK\t{name}\t{','.join(codes)}\t{cut}"
+            for name, codes, cut in _split_scenarios()]
+
+
+def split_observation(name: str, codes: tuple, cut: int,
+                      order: str = "") -> tuple:
+    """Run the first `cut` actions of a split body, crash, and let
+    `revl.recovery.recover` read what survived.
+
+    The world is a `DictWorld` whose referents persist across the crash, which
+    is what "the mutation landed" means; the WAL holds only the records the
+    actions wrote. Reports `(outcome, applied seqs, residue seqs, remaining
+    seqs)`, the last being the referents still in the world after recover.
+    Nothing here decides anything: every column is read off what recover did."""
+    world = _ProbeWorld([])
+    records: list = []
+    for action in _split_actions(codes, order)[:cut]:
+        if action[0] == "mutate":
+            world.seed(f"r{action[1]}:")
+        elif action[0] == "record":
+            records.append((action[1], action[2]))
+        else:  # emit: the crossing lands and its `effect` record is written
+            world.seed(f"r{action[1]}:")
+            records.append((("effect", True, False, False), action[1]))
+    report = _recover_records(records, world)
+    verdict = _WAL_VERDICTS.get(report["verdict"])
+    if verdict is None:  # pragma: no cover, the corpus supplies no session
+        raise SystemExit(
+            f"differential oracle: recover returned {report['verdict']!r} for "
+            f"{name}, which is outside the model's three outcomes")
+    residue = (_rolled_back_residue(report, name)
+               if verdict == "rolledBack" else None)
+    remaining = sorted(int(k[1:-1]) for k in world.state if k.startswith("r"))
+    order = order or _SPLIT_ORDER
+    if order == _SPLIT_ORDER:
+        # a probe in the OTHER order (a test showing the row tells the two
+        # apart) must not overwrite what the configured sweep observed
+        _SPLIT_MARKS[name] = _split_marks(codes, cut, order, world, remaining,
+                                          residue)
+    return (verdict, tuple(sorted(world.applied)),
+            None if residue is None else tuple(sorted(residue)),
+            tuple(remaining))
+
+
+def _split_marks(codes: tuple, cut: int, order: str, world: "_ProbeWorld",
+                 remaining: list, residue) -> frozenset:
+    """The behaviours one split cut was SEEN to exercise, off the reference's
+    own outcome. Evidence for `split_coverage`, never a compared verdict."""
+    marks = set()
+    actions = _split_actions(codes, order)
+    done = actions[:cut]
+    mutated = {a[1] for a in done if a[0] == "mutate"}
+    recorded = {a[2] for a in done if a[0] == "record"}
+    orphans = (mutated - recorded) & set(remaining)
+    emitted = {a[1] for a in done if a[0] == "emit"}
+    if orphans:
+        marks.add("orphan-survives")
+        if emitted:
+            marks.add("orphan-beside-emission")
+        if any(codes[seq - 1] == "U" for seq in orphans):
+            marks.add("orphan-undeclared")
+        if any(codes[seq - 1] == "W" for seq in orphans):
+            marks.add("orphan-declared")
+    if world.applied and not remaining:
+        marks.add("exact-revert")
+    if world.applied and orphans:
+        marks.add("revert-beside-orphan")
+    if not done:
+        marks.add("empty-cut")
+    return frozenset(marks)
+
+
+def split_coverage(observed: dict) -> list[str]:
+    """The non-vacuity ratchet for the SK row (issue #2740).
+
+    Each clause is a behaviour of the REFERENCE, never of the model, that a
+    plausible defect would remove, so the row cannot agree over a corpus that
+    never reaches the window:
+
+      * a crash INSIDE the window leaves a referent that recover neither
+        applied nor reported, for a declared and for an undeclared inverse,
+        and beside an emission, which is the case where the residue column and
+        the surviving world differ;
+      * a crash OUTSIDE the window reverts exactly, and one reverts the
+        referents it can see while the orphan stays;
+      * a crash before anything ran leaves nothing.
+
+    Returns findings, which the caller treats as gate failures."""
+    want = {"orphan-survives", "orphan-declared", "orphan-undeclared",
+            "orphan-beside-emission", "exact-revert", "revert-beside-orphan",
+            "empty-cut"}
+    scenarios = _split_scenarios()
+    findings: list[str] = []
+    seen: set = set()
+    for name, _codes, _cut in scenarios:
+        if observed.get(name) is None:
+            return [f"split coverage: no observation for {name}"]
+        seen |= _SPLIT_MARKS.get(name, frozenset())
+    for mark in sorted(want - seen):
+        findings.append(f"split coverage: NO witness of `{mark}`, the row "
+                        "would agree over a branch the corpus never reaches")
+    if not findings:
+        print(f"split coverage: {len(scenarios)} crash cuts of "
+              f"{len(_SPLIT_STEPS)}^1..{_SPLIT_DEPTH} bodies, {len(want)} "
+              "reference behaviours, every cut inside the window leaving the "
+              "mutated referent in the world")
     return findings
 
 
@@ -6822,7 +7108,10 @@ class Verdicts(NamedTuple):
     """One side's verdicts. `files` are V rows (disjoint, closed, link),
     `comps` G rows, `providers` P rows, `spawns` W rows, `refused` X rows,
     `dispositions` D rows (G7 teardown: replayed / discharged / stranded),
-    `recoveries` O rows (A8/R4 crash recovery: outcome / applied / residue),
+    `recoveries` O rows (A8/R4 crash recovery: outcome / applied / residue /
+    the roll-forward's flushed and owed emissions), `splits` SK rows (A8
+    split-step crash cuts: outcome / applied / residue / the world recovery
+    leaves, issue #2740),
     `confinements` C rows (G6: a reconstructed statement's reach surface is
     within its component's declared context), `g8surface` S8 rows (G8: a
     statement's boundary surface over the reconstructed `Prog`), `g5reg` U5
@@ -6899,6 +7188,7 @@ class Verdicts(NamedTuple):
     ev: dict[str, str]
     ir_disjoint: dict[str, str]
     ir_kept: dict[str, str]
+    splits: dict[str, tuple]
 
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
@@ -6918,6 +7208,7 @@ class Verdicts(NamedTuple):
                 + len(self.sw) + len(self.a5) + len(self.gc)
                 + len(self.g1cov)
                 + len(self.ev) + len(self.ir_disjoint) + len(self.ir_kept))
+                + len(self.ev) + len(self.splits))
 
 
 
@@ -6936,6 +7227,7 @@ def parse_verdicts(text: str) -> Verdicts:
     refused: dict[str, str] = {}
     dispositions: dict[str, tuple[tuple, tuple, tuple]] = {}
     recoveries: dict[str, tuple] = {}
+    splits: dict[str, tuple] = {}
     confinements: dict[tuple[str, str, str], str] = {}
     g8surface: dict[tuple[str, str, str], object] = {}
     g5reg: dict[tuple[str, str, str], object] = {}
@@ -6991,18 +7283,38 @@ def parse_verdicts(text: str) -> Verdicts:
                 tuple(sorted(_cols(parts[3]))),
                 tuple(sorted(_cols(parts[4]))),
             )
-        elif parts[0] == "O" and len(parts) == 5:
+        elif parts[0] == "O" and len(parts) == 7:
             # `replayed` is compared as a SET: the model walks the log in
             # append order and `_roll_back` walks each record family
             # newest-first, and neither order is a claim the other makes (the
             # ordered LIFO claim is G7's, checked by the D row). `residue` is
             # `n/a` outside a roll-back, which is the model's own scope.
+            # `flushed` and `owed` are the roll-forward's reading of the
+            # deferral queue, `n/a` outside a roll-forward, and ORDERED: both
+            # sides list the queue in log order.
             body = parts[4].split("=", 1)[1]
+            fbody = parts[5].split("=", 1)[1]
+            obody = parts[6].split("=", 1)[1]
             recoveries[parts[1]] = (
                 parts[2].split("=", 1)[1],
                 tuple(sorted(int(x) for x in _cols(parts[3]))),
                 None if body == "n/a" else tuple(sorted(int(x)
                                                         for x in _cols(parts[4]))),
+                None if fbody == "n/a" else tuple(int(x) for x in _cols(parts[5])),
+                None if obody == "n/a" else tuple(int(x) for x in _cols(parts[6])),
+            )
+        elif parts[0] == "SK" and len(parts) == 6:
+            # A8 split-step crash cut (issue #2740): outcome, the applied set,
+            # the residue, and the world a recovery run leaves, each a SET of
+            # seqs. `remaining` is where the crash window shows: a mutation
+            # whose record was never written is in it.
+            body = parts[4].split("=", 1)[1]
+            splits[parts[1]] = (
+                parts[2].split("=", 1)[1],
+                tuple(sorted(int(x) for x in _cols(parts[3]))),
+                None if body == "n/a" else tuple(sorted(int(x)
+                                                        for x in _cols(parts[4]))),
+                tuple(sorted(int(x) for x in _cols(parts[5]))),
             )
         elif parts[0] == "C" and len(parts) == 5:
             # G6 confinement: (file, comp, statement index) -> ok|fail.
@@ -7152,6 +7464,7 @@ def parse_verdicts(text: str) -> Verdicts:
                     async_sites, async_sigs, preludes, intercepts, methods,
             places, model_reach, councils, g9, retain, inv, sw, a5, gc, g1cov,
             ev, ir_disjoint, ir_kept)
+            ev, splits)
 
 
 
@@ -7729,9 +8042,18 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     _RECOVERY_MARKS.clear()
     recoveries: dict[str, tuple] = {}
     for name, records, failing in _wal_logs():
-        outcome, applied, residue = recovery_observation(name, records, failing)
+        outcome, applied, residue, flushed, owed = recovery_observation(
+            name, records, failing)
         recoveries[name] = (outcome, tuple(applied),
-                            None if residue is None else tuple(residue))
+                            None if residue is None else tuple(residue),
+                            None if flushed is None else tuple(flushed),
+                            None if owed is None else tuple(owed))
+    # SK rows: the split-step crash cuts, run through the real WAL reader and
+    # `recover` in the order the runtime writes them.
+    splits: dict[str, tuple] = {}
+    _SPLIT_MARKS.clear()
+    for name, codes, cut in _split_scenarios():
+        splits[name] = split_observation(name, codes, cut)
 
     # C rows: G6 confinement, computed INDEPENDENTLY of admission. A
     # component's declared context is its require locals (M) together with the
@@ -8041,6 +8363,7 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
                     async_sites, async_sigs, preludes, intercepts, methods,
                     places, model_reach, councils, g9, retain, inv, sw, a5,
                     gc, g1cov, ev, ir_disjoint, ir_kept)
+                    gc, g1cov, ev, splits)
 
 
 #: What the REFERENCE decided for each config field, for the CD row's
@@ -9596,6 +9919,7 @@ def main() -> int:
             ("emission_value", ref.ev, formal.ev),
             ("ir_disjoint", ref.ir_disjoint, formal.ir_disjoint),
             ("ir_kept", ref.ir_kept, formal.ir_kept)):
+            ("split", ref.splits, formal.splits)):
 
         for key, want in refmap.items():
             got = gotmap.get(key)
@@ -9635,11 +9959,13 @@ def main() -> int:
         f"{len(ref.inv)} inverse refusals + "
         f"{len(ref.sw)} witnessed-site refusals + "
         f"{len(ref.ir_disjoint)} IR documents (G2)): "
+        f"{len(ref.splits)} split-step crash cuts): "
 
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
     mismatches.extend(teardown_coverage(ref.dispositions))
     mismatches.extend(recovery_coverage(ref.recoveries))
+    mismatches.extend(split_coverage(ref.splits))
     mismatches.extend(attenuation_coverage())
     mismatches.extend(confinement_coverage())
     mismatches.extend(prog_coverage())

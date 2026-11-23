@@ -296,12 +296,22 @@ Fact rows in (tab-separated, one fact per line):
   L <scen> discharge <seqs-csv>              `RevL.Lemmas.Rec`, one row each
   L <scen> fence <seq>
   L <scen> deferred <seq>
+  L <scen> flushed <seq>                     a queued emission whose host
+                                             body crossed at the flush
+  L <scen> flushresidue <seq>                one whose host body raised
   L <scen> marker <approved|aborted|forkfrozen|complete>
   L <scen> fails <seq>                       the re-issue ORACLE (243 rule 6):
                                              this seq's inverse fails when
                                              re-issued. Not a WAL record — a
                                              property of the world the
                                              reference drives.
+  SK <scen> <steps-csv> <cut>                a split-step crash cut (A8,
+                                             issue #2740): the body the
+                                             steps name (`W` a declared-
+                                             idempotent witnessed mutation,
+                                             `U` an undeclared one, `E` an
+                                             emission), run by the model's
+                                             `SplitStep` for `cut` steps
   AR <file> <token>                          an approval-required capability
                                              token: an extern declares
                                              `requires approval`, and this is
@@ -349,7 +359,15 @@ Verdict rows out:
                                                    component that declares
                                                    or installs anything
   D <scen> <replayed=csv> <discharged=csv> <stranded=csv>   G7 disposition
-  O <scen> <outcome=...> <replayed=csv> <residue=csv|n/a>   A8/R4 recovery
+  O <scen> <outcome=...> <replayed=csv> <residue=csv|n/a> <flushed=csv|n/a>
+    <owed=csv|n/a>                                 A8/R4 recovery; `flushed`
+                                                   and `owed` are the
+                                                   roll-forward's reading of
+                                                   the deferral queue
+  SK <scen> <outcome=...> <replayed=csv> <residue=csv|n/a> <remaining=csv>
+                                                   A8 split-step crash cut:
+                                                   `remaining` is the world a
+                                                   recovery run leaves
   A2 <file> <comp> <a2=ok|fail>                    no acquisition after a
                                                    provision: `RevL.A2.a2B`
                                                    over the body's `AQ` steps
@@ -976,6 +994,12 @@ def parseL (f : List String) : Option (String × Rec) :=
   | ["L", scen, "deferred", seq] => do
       let s ← seq.toNat?
       some (scen, .deferredEmission s)
+  | ["L", scen, "flushed", seq] => do
+      let s ← seq.toNat?
+      some (scen, .flushed s)
+  | ["L", scen, "flushresidue", seq] => do
+      let s ← seq.toNat?
+      some (scen, .flushResidue s)
   | ["L", scen, "marker", "approved"] => some (scen, .commitApproved)
   | ["L", scen, "marker", "aborted"] => some (scen, .aborted)
   | ["L", scen, "marker", "forkfrozen"] => some (scen, .forkFrozen)
@@ -1057,6 +1081,138 @@ theorem mem_reported_iff (L : Log) (ok : Seq → Bool) (s : Seq) :
     · cases d <;> simp_all
   · rintro ⟨r, hr, d, hd⟩
     exact ⟨r, hr, by rw [hd]⟩
+
+/-- The emissions a roll-forward reads as confirmed crossed
+(`RevL.Lemmas.flushedOf`), as labels. -/
+def flushedSeqLabels (L : Log) : List String := (flushedOf L).map toString
+
+/-- The emissions a roll-forward reads as owed (`RevL.Lemmas.owedOf`), as
+labels. -/
+def owedSeqLabels (L : Log) : List String := (owedOf L).map toString
+
+theorem owedOf_eq (L : Log) :
+    owedOf L = (deferredSeqs L).filter (fun s => (deferClass L s).isOwed) := by
+  unfold owedOf deferralView
+  generalize deferredSeqs L = l
+  induction l with
+  | nil => rfl
+  | cons t rest ih =>
+    by_cases h : (deferClass L t).isOwed = true <;>
+      simp [h, ih]
+
+theorem flushedOf_eq (L : Log) :
+    flushedOf L = (deferredSeqs L).filter (fun s => decide (deferClass L s = .flushed)) := by
+  unfold flushedOf deferralView
+  generalize deferredSeqs L = l
+  induction l with
+  | nil => rfl
+  | cons t rest ih =>
+    by_cases h : deferClass L t = .flushed <;>
+      simp [h, ih]
+
+/-- **An emission is owed exactly when it was approved and not flushed.**
+Left to right and back: a seq printed in the `owed` column is a queued
+emission of an approved log with no `flushed` record, and every such
+emission is printed. So a reference that calls an emission owed without an
+approval, or silently drops an approved one that never flushed, or reads a
+flushed one as owed, disagrees with this column. -/
+theorem mem_owedOf_iff (L : Log) (s : Seq) :
+    s ∈ owedOf L ↔
+      s ∈ deferredSeqs L ∧ hasApproved L = true ∧ s ∉ flushedSeqs L := by
+  rw [owedOf_eq, List.mem_filter]
+  cases hA : hasApproved L <;> by_cases hf : s ∈ flushedSeqs L <;>
+    by_cases hr : s ∈ flushFailedSeqs L <;>
+    simp [deferClass, hA, memSeq_iff, hf, hr, DeferClass.isOwed]
+
+/-- **An unapproved log owes nothing.** A queue with no `commit-approved`
+reads as dropped, never owed, so a reference that reports an owed emission
+for it disagrees with the column. -/
+theorem owedSeqLabels_nil_of_unapproved {L : Log} (h : hasApproved L = false) :
+    owedSeqLabels L = [] := by
+  have hn : owedOf L = [] := by
+    rcases hl : owedOf L with _ | ⟨s, rest⟩
+    · rfl
+    · have hs : s ∈ owedOf L := by rw [hl]; exact List.mem_cons_self ..
+      have := (mem_owedOf_iff L s).mp hs
+      rw [h] at this
+      exact absurd this.2.1 (by simp)
+  simp [owedSeqLabels, hn]
+
+/-- **A flushed emission is one the log says was flushed.** -/
+theorem mem_flushedOf_iff (L : Log) (s : Seq) :
+    s ∈ flushedOf L ↔
+      s ∈ deferredSeqs L ∧ hasApproved L = true ∧ s ∈ flushedSeqs L := by
+  rw [flushedOf_eq, List.mem_filter]
+  cases hA : hasApproved L <;> by_cases hf : s ∈ flushedSeqs L <;>
+    by_cases hr : s ∈ flushFailedSeqs L <;>
+    simp [deferClass, hA, memSeq_iff, hf, hr]
+
+/-- The body a split scenario's step codes name, ending in the failing
+step; `none` for a code the model has no step for, which the caller
+refuses rather than skipping. -/
+def splitBodyOf : List String → Seq → Option Body
+  | [], _ => some .fail
+  | c :: rest, n => do
+      let b ← splitBodyOf rest (n + 1)
+      match c with
+      | "W" => some (.witnessed n true b)
+      | "U" => some (.witnessed n false b)
+      | "E" => some (.emit n b)
+      | _ => none
+
+/-- One split crash-cut scenario: its name, its step codes, its cut. -/
+def parseSK (f : List String) : Option (String × List String × Nat) :=
+  match f with
+  | ["SK", scen, steps, cut] => do
+      let n ← cut.toNat?
+      some (scen, splitKeys steps, n)
+  | _ => none
+
+def isSKRow (f : List String) : Bool :=
+  match f with
+  | "SK" :: _ => true
+  | _ => false
+
+/-- The configuration a split scenario's cut leaves: the model's own
+`splitRun`, so the printed log and world are the split step's. -/
+def skCut (body : Body) (cut : Nat) : SplitConfig :=
+  splitRun ⟨body, [], [], none⟩ cut
+
+/-- The world a recovery run leaves after a split cut: what a crash found,
+less what recovery applied. -/
+def skRemaining (c : SplitConfig) : List String :=
+  (replay c.live (replayed c.log)).map toString
+
+/-- **The printed cut is a run of the split relation.** Every configuration
+an `SK` row prints is reached from the empty start by `SplitSteps`, so a
+reference that agrees with the row agrees with a genuine run of the model
+rather than with a hand-written log. -/
+theorem skCut_is_a_run (body : Body) (cut : Nat) :
+    SplitSteps ⟨body, [], [], none⟩ (skCut body cut) :=
+  splitRun_steps cut _
+
+/-- **A cut inside the window leaves the pending referent in the world.**
+The `remaining` column of an `SK` row names the pending mutation whenever
+the cut is inside the window and no record names it: recovery replays only
+what the log carries, so the referent survives. A reference that undoes it,
+or a model that wrote the record first, disagrees with this column. -/
+theorem pending_survives_recovery {body : Body} {cut : Nat} {s : Seq} {i : Bool}
+    (hp : (skCut body cut).pend = some (s, i))
+    (hnew : s ∉ logSeqs (skCut body cut).log) :
+    toString s ∈ skRemaining (skCut body cut) := by
+  have hrun := skCut_is_a_run body cut
+  obtain ⟨hlive, hrep, _⟩ := RevL.A8.orphan_is_invisible_to_recovery hrun hp hnew
+  obtain ⟨M, hL, hM, _⟩ := splitSteps_trace hrun
+  have hM' : SemLog (skCut body cut).log := hL ▸ hM
+  have hout : outcome (skCut body cut).log = .rolledBack :=
+    RevL.A8.trace_reads_back_as_abort hM'
+  have hrb : replayed (skCut body cut).log = rollbackReplay (skCut body cut).log := by
+    simp [replayed, hout]
+  simp only [skRemaining, hrb, List.mem_map]
+  refine ⟨s, ?_, rfl⟩
+  rw [replay_eq_filter, List.mem_filter]
+  refine ⟨hlive, ?_⟩
+  simp [memSeq_false.mpr hrep]
 
 /-- The printed columns are the model's two lists, spelled. -/
 theorem replayedSeqLabels_eq (L : Log) :
@@ -3312,6 +3468,7 @@ def main (args : List String) : IO UInt32 := do
     let lrecs := fields.filterMap parseL
     let lruns := fields.filterMap parseLRun
     let lfails := fields.filterMap parseLFail
+    let skrows := fields.filterMap parseSK
     let aqrows := fields.filterMap parseAQ
     let arrows' := fields.filterMap parseAR
     let axrows := fields.filterMap parseAX
@@ -3395,8 +3552,39 @@ def main (args : List String) : IO UInt32 := do
       -- claiming a surface the model does not have.
       let residue :=
         if outcome log = .rolledBack then csv (reportedSeqLabels log ok) else "n/a"
+      -- The roll-forward's reading of the deferral queue: which emissions it
+      -- confirms crossed and which it owes. A roll-back drops the queue and a
+      -- retired fork carries none, so the columns say `n/a` there.
+      let fwd := outcome log = .rolledForward
+      let flushedCol := if fwd then csv (flushedSeqLabels log) else "n/a"
+      let owedCol := if fwd then csv (owedSeqLabels log) else "n/a"
       out := out ++ s!"O\t{scen}\toutcome={outcomeName (outcome log)}\t" ++
-        s!"replayed={csv (replayedSeqLabels log)}\tresidue={residue}\n"
+        s!"replayed={csv (replayedSeqLabels log)}\tresidue={residue}\t" ++
+        s!"flushed={flushedCol}\towed={owedCol}\n"
+    -- SK rows (A8 split-step crash cuts, issue #2740), one per scenario. The
+    -- body is the steps the row names and the cut is the model's own
+    -- `splitRun`, so the log and the world printed are the split step's. A row
+    -- naming a step the model has no form for is a HARD error: skipping it
+    -- would hide the scenario from the comparison.
+    let skAll := fields.filter isSKRow
+    if skAll.length != skrows.length then
+      IO.eprintln "oracle: malformed SK row in the split-step corpus"
+      return 1
+    for (scen, codes, cut) in skrows do
+      match splitBodyOf codes 1 with
+      | none =>
+        IO.eprintln s!"oracle: SK row {scen} names a step the model has no form for"
+        return 1
+      | some body =>
+        let c := skCut body cut
+        let log := c.log
+        let residue :=
+          if outcome log = .rolledBack then
+            csv (reportedSeqLabels log (fun _ => true))
+          else "n/a"
+        out := out ++ s!"SK\t{scen}\toutcome={outcomeName (outcome log)}\t" ++
+          s!"replayed={csv (replayedSeqLabels log)}\tresidue={residue}\t" ++
+          s!"remaining={csv (skRemaining c)}\n"
     -- A `DR` row whose scope or position the model has no constructor for
     -- would drop a reach silently and move the verdict: refuse instead.
     if !mrows'.unknown.isEmpty then
@@ -3704,6 +3892,11 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.fenced_not_reissued
 #print axioms RevLOracle.declared_idempotent_reissued
 #print axioms RevLOracle.reportedSeqLabels_nil_iff_clean
+#print axioms RevLOracle.mem_owedOf_iff
+#print axioms RevLOracle.owedSeqLabels_nil_of_unapproved
+#print axioms RevLOracle.mem_flushedOf_iff
+#print axioms RevLOracle.skCut_is_a_run
+#print axioms RevLOracle.pending_survives_recovery
 #print axioms RevLOracle.a9RowB_iff
 #print axioms RevLOracle.parseStep_stepName
 #print axioms RevLOracle.a2OKB_iff

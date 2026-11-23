@@ -252,6 +252,18 @@ import RevL
 #print axioms RevL.A8.deferred_abort_run
 #print axioms RevL.A8.deferred_commit_run
 #print axioms RevL.A8.deferred_commit_run_from_queued
+#print axioms RevL.A8.commit_flush_is_discharged_or_owed
+#print axioms RevL.A8.flush_residue_run
+#print axioms RevL.A8.flush_crash_cut_witness
+#print axioms RevL.A8.flush_hypotheses_are_inhabited
+#print axioms RevL.A8.split_complete_is_sem
+#print axioms RevL.A8.crash_window_recovery
+#print axioms RevL.A8.orphan_is_invisible_to_recovery
+#print axioms RevL.A8.window_breaks_exact_residue
+#print axioms RevL.A8.crash_window_witness
+#print axioms RevL.A8.window_hypotheses_are_inhabited
+#print axioms RevL.A8.window_log_is_the_log_before_the_mutation
+#print axioms RevL.A8.mutate_witness
 #print axioms RevL.A8.revert_witness
 #print axioms RevL.A8.revert_witness_restores
 

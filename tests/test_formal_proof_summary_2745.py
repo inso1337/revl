@@ -136,7 +136,8 @@ def test_the_real_corpus_satisfies_the_rule(dc, real_census):
     assert dc.polarity_coverage(real_census) == []
     assert all(c["rows"] > 0 for c in real_census.values())
     assert set(real_census) | {"refused", "dispositions", "recoveries",
-                               "g8surface", "g5reg"} == set(dc.Verdicts._fields)
+                               "g8surface", "g5reg",
+                               "splits"} == set(dc.Verdicts._fields)
 
 
 def test_census_file_round_trips_into_the_summary(dc, summary, real_census,
