@@ -960,10 +960,11 @@ revl diff before.ir.json after.rvl
 ### `revl migrate`
 
 Plan one component version change against the real consumers in a composition
-(issue #2685, first slice). Read-only: it joins the semantic diff, the derived
-semver bump, the consumer compatibility predicate and the declared state
-hand-off, and reports what a migration would require. It compiles the three
-inputs, admits nothing, swaps nothing and writes no file.
+(issue #2685). Read-only: it joins the semantic diff, the derived semver bump,
+the consumer compatibility predicate, the declared state hand-off and, with
+`--policy`, the operator's boundary policy, and reports what a migration would
+require. It compiles its inputs, admits nothing, swaps nothing and writes no
+file.
 
 - `OLD` - the old version of the component: a compiled composition document
   (`revl compile -o`) or a `.rvl` source (required).
@@ -975,6 +976,10 @@ inputs, admits nothing, swaps nothing and writes no file.
   must also still run the OLD version: a composition already compiled against
   NEW is refused, because its consumers no longer pin the interface the plan
   is asking about.
+- `--policy POLICY_FILE` - a boundary policy
+  ([boundary-policy.md](boundary-policy.md)), evaluated over the composition as
+  it would stand after the migration: the old version's components replaced by
+  the new version's. See "The boundary policy" below.
 - `--json` - machine-readable plan. Exit status is 0 whenever a plan is
   produced; unreadable or insufficient inputs are nonzero. The classification
   travels in the plan, so a CI gate can decide on `classification` without this
@@ -986,8 +991,8 @@ facts only:
 
 | classification | meaning |
 | --- | --- |
-| `refused` | a real consumer cannot move (its pinned shape broke) or the declared state hand-off cannot cross the swap |
-| `needs-approval` | the new version widens the measured authority surface (a new crossing or host backend, a weakened reach, a widened emission capability or emission ceiling, a dropped or weakened recovery), a consumer needs an authored adapter, or the successor drops the predecessor's state |
+| `refused` | a real consumer cannot move (its pinned shape broke), the declared state hand-off cannot cross the swap, or the boundary policy refuses the composition after the migration |
+| `needs-approval` | the new version widens the measured authority surface (a new crossing or host backend, a weakened reach, a widened emission capability or emission ceiling, a dropped or weakened recovery), the policy requires an approval for a capability the new version reaches, a consumer needs an authored adapter, or the successor drops the predecessor's state |
 | `needs-handoff` | the successor declares a compatible state hand-off; live state must cross the swap |
 | `needs-canary` | every real consumer can move, but the interface changed; exercise it on a canary slice first |
 | `safe` | no consumer work, no authority widening, no state crossing |
@@ -998,12 +1003,43 @@ exists. The adapter check uses the predicate's default opt-in map; an authored
 opt-in is supplied through `revl adapt --adapt`. The plan also reports whether
 the old version is removable (no consumer is still pinned to it) and whether a
 rollback is proven possible. `realm` is the empty string for the shared realm.
-A plan is not a gate: policy rules such as "refuse every widening" are a later
-slice.
+
+#### The boundary policy
+
+With `--policy`, the plan carries a `policy` block and the policy can refuse or
+gate the migration. The composition is evaluated before and after the
+migration, by the same `policy.evaluate` and approval admission the gate runs,
+and only what the migration changes counts:
+
+- `new` - a violation the migration introduces. Any kind but an approval
+  requirement refuses the plan (`refused`). A capability the policy marks
+  `requires approval` that the new version reaches makes it `needs-approval`:
+  the policy permits the reach once an approval is obtained and threaded, so the
+  plan names what to obtain. The gate still refuses the composition until that
+  approval edge is in the code.
+- `preexisting` - a violation the composition already has before the change.
+  It is reported, never blamed on the new version, so a composition that is
+  already out of policy does not read as refused by every plan.
+- `resolved` - a violation the migration removes.
+- `undecided` - the count of evidence rules, which read the candidate's
+  published evidence at the gate and cannot be decided from a compiled
+  document. They are reported, not failed for want of evidence. Register
+  floors read the audit alone and are decided like any other rule. The `mcp`
+  sandbox profile applies to components admitted through the MCP session, which
+  a plan has none of, so it never selects.
+
+No rule is added for migration. "Refuse any widening" is written the way it is
+for admission, as an allow-list: `component * may reach llm` refuses a version
+that starts reaching `mail`. A policy does not override the measured facts: a
+widening the policy allows is still `needs-approval`. A policy file that does
+not parse, or cannot be read, is an error (exit 1), never an empty policy.
+
+A plan is not a gate: `migrate` reports and never admits.
 
 ```bash
 revl migrate cache_v1.rvl cache_v2.rvl --against production.json
 revl migrate old.ir.json new.ir.json --against comp.json --json
+revl migrate cache_v1.rvl cache_v2.rvl --against production.json --policy boundary.policy
 ```
 
 ### `revl version`
