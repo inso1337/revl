@@ -62,6 +62,9 @@ registry/
         compensation.json      #   the recovery surface: each reversible
                                #   crossing with its class and register
         provenance.json        #   assembled source/build provenance
+        promotion.json         #   the `revl promote` verdict this release was
+                               #   promoted on, supplied by the publisher and
+                               #   never produced at publish (issue #2804)
       releases/                # GENERATED at publish; append-only (§1.2)
         <version>/
           component.rvl        #   the bytes of that release, frozen
@@ -86,6 +89,17 @@ declared sink, since that reach could be any of them. `compensation` is the
 audit recovery surface: one row per reversible crossing, with its class and
 declaration register. A crossing absent from it has no declared inverse,
 compensation or deferred class.
+
+`promotion.json` is the one file here that is a decision and not a projection of
+the source: the verbatim `revl promote --json` verdict (`revl.shadow-promotion`)
+for the release. `build_evidence` never writes it. It binds it into the signed
+attestation when the entry ships one, so a verdict edited after signing breaks
+the signature like any other bound dossier. The `strength` facet grades it
+(`exact` > `sampled` > `not-promoted` > `unavailable` > `invalid`). Only a
+`PROMOTE` verdict licenses a strength, since a refused or reverted window is
+evidence against the candidate. No producer of `exact` exists yet: a document
+that states it is `invalid`, so a published file cannot claim it. `strength`
+stays out of the rank key, like the reviewer facets (issue #2804).
 
 `index.json` maps each component to what a resolver needs without opening
 sources: provided service shapes (canonicalized), required keys,
