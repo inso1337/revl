@@ -252,11 +252,11 @@ Fact rows in (tab-separated, one fact per line):
                                              through a requirement, a handle
                                              or an alias, or a provide-block
                                              implementation (issue #1809)
-  GA <file> <comp> <root>                    one ACCESS root: a call head's
-                                             root that is no binding, module
-                                             callable, import, host family or
-                                             constructor, or an `intercept`
-                                             target (G1, issue #1807)
+  GAS <file> <comp> <scope>                  one scope of a component (G1,
+                                             issues #1807 and #2744)
+  GAU <file> <comp> <scope> <root> <kind>    one root the scope uses, with what
+                                             the file alone resolves it to
+  GAL <file> <comp> <scope> <name>           one name the scope itself binds
   DR <file> <fn|test|component> <owner> <extern> <call|arrow|value>
                                              one reach of a `deferred` emission
                                              extern and where it sits: a call,

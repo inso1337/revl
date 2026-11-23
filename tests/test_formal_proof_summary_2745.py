@@ -135,9 +135,16 @@ def test_the_real_corpus_satisfies_the_rule(dc, real_census):
     kinds are the ones the oracle compares."""
     assert dc.polarity_coverage(real_census) == []
     assert all(c["rows"] > 0 for c in real_census.values())
+    # `g1class` is the class the model gave a root (issue #2744): a name, not
+    # an accepted or refused verdict, so it is compared but not graded.
     assert set(real_census) | {"refused", "dispositions", "recoveries",
+<<<<<<< HEAD
                                "g8surface", "g5reg",
                                "splits"} == set(dc.Verdicts._fields)
+=======
+                               "g8surface", "g5reg", "g1class"} \
+        == set(dc.Verdicts._fields)
+>>>>>>> 093475070 (formal: state what the per-scope G1 classification does not cover)
 
 
 def test_census_file_round_trips_into_the_summary(dc, summary, real_census,

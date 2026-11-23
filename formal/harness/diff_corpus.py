@@ -3538,8 +3538,9 @@ def _file_root_kinds(prog) -> dict[str, str]:
     """What the FILE alone resolves a root to, without a requirement and
     whatever a scope binds: a module `fn` or `extern` (`callable`), a host
     family (`host`), a name or namespace a `use` imports (`imported`), and a
-    type or variant constructor (`ctor`). The precedence is the checker's:
-    callable, then host, then imported, then constructor."""
+    type or variant constructor (`ctor`). The exporter reads the file; a name a
+    file gives two readings takes the last of constructor, imported, host and
+    callable, which the corpus checks only through admit versus refuse."""
     kinds: dict[str, str] = {}
     for name in _BUILTIN_CTORS:
         kinds[name] = "ctor"
@@ -3640,7 +3641,7 @@ def access_rows(rel: str, comp, scope_heads: dict[str, set[str]],
 
 # ----------------------------- declared-access COVERAGE (issue #2744)
 #
-# THE VISITING HALF OF G1, which the `GA`/`G1` row above cannot state. G1 is
+# THE VISITING HALF OF G1, which the `G1` row above cannot state. G1 is
 # enforced by name resolution DURING lowering (`lower.py`'s own guarantee map:
 # "G1 undeclared access -> `_lower_postfix` name resolution"), so the walk that
 # resolves roots is the lowering walk itself. `RevL.G1Coverage.coversAccessBodyB`
@@ -7134,16 +7135,11 @@ def access_coverage() -> list[str]:
         pooled: set = set()
         for _scope, bound, _uses in scopes:
             pooled |= bound
-        scope_ok = [all(_g1_classify(declared, bound, kind, root) != "undeclared"
-                        for root, kind in uses.items())
-                    for _scope, bound, uses in scopes]
         pooled_ok = all(_g1_classify(declared, pooled, kind, root) != "undeclared"
                         for _scope, _bound, uses in scopes
                         for root, kind in uses.items())
         if not ok and pooled_ok:
             witnesses["pooled"] = witnesses["pooled"] or key
-        bound_in = {root for _s, bound, uses in scopes for root in uses
-                    if root in bound}
         classes_of: dict[str, set] = {}
         for _s, bound, uses in scopes:
             for root, kind in uses.items():
@@ -7151,7 +7147,6 @@ def access_coverage() -> list[str]:
                     _g1_classify(declared, bound, kind, root))
         if ok and any("bound" in c and len(c) > 1 for c in classes_of.values()):
             witnesses["separate"] = witnesses["separate"] or key
-        del scope_ok, bound_in
     labels = {"refused": "a component refused for an undeclared access root",
               "declared": "an admitted component with a declared access root",
               "excluded": "an admitted component using a binding of its scope, "
@@ -9731,7 +9726,8 @@ def write_status(ledger: bool = False) -> int:
 #: label). The label names the row and its guarantee for the job summary.
 #: `refused` (parse refusals, refusals by definition), `dispositions` and
 #: `recoveries` (execution outcomes), `g8surface` and `g5reg` (a surface and a
-#: count) carry no accept/refuse verdict and are not graded (issue #2745).
+#: count) and `g1class` (the class the model gave a root, issue #2744) carry no
+#: accept/refuse verdict and are not graded (issue #2745).
 ROW_KINDS = (
     ("files", "V link (G2, G3)"),
     ("comps", "G marker (G4)"),

@@ -6,7 +6,7 @@ import RevL.Typing
 `formal/STATUS.md` carried G1 as `partial` for one reason that could be
 worked: `RevL.G1.declared_only_access` says an undeclared access cannot be
 *written*, and since issue #1807 `RevL.G1Access` decides the rule over each
-component's access roots on the corpus (`GA` rows, the `G1` verdict, 21
+component's access roots on the corpus (the `G1` verdict, 21
 `agree-G1` documents). Neither says that the checker's name resolution
 VISITS the statements of a real component body. A body statement the walk
 never lowered is a statement whose undeclared reads are never refused, and

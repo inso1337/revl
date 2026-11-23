@@ -542,7 +542,7 @@ import RevL
 #print axioms RevL.G9Coverage.coversB_refuses_a_walk_that_seeds_a_trusted_param
 #print axioms RevL.G9Coverage.coversB_refuses_a_scope_the_body_does_not_have
 #print axioms RevL.G9Coverage.g9Coverage_not_vacuous
--- Issue #2744: G1 DECLARED-ACCESS COVERAGE. The `GA`/`G1` row decides the rule
+-- Issue #2744: G1 DECLARED-ACCESS COVERAGE. The `G1` row decides the rule
 -- over a component's access roots; this states that the walk which resolves
 -- those roots (the lowering walk) visits every scope, as many statements of
 -- each scope as it declares, and every declared parameter of each scope. See

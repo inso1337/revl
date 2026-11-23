@@ -16,9 +16,11 @@ depth, and drops the roots the checker resolves without a requirement: a
 binding in the component (a `let`, `var`, parameter, loop variable, arrow or
 `match` binder), a module `fn` or `extern`, a name a `use` imports, a host
 family (`Map`, `Pool`, `Job`, `Stream`), and a type or variant constructor.
-What remains are the ACCESS roots (`GA` rows), and an `intercept` target that
-is not a provision joins them. The rule is stated here: every access root is
-a declared requirement. `accessB_iff` bridges the oracle's `G1` row.
+What remains are the ACCESS roots, and an `intercept` target that is not a
+provision joins them. The rule is stated here: every access root is a declared
+requirement. `accessB_iff` is the first slice's decider over a component's
+access roots; the oracle's `G1` row is now the per-scope `componentAccessB`
+below.
 
 ## Per scope (issue #2744, second slice)
 
@@ -31,17 +33,23 @@ the roots the scope uses with what the FILE alone resolves each to
 (`FileKind`), and the names that scope itself binds; `classify` decides which
 `RootClass` each root falls in, and `ScopeAccessOK` is the rule that no root of
 a scope is `undeclared`. `scopeAccess_iff_roots_declared` bridges the new rule
-to `AccessOK` above, so the content of the first slice is unchanged, and
+to `AccessOK` above (it restates the per-scope rule in the first slice's terms,
+and does not tie the roots to the exporter's), and
 `other_scope_local_does_not_resolve` is the witness the component-wide reading
 could not give.
 
 ## What this does not cover
 
-Binding is read per SCOPE, not per statement: a name bound anywhere in a scope,
-inside a nested `if`/`while`/`for` block included, counts as bound for every
-use in that scope, and an activation binding made before a `provide` block
-counts for that block's methods. A name used before its binding, or after the
-block that bound it closed, is therefore read as bound. The corpus measures
+Binding is read per SCOPE, not per statement: a name bound anywhere in a scope
+counts as bound for every use in that scope, whatever the form that bound it:
+a `let` inside a nested `if`/`while`/`for` block, an arrow's parameter beyond
+its arrow, a `match` arm's binder beyond its arm. The checker refuses a bare
+use of an arrow parameter or of an arm binder outside its arrow or arm, and
+the exporter reads it as bound. An activation binding made before a `provide`
+block counts for that block's methods, and a name used before its binding is
+read as bound. For a call head the checker resolves a requirement or a host
+family BEFORE the local scope, so `classify`'s `bound` is the checker's reading
+in value position only; the verdict is the same either way. The corpus measures
 the reading against the checker in both directions (`missed-G1` and
 `formal-strict` are fatal).
 -/
@@ -129,9 +137,10 @@ inductive RootClass where
   deriving Repr, DecidableEq
 
 /-- **The per-scope classification.** A binding of the scope shadows what the
-file resolves, as the checker's name resolution does; a root nothing else
-resolves is a declared requirement or is undeclared. An `intercept` target (`key`)
-is never shadowed. -/
+file resolves, as the checker's name resolution does for a name read in value
+position (a call head resolves a requirement or a host family first, with the
+same verdict); a root nothing else resolves is a declared requirement or is
+undeclared. An `intercept` target (`key`) is never shadowed. -/
 def classify (declared locals : List String) (fk : FileKind) (r : String) : RootClass :=
   match fk with
   | .key => if r ∈ declared then .declared else .undeclared
@@ -197,8 +206,9 @@ theorem classify_ok_iff (declared locals : List String) (fk : FileKind) (r : Str
 
 /-- **The bridge to the first slice.** The per-scope rule admits a scope exactly
 when `AccessOK` admits the roots that scope can only resolve through a
-requirement, so the content of `AccessOK` is the content of the per-scope
-rule once the classification is done. -/
+requirement. `accessRoots` is itself defined through `classify`, so this
+restates the per-scope rule in the first slice's terms and does not tie the
+roots to anything the exporter reads. -/
 theorem scopeAccess_iff_roots_declared (declared locals : List String) (uses : List Use) :
     ScopeAccessOK declared locals uses ↔
       AccessOK declared (accessRoots declared locals uses) := by
@@ -213,8 +223,7 @@ theorem scopeAccess_iff_roots_declared (declared locals : List String) (uses : L
     intro hc
     exact h u.1 (List.mem_map.mpr ⟨u, List.mem_filter.mpr ⟨hu, by simpa using hc⟩, rfl⟩)
 
-/-- One undeclared root refuses its scope, and a root that file or scope
-resolves is never the reason. -/
+/-- One undeclared root refuses its scope. -/
 theorem undeclared_root_refuses_scope (declared locals : List String) (uses : List Use)
     (u : Use) (hu : u ∈ uses) (hc : classify declared locals u.2 u.1 = .undeclared) :
     ¬ ScopeAccessOK declared locals uses :=

@@ -329,6 +329,7 @@ def test_the_lean_oracle_agrees_on_every_scope_and_class(
     assert formal.g1class == verdicts.g1class
     assert formal.g1class, "the oracle classified no root at all"
 
+
 def test_every_fixture_files_under_agree_g1(harness, verdicts, rows, tmp_path):
     (tmp_path / "harness" / "out").mkdir(parents=True)
     with pytest.MonkeyPatch.context() as mp, redirect_stdout(io.StringIO()):
@@ -387,3 +388,17 @@ def test_the_ratchet_bites_without_the_per_scope_witness(harness, rows):
     findings = harness.access_coverage()
     harness.reference_from_tsv(rows)
     assert len(findings) == 1 and "bound in another scope" in findings[0], findings
+
+
+def test_the_ratchet_bites_without_the_separate_scopes_witness(harness, rows):
+    """An admitted component in which one name is `bound` in one scope and
+    classifies differently in another is what shows the scopes' bindings do
+    not leak into each other where the checker admits. Remove that one file
+    and the ratchet says so, and only that."""
+    with redirect_stdout(io.StringIO()):
+        harness.export()
+    harness.reference_from_tsv(_without(rows, {REQUIREMENT_NAME}))
+    findings = harness.access_coverage()
+    harness.reference_from_tsv(rows)
+    assert len(findings) == 1 and "classifies differently in another" in \
+        findings[0], findings
