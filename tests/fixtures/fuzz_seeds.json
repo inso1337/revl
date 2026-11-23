@@ -1,0 +1,20 @@
+{
+  "_about": [
+    "Recorded frontend-fuzzer divergences: one minimal reproducer per entry that",
+    "a campaign of tools/fuzz_frontend.py produced and nobody has fixed. The",
+    "evolution curriculum (tools/evolve_curriculum.py, slice 5) reads it, and an",
+    "entry is a task only while it still diverges, so a fixed bug is DELETED",
+    "from here rather than left behind. `python3 tools/fuzz_frontend.py",
+    "--replay` lists the entries that still diverge and exits 1 while any do.",
+    "",
+    "An entry is {\"id\", \"stage\", \"kind\", \"source\"}: the stage that found it",
+    "(reference | lexer | gate), the signature kind that stage returns for it,",
+    "and the shrunk input. Copy one from the `--json` output of a campaign.",
+    "",
+    "Empty at the slice-5 landing commit: a campaign of 2534 inputs on the gate",
+    "stage (seed 1) found no divergence. An empty ledger is a measurement of the",
+    "tree, not a source that stopped reading; the curriculum reports it as an",
+    "empty reachable rung. This file is in the tree, so a candidate can read it."
+  ],
+  "seeds": []
+}

@@ -71,10 +71,16 @@ USAGE
     python3 tools/fuzz_frontend.py --seconds 60
     python3 tools/fuzz_frontend.py --stage gate --seconds 600 --seed 7
     python3 tools/fuzz_frontend.py --iterations 200 --quiet   # CI smoke
+    python3 tools/fuzz_frontend.py --replay                   # recorded seeds
 
 Exit status is 1 when a finding survives shrinking, so a short budget can be
 run as a test. A long campaign is a thing you run deliberately — do not wire
 one into CI.
+
+`--replay` runs no campaign: it re-runs the minimal reproducers recorded in
+`tests/fixtures/fuzz_seeds.json` and exits 1 while any still diverges. The
+evolution curriculum reads that ledger, and a seed is a task only while it
+still diverges, so a fixed bug's entry is deleted.
 """
 
 from __future__ import annotations
@@ -482,13 +488,51 @@ _KEYWORDS = (
 )
 
 
+# The directories the campaign draws its inputs from. A constant so a reader of
+# the fuzzer (the curriculum's fuzz-seed source measures the breadth of this
+# corpus) sees the same list the loader walks.
+CORPUS_DIRS = ("examples", "tests/fixtures", "selfhost", "stdlib", "demo",
+               "backends", "tck")
+
+# Recorded divergences: one entry per minimal reproducer a campaign produced
+# and nobody has fixed yet. A seed stays here only while it still diverges.
+SEEDS = ROOT / "tests" / "fixtures" / "fuzz_seeds.json"
+
+
+def replay_seeds(path=None, *, cache=None, stages=None) -> list[tuple[dict, str]]:
+    """`[(seed, detail)]` for each recorded seed whose divergence still occurs.
+
+    A seed is `{"id", "stage", "kind", "source"}`. It replays by running its
+    stage's oracle on its source and comparing the signature's kind, so a seed
+    whose bug was fixed (the stage returns nothing) or that now trips a
+    DIFFERENT fault (another kind) is not reported as the recorded one. Only
+    the stages that recorded seeds need are built, because a self-host build
+    costs seconds and an empty ledger must cost none.
+    """
+    seeds = json.loads(Path(path or SEEDS).read_text(encoding="utf-8")).get("seeds", [])
+    registry = STAGES if stages is None else stages
+    cache = cache or _StageCache()
+    built: dict[str, object] = {}
+    still: list[tuple[dict, str]] = []
+    for seed in seeds:
+        if seed["stage"] not in registry:
+            raise KeyError(f"seed {seed['id']!r} names the unknown stage "
+                           f"{seed['stage']!r}")
+        stage = built.get(seed["stage"])
+        if stage is None:
+            stage = built[seed["stage"]] = registry[seed["stage"]](cache)
+        result = stage.check(seed["source"])
+        if result is not None and result[0].kind == seed["kind"]:
+            still.append((seed, result[1]))
+    return still
+
+
 def load_corpus() -> list[str]:
     """Every `.rvl` in the tree: examples (valid programs), rejections (the
     refusals), fixtures, and the self-host itself, which is the largest and
     most feature-dense revl program that exists."""
     seen: dict[str, str] = {}
-    for sub in ("examples", "tests/fixtures", "selfhost", "stdlib", "demo",
-                "backends", "tck"):
+    for sub in CORPUS_DIRS:
         base = ROOT / sub
         if not base.is_dir():
             continue
@@ -667,7 +711,19 @@ def main() -> int:
                         help="write the findings to PATH as JSON")
     parser.add_argument("--quiet", action="store_true",
                         help="only the summary")
+    parser.add_argument("--replay", nargs="?", const=str(SEEDS), metavar="PATH",
+                        help="replay the recorded seeds (default "
+                             "tests/fixtures/fuzz_seeds.json) instead of "
+                             "fuzzing; exit 1 while any still diverges")
     args = parser.parse_args()
+
+    if args.replay is not None:
+        still = replay_seeds(args.replay)
+        for seed, detail in still:
+            print(f"STILL DIVERGES {seed['id']} ({seed['stage']}/{seed['kind']}): "
+                  f"{detail}\n  {seed['source']!r}")
+        print(f"{len(still)} recorded seed(s) still diverge")
+        return 1 if still else 0
 
     names = list(STAGES) if args.stage == "all" else [args.stage]
     cache = _StageCache()
