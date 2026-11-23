@@ -217,6 +217,22 @@ class RegistryEntry:
     # for) this entry; `resolve` refuses such an entry rather than ranking it.
     recorded_source_hash: str = ""
     index_problems: tuple = ()
+    # The release this entry is, when the registry was loaded with its release
+    # history (`Registry.from_dir(releases=True)`): `version` is the
+    # publisher-declared release and `frozen` marks a historical one read from
+    # `releases/<version>/` rather than the current `component.rvl`. `age` is 0
+    # for the current release and counts up the older ones, so a tie breaks
+    # toward the newest. A frozen release carries no evidence bundle: evidence
+    # is published beside the current release only, and a release is never
+    # credited with a bundle that was assembled for another one.
+    version: str | None = None
+    frozen: bool = False
+    age: int = 0
+
+    @property
+    def ident(self) -> str:
+        """The key a per-resolve cache uses: one name has several releases."""
+        return f"{self.name}@{self.version}" if self.frozen else self.name
 
     @property
     def evidence(self) -> str:
@@ -1813,7 +1829,7 @@ def _normalized_claim(fieldname: str, value):
 
 def _verified_facts(entry_dir: Path, name: str, source_path: Path, source: str,
                     row: dict, recorded_manifest_text: str,
-                    recorded_manifest: dict
+                    recorded_manifest: dict, *, claims: bool = True
                     ) -> tuple[dict, dict, list[str]]:
     """Recompile one entry and return `(facts, manifest, problems)`.
 
@@ -1824,6 +1840,10 @@ def _verified_facts(entry_dir: Path, name: str, source_path: Path, source: str,
     source. A source that no longer compiles, or a `meta.json` whose declaration
     is unusable, is itself a problem: nothing can vouch for what the gate would
     refuse anyway.
+
+    `claims=False` skips the comparison against `row`: a frozen release has no
+    index row to disagree with, so only the compile, the `meta.json` and the
+    manifest reproducibility are checked.
     """
     try:
         ir = compile_files([str(source_path)])
@@ -1835,7 +1855,9 @@ def _verified_facts(entry_dir: Path, name: str, source_path: Path, source: str,
     manifest_text = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
     problems: list[str] = []
     try:
-        meta = _entry_meta(entry_dir, ir=ir)
+        # a frozen release (`claims=False`) is not described by the CURRENT
+        # `meta.json`: its marking and its health are the current release's
+        meta = _entry_meta(entry_dir, ir=ir) if claims else None
     except RevlError as error:
         # a bad meta.json is a problem on this entry, not a crash for the whole
         # registry: `build_index` refuses it, and a read path names it.
@@ -1844,7 +1866,7 @@ def _verified_facts(entry_dir: Path, name: str, source_path: Path, source: str,
     facts = _entry_index_row(name, ir, source, manifest, manifest_text,
                              meta=meta)
 
-    for fieldname in _AUTHORITY_FIELDS:
+    for fieldname in _AUTHORITY_FIELDS if claims else ():
         claimed = _normalized_claim(fieldname, row.get(fieldname))
         actual = _normalized_claim(fieldname, facts.get(fieldname))
         if claimed != actual:
@@ -1860,6 +1882,156 @@ def _verified_facts(entry_dir: Path, name: str, source_path: Path, source: str,
 
 # --------------------------------------------------------------- the registry
 
+def _current_version(entry_dir: Path) -> tuple[str | None, str | None]:
+    """`(version, problem)` of the entry's current release, from its `version`
+    file. An unusable file is a problem on the entry, never a crash for the
+    whole registry (`build_index` refuses it at publish)."""
+    try:
+        return _entry_version(entry_dir), None
+    except RevlError as error:
+        return None, f"version file is unusable: {error.message}"
+    except (OSError, UnicodeDecodeError) as error:
+        return None, f"version file cannot be read: {error}"
+
+
+def _read_exact(path: Path) -> str:
+    """The text of `path` with its newlines as written. `_read` translates
+    `\r\n`, which is right for compiling and wrong for a hash: a release
+    record hashes the bytes it froze, so the check must read the same bytes."""
+    return path.read_bytes().decode("utf-8")
+
+
+def _frozen_release_entries(entry_dir: Path, name: str, *,
+                            verify_entries: bool = True,
+                            current_version: str | None = None,
+                            current_source: str = "") -> list[RegistryEntry]:
+    """One `RegistryEntry` per frozen release of `name` other than the current
+    one, which the entry itself already is.
+
+    `publish_release` freezes every release it publishes, the current one
+    included, so `releases/<current version>/` is a copy of `component.rvl` and
+    is skipped here when it is byte-identical. When it is NOT identical, the
+    frozen copy is kept and refused: the current release was changed after it
+    was frozen, and that is exactly what a frozen release exists to show.
+
+    A frozen release is read, not believed. Its source is recompiled by the
+    current compiler for the facts a resolve ranks on, and its frozen bytes are
+    checked against the hashes its own `release.json` recorded when it was
+    published. `publish_release` always writes that record, so a release
+    without a readable one cannot be checked and is refused. The manifest is NOT
+    required to be byte-reproducible by today's compiler: a compiler upgrade
+    must not turn every historical release into a refusal. (`verify` does not
+    look at `releases/`; a changed frozen release is caught here, at load.)
+
+    It carries no evidence bundle and no mediator marking: both belong to the
+    current release, and a release is never credited with another's. The entry's
+    `meta.json` is not read for it either, so an unusable current `meta.json`
+    does not refuse the history."""
+    versions = released_versions(entry_dir)
+    out: list[RegistryEntry] = []
+    for index, version in enumerate(versions):
+        release_dir = entry_dir / RELEASES_DIRNAME / version
+        source_path = (release_dir / "component.rvl").resolve()
+        age = len(versions) - index
+        problems: list[str] = []
+
+        def refused(reason: str, source: str = "") -> RegistryEntry:
+            return RegistryEntry(
+                name=name, source=source, manifest={}, dossier=None,
+                provides={}, requires={}, service_shapes={}, capabilities=(),
+                emissions=0, source_hash=_sha256(source) if source else "",
+                manifest_hash="", source_path=str(source_path),
+                index_problems=(f"release {version}: {reason}", *problems),
+                version=version, frozen=True, age=age)
+
+        if not source_path.exists():
+            out.append(refused("component.rvl is missing"))
+            continue
+        try:
+            raw_source = _read_exact(source_path)
+        except (OSError, UnicodeDecodeError) as error:
+            out.append(refused(f"component.rvl cannot be read ({error})"))
+            continue
+        if version == current_version and _read(source_path) == current_source:
+            continue  # the current release, already an entry of its own
+        source = _read(source_path)
+        if version == current_version:
+            problems.append(
+                f"release {version}: the frozen copy differs from the current "
+                f"component.rvl published under the same version, so the "
+                f"release was changed after it was frozen")
+
+        record_path = release_dir / RELEASE_RECORD_FILENAME
+        record = None
+        if record_path.exists():
+            try:
+                record = json.loads(_read(record_path))
+            except (OSError, UnicodeDecodeError, ValueError):
+                record = None
+        if not isinstance(record, dict):
+            problems.append(
+                f"release {version}: {RELEASE_RECORD_FILENAME} is missing or "
+                f"unreadable, so the frozen bytes cannot be checked against "
+                f"what was published")
+            record = {}
+
+        manifest_path = release_dir / "manifest.json"
+        manifest_text = ""
+        if manifest_path.exists():
+            try:
+                manifest_text = _read_exact(manifest_path)
+            except (OSError, UnicodeDecodeError) as error:
+                problems.append(
+                    f"release {version}: manifest.json cannot be read "
+                    f"({error})")
+        for label, actual, recorded in (
+                ("component.rvl", _sha256(raw_source),
+                 record.get("sourceSha256")),
+                ("manifest.json", _sha256(manifest_text) if manifest_text
+                 else "", record.get("manifestSha256"))):
+            if recorded and actual != recorded:
+                problems.append(
+                    f"release {version}: {label} hashes to {actual} but its "
+                    f"{RELEASE_RECORD_FILENAME} recorded {recorded}: the "
+                    f"frozen release was changed")
+        manifest: dict = {}
+        if manifest_text:
+            try:
+                parsed = json.loads(manifest_text)
+                manifest = parsed if isinstance(parsed, dict) else {}
+            except ValueError:
+                problems.append(
+                    f"release {version}: manifest.json is not valid JSON")
+
+        facts: dict = {}
+        if verify_entries:
+            facts, manifest_rebuilt, found = _verified_facts(
+                entry_dir, name, source_path, source, {}, "", manifest,
+                claims=False)
+            manifest = manifest or manifest_rebuilt
+            problems.extend(found)
+        else:
+            problems.append(
+                "index rows were not cross-checked against component.rvl "
+                "(from_dir was called with verify_entries=False)")
+        out.append(RegistryEntry(
+            name=name, source=source, manifest=manifest, dossier=None,
+            provides=facts.get("provides") or {},
+            requires=facts.get("requires") or {},
+            service_shapes=facts.get("services") or {},
+            capabilities=tuple(facts.get("capabilities") or ()),
+            emissions=int(facts.get("emissions") or 0),
+            source_hash=_sha256(source),
+            manifest_hash=facts.get("manifestHash") or "",
+            source_path=str(source_path),
+            mediator=None,
+            evidence_bundle=EvidenceBundle(),
+            recorded_source_hash=record.get("sourceSha256") or "",
+            index_problems=tuple(problems),
+            version=version, frozen=True, age=age))
+    return out
+
+
 class Registry:
     """A loaded, git-backed component index (docs/registry.md §1).
 
@@ -1870,15 +2042,19 @@ class Registry:
     """
 
     def __init__(self, entries: list[RegistryEntry], *,
-                 verified: bool = True) -> None:
+                 verified: bool = True, releases_loaded: bool = False) -> None:
         self.entries = entries
+        # True when `from_dir(releases=True)` loaded the frozen release history
+        # beside the current releases, which `resolve(release=...)` needs.
+        self.releases_loaded = releases_loaded
         # True when every entry's index row was cross-checked against its own
         # `component.rvl` at load time (the default).
         self.verified = verified
 
     @classmethod
     def from_dir(cls, registry_dir: str | os.PathLike, *,
-                 verify_entries: bool = True) -> "Registry":
+                 verify_entries: bool = True,
+                 releases: bool = False) -> "Registry":
         """Load a registry from disk.
 
         `index.json` is a DISCOVERY list, not an authority. With
@@ -1893,6 +2069,14 @@ class Registry:
         This is `verify`'s regenerate-or-red discipline applied at READ time.
         `verify` is a CI job; a resolve that trusted the index would be the one
         place in the system where the index is believed without being checked.
+
+        `releases=True` additionally loads each entry's frozen release history
+        (`releases/<version>/`, docs/registry.md §1.2) as entries of their own,
+        so `resolve(release=...)` can select among releases. They are checked
+        like any other entry: the release's own source is recompiled, and a
+        source or manifest that no longer hashes to what its frozen record says
+        is a problem that refuses it. Default off: a resolve reads the current
+        release only.
         """
         registry_dir = Path(registry_dir)
         index_path = registry_dir / INDEX_FILENAME
@@ -1929,6 +2113,14 @@ class Registry:
                     "index rows were not cross-checked against component.rvl "
                     "(from_dir was called with verify_entries=False)"]
 
+            version = None
+            if releases:
+                # only read for a release-aware load: the default resolve never
+                # looks at the `version` file, so a malformed one must not
+                # refuse an entry the default path has always served
+                version, version_problem = _current_version(entry_dir)
+                if version_problem:
+                    problems.append(version_problem)
             entries.append(RegistryEntry(
                 name=name,
                 source=source,
@@ -1947,19 +2139,24 @@ class Registry:
                 evidence_bundle=load_evidence_bundle(entry_dir),
                 recorded_source_hash=row.get("sourceHash") or "",
                 index_problems=tuple(problems),
+                version=version,
             ))
-        return cls(entries, verified=verify_entries)
+            if releases:
+                entries.extend(_frozen_release_entries(
+                    entry_dir, name, verify_entries=verify_entries,
+                    current_version=version, current_source=source))
+        return cls(entries, verified=verify_entries, releases_loaded=releases)
 
     def resolve(self, need, manifest: dict | None = None,
                 limit: int = 5, *, verify_required: bool = False,
                 key: bytes | None = None, trusted_publishers=(),
                 adapt: bool = True, adapt_opt_ins: dict | None = None,
-                policy=None) -> dict:
+                policy=None, release: str | None = None) -> dict:
         return resolve(self, need, manifest=manifest, limit=limit,
                        verify_required=verify_required, key=key,
                        trusted_publishers=trusted_publishers,
                        adapt=adapt, adapt_opt_ins=adapt_opt_ins,
-                       policy=policy)
+                       policy=policy, release=release)
 
 
 # --------------------------------------------------------------- the need
@@ -2214,7 +2411,7 @@ def _compiled_entry_ir(entry: RegistryEntry, ir_cache: dict) -> dict:
     check and the adapter probe's type tables. A source that does not compile
     caches as `{}` - nothing can be proposed against what the gate would refuse
     anyway."""
-    ir = ir_cache.get(entry.name)
+    ir = ir_cache.get(entry.ident)
     if ir is None:
         from .compiler import compile_source  # noqa: PLC0415
         try:
@@ -2229,7 +2426,7 @@ def _compiled_entry_ir(entry: RegistryEntry, ir_cache: dict) -> dict:
                 compile_source(entry.source, entry.source_path))
         except RevlError:
             ir = {}
-        ir_cache[entry.name] = ir
+        ir_cache[entry.ident] = ir
     return ir
 
 
@@ -2488,7 +2685,7 @@ def resolve(registry, need, manifest: dict | None = None,
             limit: int = 5, *, verify_required: bool = False,
             key: bytes | None = None, trusted_publishers=(),
             adapt: bool = True, adapt_opt_ins: dict | None = None,
-            policy=None) -> dict:
+            policy=None, release: str | None = None) -> dict:
     """Rank the registry's §5-admissible providers for a need (docs/registry.md §2).
 
     `registry` is a `Registry` or a directory path. `need` is a service
@@ -2536,14 +2733,35 @@ def resolve(registry, need, manifest: dict | None = None,
     they are listed under the result's `policyPreview.unpredicted` instead of
     being silently reported as passing. Only the gate admits.
 
+    `release` selects among releases (docs/registry.md §1.2). Left `None`, a
+    resolve reads the current release of every entry, exactly as before. A
+    version string (`"1.2.0"`) considers only the entries, current or frozen,
+    that are that release, and `"*"` considers every release of every entry; the
+    registry must have been loaded with its history (`Registry.from_dir(...,
+    releases=True)`, which a path argument does for you). Each candidate then
+    carries its `version` and whether it is `frozen`, and at equal fit the
+    current release ranks above an older one. A frozen release carries no
+    evidence bundle (evidence is published beside the current release), so it
+    competes on its interface and authority and its evidence reads
+    `unavailable`, never borrowed from the current release.
+
     Two things here are checked rather than trusted, always: an entry whose
     `index.json` row disagrees with its own `component.rvl` is REFUSED (it is
     listed in `refused` with the reason, never ranked), and evidence only earns
     rank when something outside the publisher vouches for it. A registry entry
     cannot improve its standing by writing files about itself.
     """
+    if release is not None and not (isinstance(release, str) and release):
+        raise RevlError("<resolve>", 0,
+                        "release must be a version string, or `*` for every "
+                        "release")
     if not isinstance(registry, Registry):
-        registry = Registry.from_dir(registry)
+        registry = Registry.from_dir(registry, releases=release is not None)
+    if release is not None and not registry.releases_loaded:
+        raise RevlError(
+            "<resolve>", 0,
+            "selecting a release needs the registry's release history: load it "
+            "with Registry.from_dir(..., releases=True)")
     needs = _needs(need)
     taken = _manifest_provided_keys(manifest)
     key_bytes = bytes(key) if key is not None else None
@@ -2559,7 +2777,14 @@ def resolve(registry, need, manifest: dict | None = None,
     refused: list[dict] = []
     near_misses: list[dict] = []
     opt_ins = dict(adapt_opt_ins or {})
+    considered = 0
     for entry in registry.entries:
+        if release is None:
+            if entry.frozen:
+                continue  # the default reads the current release only
+        elif release != "*" and entry.version != release:
+            continue
+        considered += 1
         if entry.index_problems:
             # the index disagrees with the entry's own source. Ranking it would
             # mean ranking the publisher's claim about its authority instead of
@@ -2567,6 +2792,8 @@ def resolve(registry, need, manifest: dict | None = None,
             # demoting it: a stale index and a lying one look identical here,
             # and both are fixed the same way (regenerate and commit).
             refused.append({"name": entry.name,
+                            **({"version": entry.version}
+                               if release is not None else {}),
                             "reasons": list(entry.index_problems)})
             continue
         match = _match_entry(entry, needs)
@@ -2574,6 +2801,9 @@ def resolve(registry, need, manifest: dict | None = None,
             # the §5 filter refused it directly. Item 296: is it reachable
             # across a SAFE bridge? A proposal, never a wiring.
             match, near = _bridge_entry(entry, needs, ir_cache, opt_ins)
+            if release is not None:
+                for row in near:
+                    row["version"] = entry.version
             near_misses.extend(near)
         if match is None:
             continue  # interface-incompatible: the hard filter, never ranked in
@@ -2630,11 +2860,19 @@ def resolve(registry, need, manifest: dict | None = None,
             # consumer sees. Discount that class - and only that class.
             evidence = _discount_error_semantics(evidence)
         displacement = 0
-        if (mediator_names and match.entry.name != protected_name
+        if (mediator_names and match.entry.ident != protected_name
                 and not _replacement_bar(assessment)[0]):
             displacement = 1
+        # at equal fit and evidence the current release ranks above an older
+        # one, and a frozen release carries no source-length tiebreak so its
+        # releases order newest first (`age` counts within one name; it is 0
+        # for every entry unless releases were loaded, so a default resolve
+        # ranks exactly as before). Mixed version schemes have no defined order.
+        frozen = match.entry.frozen
         return (displacement, match.authority_fit_key(), evidence,
-                len(match.entry.source), match.entry.name)
+                1 if frozen else 0,
+                0 if frozen else len(match.entry.source),
+                match.entry.name, match.entry.age)
 
     graded.sort(key=_rank)
 
@@ -2675,6 +2913,13 @@ def resolve(registry, need, manifest: dict | None = None,
             + ("" if key_bytes is not None else
                " (no signing key was supplied, so no candidate could prove the "
                "bar and the mediator keeps its place)"))
+    if release is not None:
+        assumptions.append(
+            ("every release of every entry was considered" if release == "*"
+             else f"only release {release} of each entry was considered")
+            + ": a frozen release has no evidence bundle of its own, so its "
+            "evidence is unavailable, never borrowed from the current release; "
+            "at equal fit the current release ranks first")
     if refused:
         assumptions.append(
             f"{len(refused)} entr{'y was' if len(refused) == 1 else 'ies were'} "
@@ -2737,13 +2982,18 @@ def resolve(registry, need, manifest: dict | None = None,
                                 .present()),
             },
         }
+        if release is not None:
+            # present only when a release was asked for, so a default resolve
+            # answers with exactly the keys it always had
+            candidate["version"] = entry.version
+            candidate["frozen"] = entry.frozen
         if assessment.sweep_coverage is not None:
             candidate["evidence"]["faultSweepCoverage"] = list(
                 assessment.sweep_coverage)
         if entry.mediator is not None:
             # the marking that sets the bar is visible on the candidate itself.
             candidate["mediator"] = entry.mediator
-        if mediator_names and entry.name != protected_name:
+        if mediator_names and entry.ident != protected_name:
             # every candidate other than the protected incumbent is a
             # replacement: say the bar it had to clear and what it was missing
             # (issue #2697). With several marked mediators, no candidate is
@@ -2802,6 +3052,9 @@ def resolve(registry, need, manifest: dict | None = None,
         "candidates": candidates,
         "refused": refused,
     }
+    if release is not None:
+        result["releaseSelection"] = {"release": release,
+                                      "considered": considered}
     if mediator_ambiguous:
         # No incumbent can be named without guessing; the answer reports the
         # ambiguity rather than crowning one marked candidate (issue #2697).
@@ -2812,8 +3065,10 @@ def resolve(registry, need, manifest: dict | None = None,
         # answer next to the markers rather than living in a docstring.
         from .policy import unpredicted_rules  # noqa: PLC0415 — lazy, additive
         result["policyPreview"] = {
-            "predicted": [c["name"] for c in candidates
-                          if "wouldBeRefused" in c],
+            "predicted": [
+                (f"{c['name']}@{c['version']}" if release is not None
+                 and c.get("frozen") else c["name"])
+                for c in candidates if "wouldBeRefused" in c],
             "unpredicted": unpredicted_rules(policy),
             "caveat":
                 "a one-sided PREDICTION over each candidate's PUBLISHED evidence: "
