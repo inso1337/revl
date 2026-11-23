@@ -1799,6 +1799,10 @@ class Recorder:
         self._ir = ir or {}
         self._origin: dict = {"phase": "activation"}
         self.wal: Optional[WriteAheadLog] = None  # crash-recovery WAL (item 47)
+        # issue #2757: the receipt writer's observer, carried across a WAL that
+        # is opened or replaced (a `--watch` reload) so no generation's crossings
+        # go unaccounted. None means no receipts were asked for.
+        self._wal_observer: Optional[Callable] = None
         # item 256 Slice 3: the declared `Secret[T]` surface of this composition,
         # read off the IR's lowering-time marking. Rebuilt whenever the IR is
         # replaced (a swap re-instruments against a new generation).
@@ -1911,10 +1915,24 @@ class Recorder:
         if self.wal is not None:  # a prior generation's log (e.g. --watch reload)
             self.wal.close()
         self.wal = WriteAheadLog(path, self._ir, generation,
-                                 allow_unsynced=allow_unsynced).open()
+                                 allow_unsynced=allow_unsynced)
+        # attach BEFORE open(): the header and generation records `open()` writes
+        # name the composition a receipt's bundle digest comes from
+        self.wal.attach_observer(self._wal_observer)
+        self.wal.open()
         for timeline in self.timelines.values():
             timeline.attach_wal(self.wal, self._ir)
         return self.wal
+
+    def engage_receipts(self, observer: "Optional[Callable]") -> None:
+        """Hand every record the run's WAL makes durable to ``observer`` (issue
+        #2757), or with None stop. Opt-in: a run that never engages writes what
+        it wrote before. Call it BEFORE :meth:`open_wal` so the log's own header
+        is observed; called after, it covers the records from here on, and the
+        observer must treat the missing header as a missing bundle digest."""
+        self._wal_observer = observer
+        if self.wal is not None:
+            self.wal.attach_observer(observer)
 
     def commit_wal(self, components: Optional[list] = None) -> None:
         """Mark activation complete WITHOUT closing the WAL. The marker's
@@ -2377,6 +2395,12 @@ class WriteAheadLog:
         # `(decisionId, ordinal)` regardless of where the crossing landed in seq.
         self._admit_decision_id: Optional[str] = None
         self._admit_ordinal = 0
+        # issue #2757: an optional OBSERVER of every record once it is durable.
+        # The signed receipt writer (`revl.action_receipt_writer`) holds the key
+        # and this module is stdlib-only, so it reaches here as a bare callable,
+        # the same shape the model-decision sink takes. None (the default) is a
+        # log that behaves, byte for byte, as it did before.
+        self._observer: Optional[Callable] = None
         # item 256 Slice 3: the log is plaintext at rest for the life of the run
         # and is created 0644, so a `Secret[T]` argument is redacted before it
         # reaches `_write`, not after. Built from the same IR marking the
@@ -2447,6 +2471,17 @@ class WriteAheadLog:
             self._handle.close()
             self._handle = None
 
+    def attach_observer(self, observer: "Optional[Callable]") -> None:
+        """Hand every record this log makes durable to ``observer(record)``, or,
+        with None, stop (issue #2757).
+
+        The observer sees a record only AFTER it is durable, so it never
+        accounts for a write that was cut back out (issue #2345). It must be
+        total: this log does not catch what it raises, because an observer that
+        can fail silently is exactly an accountability gap. The record it is
+        handed is the one written, by reference, and it must not mutate it."""
+        self._observer = observer
+
     def _write(self, record: dict) -> None:
         if self._handle is None:
             raise ReplayError("write-ahead log is not open — call open() first")
@@ -2462,6 +2497,8 @@ class WriteAheadLog:
                 # reader acts on a record the run was told had failed.
                 _drop_unsynced_tail(self._handle, start)
                 raise ReplayError("write-ahead log fsync failed") from error
+        if self._observer is not None:
+            self._observer(record)
 
     def record_emission_outcome(self, seq: Optional[int], outcome: str,
                                  *, detail: Optional[dict] = None,

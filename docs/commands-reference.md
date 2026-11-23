@@ -1444,6 +1444,22 @@ Holds and opens a REPL by default; `--watch`, `--once`, or `--plan` change that.
   `--placement`, each process writes its own WAL (`FILE.<process>`) and FILE
   is the run's index; py processes only, unsandboxed, and no `revl swap`
   ([section 5d](crash-recovery.md#5d-recovering-a-placement-run-issue-1477)).
+- `--receipts-out FILE` - at teardown, write a signed, chained receipt per
+  consequential action the run's WAL recorded (issue #2757, see
+  [`revl receipts`](#revl-receipts)). A plain run journals emission crossings;
+  deferred emissions and approval spends are receipted when the log holds them.
+  Requires `--wal`, `--receipts-worker` and a key, and the single-process Python
+  backend; refused before anything boots otherwise. A chain that cannot be
+  completed is not written and the run exits non-zero, and a chain already at
+  the path is removed before the run. The verdict is `aborted` when the run
+  died, teardown failed or residue was left, and `committed` otherwise.
+- `--receipts-key PATH` - the receipt signing key file; falls back to
+  `REVL_RECEIPT_KEY_FILE` (a path) then `REVL_RECEIPT_KEY` (the secret), never
+  hardcoded.
+- `--receipts-worker NAME` - the identity the receipts attribute the run's
+  actions to.
+- `--receipts-session NAME` - the session the chain is bound to (default: the
+  WAL file's name without its extension).
 - `--require-settled-wal` - refuse a new run while the `--wal` file still
   holds unresolved emissions (crossings neither completed nor acknowledged
   with `revl recover --operator-resolved`); the run exits 1 and prints them.
@@ -2246,9 +2262,22 @@ anchoring option, is [design/570-action-receipt-chain.md](design/570-action-rece
   names `receipt_kind` (`effect-crossing` or `approval-use`), `task`,
   `component`, `capability`, `worker`, `input` and `result`; `bundle`,
   `policy`, `approval` and the two origins lists are optional.
+- `--wal FILE` - instead of `--actions`, derive the actions from a write-ahead
+  log (`revl run --wal`): every emission crossing, every deferred emission that
+  fired and every approval spend, in the order the log recorded them, with a
+  declared `Secret[T]` argument suppressed. Needs `--worker`. The rules, and
+  what is not covered, are section 12 of the design note.
+- `--worker NAME` - with `--wal`: the identity the receipts attribute the
+  actions to (the log holds none).
+- `--task NAME` - with `--wal`: the task the actions belong to (default: the
+  session name).
+- `--policy-digest HEX` - with `--wal`: the 64-hex digest of the policy in
+  force, bound as given; omitted means the run had none.
 - `--session NAME` - the session the chain belongs to (required).
 - `--session-verdict VERDICT` - `committed` or `aborted`, bound into every
-  receipt. Absence of the session commit marker is the abort verdict.
+  receipt. With `--actions` the default is `committed`. With `--wal` it is read
+  from the log (`commit-approved` or an `aborted` marker), and a log that says
+  neither is refused until this is given.
 - `--key PATH` - the signing key file; falls back to `REVL_RECEIPT_KEY_FILE` (a
   path) then `REVL_RECEIPT_KEY` (the secret), never a default in the tree.
 - `--salt HEX` - the 64-hex commitment salt; random when omitted.
