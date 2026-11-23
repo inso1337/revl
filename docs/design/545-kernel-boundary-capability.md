@@ -313,3 +313,77 @@ section 6 is what proves the namespace bites.
 `no-objection-out-of-slice`, like every other refusal from a later frontend
 phase. `tools/gate_reference_census.py --check` reports no change from the
 baseline.
+
+---
+
+## 8. The evaluator namespace (issue #2802, slice 3)
+
+Issue #2802 put the judge of the evolution loop on one enumeration,
+`kernel_boundary.EVALUATOR_PATHS`, and gave every scorecard and verdict a digest
+of it. Both are answered against a changed-file set, which is the limit section 1
+names: a candidate composed for another consumer that reaches the evaluator
+without editing an enumerated file is not refused by them.
+
+The same remedy applies, in the same file. `EVALUATOR_NAMESPACE = "evaluator"`
+is reserved as `kernel` is, and `EVALUATOR_CAPS` is the evaluator's own held set:
+
+| token | guarantee | stands for |
+|---|---|---|
+| `evaluator.reward` | G8 | `tools/evolution_reward.py`, `tests/test_evolution_reward.py` |
+| `evaluator.progress` | G8 | `tools/evolution_progress.py`, `tests/test_evolution_progress.py` |
+| `evaluator.controller` | G8 | `tools/evolution_controller.py`, `tests/test_evolution_controller.py` |
+| `evaluator.heldout` | G8 | `tools/heldout_scoring.py`, `tests/test_heldout_scoring.py`, `tools/build_gate_crate.py`, `tests/test_selfhost_lower.py` |
+| `evaluator.protocol` | G8 | `tools/evaluator_protocol.py`, `tests/test_evaluator_protocol.py` |
+
+Two rules keep it one list. A path has ONE capability: the census tool and its
+baseline are `kernel.census` and this file is `kernel.admission`, so the
+evaluator members stand for the evaluator paths that are not kernel paths, and
+`tests/test_evaluator_capability_2802.py` holds that every such path is stood
+for by exactly one member and no path by two. No new guarantee code is
+registered: every member cites G8, the code the kernel namespace's own
+unenumerated-token refusal cites, so the generated tier matrix gains no row.
+
+The refusal is `lower._check_evaluator_boundary`, run beside
+`_check_kernel_boundary` and folded by the same `cap_order.disjoint`:
+
+```
+held(evaluator)  n  effective(C)  =  {}   ->  admit
+held(evaluator)  n  effective(C) !=  {}   ->  REFUSE, naming both sets
+```
+
+**Which way it fails.** Toward refusing, on a DECLARED reach, on both sides of
+the trust boundary. A declared `evaluator.*` token is refused by its member, and
+a token the enumeration has no member for (a bare `evaluator`, or
+`evaluator.something_new`) is refused under G8 rather than read as an ordinary
+boundary. The bare namespace needs its own arm because `cap_order.disjoint`
+treats two distinct tokens as disjoint, exactly as it does for `kernel`.
+
+**What it does not read.** The undeclared reaches, the unnameable `*` and the
+`svc:` elements, are the kernel arm's. Under the untrusted-author profile
+`_check_kernel_boundary` meets them against every kernel member and refuses the
+composition by name before this fold runs, and the first-party tree is the
+subject of the loop rather than a candidate passing through admission. Folding
+them here too would add a second refusal for the same reach that names the
+evaluator where the kernel is already the stronger statement.
+
+**Item 519's product record is read the way the kernel reads it.**
+`model_reach[].effective` contributes to a component's ceiling, so a model role
+that reaches an `evaluator.*` token is refused with the component it steers. The
+gate that decides whether the fold runs scans the declarations and the rows, so
+a composition that spells the namespace nowhere compiles with no extra pass and
+no extra record.
+
+**Non-vacuity.** `tests/test_evaluator_capability_2802.py` compiles one corpus
+twice, as section 6 does: once with `_check_evaluator_boundary` neutralised and
+once live. Seven programs, one per enumerated member plus an unenumerated
+`evaluator.*` token and the bare namespace, are admitted before and refused
+after; the control declaring `kv.write` is admitted on both sides.
+
+**What this does not do.** Like the kernel, it refuses a reach that is NAMED.
+Nothing here refuses an evaluator reach made by host code (G8's boundary is
+verbatim host code, unchecked inside, section 7), and the diff check stays: it
+answers a different question, and neither replaces the other. No service in the
+tree declares an `evaluator.*` token, which is the intended state: the namespace
+exists so that a reach into the judge has to be written in the one vocabulary
+the product already folds. And the digest in slice 2 proves identity, not
+correctness; custody of the expected value is issue #2762.
