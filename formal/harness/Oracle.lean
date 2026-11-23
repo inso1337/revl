@@ -62,10 +62,13 @@ proved model itself**, not from a private restatement of it (roadmap item
     over one scope's seed names and its bind/enter/leave events (the `BE`
     rows); `bindingRowB_iff` PROVES it equals `RevL.G6Binding.BindingOK`
     (G6 binding uniqueness, issue #1812);
-  * `G1 … access=` is `accessRowB`, which IS `RevL.G1Access.accessB` over
-    the component's declared requirements (its `M` row) and its access
-    roots (the `GA` rows); `accessRowB_iff` PROVES it equals
-    `RevL.G1Access.AccessOK` (G1 declared access, issue #1807);
+  * `G1 … access=` is `accessRowB`, which IS `RevL.G1Access.componentAccessB`
+    over the component's declared requirements (its `M` row), the names each
+    scope binds and the roots it uses (the `GAS`/`GAL`/`GAU` rows);
+    `accessRowB_iff` PROVES it equals `RevL.G1Access.ComponentAccessOK`,
+    `G1S … access=` is the same rule over one scope (`scopeAccessRowB_iff`)
+    and `G1R … class=` is the class the model gave one root
+    (`RevL.G1Access.classify`, G1 declared access, issues #1807 and #2744);
   * `A1 … async=` is `asyncRowB`, which IS `RevL.A1Async.siteB` over one
     site's kind and heads, the file's async names (the `AN` rows) and its
     `fn` call graph (the `FN` rows); `asyncRowB_iff` PROVES it equals
@@ -384,8 +387,16 @@ Verdict rows out:
                                                    one scope:
                                                    `RevL.G6Binding.bindingB`
   G1 <file> <comp> <access=ok|fail>                G1 declared access:
-                                                   `RevL.G1Access.accessB`
-                                                   over the `GA` roots
+                                                   `RevL.G1Access.componentAccessB`
+                                                   over the scopes' `GAS`,
+                                                   `GAU` and `GAL` rows
+  G1S <file> <comp> <scope> <access=ok|fail>       the same rule over one
+                                                   scope
+  G1R <file> <comp> <scope> <root> <class=...>     the class of one root in
+                                                   one scope: `bound`,
+                                                   `callable`, `imported`,
+                                                   `host`, `ctor`, `declared`
+                                                   or `undeclared`
   G1C <file> <comp> <scope> <coverage=ok|fail>     G1 declared-access
                                                    coverage over one scope:
                                                    `RevL.G1Coverage.coversAccessBodyB`
@@ -2179,34 +2190,130 @@ theorem bindingRowB_iff (seed : List String) (evs : List RevL.G6Binding.Ev) :
 
 end BindingUnique
 
-/-! ## Deciding G1 declared access (issue #1807)
+/-! ## Deciding G1 declared access (issues #1807 and #2744)
 
-A `GA` row is one access root of a component: a call head's root the
-checker can only resolve through a requirement. The verdict is the model's
-`RevL.G1Access.accessB` over the component's declared requirements (its `M`
-row) and its roots, and `accessRowB_iff` is the bridge to
-`RevL.G1Access.AccessOK`. -/
+The rule is stated PER SCOPE (`RevL.G1Access.ScopeAccessOK`): a scope is the
+activation or one provide method, and a root it uses is `bound` (a binding of
+THAT scope), what the file alone resolves it to (`callable`, `imported`,
+`host`, `ctor`), `declared` or `undeclared`. The classification is the
+model's `RevL.G1Access.classify`, not the exporter's, and every root's class
+is printed (`G1R`) and compared as well as the verdict it feeds (`G1S`, `G1`).
+
+Three kinds of export row, deliberately not folded into one:
+
+* `GAS` is one scope of a component;
+* `GAU` is one root a scope uses, with what the FILE alone resolves it to
+  (`none`, `callable`, `imported`, `host`, `ctor`, or `key` for an `intercept`
+  target, which no binding shadows);
+* `GAL` is one name the scope itself binds.
+
+`scopeAccessRowB_iff` bridges the printed per-scope verdict to
+`RevL.G1Access.ScopeAccessOK`, and `accessRowB_iff` the printed component
+verdict to `RevL.G1Access.ComponentAccessOK`; `className_inj` is what makes a
+printed class name the class. -/
 
 section KeyAccess
 
-structure GARow where
+/-- One scope of a component, as the export carries it. -/
+structure GASRow where
   path : String
   comp : String
-  root : String
+  scope : String
 
-def parseGA (f : List String) : Option GARow :=
+def parseGAS (f : List String) : Option GASRow :=
   match f with
-  | ["GA", path, comp, root] => some ⟨path, comp, root⟩
+  | ["GAS", path, comp, scope] => some ⟨path, comp, scope⟩
   | _ => none
 
-/-- **Access decider**: the model's judgment over one component. -/
-def accessRowB (declared roots : List String) : Bool :=
-  RevL.G1Access.accessB declared roots
+/-- What the file alone resolves a root to, as the export spells it. `none`
+for a spelling the model does not carry, so an unmodelled kind can never
+agree. -/
+def parseFileKind : String → Option RevL.G1Access.FileKind
+  | "none" => some .none
+  | "callable" => some .callable
+  | "imported" => some .imported
+  | "host" => some .host
+  | "ctor" => some .ctor
+  | "key" => some .key
+  | _ => none
+
+/-- One root a scope uses. -/
+structure GAURow where
+  path : String
+  comp : String
+  scope : String
+  root : String
+  kind : RevL.G1Access.FileKind
+
+def parseGAU (f : List String) : Option GAURow :=
+  match f with
+  | ["GAU", path, comp, scope, root, kind] =>
+      (parseFileKind kind).map fun k => ⟨path, comp, scope, root, k⟩
+  | _ => none
+
+/-- One name a scope binds. -/
+structure GALRow where
+  path : String
+  comp : String
+  scope : String
+  name : String
+
+def parseGAL (f : List String) : Option GALRow :=
+  match f with
+  | ["GAL", path, comp, scope, name] => some ⟨path, comp, scope, name⟩
+  | _ => none
+
+/-- **Per-scope decider**: the model's judgment over one scope. -/
+def scopeAccessRowB (declared locals : List String)
+    (uses : List RevL.G1Access.Use) : Bool :=
+  RevL.G1Access.scopeAccessB declared locals uses
+
+/-- **The per-scope verdict is the model's rule.** -/
+theorem scopeAccessRowB_iff (declared locals : List String)
+    (uses : List RevL.G1Access.Use) :
+    scopeAccessRowB declared locals uses = true ↔
+      RevL.G1Access.ScopeAccessOK declared locals uses :=
+  RevL.G1Access.scopeAccessB_iff declared locals uses
+
+/-- **Component decider**: every scope is admitted. -/
+def accessRowB (declared : List String)
+    (scopes : List (List String × List RevL.G1Access.Use)) : Bool :=
+  RevL.G1Access.componentAccessB declared scopes
 
 /-- **The `G1` verdict is the model's rule.** -/
-theorem accessRowB_iff (declared roots : List String) :
-    accessRowB declared roots = true ↔ RevL.G1Access.AccessOK declared roots :=
-  RevL.G1Access.accessB_iff declared roots
+theorem accessRowB_iff (declared : List String)
+    (scopes : List (List String × List RevL.G1Access.Use)) :
+    accessRowB declared scopes = true ↔
+      RevL.G1Access.ComponentAccessOK declared scopes :=
+  RevL.G1Access.componentAccessB_iff declared scopes
+
+/-- The spelling a class is printed under. -/
+def className : RevL.G1Access.RootClass → String
+  | .bound => "bound"
+  | .callable => "callable"
+  | .imported => "imported"
+  | .host => "host"
+  | .ctor => "ctor"
+  | .declared => "declared"
+  | .undeclared => "undeclared"
+
+/-- **A printed class name IS the class**: two classes print alike only if
+they are the same class, so the compared `G1R` column cannot hide a
+difference of classification behind a shared spelling. -/
+theorem className_inj (a b : RevL.G1Access.RootClass) :
+    className a = className b → a = b := by
+  cases a <;> cases b <;> simp [className]
+
+/-- The three kinds of access row of one export. -/
+structure G1ScopeRows where
+  gas : List GASRow
+  gau : List GAURow
+  gal : List GALRow
+
+def parseG1ScopeRows (fields : List (List String)) : G1ScopeRows :=
+  { gas := fields.filterMap parseGAS
+    gau := fields.filterMap parseGAU
+    gal := fields.filterMap parseGAL }
 
 end KeyAccess
 
@@ -2956,14 +3063,31 @@ def bindingVerdicts (p : String) (berows : List BERow) : String := Id.run do
     out := out ++ s!"BU\t{p}\t{k.1}\t{k.2}\tbinding={buv}\n"
   return out
 
-/-- G1 verdicts (declared access, issue #1807), one per component: the
-model's rule over its declared requirements and its access roots. -/
-def accessVerdicts (p : String) (fm : List MRow) (garows : List GARow) : String := Id.run do
+/-- G1 verdicts (declared access, issues #1807 and #2744). One `G1R` per root a
+scope uses (its class, the model's `classify`), one `G1S` per scope (no root
+is undeclared) and one `G1` per component (every scope is admitted), all over
+the component's declared requirements (its `M` row), the names each scope binds
+and the roots it uses. -/
+def accessVerdicts (p : String) (fm : List MRow) (rs : G1ScopeRows) : String := Id.run do
   let mut out := ""
-  let pga := garows.filter (fun r => r.path == p)
+  let gas := rs.gas.filter (fun r => r.path == p)
+  let gau := rs.gau.filter (fun r => r.path == p)
+  let gal := rs.gal.filter (fun r => r.path == p)
   for m in fm do
-    let roots := (pga.filter (fun r => r.comp == m.name)).map (·.root)
-    let g1v := if accessRowB m.requires roots then "ok" else "fail"
+    let mut scopes : List (List String × List RevL.G1Access.Use) := []
+    for sc in gas.filter (fun r => r.comp == m.name) do
+      let locals := (gal.filter (fun r => r.comp == m.name && r.scope == sc.scope)).map
+        (·.name)
+      let uses : List RevL.G1Access.Use :=
+        (gau.filter (fun r => r.comp == m.name && r.scope == sc.scope)).map
+          (fun r => (r.root, r.kind))
+      scopes := scopes ++ [(locals, uses)]
+      let ok := if scopeAccessRowB m.requires locals uses then "ok" else "fail"
+      out := out ++ s!"G1S\t{p}\t{m.name}\t{sc.scope}\taccess={ok}\n"
+      for u in uses do
+        let cls := className (RevL.G1Access.classify m.requires locals u.2 u.1)
+        out := out ++ s!"G1R\t{p}\t{m.name}\t{sc.scope}\t{u.1}\tclass={cls}\n"
+    let g1v := if accessRowB m.requires scopes then "ok" else "fail"
     out := out ++ s!"G1\t{p}\t{m.name}\taccess={g1v}\n"
   return out
 
@@ -3473,7 +3597,7 @@ def main (args : List String) : IO UInt32 := do
     let arrows' := fields.filterMap parseAR
     let axrows := fields.filterMap parseAX
     let berows := fields.filterMap parseBE
-    let garows := fields.filterMap parseGA
+    let g1scopes := parseG1ScopeRows fields
     let anrows := fields.filterMap parseAN
     let asrows := fields.filterMap parseAS
     let agrows := fields.filterMap parseAG
@@ -3822,7 +3946,7 @@ def main (args : List String) : IO UInt32 := do
       -- BU, G1, A1/A1S and PL/IC/MS verdicts (issues #1812, #1807, #1808,
       -- #1809), in helpers so `main` stays within the elaboration budget.
       out := out ++ bindingVerdicts p berows
-      out := out ++ accessVerdicts p fm garows
+      out := out ++ accessVerdicts p fm g1scopes
       out := out ++ asyncVerdicts p fnrows anrows asrows agrows
       out := out ++ declVerdicts p fm brows psrows itrows mcrows
     -- A5 verdicts (compensation accompanies an emission, issue #2114),
@@ -3905,6 +4029,8 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.approvalRowB_iff
 #print axioms RevLOracle.bindingRowB_iff
 #print axioms RevLOracle.accessRowB_iff
+#print axioms RevLOracle.scopeAccessRowB_iff
+#print axioms RevLOracle.className_inj
 #print axioms RevLOracle.asyncRowB_iff
 #print axioms RevLOracle.sigRowB_iff
 #print axioms RevLOracle.preludeRowB_iff

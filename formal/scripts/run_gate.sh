@@ -353,6 +353,16 @@ python3 scripts/axioms_gate.py \
   RevL.G1Access.declaring_admits \
   RevL.G1Access.fixtures_decided \
   RevL.G1Access.g1_access_not_vacuous \
+  RevL.G1Access.classify_ok_iff \
+  RevL.G1Access.scopeAccessB_iff \
+  RevL.G1Access.componentAccessB_iff \
+  RevL.G1Access.scopeAccess_iff_roots_declared \
+  RevL.G1Access.undeclared_root_refuses_scope \
+  RevL.G1Access.scope_access_mono \
+  RevL.G1Access.other_scope_local_does_not_resolve \
+  RevL.G1Access.same_use_two_classes \
+  RevL.G1Access.file_kinds_resolve_without_a_requirement \
+  RevL.G1Access.g1_scope_access_not_vacuous \
   RevL.G1Coverage.coversAccessB_iff \
   RevL.G1Coverage.scopeParamNames_eq \
   RevL.G1Coverage.coversAccessBodyB_iff \
@@ -537,6 +547,8 @@ python3 scripts/axioms_gate.py \
   RevLOracle.approvalRowB_iff \
   RevLOracle.bindingRowB_iff \
   RevLOracle.accessRowB_iff \
+  RevLOracle.scopeAccessRowB_iff \
+  RevLOracle.className_inj \
   RevLOracle.asyncRowB_iff \
   RevLOracle.sigRowB_iff \
   RevLOracle.preludeRowB_iff \

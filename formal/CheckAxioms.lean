@@ -442,6 +442,18 @@ import RevL
 #print axioms RevL.G1Access.declaring_admits
 #print axioms RevL.G1Access.fixtures_decided
 #print axioms RevL.G1Access.g1_access_not_vacuous
+-- Issue #2744, second slice: the classification of a root is per scope and the
+-- model's, not the exporter's. See RevL/Theorems/G1_KeyAccess.lean.
+#print axioms RevL.G1Access.classify_ok_iff
+#print axioms RevL.G1Access.scopeAccessB_iff
+#print axioms RevL.G1Access.componentAccessB_iff
+#print axioms RevL.G1Access.scopeAccess_iff_roots_declared
+#print axioms RevL.G1Access.undeclared_root_refuses_scope
+#print axioms RevL.G1Access.scope_access_mono
+#print axioms RevL.G1Access.other_scope_local_does_not_resolve
+#print axioms RevL.G1Access.same_use_two_classes
+#print axioms RevL.G1Access.file_kinds_resolve_without_a_requirement
+#print axioms RevL.G1Access.g1_scope_access_not_vacuous
 -- Issue #1808: A1 async colour. Reach of an async name through the `fn`
 -- graph within a fuel bound, the per-site rule (a sync method, an unawaited
 -- step and a teardown slot reach nothing async; an awaited step must), the

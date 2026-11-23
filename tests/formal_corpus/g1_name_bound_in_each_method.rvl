@@ -1,0 +1,20 @@
+// ADMITTED: the same name bound in each provide method that uses it. Each
+// scope resolves `tmp` through its own binding, so the per-scope reading and
+// the component-wide one agree; the twin that binds it in one method only is
+// `g1_name_bound_in_other_method.rvl`.
+
+service Pair { fn first() -> Int
+               fn second() -> Int }
+
+component Holder provides pair: Pair {
+  provide pair {
+    fn first() {
+      let tmp = 1
+      return tmp
+    }
+    fn second() {
+      let tmp = 2
+      return tmp
+    }
+  }
+}
