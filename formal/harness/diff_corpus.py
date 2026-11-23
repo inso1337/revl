@@ -1092,14 +1092,28 @@ def collect_arrow_param_aliases(body, handles: dict, aliases: dict,
 def _reach_call(node: ExprCall, out: "set[tuple[str, str]]", region: str,
                 requires: dict, handles: dict, psvc: dict, bounds: dict,
                 em_set: set, emitting: set, aliases: dict | None,
-                host_tokens: "dict[str, set[str]] | None") -> None:
+                host_tokens: "dict[str, set[str]] | None",
+                via_out: "dict[tuple[str, str], set[str]] | None" = None
+                ) -> None:
     """The crossing ONE call head contributes (see `walk_reach`). The
     arguments are the caller's to walk, under whatever region encloses them:
-    a call evaluated to produce an argument is not the marked crossing."""
+    a call evaluated to produce an argument is not the marked crossing.
+
+    `via_out`, when given, records HOW each pair was reached, the third
+    spelling the provide-method bound reads (issue #3485): the `k.m` of a
+    crossing through a required key (`emission_analysis.record_scope`), or
+    `*` for a crossing that names no verb of the key: a resolved receiver, a
+    host emission, a `fn` reaching one (`emission_analysis.unname`)."""
     rt = _route_values(node.callee)
     if not rt:
         return
     root, chain = rt
+
+    def note(cap: str, bound: str, via: str) -> None:
+        out.add((cap, bound))
+        if via_out is not None:
+            via_out.setdefault((cap, bound), set()).add(via)
+
     res = _resolve_emission(root, chain, requires, handles, psvc, aliases)
     if res is not None and region == "all":
         svc, meth = res
@@ -1111,23 +1125,24 @@ def _reach_call(node: ExprCall, out: "set[tuple[str, str]]", region: str,
             # declared scope, `*` when bare, which is what the checker's
             # provider bound reads (`_resolved_crossings`); the attenuation
             # column stays `*`, as `_emit_step_caps_pairs` reads a non-`req`
-            # head.
+            # head. No verb of a required key is crossed, so the VIA is `*`.
             mode, entries = bounds[(svc, meth)]
             if mode == "any":
-                out.add(("*", "*"))
+                note("*", "*", "*")
             else:
                 for e in entries:
-                    out.add(("*", e))
+                    note("*", e, "*")
         elif (svc, meth) in em_set:
             mode, entries = bounds[(svc, meth)]
+            via = f"{root}.{meth}"
             if mode == "any":
                 # No declared token: the SERVICE names the boundary
                 # for the fold, in its own namespace; the BOUND
                 # column still reads the wiring key (item 561).
-                out.add((_undeclared_cap(svc), root))
+                note(_undeclared_cap(svc), root, via)
             else:
                 for e in entries:
-                    out.add((_declared_cap(e), _canon_cap(root, e)))
+                    note(_declared_cap(e), _canon_cap(root, e), via)
     elif res is None and region == "all" and root in emitting:
         # A host emission. The two namespaces part company here (#1169 F3):
         # the attenuation fold gives it the unnameable `*` whatever the
@@ -1144,13 +1159,15 @@ def _reach_call(node: ExprCall, out: "set[tuple[str, str]]", region: str,
         # first-class reference, as the checker's fold adds it.
         reached = (host_tokens or {}).get(root) or {"*"}
         for token in sorted(reached):
-            out.add(("*", token))
+            note("*", token, "*")
 
 
 def walk_reach(node, out: "set[tuple[str, str]]", region: str, requires: dict,
                handles: dict, psvc: dict, bounds: dict, em_set: set,
                emitting: set, aliases: dict | None = None,
-               host_tokens: "dict[str, set[str]] | None" = None) -> None:
+               host_tokens: "dict[str, set[str]] | None" = None,
+               via_out: "dict[tuple[str, str], set[str]] | None" = None
+               ) -> None:
     """Collect the emission caps `node` crosses, each as the PAIR
     `(attenuation spelling, bound spelling)` — the two namespaces a crossing
     has (see `_canon_cap` / `_declared_cap`). The caller keeps whichever half
@@ -1163,7 +1180,8 @@ def walk_reach(node, out: "set[tuple[str, str]]", region: str, requires: dict,
     `*` in both namespaces; a host emission (an emission extern, or a fn
     reaching one) is `*` for the fold and the capability tokens it reaches
     for the bound (`_reach_call`). `host_tokens` is the file's
-    `_emitting_tokens` table.
+    `_emitting_tokens` table. `via_out`, when given, collects per pair how
+    it was reached (`_reach_call`): the F row's third column.
 
     An `emit` marks its HEAD call only: `_emit_step_caps_pairs` reads the
     step's `expr.target` and nothing beneath it, so the arguments (and a
@@ -1174,7 +1192,7 @@ def walk_reach(node, out: "set[tuple[str, str]]", region: str, requires: dict,
     if node is None or isinstance(node, (str, int, float, bool)):
         return
     args = (requires, handles, psvc, bounds, em_set, emitting, aliases,
-            host_tokens)
+            host_tokens, via_out)
     if isinstance(node, (EmitStmt, EmitExpr)) and not isinstance(node, type):
         expr = getattr(node, "expr", None)
         if isinstance(expr, ExprCall):
@@ -5069,7 +5087,12 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             # surfaces read, so it carries BOTH spellings: `cap` is the
             # attenuation element (the declared boundary) and `bound` is the
             # bound element (the wiring key the crossing went through). They
-            # differ, and collapsing them is the laundering hole.
+            # differ, and collapsing them is the laundering hole. The ninth
+            # column, `via`, is the `k.m` a crossing through a required key
+            # names, or `*` when the crossing names no verb of the key; the
+            # bound admits a declared `k.m` only for a key every crossing of
+            # which is such a verb (issue #3485). One row per (pair, via):
+            # a key reached both ways carries both rows.
             for stmt in c.body:
                 if isinstance(stmt, ProvideStmt):
                     svc = psvc.get(c.name, {}).get(stmt.key)
@@ -5077,17 +5100,19 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                         continue
                     for pm in stmt.methods:
                         reach: "set[tuple[str, str]]" = set()
+                        vias: "dict[tuple[str, str], set[str]]" = {}
                         for inner in pm.body:
                             walk_reach(inner, reach, "all", require_map, handles,
                                        psvc, bounds, em_set, emitting, aliases,
-                                       host_tokens)
+                                       host_tokens, vias)
                         for cap, bound in sorted(reach):
                             caps_seen.add(cap)
                             caps_seen.add(bound)
                             held_strs.add(cap)
-                            tsv.append("\t".join(
-                                ["F", rel, c.name, stmt.key, svc, pm.name,
-                                 cap, bound]))
+                            for via in sorted(vias.get((cap, bound), {"*"})):
+                                tsv.append("\t".join(
+                                    ["F", rel, c.name, stmt.key, svc, pm.name,
+                                     cap, bound, via]))
 
             # approval-floor facts (AX/AE): each marked crossing's tokens and
             # its `with` edge, in a file that declares an approval-required
@@ -7090,7 +7115,7 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     brows = [r for r in rows if r and r[0] == "B" and len(r) == 5]
     qrows = [r for r in rows if r and r[0] == "Q" and len(r) == 5]
     arows = [r for r in rows if r and r[0] == "A" and len(r) == 4]
-    frows = [r for r in rows if r and r[0] == "F" and len(r) == 8]
+    frows = [r for r in rows if r and r[0] == "F" and len(r) == 9]
     krows = [r for r in rows if r and r[0] == "K" and len(r) == 5]
     srows = [r for r in rows if r and r[0] == "S" and len(r) == 4]
     harows = [r for r in rows if r and r[0] == "HA" and len(r) == 5]
@@ -7179,10 +7204,15 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     providers: dict[tuple[str, str, str, str, str], str] = {}
     # The BOUND surface reads the F row's bound spelling (column 8): the
     # reference names a crossing by the wiring key it went through when it
-    # measures a provide method against its own service's declaration.
-    fmethods: dict[tuple[str, str, str, str, str], set[str]] = {}
+    # measures a provide method against its own service's declaration. Column
+    # 9 is how the key was reached: a key is covered by its token, or by the
+    # `k.m` of every crossing when each one names a verb of the key (`*` is
+    # a crossing that does not: `emission_analysis._admit_required_scopes`,
+    # issue #3485).
+    fmethods: dict[tuple[str, str, str, str, str], dict[str, set[str]]] = {}
     for r in frows:
-        fmethods.setdefault((r[1], r[2], r[3], r[4], r[5]), set()).add(r[7])
+        fmethods.setdefault((r[1], r[2], r[3], r[4], r[5]), {}) \
+            .setdefault(r[7], set()).add(r[8])
     for k, caps in fmethods.items():
         mode, ents = bounds_by_file.get((k[0], k[3], k[4]), ("plain", set()))
         if mode == "any":
@@ -7190,7 +7220,9 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
         elif mode == "plain":
             ok = not caps
         else:
-            ok = {parse_cap(c).token for c in caps} <= ents
+            ok = all(parse_cap(c).token in ents
+                     or all(v != "*" and v in ents for v in vias)
+                     for c, vias in caps.items())
         providers[k] = "ok" if ok else "fail"
 
     # ... and the ATTENUATION surface reads the same row's column 7, the

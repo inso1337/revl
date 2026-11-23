@@ -1185,8 +1185,8 @@ def check_allowlist(document: dict, profile: AdmissionProfile) -> None:
                 comp.get("source") or document.get("filename") or "<candidate>",
                 0,
                 f"admission refused: component `{name}` reaches "
-                f"service `{service}` (via `requires {key}`), which is not in the "
-                f"granted set",
+                f"service `{service}` {_reach_clause(document, service, key)}, "
+                f"which is not in the granted set",
                 hint=f"the untrusted-author profile grants [{allowed}] and "
                      f"nothing else; an admitted turn may only reach a granted "
                      f"service or one its OWN components provide under the very "
@@ -1207,7 +1207,8 @@ def _refuse_ungranted_key(document: dict, comp: dict, key: str, service: str,
         comp.get("source") or document.get("filename") or "<candidate>",
         0,
         f"admission refused: component `{name}` reaches service `{service}` "
-        f"(via `requires {key}`), and no grant names `{name}.{key}`",
+        f"{_reach_clause(document, service, key)}, and no grant names "
+        f"`{name}.{key}`",
         hint=(f"`{service}` is granted only to {', '.join(holders) or 'another component'}. "
               f"A grant is key-precise: it covers the granted row's own "
               f"component under the keys it names, never another component "
@@ -1215,6 +1216,39 @@ def _refuse_ungranted_key(document: dict, comp: dict, key: str, service: str,
               f"provide `{key}` inside the turn."),
         code="R2", category="admission",
     )
+
+
+def _emission_tokens(document: dict, service: str) -> tuple[tuple[str, ...], bool]:
+    """The capability tokens `service` declares on its emission methods
+    (`emission[jobs] fn start(...)`), sorted and deduplicated, and whether it
+    also has an unbounded `emission fn` (issue #3586). Empty and False when
+    the document carries no such declaration."""
+    spec = (document.get("services") or {}).get(service)
+    methods = spec.get("methods") if isinstance(spec, dict) else None
+    tokens: set[str] = set()
+    unbounded = False
+    for mspec in (methods or {}).values():
+        if not (isinstance(mspec, dict) and mspec.get("emission")):
+            continue
+        caps = mspec.get("capabilities")
+        if caps:
+            tokens.update(str(t) for t in caps)
+        else:
+            unbounded = True
+    return tuple(sorted(tokens)), unbounded
+
+
+def _reach_clause(document: dict, service: str, key: str) -> str:
+    """How a refusal says the service was reached: the binding key is a local
+    name, so name the capability tokens too when the service declares any.
+    A service with no tokens keeps the plain `(via ...)` text."""
+    tokens, unbounded = _emission_tokens(document, service)
+    if not tokens:
+        return f"(via `requires {key}`)"
+    listed = ", ".join(tokens)
+    if unbounded:
+        listed += ", and an unbounded emission"
+    return f"(emission tokens: {listed}) via `requires {key}`"
 
 
 def _comp_service_of(document: dict, comp_name: str, key: str):

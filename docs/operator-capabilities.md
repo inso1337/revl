@@ -260,6 +260,22 @@ operator ops may mint * uses * ttl *
 which bounds nothing and says so, and is worth writing because it is the
 difference between an authority nobody declared and one somebody did.
 
+### A standing grant is not bound to an operator
+
+A standing grant is session-scoped and is not bound to any operator. It is keyed by the capability and the reach closure,
+so it covers every class-(c) call reaching that capability under the same
+closure from any operator the profile lets `call` it, until its `uses` or TTL
+run out. The `may mint` declaration above bounds what an operator may mint; it
+does not make the grant belong to that operator or to the one whose ticket it
+answered. The single-use hash approval is the operator-bound shape: it binds to
+the operator that proposed the call (issue #3216), and only that operator's
+identical re-issue spends it.
+
+To scope who may reach a capability under a standing grant, use the `call` verb:
+grant it with `may call on <subject>` to the operators that should reach it, and
+`may not call on <subject>` to keep the others out (deny wins). That is the
+only place the profile says who may call; the grant does not.
+
 ## Binding a session to an operator
 
 A session runs *as* one operator. The identity is set at serve time:

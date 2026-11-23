@@ -18,12 +18,16 @@ call — between tool calls the composition is simply idle.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import copy
 import dataclasses
+import functools
 import hashlib
 import io
 import pickle
 import sys
+import threading
 import weakref
 from fnmatch import fnmatchcase
 
@@ -43,6 +47,184 @@ from .approval import ApprovalRequired
 from .undo_record import undo_cold_start_note, undo_dropped_state_note
 from .approval import UnencodableTicketArgs
 from .approval import _args_digest
+
+
+# Issue #3380: one Session runs at a time per process. The Python runtime kept
+# the running session's owner (`runtime._SESSION_OWNER`), its host trace and
+# other module slots once for the whole process, so a verb of one session on one
+# thread and a verb of another on a second thread interleaved with the wrong
+# owner in the slot. The owner, the trace and the stack of activating frames
+# are context-local now (slice 2); the live-instance registry, the clock and
+# the frame table are still one per process, so every verb that sets the
+# owner, and every drive of a session's loop, takes this turn. Another thread
+# waits for it, up to
+# `_TURN_TIMEOUT` seconds, then gets a SessionError naming the holder. On the
+# thread that holds it, only the same session's own nested steps pass; any other
+# entry (a second session, or this session re-entered from inside its running
+# loop) is refused at once, because waiting there would never end. `estop`
+# takes no turn: it must reach a session whose call is stuck.
+_TURN_LOCK = threading.Lock()
+_TURN_TIMEOUT = 30.0
+_TURN_HOLDER: dict = {"session": None, "thread": None, "label": "",
+                      "lend": None, "lender": None, "borrowed": False,
+                      "orphaned": False}
+_TURN_BORROW = threading.Lock()   # guards a lend and its borrow
+_TURN_LENT: contextvars.ContextVar = contextvars.ContextVar(
+    "revl_session_turn_lent", default=None)
+
+
+def _turn_label(session) -> str:
+    return (f"session {id(session):#x} on thread "
+            f"{threading.current_thread().name!r}")
+
+
+def _busy(session, why: str) -> SessionError:
+    return SessionError(
+        f"{_turn_label(session)} cannot run: {why}. One session runs at a "
+        "time per process (issue #3380), and waiting here would never end",
+        code="SESSION_BUSY")
+
+
+class _SessionTurn:
+    """The process's session turn for one session (issue #3380)."""
+
+    __slots__ = ("session", "nested", "lent")
+
+    def __init__(self, session) -> None:
+        self.session = session
+        self.nested = False
+        self.lent = None
+
+    def __enter__(self):
+        held = _TURN_HOLDER
+        me = threading.get_ident()
+        if held["thread"] == me:
+            loop = self.session._loop
+            if held["session"] is self.session and not (
+                    loop is not None and loop.is_running()):
+                self.nested = True
+                return self
+            raise _busy(self.session, f"{held['label']} holds the process's "
+                        "session turn on this same thread")
+        token = _TURN_LENT.get()
+        with _TURN_BORROW:
+            if held["lender"] == me:
+                raise _busy(self.session, "this thread lent its session turn "
+                            f"to {held['label']}, which it is joining")
+            if token is not None and token is held["lend"]:
+                if held["borrowed"]:
+                    raise _busy(self.session, "the lent session turn is "
+                                f"already borrowed by {held['label']}")
+                # the holder lent its turn to this thread (`_lend_turn`)
+                self.lent = (held["session"], held["thread"], held["label"])
+                held.update(session=self.session, thread=me,
+                            label=_turn_label(self.session), borrowed=True)
+                return self
+        timeout = _TURN_TIMEOUT
+        if not _TURN_LOCK.acquire(timeout=timeout):
+            holder = held["label"] or "another session"
+            raise SessionError(
+                f"{_turn_label(self.session)} waited {timeout:g} s for the "
+                f"process's session turn, held by {holder}. One session runs "
+                "at a time per process (issue #3380)", code="SESSION_BUSY")
+        held.update(session=self.session, thread=me,
+                    label=_turn_label(self.session), lend=None, lender=None,
+                    borrowed=False, orphaned=False)
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        if self.nested:
+            return False
+        held = _TURN_HOLDER
+        with _TURN_BORROW:
+            if self.lent is not None:
+                if not held["orphaned"]:
+                    session, thread, label = self.lent
+                    held.update(session=session, thread=thread, label=label,
+                                borrowed=False)
+                    return False
+                # the lender's turn ended while this borrow ran: the lock
+                # passed to this borrower, which releases it now
+            elif held["borrowed"]:
+                # a borrower outlived the lend (`_lend_turn` raised for it):
+                # hand it the lock rather than release it under its feet
+                held["orphaned"] = True
+                return False
+            held.update(session=None, thread=None, label="", lend=None,
+                        lender=None, borrowed=False, orphaned=False)
+        _TURN_LOCK.release()
+        return False
+
+
+@contextlib.contextmanager
+def _lend_turn():
+    """Lend the session turn this thread holds to a worker it joins (#3380).
+
+    For a host body that must boot a scratch Session from inside a running
+    session's method (`truc ship` re-running the gauntlet): asyncio refuses a
+    second loop on this thread, so the scratch runs on a worker thread, and the
+    worker would wait for the turn this thread holds while this thread waits for
+    the worker. Inside the block, a session step on a thread whose context was
+    copied from this one (`contextvars.copy_context()` taken inside the block)
+    runs under the lent turn, one borrower at a time; a second borrower, and
+    this thread driving a session, are refused at once. Each lend has a token
+    of its own, retired when the block ends, so a copy that outlives the block
+    lends nothing. The runtime's session owner and host trace are context-local
+    (slice 2 of #3380): the borrower sets its own in its copied context and
+    the lender's are untouched; on exit they are set again all the same, so a
+    host body that changed them in this context gets the lender's back. A
+    borrower still running at exit is an error (join it inside the block). On
+    that orphan path the lock passes to the borrower, the lender's thread is
+    refused at once until the borrower's step ends, and the borrower's step
+    keeps its own owner and trace. The lender recovers on its next call.
+    Outside a held turn it lends nothing."""
+    held = _TURN_HOLDER
+    me = threading.get_ident()
+    with _TURN_BORROW:
+        lending = (held["thread"] == me and held["lend"] is None
+                   and not held["borrowed"])
+        if lending:
+            token = object()
+            held.update(lend=token, lender=me)
+    if not lending:
+        yield
+        return
+    lender = held["session"]
+    driver = lender._driver
+    runtime = driver.runtime if driver is not None else None
+    owner = runtime.session_owner() if runtime is not None else None
+    reset = _TURN_LENT.set(token)
+    try:
+        yield
+    finally:
+        _TURN_LENT.reset(reset)
+        with _TURN_BORROW:
+            outlived = held["borrowed"] or held["thread"] != me
+            # an orphan keeps `lender`, so this thread is refused at once
+            held.update(lend=None, lender=me if outlived else None)
+        if outlived:
+            raise SessionError(
+                f"{held['label']} still runs under the session turn "
+                f"{_turn_label(lender)} lent it: a borrower must be joined "
+                "inside the lend (issue #3380)", code="SESSION_BUSY")
+        if runtime is not None:
+            if owner is not None:
+                runtime.set_session_owner(owner)
+            else:
+                runtime.clear_session_owner()
+            lender._own_host_trace()
+
+
+def _one_turn(method):
+    """Hold the process's session turn for the whole of `method` (issue #3380):
+    the methods that set or clear the runtime's session owner, and the verbs
+    that change session state before their first drive, so a refusal leaves
+    that state as it was."""
+    @functools.wraps(method)
+    def held(self, *args, **kwargs):
+        with _SessionTurn(self):
+            return method(self, *args, **kwargs)
+    return held
 
 
 
@@ -1112,7 +1294,19 @@ def _handoff_back_pairs(old_ir: dict, new_ir: dict) -> dict[str, str]:
 
 
 class Session:
-    """One live composition, driven step by step."""
+    """One live composition, driven step by step.
+
+    One session runs at a time per process (issue #3380). The Python runtime
+    keeps part of the running session's state in process-wide slots (the
+    live-instance registry, the clock, the frame table; the session owner,
+    host trace and activating stack are per session), so sessions on
+    different threads take turns: a `load`, `swap`, `call` or any
+    other step that drives the session's loop waits while another session's
+    step runs on another thread, and fails with a `SessionError` (code
+    ``SESSION_BUSY``) naming the holder after 30 s. A step of a second session
+    started on the thread that holds the turn (from inside a method body, say)
+    fails at once; a host body that boots one on a worker thread it joins
+    lends it the turn (`_lend_turn`). `estop` does not wait."""
 
     def __init__(self) -> None:
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -1555,14 +1749,30 @@ class Session:
     # -- plumbing ----------------------------------------------------------
 
     def _run(self, coro):
-        if self._loop is None:
-            self._loop = asyncio.new_event_loop()
-            # a session dropped while still loaded never reaches `_reset`;
-            # close its loop when it is collected rather than leave that to
-            # the loop's own finalizer and its ResourceWarning (issue #1720)
-            weakref.finalize(self, _close_abandoned_loop, self._loop)
-        self._own_host_trace()
-        return self._loop.run_until_complete(coro)
+        turn = _SessionTurn(self)
+        try:
+            turn.__enter__()
+        except SessionError:
+            close = getattr(coro, "close", None)
+            if close is not None:
+                close()        # refused before it ran: never awaited, by design
+            raise
+        try:
+            if self._loop is None:
+                # issue #3380: a new loop registers its self-pipe reader with a
+                # copy of the current context, which here holds this session's
+                # owner, and the owner reaches back to the session. Made under
+                # an empty context, the loop holds no such reference, so a
+                # session dropped while loaded can still be collected.
+                self._loop = contextvars.Context().run(asyncio.new_event_loop)
+                # a session dropped while still loaded never reaches `_reset`;
+                # close its loop when it is collected rather than leave that to
+                # the loop's own finalizer and its ResourceWarning (issue #1720)
+                weakref.finalize(self, _close_abandoned_loop, self._loop)
+            self._own_host_trace()
+            return self._loop.run_until_complete(coro)
+        finally:
+            turn.__exit__(None, None, None)
 
     def _own_host_trace(self) -> None:
         """Route the host stubs' trace to THIS session's driver while it runs
@@ -1599,16 +1809,19 @@ class Session:
                 self._loop = None
                 loop.close()
             return
-        self._loop = None
-        try:
-            for task in pending:
-                task.cancel()
-            if pending:
-                loop.run_until_complete(
-                    asyncio.gather(*pending, return_exceptions=True))
-            loop.run_until_complete(loop.shutdown_asyncgens())
-        finally:
-            loop.close()
+        # issue #3380: the drain runs the session's tasks, so it takes the turn
+        # like any other drive (a no-op inside `_reset` or `load`, which hold it)
+        with _SessionTurn(self):
+            self._loop = None
+            try:
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True))
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            finally:
+                loop.close()
 
     @property
     def loaded(self) -> bool:
@@ -1630,6 +1843,7 @@ class Session:
 
     # -- lifecycle ---------------------------------------------------------
 
+    @_one_turn
     def load(self, ir: dict, config: dict | None = None,
              record: bool = False, origin: dict | None = None, *,
              agent_authored: bool | None = None) -> dict:
@@ -2441,6 +2655,7 @@ class Session:
                          pre_pending=pre_pending, policy=migrate,
                          handoff_carry=handoff_carry)
 
+    @_one_turn
     def _cut_over(self, driver, ir: dict, origin: dict | None,
                   plan: "_SwapPlan") -> dict:
         """Tear the running generation down and boot the successor in its place.
@@ -2775,6 +2990,7 @@ class Session:
                 "resources": sum(len(cap) for _, cap in pairs)}
         return report
 
+    @_one_turn
     def _abort_swap(self, old_ir: dict, pre: dict,
                     saved_previous: dict | None,
                     saved_previous_origin: dict | None,
@@ -4309,6 +4525,7 @@ class Session:
             if isinstance(answer, dict):
                 held.extend(answer.get("compensationResidue") or ())
 
+    @_one_turn
     def unload(self) -> dict:
         """Tear down and report the residue checks — R4 from inside the
         protocol, so an agent can prove its component leaves nothing.
@@ -4625,8 +4842,12 @@ class Session:
         def _drive() -> None:
             driver._settlement_ledger = ledger
             try:
-                self._own_host_trace()             # issue #1859
-                self._loop.run_until_complete(driver._dispose_all(self.ir))
+                # issue #3380: the worker thread takes the process's session
+                # turn like any other drive; a refusal or a timeout is recorded
+                # as the attempt's failure below, never read as a release.
+                with _SessionTurn(self):
+                    self._own_host_trace()         # issue #1859
+                    self._loop.run_until_complete(driver._dispose_all(self.ir))
                 disposal["returned"] = True
             except asyncio.CancelledError:
                 disposal["cancelled"] = True
@@ -4635,7 +4856,10 @@ class Session:
             finally:
                 driver._settlement_ledger = None
 
-        await host_loop.run_in_executor(None, _drive)
+        # issue #3380: the runtime's session owner and trace are context-local,
+        # and an executor thread starts with none; carry this context over.
+        await host_loop.run_in_executor(
+            None, contextvars.copy_context().run, _drive)
         result = self._settlement(driver, owner, aborting, disposal, ledger,
                                   verdict=verdict, finalize=finalize)
         self._teardown_settlement = result
@@ -4840,6 +5064,7 @@ class Session:
             manifest["actions"] = [dict(a) for a in self._actions]
         return manifest
 
+    @_one_turn
     def commit_confirm(self, manifest_hash: str) -> dict:
         """Execute the approved commit — step 2 (Decision 3/4). The durable
         record order is exactly: `commit-approved`, then each `flushed`, then the
@@ -4871,6 +5096,7 @@ class Session:
                 "flushResidue": flush["flushResidue"], "discharged": discharged,
                 "prompts": prompts, "compensationResidue": residue, **report}
 
+    @_one_turn
     def abort(self) -> dict:
         """Abort the session (Decision 5): mark every live frame aborting BEFORE
         any teardown starts, drop the deferral queue (zero cost, zero crossings),
@@ -5827,6 +6053,7 @@ class Session:
         if wal is not None and getattr(wal, "is_open", True):
             wal.close()
 
+    @_one_turn
     def _reset(self) -> None:
         if self._driver is not None:
             self._driver.runtime.clear_session_owner()
@@ -6042,6 +6269,7 @@ class Session:
             self._wire_turn(turn_doc, bundle=turn_bundle)
         return AdmitVerdict(True, handle=AdmitHandle(self, keys), keys=keys)
 
+    @_one_turn
     def _wire_turn(self, turn_doc: dict, *,
                    bundle: dict | None = None) -> tuple[str, ...]:
         """Plug an admitted turn's components into the LIVE driver with the
@@ -6409,6 +6637,7 @@ class Session:
 
     # -- interaction -------------------------------------------------------
 
+    @_one_turn
     def call(self, key: str, method: str, args: list | None = None,
              *, raw: bool = False) -> dict:
         """Invoke a provided service operation on the running composition —

@@ -1993,7 +1993,11 @@ def plug(ctx, component: dict, config=None):
 #: fibers whose body is *currently* activating — a stack, innermost last. A host
 #: resource created inside a body (`Map.new()`) registers onto the top frame, so
 #: it is attributed to the activation (hence the instance) that acquired it.
-_ACTIVATING: list["Frame"] = []
+#: Context-local (issue #3380): a tuple in a context variable, so a session on
+#: another thread never sees this one's frames, and a task a body starts
+#: inherits the body's frame with its copied context.
+_ACTIVATING: "contextvars.ContextVar[tuple]" = contextvars.ContextVar(
+    "_revl_activating", default=())
 
 #: ctx -> the Frame of the activation on that context, for a context that
 #: cannot carry the frame itself (no instance `__dict__`). Every cordis context
@@ -2054,8 +2058,9 @@ def _register_resource(resource: Any) -> None:
     Called from `_Closable.__init__`; a no-op when nothing is activating (a
     resource made outside any component body — e.g. a bare test — is not
     instance state and is simply not tracked)."""
-    if _ACTIVATING:
-        _ACTIVATING[-1]._resources.append(resource)
+    activating = _ACTIVATING.get()
+    if activating:
+        activating[-1]._resources.append(resource)
 
 
 def _frame_for_ctx(ctx: Any) -> "Optional[Frame]":
@@ -2230,7 +2235,11 @@ def spawn(ctx, component: dict, config, realms):
 # tracing (test/demo observability for the stub stdlib)
 # ---------------------------------------------------------------------------
 
-_trace: Optional[Callable[[str], None]] = None
+#: the primary trace callback. Context-local (issue #3380): each session's
+#: driver installs its own before it drives its loop, and the tasks that loop
+#: runs copy it, so two sessions on two threads each trace to their own sink.
+_TRACE: "contextvars.ContextVar[Optional[Callable[[str], None]]]" = (
+    contextvars.ContextVar("_revl_trace", default=None))
 _observers: list = []
 
 
@@ -2242,9 +2251,12 @@ def set_trace(callback: Optional[Callable[[str], None]]) -> None:
     separate list and are **not** disturbed by this call, so a demo can hold
     its own subscription across a driver's install/teardown of the primary
     callback.
+
+    The callback is held in the calling context: a thread, or an asyncio task,
+    and the tasks started from it afterwards. One installed inside a task is
+    gone when that task ends.
     """
-    global _trace
-    _trace = callback
+    _TRACE.set(callback)
 
 
 def add_trace(callback: Callable[[str], None]) -> Callable[[], None]:
@@ -2279,7 +2291,7 @@ def remove_trace(callback: Callable[[str], None]) -> bool:
 
 def trace_observers() -> int:
     """How many callbacks are currently receiving events (primary included)."""
-    return len(_observers) + (1 if _trace is not None else 0)
+    return len(_observers) + (1 if _TRACE.get() is not None else 0)
 
 
 # item 259 slice 2 (docs/design/259-checked-parallel-emissions.md §4.1, HIGH-1):
@@ -2317,8 +2329,9 @@ def _record(event: str) -> None:
         # the parallel group's join rather than emitting to the real sink now.
         sinks[-1].append(event)
         return
-    if _trace is not None:
-        _trace(event)
+    trace = _TRACE.get()
+    if trace is not None:
+        trace(event)
     for observer in list(_observers):
         observer(event)
 
@@ -3098,7 +3111,7 @@ class _CallScope:
     def __enter__(self) -> "_CallScope":
         # an activation that starts INSIDE this call (a spawn) registers on its
         # own frame's cordis stack; `declared_crossing` compares depths
-        self._activating = len(_ACTIVATING)
+        self._activating = len(_ACTIVATING.get())
         self._token = _CALL_SCOPE.set(self)
         return self
 
@@ -3184,7 +3197,7 @@ def declared_crossing(label: str, compensate: Optional[Callable[[], Any]] = None
     def _wrap(fn):
         def _enter():
             scope = _CALL_SCOPE.get()
-            if scope is None or len(_ACTIVATING) > scope._activating:
+            if scope is None or len(_ACTIVATING.get()) > scope._activating:
                 return None   # no scope, or an activation body: it registers on cordis's stack
             scope.crossed.append(label)
             return scope
@@ -3256,12 +3269,15 @@ def declared_crossing(label: str, compensate: Optional[Callable[[], Any]] = None
 # from — the deferral queue, the discharge escrow, the live-frame registry —
 # never the runtime's per-call current frame (`_FRAME_BY_CTX`).
 #
-# The owner is process-global and single-slot, exactly like `_trace`: one driver
-# runs a session at a time. When NO owner is registered (`_SESSION_OWNER is
-# None`), every `Frame` behaves byte-identically to the pre-245 world — a clean
-# drain discharges at unload (implicit commit), the compatibility clause.
+# The owner is context-local (issue #3380), exactly like the trace: the driver
+# registers it on its own thread before it drives its loop, every task that
+# loop runs copies it, and a second session on another thread has its own.
+# When NO owner is registered (`session_owner()` is None), every `Frame`
+# behaves byte-identically to the pre-245 world: a clean drain discharges at
+# unload (implicit commit), the compatibility clause.
 
-_SESSION_OWNER: "Optional[SessionOwner]" = None
+_SESSION_OWNER: "contextvars.ContextVar[Optional[SessionOwner]]" = (
+    contextvars.ContextVar("_revl_session_owner", default=None))
 
 
 def set_session_owner(owner: "SessionOwner") -> None:
@@ -3270,20 +3286,20 @@ def set_session_owner(owner: "SessionOwner") -> None:
     The driver calls this once at session start, before loading the
     composition, so each activation `Frame.__init__` joins the owner's registry.
     Idempotent-ish: replacing an owner mid-session is a caller error, not
-    guarded here (one driver owns one session)."""
-    global _SESSION_OWNER
-    _SESSION_OWNER = owner
+    guarded here (one driver owns one session). Registered in the calling
+    context: a thread, or an asyncio task and the tasks started from it."""
+    _SESSION_OWNER.set(owner)
 
 
 def clear_session_owner() -> None:
     """Unregister the session owner (the driver calls this at commit/abort/unload
-    end). Frames built afterwards get the pre-245 implicit-commit semantics."""
-    global _SESSION_OWNER
-    _SESSION_OWNER = None
+    end). Frames built afterwards in this context get the pre-245
+    implicit-commit semantics; a task that copied the owner keeps it."""
+    _SESSION_OWNER.set(None)
 
 
 def session_owner() -> "Optional[SessionOwner]":
-    return _SESSION_OWNER
+    return _SESSION_OWNER.get()
 
 
 def _hold_for_session(entry: Any) -> bool:
@@ -3986,7 +4002,7 @@ class Frame:
         # the session verdict instead of the activation's own clean unload. None
         # is the compatibility clause: drain discharges at unload, byte-identical
         # to the pre-245 world.
-        self._owner: "Optional[SessionOwner]" = _SESSION_OWNER
+        self._owner: "Optional[SessionOwner]" = _SESSION_OWNER.get()
         if self._owner is not None:
             self._owner.register_frame(self)
         # item 245: set by `drain`'s mid-session-withdrawal branch, so the
@@ -4417,7 +4433,7 @@ class Frame:
             async def _async_tracked():
                 iterator = body().__aiter__()
                 while True:
-                    _ACTIVATING.append(frame)
+                    token = _ACTIVATING.set(_ACTIVATING.get() + (frame,))
                     try:
                         value = await iterator.__anext__()
                     except StopAsyncIteration:
@@ -4426,14 +4442,14 @@ class Frame:
                         frame._take_journal()   # a forward that raised (issue #1945)
                         raise
                     finally:
-                        _ACTIVATING.pop()
+                        _ACTIVATING.reset(token)
                     yield frame._guard(value)
             return _async_tracked
 
         def _tracked_gen():
             iterator = iter(body())
             while True:
-                _ACTIVATING.append(frame)
+                token = _ACTIVATING.set(_ACTIVATING.get() + (frame,))
                 try:
                     value = next(iterator)
                 except StopIteration:
@@ -4442,7 +4458,7 @@ class Frame:
                     frame._take_journal()   # a forward that raised (issue #1945)
                     raise
                 finally:
-                    _ACTIVATING.pop()
+                    _ACTIVATING.reset(token)
                 yield frame._guard(value)
         return _tracked_gen
 
@@ -8251,7 +8267,8 @@ class Map(_Closable):
         self._reported: set = set()
         # the activation that acquired this map: a reversal failure found at
         # release is recorded on it, because its teardown releases the map
-        self._owner = _ACTIVATING[-1] if _ACTIVATING else None
+        activating = _ACTIVATING.get()
+        self._owner = activating[-1] if activating else None
 
     @classmethod
     def new(cls) -> "Map":

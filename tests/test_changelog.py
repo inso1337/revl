@@ -162,6 +162,80 @@ def test_guard_reach_change_alone_is_consumed_not_honesty_lined():
     assert _completeness_guard(before, after) == []
 
 
+def _extern_audit(cls: str, inverse: str, **extra) -> dict:
+    """A minimal audit whose one extern appears in the top-level `externs` list
+    and in the per-component `boundary[*].externs`, as `audit_report` emits it."""
+    entry = {"name": "deposit", "class": cls, "inverse": inverse, "backends": []}
+    return {"boundary": {"C": {"emissions": [], "externs": [dict(entry)]}},
+            "externs": [dict(entry)], **extra}
+
+
+def test_per_component_inverse_move_is_one_classified_line_not_two():
+    """`boundary[*].externs[*].inverse` repeats the top-level `externs[*].inverse`
+    `diff_inverses` reads. A move shows in both, so it is one classified
+    `inverse.*` line and no guard honesty line beside it."""
+    before = _extern_audit("emission", "declared")
+    after = _extern_audit("emission", "compensation")
+    assert _completeness_guard(before, after) == []
+    doc = _build_changelog(EMPTY_DELTA, {"bump": "patch", "changes": []},
+                           before, after, "v1", "v2", None, degraded=False)
+    assert [e["fact"] for e in doc["breaking"]] == ["inverse.weakened:deposit"]
+    assert doc["unclassified"] == []
+    assert doc["headline"]["clean"] is True
+
+
+def test_per_component_class_leaf_is_consumed_by_the_guard():
+    """`boundary[*].externs[*].class` is the per-component copy of the effect
+    class. Moved alone it is not an honesty line: the top-level copy carries the
+    same fact (and stays reportable, see the next test)."""
+    before = {"boundary": {"C": {"externs": [
+        {"name": "x", "class": "pure", "inverse": "unknown"}]}}}
+    after = {"boundary": {"C": {"externs": [
+        {"name": "x", "class": "emission", "inverse": "unknown"}]}}}
+    assert _completeness_guard(before, after) == []
+
+
+def test_top_level_class_move_is_still_an_honesty_line():
+    """The top-level `externs[*].class` is NOT consumed: a class move that leaves
+    the inverse rank alone (`pure` to `local`, both `unknown`) is not an inverse
+    change, so the guard stays the one place that reports it, once."""
+    before = _extern_audit("pure", "unknown")
+    after = _extern_audit("local", "unknown")
+    lines = _completeness_guard(before, after)
+    assert [line.fact for line in lines] == ["audit-path:externs"]
+    assert list(lines[0].paths) == ["externs[0].class"]
+
+
+def test_real_compiled_inverse_move_leaves_no_boundary_honesty_line():
+    """End to end: declared `undo` to `compensate` moves the per-component
+    `class` and `inverse` leaves; neither is reported as `audit-path:boundary`."""
+    for before_src, after_src in ((_UNDO, _COMPENSATE), (_COMPENSATE, _UNDO)):
+        before = compile_source(before_src, "corpus.rvl")
+        after = compile_source(after_src, "corpus.rvl")
+        doc = derive_changelog(before, after, no_semver=True)
+        assert "audit-path:boundary" not in [e["fact"] for e in doc["unclassified"]]
+        assert [e for e in doc["breaking"] + doc["added"]
+                if e["fact"].startswith("inverse.")]
+
+
+def test_inverse_field_appearing_against_an_old_baseline_reports_nothing():
+    """A baseline recorded before the `inverse` field existed has no such leaf.
+    The leaf is consumed and `diff_inverses` skips an extern whose entry lacks
+    it on either side, so the field appearing is not a move: no guard line, no
+    `inverse.*` line. Pins that this schema change stays silent."""
+    new = _extern_audit("emission", "compensation")
+    old = json.loads(json.dumps(new))
+    del old["externs"][0]["inverse"]
+    del old["boundary"]["C"]["externs"][0]["inverse"]
+    assert _completeness_guard(old, new) == []
+    assert audit_diff.diff_inverses(old, new) == {
+        "inverse_weakened": [], "inverse_strengthened": []}
+    doc = _build_changelog(EMPTY_DELTA, {"bump": "patch", "changes": []},
+                           old, new, "v1", "v2", None, degraded=False)
+    assert doc["breaking"] == [] and doc["added"] == []
+    assert doc["unclassified"] == []
+
+
 def test_guard_removed_optional_surface_trips_over_before_union():
     """MEDIUM finding 3: `parallel_plan` is conditionally present. Removing the
     last parallel group leaves it in `before` and absent from `after`; a guard

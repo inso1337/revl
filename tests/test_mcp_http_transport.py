@@ -885,6 +885,39 @@ def test_estop_lands_while_another_callers_request_holds_the_session(proxied,
 
 
 @needs_cordis
+def test_a_hatch_estop_lands_while_another_callers_request_holds_the_session(
+        serving, fresh):
+    """Issue #3183: `revl_estop` reached through the `revl_verbs` hatch (#2073)
+    is still the E-Stop: it latches at once, as the direct call does, instead of
+    queueing behind the request that holds the session."""
+    import runtime as rt  # the py backend (cordis-gated test)
+
+    transport = serving()
+    port = _port(transport)
+    lock = transport.binding.lock
+    lock.acquire()  # another caller's request holds the session
+    # a regression queues the stop behind that request, which here ends only
+    # when released: release it after a while so the test fails, not hangs
+    safety = threading.Timer(6, lambda: lock.locked() and lock.release())
+    safety.start()
+    try:
+        started = time.monotonic()
+        halted = _payload(port, "human", "revl_verbs",
+                          {"name": "revl_estop", "args": {"reason": "hatch halt"}})
+        took = time.monotonic() - started
+        assert took < 4, f"the hatch E-Stop waited {took:.1f}s behind the busy session"
+        assert halted["ok"] is True and halted["latched"] is True
+        assert halted["operator"] == "human" and halted["reason"] == "hatch halt"
+        assert lock.locked(), "the request holding the session was still in flight"
+    finally:
+        safety.cancel()
+        if lock.locked():
+            lock.release()
+        rt.clear_estop()
+        rt._LIVE_FRAMES.clear()
+
+
+@needs_cordis
 def test_estop_on_an_idle_session_halts_at_once(proxied):
     import runtime as rt
 

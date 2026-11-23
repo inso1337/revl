@@ -11339,6 +11339,7 @@ from .emission_analysis import (  # noqa: E402,F401
     _is_async_fn_type,
     _calls_in,
     _capability_hint,
+    _admit_required_scopes,
     _emission_chain,
     _emission_value_externs,
     _emitting_capabilities,
@@ -16198,7 +16199,8 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
             # witnessed operation reaches.
             spoken = "witnessed" if not decl.witnessed else (
                 f"witnessed[{', '.join(decl.witnessed)}]")
-            caused, used = _method_emissions(mbody, env)
+            scopes: dict = {}
+            caused, used = _method_emissions(mbody, env, scopes_out=scopes)
             true_caused, _true_used = _method_emissions(mbody, env,
                                                         irreversible_only=True)
             if true_caused:
@@ -16211,8 +16213,11 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                     code="G4", category="emission-propagation",
                 )
             if decl.witnessed:
-                extra = sorted(cap for cap in used
-                               if cap not in decl.witnessed)
+                # issue #3485: `witnessed[k.m]` names one crossing through
+                # required key `k`, as `emission[k.m]` does
+                extra = _admit_required_scopes(
+                    sorted(cap for cap in used if cap not in decl.witnessed),
+                    decl.witnessed, scopes)
                 if extra:
                     offending = ", ".join(
                         "an unnameable boundary" if cap == "*" else f"`{cap}`"
@@ -16279,8 +16284,10 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
             # *where* a provider may cross, so the body's capability set must
             # be a subset. A provider using fewer capabilities is purer than
             # declared, which is the sound direction (docs/capabilities.md).
-            caused, used = _method_emissions(mbody, env)
-            extra = sorted(used - set(decl.capabilities))
+            scopes: dict = {}
+            caused, used = _method_emissions(mbody, env, scopes_out=scopes)
+            extra = _admit_required_scopes(sorted(used - set(decl.capabilities)),
+                                           decl.capabilities, scopes)
             if extra:
                 declared = ", ".join(decl.capabilities)
                 offending = ", ".join(

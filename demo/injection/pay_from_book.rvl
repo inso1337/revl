@@ -1,0 +1,29 @@
+// ADMITTED: the same step with the payee taken from the supplier book.
+//
+// The inbox is still read, and its text still leaves with the payment: the
+// first line of the mail is the memo. A memo is data. The account the money
+// goes to is authority, and it comes from `suppliers`, a service this
+// component requires, so no mail-derived value reaches `pay`'s payee. Paying
+// stays an emission, so a host that pends emissions still asks a human before
+// the money moves.
+
+extern emission[mail] fn read_inbox() -> Untrusted[Str] = @py { return "" }
+extern emission[bank] fn pay(iban: Trusted[Str], cents: Int, memo: Str) = @py { return }
+
+fn first_line(mail: Str) -> Str {
+  return mail.split("\n").slice(0, 1).join("")
+}
+
+service Suppliers { fn iban_of(supplier: Str) -> Str }
+
+service Payables { emission fn settle(supplier: Str, cents: Int) }
+
+component PayInvoices requires suppliers: Suppliers provides payables: Payables {
+  provide payables {
+    fn settle(supplier, cents) {
+      let mail = emit read_inbox()
+      emit pay(suppliers.iban_of(supplier), cents, first_line(mail))
+      return
+    }
+  }
+}

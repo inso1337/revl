@@ -76,14 +76,9 @@ EXEMPT_LISTS = {
 EXEMPT_KEYWORDS: dict[str, str] = {}
 
 #: Clause heads of `composition_decl` left out of the prompt grammar, with the
-#: reason. They are row kinds and an SLO block, not security declarations, and
-#: the prompt grammar is at its character budget (tests/test_grammar_prompt.py);
-#: the prose docs/composition-rows.md carries them.
-EXEMPT_COMPOSITION_KEYWORDS = {
-    "host": "a row kind (ambient host service); budget",
-    "seam": "a row kind (observer forwarder); budget",
-    "slo": "a service-level objective block; budget",
-}
+#: reason. Empty today: every clause head is named in the `composition`
+#: production.
+EXEMPT_COMPOSITION_KEYWORDS: dict[str, str] = {}
 
 
 def _prompt_grammar_text(capsys) -> str:
