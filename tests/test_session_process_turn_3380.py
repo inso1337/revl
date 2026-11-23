@@ -1,6 +1,6 @@
 """One session runs at a time per process (issue #3380).
 
-The Python runtime keeps the running session's owner in one process-wide slot
+The Python runtime kept the running session's owner in one process-wide slot
 (`runtime._SESSION_OWNER`). Two sessions driven from two threads used to
 interleave, so a call of one ran part of the time with the other's owner in
 the slot. Each session step now takes the process's session turn: another
@@ -52,7 +52,7 @@ def _lend():
 
 def _owner_id() -> int:
     """The runtime's own look: the session it says is running."""
-    owner = sys.modules["runtime"]._SESSION_OWNER
+    owner = sys.modules["runtime"].session_owner()
     return id(owner) if owner is not None else 0
 
 
@@ -463,7 +463,7 @@ def test_a_borrower_that_raises_gives_the_lender_its_slots_back(hook):
                     pool.submit(context.run, worker).result()
         except RuntimeError as exc:
             seen["raised"] = str(exc)
-        seen["trace"] = runtime._trace
+        seen["trace"] = runtime._TRACE.get()
         return _owner_id()
 
     hook.fn = fn

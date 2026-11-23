@@ -49,12 +49,15 @@ from .approval import UnencodableTicketArgs
 from .approval import _args_digest
 
 
-# Issue #3380: one Session runs at a time per process. The Python runtime keeps
+# Issue #3380: one Session runs at a time per process. The Python runtime kept
 # the running session's owner (`runtime._SESSION_OWNER`), its host trace and
 # other module slots once for the whole process, so a verb of one session on one
 # thread and a verb of another on a second thread interleaved with the wrong
-# owner in the slot. Every verb that sets those slots, and every drive of a
-# session's loop, takes this turn. Another thread waits for it, up to
+# owner in the slot. The owner, the trace and the stack of activating frames
+# are context-local now (slice 2); the live-instance registry, the clock and
+# the frame table are still one per process, so every verb that sets the
+# owner, and every drive of a session's loop, takes this turn. Another thread
+# waits for it, up to
 # `_TURN_TIMEOUT` seconds, then gets a SessionError naming the holder. On the
 # thread that holds it, only the same session's own nested steps pass; any other
 # entry (a second session, or this session re-entered from inside its running
@@ -166,13 +169,15 @@ def _lend_turn():
     runs under the lent turn, one borrower at a time; a second borrower, and
     this thread driving a session, are refused at once. Each lend has a token
     of its own, retired when the block ends, so a copy that outlives the block
-    lends nothing. On exit the runtime's owner slot and host trace go back to
-    the lender's; a borrower still running then is an error (join it inside the
-    block). On that orphan path the lock passes to the borrower, the lender's
-    thread is refused at once until the borrower's step ends, and the rest of
-    that step runs with the runtime owner slot cleared: the lender's `call`
-    clears it in its `finally`. The lender recovers on its next call. Outside a
-    held turn it lends nothing."""
+    lends nothing. The runtime's session owner and host trace are context-local
+    (slice 2 of #3380): the borrower sets its own in its copied context and
+    the lender's are untouched; on exit they are set again all the same, so a
+    host body that changed them in this context gets the lender's back. A
+    borrower still running at exit is an error (join it inside the block). On
+    that orphan path the lock passes to the borrower, the lender's thread is
+    refused at once until the borrower's step ends, and the borrower's step
+    keeps its own owner and trace. The lender recovers on its next call.
+    Outside a held turn it lends nothing."""
     held = _TURN_HOLDER
     me = threading.get_ident()
     with _TURN_BORROW:
@@ -1263,8 +1268,10 @@ class Session:
     """One live composition, driven step by step.
 
     One session runs at a time per process (issue #3380). The Python runtime
-    keeps the running session's owner and host trace in process-wide slots, so
-    sessions on different threads take turns: a `load`, `swap`, `call` or any
+    keeps part of the running session's state in process-wide slots (the
+    live-instance registry, the clock, the frame table; the session owner,
+    host trace and activating stack are per session), so sessions on
+    different threads take turns: a `load`, `swap`, `call` or any
     other step that drives the session's loop waits while another session's
     step runs on another thread, and fails with a `SessionError` (code
     ``SESSION_BUSY``) naming the holder after 30 s. A step of a second session
@@ -1723,7 +1730,12 @@ class Session:
             raise
         try:
             if self._loop is None:
-                self._loop = asyncio.new_event_loop()
+                # issue #3380: a new loop registers its self-pipe reader with a
+                # copy of the current context, which here holds this session's
+                # owner, and the owner reaches back to the session. Made under
+                # an empty context, the loop holds no such reference, so a
+                # session dropped while loaded can still be collected.
+                self._loop = contextvars.Context().run(asyncio.new_event_loop)
                 # a session dropped while still loaded never reaches `_reset`;
                 # close its loop when it is collected rather than leave that to
                 # the loop's own finalizer and its ResourceWarning (issue #1720)
@@ -4815,7 +4827,10 @@ class Session:
             finally:
                 driver._settlement_ledger = None
 
-        await host_loop.run_in_executor(None, _drive)
+        # issue #3380: the runtime's session owner and trace are context-local,
+        # and an executor thread starts with none; carry this context over.
+        await host_loop.run_in_executor(
+            None, contextvars.copy_context().run, _drive)
         result = self._settlement(driver, owner, aborting, disposal, ledger,
                                   verdict=verdict, finalize=finalize)
         self._teardown_settlement = result
