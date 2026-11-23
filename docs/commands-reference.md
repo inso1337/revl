@@ -980,6 +980,8 @@ file.
   ([boundary-policy.md](boundary-policy.md)), evaluated over the composition as
   it would stand after the migration: the old version's components replaced by
   the new version's. See "The boundary policy" below.
+- `--coexistence` - add the view with both versions live. See "Coexistence"
+  below.
 - `--json` - machine-readable plan. Exit status is 0 whenever a plan is
   produced; unreadable or insufficient inputs are nonzero. The classification
   travels in the plan, so a CI gate can decide on `classification` without this
@@ -1034,12 +1036,52 @@ that starts reaching `mail`. A policy does not override the measured facts: a
 widening the policy allows is still `needs-approval`. A policy file that does
 not parse, or cannot be read, is an error (exit 1), never an empty policy.
 
+#### Coexistence
+
+`--coexistence` adds a `coexistence` block: the old version stays where it runs
+and the new version is added next to it, as declared, in ONE composition. The
+plan classification answers what happens when the old version is replaced; this
+answers whether the two can be live together first.
+
+- `g2` - per `(key, realm)` slot the new version provides: the providers there
+  (`old`, `new`, or `retained` for a component the migration does not replace)
+  and whether the slot `holds`. A key is provided once per realm, so a new
+  version that provides a key a provider already provides in the same realm
+  conflicts. The new version's own `isolate` places it, so one declared into
+  another realm or under another key reports no conflict. `g2Holds` is true when
+  every slot holds.
+- `nameCollisions` - components the new version redeclares under a name the
+  composition already uses. A composition holds one component per name, so the
+  new version needs another name to be live beside the old in one composition.
+  [`revl canary`](#revl-canary) compares two generations and builds its candidate
+  by replacing the baseline provider, so a candidate that reuses the baseline
+  name is a normal canary even when this list is not empty.
+- `possible` - no G2 conflict and no name collision. `existingRealms` lists the
+  realms the composition already has, including the realms a consumer routes a
+  key across, as places to put the new version.
+- `serving` - for every consumer of a slot either version provides, which
+  versions serve it (`servedBy`) and whether that slot is a G2 `conflict`. A
+  consumer reads the provider in its own realm, so the realm the new version is
+  placed in decides which consumers it serves; a consumer that routes a key
+  across several realms is read once per routed realm. A component the
+  migration replaces is not listed.
+- `authority` - what the composition holds while both are live: `held` is every
+  crossing it holds before united with every crossing it holds after, `before`,
+  `after` and `overlap` are their counts, `added` is new in the migration and
+  `retired` is held only until the old version is removed. A crossing names its
+  component, so a version that reuses a component name merges its crossings
+  with the old version's instead of doubling them.
+
+The view reads the compiled documents and changes no classification. It does
+not run either version, so it says nothing about traffic or behaviour.
+
 A plan is not a gate: `migrate` reports and never admits.
 
 ```bash
 revl migrate cache_v1.rvl cache_v2.rvl --against production.json
 revl migrate old.ir.json new.ir.json --against comp.json --json
 revl migrate cache_v1.rvl cache_v2.rvl --against production.json --policy boundary.policy
+revl migrate cache_v1.rvl cache_v2_canary.rvl --against production.json --coexistence
 ```
 
 ### `revl version`

@@ -133,7 +133,8 @@ def _run_migrate(args) -> int:
     try:
         result = build_plan(old, new, against, old_label=args.old,
                             new_label=args.new, against_label=args.against,
-                            policy=policy)
+                            policy=policy,
+                            overlap=bool(getattr(args, "coexistence", False)))
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
