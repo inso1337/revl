@@ -932,8 +932,10 @@ answers with the roster of known ones rather than with nothing.
 
 ## Drive a live session
 
-One session runs at a time per process. The Python runtime keeps the running
-session's owner and host trace once for the whole process, so two sessions
+One session runs at a time per process. The Python runtime keeps part of the
+running session's state once for the whole process (the registry of live
+instances, the clock and its timers, the table of frames; the session's owner,
+host trace and activating stack are its own), so two sessions
 driven from two threads take turns: a `revl_load`, `revl_swap`, `revl_call` or
 any other verb that runs a session's code waits while another session's verb
 runs on another thread. After 30 s of waiting it fails with a `SESSION_BUSY`

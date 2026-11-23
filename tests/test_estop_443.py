@@ -559,11 +559,11 @@ def _activating(frame):
     calls `_register_resource`; a bare resource in a test is not tracked)."""
     class _Ctx:
         def __enter__(self):
-            rt._ACTIVATING.append(frame)
+            self.token = rt._ACTIVATING.set(rt._ACTIVATING.get() + (frame,))
             return frame
 
         def __exit__(self, *_exc):
-            rt._ACTIVATING.pop()
+            rt._ACTIVATING.reset(self.token)
             return False
     return _Ctx()
 

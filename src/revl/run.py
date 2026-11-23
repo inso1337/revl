@@ -3420,3 +3420,9 @@ def run_command(args, hold_once: bool = False) -> int:
         return _fail(str(exc), lifecycle.BOOT)
     except KeyboardInterrupt:  # pragma: no cover — signal handler covers unix
         return 130
+    finally:
+        # issue #3380: the trace is context-local. The driver installed its
+        # `_on_host` on this thread when it was built, and the `set_trace(None)`
+        # of its teardown ran inside `asyncio.run`'s task, which this thread
+        # does not see; clear this thread's own.
+        runtime_mod.set_trace(None)
