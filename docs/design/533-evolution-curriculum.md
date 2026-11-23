@@ -230,12 +230,22 @@ cannot invent one, and a missing record directory returns no signal so `check`
 reds on the source instead of reading `hard` as empty.
 
 ### 3.6 `design-docs` (source: design documents) -> varies with the oracle named
+### 3.6 `mutation-survivors` (source: mutation testing) -> easy
 
 Slice 4. A design document states its own acceptance, and the slice table is
 where it does so most precisely: a row says which oracle decides the slice. A
 row that names a test under `tests/` which is not in the tree is a stated exit
 with no mechanism that verifies it, and the task is to write the oracle the
 document already names.
+Slice 7. Not one of the review's eight sources, and the one the issue says this
+tree did not have (section 7). `tools/mutation_runner.py` mutates the refusal
+arms of one narrow module, `src/revl/anchor.py`, and runs that module's tests
+(`tests/test_anchor.py`) against each mutant. A refusal arm is an `if <guard>:
+raise RevlError(...)` whose body is exactly the raise, and it has two
+unambiguous mutations: `drop-refusal` (the raise becomes `pass`) and
+`negate-guard`. A mutant is killed when a test fails against it and survives
+when every test passes. The unmutated module must be green first, so a red
+baseline is refused rather than measured.
 
 Only a path under `tests/` in a slice table's own row counts, where a slice
 table is one whose header opens with `Slice`, `Step`, `Phase` or `Stage`. A path
@@ -246,6 +256,18 @@ names `tests/test_selfhost_ambient.py`; `backend-runtime-fork-status-2026-09.md`
 names `tests/test_reentrancy.py` in a commit table about another repository, and
 taking it would be inventing a task (`test_a_path_outside_a_slice_table_is_not_
 a_design_task` is the negative control).
+A survivor is a refusal nothing pins in one direction, and each is a task: write
+the test that kills it. At the slice-7 commit the module has 10 refusal arms,
+20 mutants, 17 killed and 3 survivors: the non-mapping check of
+`_validated_digests`, the missing-separator check of `parse_digest_arg` (the
+mutant still refuses, with a different message no test reads), and the second
+arm of `make_anchor`. The survivors are recorded in
+`tests/fixtures/mutation_survivors.json`, which `mutation_runner.py --check`
+holds equal to a fresh run in both directions (a new survivor is a regression, a
+recorded one that is now killed is a stale line), and the curriculum reads that
+ledger rather than running twenty test-suite runs. A survivor is kept only while
+its arm is in the target with the same source, so a rewritten arm retires its
+entry.
 
 The rung varies with the oracle named, and an oracle that does not exist has no
 corpus to read, so `_oracle_signal` reads it off the path by the naming the
@@ -258,6 +280,10 @@ the written oracle's real corpus replaces it. Slice B of design 456 therefore
 lands on medium. Every named oracle declares its signal whether or not the file
 exists, so a tree with no slice gap left is an empty reachable rung and not a
 source that stopped reading, and a missing `docs/design/` is an error.
+The rung is the mechanism's own. A mutation run makes one implementation agree
+with its own tests, over the test files the ledger names, so it lands on easy.
+The design expected expert; the ladder has no line for "measures a suite", and
+the signal decides, not the expectation.
 
 ### 3.7 `tracker` (source: the tracker) -> varies with the verifier an issue names
 
@@ -291,6 +317,15 @@ What an offline snapshot cannot know is stated, not hidden: an issue closed
 after it was taken is still a task until the next `--write`. A missing snapshot
 is an error, and a snapshot whose named files have all gone is an empty
 reachable rung.
+The acceptance is demonstrated on a tree the test owns:
+`test_a_weakened_arm_is_a_task_and_the_pinned_one_is_not` runs the real runner
+on a one-arm module, once with the test that pins the arm (no survivor, no task,
+the rung still declared) and once without it (the drop-refusal mutant survives
+and is a task), and `tests/test_mutation_runner.py` does the same two-sided
+check on a module with three arms. Only a removed refusal goes unnoticed once
+the pinning test is gone: the negated guard is still killed by any happy-path
+test, which the negation makes refuse a good input. A missing ledger is an error, a target that left the
+tree is an error, and an empty ledger is an empty reachable rung.
 
 ## 4. Non-vacuity: the tasks, and the gate
 
@@ -496,6 +531,7 @@ before it does.
 ## 6. Slice plan
 
 Slices 1, 3, 4 and 6 are landed. Each later slice states the source it adds, the rung
+Slices 1, 3 and 7 are landed. Each later slice states the source it adds, the rung
 it is expected to land on, and the oracle that would catch it going vacuous.
 
 | slice | source added | expected rung | fixture / oracle |
@@ -507,10 +543,12 @@ it is expected to land on, and the oracle that would catch it going vacuous.
 | 5 | generated adversarial programs: `tools/fuzz_frontend.py` seeds that survive to a divergence | hard | the fuzz corpus; a seed is only a task while it still diverges |
 | 6 (landed) | the tracker | varies with the verifier an issue names | an offline snapshot only, so the curriculum stays computable in a checkout with no network (section 3.7) |
 | 7 | mutation testing, which the issue is right that this tree does not have | expert | see section 7 |
+| 6 | the tracker | varies | offline snapshot only, so the curriculum stays computable in a checkout with no network |
+| 7 (landed) | mutation testing, which the issue is right that this tree did not have | easy (the mutation run makes one implementation agree with its own tests) | `tools/mutation_runner.py` over `src/revl/anchor.py`, the ledger `tests/fixtures/mutation_survivors.json`, readable by a candidate (sections 3.6 and 7) |
 
-## 7. Mutation testing is absent and stays absent in slice 3
+## 7. Mutation testing, and where its mutants live
 
-The issue is precise about this and the check still holds at `c136eae6`:
+At `c136eae6` the issue's claim held: this tree had no mutation testing.
 
 ```
 $ git grep -liE 'mutation testing|mutmut|cosmic.ray|mutate the (suite|tests)' -- tools/ tests/ | wc -l
@@ -527,6 +565,15 @@ Slices 1, 3, 4 and 6 do not add it, and do not pretend to. It is slice 7 because
 the one source whose machinery does not exist, and because it interacts with
 issue #1207: a mutation test a candidate can read is not a hidden mutation
 test, so where the mutants live is that item's question and not this one's.
+Slice 7 adds the second, small on purpose: one module, two operators, a ledger
+(section 3.6). It interacts with issue #1207: a mutation test a candidate can
+read is not a hidden mutation test, so where the mutants live is that item's
+question and not this one's. The first version is therefore in the tree and
+labelled so: the runner, its target, the mutants it generates and the ledger of
+survivors are all readable by a candidate, and the ledger's own `_about` says
+so. A candidate can read the survivor list and write the killing test; that is
+the point of it being a curriculum task. What it cannot do is serve as a hidden
+scoring artifact.
 
 ## 8. What this does not claim
 
@@ -536,6 +583,10 @@ test, so where the mutants live is that item's question and not this one's.
 - It does not claim to read all eight sources. It reads seven. The other one is
   slice 5 (fuzz seeds), with a named oracle; slice 2 is an extra oracle, not one
   of the eight.
+- It does not claim to read all eight sources. It reads five, plus mutation
+  testing, which the review does not name. The other three
+  sources are slices 4 (design documents), 5 (fuzz seeds) and 6 (the tracker),
+  each with a named oracle; slice 2 is an extra oracle, not one of the eight.
 - It does not claim the derived tasks are a complete list of what is wrong with
   the tree. They are the gaps seven artifacts exhibit, no more.
 - It does not touch the reward (issue #1206) or the held-out scoring set

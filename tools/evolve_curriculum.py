@@ -42,6 +42,12 @@ SOURCES. The review names eight. This module reads seven of them; the rest are
 staged in the design doc's slice plan. Each adapter below states the artifact
 it reads, and every task it emits carries that artifact by path, so a reader
 can go and look.
+SOURCES. The review names eight. This module reads five of them; the rest are
+staged in the design doc's slice plan. It also reads one the review does not
+name, mutation testing, because a suite nobody has measured for sensitivity is
+a scoring set of unknown value. Each adapter below states the artifact it
+reads, and every task it emits carries that artifact by path, so a reader can
+go and look.
 
 USAGE
     python3 tools/evolve_curriculum.py              # human summary
@@ -638,12 +644,19 @@ def adapter_cross_tier_probe(cases_dir=None) -> Derivation:
 
 # --------------------------------------------------------------------------- #
 # Adapter 6 -- design documents: a slice table row whose oracle is not there     #
+# Adapter 6 -- mutation testing: a refusal a mutant removes and no test notices  #
 # --------------------------------------------------------------------------- #
 # docs/design/*.md states its own acceptance. A slice table (header cell opening
 # with "Slice", "Step", "Phase" or "Stage") whose row names a test under
 # `tests/` is a promise: this oracle decides the slice. When the named file is
 # not in the tree, the slice has a stated exit and no mechanism to verify it,
 # which is precisely a task: write the oracle the doc already names.
+# tools/mutation_runner.py mutates the refusal arms of one narrow module and runs
+# that module's tests against each mutant. A mutant that survives is a refusal
+# nothing pins in one direction: delete it (or negate its guard) and every test
+# stays green, so a candidate that removed the refusal could not be told from one
+# that kept it. Closing the hole is writing the test that kills the mutant, which
+# is a task with a verifier the tool already runs.
 #
 # Only a path under `tests/` in a slice table's own row counts. A path in prose,
 # in a table about something else (a commit table, a fork-status table), or in a
@@ -654,6 +667,20 @@ _SLICE_HEADER = re.compile(r"(?i)^\W*(slice|step|phase|stage)\b")
 _TABLE_RULE = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
 _ORACLE_PATH = re.compile(
     r"(?<![\w/.-])(tests/[A-Za-z0-9_./-]*?\.(?:py|ts|rs|go|java))")
+# The survivors are recorded in `tests/fixtures/mutation_survivors.json`, which
+# `mutation_runner.py --check` holds equal to a fresh run. This source reads the
+# ledger rather than running the mutants (each is a test-suite run), and keeps a
+# survivor only while its arm is still in the target with the same source, so a
+# rewritten arm retires its entry instead of leaving a task about code that is
+# gone. The mutants and the ledger are readable by a candidate: the first version
+# is in the tree, and where hidden mutants live is issue #1207's question.
+#
+# The rung is the mechanism's own. The mutation run makes one implementation
+# agree with its own tests, over the test files the ledger names, so it lands on
+# `easy`. The design expected `expert` for this source; the ladder has no line
+# for "measures a suite", and the signal, not the expectation, decides.
+MUTATION_LEDGER = "tests/fixtures/mutation_survivors.json"
+MUTATION_RUNNER = "tools/mutation_runner.py"
 
 
 def _oracle_signal(path: str) -> Signal:
@@ -709,6 +736,24 @@ def adapter_design_docs(design_dir=None) -> Derivation:
         # the source failing to read its artifact, and an empty derivation
         # makes `check` say so.
         return Derivation("design-docs", (), ())
+def adapter_mutation_survivors(ledger=None, root=None) -> Derivation:
+    base = Path(root) if root else ROOT       # a staged tree the test owns
+    path = Path(ledger) if ledger else base / MUTATION_LEDGER
+    if not path.is_file():
+        # No ledger is not "no survivors". It is the source failing to read its
+        # artifact, and an empty derivation makes `check` say so.
+        return Derivation("mutation-survivors", (), ())
+    runner = _load("_ec_mutation", MUTATION_RUNNER)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    target, tests = data["target"], list(data["tests"])
+    if not (base / target).is_file():
+        raise FileNotFoundError(f"{path} names {target}, which is not in the tree")
+    # Measured before the survivors are looked at: a mutation run over this
+    # target and these tests is a property of the ledger's configuration.
+    signal = Signal(impls=(REFERENCE,), breadth=breadth_of(tests))
+    current = {a.id: a for a in runner.arms(
+        (base / target).read_text(encoding="utf-8"))}
+    module = runner.module_name(target)
     tasks: list[Task] = []
     signals: list[Signal] = []
     for doc in docs:
@@ -795,6 +840,11 @@ def adapter_tracker(snapshot=None) -> Derivation:
             continue
         number = issue["number"]
         verifier = present[0]
+    for survivor in data["survivors"]:
+        arm = current.get(survivor["arm"])
+        if arm is None or arm.digest != survivor["digest"]:
+            continue                      # the arm was rewritten or removed
+        operator = survivor["operator"]
         tasks.append(_task(
             task_id=f"tracker/{number}",
             source="the tracker",
@@ -807,8 +857,22 @@ def adapter_tracker(snapshot=None) -> Derivation:
             verify=(f"gh issue view {number} --json state  # closed; then "
                     "python3 tools/tracker_snapshot.py --write"),
             signal=_oracle_signal(verifier),
+            task_id=f"mutant/{module}/{survivor['arm']}/{operator}",
+            source="mutation testing",
+            artifact=target,
+            locator=f"{survivor['arm']}, line {arm.line}",
+            gap=(f"the {operator} mutant of the refusal arm {survivor['arm']} "
+                 f"of {target} survives: {runner.EFFECT[operator]} and no test "
+                 f"in {', '.join(tests)} fails"),
+            subject=", ".join(tests),
+            mechanism=f"{MUTATION_RUNNER} --check",
+            verify=(f"python3 {MUTATION_RUNNER} --check  # the mutant is "
+                    f"killed; then python3 {MUTATION_RUNNER} --write to drop "
+                    f"its entry from {MUTATION_LEDGER}"),
+            signal=signal,
         ))
     return Derivation("tracker", tuple(dict.fromkeys(signals)), tuple(tasks))
+    return Derivation("mutation-survivors", (signal,), tuple(tasks))
 
 
 ADAPTERS = {
@@ -819,6 +883,7 @@ ADAPTERS = {
     "cross-tier-probes": adapter_cross_tier_probe,
     "design-docs": adapter_design_docs,
     "tracker": adapter_tracker,
+    "mutation-survivors": adapter_mutation_survivors,
 }
 
 
