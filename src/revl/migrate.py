@@ -31,6 +31,12 @@ not blamed on the new version. No rule is invented here: "refuse every
 widening" is written in the policy file as an allow-list, as it is for
 admission.
 
+The coexistence view (`--coexistence`, `coexistence`) answers the other
+question a reviewer has before a canary: can the new version run beside the old
+one, per `(key, realm)` under G2, which consumers each version serves, and what
+authority the composition holds while both are live. It is a view over the same
+documents and does not change the classification.
+
 Classification is read off those facts only:
 
   * `refused`: a real consumer cannot move, the declared state hand-off is
@@ -60,6 +66,7 @@ from .adapt import bridge_plan
 from .audit_diff import (audit_report, diff_backends, diff_capability_scopes,
                          diff_cardinality, diff_crossings, diff_inverses,
                          diff_recovery, diff_registers)
+from .audit_diff import crossings as crossing_tokens
 from .compiler import _running_handoffs
 from .composition_diff import _components, _realm
 from .composition_diff import diff as composition_diff
@@ -683,6 +690,137 @@ def policy_verdict(policy, against_ir: dict, after_ir: dict) -> dict:
     }
 
 
+# --------------------------------------------------------------- coexistence
+
+def _provider_slots(ir: dict, label_of) -> dict:
+    """`(key, realm) -> [(component, version)]` for every provision of `ir`,
+    each labelled by `label_of(component name)`. A slot with two providers is a
+    G2 conflict: one key is provided once per realm."""
+    slots: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    for name, rec in _components(ir).items():
+        for key in rec.get("provides") or {}:
+            slots.setdefault((key, _realm(rec, key)), []).append(
+                (name, label_of(name)))
+    return slots
+
+
+def _crossing_set(ir: dict) -> set:
+    return crossing_tokens(audit_report(ir))
+
+
+def _routes_of(ir: dict) -> dict:
+    """`{component: {key: [realm, ...]}}` for every consumer that binds a key
+    across several realms (`isolate k in realms(...)`). A route is resolved per
+    realm by the linker, so a reader that looks a routed key up in one realm
+    reads the wrong provider. Read off the component records, else the manifest
+    rows, because `composition_diff._components` does not carry routes."""
+    out: dict[str, dict[str, list[str]]] = {}
+    for rows in (ir.get("components") or [],
+                 (ir.get("manifest") or {}).get("components") or []):
+        for row in rows:
+            for key, route in (row.get("routes") or {}).items():
+                realms = list((route or {}).get("realms") or [])
+                if realms:
+                    out.setdefault(row.get("name"), {}).setdefault(key, realms)
+    return out
+
+
+def coexistence(old_ir: dict, new_ir: dict, against_ir: dict,
+                after_ir: dict) -> dict:
+    """The view with both versions live in one composition: the old version
+    stays where it runs and the new version is added next to it as declared.
+
+    Reads three things off the same documents the rest of the plan reads:
+
+    * G2 per `(key, realm)`: a slot the new version provides that the old one
+      already provides is a conflict, because a key is provided once per realm.
+      The way two versions coexist is to place the new one in another realm
+      (the canary slice, `revl canary`) or under another key. The new
+      version's own `isolate` declarations are what place it, so a version
+      declared into a canary realm reports no conflict.
+    * component names: a composition holds one component per name, so a
+      component the new version redeclares under a name the composition already
+      uses cannot be live twice as written.
+    * authority during the overlap: while both are live the composition holds
+      everything it holds before and everything it holds after, which is the
+      union of the two crossing sets (`held`); `retired` is what only the old
+      version held and the migration gives up. A crossing token names its
+      component, so a new version that reuses a component name merges its
+      tokens with the old version's rather than doubling them.
+
+    The view answers "both live in ONE composition, as declared". `revl canary`
+    compares two generations and builds its candidate with `replacing=` the
+    baseline provider, so a candidate that reuses the baseline name is a normal
+    canary even when `nameCollisions` says one composition cannot hold both.
+    """
+    old_names = set(_names(old_ir))
+    new_names = set(_names(new_ir))
+    against_names = set(_names(against_ir))
+
+    slots = _provider_slots(
+        against_ir, lambda n: "old" if n in old_names else "retained")
+    for slot, owners in _provider_slots(new_ir, lambda n: "new").items():
+        slots.setdefault(slot, []).extend(owners)
+    g2 = [
+        {"key": key, "realm": realm,
+         "providers": [{"component": c, "version": v} for c, v in owners],
+         "holds": len(owners) == 1}
+        for (key, realm), owners in sorted(slots.items())
+        if any(v == "new" for _, v in owners)]
+    conflicts = [slot for slot in g2 if not slot["holds"]]
+
+    collisions = sorted(new_names & against_names)
+
+    # who serves each consumer during the overlap: a consumer reads the
+    # provider in its own realm, so the realm the new version is placed in
+    # decides which consumers it serves. A consumer that routes a key across
+    # several realms (`isolate k in realms(...)`) is read once per routed realm,
+    # the way the linker resolves it. Every consumer of a slot either version
+    # provides is listed, including one in a realm only the new version fills;
+    # a component the migration replaces is not a consumer of the overlap.
+    routes = _routes_of(against_ir)
+    serving = []
+    for name, rec in sorted(_components(against_ir).items()):
+        if name in old_names:
+            continue
+        for key in sorted(rec.get("requires") or {}):
+            routed = (routes.get(name) or {}).get(key)
+            realms_of_key = (list(routed) if routed is not None
+                             else [_realm(rec, key)])
+            for realm in realms_of_key:
+                owners = slots.get((key, realm), [])
+                if not any(v in ("old", "new") for _, v in owners):
+                    continue
+                serving.append({
+                    "component": name, "key": key, "realm": realm,
+                    "servedBy": sorted({v for _, v in owners}),
+                    "conflict": len(owners) > 1})
+
+    before = _crossing_set(against_ir)
+    after = _crossing_set(after_ir)
+    # everything held before and everything held after: both live means both
+    held = before | after
+    realms = sorted(
+        {r for rec in _components(against_ir).values()
+         for r in (rec.get("isolate") or {}).values() if r}
+        | {r for per_key in routes.values() for rs in per_key.values()
+           for r in rs if r})
+    return {
+        "possible": not conflicts and not collisions,
+        "g2": g2,
+        "g2Holds": not conflicts,
+        "nameCollisions": collisions,
+        "existingRealms": realms,
+        "serving": serving,
+        "authority": {
+            "before": len(before), "after": len(after), "overlap": len(held),
+            "held": sorted(held),
+            "added": sorted(after - before),
+            "retired": sorted(before - after),
+        },
+    }
+
+
 # ------------------------------------------------------------- classification
 
 def _classification(consumer_plans: list[dict], authority_delta: dict,
@@ -777,7 +915,8 @@ def _rollback(handoff_plans: list[dict], classification: str) -> dict:
 
 def plan(old_ir: dict, new_ir: dict, against_ir: dict, *,
          old_label: str = "OLD", new_label: str = "NEW",
-         against_label: str = "COMPOSITION", policy=None) -> dict:
+         against_label: str = "COMPOSITION", policy=None,
+         overlap: bool = False) -> dict:
     """Build the read-only migration plan.
 
     `old_ir` and `new_ir` are the two compiled versions of the component
@@ -785,7 +924,8 @@ def plan(old_ir: dict, new_ir: dict, against_ir: dict, *,
     whose real consumers decide compatibility, which must still run the OLD
     version. `policy` is a loaded `policy.Policy`: when given, it is evaluated
     over the composition as it would stand after the migration and the plan
-    carries the verdict under `policy`. Raises `ValueError` when an input
+    carries the verdict under `policy`. `overlap` adds the coexistence view
+    (both versions live) under `coexistence`. Raises `ValueError` when an input
     cannot supply the facts the plan needs.
     """
     _require_consumers(against_ir)
@@ -799,8 +939,9 @@ def plan(old_ir: dict, new_ir: dict, against_ir: dict, *,
     consumer_plans = consumers(against_ir, changed, old_surface, new_surface,
                                new_ir)
     handoff_plans = handoffs(old_ir, new_ir)
-    policy_result = (policy_verdict(policy, against_ir,
-                                    compose_after(old_ir, new_ir, against_ir))
+    after_ir = (compose_after(old_ir, new_ir, against_ir)
+                if policy is not None or overlap else None)
+    policy_result = (policy_verdict(policy, against_ir, after_ir)
                      if policy is not None else None)
     classification, reason = _classification(
         consumer_plans, authority_delta, handoff_plans, bump, policy_result)
@@ -849,6 +990,11 @@ def plan(old_ir: dict, new_ir: dict, against_ir: dict, *,
         "rollback": _rollback(handoff_plans, classification),
         "structural": delta,
     }
+    if overlap:
+        # present only when asked for, like `policy`, so a plan without the
+        # flag keeps the exact shape it had
+        result["coexistence"] = coexistence(old_ir, new_ir, against_ir,
+                                            after_ir)
     if policy_result is not None:
         # present only when a policy was given, so a plan without `--policy`
         # keeps the exact shape it had before the policy slice
@@ -941,6 +1087,49 @@ def render(plan: dict) -> str:
         for entry in plan["handoff"]:
             lines.append(f"  {entry['key']}: {entry['verdict']}")
             lines.append(f"      {entry['reason']}")
+
+    # coexistence: both versions live
+    overlap = plan.get("coexistence")
+    if overlap is not None:
+        lines.append("")
+        lines.append("coexistence (both versions live, new added as declared):")
+        lines.append("  possible: " + ("yes" if overlap["possible"] else "no"))
+        for slot in overlap["g2"]:
+            where = f" in realm `{slot['realm']}`" if slot["realm"] else ""
+            who = ", ".join(f"{p['component']} ({p['version']})"
+                            for p in slot["providers"])
+            mark = "ok" if slot["holds"] else "CONFLICT"
+            lines.append(f"  G2 `{slot['key']}`{where}: {mark}  [{who}]")
+        if not overlap["g2Holds"]:
+            lines.append(
+                "      a key is provided once per realm: place the new version "
+                "in another realm (a canary slice, `revl canary`) or under "
+                "another key")
+            if overlap["existingRealms"]:
+                lines.append("      realms in the composition: " + ", ".join(
+                    f"`{r}`" for r in overlap["existingRealms"]))
+        if overlap["nameCollisions"]:
+            lines.append(
+                "  name collision: " + ", ".join(
+                    f"`{n}`" for n in overlap["nameCollisions"])
+                + " (a composition holds one component per name; the new "
+                  "version needs another name to be live beside the old)")
+        for entry in overlap["serving"]:
+            where = f" in realm `{entry['realm']}`" if entry["realm"] else ""
+            by = " and ".join(entry["servedBy"]) or "nobody"
+            tail = "  (G2 conflict)" if entry["conflict"] else ""
+            lines.append(f"  consumer {entry['component']} (`{entry['key']}`"
+                         f"{where}) served by: {by}{tail}")
+        auth = overlap["authority"]
+        lines.append(
+            f"  authority: {auth['before']} crossing(s) before, "
+            f"{auth['after']} after, {auth['overlap']} held while both are "
+            f"live")
+        for token in auth["added"]:
+            lines.append(f"      + {token}")
+        for token in auth["retired"]:
+            lines.append(f"      - {token}  (held only until the old version "
+                         f"is removed)")
 
     # boundary policy
     verdict = plan.get("policy")

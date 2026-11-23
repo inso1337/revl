@@ -822,6 +822,11 @@ def build_parser() -> argparse.ArgumentParser:
              "violation the migration introduces refuses it, an approval-"
              "required capability it reaches needs approval")
     migrate_cmd.add_argument(
+        "--coexistence", action="store_true",
+        help="add the view with both versions live: G2 per (key, realm), which "
+             "consumers each version serves, and the authority the composition "
+             "holds during the overlap")
+    migrate_cmd.add_argument(
         "--json", action="store_true",
         help="machine-readable plan an agent or a CI gate can consume")
 
