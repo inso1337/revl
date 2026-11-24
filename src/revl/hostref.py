@@ -195,12 +195,15 @@ def _record(node, decl_name: str, rel_path: str, digest: str,
 
 def resolve_refs(program, module_dir: str, root_dirs: list[str],
                  sources: dict[str, str], is_virtual: bool,
-                 install_root: str | None = None) -> None:
+                 install_root: str | None = None,
+                 reads: set[str] | None = None) -> None:
     """Resolve every `HostRef` node in `program`'s externs against a ROOT-tree
     jail, pinning `rel_path` (relative to the containing root) and `sha256` onto
     each node. A virtual module resolves through `sources` only (no disk read);
     a real module reads the file's bytes from disk. Refuses a ref that resolves
     outside every root tree, or whose path cannot become a legal tier specifier.
+    `reads` (issue #3198) collects the disk paths the real reads touched, so the
+    sandbox driver can mount them for the in-boundary recompile.
 
     item 410 — origin decides the jail's root SET, exclusively:
 
@@ -238,11 +241,11 @@ def resolve_refs(program, module_dir: str, root_dirs: list[str],
                                     program.filename, root_kind)
             else:
                 _resolve_ref_disk(body, ext.name, module_dir, jail_roots,
-                                  program.filename, root_kind)
+                                  program.filename, root_kind, reads=reads)
 
 
 def _resolve_ref_disk(body, decl_name, module_dir, real_roots, filename,
-                      root_kind=None):
+                      root_kind=None, reads: set[str] | None = None):
     candidate = os.path.join(module_dir, body.path)
     if not os.path.exists(candidate):
         raise RevlError(
@@ -266,6 +269,11 @@ def _resolve_ref_disk(body, decl_name, module_dir, real_roots, filename,
             f"{'install' if root_kind == 'stdlib' else 'root compile'} tree "
             f"({real} is not inside {', '.join(real_roots) or '(no root)'})",
             hint=_outside_root_hint(root_kind))
+    if reads is not None:
+        # both the spelling the in-sandbox compile constructs and the real path
+        # the bytes came from: a symlinked ref needs the one, the open the other
+        reads.add(os.path.abspath(candidate))
+        reads.add(real)
     with open(real, "rb") as fh:
         data = fh.read()
     rel = os.path.relpath(real, root)
@@ -347,10 +355,14 @@ def program_has_ref(program) -> bool:
 
 def resolve_assets(program, module_dir: str, root_dirs: list[str],
                    sources: dict[str, str], is_virtual: bool,
-                   install_root: str | None = None) -> None:
+                   install_root: str | None = None,
+                   reads: set[str] | None = None) -> None:
     """Resolve every `asset "<path>"` in `program` against the root-tree jail,
     filling the node's record fields with the root-relative path and the
     sha256 of the file's bytes.
+
+    `reads` (issue #3198) collects the disk paths the real reads touched, so the
+    sandbox driver can mount them for the in-boundary recompile.
 
     The five refusals, all fail-closed (each REFUSES; none falls back to a
     default, a guess, or an unresolved handle):
@@ -387,7 +399,7 @@ def resolve_assets(program, module_dir: str, root_dirs: list[str],
                                   program.filename, root_kind)
         else:
             _resolve_asset_disk(node, module_dir, jail_roots,
-                                program.filename, root_kind)
+                                program.filename, root_kind, reads=reads)
 
 
 def _reject_bad_asset_path(node, filename: str) -> None:
@@ -436,7 +448,8 @@ def _record_asset(node, rel_path: str, digest: str, root_kind: str | None) -> No
                    ("sha256", ExprLit(digest, node.line))]
 
 
-def _resolve_asset_disk(node, module_dir, real_roots, filename, root_kind):
+def _resolve_asset_disk(node, module_dir, real_roots, filename, root_kind,
+                        reads: set[str] | None = None):
     candidate = os.path.join(module_dir, node.written)
     if not os.path.exists(candidate):
         raise RevlError(
@@ -460,6 +473,11 @@ def _resolve_asset_disk(node, module_dir, real_roots, filename, root_kind):
             f"{'install' if root_kind == 'stdlib' else 'root compile'} tree "
             f"({real} is not inside {', '.join(real_roots) or '(no root)'})",
             hint=_asset_outside_root_hint(root_kind))
+    if reads is not None:
+        # both the spelling the in-sandbox compile constructs and the real path
+        # the bytes came from: a symlinked asset needs the one, the open the other
+        reads.add(os.path.abspath(candidate))
+        reads.add(real)
     try:
         with open(real, "rb") as fh:
             data = fh.read()

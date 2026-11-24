@@ -347,3 +347,77 @@ def test_the_ci_job_runs_four_shards_and_shards_a_full_selection():
     assert 'REVL_TEST_SHARD="${SHARD_INDEX}/${SHARD_TOTAL}"' in script
     assert re.search(r'SEL_FULL" = "1"', script), "a FULL selection is not sharded"
     assert "pytest $SEL_PYTEST -q" in script
+
+
+# ---------------------------------- the main path: `frontend`, `frontend-cordis`
+# Issue #3353: on main the root suite runs sharded too, once per Python version.
+# The completeness claim is the same as for the pull-request job: the legs of one
+# version run every test of `tests/` exactly once. These tests read the workflow
+# the way CI would and then partition the real root suite by the specs it yields.
+
+def _jobs():
+    return yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yml")
+                          .read_text(encoding="utf-8"))["jobs"]
+
+
+def _suite_step(job: dict) -> dict:
+    steps = [s for s in job["steps"]
+             if re.search(r"(^|\s)pytest tests/ -q\s*$", str(s.get("run", "")).strip())]
+    assert len(steps) == 1, "the job must hold exactly one whole-suite pytest step"
+    return steps[0]
+
+
+def _specs(job: dict) -> list:
+    """The `REVL_TEST_SHARD` value each matrix leg of `job` exports to pytest."""
+    template = _suite_step(job)["env"]["REVL_TEST_SHARD"]
+    assert "${{ matrix.shard }}" in template, template
+    return [template.replace("${{ matrix.shard }}", str(k))
+            for k in job["strategy"]["matrix"]["shard"]]
+
+
+MAIN_JOBS = ("frontend", "frontend-cordis")
+
+
+@pytest.mark.parametrize("name", MAIN_JOBS)
+def test_a_main_job_runs_every_shard_of_the_whole_suite(name):
+    job = _jobs()[name]
+    assert job["strategy"]["fail-fast"] is False
+    assert job["strategy"]["matrix"]["shard"] == list(range(1, SHARDS + 1))
+    parsed = [_shard.parse(spec) for spec in _specs(job)]
+    assert [k for k, _ in parsed] == list(range(1, SHARDS + 1))
+    assert {n for _, n in parsed} == {SHARDS}, "a leg splits by a different total"
+    # no narrowing: the legs are the only thing between the suite and a run
+    step = _suite_step(job)
+    assert "-k" not in step["run"].split() and "--deselect" not in step["run"]
+    assert "REVL_SKIP_SLOW" not in str(step), "the slow lane must stay on main"
+    # the whole suite, so every leg's share is a partition of the root files
+    files = _root_files()
+    owner = _shard.assign(files, _shard.load_weights(), SHARDS)
+    ran = [{f for f, i in owner.items() if i == k - 1} for k, _ in parsed]
+    assert set().union(*ran) == set(files), "a test file ran in no leg"
+    assert sum(len(r) for r in ran) == len(files), "a test file ran in two legs"
+
+
+def test_frontend_keeps_all_three_python_versions_whole():
+    """Sharding is per version: every version runs all four legs."""
+    assert _jobs()["frontend"]["strategy"]["matrix"]["python"] == ["3.11", "3.12", "3.13"]
+
+
+def test_the_frontend_gates_run_once_per_python_version_not_once_per_shard():
+    job = _jobs()["frontend"]
+    gates = [s for s in job["steps"]
+             if re.search(r"tools/\w+\.py\s+--check|revl docs check", str(s.get("run", "")))]
+    assert len(gates) == 6, [s["run"] for s in gates]
+    for step in gates:
+        cond = step["if"]
+        assert "matrix.shard == 1" in cond, step["run"]
+        assert "!cancelled()" in cond, step["run"]
+    assert "matrix.shard" not in _suite_step(job).get("if", ""), \
+        "the suite step runs in every leg"
+
+
+@pytest.mark.parametrize("name", ("conformance", "formal"))
+def test_conformance_and_formal_do_not_wait_for_frontend(name):
+    job = _jobs()[name]
+    assert job["needs"] == ["lint"], job["needs"]
+    assert job["if"] == "${{ github.event_name != 'pull_request' }}"

@@ -435,4 +435,251 @@ theorem originOfCap_mem {Γ : List String} {k : String} :
   intro h
   exact List.mem_map.mpr ⟨k, h, rfl⟩
 
+/-! ## A value model for the walk (issue #2738)
+
+`Flow` relates labels, not values: the rule at the sink says which origins
+may reach it, never what a run computes. This section defines a small
+value model next to the walk so that a statement about two runs can be
+made. It is a model defined here. Nothing in `RevL.G9Flow` or the
+differential oracle reads it, and it is not tied to the checker.
+
+A value is `Val`: the data it carries and the label the walk gives it.
+The data of a run comes from numbered inputs (`Inputs`). A crossing
+(`VStep.source o i`) reads input `i` and mints origin `o`; a join
+(`VStep.join m i`) combines the running value with input `i`, labelled
+`m`; both ADD the input to the running data, so the output really is a
+function of what was read. `propagate` carries the value through, and a
+declassifier leaves the data alone and rewrites the label with `applyD`.
+`VStep.toStep` forgets the payload, so a list of `VStep` is also a list of
+`Step`, and the label transition of `stepV` is exactly the one `Flow`
+states (`execV_label_eq`).
+
+The observer is the disclosure sink, `Admits Sink.disclosure`: a value
+whose label carries `secret` or `confidential` is not observable there.
+`execV_lowEq` is the two-run statement: two runs of one admitted flow
+whose inputs agree wherever the observer can see them end with the same
+label, and with the same data whenever the output is observable, unless a
+declassifier on the path clears `confidential`. Unlike a statement about a
+path that never writes the public output, the data here is COMPUTED from
+the inputs, so the proof has to use the label discipline: a join with a
+`secret`-labelled input taints the label of the result, and a declassifier
+that is not admitted (`endorse[secret]`) is exactly what breaks it. -/
+
+/-- A labelled value: the data it carries and the label the walk gives it. -/
+structure Val where
+  data : Nat
+  label : Label
+  deriving Repr, DecidableEq
+
+/-- A step of a run. `source o i` is a crossing minting origin `o` whose
+result is input `i`; `join m i` combines input `i`, labelled `m`, into the
+running value; `propagate` and `declassify` are as in `Step`. -/
+inductive VStep where
+  | source : Origin → Nat → VStep
+  | join : Label → Nat → VStep
+  | propagate : VStep
+  | declassify : Declassifier → VStep
+  deriving Repr
+
+/-- The label-level step a run step stands for. -/
+def VStep.toStep : VStep → Step
+  | .source o _ => .source o
+  | .join m _ => .join m
+  | .propagate => .propagate
+  | .declassify d => .declassify d
+
+/-- The data the numbered inputs of a run carry. -/
+abbrev Inputs := Nat → Nat
+
+/-- One step over a labelled value. The label transition is `Flow`'s. -/
+def stepV (ρ : Inputs) : VStep → Val → Val
+  | .source o i, v => ⟨v.data + ρ i, o :: v.label⟩
+  | .join m i, v => ⟨v.data + ρ i, join m v.label⟩
+  | .propagate, v => v
+  | .declassify d, v => ⟨v.data, applyD d v.label⟩
+
+/-- Run a path over a value, left to right. -/
+def execV (ρ : Inputs) : List VStep → Val → Val
+  | [], v => v
+  | s :: st, v => execV ρ st (stepV ρ s v)
+
+/-- Two input assignments agree along a path where the observer can see
+what is read: an input whose label the disclosure sink admits carries the
+same data in both. An input labelled `secret` or `confidential` may
+differ. -/
+def InputsAgree (ρ₁ ρ₂ : Inputs) : List VStep → Prop
+  | [] => True
+  | .source o i :: st =>
+      (Admits Sink.disclosure [o] → ρ₁ i = ρ₂ i) ∧ InputsAgree ρ₁ ρ₂ st
+  | .join m i :: st =>
+      (Admits Sink.disclosure m → ρ₁ i = ρ₂ i) ∧ InputsAgree ρ₁ ρ₂ st
+  | .propagate :: st => InputsAgree ρ₁ ρ₂ st
+  | .declassify _ :: st => InputsAgree ρ₁ ρ₂ st
+
+/-- A value the disclosure sink admits stays admitted when a crossing's
+origin is consed on: both the origin and the rest are admitted. -/
+theorem disclosure_of_cons {o : Origin} {ℓ : Label}
+    (h : Admits Sink.disclosure (o :: ℓ)) :
+    Admits Sink.disclosure [o] ∧ Admits Sink.disclosure ℓ := by
+  obtain ⟨hs, hc⟩ := h
+  refine ⟨⟨?_, ?_⟩, ⟨?_, ?_⟩⟩
+  · intro hm; exact hs (List.mem_cons.mpr (Or.inl (List.mem_singleton.mp hm)))
+  · intro hm; exact hc (List.mem_cons.mpr (Or.inl (List.mem_singleton.mp hm)))
+  · intro hm; exact hs (List.mem_cons_of_mem _ hm)
+  · intro hm; exact hc (List.mem_cons_of_mem _ hm)
+
+/-- Likewise for a join: both sides of the joined label are admitted. -/
+theorem disclosure_of_append {m ℓ : Label}
+    (h : Admits Sink.disclosure (m ++ ℓ)) :
+    Admits Sink.disclosure m ∧ Admits Sink.disclosure ℓ := by
+  obtain ⟨hs, hc⟩ := h
+  refine ⟨⟨?_, ?_⟩, ⟨?_, ?_⟩⟩
+  · intro hm; exact hs (List.mem_append.mpr (Or.inl hm))
+  · intro hm; exact hc (List.mem_append.mpr (Or.inl hm))
+  · intro hm; exact hs (List.mem_append.mpr (Or.inr hm))
+  · intro hm; exact hc (List.mem_append.mpr (Or.inr hm))
+
+/-- An admitted declassifier that does not clear `confidential` cannot make
+an unobservable value observable: `secret` is never cleared (the two
+refusals in `kindOK`), and `confidential` survives by hypothesis. -/
+theorem disclosure_of_applyD {P : Profile} {G : Grants} {d : Declassifier}
+    {ℓ : Label} (hok : DeclassOK P G d ℓ)
+    (hnc : ¬ Clears d Origin.confidential)
+    (h : Admits Sink.disclosure (applyD d ℓ)) : Admits Sink.disclosure ℓ :=
+  ⟨fun hs => h.1 (declassOK_secret_persists hok hs),
+   fun hc => h.2 (applyD_preserves hnc hc)⟩
+
+/-- The label of a run is the label `Flow` states for the same path. -/
+theorem execV_label_eq {P : Profile} {G : Grants} {ρ : Inputs}
+    (st : List VStep) :
+    ∀ {ℓ out : Label} (v : Val),
+      Flow P G ℓ (st.map VStep.toStep) out → v.label = ℓ →
+      (execV ρ st v).label = out := by
+  induction st with
+  | nil =>
+    intro ℓ out v hf hv
+    have hf' : Flow P G ℓ [] out := hf
+    cases hf'
+    exact hv
+  | cons s st ih =>
+    intro ℓ out v hf hv
+    cases s with
+    | source o i =>
+      have hf' : Flow P G ℓ (Step.source o :: st.map VStep.toStep) out := hf
+      cases hf' with
+      | source _ _ _ _ hrest =>
+        exact ih ⟨v.data + ρ i, o :: v.label⟩ hrest
+          (by show o :: v.label = o :: ℓ; rw [hv])
+    | join m i =>
+      have hf' : Flow P G ℓ (Step.join m :: st.map VStep.toStep) out := hf
+      cases hf' with
+      | join _ _ _ _ hrest =>
+        exact ih ⟨v.data + ρ i, join m v.label⟩ hrest
+          (by show join m v.label = join m ℓ; rw [hv])
+    | propagate =>
+      have hf' : Flow P G ℓ (Step.propagate :: st.map VStep.toStep) out := hf
+      cases hf' with
+      | propagate _ _ _ hrest => exact ih v hrest hv
+    | declassify d =>
+      have hf' : Flow P G ℓ (Step.declassify d :: st.map VStep.toStep) out := hf
+      cases hf' with
+      | declassify _ _ _ _ _ hrest =>
+        exact ih ⟨v.data, applyD d v.label⟩ hrest
+          (by show applyD d v.label = applyD d ℓ; rw [hv])
+
+/-- **Two runs of one admitted flow, inputs agreeing where the observer
+can see.** Both end with the flow's output label, and if a disclosure sink
+admits that label, both end with the same data, provided no declassifier
+on the path clears `confidential`. The data is computed by adding the
+inputs a crossing or join reads, so the label discipline does the work: a
+read of a `secret`- or `confidential`-labelled input puts that origin on
+the label of everything computed from it, and a declassifier cannot take a
+`secret` off. -/
+theorem execV_lowEq {P : Profile} {G : Grants} {ρ₁ ρ₂ : Inputs}
+    (st : List VStep) :
+    ∀ {ℓ out : Label} (v₁ v₂ : Val),
+      Flow P G ℓ (st.map VStep.toStep) out →
+      InputsAgree ρ₁ ρ₂ st →
+      (∀ d, VStep.declassify d ∈ st → ¬ Clears d Origin.confidential) →
+      v₁.label = ℓ → v₂.label = ℓ →
+      (Admits Sink.disclosure ℓ → v₁.data = v₂.data) →
+      (execV ρ₁ st v₁).label = out ∧ (execV ρ₂ st v₂).label = out ∧
+      (Admits Sink.disclosure out →
+        (execV ρ₁ st v₁).data = (execV ρ₂ st v₂).data) := by
+  induction st with
+  | nil =>
+    intro ℓ out v₁ v₂ hf _ _ h₁ h₂ hd
+    have hf' : Flow P G ℓ [] out := hf
+    cases hf'
+    exact ⟨h₁, h₂, hd⟩
+  | cons s st ih =>
+    intro ℓ out v₁ v₂ hf hag hcl h₁ h₂ hd
+    have hcl' : ∀ d, VStep.declassify d ∈ st → ¬ Clears d Origin.confidential :=
+      fun d hd' => hcl d (List.mem_cons_of_mem _ hd')
+    cases s with
+    | source o i =>
+      have hf' : Flow P G ℓ (Step.source o :: st.map VStep.toStep) out := hf
+      cases hf' with
+      | source _ _ _ _ hrest =>
+        obtain ⟨hi, hag'⟩ := hag
+        exact ih ⟨v₁.data + ρ₁ i, o :: v₁.label⟩ ⟨v₂.data + ρ₂ i, o :: v₂.label⟩
+          hrest hag' hcl'
+          (by show o :: v₁.label = o :: ℓ; rw [h₁])
+          (by show o :: v₂.label = o :: ℓ; rw [h₂])
+          (fun hadm => by
+            obtain ⟨ho, hl⟩ := disclosure_of_cons hadm
+            show v₁.data + ρ₁ i = v₂.data + ρ₂ i
+            rw [hd hl, hi ho])
+    | join m i =>
+      have hf' : Flow P G ℓ (Step.join m :: st.map VStep.toStep) out := hf
+      cases hf' with
+      | join _ _ _ _ hrest =>
+        obtain ⟨hi, hag'⟩ := hag
+        exact ih ⟨v₁.data + ρ₁ i, join m v₁.label⟩ ⟨v₂.data + ρ₂ i, join m v₂.label⟩
+          hrest hag' hcl'
+          (by show join m v₁.label = join m ℓ; rw [h₁])
+          (by show join m v₂.label = join m ℓ; rw [h₂])
+          (fun hadm => by
+            obtain ⟨hm, hl⟩ := disclosure_of_append hadm
+            show v₁.data + ρ₁ i = v₂.data + ρ₂ i
+            rw [hd hl, hi hm])
+    | propagate =>
+      have hf' : Flow P G ℓ (Step.propagate :: st.map VStep.toStep) out := hf
+      cases hf' with
+      | propagate _ _ _ hrest => exact ih v₁ v₂ hrest hag hcl' h₁ h₂ hd
+    | declassify d =>
+      have hf' : Flow P G ℓ (Step.declassify d :: st.map VStep.toStep) out := hf
+      cases hf' with
+      | declassify _ _ _ _ hok hrest =>
+        exact ih ⟨v₁.data, applyD d v₁.label⟩ ⟨v₂.data, applyD d v₂.label⟩
+          hrest hag hcl'
+          (by show applyD d v₁.label = applyD d ℓ; rw [h₁])
+          (by show applyD d v₂.label = applyD d ℓ; rw [h₂])
+          (fun hadm => hd (disclosure_of_applyD hok
+            (hcl d (by simp)) hadm))
+
+/-- An origin no declassifier on the path clears is still on the label when
+the run ends: the label half of `origin_persists_or_is_declassified`, over
+the value model. -/
+theorem execV_preserves_uncleared_origin (o : Origin) (ρ : Inputs) :
+    ∀ (st : List VStep) (v : Val),
+      (∀ d, VStep.declassify d ∈ st → ¬ Clears d o) →
+      o ∈ v.label → o ∈ (execV ρ st v).label
+  | [], v, _, ho => ho
+  | .source o' i :: st, v, h, ho =>
+      execV_preserves_uncleared_origin o ρ st (stepV ρ (.source o' i) v)
+        (fun d hd => h d (List.mem_cons_of_mem _ hd))
+        (List.mem_cons_of_mem o' ho)
+  | .join m i :: st, v, h, ho =>
+      execV_preserves_uncleared_origin o ρ st (stepV ρ (.join m i) v)
+        (fun d hd => h d (List.mem_cons_of_mem _ hd))
+        (mem_join_right ho)
+  | .propagate :: st, v, h, ho =>
+      execV_preserves_uncleared_origin o ρ st (stepV ρ .propagate v)
+        (fun d hd => h d (List.mem_cons_of_mem _ hd)) ho
+  | .declassify d :: st, v, h, ho =>
+      execV_preserves_uncleared_origin o ρ st (stepV ρ (.declassify d) v)
+        (fun d' hd' => h d' (List.mem_cons_of_mem _ hd'))
+        (applyD_preserves (h d (by simp)) ho)
+
 end RevL.Lemmas

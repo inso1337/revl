@@ -1,0 +1,3648 @@
+{
+ "_about": [
+  "An offline snapshot of the open issues of inso1337/revl, written by",
+  "tools/tracker_snapshot.py --write and read by tools/evolve_curriculum.py",
+  "(slice 6 of issue #2761). It keeps each issue's number, title and labels and",
+  "the tests/ and tools/ paths its body names as `verifiers`; never the body.",
+  "An issue closed since the snapshot was taken stays here until the next",
+  "--write. The file is in the tree, so a candidate can read it."
+ ],
+ "repo": "inso1337/revl",
+ "issues": [
+  {
+   "number": 81,
+   "title": "130: stream reactive types — slices 1-5 landed (the whole v1 surface); tiers and durability remain",
+   "labels": [
+    "p4",
+    "post-v3",
+    "roadmap",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 84,
+   "title": "146: Full self-host: `lower.rvl` + the six emitters in revl (Path B, finally). The maximal stor",
+   "labels": [
+    "p4",
+    "post-v3",
+    "roadmap",
+    "self-host"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 104,
+   "title": "338: DESIGN DONE 2026-09-01 (docs/design/338-revl-as-dependency.md). Exists today (py): pip in",
+   "labels": [
+    "gate",
+    "p4",
+    "post-v3",
+    "roadmap"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 106,
+   "title": "391: SELF-HOST PARITY CATCH-UP — the self-host revl compiler (selfhost/.rvl) has fallen behind",
+   "labels": [
+    "p4",
+    "post-v3",
+    "roadmap",
+    "self-host"
+   ],
+   "verifiers": [
+    "tests/test_selfhost_compile.py"
+   ]
+  },
+  {
+   "number": 1189,
+   "title": "The model portfolio as a schedulable, device-profiled resource",
+   "labels": [
+    "model-runtime",
+    "p4",
+    "post-v3",
+    "review-2026-09-19",
+    "roadmap",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 1192,
+   "title": "Shadow routing with evidence-gated, revertible promotion",
+   "labels": [
+    "model-runtime",
+    "p4",
+    "post-v3",
+    "review-2026-09-19",
+    "roadmap",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 1193,
+   "title": "Model-aware capability attenuation: put the model role in the product",
+   "labels": [
+    "model-runtime",
+    "p3",
+    "post-v3",
+    "review-2026-09-19",
+    "roadmap",
+    "security"
+   ],
+   "verifiers": [
+    "tests/test_model_attenuation_519.py",
+    "tests/test_model_reach_spawn.py"
+   ]
+  },
+  {
+   "number": 1198,
+   "title": "The private peer pool as an operable product (`revl pool` / `run --pool private`)",
+   "labels": [
+    "p4",
+    "post-v3",
+    "review-2026-09-19",
+    "roadmap",
+    "runtime",
+    "tooling"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2188,
+   "title": "Audit 2026-10-09: Performance report",
+   "labels": [
+    "observation",
+    "post-v3",
+    "tooling"
+   ],
+   "verifiers": [
+    "tests/test_selfhost_lower.py",
+    "tests/test_selfhost_lower_ir.py",
+    "tests/test_secret_witness_receiver_position.py",
+    "tests/test_ui_target_binding_521.py",
+    "tests/test_ui_target_provenance_1371.py",
+    "tests/test_458_criterion_surface.py",
+    "tests/test_1240_selfhost_scoped_extern_seed.py",
+    "tests/test_retention_summary_worklist_539.py",
+    "tests/shard_weights.json",
+    "tests/conftest.py"
+   ]
+  },
+  {
+   "number": 2189,
+   "title": "Audit 2026-10-09: Code quality report",
+   "labels": [
+    "observation",
+    "post-v3",
+    "tooling"
+   ],
+   "verifiers": [
+    "tests/test_expr_dispatcher_conformance.py",
+    "tests/test_load_by_path_is_the_only_by_path_loader.py",
+    "tools/conformance.py",
+    "tools/tier_guarantees.py",
+    "tools/validate.py",
+    "tools/selfhost_line_coverage.py"
+   ]
+  },
+  {
+   "number": 2190,
+   "title": "Audit 2026-10-09: Tests and verification report",
+   "labels": [
+    "observation",
+    "post-v3",
+    "tooling"
+   ],
+   "verifiers": [
+    "tools/pre_merge.sh",
+    "tests/test_247_second_pass_dataloss.py",
+    "tests/conftest.py",
+    "tools/affected_tests.py",
+    "tests/test_frontend.py",
+    "tests/test_doc_examples.py",
+    "tools/regen_goldens.py",
+    "tests/test_env_gated_skips_run_somewhere.py",
+    "tests/test_serve_http_operator_listener_1553.py",
+    "tests/test_471_quorum_slice2.py",
+    "tests/test_424_b1_interposition.py",
+    "tests/test_fs_witnessed_restore_identity_1054.py",
+    "tests/test_roadmap_issue_state.py",
+    "tests/test_estop_443.py",
+    "tests/test_affected_tests.py",
+    "tests/test_check_vocabulary_mirrors.py",
+    "tests/test_selfhost_lower.py",
+    "tests/test_gate_crate_admit.py",
+    "tests/test_inprocess_gate_rust.py",
+    "tests/test_approval_emission_session_path_1781.py"
+   ]
+  },
+  {
+   "number": 2194,
+   "title": "Each `revl_check` compiles the candidate 3 times and runs the lexer about 20 times (performance audit PERF-04)",
+   "labels": [
+    "mcp",
+    "p3",
+    "performance",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2202,
+   "title": "Complexity hot spots: the top-churn files hold the largest functions, and the compiler and emitters are each maintained twice (quality audit QUAL-05)",
+   "labels": [
+    "dx",
+    "enhancement",
+    "observation",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2277,
+   "title": "Can a swap produce differential evidence? The downstream gate is 8 to 11 hours of cold processes",
+   "labels": [
+    "dx",
+    "language-design",
+    "p2",
+    "post-v3",
+    "question"
+   ],
+   "verifiers": [
+    "tools/run_tests.py"
+   ]
+  },
+  {
+   "number": 2325,
+   "title": "java: generic variants, Unit type arguments and Set/Stream heads emit invalid Java",
+   "labels": [
+    "backend-java",
+    "bug",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2328,
+   "title": "selfhost rust: a type named Box is not renamed to Box_ as the reference does",
+   "labels": [
+    "bug",
+    "post-v3",
+    "self-host"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2391,
+   "title": "self-host rust and java component output differs from the reference even for unqualified keys",
+   "labels": [
+    "bug",
+    "post-v3",
+    "self-host"
+   ],
+   "verifiers": [
+    "tests/test_namespaced_key_emit_1914.py"
+   ]
+  },
+  {
+   "number": 2394,
+   "title": "self-host py, rust and java emitters: port host_key mangling so namespaced keys match the reference bytes",
+   "labels": [
+    "enhancement",
+    "post-v3",
+    "self-host"
+   ],
+   "verifiers": [
+    "tests/test_namespaced_key_emit_1914.py"
+   ]
+  },
+  {
+   "number": 2402,
+   "title": "Checker: values of a user-declared generic variant cannot be constructed",
+   "labels": [
+    "bug",
+    "language-design",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2405,
+   "title": "self-host: known silent type-check gaps (generic records, var, if branches)",
+   "labels": [
+    "bug",
+    "post-v3",
+    "self-host"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2418,
+   "title": "docs: remove remaining em-dashes from prose",
+   "labels": [
+    "documentation",
+    "p4",
+    "post-v3"
+   ],
+   "verifiers": [
+    "tools/docgen.py"
+   ]
+  },
+  {
+   "number": 2421,
+   "title": "Item 148: a frozen retry budget and a minimum number of rejects before an unreliable-evaluation stop",
+   "labels": [
+    "enhancement",
+    "p4",
+    "post-v3",
+    "self-evolution"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2469,
+   "title": "self-host compile hangs on a config list of records with a function field",
+   "labels": [
+    "bug",
+    "post-v3",
+    "self-host"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2472,
+   "title": "self-host: user generic variant construction and arm binding disagree with the reference",
+   "labels": [
+    "bug",
+    "post-v3",
+    "self-host"
+   ],
+   "verifiers": [
+    "tests/test_selfhost_compile.py"
+   ]
+  },
+  {
+   "number": 2481,
+   "title": "go: a provide method that panics outside an activation still kills the process, and the recovered error drops the stack",
+   "labels": [
+    "bug",
+    "runtime",
+    "v3-blocking"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2489,
+   "title": "selfhost: effect call arguments with a wrong payload count or built-in case are admitted",
+   "labels": [
+    "bug",
+    "post-v3",
+    "self-host"
+   ],
+   "verifiers": [
+    "tests/test_selfhost_compile.py"
+   ]
+  },
+  {
+   "number": 2526,
+   "title": "authoring trust: open rules for untrusted authors (placeholders, operator text, requirer side, approvals, replay, deploy paths, export root)",
+   "labels": [
+    "language-design",
+    "question",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2527,
+   "title": "trace: redact host-reported usage fields before writing the run trace",
+   "labels": [
+    "enhancement",
+    "post-v3",
+    "runtime",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2547,
+   "title": "the CLI compiles author-exported files under .revl/export without the authoring profile",
+   "labels": [
+    "bug",
+    "security",
+    "tooling",
+    "v3-blocking"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2563,
+   "title": "Export-area trust decides from a path, but many compile sites pass a label: fail closed",
+   "labels": [
+    "bug",
+    "gate",
+    "mcp",
+    "security",
+    "v3-blocking"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2569,
+   "title": "Self-host lowering admits a wrong-typed host verb argument in a component body",
+   "labels": [
+    "bug",
+    "p3",
+    "post-v3",
+    "self-host"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2579,
+   "title": "component bodies still do not type a lambda: a let-bound or passed arrow is unchecked, and its parameter types leak into the enclosing scope",
+   "labels": [
+    "bug",
+    "language-design",
+    "p2",
+    "self-host",
+    "v3-blocking"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2586,
+   "title": "untrusted realm-removal check compares placements by key; a component can leave its realm set by dropping or re-adding the key",
+   "labels": [
+    "bug",
+    "mcp",
+    "p3",
+    "security",
+    "v3-blocking"
+   ],
+   "verifiers": [
+    "tests/test_realm_removal_by_key_2523.py",
+    "tests/test_untrusted_repair_realm_2520.py"
+   ]
+  },
+  {
+   "number": 2621,
+   "title": "Published benchmark arms cannot be traced to a driver: six bench_agentic variants, none tracked, two sharing one docstring",
+   "labels": [
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2622,
+   "title": "Run records do not identify the system prompt, so two different experiments pass an identity check as one",
+   "labels": [
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2631,
+   "title": "_host_bodies lists every host body in the merged composition, so the approval ticket cannot say who wrote one",
+   "labels": [
+    "bug",
+    "mcp",
+    "p3",
+    "security",
+    "v3-blocking"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2632,
+   "title": "Two benchmark drivers default to the same output file, so one run silently overwrites another",
+   "labels": [
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2635,
+   "title": "truc add has no bound on a vendored row's declared reach, and #2561 closed before it was decided",
+   "labels": [
+    "bug",
+    "language-design",
+    "v3-blocking"
+   ],
+   "verifiers": [
+    "tests/test_truc_add_assemble.py"
+   ]
+  },
+  {
+   "number": 2683,
+   "title": "Evaluate injection resistance on a public agent-security benchmark (AgentDojo first), baseline vs admitted arm",
+   "labels": [
+    "enhancement",
+    "p2",
+    "post-v3",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2685,
+   "title": "No command plans a component version change against its real consumers",
+   "labels": [
+    "enhancement",
+    "gate",
+    "p3",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2686,
+   "title": "Policy cannot forbid two capabilities held together by one component",
+   "labels": [
+    "enhancement",
+    "p3",
+    "post-v3",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2687,
+   "title": "Int has no value-returning add, sub or mul and no explicit wrapping form",
+   "labels": [
+    "enhancement",
+    "language-design",
+    "p3",
+    "post-v3"
+   ],
+   "verifiers": [
+    "tests/test_cross_tier_execution.py"
+   ]
+  },
+  {
+   "number": 2688,
+   "title": "Declared bytes, time and host-path call ceilings are not enforced when the program runs",
+   "labels": [
+    "enhancement",
+    "p2",
+    "runtime",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2691,
+   "title": "No single runnable demo shows an untrusted component refused, explained and repaired",
+   "labels": [
+    "documentation",
+    "dx",
+    "p3",
+    "post-v3",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2693,
+   "title": "Delegate[S] is type-checked but nothing mints, attributes or revokes a delegation",
+   "labels": [
+    "enhancement",
+    "language-design",
+    "p3",
+    "post-v3",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2696,
+   "title": "No typed memory service keeps taint and retention on stored items",
+   "labels": [
+    "enhancement",
+    "p3",
+    "post-v3",
+    "security",
+    "stdlib"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2698,
+   "title": "Ownership modes lack transfer and shared, so a handle cannot move with its closing duty",
+   "labels": [
+    "enhancement",
+    "language-design",
+    "p3",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2699,
+   "title": "Branching self-recursion with a small literal fuel is reported unbounded",
+   "labels": [
+    "enhancement",
+    "language-design",
+    "p4",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2701,
+   "title": "Language servers lack document symbols, references, completion and rename",
+   "labels": [
+    "dx",
+    "enhancement",
+    "p4",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2702,
+   "title": "No authority graph answers which model role can reach a capability, or which update widens it",
+   "labels": [
+    "enhancement",
+    "p3",
+    "post-v3",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2703,
+   "title": "The example web app has no authorization step, one driver, and no audit view",
+   "labels": [
+    "dx",
+    "enhancement",
+    "p3",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2704,
+   "title": "A service operation does not compile to an argument schema, grammar and capability check",
+   "labels": [
+    "enhancement",
+    "model-runtime",
+    "p3",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2705,
+   "title": "A function cannot state a spec that revl checks as admission evidence",
+   "labels": [
+    "enhancement",
+    "formal",
+    "language-design",
+    "p3",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2707,
+   "title": "No worked example of a WIT resource whose destructor is the revl undo",
+   "labels": [
+    "documentation",
+    "dx",
+    "p4",
+    "post-v3"
+   ],
+   "verifiers": [
+    "tests/test_export_wit.py"
+   ]
+  },
+  {
+   "number": 2708,
+   "title": "No native tier for hot pure functions: extern pure is a claim, not a pinned or sandboxed artifact",
+   "labels": [
+    "enhancement",
+    "p3",
+    "performance",
+    "post-v3",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2710,
+   "title": "Repeated component failures never trip anything: no failure counter, open state or half-open probe",
+   "labels": [
+    "enhancement",
+    "p3",
+    "post-v3",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2712,
+   "title": "Question: is a declared standby divert enough, or is run-time leader election needed?",
+   "labels": [
+    "language-design",
+    "p4",
+    "post-v3",
+    "question"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2714,
+   "title": "The TypeScript tier writes no durable WAL, so a crashed TypeScript run cannot be recovered",
+   "labels": [
+    "enhancement",
+    "p3",
+    "post-v3",
+    "runtime"
+   ],
+   "verifiers": [
+    "tests/test_go_crash_recovery.py",
+    "tests/test_java_crash_recovery.py",
+    "tests/test_rust_crash_recovery.py",
+    "tests/test_wasm_crash_recovery.py",
+    "tests/test_ts_crash_recovery.py"
+   ]
+  },
+  {
+   "number": 2716,
+   "title": "A failed multi-host deploy cannot unwind committed ssh hosts; deploy docs still say ssh is refused",
+   "labels": [
+    "enhancement",
+    "p2",
+    "post-v3",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2717,
+   "title": "Deploy attestation is HMAC only, so a verifier can forge it; imports and fault counts are unbound",
+   "labels": [
+    "enhancement",
+    "p3",
+    "post-v3",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2721,
+   "title": "No verifier role in the peer pool: a worker's result is used without an independent claim check",
+   "labels": [
+    "enhancement",
+    "p4",
+    "post-v3",
+    "runtime",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2722,
+   "title": "A pool peer that drifts or breaks its terms is never lowered or withdrawn automatically",
+   "labels": [
+    "enhancement",
+    "p3",
+    "post-v3",
+    "runtime",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2724,
+   "title": "No deterministic profile: nothing refuses ambient time, network or randomness, or bounds steps",
+   "labels": [
+    "enhancement",
+    "language-design",
+    "p4",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2727,
+   "title": "The cross-tier fuzzer cannot generate non-ASCII strings or compare how tiers fault",
+   "labels": [
+    "ci",
+    "emitter",
+    "p3",
+    "post-v3",
+    "tooling"
+   ],
+   "verifiers": [
+    "tools/fuzz_cross_tier.py"
+   ]
+  },
+  {
+   "number": 2728,
+   "title": "No named fault profile, and no test for a crash between an effect and its inverse record",
+   "labels": [
+    "p3",
+    "post-v3",
+    "runtime",
+    "tooling"
+   ],
+   "verifiers": [
+    "tests/test_go_crash_recovery.py",
+    "tests/test_java_crash_recovery.py",
+    "tests/test_rust_crash_recovery.py",
+    "tests/test_wasm_crash_recovery.py"
+   ]
+  },
+  {
+   "number": 2729,
+   "title": "Generated components need not run confined: wasm import check, limits and policy are partial",
+   "labels": [
+    "enhancement",
+    "p2",
+    "post-v3",
+    "runtime",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2730,
+   "title": "Runtime metrics and spans omit the composition hash, residue count and admission rejections",
+   "labels": [
+    "dx",
+    "enhancement",
+    "p3",
+    "post-v3",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2733,
+   "title": "Parallel emission fan-out exists only on py; ts runs the same groups sequentially",
+   "labels": [
+    "emitter",
+    "enhancement",
+    "p4",
+    "performance",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2735,
+   "title": "No way to emit an AX task manifest from a composition",
+   "labels": [
+    "emitter",
+    "enhancement",
+    "p4",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2736,
+   "title": "Revertible-effects paper has no evaluation: no seeded-defect saga corpus, no Temporal comparison",
+   "labels": [
+    "enhancement",
+    "knowledge",
+    "p3",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2738,
+   "title": "Secret and endorse are proved as flow rules only, and the ledger calls non-interference done",
+   "labels": [
+    "enhancement",
+    "formal",
+    "p3",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2739,
+   "title": "Model and compiler agree only by corpus oracle: no IR-level theorem, agreed subset or current summary",
+   "labels": [
+    "enhancement",
+    "formal",
+    "p2",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2740,
+   "title": "No theorem that an abort drops deferred emissions; roll-forward and witnessed crash windows unmodelled",
+   "labels": [
+    "enhancement",
+    "formal",
+    "p3",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2741,
+   "title": "Parallel fan-out has no formal semantics and no chosen formalism for one",
+   "labels": [
+    "enhancement",
+    "formal",
+    "p3",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2743,
+   "title": "Emission cardinality bounds have no Lean theorem, though ceilings and budgets do",
+   "labels": [
+    "enhancement",
+    "formal",
+    "p3",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2744,
+   "title": "G1 is the last partial formal row: the access walk's coverage of a body is measured, not stated",
+   "labels": [
+    "enhancement",
+    "formal",
+    "p2",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2745,
+   "title": "The formal CI job prints no proof-status summary and does not require accept and refuse cases per row",
+   "labels": [
+    "enhancement",
+    "formal",
+    "p4",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2749,
+   "title": "revl replay branch cannot run: every replay mode only reports readiness",
+   "labels": [
+    "enhancement",
+    "p3",
+    "post-v3",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2751,
+   "title": "The evolution controller trusts supplied stage records and no command runs the stages",
+   "labels": [
+    "enhancement",
+    "gate",
+    "p2",
+    "post-v3",
+    "self-evolution"
+   ],
+   "verifiers": [
+    "tools/evolution_controller.py"
+   ]
+  },
+  {
+   "number": 2752,
+   "title": "Four of seven non-evolvable authority surfaces rest on a digest or nothing, not a refusal",
+   "labels": [
+    "enhancement",
+    "p2",
+    "post-v3",
+    "security",
+    "self-evolution"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2753,
+   "title": "Evidence policy can only refuse: add graded outcomes observe, canary, review, admit, quarantine",
+   "labels": [
+    "enhancement",
+    "gate",
+    "p3",
+    "post-v3",
+    "self-evolution"
+   ],
+   "verifiers": [
+    "tools/evolution_controller.py"
+   ]
+  },
+  {
+   "number": 2755,
+   "title": "The benchmark cannot show whether a model writes sound effect, undo and capability declarations",
+   "labels": [
+    "dx",
+    "enhancement",
+    "model-runtime",
+    "p4",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2757,
+   "title": "No signed, chained receipt per consequential action with input and result commitments",
+   "labels": [
+    "enhancement",
+    "p2",
+    "post-v3",
+    "runtime",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2758,
+   "title": "Drift verdicts exist but no monitor re-measures live hashes and no actuator acts",
+   "labels": [
+    "enhancement",
+    "p3",
+    "post-v3",
+    "runtime",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2761,
+   "title": "Four curriculum sources and mutation testing are unbuilt and no open issue tracks them",
+   "labels": [
+    "enhancement",
+    "p2",
+    "post-v3",
+    "self-evolution"
+   ],
+   "verifiers": [
+    "tools/evolve_curriculum.py",
+    "tests/test_selfhost_lower.py",
+    "tools/fuzz_frontend.py"
+   ]
+  },
+  {
+   "number": 2766,
+   "title": "Agentic withdraw task regresses stepwise across 5d37833d0..46cb085bd: 8/8 to 6/8 with premature stops, while the #2500 fallback result holds",
+   "labels": [
+    "bug",
+    "mcp",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2802,
+   "title": "Pin the scoring protocol by digest and fence one evaluator set",
+   "labels": [
+    "enhancement",
+    "p3",
+    "post-v3",
+    "self-evolution"
+   ],
+   "verifiers": [
+    "tools/evolution_controller.py",
+    "tools/heldout_scoring.py",
+    "tools/evolution_reward.py",
+    "tools/evolution_progress.py",
+    "tests/test_kernel_boundary_544.py",
+    "tests/test_evolution_controller.py"
+   ]
+  },
+  {
+   "number": 2804,
+   "title": "Tag promotion evidence exact or sampled and state the bound on a sampled pass",
+   "labels": [
+    "enhancement",
+    "gate",
+    "p3",
+    "post-v3"
+   ],
+   "verifiers": [
+    "tests/test_shadow_promotion_518.py"
+   ]
+  },
+  {
+   "number": 2805,
+   "title": "Fresh-context rounds in the evolve loop with the proposer packet digest recorded",
+   "labels": [
+    "enhancement",
+    "p3",
+    "post-v3",
+    "self-evolution"
+   ],
+   "verifiers": [
+    "tools/evolution_controller.py",
+    "tests/test_evolve_loop.py"
+   ]
+  },
+  {
+   "number": 2806,
+   "title": "Counterfactual replay as the probe for a candidate edit, and continue vs reset",
+   "labels": [
+    "enhancement",
+    "p3",
+    "post-v3",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2809,
+   "title": "Best-per-cost-cell archive of retained candidates, authority never an axis",
+   "labels": [
+    "enhancement",
+    "p4",
+    "post-v3",
+    "self-evolution"
+   ],
+   "verifiers": [
+    "tools/evolution_reward.py",
+    "tools/evolution_controller.py"
+   ]
+  },
+  {
+   "number": 2810,
+   "title": "Derived values that go stale when an input is superseded or retracted",
+   "labels": [
+    "enhancement",
+    "language-design",
+    "p4",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2843,
+   "title": "MCP: no verb runs a selected suite and returns per-test results",
+   "labels": [
+    "bug",
+    "mcp",
+    "post-v3"
+   ],
+   "verifiers": [
+    "tools/docgen.py",
+    "tools/run_tests.py"
+   ]
+  },
+  {
+   "number": 2844,
+   "title": "check doc and comment references so stale anchors cannot accumulate",
+   "labels": [
+    "bug",
+    "post-v3",
+    "tooling"
+   ],
+   "verifiers": [
+    "tools/docgen.py",
+    "tools/check_vision_claims.py",
+    "tools/check_roadmap_claims.py",
+    "tools/check_vocabulary_mirrors.py",
+    "tools/gate_reference_line_ledger.json",
+    "tools/check_doc_refs.py",
+    "tools/pre_pr.sh"
+   ]
+  },
+  {
+   "number": 2845,
+   "title": "MCP refusals should carry the repair, not only the diagnosis",
+   "labels": [
+    "bug",
+    "mcp",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2846,
+   "title": "tie behavior claims in comments and docs to a witness (revl:claim)",
+   "labels": [
+    "bug",
+    "post-v3",
+    "tooling"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2850,
+   "title": "bounded local test selection and a documented hook budget",
+   "labels": [
+    "bug",
+    "post-v3",
+    "tooling"
+   ],
+   "verifiers": [
+    "tools/pre_merge.sh"
+   ]
+  },
+  {
+   "number": 2851,
+   "title": "scope the required backend jobs to touched tiers (gate-shape decision)",
+   "labels": [
+    "bug",
+    "ci",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2852,
+   "title": "MCP: return content handles so callers stop resending bytes",
+   "labels": [
+    "enhancement",
+    "mcp",
+    "performance",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2853,
+   "title": "MCP: agent output profile with bounded, paginated answers",
+   "labels": [
+    "enhancement",
+    "mcp",
+    "performance",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2854,
+   "title": "MCP: revl_brief, a compact next-step answer for the loop",
+   "labels": [
+    "dx",
+    "enhancement",
+    "mcp",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2855,
+   "title": "MCP: apply a refusal's repair and return the repaired candidate",
+   "labels": [
+    "enhancement",
+    "mcp",
+    "performance",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2857,
+   "title": "test result cache keyed by content so repeat runs only rerun what changed",
+   "labels": [
+    "enhancement",
+    "performance",
+    "post-v3",
+    "tooling"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2858,
+   "title": "one answer envelope and refusal-code registry across CLI --json and MCP",
+   "labels": [
+    "enhancement",
+    "mcp",
+    "post-v3",
+    "tooling"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2859,
+   "title": "turn and token economy deep dive (user-facing surfaces)",
+   "labels": [
+    "enhancement",
+    "mcp",
+    "performance",
+    "post-v3",
+    "roadmap"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2861,
+   "title": "non-required full-suite shards can merge real regressions; decide the gate shape",
+   "labels": [
+    "bug",
+    "ci",
+    "p2"
+   ],
+   "verifiers": [
+    "tests/test_typesafety.py"
+   ]
+  },
+  {
+   "number": 2867,
+   "title": "The 46cb085bd withdraw gate does not reproduce on Linux aarch64 (3/8 against a recorded 6/8)",
+   "labels": [
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2869,
+   "title": "load penalty: the 3.7x slow lane is not reproduced by compressor pressure or one extra lane",
+   "labels": [
+    "ci",
+    "p2",
+    "performance",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2888,
+   "title": "MCP: a passing revl_check answer is about 5 KB, most of it repeated",
+   "labels": [
+    "enhancement",
+    "mcp",
+    "p3",
+    "performance",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2899,
+   "title": "self-host: Go, Java and Wasm cannot compile the self-host, measured per file",
+   "labels": [
+    "observation",
+    "p3",
+    "post-v3",
+    "self-host"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2907,
+   "title": "rust: the self-host runs 2x to 5x slower than on the Python tier because values are copied, not shared",
+   "labels": [
+    "language-design",
+    "p2",
+    "performance",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2912,
+   "title": "self-host: four component-body differences left after #2569 (subscribe stages, timer unit, await emit output)",
+   "labels": [
+    "bug",
+    "p3",
+    "post-v3",
+    "self-host"
+   ],
+   "verifiers": [
+    "tests/test_selfhost_compile.py"
+   ]
+  },
+  {
+   "number": 2937,
+   "title": "a List[Int] value passed as List[Float] builds on py and ts but not on go and java",
+   "labels": [
+    "bug",
+    "language-design",
+    "p2",
+    "v3-blocking"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2938,
+   "title": "An Int literal in a nested Float slot is not converted, so == disagrees across tiers",
+   "labels": [
+    "bug",
+    "emitter",
+    "p2",
+    "v3-blocking"
+   ],
+   "verifiers": [
+    "tests/test_mixed_numeric_equality_tiers.py"
+   ]
+  },
+  {
+   "number": 2951,
+   "title": "stdlib/auth.rvl has no way to read the subject of a Principal",
+   "labels": [
+    "enhancement",
+    "language-design",
+    "p3",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2969,
+   "title": "`let r = emit helper()` emits a bare call and records no emission step",
+   "labels": [
+    "backend-python",
+    "bug",
+    "emitter",
+    "p1",
+    "runtime",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2970,
+   "title": "Decide whether a compensation slot's host crossing is recorded as an emission",
+   "labels": [
+    "enhancement",
+    "language-design",
+    "p2",
+    "runtime"
+   ],
+   "verifiers": [
+    "tests/test_1589_timer_extern_compensate.py"
+   ]
+  },
+  {
+   "number": 2971,
+   "title": "An extern declaration has no reach statement, so no consumer can narrow on it and the unknown set saturates",
+   "labels": [
+    "enhancement",
+    "gate",
+    "language-design",
+    "p2",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2974,
+   "title": "A use braces list adds names but does not restrict them, so a declared import surface is not a contract",
+   "labels": [
+    "language-design",
+    "question"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2978,
+   "title": "Self-host lowering admits an async callable passed through a generic fn into a sync slot",
+   "labels": [
+    "bug",
+    "p2",
+    "self-host"
+   ],
+   "verifiers": [
+    "tests/test_selfhost_lower.py"
+   ]
+  },
+  {
+   "number": 2996,
+   "title": "Live updates: check the latest release and hot-swap it into a running composition",
+   "labels": [
+    "enhancement",
+    "mcp",
+    "p2"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 2997,
+   "title": "R1: outbound HTTP standard library module",
+   "labels": [
+    "enhancement",
+    "stdlib"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3000,
+   "title": "R3: JWT verification and JWKS key selection",
+   "labels": [
+    "enhancement",
+    "stdlib"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3023,
+   "title": "Enforce use lists for pub names: an un-imported pub fn or extern is still callable by bare name",
+   "labels": [
+    "bug",
+    "gate",
+    "language-design"
+   ],
+   "verifiers": [
+    "tests/test_selfhost_compile.py"
+   ]
+  },
+  {
+   "number": 3098,
+   "title": "selfhost/emit_go.rvl exceeds the gate crate's MAX_SOURCE_BYTES since #3079",
+   "labels": [
+    "gate",
+    "p3",
+    "self-host"
+   ],
+   "verifiers": [
+    "tools/build_gate_crate.py"
+   ]
+  },
+  {
+   "number": 3114,
+   "title": "Anyone with one merged commit can run a pull request's code on the persistent self-hosted arm64 runner",
+   "labels": [
+    "bug",
+    "ci",
+    "p1",
+    "security"
+   ],
+   "verifiers": [
+    "tools/check_workflow_permissions.py"
+   ]
+  },
+  {
+   "number": 3115,
+   "title": "Any write account can publish a release by pushing a v* tag: no pypi environment, no tag rule, no main check (regression of #551)",
+   "labels": [
+    "bug",
+    "ci",
+    "p1",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3116,
+   "title": "Branch protection requires code-owner review but the repository has no CODEOWNERS file, so the rule requires nothing",
+   "labels": [
+    "bug",
+    "ci",
+    "p2",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3118,
+   "title": "CI runs release binaries downloaded by version with no checksum (wasmtime, wasm-tools, temporal cli)",
+   "labels": [
+    "ci",
+    "enhancement",
+    "p3",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3124,
+   "title": "A provider error that echoes the API key re-encoded or masked passes the redaction into the console and the WAL",
+   "labels": [
+    "enhancement",
+    "model-runtime",
+    "p3",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3135,
+   "title": "A service method named __a is name-mangled by the python class body, so a call reaches a different method",
+   "labels": [
+    "backend-python",
+    "bug",
+    "emitter",
+    "p3",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3138,
+   "title": "A fn named like an ADT case replaces the case constructor on the python tier, so a T-typed fn returns an Int",
+   "labels": [
+    "backend-python",
+    "bug",
+    "emitter",
+    "p2",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3139,
+   "title": "A pub fn named test_0 is replaced by the generated test function on the python tier",
+   "labels": [
+    "backend-python",
+    "bug",
+    "emitter",
+    "p3",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3143,
+   "title": "self-host: eight host externs have no body outside Python, so five tiers refuse the files that declare them",
+   "labels": [
+    "bug",
+    "emitter",
+    "post-v3",
+    "self-host"
+   ],
+   "verifiers": [
+    "tools/selfhost_compile_matrix.json"
+   ]
+  },
+  {
+   "number": 3154,
+   "title": "A pool peer forgets the tasks it ran when it restarts and never checks a task's issued_at, so a captured task runs again",
+   "labels": [
+    "bug",
+    "p3",
+    "runtime",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3156,
+   "title": "A TDX quote is accepted on MRTD alone: the RTMRs, TCB and quoting-enclave identity are parsed and never compared",
+   "labels": [
+    "bug",
+    "p2",
+    "runtime",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3172,
+   "title": "docs: the #2688 declared-capabilities check refuses a bare Mock, test doubles need a spec",
+   "labels": [
+    "documentation",
+    "p3",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3182,
+   "title": "revl audit --diff reports clean on a new host backend body or a widened emission scope; revl diff also drops reach weakening",
+   "labels": [
+    "bug",
+    "p2",
+    "security",
+    "tooling"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3188,
+   "title": "An operator scoped to one realm can swap a component outside it by giving the candidate a realm its grant matches",
+   "labels": [
+    "bug",
+    "mcp",
+    "p1",
+    "security"
+   ],
+   "verifiers": [
+    "tests/test_mcp_operator.py"
+   ]
+  },
+  {
+   "number": 3189,
+   "title": "revl run --backend wasm applies no fuel, memory or wall ceiling and ignores the policy's wasm component limits",
+   "labels": [
+    "bug",
+    "p2",
+    "runtime",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3193,
+   "title": "A forged committed line in a placement WAL index makes revl recover keep an uncommitted run and stamp WALs outside the index directory",
+   "labels": [
+    "bug",
+    "p2",
+    "runtime",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3196,
+   "title": "A validated model response or tool argument may carry members its record type does not declare",
+   "labels": [
+    "bug",
+    "model-runtime",
+    "p2",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3198,
+   "title": "A container-sandboxed process can read the conductor's whole working directory, not just its declared fs grants",
+   "labels": [
+    "bug",
+    "p2",
+    "runtime",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3199,
+   "title": "The python fs jail's syscall helpers walk out of the root on an unnormalised path, so a caller that skips resolve_within deletes or reads outside",
+   "labels": [
+    "enhancement",
+    "p3",
+    "runtime",
+    "security"
+   ],
+   "verifiers": [
+    "tests/test_fs_confinement_families.py"
+   ]
+  },
+  {
+   "number": 3201,
+   "title": "The gate crate draws no objection to a violation hidden between two host bodies that hold a quote char literal",
+   "labels": [
+    "bug",
+    "gate",
+    "p2",
+    "security"
+   ],
+   "verifiers": [
+    "tools/gate_reference_census.py"
+   ]
+  },
+  {
+   "number": 3202,
+   "title": "An OpenAPI path key with a newline injects revl source and host code into the generated module",
+   "labels": [
+    "bug",
+    "p1",
+    "security",
+    "tooling"
+   ],
+   "verifiers": [
+    "tests/test_import_openapi_injection_416f.py"
+   ]
+  },
+  {
+   "number": 3203,
+   "title": "The authority panel reports clean for a layer that raises a numeric limit or flips a bool an emission uses (regression of #706)",
+   "labels": [
+    "bug",
+    "gate",
+    "p1",
+    "security"
+   ],
+   "verifiers": [
+    "tests/test_composition_confinement.py"
+   ]
+  },
+  {
+   "number": 3204,
+   "title": "The gate crate frontier guard is switched off by a lone double quote in a template, so a declined name draws no objection",
+   "labels": [
+    "bug",
+    "gate",
+    "p3",
+    "security"
+   ],
+   "verifiers": [
+    "tools/gate_reference_census.py"
+   ]
+  },
+  {
+   "number": 3205,
+   "title": "The ts json_parse accepts malformed JSON the py tier refuses, including 1e as a NaN that passes bound checks",
+   "labels": [
+    "bug",
+    "p2",
+    "security",
+    "stdlib"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3207,
+   "title": "truc apply admits a vendored component whose bytes no longer match its truc.lock pin",
+   "labels": [
+    "bug",
+    "p2",
+    "security",
+    "tooling"
+   ],
+   "verifiers": [
+    "tests/test_truc_apply_stack_check.py"
+   ]
+  },
+  {
+   "number": 3211,
+   "title": "A realm-scoped policy rule does not select a component placed with realms(...), so its allow-list bounds nothing",
+   "labels": [
+    "bug",
+    "gate",
+    "p2",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3212,
+   "title": "A let annotation inside a provide method is trusted without checking the value, so an Opt or wrong-typed value passes T1/T2",
+   "labels": [
+    "bug",
+    "gate",
+    "p3",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3214,
+   "title": "The language server runs a python planted in the shared temp dir when HOME is unset, with no owner check on the cache",
+   "labels": [
+    "bug",
+    "p3",
+    "security",
+    "tooling"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3215,
+   "title": "docs: ten links to guarantee anchors (#a1, #g1, #g2, #g4, #a2) resolve to no heading",
+   "labels": [
+    "documentation",
+    "p4"
+   ],
+   "verifiers": [
+    "tests/test_docgen_formal_status.py",
+    "tests/test_check_doc_refs.py"
+   ]
+  },
+  {
+   "number": 3220,
+   "title": "Single-process runs on rust, go, java, ts and wasm do not check the E-Stop latch",
+   "labels": [
+    "enhancement",
+    "p3",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3223,
+   "title": "Self-repair eligibility reads only the running side's realms, so a repair candidate can move the component out of the realm that made it eligible",
+   "labels": [
+    "bug",
+    "mcp",
+    "p2",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3225,
+   "title": "truc apply sets no import path: one stdlib file through two paths is a duplicate",
+   "labels": [
+    "bug",
+    "p3",
+    "tooling"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3232,
+   "title": "Taint: a branch assignment overwrites a variable's taint instead of joining it",
+   "labels": [
+    "bug",
+    "gate",
+    "p1",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3234,
+   "title": "recover: require a process-up record before trusting a committed line; apply the declared-inverse check to reissue_deferred, reclaim_shared, open_keys",
+   "labels": [
+    "bug",
+    "p2",
+    "runtime",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3238,
+   "title": "services IR stamps one qualifier per return: Result[Untrusted, Secret] through a manifest loses the Secret",
+   "labels": [
+    "bug",
+    "gate",
+    "p2",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3239,
+   "title": "gate: an expression-bodied top-level fn is a parse error ('expected { after fn signature') but the reference accepts it",
+   "labels": [
+    "bug",
+    "gate",
+    "p3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3265,
+   "title": "The ts shell classifier trims with JS trim(), python strips with a different whitespace set, so the refusal reason differs",
+   "labels": [
+    "bug",
+    "p3",
+    "runtime"
+   ],
+   "verifiers": [
+    "tests/test_ts_witnessed_parity.py"
+   ]
+  },
+  {
+   "number": 3292,
+   "title": "handoff: no way to change the state's shape and keep the state",
+   "labels": [
+    "enhancement",
+    "language-design",
+    "playground",
+    "self-evolution"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3298,
+   "title": "ts tier: emit Int as a JS number where the compiler proves it stays below 2^53",
+   "labels": [
+    "emitter",
+    "enhancement",
+    "javascript",
+    "performance",
+    "playground",
+    "post-v3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3301,
+   "title": "ts tier: no in-page driver for a gated hot swap (load, swap, undo) in a browser",
+   "labels": [
+    "enhancement",
+    "javascript",
+    "playground",
+    "runtime",
+    "self-evolution"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3304,
+   "title": "Each effect in a long-running component keeps its undo record until the session ends, so memory and swap time grow without bound",
+   "labels": [
+    "enhancement",
+    "performance",
+    "playground",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3305,
+   "title": "AgentDojo: run the full task set and every attack family",
+   "labels": [
+    "enhancement",
+    "p2",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3306,
+   "title": "AgentDojo: add an out-of-grant injection arm for the admission claim",
+   "labels": [
+    "enhancement",
+    "p2",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3307,
+   "title": "AgentDojo: count baseline tokens so cost is comparable across arms",
+   "labels": [
+    "enhancement",
+    "p3",
+    "tooling"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3308,
+   "title": "AgentDojo: measure and reduce revl authoring failures in the admitted arm",
+   "labels": [
+    "enhancement",
+    "p3",
+    "tooling"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3309,
+   "title": "AgentDojo: port a second public suite after banking",
+   "labels": [
+    "enhancement",
+    "p3",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3310,
+   "title": "AgentDojo: add a G9 taint arm to the admitted measurement",
+   "labels": [
+    "enhancement",
+    "gate",
+    "p2"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3311,
+   "title": "AgentDojo: add a session-fork arm to the measurement",
+   "labels": [
+    "enhancement",
+    "p3",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3319,
+   "title": "Float has no math and no conversion to Int, so geometry and physics need host externs on every tier",
+   "labels": [
+    "enhancement",
+    "playground",
+    "stdlib"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3320,
+   "title": "A call into a running session has no deadline, so a loop that never ends holds the host thread for good",
+   "labels": [
+    "backend-python",
+    "enhancement",
+    "playground",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3339,
+   "title": "A provide method cannot register an effect under `if`, `while` or `for`: schedule the deferred remainder of design note 478 items 8 and 9",
+   "labels": [
+    "enhancement",
+    "language-design",
+    "playground"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3340,
+   "title": "A looped `emit` is refused as a statement and compiles as `let r = emit ...`, where a compensated emission then registers once per iteration",
+   "labels": [
+    "bug",
+    "gate",
+    "playground"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3341,
+   "title": "Two methods of one component cannot share logic that calls the component's required services",
+   "labels": [
+    "enhancement",
+    "language-design",
+    "playground"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3342,
+   "title": "A Map resource has no value type, even when `handoff` declares one: a method declared `-> Int` returns a Str and the next `+ 1` fails at run time",
+   "labels": [
+    "enhancement",
+    "language-design",
+    "playground"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3343,
+   "title": "stdlib/value.rvl has no Float accessor: add `value_float` beside `value_int`, `value_str` and `value_bool`",
+   "labels": [
+    "enhancement",
+    "playground",
+    "stdlib"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3345,
+   "title": "Session.call hands arguments to the method unchecked: an ill-shaped record is accepted and faults later, or never",
+   "labels": [
+    "enhancement",
+    "mcp",
+    "playground",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3346,
+   "title": "Turns admitted during one call are not checked against each other, and the first leaves the session manifest",
+   "labels": [
+    "bug",
+    "gate",
+    "mcp"
+   ],
+   "verifiers": [
+    "tests/test_admit_two_phase.py"
+   ]
+  },
+  {
+   "number": 3347,
+   "title": "mcp: unreviewedHostCode omits externs backed by a host-module ref",
+   "labels": [
+    "mcp",
+    "observation",
+    "p3",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3348,
+   "title": "py runtime: compensation and flush residue record a host error's text unredacted (Secret leak, follow-up to #3142)",
+   "labels": [
+    "backend-python",
+    "bug",
+    "p2",
+    "runtime",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3349,
+   "title": "An expired Retained value passed as an argument to a writing closure reaches a persistence sink and compiles",
+   "labels": [
+    "bug",
+    "p2",
+    "security"
+   ],
+   "verifiers": [
+    "tests/test_retention_472.py"
+   ]
+  },
+  {
+   "number": 3350,
+   "title": "selfhost: lower.rvl leaves a component let-effect binder unescaped, one Java document off the native chain",
+   "labels": [
+    "backend-java",
+    "bug",
+    "p3",
+    "self-host"
+   ],
+   "verifiers": [
+    "tests/fixtures/emit_java_corpus/comp_provide_ctx_bind.rvl",
+    "tests/test_selfhost_compile.py",
+    "tests/test_selfhost_emit_java.py"
+   ]
+  },
+  {
+   "number": 3352,
+   "title": "attest: a remote row's host and pin are outside the attested composition hash",
+   "labels": [
+    "observation",
+    "p3",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3353,
+   "title": "ci: a full main run takes 2 h 40 min; shard the root suite on main and stop conformance and formal waiting on frontend",
+   "labels": [
+    "ci",
+    "enhancement",
+    "p2"
+   ],
+   "verifiers": [
+    "tests/_shard.py",
+    "tests/test_root_suite_shards_1774.py"
+   ]
+  },
+  {
+   "number": 3355,
+   "title": "A component cannot receive a fault of a service it calls as a value",
+   "labels": [
+    "enhancement",
+    "language-design",
+    "playground",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3356,
+   "title": "A component cannot publish a stream: provides Stream[T] is refused, and nothing in a component puts an item into a source",
+   "labels": [
+    "enhancement",
+    "language-design",
+    "playground",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3357,
+   "title": "No stdlib binding for an accepted socket connection: a program that serves live clients writes the socket as host code",
+   "labels": [
+    "enhancement",
+    "playground",
+    "stdlib"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3361,
+   "title": "Str has no trim: text read from people or models is cleaned by hand",
+   "labels": [
+    "enhancement",
+    "playground",
+    "stdlib"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3363,
+   "title": "Installed document keeps `types` entries the composition no longer reaches",
+   "labels": [
+    "enhancement",
+    "gate",
+    "tooling"
+   ],
+   "verifiers": [
+    "tests/test_service_declared_types.py",
+    "tests/test_state_handoff.py"
+   ]
+  },
+  {
+   "number": 3364,
+   "title": "A private fn named like an imported one replaces it silently, and the message shows a rewritten name (dice__m0)",
+   "labels": [
+    "bug",
+    "dx",
+    "p3",
+    "playground"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3376,
+   "title": "A model crossing declared with a ceiling on the bare scope, model(calls=3), is not recognized as a model crossing",
+   "labels": [
+    "bug",
+    "p2",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3380,
+   "title": "Two sessions in one process cannot run on two threads: the runtime has one slot for the session that is running",
+   "labels": [
+    "backend-python",
+    "enhancement",
+    "playground",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3384,
+   "title": "Pool peer: 16 silent connections fill the pending-frame cap, and a failed on_event is noticed one accept late",
+   "labels": [
+    "bug",
+    "p3",
+    "runtime",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3385,
+   "title": "reasoning_span: a zero count with an explicit visibility is not folded into none-reported",
+   "labels": [
+    "bug",
+    "model-runtime",
+    "p4"
+   ],
+   "verifiers": [
+    "tests/test_model_evidence_reasoning.py"
+   ]
+  },
+  {
+   "number": 3386,
+   "title": "temporal target: workflow calls acquire and pure externs it never binds",
+   "labels": [
+    "bug",
+    "emitter",
+    "p2"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3387,
+   "title": "serve: a --revoked-key typo is accepted when one --key file is unreadable",
+   "labels": [
+    "enhancement",
+    "p3",
+    "security",
+    "tooling"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3388,
+   "title": "action receipts: split _verify_chain and _check_body into named checks",
+   "labels": [
+    "enhancement",
+    "p4",
+    "tooling"
+   ],
+   "verifiers": [
+    "tests/test_action_receipt_chain_2757.py"
+   ]
+  },
+  {
+   "number": 3389,
+   "title": "bench compare tools: shared proc_id passes as two runs, --reps accepts extra reps, bool and int compare equal",
+   "labels": [
+    "bug",
+    "p3",
+    "tooling"
+   ],
+   "verifiers": [
+    "tests/test_bench_compare_runs.py"
+   ]
+  },
+  {
+   "number": 3391,
+   "title": "temporal target: a renamed let (fetch_) is read by its bare name in the undo, so the inverse gets the host global",
+   "labels": [
+    "bug",
+    "emitter",
+    "p2"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3392,
+   "title": "A pure extern named like a JS global (Map) cannot be an undo: the checker asks for Map_, then refuses Map_",
+   "labels": [
+    "bug",
+    "emitter",
+    "p3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3393,
+   "title": "temporal target: a witnessed extern's declared inverse is never pushed on the saga",
+   "labels": [
+    "bug",
+    "emitter",
+    "p2"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3394,
+   "title": "fs: a symlinked sidecar directory's refusal names the link's resolved target",
+   "labels": [
+    "bug",
+    "p3",
+    "runtime",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3395,
+   "title": "compile_source says nothing is read from the disk, but with manifest= or modules= a use is resolved from it",
+   "labels": [
+    "bug",
+    "playground",
+    "tooling"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3396,
+   "title": "self-host gate admits an event field of type Aggregate[Str] that the reference refuses (G4)",
+   "labels": [
+    "bug",
+    "gate",
+    "p2",
+    "self-host"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3397,
+   "title": "mcp: scoped operator verbs reveal which ticket hashes exist and whose they are",
+   "labels": [
+    "bug",
+    "mcp",
+    "p2",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3398,
+   "title": "Nested templates are lexed again at every level: a 100 KB text takes 26 s to refuse",
+   "labels": [
+    "enhancement",
+    "performance",
+    "playground"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3401,
+   "title": "self-host gate admits an emit expression inside a brace fn body that the reference refuses",
+   "labels": [
+    "bug",
+    "gate",
+    "p2",
+    "self-host"
+   ],
+   "verifiers": [
+    "tests/test_selfhost_lower.py"
+   ]
+  },
+  {
+   "number": 3402,
+   "title": "self-host gate refuses cache-on-plain-fn, trailing tokens and plain strings with a different message than the reference",
+   "labels": [
+    "bug",
+    "gate",
+    "p3",
+    "self-host"
+   ],
+   "verifiers": [
+    "tests/test_selfhost_lower.py"
+   ]
+  },
+  {
+   "number": 3403,
+   "title": "py tier: a chain of 101 operands compiles, then fails to load with MemoryError from the host parser",
+   "labels": [
+    "backend-python",
+    "bug",
+    "emitter",
+    "playground"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3404,
+   "title": "self-host ts and rust emitters miss the reserved rename for a case named like a JS global and a component named Box",
+   "labels": [
+    "bug",
+    "emitter",
+    "p3",
+    "self-host"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3405,
+   "title": "wasm browser host: two re-entry edges left after the host invariant (load+unload inside own activation, describe outside the user guard)",
+   "labels": [
+    "bug",
+    "p4",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3406,
+   "title": "self-host gate: a service spec scan hides an earlier parse error, and extern local is always refused",
+   "labels": [
+    "bug",
+    "gate",
+    "p4",
+    "self-host"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3407,
+   "title": "python backend: every record field read tests isinstance, a third of a hot pure function's time",
+   "labels": [
+    "backend-python",
+    "codegen-perf",
+    "emitter",
+    "enhancement",
+    "performance",
+    "playground"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3412,
+   "title": "rust (and maybe go) runtime clock keeps every timer and firing",
+   "labels": [
+    "performance",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3415,
+   "title": "rust bridge proxy spells a keyword-named provide parameter raw",
+   "labels": [
+    "bug",
+    "emitter"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3417,
+   "title": "A Session cannot be driven in a browser page without JSPI: its loop needs a thread or a selector, and a page has neither",
+   "labels": [
+    "enhancement",
+    "mcp",
+    "playground",
+    "runtime"
+   ],
+   "verifiers": [
+    "tests/test_session_inline_loop.py",
+    "tests/test_session_awaitable_teardown.py"
+   ]
+  },
+  {
+   "number": 3418,
+   "title": "No connection between two browser pages: a composition hosted in a tab cannot be joined without a server",
+   "labels": [
+    "enhancement",
+    "language-design",
+    "playground",
+    "stdlib"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3420,
+   "title": "wasm: a fn using a checked form loses its locals when emitted twice",
+   "labels": [
+    "bug",
+    "emitter"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3422,
+   "title": "selfhost lower.rvl does not stamp operands \"Int\" on a binary + whose left operand is an awaited call",
+   "labels": [
+    "bug",
+    "self-host"
+   ],
+   "verifiers": [
+    "tests/fixtures/emit_ts_corpus/int_inline_2904.rvl",
+    "tests/test_selfhost_compile.py"
+   ]
+  },
+  {
+   "number": 3423,
+   "title": "A swap to a new document renders it again when another process already did: 300 of 330 ms",
+   "labels": [
+    "enhancement",
+    "mcp",
+    "performance",
+    "playground"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3424,
+   "title": "corpus provenance floor counts documents, so a case appended to a loop-authored document escapes it",
+   "labels": [
+    "enhancement",
+    "p3",
+    "tooling"
+   ],
+   "verifiers": [
+    "tests/fixtures/corpus_provenance.json",
+    "tests/fixtures/emit_go_corpus/reserved_builtins.rvl",
+    "tests/test_corpus_provenance.py"
+   ]
+  },
+  {
+   "number": 3425,
+   "title": "wasm self-host: emit_wasm.rvl has no f64 lowering",
+   "labels": [
+    "enhancement",
+    "self-host"
+   ],
+   "verifiers": [
+    "tests/fixtures/wasm_true_division_port_gap.rvl"
+   ]
+  },
+  {
+   "number": 3426,
+   "title": "A call into a running session has no bound on memory: a text of 470 MB in 0.04 s from a loop of one line",
+   "labels": [
+    "backend-python",
+    "enhancement",
+    "playground",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3429,
+   "title": "Compile only what changed: per-file compiled units, the way C keeps object files",
+   "labels": [
+    "enhancement",
+    "p2",
+    "performance"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3430,
+   "title": "serve --http: a served composition has no tested or documented way to take a new version without a restart",
+   "labels": [
+    "enhancement",
+    "mcp",
+    "p1",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3431,
+   "title": "The self-host ts emitter keeps a local named BigInt, revlI64 or undefined, which breaks the emitted Int arithmetic",
+   "labels": [
+    "bug",
+    "self-host"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3432,
+   "title": "A refusal shown to the author of a rule speaks only to compiler authors: no plain sentence for the person who wrote it",
+   "labels": [
+    "dx",
+    "enhancement",
+    "gate",
+    "playground"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3434,
+   "title": "A plain string \"a\\nb\" compiles without a word as a backslash and an n, where its author meant a line break",
+   "labels": [
+    "dx",
+    "enhancement",
+    "language-design",
+    "playground"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3435,
+   "title": "revl run --once is ignored on the py tier: it opens the prompt and waits on stdin",
+   "labels": [
+    "backend-python",
+    "bug",
+    "p2",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3436,
+   "title": "revl run exits 0 when a component fails at boot",
+   "labels": [
+    "bug",
+    "p1",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3437,
+   "title": "revl run on the py tier has no clean stop on SIGTERM or SIGINT: every undo is skipped",
+   "labels": [
+    "backend-python",
+    "bug",
+    "p2",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3438,
+   "title": "A one-shot call: run one operation with arguments and return its outcome as the exit status",
+   "labels": [
+    "dx",
+    "enhancement",
+    "p1",
+    "tooling"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3439,
+   "title": "A let with a type annotation cannot take an effect call: `let x: T = effect ...` is refused with a generic code and no way forward",
+   "labels": [
+    "dx",
+    "enhancement",
+    "language-design",
+    "playground"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3440,
+   "title": "every timers never fire under revl run: nothing drives the timer clock outside tests",
+   "labels": [
+    "bug",
+    "p1",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3441,
+   "title": "An extern's host body can return an Int beyond 64 bits and the boundary accepts it",
+   "labels": [
+    "bug",
+    "p2",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3442,
+   "title": "Bytes cannot be built from numbers: binary framing has to live in a host body",
+   "labels": [
+    "dx",
+    "enhancement",
+    "p2",
+    "stdlib"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3443,
+   "title": "No way to declare the packages a host body needs, or to run a body under another interpreter",
+   "labels": [
+    "dx",
+    "enhancement",
+    "language-design",
+    "p3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3444,
+   "title": "The thread a host body runs on depends on the command and cannot be requested",
+   "labels": [
+    "dx",
+    "enhancement",
+    "language-design",
+    "p3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3445,
+   "title": "A host body can replace process signal handlers; nothing restores them and the residue proof stays clean",
+   "labels": [
+    "enhancement",
+    "p3",
+    "residue",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3446,
+   "title": "The self-host gate admits an emit in a top-level fn body that the reference refuses",
+   "labels": [
+    "bug",
+    "self-host"
+   ],
+   "verifiers": [
+    "tests/test_selfhost_lower.py"
+   ]
+  },
+  {
+   "number": 3448,
+   "title": "xs.push(x) on a var list compiles and does nothing",
+   "labels": [
+    "bug",
+    "dx",
+    "language-design",
+    "p1"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3449,
+   "title": "A test cannot be marked skipped with a reason",
+   "labels": [
+    "dx",
+    "enhancement",
+    "p3",
+    "tooling"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3450,
+   "title": "A lifecycle test body refuses a pure let, and the docs disagree with themselves about it",
+   "labels": [
+    "dx",
+    "enhancement",
+    "language-design",
+    "p3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3451,
+   "title": "The stdlib has no regular expressions",
+   "labels": [
+    "dx",
+    "enhancement",
+    "p2",
+    "stdlib"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3452,
+   "title": "stdlib/str.rvl lacks lower, upper and lines, and str_char returns an empty string for CR",
+   "labels": [
+    "dx",
+    "enhancement",
+    "p2",
+    "stdlib"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3453,
+   "title": "Reading a Result always takes a full match",
+   "labels": [
+    "dx",
+    "enhancement",
+    "p3",
+    "stdlib"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3454,
+   "title": "The ts tier refuses a whole test module for one extern without a @ts body that no selected test reaches",
+   "labels": [
+    "emitter",
+    "enhancement",
+    "p2",
+    "tooling"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3455,
+   "title": "Two imports that export the same type name cannot be used together: no alias",
+   "labels": [
+    "enhancement",
+    "language-design",
+    "p3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3456,
+   "title": "stdlib/fs.rvl has no read: every product writes its own, and a file that is not text reads as empty",
+   "labels": [
+    "enhancement",
+    "p3",
+    "stdlib"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3458,
+   "title": "One ship compiles the same candidate once per stage: check, admit, plan and swap share no compiled result",
+   "labels": [
+    "enhancement",
+    "mcp",
+    "p2",
+    "performance"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3459,
+   "title": "The MCP server cannot reach a session that is already running in a host process",
+   "labels": [
+    "dx",
+    "enhancement",
+    "mcp",
+    "p2"
+   ],
+   "verifiers": [
+    "tools/harness_evolve_bridge.py"
+   ]
+  },
+  {
+   "number": 3461,
+   "title": "revl test: no setup shared by the tests of a file, and no undo when the runner is signalled",
+   "labels": [
+    "dx",
+    "enhancement",
+    "p2",
+    "tooling"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3462,
+   "title": "A test cannot assert that a call raises",
+   "labels": [
+    "dx",
+    "enhancement",
+    "p3",
+    "tooling"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3465,
+   "title": "json_parse reads an integer past the Float range as infinity on py and ts, but not on rust",
+   "labels": [
+    "bug",
+    "stdlib"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3466,
+   "title": "stdlib trim and is_space use a wider whitespace set than the Str builtins",
+   "labels": [
+    "bug",
+    "stdlib"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3470,
+   "title": "A Secret passed through a plain fn's Str parameter reaches an extern sink and compiles",
+   "labels": [
+    "bug",
+    "gate",
+    "p1",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3471,
+   "title": "The Secret disclosure-sink check does not apply inside a test body, and no doc says so",
+   "labels": [
+    "bug",
+    "gate",
+    "p2",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3472,
+   "title": "stdlib: escape encodes but nothing decodes (no percent-decoding, no query or form parser)",
+   "labels": [
+    "dx",
+    "enhancement",
+    "p2",
+    "tooling"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3473,
+   "title": "revl run: a fiber that settles in FAILED prints no cause",
+   "labels": [
+    "bug",
+    "dx",
+    "p2",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3474,
+   "title": "emit in a plain test block is refused with a generic message that does not point to lifecycle test",
+   "labels": [
+    "dx",
+    "enhancement",
+    "language-design",
+    "p3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3477,
+   "title": "revl_check cannot check several files compiled together without writing them to disk",
+   "labels": [
+    "dx",
+    "mcp"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3479,
+   "title": "A local named like an acquire or deferred extern is refused as a read of the extern",
+   "labels": [
+    "bug",
+    "gate"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3480,
+   "title": "Header stub for a refused component carries no isolate pins, so its providers join the shared realm",
+   "labels": [
+    "bug",
+    "gate"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3481,
+   "title": "Self-host gate and reference disagree on a router whose first route has an unknown strategy",
+   "labels": [
+    "bug",
+    "gate",
+    "self-host"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3484,
+   "title": "Row config values never reach a running py component",
+   "labels": [
+    "bug",
+    "runtime"
+   ],
+   "verifiers": [
+    "tests/test_composition_layers.py"
+   ]
+  },
+  {
+   "number": 3485,
+   "title": "A method that emits through a required service's scoped verbs cannot declare those tokens",
+   "labels": [
+    "bug",
+    "language-design"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3491,
+   "title": "List `+` is refused as \"expects Int\" though `+` joins strings, and the message does not name concat or push",
+   "labels": [
+    "bug",
+    "dx",
+    "language-design",
+    "p3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3492,
+   "title": "A record literal written `T { ... }` is refused as an undeclared variable (G1)",
+   "labels": [
+    "dx",
+    "enhancement",
+    "language-design",
+    "p3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3493,
+   "title": "Reserved words cannot name a record field: after, before, emission, service",
+   "labels": [
+    "dx",
+    "enhancement",
+    "language-design",
+    "p3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3494,
+   "title": "Builtin text surface mixes camelCase and snake_case, methods and free functions (indexOf vs last_index_of)",
+   "labels": [
+    "dx",
+    "enhancement",
+    "p4",
+    "stdlib"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3495,
+   "title": "`assert` takes no message: a failing check cannot say what it saw",
+   "labels": [
+    "dx",
+    "enhancement",
+    "language-design",
+    "p3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3496,
+   "title": "The refusal for `Int / Int` where an Int is expected does not name div_floor",
+   "labels": [
+    "dx",
+    "enhancement",
+    "language-design",
+    "p3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3498,
+   "title": "Refusals outside admit_profile.py, and results that rewrap a refusal, carry no plain sentence for the author",
+   "labels": [
+    "dx",
+    "enhancement",
+    "gate"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3499,
+   "title": "A failed assert prints the lowered host expression, not the revl source line",
+   "labels": [
+    "bug",
+    "dx",
+    "p3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3500,
+   "title": "A refused list method does not name the stdlib function that does it (xs.contains, list_contains)",
+   "labels": [
+    "bug",
+    "dx",
+    "p3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3501,
+   "title": "The stdlib has no base64 or base64url, and sha256 gives hex only",
+   "labels": [
+    "dx",
+    "enhancement",
+    "p3",
+    "stdlib"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3502,
+   "title": "A plain string holding ${...} is refused, though the message and docs/strings.md call it literal text",
+   "labels": [
+    "bug",
+    "dx",
+    "language-design",
+    "p3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3503,
+   "title": "A backtick template keeps \\\\ as two characters where a plain string makes it one",
+   "labels": [
+    "bug",
+    "documentation",
+    "language-design",
+    "p3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3504,
+   "title": "A test cannot show a value while its author explores: no note or log form, and print's refusal offers none",
+   "labels": [
+    "dx",
+    "enhancement",
+    "p3",
+    "tooling"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3505,
+   "title": "revl check is refused with the verb list and no pointer to compile or test --list",
+   "labels": [
+    "dx",
+    "enhancement",
+    "p3",
+    "tooling"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3506,
+   "title": "A boot config field cannot be read from an environment variable, so a product keeps a host writer for the --env file",
+   "labels": [
+    "dx",
+    "enhancement",
+    "language-design",
+    "p3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3507,
+   "title": "Importing the builtin Value from stdlib/value.rvl is refused as \"not a public declaration\"",
+   "labels": [
+    "dx",
+    "enhancement",
+    "p3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3508,
+   "title": "revl test: fixed cost per call (vitest fixtures emitted at every ts run, a second compile to count tests)",
+   "labels": [
+    "dx",
+    "enhancement",
+    "p3",
+    "performance"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3509,
+   "title": "Restore lease check derives targets without the bound realms",
+   "labels": [
+    "bug",
+    "mcp",
+    "p3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3511,
+   "title": "stdlib/shell.rvl: sh takes a shell string and returns text; no argv, time bound, exit code or child handle, so a product's test runner stays outside revl",
+   "labels": [
+    "dx",
+    "enhancement",
+    "p3",
+    "stdlib"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3512,
+   "title": "Str.indexOf takes no start offset, so \"the next occurrence after n\" copies the rest of the string",
+   "labels": [
+    "dx",
+    "enhancement",
+    "stdlib"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3513,
+   "title": "A failed `assert a && b` says only \"assertion failed\": no operand, no value",
+   "labels": [
+    "dx",
+    "enhancement",
+    "tooling"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3514,
+   "title": "A match block arm must end in an expression: a match used for its effect needs a helper fn, and the message for assigning an outer var is wrong",
+   "labels": [
+    "dx",
+    "enhancement",
+    "language-design"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3515,
+   "title": "A reversible host write that can fail has no declarable shape: an acquire cannot return a Result and its undo sees only `result`",
+   "labels": [
+    "dx",
+    "enhancement",
+    "language-design"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3530,
+   "title": "A composition-level `use \"stdlib/...\"` is refused",
+   "labels": [
+    "enhancement",
+    "stdlib"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3531,
+   "title": "`revl emit --backend ts` has no way to name the runtime import for the browser layout",
+   "labels": [
+    "dx",
+    "enhancement",
+    "tooling"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3532,
+   "title": "A composition document compiles to zero components in a session, with no error",
+   "labels": [
+    "dx",
+    "enhancement",
+    "mcp"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3534,
+   "title": "An apply that changes a row-placed component's config schema starts it with values that no longer fit",
+   "labels": [
+    "bug",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3537,
+   "title": "Over HTTP, the Mcp-Name header of a hatch call is checked against the hatch, not the verb it reaches",
+   "labels": [
+    "bug",
+    "mcp",
+    "security"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3540,
+   "title": "A routed operation cannot take or answer bytes, stream its answer, or upgrade to a WebSocket",
+   "labels": [
+    "dx",
+    "enhancement",
+    "stdlib"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3544,
+   "title": "selfhost: native driver words a bare reference to another module's private name differently from the reference",
+   "labels": [
+    "bug",
+    "self-host"
+   ],
+   "verifiers": [
+    "tests/test_selfhost_compile.py"
+   ]
+  },
+  {
+   "number": 3571,
+   "title": "deploy: no-bundle run skips the order refusal, and read_decision ignores federation and generation",
+   "labels": [
+    "bug",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3573,
+   "title": "selfhost: emit_ts.rvl ladders a provider capture named ctx one rung short of the reference",
+   "labels": [
+    "bug",
+    "emitter",
+    "p3",
+    "self-host"
+   ],
+   "verifiers": [
+    "tests/test_selfhost_emit_ts.py"
+   ]
+  },
+  {
+   "number": 3582,
+   "title": "A top-level fn named __h is name-mangled when called from a provided method on the python tier",
+   "labels": [
+    "backend-python",
+    "bug",
+    "emitter",
+    "p3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3584,
+   "title": "Swapping a component that holds an effect lease is rejected and its rollback fails too",
+   "labels": [
+    "bug",
+    "runtime"
+   ],
+   "verifiers": [
+    "tests/test_capability_leases.py"
+   ]
+  },
+  {
+   "number": 3585,
+   "title": "self-host emit_go and emit_java: port the character classifiers and shared-field record literal resolution",
+   "labels": [
+    "emitter",
+    "self-host"
+   ],
+   "verifiers": [
+    "tests/fixtures/selfhost_uncovered_lines/reference/go.json"
+   ]
+  },
+  {
+   "number": 3587,
+   "title": "revl_fs_workspace has no public confined read open, so hosts call the private _split and _open_dirfd",
+   "labels": [
+    "enhancement",
+    "p3"
+   ],
+   "verifiers": [
+    "tools/mail_transport.py"
+   ]
+  },
+  {
+   "number": 3592,
+   "title": "A record destructuring let on a generic record, or in the selfhost lowering, binds a field the record does not have",
+   "labels": [
+    "bug",
+    "language-design",
+    "self-host"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3595,
+   "title": "Host config has no working encoding for a variant config value",
+   "labels": [
+    "bug",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3597,
+   "title": "Session.load: let a host hand in the rendered module, and find the SLO contract without parsing every origin file",
+   "labels": [
+    "enhancement",
+    "p3",
+    "performance",
+    "runtime"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3604,
+   "title": "Extern parameter named max is renamed in the Python signature but not in its @py body, so the body reads the builtin",
+   "labels": [
+    "backend-python",
+    "bug",
+    "emitter",
+    "p2"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3611,
+   "title": "No decoder from a parsed JSON value to a declared record: each member is checked by hand",
+   "labels": [
+    "dx"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3613,
+   "title": "self-host gate: a reaches clause that omits the extern's own scope is admitted",
+   "labels": [
+    "bug",
+    "gate",
+    "self-host"
+   ],
+   "verifiers": [
+    "tests/test_selfhost_lower.py"
+   ]
+  },
+  {
+   "number": 3614,
+   "title": "Session: a public read-only accessor for the loaded composition's emitted module",
+   "labels": [
+    "enhancement",
+    "mcp",
+    "p3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3619,
+   "title": "wasm: the self-host is refused on the Str builtins is_digit, is_alpha and is_alnum",
+   "labels": [
+    "bug",
+    "emitter",
+    "post-v3",
+    "self-host"
+   ],
+   "verifiers": [
+    "tools/selfhost_compile_matrix.json"
+   ]
+  },
+  {
+   "number": 3620,
+   "title": "go and java externs rename a parameter that their inline host body spells by its source name",
+   "labels": [
+    "backend-java",
+    "bug",
+    "emitter",
+    "p3"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3621,
+   "title": "selfhost/emit_rust.rvl exceeds the gate crate's MAX_SOURCE_BYTES: split it",
+   "labels": [
+    "gate",
+    "p3",
+    "self-host"
+   ],
+   "verifiers": [
+    "tools/build_gate_crate.py",
+    "tools/selfhost_coverage.py",
+    "tools/selfhost_line_coverage.py",
+    "tools/affected_tests.py",
+    "tests/test_selfhost_census_buckets.py",
+    "tests/test_selfhost_emit_rust.py"
+   ]
+  },
+  {
+   "number": 3622,
+   "title": "selfhost/emit_py.rvl exceeds the gate crate's MAX_SOURCE_BYTES: split it",
+   "labels": [
+    "gate",
+    "p3",
+    "self-host"
+   ],
+   "verifiers": [
+    "tools/build_gate_crate.py",
+    "tools/selfhost_coverage.py",
+    "tools/selfhost_line_coverage.py",
+    "tools/affected_tests.py",
+    "tests/test_selfhost_census_buckets.py",
+    "tests/test_selfhost_emit_py.py"
+   ]
+  },
+  {
+   "number": 3626,
+   "title": "revl run on ts fails to boot when a composition file holds a test block",
+   "labels": [
+    "bug",
+    "dx"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3627,
+   "title": "rust emitter: a field read in a ternary branch is moved although the field is read again in the same record literal (E0382)",
+   "labels": [
+    "bug",
+    "emitter",
+    "self-host"
+   ],
+   "verifiers": [
+    "tools/build_gate_crate.py"
+   ]
+  },
+  {
+   "number": 3640,
+   "title": "formal exporter: crossings into a service from a used module produce no F row",
+   "labels": [
+    "bug",
+    "formal"
+   ],
+   "verifiers": []
+  },
+  {
+   "number": 3642,
+   "title": "json_stringify drops an absent Opt member on the ts tier and writes null on py",
+   "labels": [
+    "bug",
+    "javascript",
+    "stdlib"
+   ],
+   "verifiers": []
+  }
+ ]
+}

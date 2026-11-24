@@ -527,10 +527,16 @@ def measure_selfhost() -> dict:
     with tempfile.TemporaryDirectory(prefix="selfhost-coverage-") as temporary:
         scratch = Path(temporary)
         for tier in TIERS:
-            source_rvl = ROOT / "selfhost" / f"emit_{tier}.rvl"
+            # An emitter split across files (issue #3098) keeps its entry in
+            # `emit_<tier>.rvl` and the rest in `emit_<tier>_<part>.rvl`.
+            sources_rvl = [ROOT / "selfhost" / f"emit_{tier}.rvl"] + sorted(
+                (ROOT / "selfhost").glob(f"emit_{tier}_*.rvl"))
             module_path = scratch / f"selfhost_emit_{tier}.py"
-            declared = set(re.findall(r"^\s*(?:pub\s+)?fn\s+(\w+)",
-                                      source_rvl.read_text(encoding="utf-8"), re.M))
+            declared = set()
+            for source_rvl in sources_rvl:
+                declared |= set(re.findall(r"^\s*(?:pub\s+)?fn\s+(\w+)",
+                                           source_rvl.read_text(encoding="utf-8"),
+                                           re.M))
             cov = coverage.Coverage(data_file=None, include=[str(module_path)])
             cov.start()
             try:

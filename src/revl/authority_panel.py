@@ -38,10 +38,15 @@ than no screen.
 
 This module reads a resolved `RowTable` (base) and the folded candidate table.
 Config classification is header-only and syntactic, which is the fail-closed
-direction: a string-valued field that is not pinned by a `reach` bound is
-UNCLASSIFIABLE and therefore authority-bearing; a numeric/bool field that feeds
-only pure computation gets no token. `reach`-bound violations never reach the
-panel — they are refused at resolution (`composition._check_reach_bounds`).
+direction: a field that is not pinned by a `reach` bound emits a `config:`
+token unless it is PROVEN to feed only pure computation. A string-valued field
+is never proven pure; a numeric/bool field is, but only when the component body
+never reads it (`Row.config_uses`, recorded by resolution). A numeric/bool
+field the body reads may reach an emission or an extern argument (§8.4), and
+that cannot be decided header-only, so it is UNCLASSIFIABLE and authority-
+bearing (incompleteness costs noise, never silence). `reach`-bound violations
+never reach the panel: they are refused at resolution
+(`composition._check_reach_bounds`).
 """
 
 from __future__ import annotations
@@ -64,21 +69,27 @@ def _digest8(value: object) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:8]
 
 
-def _authority_bearing(field: str, value: object,
-                       reach: dict | None) -> tuple[bool, bool]:
+def _authority_bearing(field: str, value: object, reach: dict | None,
+                       config_uses: frozenset | set
+                       ) -> tuple[bool, bool]:
     """`(bearing, unclassifiable)` for one config field's value.
 
-    A numeric or boolean value that feeds pure computation is not
-    authority-bearing (`pool: 8`, §8.7 "pure, no token"). A value with a
-    declared `reach` bound is authority-bearing and CLASSIFIED (its host was
-    checked at resolution). Anything else the classifier cannot decide — a
-    bare string, a structured value — is UNCLASSIFIABLE and therefore treated
-    as authority-bearing (§8.5 conjunct 5, the load-bearing one).
+    A value with a declared `reach` bound is authority-bearing and CLASSIFIED
+    (its host was checked at resolution). A numeric or boolean value is pure
+    only when the component body never reads the field: then nothing can carry
+    it to a host argument (`pool: 8`, §8.7 "pure, no token"). If the body DOES
+    read it, §8.4's question (does the value reach an emission or extern
+    argument, or only pure computation?) cannot be decided header-only, so it
+    is UNCLASSIFIABLE and therefore treated as authority-bearing (§8.5
+    conjunct 5, the load-bearing one). A string or structured value with no
+    declared bound is unclassifiable for the same reason, read or not.
     """
     if reach and field in reach:
         return True, False
     if isinstance(value, bool) or isinstance(value, (int, float)):
-        return False, False
+        if field not in config_uses:
+            return False, False
+        return True, True
     # A string (or anything else) with no declared bound: the dataflow to a
     # host argument cannot be decided header-only, so fail closed.
     return True, True
@@ -194,16 +205,18 @@ def panel(base, candidate, *, trust_host_code=False) -> dict:
     cand_reach = _reach_of(candidate)
     cand_trust = _trust_of(candidate)
     qual_of = {row.label: row.qualified for row in candidate.rows}
+    cand_uses = {row.label: row.config_uses for row in candidate.rows}
 
     tokens: list[dict] = []
     unclassifiable: list[str] = []
     for label, cfg in cand_cfg.items():
         prior = base_cfg.get(label, {})
         reach = cand_reach.get(label) or None
+        uses = cand_uses.get(label, frozenset())
         for field, value in cfg.items():
             if field in prior and prior[field] == value:
                 continue                              # unchanged
-            bearing, unclass = _authority_bearing(field, value, reach)
+            bearing, unclass = _authority_bearing(field, value, reach, uses)
             if not bearing:
                 continue                              # pure, no token (§8.7)
             token = f"config:@{label}:{field}:{_digest8(value)}"

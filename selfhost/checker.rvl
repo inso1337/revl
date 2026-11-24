@@ -1035,9 +1035,23 @@ fn infer_call_t(c: CallN, env: List[Bind], tt: Tt, ct: Ct) -> Infer {
   return match c.target {
     // a named ADT case constructor; anything else (plain fns — no signature
     // table in this slice — and non-name callees) stays unchecked
-    Var(n) => case_call_ty(n, unwrap_case(ct, n), args, ct.has(n), tt),
+    Var(n) => case_call_flow(c, n, args, env, tt, ct),
     _      => ok_ty(""),
   }
+}
+
+// `case_call_ty`, then the issue #2937 nested-widening check on the payload.
+fn case_call_flow(c: CallN, n: Str, args: List[Str], env: List[Bind], tt: Tt,
+                  ct: Ct) -> Infer {
+  let r = case_call_ty(n, unwrap_case(ct, n), args, ct.has(n), tt)
+  if (!r.ok || !ct.has(n) || args.length() == 0) { return r }
+  let ci = unwrap_case(ct, n)
+  if (ci.payload != "") {
+    let f = nested_flow(c.args[0], ci.payload, args[0], env, tt, ct,
+                        "`".concat(n).concat("(...)` payload"))
+    if (!f.ok) { return f }
+  }
+  return r
 }
 
 fn pick_arg0(args: List[Str]) -> Str {
@@ -1096,6 +1110,130 @@ pub fn check_t(e: Expr, expected: Str, env: List[Bind], tt: Tt, ct: Ct,
   }
 }
 
+// typecheck.nested_widening_flow_error, message for message (issue #2937).
+fn nested_flow_refusal(where_: Str, expected: Str, actual: Str, w: Widen) -> Infer {
+  let a = render_type(w.l)
+  let b = render_type(w.r)
+  let narrow = widen_rank(a) < widen_rank(b) ? a : b
+  let wide = widen_rank(a) < widen_rank(b) ? b : a
+  return refuse("T1", where_.concat(" expects `").concat(render_type(expected))
+                  .concat("`, got `").concat(render_type(actual))
+                  .concat("`; the `").concat(narrow)
+                  .concat("` inside is not widened to `").concat(wide)
+                  .concat("` (only a bare value widens), so the tiers ")
+                  .concat("would not agree on the program"))
+}
+
+// typecheck._site_children: the parts of a constructor written at the site,
+// each with the type it is held to. `ctor` is false for a value that already
+// carries its type (a variable, a field read, a call result).
+type FlowParts = { ctor: Bool, exprs: List[Expr], tys: List[Str] }
+
+fn flow_value() -> FlowParts { return { ctor: false, exprs: [], tys: [] } }
+
+fn flow_leaf() -> FlowParts { return { ctor: true, exprs: [], tys: [] } }
+
+fn flow_one(e: Expr, t: Str) -> FlowParts {
+  return { ctor: true, exprs: [e], tys: [t] }
+}
+
+fn flow_parts(e: Expr, expected: Str, tt: Tt, ct: Ct) -> FlowParts {
+  let ep = parse_type(expected)
+  return match e {
+    IntLit(_)   => flow_leaf(),
+    FloatLit(_) => flow_leaf(),
+    StrLit(_)   => flow_leaf(),
+    BoolLit(_)  => flow_leaf(),
+    NullLit     => flow_leaf(),
+    Lst(l)      => flow_list_parts(l.items, ep),
+    Rec(r)      => flow_rec_parts(r.fields, expected, tt),
+    If(f)       => { ctor: true, exprs: [f.then_, f.els],
+                     tys: [expected, expected] },
+    Call(c)     => flow_call_parts(c, ep, ct),
+    _           => flow_value(),
+  }
+}
+
+fn flow_list_parts(items: List[Expr], ep: Parsed) -> FlowParts {
+  if (ep.head != "List" || ep.args.length() != 1) { return flow_leaf() }
+  var exprs: List[Expr] = []
+  var tys: List[Str] = []
+  var i = 0
+  while (i < items.length()) {
+    exprs = exprs.push(items[i])
+    tys = tys.push(ep.args[0])
+    i += 1
+  }
+  return { ctor: true, exprs: exprs, tys: tys }
+}
+
+fn flow_rec_parts(fields: List[InitN], expected: Str, tt: Tt) -> FlowParts {
+  let rf = rec_fields_of(expected, tt)
+  var exprs: List[Expr] = []
+  var tys: List[Str] = []
+  if (!rf.is_rec) { return flow_leaf() }
+  var i = 0
+  while (i < fields.length()) {
+    if (rec_has(rf.fields, fields[i].name)) {
+      exprs = exprs.push(fields[i].value)
+      tys = tys.push(struct_field_ty(rf.fields, fields[i].name))
+    }
+    i += 1
+  }
+  return { ctor: true, exprs: exprs, tys: tys }
+}
+
+fn flow_call_parts(c: CallN, ep: Parsed, ct: Ct) -> FlowParts {
+  if (c.args.length() != 1) { return flow_value() }
+  return match c.target {
+    Var(n) => flow_case_parts(n, c.args[0], ep, ct),
+    _      => flow_value(),
+  }
+}
+
+fn flow_case_parts(n: Str, arg: Expr, ep: Parsed, ct: Ct) -> FlowParts {
+  if (n == "Some" && ep.head == "Opt" && ep.args.length() == 1) {
+    return flow_one(arg, ep.args[0])
+  }
+  if ((n == "Ok" || n == "Err") && ep.head == "Result"
+      && ep.args.length() == 2) {
+    return flow_one(arg, n == "Ok" ? ep.args[0] : ep.args[1])
+  }
+  if (ct.has(n)) {
+    let ci = unwrap_case(ct, n)
+    if (ci.payload != "") { return flow_one(arg, ci.payload) }
+    return flow_leaf()
+  }
+  return flow_value()
+}
+
+// typecheck.refuse_nested_widening (issue #2937): a value whose declared type
+// nests a widening the position needs. `compat_tt` admits `List[Int]` where
+// `List[Float]` is declared, but no marker reaches an element, so the tiers
+// disagreed on the program. A constructor written at the site is entered and
+// each part judged on its own.
+fn nested_flow(e: Expr, expected: Str, actual: Str, env: List[Bind], tt: Tt,
+               ct: Ct, where_: Str) -> Infer {
+  if (expected == "" || actual == "") { return ok_ty("") }
+  let p = flow_parts(e, expected, tt, ct)
+  if (p.ctor) {
+    var i = 0
+    while (i < p.exprs.length()) {
+      if (p.tys[i] != "") {
+        let c = infer_t(p.exprs[i], env, tt, ct)
+        if (!c.ok) { return c }
+        let r = nested_flow(p.exprs[i], p.tys[i], c.ty, env, tt, ct, where_)
+        if (!r.ok) { return r }
+      }
+      i += 1
+    }
+    return ok_ty("")
+  }
+  let w = nested_widening(expected, actual, tt, 0)
+  if (w.hit) { return nested_flow_refusal(where_, expected, actual, w) }
+  return ok_ty("")
+}
+
 fn check_default_t(e: Expr, expected: Str, env: List[Bind], tt: Tt, ct: Ct,
                    where_: Str) -> Infer {
   let a = infer_t(e, env, tt, ct)
@@ -1115,7 +1253,7 @@ fn check_default_t(e: Expr, expected: Str, env: List[Bind], tt: Tt, ct: Ct,
   if (!compat_tt(expected, a.ty, tt)) {
     return mismatch(where_, expected, a.ty)
   }
-  return ok_ty("")
+  return nested_flow(e, expected, a.ty, env, tt, ct, where_)
 }
 
 fn check_struct_against(struct: List[RecField], expected: Str, spec: TySpec,

@@ -38,7 +38,7 @@ review's own words for the rung it produces. See
 docs/design/533-evolution-curriculum.md for the argument, the measured
 populations, and the cases the signal gets wrong.
 
-SOURCES. The review names eight. This module reads five of them; the rest are
+SOURCES. The review names eight. This module reads seven of them; the rest are
 staged in the design doc's slice plan. Each adapter below states the artifact
 it reads, and every task it emits carries that artifact by path, so a reader
 can go and look.
@@ -636,12 +636,189 @@ def adapter_cross_tier_probe(cases_dir=None) -> Derivation:
     return Derivation("cross-tier-probes", (signal,), tuple(tasks))
 
 
+# --------------------------------------------------------------------------- #
+# Adapter 6 -- design documents: a slice table row whose oracle is not there     #
+# --------------------------------------------------------------------------- #
+# docs/design/*.md states its own acceptance. A slice table (header cell opening
+# with "Slice", "Step", "Phase" or "Stage") whose row names a test under
+# `tests/` is a promise: this oracle decides the slice. When the named file is
+# not in the tree, the slice has a stated exit and no mechanism to verify it,
+# which is precisely a task: write the oracle the doc already names.
+#
+# Only a path under `tests/` in a slice table's own row counts. A path in prose,
+# in a table about something else (a commit table, a fork-status table), or in a
+# row of a table whose first column is not a slice, is not a promise made by a
+# slice plan, and a task derived from one would be an invented task.
+DESIGN_DIR = "docs/design"
+_SLICE_HEADER = re.compile(r"(?i)^\W*(slice|step|phase|stage)\b")
+_TABLE_RULE = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
+_ORACLE_PATH = re.compile(
+    r"(?<![\w/.-])(tests/[A-Za-z0-9_./-]*?\.(?:py|ts|rs|go|java))")
+
+
+def _oracle_signal(path: str) -> Signal:
+    """The signal of an oracle that may NOT EXIST YET, off its named path.
+
+    A mechanism that is not in the tree has no corpus to read, so the signal is
+    what the path itself says the oracle will make agree, by the naming the
+    tree already uses for its differential oracles: `tests/test_selfhost_*.py`
+    compare `src/revl` with `selfhost/*.rvl`, a `crate` or `native` test adds
+    `crates/revl-gate`, and everything else is one implementation checking
+    itself. Breadth is 1: one test file is one curated corpus, the reading
+    `construct-reach` gives an emitter oracle's fixture directory. It is an
+    approximation and is stated as one; when the oracle is written its real
+    corpus replaces this reading, and no table of "this doc is hard" exists.
+    """
+    name = Path(path).name
+    impls = [REFERENCE]
+    if "selfhost" in name:
+        impls.append(SELFHOST)
+    if "crate" in name or "native" in name:
+        impls.append(NATIVE)
+    return Signal(impls=tuple(impls), breadth=1)
+
+
+def _slice_table_rows(text: str):
+    """`(line, slice cell, row)` for each row of each slice table in `text`."""
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        is_table = (lines[i].lstrip().startswith("|") and i + 1 < len(lines)
+                    and _TABLE_RULE.match(lines[i + 1]))
+        if not is_table:
+            i += 1
+            continue
+        header = [c.strip() for c in lines[i].strip().strip("|").split("|")]
+        j = i + 2
+        rows = []
+        while j < len(lines) and lines[j].lstrip().startswith("|"):
+            rows.append((j + 1, lines[j]))
+            j += 1
+        if header and _SLICE_HEADER.match(header[0]):
+            for lineno, row in rows:
+                cells = row.strip().strip("|").split("|")
+                yield lineno, cells[0].strip(), row
+        i = j
+
+
+def adapter_design_docs(design_dir=None) -> Derivation:
+    base = Path(design_dir) if design_dir else ROOT / DESIGN_DIR
+    docs = sorted(base.glob("*.md")) if base.is_dir() else []
+    if not docs:
+        # No design document to read is not "every slice has its oracle". It is
+        # the source failing to read its artifact, and an empty derivation
+        # makes `check` say so.
+        return Derivation("design-docs", (), ())
+    tasks: list[Task] = []
+    signals: list[Signal] = []
+    for doc in docs:
+        try:
+            rel = str(doc.relative_to(ROOT))
+        except ValueError:
+            rel = str(doc)           # a staged document the test owns
+        for lineno, cell, row in _slice_table_rows(
+                doc.read_text(encoding="utf-8")):
+            for oracle in dict.fromkeys(_ORACLE_PATH.findall(row)):
+                # Measured before the instance is looked at: a slice that
+                # already has its oracle stamps the same rung a missing one
+                # would, so a doc with no gap left is an empty rung, not a
+                # source that stopped reading.
+                signal = _oracle_signal(oracle)
+                signals.append(signal)
+                if (ROOT / oracle).exists():
+                    continue
+                slug = re.sub(r"[^A-Za-z0-9]+", "-", cell).strip("-") or "row"
+                tasks.append(_task(
+                    task_id=f"design/{doc.stem}/{slug}/{Path(oracle).stem}",
+                    source="design documents",
+                    artifact=rel,
+                    locator=f"line {lineno}, slice {cell}",
+                    gap=(f"{rel} names {oracle} as what decides slice {cell}, "
+                         "and that file is not in the tree, so the slice's "
+                         "stated exit has no mechanism that verifies it"),
+                    subject=oracle,
+                    mechanism=oracle,
+                    verify=f"test -f {oracle} && python3 -m pytest {oracle}",
+                    signal=signal,
+                ))
+    return Derivation("design-docs", tuple(dict.fromkeys(signals)),
+                      tuple(tasks))
+
+
+# --------------------------------------------------------------------------- #
+# Adapter 7 -- the tracker: an open issue that names an in-tree verifier        #
+# --------------------------------------------------------------------------- #
+# The tracker is the review's last source, and the one that needs the network.
+# The curriculum must stay computable in a checkout with none, so this adapter
+# never calls GitHub and never imports anything that does: it reads
+# `tests/fixtures/tracker_snapshot.json`, which `tools/tracker_snapshot.py
+# --write` produces and `--check` validates offline.
+#
+# An open issue is a task when it names, as a verifier, a file under `tests/` or
+# `tools/` that is in the tree: that is the issue saying which mechanism decides
+# it is done, which every task here has to name. An issue that names none, or
+# only files that are not there, is a task nobody can verify, and deriving one
+# would be inventing the verifier. The rung is that verifier's, by the same
+# reading slice 4 gives an oracle (`_oracle_signal`); the issue's labels (its
+# priority, its area) say nothing about how many implementations must agree and
+# are not read.
+#
+# What the snapshot cannot know is stated in `tools/tracker_snapshot.py`: an
+# issue closed after it was taken stays a task until it is regenerated.
+TRACKER_SNAPSHOT = "tests/fixtures/tracker_snapshot.json"
+
+
+def adapter_tracker(snapshot=None) -> Derivation:
+    path = Path(snapshot) if snapshot else ROOT / TRACKER_SNAPSHOT
+    if not path.is_file():
+        # No snapshot is not "no open work": it is the source failing to read
+        # its artifact, and an empty derivation makes `check` say so.
+        return Derivation("tracker", (), ())
+    data = json.loads(path.read_text(encoding="utf-8"))
+    issues = data.get("issues") if isinstance(data, dict) else None
+    if not isinstance(issues, list):
+        raise ValueError(f"{path}: the snapshot has no `issues` list")
+    try:
+        artifact = str(path.relative_to(ROOT))
+    except ValueError:
+        artifact = str(path)             # a staged snapshot the test owns
+    # Measured before the instances are looked at: every verifier the snapshot
+    # names declares the rung it would land on, in the tree or not, so a tracker
+    # whose named files have all gone is an empty rung and not silence.
+    signals: list[Signal] = []
+    tasks: list[Task] = []
+    for issue in issues:
+        named = list(issue.get("verifiers", ()))
+        signals.extend(_oracle_signal(v) for v in named)
+        present = [v for v in named if (ROOT / v).is_file()]
+        if not present:
+            continue
+        number = issue["number"]
+        verifier = present[0]
+        tasks.append(_task(
+            task_id=f"tracker/{number}",
+            source="the tracker",
+            artifact=artifact,
+            locator=f"issues[#{number}]",
+            gap=(f"open issue #{number} ({issue['title']}) names {verifier} "
+                 "as its verifier and is still open in the snapshot"),
+            subject=f"inso1337/revl#{number}",
+            mechanism=verifier,
+            verify=(f"gh issue view {number} --json state  # closed; then "
+                    "python3 tools/tracker_snapshot.py --write"),
+            signal=_oracle_signal(verifier),
+        ))
+    return Derivation("tracker", tuple(dict.fromkeys(signals)), tuple(tasks))
+
+
 ADAPTERS = {
     "construct-reach": adapter_construct_reach,
     "census-bypass": adapter_census_bypass,
     "unexplained-refusal": adapter_unexplained_refusal,
     "formal-obligation": adapter_formal_obligation,
     "cross-tier-probes": adapter_cross_tier_probe,
+    "design-docs": adapter_design_docs,
+    "tracker": adapter_tracker,
 }
 
 
