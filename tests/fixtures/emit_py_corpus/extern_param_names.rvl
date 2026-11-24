@@ -1,0 +1,7 @@
+// An inline `@py` body names its parameters itself (issue #3604): a parameter
+// spelled like a builtin the emitter emits bare keeps its spelling, by the
+// reference and the self-hosted emitter alike, so `span(1, 5, 10)` answers 14.
+extern pure fn span(min: Int, max: Int, len: Int) -> Int
+= @py { return max - min + len }
+
+pub fn f(x: Int) -> Int { return span(x, 5, 10) }
