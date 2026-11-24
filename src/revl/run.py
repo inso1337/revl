@@ -3510,18 +3510,6 @@ def run_command(args, hold_once: bool = False) -> int:
         # not wait on the prompt. `revl dev` still passes `hold_once` itself.
         return asyncio.run(driver.hold_repl(
             once=hold_once or bool(getattr(args, "once", False))))
-            code = asyncio.run(driver.withdraw_once())
-        elif getattr(args, "watch", False):
-            code = asyncio.run(driver.watch(args.files))
-        else:
-            code = asyncio.run(driver.hold_repl(once=hold_once))
-        if driver.receipts_error is not None and not code:
-            # issue #2757: the run asked for signed receipts and could not give a
-            # complete chain, so it did not deliver what it was asked for
-            print(f"error: the receipt chain was not written: "
-                  f"{driver.receipts_error}", file=sys.stderr)
-            return 1
-        return code
     except refusals(emit) as exc:
         # issue #1393: an emit-time refusal is an ANSWER, not a crash. The py
         # emitter refuses a document it cannot lower rather than silently
