@@ -38,7 +38,7 @@ review's own words for the rung it produces. See
 docs/design/533-evolution-curriculum.md for the argument, the measured
 populations, and the cases the signal gets wrong.
 
-SOURCES. The review names eight. This module reads seven of them; the rest are
+SOURCES. The review names eight. This module reads eight of them; the rest are
 SOURCES. The review names eight. This module reads six of them; the rest are
 staged in the design doc's slice plan. Each adapter below states the artifact
 it reads, and every task it emits carries that artifact by path, so a reader
@@ -639,20 +639,12 @@ def adapter_cross_tier_probe(cases_dir=None) -> Derivation:
 
 # --------------------------------------------------------------------------- #
 # Adapter 6 -- design documents: a slice table row whose oracle is not there     #
-# Adapter 6 -- generated adversarial programs: fuzz seeds that still diverge     #
 # --------------------------------------------------------------------------- #
 # docs/design/*.md states its own acceptance. A slice table (header cell opening
 # with "Slice", "Step", "Phase" or "Stage") whose row names a test under
 # `tests/` is a promise: this oracle decides the slice. When the named file is
 # not in the tree, the slice has a stated exit and no mechanism to verify it,
 # which is precisely a task: write the oracle the doc already names.
-# tools/fuzz_frontend.py mutates the tree's own programs and runs each stage's
-# oracle over the result: the reference frontend must refuse and never crash,
-# the self-host lexer must agree with the reference lexer, and the self-host
-# gate must not admit what the reference refuses. A campaign that finds a
-# divergence shrinks it to a minimal reproducer. A reproducer nobody has fixed
-# is a task, and it is a task ONLY WHILE IT STILL DIVERGES, so the curriculum
-# replays it instead of trusting that it was recorded.
 #
 # Only a path under `tests/` in a slice table's own row counts. A path in prose,
 # in a table about something else (a commit table, a fork-status table), or in a
@@ -663,20 +655,6 @@ _SLICE_HEADER = re.compile(r"(?i)^\W*(slice|step|phase|stage)\b")
 _TABLE_RULE = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
 _ORACLE_PATH = re.compile(
     r"(?<![\w/.-])(tests/[A-Za-z0-9_./-]*?\.(?:py|ts|rs|go|java))")
-# The recorded reproducers are `tests/fixtures/fuzz_seeds.json`. The source
-# reads that ledger and replays each entry through the fuzzer's own
-# `replay_seeds`, which is the same function `python3 tools/fuzz_frontend.py
-# --replay` runs, so the task's verifier and the generator cannot drift.
-#
-# What each stage makes agree is read off the stage classes themselves, by AST:
-# a stage that builds a self-host module compares it with the reference, one
-# that does not checks the reference alone. Nothing here says which stage is
-# hard. The corpus a stage mutates is the fuzzer's own `CORPUS_DIRS`.
-FUZZ_FRONTEND = "tools/fuzz_frontend.py"
-FUZZ_SEEDS = "tests/fixtures/fuzz_seeds.json"
-_FUZZ_SUBJECT = {"reference": "src/revl (the reference frontend)",
-                 "lexer": "selfhost/lexer.rvl",
-                 "gate": "selfhost/lower.rvl"}
 
 
 def _oracle_signal(path: str) -> Signal:
@@ -699,33 +677,6 @@ def _oracle_signal(path: str) -> Signal:
     if "crate" in name or "native" in name:
         impls.append(NATIVE)
     return Signal(impls=tuple(impls), breadth=1)
-def _fuzz_stage_impls() -> dict[str, tuple[str, ...]]:
-    """`stage name -> implementations it makes agree`, read from the fuzzer."""
-    tree = ast.parse((ROOT / FUZZ_FRONTEND).read_text(encoding="utf-8"))
-    classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
-    registry = next(
-        (n.value for n in tree.body if isinstance(n, ast.Assign)
-         and any(isinstance(t, ast.Name) and t.id == "STAGES" for t in n.targets)),
-        None)
-    if not isinstance(registry, ast.DictComp):
-        raise ValueError(f"{FUZZ_FRONTEND}: STAGES is no longer a comprehension "
-                         "over a tuple of stage classes; teach "
-                         "_fuzz_stage_impls its shape")
-    out: dict[str, tuple[str, ...]] = {}
-    for generator in registry.generators:
-        for element in generator.iter.elts:
-            node = classes[element.id]
-            name = next(
-                stmt.value.value for stmt in node.body
-                if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Constant)
-                and any(isinstance(t, ast.Name) and t.id == "name"
-                        for t in stmt.targets))
-            builds_selfhost = any(isinstance(n, ast.Attribute) and n.attr == "selfhost"
-                                  for n in ast.walk(node))
-            out[name] = (REFERENCE, SELFHOST) if builds_selfhost else (REFERENCE,)
-    if not out:
-        raise ValueError(f"{FUZZ_FRONTEND}: STAGES names no stage")
-    return out
 
 
 def _slice_table_rows(text: str):
@@ -820,8 +771,6 @@ TRACKER_SNAPSHOT = "tests/fixtures/tracker_snapshot.json"
 
 def adapter_tracker(snapshot=None) -> Derivation:
     path = Path(snapshot) if snapshot else ROOT / TRACKER_SNAPSHOT
-def adapter_fuzz_seeds(ledger=None, stages=None) -> Derivation:
-    path = Path(ledger) if ledger else ROOT / FUZZ_SEEDS
     if not path.is_file():
         # No snapshot is not "no open work": it is the source failing to read
         # its artifact, and an empty derivation makes `check` say so.
@@ -830,6 +779,98 @@ def adapter_fuzz_seeds(ledger=None, stages=None) -> Derivation:
     issues = data.get("issues") if isinstance(data, dict) else None
     if not isinstance(issues, list):
         raise ValueError(f"{path}: the snapshot has no `issues` list")
+    try:
+        artifact = str(path.relative_to(ROOT))
+    except ValueError:
+        artifact = str(path)             # a staged snapshot the test owns
+    # Measured before the instances are looked at: every verifier the snapshot
+    # names declares the rung it would land on, in the tree or not, so a tracker
+    # whose named files have all gone is an empty rung and not silence.
+    signals: list[Signal] = []
+    tasks: list[Task] = []
+    for issue in issues:
+        named = list(issue.get("verifiers", ()))
+        signals.extend(_oracle_signal(v) for v in named)
+        present = [v for v in named if (ROOT / v).is_file()]
+        if not present:
+            continue
+        number = issue["number"]
+        verifier = present[0]
+        tasks.append(_task(
+            task_id=f"tracker/{number}",
+            source="the tracker",
+            artifact=artifact,
+            locator=f"issues[#{number}]",
+            gap=(f"open issue #{number} ({issue['title']}) names {verifier} "
+                 "as its verifier and is still open in the snapshot"),
+            subject=f"inso1337/revl#{number}",
+            mechanism=verifier,
+            verify=(f"gh issue view {number} --json state  # closed; then "
+                    "python3 tools/tracker_snapshot.py --write"),
+            signal=_oracle_signal(verifier),
+        ))
+    return Derivation("tracker", tuple(dict.fromkeys(signals)), tuple(tasks))
+
+
+# --------------------------------------------------------------------------- #
+# Adapter 6 -- generated adversarial programs: fuzz seeds that still diverge     #
+# --------------------------------------------------------------------------- #
+# tools/fuzz_frontend.py mutates the tree's own programs and runs each stage's
+# oracle over the result: the reference frontend must refuse and never crash,
+# the self-host lexer must agree with the reference lexer, and the self-host
+# gate must not admit what the reference refuses. A campaign that finds a
+# divergence shrinks it to a minimal reproducer. A reproducer nobody has fixed
+# is a task, and it is a task ONLY WHILE IT STILL DIVERGES, so the curriculum
+# replays it instead of trusting that it was recorded.
+#
+# The recorded reproducers are `tests/fixtures/fuzz_seeds.json`. The source
+# reads that ledger and replays each entry through the fuzzer's own
+# `replay_seeds`, which is the same function `python3 tools/fuzz_frontend.py
+# --replay` runs, so the task's verifier and the generator cannot drift.
+#
+# What each stage makes agree is read off the stage classes themselves, by AST:
+# a stage that builds a self-host module compares it with the reference, one
+# that does not checks the reference alone. Nothing here says which stage is
+# hard. The corpus a stage mutates is the fuzzer's own `CORPUS_DIRS`.
+FUZZ_FRONTEND = "tools/fuzz_frontend.py"
+FUZZ_SEEDS = "tests/fixtures/fuzz_seeds.json"
+_FUZZ_SUBJECT = {"reference": "src/revl (the reference frontend)",
+                 "lexer": "selfhost/lexer.rvl",
+                 "gate": "selfhost/lower.rvl"}
+
+
+def _fuzz_stage_impls() -> dict[str, tuple[str, ...]]:
+    """`stage name -> implementations it makes agree`, read from the fuzzer."""
+    tree = ast.parse((ROOT / FUZZ_FRONTEND).read_text(encoding="utf-8"))
+    classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
+    registry = next(
+        (n.value for n in tree.body if isinstance(n, ast.Assign)
+         and any(isinstance(t, ast.Name) and t.id == "STAGES" for t in n.targets)),
+        None)
+    if not isinstance(registry, ast.DictComp):
+        raise ValueError(f"{FUZZ_FRONTEND}: STAGES is no longer a comprehension "
+                         "over a tuple of stage classes; teach "
+                         "_fuzz_stage_impls its shape")
+    out: dict[str, tuple[str, ...]] = {}
+    for generator in registry.generators:
+        for element in generator.iter.elts:
+            node = classes[element.id]
+            name = next(
+                stmt.value.value for stmt in node.body
+                if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Constant)
+                and any(isinstance(t, ast.Name) and t.id == "name"
+                        for t in stmt.targets))
+            builds_selfhost = any(isinstance(n, ast.Attribute) and n.attr == "selfhost"
+                                  for n in ast.walk(node))
+            out[name] = (REFERENCE, SELFHOST) if builds_selfhost else (REFERENCE,)
+    if not out:
+        raise ValueError(f"{FUZZ_FRONTEND}: STAGES names no stage")
+    return out
+
+
+def adapter_fuzz_seeds(ledger=None, stages=None) -> Derivation:
+    path = Path(ledger) if ledger else ROOT / FUZZ_SEEDS
+    if not path.is_file():
         # No ledger to read is not "nothing diverges". It is the source failing
         # to read its artifact, and an empty derivation makes `check` say so.
         return Derivation("fuzz-seeds", (), ())
@@ -843,37 +884,14 @@ def adapter_fuzz_seeds(ledger=None, stages=None) -> Derivation:
     try:
         artifact = str(path.relative_to(ROOT))
     except ValueError:
-        artifact = str(path)             # a staged snapshot the test owns
-    # Measured before the instances are looked at: every verifier the snapshot
-    # names declares the rung it would land on, in the tree or not, so a tracker
-    # whose named files have all gone is an empty rung and not silence.
-    signals: list[Signal] = []
         artifact = str(path)             # a staged ledger the test owns
     tasks: list[Task] = []
-    for issue in issues:
-        named = list(issue.get("verifiers", ()))
-        signals.extend(_oracle_signal(v) for v in named)
-        present = [v for v in named if (ROOT / v).is_file()]
-        if not present:
-            continue
-        number = issue["number"]
-        verifier = present[0]
     for seed, detail in fuzz.replay_seeds(path, stages=stages):
         stage = seed["stage"]
         tasks.append(_task(
-            task_id=f"tracker/{number}",
-            source="the tracker",
             task_id=f"fuzz/{seed['id']}",
             source="generated adversarial programs",
             artifact=artifact,
-            locator=f"issues[#{number}]",
-            gap=(f"open issue #{number} ({issue['title']}) names {verifier} "
-                 "as its verifier and is still open in the snapshot"),
-            subject=f"inso1337/revl#{number}",
-            mechanism=verifier,
-            verify=(f"gh issue view {number} --json state  # closed; then "
-                    "python3 tools/tracker_snapshot.py --write"),
-            signal=_oracle_signal(verifier),
             locator=f"seeds[{seed['id']!r}]",
             gap=(f"the {stage} stage of {FUZZ_FRONTEND} still reports "
                  f"{seed['kind']} on a recorded {len(seed['source'])}-character "
@@ -884,7 +902,6 @@ def adapter_fuzz_seeds(ledger=None, stages=None) -> Derivation:
                     f"longer listed; then delete its entry from {FUZZ_SEEDS}"),
             signal=signals[stage],
         ))
-    return Derivation("tracker", tuple(dict.fromkeys(signals)), tuple(tasks))
     return Derivation("fuzz-seeds", tuple(dict.fromkeys(signals.values())),
                       tuple(tasks))
 

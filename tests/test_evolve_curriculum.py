@@ -486,7 +486,6 @@ def test_medium_tasks_name_a_dispatch_the_reference_really_has(curriculum):
 
 # --------------------------------------------------------------------------- #
 # Design documents (slice 4): a slice table row whose oracle is not there.      #
-# Fuzz seeds (slice 5): a recorded reproducer is a task only while it diverges. #
 # --------------------------------------------------------------------------- #
 def test_design_tasks_name_a_row_and_an_oracle_that_is_really_missing(
         curriculum):
@@ -506,8 +505,6 @@ def test_design_tasks_name_a_row_and_an_oracle_that_is_really_missing(
         assert task.subject in line, (task.task_id, line)
         assert not (ROOT / task.subject).exists(), \
             f"{task.task_id} names {task.subject}, which exists"
-def _fuzz(tool):
-    return tool._load("_ec_fuzz_test", "tools/fuzz_frontend.py")
 
 
 def test_a_path_outside_a_slice_table_is_not_a_design_task(curriculum):
@@ -519,22 +516,6 @@ def test_a_path_outside_a_slice_table_is_not_a_design_task(curriculum):
     assert not (ROOT / "tests" / "test_reentrancy.py").exists()
     assert not any("backend-runtime-fork-status" in t.artifact
                    for t in tasks if t.task_id.startswith("design/"))
-def test_the_fuzz_stage_signals_are_what_the_stage_classes_build(derived):
-    """Re-derived from the fuzzer's classes at runtime, not from the generator's
-    AST scan: a stage that builds a self-host module compares it with the
-    reference, one that does not checks the reference alone."""
-    import inspect
-
-    tool, derivations = derived
-    fuzz = _fuzz(tool)
-    impls = tool._fuzz_stage_impls()
-    assert set(impls) == set(fuzz.STAGES)
-    for name, stage in fuzz.STAGES.items():
-        builds = "selfhost(" in inspect.getsource(stage)
-        assert impls[name] == (("reference", "selfhost") if builds
-                               else ("reference",)), name
-    declared = next(d for d in derivations if d.source == "fuzz-seeds")
-    assert {tool.tier(s) for s in declared.signals} == {"easy", "hard"}
 
 
 def _staged_design(tmp_path, body):
@@ -542,19 +523,6 @@ def _staged_design(tmp_path, body):
     docs.mkdir(exist_ok=True)
     (docs / "900-staged.md").write_text(body, encoding="utf-8")
     return docs
-def test_every_fuzz_task_is_a_recorded_seed_that_really_still_diverges(
-        derived):
-    """Holds over whatever the ledger holds, which is nothing at HEAD (a
-    campaign of 2534 inputs on the gate stage found no divergence). The set of
-    tasks must equal the fuzzer's own replay, so a task for a fixed seed, or a
-    live seed with no task, fails here. Its teeth are shown on a staged ledger
-    below, not by requiring the tree to still have an open fuzz finding."""
-    tool, derivations = derived
-    fuzz = _fuzz(tool)
-    ids = {f"fuzz/{seed['id']}" for seed, _ in fuzz.replay_seeds()}
-    mine = {t.task_id for d in derivations if d.source == "fuzz-seeds"
-            for t in d.tasks}
-    assert mine == ids
 
 
 _SLICE_TABLE = """# staged
@@ -611,14 +579,11 @@ def test_a_missing_design_directory_reds_instead_of_reading_as_empty(
 # The tracker (slice 6): an offline snapshot, never the network.                #
 # --------------------------------------------------------------------------- #
 def _staged_snapshot(tmp_path, issues):
-def _staged_seeds(tmp_path, seeds):
     import json
 
     path = tmp_path / "tracker_snapshot.json"
     path.write_text(json.dumps({"repo": "x/y", "issues": issues}),
                     encoding="utf-8")
-    path = tmp_path / "fuzz_seeds.json"
-    path.write_text(json.dumps({"seeds": seeds}), encoding="utf-8")
     return path
 
 
@@ -627,8 +592,6 @@ def test_tracker_tasks_are_the_snapshot_issues_that_name_a_verifier_in_the_tree(
     """Re-derived by reading the committed snapshot by hand: a task for every
     open issue that names a verifier which is in the tree, and for no other."""
     import json
-class _BoomStage:
-    """A stage whose oracle trips on one marker, standing in for a real bug."""
 
     tool, derivations = derived
     snapshot = json.loads((ROOT / "tests" / "fixtures"
@@ -644,16 +607,6 @@ class _BoomStage:
     for task in mine.values():
         assert task.artifact == "tests/fixtures/tracker_snapshot.json"
         assert (ROOT / task.mechanism).is_file()
-    name = "reference"
-
-    def __init__(self, _cache):
-        pass
-
-    def check(self, src):
-        class Signature:
-            kind = "boom"
-
-        return (Signature, "marker found") if "BOOM" in src else None
 
 
 def test_the_tracker_source_never_touches_the_network(derived, monkeypatch):
@@ -661,26 +614,6 @@ def test_the_tracker_source_never_touches_the_network(derived, monkeypatch):
     snapshot and calls nothing that could reach GitHub."""
     import socket
     import subprocess
-def test_a_seed_is_a_task_only_while_it_still_diverges(derived, tmp_path):
-    """The source's vacuity oracle, in both directions, on a ledger this test
-    owns and a stage whose bug is a marker: a seed that trips it is a task; a
-    seed whose bug was fixed (the stage returns nothing), and a seed that now
-    trips a DIFFERENT fault, are not."""
-    tool, derivations = derived
-    live = _staged_seeds(tmp_path, [
-        {"id": "live", "stage": "reference", "kind": "boom",
-         "source": "fn BOOM() {}"},
-        {"id": "fixed", "stage": "reference", "kind": "boom",
-         "source": "fn ok() {}"},
-        {"id": "other", "stage": "reference", "kind": "different",
-         "source": "fn BOOM() {}"},
-    ])
-    found = tool.adapter_fuzz_seeds(live, stages={"reference": _BoomStage})
-    assert [t.task_id for t in found.tasks] == ["fuzz/live"]
-    task = found.tasks[0]
-    assert task.tier == "easy" and task.artifact == str(live)
-    assert "marker found" in task.gap
-    assert "--replay" in task.verify
 
     tool, _ = derived
 
@@ -691,19 +624,6 @@ def test_a_seed_is_a_task_only_while_it_still_diverges(derived, tmp_path):
     monkeypatch.setattr(subprocess, "Popen", refuse)
     monkeypatch.setattr(socket, "create_connection", refuse)
     assert tool.adapter_tracker().tasks
-    quiet_dir = tmp_path / "quiet"
-    quiet_dir.mkdir()
-    quiet = tool.adapter_fuzz_seeds(
-        _staged_seeds(quiet_dir, [
-            {"id": "fixed", "stage": "reference", "kind": "boom",
-             "source": "fn ok() {}"}]),
-        stages={"reference": _BoomStage})
-    assert quiet.tasks == ()
-    assert quiet.signals == found.signals          # the same measurement
-    others = [d for d in derivations if d.source != "fuzz-seeds"]
-    assert tool.check(others + [found]) == []
-    assert tool.check(others + [quiet]) == [], \
-        "an empty but reachable rung is a measurement, not a failure"
 
 
 def test_a_staged_snapshot_fills_the_tracker_rung_and_a_gone_verifier_empties_it(
@@ -733,16 +653,12 @@ def test_a_staged_snapshot_fills_the_tracker_rung_and_a_gone_verifier_empties_it
 
 
 def test_a_missing_or_malformed_tracker_snapshot_is_not_an_empty_tracker(
-def test_a_missing_fuzz_ledger_reds_and_an_unknown_stage_is_refused(
         derived, tmp_path):
     tool, derivations = derived
     missing = tool.adapter_tracker(tmp_path / "does-not-exist.json")
-    missing = tool.adapter_fuzz_seeds(tmp_path / "does-not-exist.json")
     assert missing.signals == () and missing.tasks == ()
     live = [d for d in derivations if d.source != "tracker"]
     assert any("'tracker' ran and measured no signal" in p
-    live = [d for d in derivations if d.source != "fuzz-seeds"]
-    assert any("'fuzz-seeds' ran and measured no signal" in p
                for p in tool.check(live + [missing]))
     bad = tmp_path / "bad.json"
     bad.write_text('{"issues": 3}', encoding="utf-8")
@@ -759,6 +675,116 @@ def test_the_tier_of_a_missing_oracle_is_read_off_its_named_path(derived):
     assert tier("tests/test_selfhost_ambient.py") == "medium"
     assert tier("tests/test_gate_crate_admit.py") == "medium"
     assert tier("tests/test_selfhost_crate_admit.py") == "expert"
+
+
+# --------------------------------------------------------------------------- #
+# Fuzz seeds (slice 5): a recorded reproducer is a task only while it diverges. #
+# --------------------------------------------------------------------------- #
+def _fuzz(tool):
+    return tool._load("_ec_fuzz_test", "tools/fuzz_frontend.py")
+
+
+def test_the_fuzz_stage_signals_are_what_the_stage_classes_build(derived):
+    """Re-derived from the fuzzer's classes at runtime, not from the generator's
+    AST scan: a stage that builds a self-host module compares it with the
+    reference, one that does not checks the reference alone."""
+    import inspect
+
+    tool, derivations = derived
+    fuzz = _fuzz(tool)
+    impls = tool._fuzz_stage_impls()
+    assert set(impls) == set(fuzz.STAGES)
+    for name, stage in fuzz.STAGES.items():
+        builds = "selfhost(" in inspect.getsource(stage)
+        assert impls[name] == (("reference", "selfhost") if builds
+                               else ("reference",)), name
+    declared = next(d for d in derivations if d.source == "fuzz-seeds")
+    assert {tool.tier(s) for s in declared.signals} == {"easy", "hard"}
+
+
+def test_every_fuzz_task_is_a_recorded_seed_that_really_still_diverges(
+        derived):
+    """Holds over whatever the ledger holds, which is nothing at HEAD (a
+    campaign of 2534 inputs on the gate stage found no divergence). The set of
+    tasks must equal the fuzzer's own replay, so a task for a fixed seed, or a
+    live seed with no task, fails here. Its teeth are shown on a staged ledger
+    below, not by requiring the tree to still have an open fuzz finding."""
+    tool, derivations = derived
+    fuzz = _fuzz(tool)
+    ids = {f"fuzz/{seed['id']}" for seed, _ in fuzz.replay_seeds()}
+    mine = {t.task_id for d in derivations if d.source == "fuzz-seeds"
+            for t in d.tasks}
+    assert mine == ids
+
+
+def _staged_seeds(tmp_path, seeds):
+    import json
+
+    path = tmp_path / "fuzz_seeds.json"
+    path.write_text(json.dumps({"seeds": seeds}), encoding="utf-8")
+    return path
+
+
+class _BoomStage:
+    """A stage whose oracle trips on one marker, standing in for a real bug."""
+
+    name = "reference"
+
+    def __init__(self, _cache):
+        pass
+
+    def check(self, src):
+        class Signature:
+            kind = "boom"
+
+        return (Signature, "marker found") if "BOOM" in src else None
+
+
+def test_a_seed_is_a_task_only_while_it_still_diverges(derived, tmp_path):
+    """The source's vacuity oracle, in both directions, on a ledger this test
+    owns and a stage whose bug is a marker: a seed that trips it is a task; a
+    seed whose bug was fixed (the stage returns nothing), and a seed that now
+    trips a DIFFERENT fault, are not."""
+    tool, derivations = derived
+    live = _staged_seeds(tmp_path, [
+        {"id": "live", "stage": "reference", "kind": "boom",
+         "source": "fn BOOM() {}"},
+        {"id": "fixed", "stage": "reference", "kind": "boom",
+         "source": "fn ok() {}"},
+        {"id": "other", "stage": "reference", "kind": "different",
+         "source": "fn BOOM() {}"},
+    ])
+    found = tool.adapter_fuzz_seeds(live, stages={"reference": _BoomStage})
+    assert [t.task_id for t in found.tasks] == ["fuzz/live"]
+    task = found.tasks[0]
+    assert task.tier == "easy" and task.artifact == str(live)
+    assert "marker found" in task.gap
+    assert "--replay" in task.verify
+
+    quiet_dir = tmp_path / "quiet"
+    quiet_dir.mkdir()
+    quiet = tool.adapter_fuzz_seeds(
+        _staged_seeds(quiet_dir, [
+            {"id": "fixed", "stage": "reference", "kind": "boom",
+             "source": "fn ok() {}"}]),
+        stages={"reference": _BoomStage})
+    assert quiet.tasks == ()
+    assert quiet.signals == found.signals          # the same measurement
+    others = [d for d in derivations if d.source != "fuzz-seeds"]
+    assert tool.check(others + [found]) == []
+    assert tool.check(others + [quiet]) == [], \
+        "an empty but reachable rung is a measurement, not a failure"
+
+
+def test_a_missing_fuzz_ledger_reds_and_an_unknown_stage_is_refused(
+        derived, tmp_path):
+    tool, derivations = derived
+    missing = tool.adapter_fuzz_seeds(tmp_path / "does-not-exist.json")
+    assert missing.signals == () and missing.tasks == ()
+    live = [d for d in derivations if d.source != "fuzz-seeds"]
+    assert any("'fuzz-seeds' ran and measured no signal" in p
+               for p in tool.check(live + [missing]))
+
     bad = _staged_seeds(tmp_path, [
         {"id": "x", "stage": "nope", "kind": "k", "source": "s"}])
     with pytest.raises(KeyError, match="unknown stage"):
