@@ -8955,6 +8955,7 @@ GATE_3107_ADMITTED = [
     ("verified_before_an_ordinary_fn",
      "verified fn one() -> Int { return 1 }\n"
      "fn two() -> Int { return 2 }\n"),
+]
 
 _HANDOFF_MAP_3342 = [
     ("wrong_value", _handoff_map_3342(), "T1"),
