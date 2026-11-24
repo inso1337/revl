@@ -2580,21 +2580,6 @@ Known fidelity limits of the shaped model, deliberately not papered over:
    a refinement of it (`semSteps_has_split` and `splitSteps_collapse`,
    both directions), which is why no theorem over `SemSteps` moved.
 
-<<<<<<< HEAD
-   **Still not modelled:** positional drop (an emission queued after the
-   last `commit-approved` of a WAL that carries several runs, which the
-   reference drops and the model reads by the log's approval alone), a
-   flush that raises more than once on the same entry, a `flushed` record
-   that fails to write after a fire that succeeded (the runtime then lists
-   the entry as crossed and also records `flush-residue`), an E-Stop
-   between the extern returning and the registration, the split of an
-   emission's own crossing and record, cascading abort,
-   compensation drain and escrow, and item 250's frozen fork beyond
-   being a third `Outcome` the commit/abort dichotomy is hypothesised
-   away from. Durability is a floor, not a theorem: `WAFrom` orders the
-   fence append before the apply; that `fsync` reaches the platter is a
-   host obligation.
-=======
    **Also not modelled:** the roll-forward window's `flush-residue`
    surface (a queued emission whose host body RAISED at the flush; the
    commit theorem fires every entry successfully, so R4 is stated for the
@@ -2605,7 +2590,6 @@ Known fidelity limits of the shaped model, deliberately not papered over:
    compensation drain and escrow, and item 250's frozen fork beyond
    being a third `Outcome` the commit/abort dichotomy is hypothesised
    away from.
->>>>>>> 1dcf48e27 (go: refuse a consumer's Opt outside a return by name, not through go build (#1627) (#1637))
 
    **Honest weighting of the rows**, per item 418's finding that a
    statement can be true and empty: `revert_on_failure`,

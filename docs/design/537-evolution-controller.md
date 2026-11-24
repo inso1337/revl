@@ -390,12 +390,8 @@ lands; section 9 lists it.
 ## 7. The failure direction, and the named refusals
 
 Fail-closed everywhere, with no third value, because a third value is where a
-<<<<<<< HEAD
-fail-open default hides. Twenty-seven named codes:
-=======
 fail-open default hides. Twenty-six named codes:
 fail-open default hides. Fifteen named codes:
->>>>>>> 1dcf48e27 (go: refuse a consumer's Opt outside a return by name, not through go build (#1627) (#1637))
 
 | code | fires when |
 |---|---|
@@ -462,12 +458,8 @@ it meant, which is a fail-open default by another route.
 
 ## 8. Non-vacuity
 
-<<<<<<< HEAD
-Four demonstrations, all in `tests/test_evolution_controller.py`: 165 tests,
-=======
 Four demonstrations, all in `tests/test_evolution_controller.py`: 138 tests,
 Three demonstrations, all in `tests/test_evolution_controller.py`: 77 tests,
->>>>>>> 1dcf48e27 (go: refuse a consumer's Opt outside a return by name, not through go build (#1627) (#1637))
 all passing.
 
 1. **It refuses on missing evidence.** Parametrized over all four

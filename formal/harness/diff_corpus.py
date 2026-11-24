@@ -81,12 +81,8 @@ Pipeline (formal/STATUS.md, "differential oracle"):
    instead: `formal/out_of_fragment_ledger/` holds one record per file in
    each, shrinks only, and a file joining one without a record fails the
    gate (`--show-ledger` prints it). Only `agree-*` and the generic `out-of-fragment` are purely
-   instead: `formal/out_of_fragment_ledger.json` names the files in each,
-   shrinks only, and a file joining one without a line in it fails the
-   gate. Only `agree-*` and the generic `out-of-fragment` are purely
    informational.
 5. render those buckets into `formal/STATUS.md` between the
-5. render the census and those buckets into `formal/STATUS.md` between the
    `GENERATED alignment` markers, and fail the gate when the checked-in
    block is not what this run produced. The document's "0 formal-strict"
    is then this run's own output rather than a sentence somebody typed.
@@ -870,8 +866,6 @@ def _resolve_emission(root: str, chain: str, requires: dict, handles: dict,
         (comp, key), meth = hit
         if comp == SERVICE_PARAM:
             return key, meth  # a service-typed method parameter (#1682)
-    if aliases and root in aliases and chain and "." not in chain:
-        comp, key = aliases[root]
         svc = psvc.get(comp, {}).get(key)
         return (svc, meth) if svc else None
     return None
@@ -918,7 +912,6 @@ def _alias_hit(root: str, chain: str, aliases: dict | None):
     held = aliases.get(name)
     if isinstance(held, tuple):
         return held, parts[-1]
-        return (svc, chain) if svc else None
     return None
 
 
@@ -938,15 +931,6 @@ def collect_provision_aliases(node, handles: dict, aliases: dict) -> None:
         held = _value_provision(node.callee.target, handles, aliases)
         if held is not None:
             aliases[_expr_key(node.callee.target)] = held
-    if type(node).__name__ == "LetStmt":
-        value = getattr(node, "value", None)
-        name = getattr(node, "name", None)
-        if isinstance(value, ExprField) and isinstance(value.target, ExprVar) \
-                and value.target.name in handles and isinstance(name, str):
-            aliases[name] = (handles[value.target.name], value.name)
-        elif isinstance(value, ExprVar) and value.name in aliases \
-                and isinstance(name, str):
-            aliases[name] = aliases[value.name]  # a second hop
     if dataclasses.is_dataclass(node) and not isinstance(node, type):
         for f in dataclasses.fields(node):
             collect_provision_aliases(getattr(node, f.name), handles, aliases)
@@ -1124,7 +1108,6 @@ def _reach_call(node: ExprCall, out: "set[tuple[str, str]]", region: str,
                 host_tokens: "dict[str, set[str]] | None",
                 via_out: "dict[tuple[str, str], set[str]] | None" = None
                 ) -> None:
-                externs: "set[str] | None") -> None:
     """The crossing ONE call head contributes (see `walk_reach`). The
     arguments are the caller's to walk, under whatever region encloses them:
     a call evaluated to produce an argument is not the marked crossing.
@@ -1135,8 +1118,6 @@ def _reach_call(node: ExprCall, out: "set[tuple[str, str]]", region: str,
     `*` for a crossing that names no verb of the key: a resolved receiver, a
     host emission, a `fn` reaching one (`emission_analysis.unname`)."""
     rt = _route_values(node.callee)
-    a call evaluated to produce an argument is not the marked crossing."""
-    rt = _route(node.callee)
     if not rt:
         return
     root, chain = rt
@@ -1161,9 +1142,6 @@ def _reach_call(node: ExprCall, out: "set[tuple[str, str]]", region: str,
             mode, entries = bounds[(svc, meth)]
             if mode == "any":
                 note("*", "*", "*")
-        if (svc, meth) in em_set:
-            if root in handles or (aliases and root in aliases):
-                out.add(("*", "*"))
             else:
                 for e in entries:
                     note("*", e, "*")
@@ -1178,15 +1156,6 @@ def _reach_call(node: ExprCall, out: "set[tuple[str, str]]", region: str,
             else:
                 for e in entries:
                     note(_declared_cap(e), _canon_cap(root, e), via)
-                mode, entries = bounds[(svc, meth)]
-                if mode == "any":
-                    # No declared token: the SERVICE names the boundary
-                    # for the fold, in its own namespace; the BOUND
-                    # column still reads the wiring key (item 561).
-                    out.add((_undeclared_cap(svc), root))
-                else:
-                    for e in entries:
-                        out.add((_declared_cap(e), _canon_cap(root, e)))
     elif res is None and region == "all" and root in emitting:
         # A host emission. The two namespaces part company here (#1169 F3):
         # the attenuation fold gives it the unnameable `*` whatever the
@@ -1204,15 +1173,6 @@ def _reach_call(node: ExprCall, out: "set[tuple[str, str]]", region: str,
         reached = (host_tokens or {}).get(root) or {"*"}
         for token in sorted(reached):
             note("*", token, "*")
-        # `Cap("*")`), but the provide-method BOUND names a DIRECT emission
-        # extern by the extern — `_emitting_capabilities` seeds the fixed
-        # point with `{wire}` for `extern emission fn wire`, and
-        # `_method_emissions` measures that name against the declared
-        # `emission[...]` entries, which is why `Db.execute` can be declared
-        # `emission[wire, ...]` at all. A transitively-emitting named fn
-        # stays `*` on both sides (STATUS.md, "known fidelity limits").
-        bound = root if externs is not None and root in externs else "*"
-        out.add(("*", bound))
 
 
 def walk_reach(node, out: "set[tuple[str, str]]", region: str, requires: dict,
@@ -1221,7 +1181,6 @@ def walk_reach(node, out: "set[tuple[str, str]]", region: str, requires: dict,
                host_tokens: "dict[str, set[str]] | None" = None,
                via_out: "dict[tuple[str, str], set[str]] | None" = None
                ) -> None:
-               externs: "set[str] | None" = None) -> None:
     """Collect the emission caps `node` crosses, each as the PAIR
     `(attenuation spelling, bound spelling)` — the two namespaces a crossing
     has (see `_canon_cap` / `_declared_cap`). The caller keeps whichever half
@@ -1236,9 +1195,6 @@ def walk_reach(node, out: "set[tuple[str, str]]", region: str, requires: dict,
     for the bound (`_reach_call`). `host_tokens` is the file's
     `_emitting_tokens` table. `via_out`, when given, collects per pair how
     it was reached (`_reach_call`): the F row's third column.
-    `*` in both namespaces; an emitting-fn call too; a DIRECT emission-extern
-    call is `*` for the fold and the extern's name for the bound
-    (`_reach_call`). `externs` is the file's emission-extern name set.
 
     An `emit` marks its HEAD call only: `_emit_step_caps_pairs` reads the
     step's `expr.target` and nothing beneath it, so the arguments (and a
@@ -1250,7 +1206,6 @@ def walk_reach(node, out: "set[tuple[str, str]]", region: str, requires: dict,
         return
     args = (requires, handles, psvc, bounds, em_set, emitting, aliases,
             host_tokens, via_out)
-    args = (requires, handles, psvc, bounds, em_set, emitting, aliases, externs)
     if isinstance(node, (EmitStmt, EmitExpr)) and not isinstance(node, type):
         expr = getattr(node, "expr", None)
         if isinstance(expr, ExprCall):
@@ -4357,7 +4312,6 @@ def walk_calls(node: object, out: list[tuple[str, str, str]], ctx: str) -> None:
             expr = getattr(node, "expr", None)
             if isinstance(expr, ExprCall):
                 route = _route_values(expr.callee)
-                route = _route(expr.callee)
                 if route is not None:
                     out.append((*route, head_ctx))
                 for a in expr.args:
@@ -4370,7 +4324,6 @@ def walk_calls(node: object, out: list[tuple[str, str, str]], ctx: str) -> None:
         return
     if isinstance(node, ExprCall):
         route = _route_values(node.callee)
-        route = _route(node.callee)
         if route is not None:
             out.append((*route, ctx))
         for a in node.args:
@@ -4996,10 +4949,6 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
         # The capability TOKENS each host callable reaches, for the F row's
         # bound column (`_reach_call`) and the approval floor's crossings.
         host_tokens = _emitting_tokens(prog)
-        # The DIRECT emission externs, for the F row's bound column: the one
-        # host crossing the reference can name (`_reach_call`).
-        emission_externs = {e.name for e in prog.externs
-                            if getattr(e, "classification", "") == "emission"}
         templates = _spawn_templates(prog)
         fns_by_name = {fn.name: fn for fn in prog.fn_decls}
         # provide-key -> service, file-wide (children resolve handle receivers).
@@ -5190,7 +5139,6 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                 walk_reach(stmt, act_reach, "emit-step", require_map, handles,
                            psvc, bounds, em_set, emitting, aliases,
                            host_tokens)
-                           emission_externs)
             act_caps = {cap for cap, _bound in act_reach}
             caps_seen.update(act_caps)
             for cap in sorted(act_caps):
@@ -5217,7 +5165,6 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             # bound admits a declared `k.m` only for a key every crossing of
             # which is such a verb (issue #3485). One row per (pair, via):
             # a key reached both ways carries both rows.
-            # differ, and collapsing them is the laundering hole.
             for stmt in c.body:
                 if isinstance(stmt, ProvideStmt):
                     svc = psvc.get(c.name, {}).get(stmt.key)
@@ -5230,7 +5177,6 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                             walk_reach(inner, reach, "all", require_map, handles,
                                        psvc, bounds, em_set, emitting, aliases,
                                        host_tokens, vias)
-                                       emission_externs)
                         for cap, bound in sorted(reach):
                             caps_seen.add(cap)
                             caps_seen.add(bound)
@@ -5250,9 +5196,6 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             # binding-uniqueness facts (BE, issue #1812): each scope's seed
             # names and its bind/enter/leave steps.
             tsv.extend(binding_rows(rel, c))
-                            tsv.append("\t".join(
-                                ["F", rel, c.name, stmt.key, svc, pm.name,
-                                 cap, bound]))
 
             calls: list[tuple[str, str, str, str]] = []
             kinds: list[str] = []
@@ -7209,7 +7152,6 @@ class Verdicts(NamedTuple):
     `RevL.G1Coverage.coversAccessBodyB` states, issue #2744), and `ev`
     EV rows (G4 emission value: an emission is reached only by a call, never
     as a function value, issues #2842 and #2834)."""
-    a component's activation body)."""
     files: dict[str, tuple[str, str, str]]
     comps: dict[tuple[str, str], str]
     providers: dict[tuple[str, str, str, str, str], str]
@@ -7248,7 +7190,6 @@ class Verdicts(NamedTuple):
     ir_kept: dict[str, str]
     splits: dict[str, tuple]
 
-
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
                 + len(self.spawns) + len(self.refused)
@@ -7266,12 +7207,7 @@ class Verdicts(NamedTuple):
                 + len(self.inv)
                 + len(self.sw) + len(self.a5) + len(self.gc)
                 + len(self.g1cov)
-<<<<<<< HEAD
                 + len(self.ev) + len(self.ir_disjoint) + len(self.ir_kept) + len(self.splits))
-=======
-                + len(self.ev) + len(self.ir_disjoint) + len(self.ir_kept))
-                + len(self.a2))
->>>>>>> 1dcf48e27 (go: refuse a consumer's Opt outside a return by name, not through go build (#1627) (#1637))
 
 
 
@@ -7526,12 +7462,7 @@ def parse_verdicts(text: str) -> Verdicts:
                     a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
             places, model_reach, councils, g9, retain, inv, sw, a5, gc, g1cov,
-<<<<<<< HEAD
             ev, ir_disjoint, ir_kept, splits)
-=======
-            ev, ir_disjoint, ir_kept)
-                    a2)
->>>>>>> 1dcf48e27 (go: refuse a consumer's Opt outside a return by name, not through go build (#1627) (#1637))
 
 
 
@@ -7673,7 +7604,6 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     qrows = [r for r in rows if r and r[0] == "Q" and len(r) == 5]
     arows = [r for r in rows if r and r[0] == "A" and len(r) == 4]
     frows = [r for r in rows if r and r[0] == "F" and len(r) == 9]
-    frows = [r for r in rows if r and r[0] == "F" and len(r) == 8]
     krows = [r for r in rows if r and r[0] == "K" and len(r) == 5]
     srows = [r for r in rows if r and r[0] == "S" and len(r) == 4]
     harows = [r for r in rows if r and r[0] == "HA" and len(r) == 5]
@@ -7768,12 +7698,9 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     # a crossing that does not: `emission_analysis._admit_required_scopes`,
     # issue #3485).
     fmethods: dict[tuple[str, str, str, str, str], dict[str, set[str]]] = {}
-    # measures a provide method against its own service's declaration.
-    fmethods: dict[tuple[str, str, str, str, str], set[str]] = {}
     for r in frows:
         fmethods.setdefault((r[1], r[2], r[3], r[4], r[5]), {}) \
             .setdefault(r[7], set()).add(r[8])
-        fmethods.setdefault((r[1], r[2], r[3], r[4], r[5]), set()).add(r[7])
     for k, caps in fmethods.items():
         mode, ents = bounds_by_file.get((k[0], k[3], k[4]), ("plain", set()))
         if mode == "any":
@@ -7784,7 +7711,6 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
             ok = all(parse_cap(c).token in ents
                      or all(v != "*" and v in ents for v in vias)
                      for c, vias in caps.items())
-            ok = {parse_cap(c).token for c in caps} <= ents
         providers[k] = "ok" if ok else "fail"
 
     # ... and the ATTENUATION surface reads the same row's column 7, the
@@ -8295,7 +8221,6 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
                if sc != "component" or pos == "value"]
         deferred[rel] = "fail" if bad else "ok"
         _DEFERRED_FILES[rel] = (not bad, frozenset(mine))
-    return Verdicts(files, comps, providers, spawns, refused, dispositions,
 
     # EV rows (G4 emission value, issues #2842 and #2834), recomputed
     # INDEPENDENTLY from the EVR rows with the checker's own rule (`lower.
@@ -8435,12 +8360,7 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
                     configs, a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
                     places, model_reach, councils, g9, retain, inv, sw, a5,
-<<<<<<< HEAD
                     gc, g1cov, ev, ir_disjoint, ir_kept, splits)
-=======
-                    gc, g1cov, ev, ir_disjoint, ir_kept)
-                    configs, a2)
->>>>>>> 1dcf48e27 (go: refuse a consumer's Opt outside a return by name, not through go build (#1627) (#1637))
 
 
 #: What the REFERENCE decided for each config field, for the CD row's
@@ -8580,8 +8500,6 @@ FATAL_BUCKETS = ("missed-G1", "missed-G4", "missed-G2", "missed-G5",
                  "missed-G9-coverage-observation",
                  "missed-G1-coverage", "missed-G1-coverage-observation",
                  "formal-strict", "formal-found-other")
-FATAL_BUCKETS = ("missed-G4", "missed-G2", "missed-G5", "missed-A9",
-                 "missed-A2", "formal-strict", "formal-found-other")
 
 
 def checker_code(rel: str) -> tuple[str, str]:
@@ -8630,11 +8548,6 @@ def g5_files_the_prog_resolves(tsv) -> set[str]:
     dispatched `let`-bound arrow, a passed emitting fn and a service
     operation read off a spawn handle no longer do: `inverse_reach_heads`
     adds what they reach to the inverse heads, issue #1792.) A zero there is the model having no fact, not the
-    fn or extern. An `undo w.task.run(...)` (a spawn handle), an
-    `undo store.drop()` (a host receiver), an `undo f()` (an arrow parameter)
-    and an `undo dispatch1(...)` whose `dispatch1` calls its own parameter all
-    leave the `Prog` at the first hop: the fold has no declaration to follow
-    and counts nothing. A zero there is the model having no fact, not the
     model disagreeing, and filing it as `missed-G5` would red the gate over a
     documented fragment boundary.
 
@@ -8677,7 +8590,6 @@ def g5_files_the_prog_resolves(tsv) -> set[str]:
 
 def checker_alignment(file_facts: dict, componentless: list[str],
                       v: Verdicts, tsv=(), refusals=()) -> list[str]:
-                      v: Verdicts, tsv=()) -> list[str]:
     """Compile each file with the real checker and compare refusal codes
     against the formal verdicts. Returns the fatal-bucket findings.
 
@@ -8719,7 +8631,6 @@ def checker_alignment(file_facts: dict, componentless: list[str],
     # covering `with` edge (item 246) — is `RevL.G4Approval.crossingB` over the
     # `AR`/`AX`/`AE` facts, one `AP` row per crossing (issue #1455). It was a
     # ratcheted `out-of-fragment-approval` bucket until then.
-    # kind rather than a case in an existing rule.
     # So a G4 refusal is fatal in EVERY category again: there is
     # no out-of-fragment exemption. The two G4-coded refusals the model still
     # cannot see — `g4_missing_undo.rvl` and `v2_extern_acquire_no_undo.rvl` —
@@ -8783,7 +8694,6 @@ def checker_alignment(file_facts: dict, componentless: list[str],
                       if k[0] == rel) or any(
             x == "fail" for k, x in v.async_sigs.items() if k[0] == rel)
         g4_rows = comp_rows + prov_rows + spawn_rows + cfg_rows + ap_rows
-        g4_rows = comp_rows + prov_rows + spawn_rows + cfg_rows
         # The A2 row (issue 1166) is checker-visible: `lower._dispatch_action`
         # refuses the shape with code A2, so a model `fail` on an accepted
         # file is `formal-strict` and a checker A2 with the row `ok` is the
@@ -8805,7 +8715,6 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             and not mp_fail and not ma_fail and not cv_fail and not g9_fail \
             and not rt_fail and not inv_fail and not sw_fail \
             and not a5_fail
-            x == "ok" for _, x in g4_rows + a9_rows + a2_rows)
         a2_found = any(x == "fail" for _, x in a2_rows)
         raw_found = any(x == "fail" for _, x in g4_rows)
 
@@ -8872,18 +8781,6 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             # refusal the rows see is `agree-G4` and a refusal the rows
             # admit is the model being weaker, and fatal.
             record("agree-G4" if sw_fail else "missed-G4", rel)
-        elif code == "G4" and category == "approval":
-            # The declaration-owned approval floor (item 246, `lower.
-            # _require_declared_approval`) carries the G4 code, but it is not
-            # the marker rule the `G` row states: it asks whether a crossing's
-            # capability TOKEN is covered by an `Approval[C]` edge, and the
-            # model carries no fact about approvals at all. Judged against
-            # the `G` row it would be a `missed-G4` the row was never aimed
-            # at. It is an absence of fact, so it is ratcheted by name like
-            # G5 and G6 below: a new approval refusal joins the ledger, or
-            # somebody models the floor.
-            record("out-of-fragment-approval" if formal_clean
-                   else "formal-found-other", rel)
         elif code == "G4":
             record("agree-G4" if raw_found else "missed-G4", rel)
         elif code in ("G2", "G3"):
@@ -8916,7 +8813,6 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             elif rel not in g5_resolved:
                 # Every `undo` in the file leaves the `Prog` at the first hop
                 # (a host receiver, or a call through a function-typed
-                # (a handle, a host receiver, an arrow or a dispatched
                 # parameter), so the U5 row has no declaration to follow and
                 # its zero is an absence of fact. Named in full below, never
                 # counted silently.
@@ -9028,10 +8924,6 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             # `out-of-fragment` mean unbuilt work.
             record("out-of-scope" if formal_clean else "formal-found-other",
                    rel)
-            # rule about purity outside an effect form or about a duplicate
-            # binding, so a G6 refusal is honestly outside its fragment.
-            record("out-of-fragment-G6" if formal_clean
-                   else "formal-found-other", rel)
         else:
             record("out-of-fragment" if formal_clean else "formal-found-other",
                    rel)
@@ -9148,10 +9040,8 @@ def checker_alignment(file_facts: dict, componentless: list[str],
     # reading of a file the chain above already bucketed, so counting it here
     # would report 566 files bucketed for a 551-file corpus.
     print(f"checker alignment ({total} files bucketed; every disagreeing "
-    print(f"checker alignment ({total} modeled files; every disagreeing "
           f"bucket is FATAL: {'/'.join(FATAL_BUCKETS)}):")
     for k in sorted(set(align) | set(FATAL_BUCKETS) | set(OOF_RATCHET_BUCKETS)):
-    for k in sorted(set(align) | set(FATAL_BUCKETS)):
         n = align.get(k, 0)
         mark = "  FATAL" if k in FATAL_BUCKETS and n else ""
         print(f"  {k:20} {n}{mark}")
@@ -9233,7 +9123,6 @@ def checker_alignment(file_facts: dict, componentless: list[str],
 #   * a file that JOINS one of these buckets and is not in the ledger fails
 #     the gate. A new `undo` shape the `Prog` cannot resolve, or a new
 #     G6 purity fixture, can no longer arrive while the model stays silent:
-#     G6-coded fixture, can no longer arrive while the model stays silent:
 #     somebody has to model it, or write its name down and own the hole.
 #   * a ledger entry that is NO LONGER in its bucket fails the gate too and
 #     must be DELETED. So the list shrinks only, and a file cannot be parked
@@ -9247,12 +9136,6 @@ def checker_alignment(file_facts: dict, componentless: list[str],
 # on each of the ten files it newly resolved, until their lines went.
 # Deleting the ledger reds it as well while any bucket has a member: a
 # missing ratchet reads as a failure, never as nothing to check.
-# `examples/rejections/g5_undo_*.rvl` whose `undo` reads its crossing off a
-# handle into the corpus reds the gate with `joined out-of-fragment-G5`;
-# teaching the `U5` fold to follow a handle reds it with `left
-# out-of-fragment-G5` on each of the ten files it newly resolves, until
-# their lines go. Deleting the ledger reds it as well — a missing ratchet
-# reads as a failure, never as nothing to check.
 #
 # It records NAMES ONLY — no counts, no totals, no line numbers — so the
 # file is byte-identical whether it is written under CI's python 3.11 or a
@@ -9266,7 +9149,6 @@ def checker_alignment(file_facts: dict, componentless: list[str],
 #
 # NOT extended to the generic `out-of-fragment` bucket, deliberately. That
 # one collects every checker code the model states no row about at all (A1,
-# one collects every checker code the model states no row about at all (G1,
 # G7, T1, REVL, HOST-METHOD, ...) and grows with any new type-error fixture
 # anywhere in revl, so a ratchet there would red the formal gate on work
 # that never touched the formal layer. G5 and G6 are different in kind: the
@@ -9282,7 +9164,6 @@ def checker_alignment(file_facts: dict, componentless: list[str],
 #: What the documents call it; the path a test repoints is OOF_LEDGER_PATH.
 OOF_LEDGER_NAME = "formal/out_of_fragment_ledger"
 OOF_LEDGER_PATH = FORMAL / "out_of_fragment_ledger"
-OOF_LEDGER_PATH = FORMAL / "out_of_fragment_ledger.json"
 OOF_RATCHET_BUCKETS = ("out-of-fragment-G5", "out-of-fragment-G6",
                        "out-of-fragment-inverse", "out-of-fragment-witnessed")
 #: Bytes a record path keeps as is; every other byte is `%XX`.
@@ -9290,28 +9171,6 @@ _LEDGER_SAFE = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
                          "0123456789_.-")
 _LEDGER_CLEAN = _LEDGER_SAFE | {"+"}
 _LEDGER_ESCAPED = "_escaped"
-                       "out-of-fragment-approval")
-OOF_LEDGER_ABOUT = [
-    "The corpus files the checker refuses G5, G6 or with the G4 approval",
-    "floor, and the model has NO fact about: `out-of-fragment-G5`,",
-    "`out-of-fragment-G6` and `out-of-fragment-approval` in",
-    "`formal/harness/diff_corpus.py`'s checker-alignment buckets.",
-    "",
-    "Each bucket records an absence, so none can disagree with anything",
-    "and none could fail the gate on its own (issue #1169). This ledger",
-    "is what makes them fire: MEMBERSHIP is checkable even when the",
-    "contents are not. A file that joins a bucket without a line here is a",
-    "gate failure, and a line that is no longer in its bucket is a gate",
-    "failure that must be DELETED -- so the lists shrink only, and every",
-    "name left is a hole someone still owes the model a row for.",
-    "",
-    "Regenerate with `python3 formal/harness/diff_corpus.py --write-ledger`",
-    "and read the diff: a new name is a new hole, not a formality.",
-    "`--write-status` deliberately does not touch this file.",
-    "",
-    "It records NAMES only -- never counts, totals or line numbers -- so it",
-    "is identical under CI's python 3.11 and a 3.14 developer venv.",
-]
 
 
 def _oof_ledger_path() -> Path:
@@ -9431,11 +9290,6 @@ def show_ledger(path: Path | None = None) -> str:
     doc = load_out_of_fragment_ledger(path)
     rows = [f"{bucket} {rel}" for bucket in sorted(doc) for rel in doc[bucket]]
     return "\n".join(rows) if rows else "the out-of-fragment ledger is empty"
-    """The ledger this run's buckets would produce, ready to serialize."""
-    doc: dict = {"_about": list(OOF_LEDGER_ABOUT)}
-    for bucket in OOF_RATCHET_BUCKETS:
-        doc[bucket] = sorted(set(samples.get(bucket, [])))
-    return doc
 
 
 def out_of_fragment_ratchet(samples: dict[str, list[str]],
@@ -9450,11 +9304,8 @@ def out_of_fragment_ratchet(samples: dict[str, list[str]],
     ledger as stale."""
     path = _oof_ledger_path()
     doc = out_of_fragment_ledger(samples)
-    text = json.dumps(doc, indent=2, ensure_ascii=True) + "\n"
     if write:
         write_out_of_fragment_ledger(doc, path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
         print(f"{_shown(path)}: out-of-fragment ledger rewritten "
               + " ".join(f"{b}={len(doc[b])}" for b in OOF_RATCHET_BUCKETS))
         return []
@@ -9462,9 +9313,6 @@ def out_of_fragment_ratchet(samples: dict[str, list[str]],
         # No directory is the empty ledger, so deleting it claims every
         # bucket is empty; with members in the corpus that is one failure,
         # said as what happened rather than as a joined line for each.
-    try:
-        committed = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
         return [f"{_shown(path)} is missing — the out-of-fragment "
                 "buckets have no ratchet, so a file can join them silently; "
                 "regenerate with `python3 formal/harness/diff_corpus.py "
@@ -9473,8 +9321,6 @@ def out_of_fragment_ratchet(samples: dict[str, list[str]],
         committed = load_out_of_fragment_ledger(path)
     except ValueError as e:
         return [f"{_shown(path)} is not a readable ledger ({e})"]
-    except json.JSONDecodeError as e:
-        return [f"{_shown(path)} is not readable JSON ({e})"]
     findings: list[str] = []
     for bucket in OOF_RATCHET_BUCKETS:
         have = set(doc[bucket])
@@ -9552,30 +9398,11 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
     them; this block deliberately does not."""
     del census, file_facts, componentless, refusals, ref, mismatches
 
-    `mismatches` is the differential's own count, which only `main` has (it
-    needs the Lean side). `--write-status` renders 0, and that is not a claim
-    it measured: the gate returns non-zero on ANY mismatch, so a census can
-    only reach a green main saying zero, and a `main` run with a mismatch
-    renders the real number and reports the drift as well."""
-    parts = [
-        f"{len(ref.files)} files", f"{len(ref.comps)} components",
-        f"{len(ref.providers)} provide methods", f"{len(ref.spawns)} spawn edges",
-        f"{len(ref.refused)} parse refusals",
-        f"{len(ref.dispositions)} teardown scenarios",
-        f"{len(ref.recoveries)} recoveries",
-        f"{len(ref.confinements)} confinements", f"{len(ref.g8surface)} surfaces",
-        f"{len(ref.g5reg)} teardowns",
-        f"{len(ref.a9)} provide-clause components",
-        f"{len(ref.configs)} config fields", f"{len(ref.a2)} A2 bodies",
-    ]
     def para(text: str) -> str:
         # The document is hand-wrapped at 72; a generated block that is not
         # would show up as a wall of diff noise. `break_on_hyphens` off, or
         # `out-of-fragment*` splits mid-token and markdown stops reading the
         # code span.
-        # would show up as a wall of diff noise every time the corpus grows.
-        # `break_on_hyphens` off, or `out-of-fragment*` splits mid-token and
-        # markdown stops reading the code span.
         return textwrap.fill(" ".join(text.split()), width=72,
                              break_on_hyphens=False, break_long_words=False)
 
@@ -9590,16 +9417,9 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
             "that moves with the corpus made every pull request that added a "
             "`.rvl` rewrite this block (issue #1768). The block changes only "
             "when a named file joins or leaves a bucket below."),
-            f"**{census['files']} .rvl files -> {census['components']} "
-            f"components -> {census['statements']} statements = "
-            f"{len(file_facts)} modeled + {len(componentless)} componentless "
-            f"+ {len(refusals)} refused at parse**, and **{ref.total()} "
-            f"verdicts compared ({' + '.join(parts)}), "
-            f"{ref.total() - mismatches} agree, {mismatches} mismatches**."),
         "",
         para(
             "Checker alignment over the modeled files. "
-            f"Checker alignment over the {len(file_facts)} modeled files. "
             "Every bucket recording a DISAGREEMENT fails the gate, in both "
             "directions: `missed-*` is the model weaker than the checker, "
             "`formal-strict` and `formal-found-other` are the model stricter "
@@ -9613,11 +9433,8 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
             f"`{'` and `'.join(OOF_RATCHET_BUCKETS)}` are held to the names "
             f"in `{OOF_LEDGER_NAME}/`, which shrinks only. "
             "A file that JOINS one fails the gate, and a record no longer in "
-            f"in `{OOF_LEDGER_PATH.relative_to(REPO)}`, which shrinks only. "
-            "A file that JOINS one fails the gate, and a line no longer in "
             "its bucket fails it until it is deleted. So a new `undo` shape "
             "the `Prog` cannot resolve, or a new G6 purity fixture, cannot arrive "
-            "the `Prog` cannot resolve, or a new G6 fixture, cannot arrive "
             "while the model stays silent about it. `agree-*` and the "
             "generic `out-of-fragment` stay informational; that one collects "
             "every refusal under a rule the model states no row about, so it "
@@ -9634,8 +9451,6 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
             "below. Recording the agreement as a bucket would give one file "
             "two of them, which is what the one-bucket-per-file maps the "
             "fatal list, the ratchets and the census total are built on."),
-            "every code the model states no row about at all, so it grows "
-            "with corpus work that never touched this layer."),
         "",
         "| bucket | files | gate |",
         "| --- | --- | --- |",
@@ -9647,10 +9462,6 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
             lines.append(f"| `{k}` | in the ledger | ratcheted |")
         else:
             lines.append(f"| `{k}` | printed by the gate | informational |")
-    for k in sorted(set(align) | set(FATAL_BUCKETS)):
-        gate = ("**FATAL**" if k in FATAL_BUCKETS else
-                "ratcheted" if k in OOF_RATCHET_BUCKETS else "informational")
-        lines.append(f"| `{k}` | {align.get(k, 0)} | {gate} |")
     lines.append("")
     # The ratcheted buckets' members are the ledger's files, not a list here
     # (issue #1768): a sorted list put two pull requests that each added a
@@ -9668,19 +9479,12 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
         "(issue #1768)."))
     lines.append("")
     fatal = [(k, rel) for k in FATAL_BUCKETS
-    named = [(k, rel)
-             for k in (*OOF_RATCHET_BUCKETS, *FATAL_BUCKETS)
              for rel in sorted(_ALIGN_SAMPLES.get(k, []))]
     if fatal:
         lines.append(para("The files in a FATAL bucket, which is empty on "
                           "every run that passes the gate:"))
-    if named:
-        lines.append(para("Nothing is counted without being named; the files "
-                          "in the non-`agree` buckets are:"))
         lines.append("")
         lines.extend(f"- `{k}`: `{rel}`" for k, rel in fatal)
-        for k, rel in named:
-            lines.append(f"- `{k}`: `{rel}`")
         lines.append("")
     if _G5_WITNESS:
         lines.append(para(
@@ -9736,7 +9540,6 @@ def write_status(ledger: bool = False) -> int:
     ref = reference_from_tsv(tsv)
     checker_alignment(file_facts, census["componentless"], ref, tsv,
                       census["refusals"])
-    checker_alignment(file_facts, census["componentless"], ref, tsv)
     if ledger:
         out_of_fragment_ratchet(_ALIGN_SAMPLES, write=True)
         return 0
@@ -10112,13 +9915,8 @@ def main() -> int:
             ("a5", ref.a5, formal.a5),
             ("emission_value", ref.ev, formal.ev),
             ("ir_disjoint", ref.ir_disjoint, formal.ir_disjoint),
-<<<<<<< HEAD
             ("ir_kept", ref.ir_kept, formal.ir_kept),
             ("split", ref.splits, formal.splits)):
-=======
-            ("ir_kept", ref.ir_kept, formal.ir_kept)):
-            ("a2", ref.a2, formal.a2)):
->>>>>>> 1dcf48e27 (go: refuse a consumer's Opt outside a return by name, not through go build (#1627) (#1637))
 
         for key, want in refmap.items():
             got = gotmap.get(key)
@@ -10158,11 +9956,7 @@ def main() -> int:
         f"{len(ref.inv)} inverse refusals + "
         f"{len(ref.sw)} witnessed-site refusals + "
         f"{len(ref.ir_disjoint)} IR documents (G2)): "
-<<<<<<< HEAD
         f"{len(ref.splits)} split-step crash cuts): "
-=======
-        f"{len(ref.a2)} a2 bodies) — "
->>>>>>> 1dcf48e27 (go: refuse a consumer's Opt outside a return by name, not through go build (#1627) (#1637))
 
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
@@ -10207,7 +10001,6 @@ def main() -> int:
     # `checker_alignment` has just filled, so it must follow that call.
     print(format_agreed_subset(
         agreed_subset(_ALIGN, len(refusals), len(componentless))))
-    fatal = checker_alignment(file_facts, componentless, formal, tsv)
     # The two buckets that record an absence rather than a disagreement, held
     # to their committed membership so they can fail at all.
     fatal.extend(out_of_fragment_ratchet(_ALIGN_SAMPLES))

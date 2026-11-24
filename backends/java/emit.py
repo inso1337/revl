@@ -421,14 +421,12 @@ def _secret_method_params(env, key: str, mname: str, params: list) -> list[str]:
     which matters because that branch is unreachable outside `_SECRET_MODE`
     and every statement added inside it is a new uncovered region the line
     ratchet has to price (tools/selfhost_line_coverage.py)."""
-    the py, ts and go emitters read. Empty outside `_SECRET_MODE`."""
     if not _SECRET_MODE:
         return []
     service = env.provides[key]
     declared = env.services[service]["methods"].get(mname, {}).get("params", [])
     secret = {mp["name"] for mp in declared if isinstance(mp, dict) and mp.get("secret")}
     return [_ident(p, "parameter name") for p in params if p in secret]
-    return [p for p in params if p in secret]
 
 TYPE_MAP = {
     "Str": "String",
@@ -675,16 +673,6 @@ def _refuse_unlowered_stream_surface(node: dict, tier: str = CRATE) -> None:
     the window, so a head carrying both names the same half every time."""
     replay = node.get("replay")
     if replay and "cursor" in replay:
-    §4.5's `replay(…)` is the other one, and it is refused for a reason of its
-    own rather than for the clock. Replay is a DURABILITY claim, and the half
-    that makes it worth anything is §4.9's: a durable cursor is what turns a
-    crashed subscription from residue into a re-issuable descriptor, and that
-    recovery surface is the WAL's, which lives on the py reference tier. A tier
-    that emitted a subscription while silently dropping the backlog would
-    deliver only live items and call it replay. Refused at the provider's
-    declaration as well as at the consumer's request, because a declared backlog
-    nothing holds is the same vacuous claim one end earlier."""
-    if node.get("replay"):
         raise EmitError(
             "a durable stream `replay(from: …)` cursor is not lowered on the %s "
             "tier; a durable cursor is what makes a crashed subscription "
@@ -692,11 +680,6 @@ def _refuse_unlowered_stream_surface(node: dict, tier: str = CRATE) -> None:
             "the py reference tier's WAL (item 130 §4.5, §4.9). The last-n "
             "`replay(<n>)` form does lower here; try `--backend py` for the "
             "cursor" % tier)
-            "a stream `replay(…)` is not lowered on the %s tier; replay is a "
-            "durability claim — the provider holds the backlog, and a durable "
-            "cursor is what makes a crashed subscription reconstructible rather "
-            "than residue — and that recovery surface is the py reference "
-            "tier's (item 130 §4.5, §4.9) — try `--backend py`" % tier)
     if node.get("drain") is not None:
         raise EmitError(
             "a `drain` window is not lowered on the %s tier; the `block` policy "
@@ -842,7 +825,6 @@ def _split_generic(inner: str) -> list[str]:
 
 def _mangle(name: str, extra: "frozenset[str]" = frozenset(), *,
             helper_namespace: bool = False) -> str:
-def _mangle(name: str, extra: "frozenset[str]" = frozenset()) -> str:
     """Rename a syntactically-valid identifier that collides with a *Java*
     reserved word (`class`, `new`, `int`, `default`, …) so a valid revl
     identifier that happens to be a Java keyword emits and RUNS instead of
@@ -883,8 +865,6 @@ def _mangle(name: str, extra: "frozenset[str]" = frozenset()) -> str:
     loud refusal at `type name`/`service`/`component`/`requirement`/
     `provision`/`method`/`callable`/`adt case`/`case name`/`package`/`event
     name`/`arrow capture`/`inverse capture`, whose spelling is not internal.
-    does not name a Java keyword changes its emitted output. Target keywords
-    only; the emitter scaffolding stays rejected in `_ident`.
 
     `extra` is an additional, position-specific reserved set folded into the
     same injective ladder: a type name passes `_JAVA_TYPE_RESERVED` so the
@@ -898,13 +878,11 @@ def _mangle(name: str, extra: "frozenset[str]" = frozenset()) -> str:
     String)` over the helper's `revlEq(Object, Object)`. It is opt-in so a
     `record field` / `config field` (a member or wire name) keeps its spelling;
     the binding and top-level-callable positions pass it."""
-    while every other position passes the empty set and is unchanged."""
     root = name
     while root:
         if (root in _JAVA_RESERVED or root in extra
                 or (helper_namespace
                     and _REVL_NAMESPACE_RE.match(root) is not None)):
-        if root in _JAVA_RESERVED or root in extra:
             return name + "_"
         if not root.endswith("_"):
             break
@@ -1046,7 +1024,6 @@ def _ident(name: object, role: str) -> str:
         return _mangle(name, extra)
     if name in _EMITTER_RESERVED:
         raise EmitError(f"{role} identifier collides with Java/reserved name: {name!r}")
-    extra = _JAVA_TYPE_RESERVED if role == "type name" else frozenset()
     return _mangle(name, extra)
 
 
@@ -1096,7 +1073,6 @@ def _fn_name(name: object) -> str:
     while root:
         if (root in _JAVA_RESERVED or root in _EMITTER_RESERVED
                 or _REVL_NAMESPACE_RE.match(root) is not None):
-        if root in _JAVA_RESERVED or root in _EMITTER_RESERVED:
             return name + "_"
         if not root.endswith("_"):
             break
@@ -1313,7 +1289,6 @@ _V3_ERASED = {"Any": "Object", "Value": "Object"}
 def _java_v3_type(name: object, *, boxed: bool = False) -> str:
     """IR v3 surface type -> Java type for emitted v3 classes."""
     if name is None:
-    if name is None or name == "Unit":
         return "void"
     if not isinstance(name, str) or not name.strip():
         return "Object"
@@ -1327,11 +1302,6 @@ def _java_v3_type(name: object, *, boxed: bool = False) -> str:
     erased = _V3_ERASED.get(name)
     if erased is not None:
         return erased
-        return {
-            "long": "java.lang.Long",
-            "double": "java.lang.Double",
-            "boolean": "java.lang.Boolean",
-        }.get(java_type, java_type)
     if "[" in name:
         base = name[: name.index("[")]
         inner = name[name.index("[") + 1 : name.rindex("]")]
@@ -1366,7 +1336,6 @@ def _java_v3_type(name: object, *, boxed: bool = False) -> str:
         # of a field whose declared type is the parameter (#2303).
         return base + "<" + ", ".join(
             _java_v3_type(a, boxed=True) for a in args) + ">"
-        return base + "<" + ", ".join("Object" for _ in args) + ">"
     if name == "Row" and name not in _V3_DECLARED_TYPES:
         # The host Pool's query-result row: undeclared by the document, handed
         # back by the runtime. `Pool.query` here returns `java.util.List<Object>`,
@@ -1523,7 +1492,6 @@ class _V3Ctx:
 
     def record_type_for_fields(self, field_names: list[str],
                                expected: str | None = None) -> str:
-    def record_type_for_fields(self, field_names: list[str]) -> str:
         wanted = set(field_names)
         matches = [
             name
@@ -1600,15 +1568,11 @@ def _v3_builtin(method: object, target: str, args: list[str],
     Str parse)."""
     # The total forms (docs/arithmetic.md): same value as the faulting
     # operation where it fits, Err(reason) instead of the fault otherwise —
-    # The total forms (docs/arithmetic.md): same quotient as the faulting
-    # operation, but a zero divisor yields Err(reason) instead of throwing —
     # `fail` is refused in a pure fn, so the error travels as a value. The
     # static helpers evaluate each operand exactly once and return a typed
     # RevlResult.
     if method in _CHECKED_ARITH:
         return f"{_CHECKED_ARITH_HELPER[method]}({target}, {args[0]})"
-    # static helpers (emitted by `_emit_checked_div_helpers`) evaluate each
-    # operand exactly once and return a typed RevlResult.
     if method in _CHECKED_DIVS:
         return f"{_CHECKED_HELPER[method]}({target}, {args[0]})"
     if method == "length":
@@ -1636,8 +1600,6 @@ def _v3_builtin(method: object, target: str, args: list[str],
     # `revlToInt32` (Math.toIntExact under it), which faults out of the int
     # range with revl's own `revl: Int32 overflow`, like the other Int32
     # operations.
-    # Math.toIntExact, which throws ArithmeticException out of the int range —
-    # the same fault the other Int32 operations give.
     if method == "to_int":
         if recv == "Str":
             # Str.to_int (FR-9, docs/stdlib-2.0.md §Str.to_int): Long.parseLong
@@ -1648,7 +1610,6 @@ def _v3_builtin(method: object, target: str, args: list[str],
         return f"((long) ({target}))"
     if method == "to_int32":
         return f"revlToInt32({target})"
-        return f"Math.toIntExact({target})"
     if method == "div_trunc":
         # `div_trunc` truncates toward zero (Java `/` already does), but the
         # true quotient of `Int.MIN / -1` is 2^63 — one past Int.MAX — so it
@@ -1659,15 +1620,9 @@ def _v3_builtin(method: object, target: str, args: list[str],
         # one overflow with revl's `revl: Int overflow` (and on a zero
         # divisor), matching `revlAdd`/`revlSub`/`revlMul`/`revlNeg`.
         return f"revlDivTrunc({target}, {args[0]})"
-        # Int.MIN with no trap — the #549 java divergence. `Math.divideExact`
-        # truncates identically and throws ArithmeticException on that one
-        # overflow (and on a zero divisor), matching the `Math.*Exact` family
-        # already used for `+`/`-`/`*`/unary minus.
-        return f"Math.divideExact({target}, {args[0]})"
     # `div_floor`, `div_euclid` and `mod` all go through a static helper
     # rather than an inline `Math.*` expression, for the same reason
     # `div_trunc` reaches for `revlDivTrunc`: the java primitives here are
-    # `div_trunc` reaches for `Math.divideExact`: the java primitives here are
     # PARTIAL where revl's definitions are total, and each was answering a
     # value instead of trapping or answering the wrong value outright.
     #   * `Math.floorDiv(Int.MIN, -1)` is DOCUMENTED to overflow and return
@@ -2549,10 +2504,6 @@ def _expr(
             # item 130 §4.5: a provider-side `replay(…)` declaration. The
             # durable cursor is refused by name rather than dropped; the
             # last-n form opens a source that holds that many items.
-            # item 130 §4.5: a provider-side `replay(…)` declaration this tier
-            # cannot honour. Refused rather than dropped — a declared backlog
-            # nothing holds is the same vacuous durability claim the consumer's
-            # request would be, one end earlier.
             _refuse_unlowered_stream_surface(node)
             return "Stream.source(%d)" % int(node["replay"]["count"])
         host, _, method = fn.partition(".")
@@ -2566,7 +2517,6 @@ def _expr(
             return _v3_call(node, ctx, rename, env)
         target = node.get("target") or {}
         method = _method_name(node.get("method"))
-        method = _ident(node.get("method"), "method")
         args = ", ".join(
             _expr(a, ctx, rename, env) for a in node.get("args") or []
         )
@@ -2632,12 +2582,6 @@ def _expr(
             # `int`) resolves to the 32-bit check and says `revl: Int32 overflow`.
             helper = {"+": "revlAdd", "-": "revlSub", "*": "revlMul"}[op]
             return f"{helper}({left}, {right})"
-            # Int/Int32 overflow traps (docs/arithmetic.md); Math.*Exact throws
-            # ArithmeticException, which is exactly the fault we want. Each has
-            # an `int` overload as well as a `long` one, so an Int32 operand
-            # (a Java `int`) resolves to the 32-bit check with no extra code.
-            exact = {"+": "addExact", "-": "subtractExact", "*": "multiplyExact"}[op]
-            return f"Math.{exact}({left}, {right})"
         if op in ("<", ">", "<=", ">=") and node.get("operands") == "Str":
             # Java has NO relational operator on `String`: `(a < b)` reached
             # javac as "bad operand types for binary operator '<'", so a
@@ -2667,10 +2611,6 @@ def _expr(
                 # revl-worded fault as the other Int/Int32 operations
                 # (docs/arithmetic.md)
                 return f"revlNeg({operand})"
-                # negating Long.MIN / Integer.MIN_VALUE overflows; Math.negateExact
-                # (long and int overloads) throws the same ArithmeticException as
-                # the other Int/Int32 operations (docs/arithmetic.md)
-                return f"Math.negateExact({operand})"
             return f"(-{operand})"
         raise EmitError(f"unsupported unary operator {node.get('op')!r}")
 
@@ -2730,7 +2670,6 @@ def _expr(
         fields = node.get("fields") or []
         type_name = ctx.record_type_for_fields(
             [k for k, _ in fields], ctx.record_targets.get(id(node)))
-        type_name = ctx.record_type_for_fields([k for k, _ in fields])
         spec = ctx.types[type_name]
         by_name = {k: _expr(v, ctx, rename, env) for k, v in fields}
         args = []
@@ -2755,7 +2694,6 @@ def _expr(
                     and _names_a_v3_class(expected, ctx)):
                 ctor = _java_v3_type(expected)
         return f"new {ctor}({', '.join(args)})"
-        return f"new {_ident(type_name, 'type name')}({', '.join(args)})"
 
     if kind == "list":
         return "java.util.List.of(" + ", ".join(
@@ -3268,7 +3206,6 @@ def _v3_match_expr(
                     f"                final {ptype} {bind} = ({ptype}) {case_var}.value;")
             else:
                 lines.append(f"                final var {bind} = {case_var}.value;")
-            lines.append(f"                final var {bind} = {case_var}.value;")
             lines.append(f"                yield ({body});")
             lines.append("            }")
         else:
@@ -3508,14 +3445,10 @@ def _let_keyword(node: dict, ctx: _V3Ctx | None = None,
     (`_empty_list_decl_type`, issue #2296). Without an annotation a raw
     `java.util.List` keeps javac's erasure in play (unchecked warning, correct
     code); non-empty literals infer their element type.
-    `List<Object>` — later pushes and the declared return type then fail to
-    unify. A raw `java.util.List` keeps javac's erasure in play (unchecked
-    warning, correct code); non-empty literals infer their element type.
     """
     value = node.get("value")
     if isinstance(value, dict) and value.get("kind") == "list" and not value.get("items"):
         return _empty_list_decl_type(value)
-        return "java.util.List"
     if isinstance(value, dict) and value.get("kind") == "maplit" and not value.get("entries"):
         return _empty_map_decl_type(node, pins)
     adt = _adt_binding_type(value, ctx)
@@ -3622,8 +3555,6 @@ def _uses_builtin_result(ir: dict) -> bool:
     `adt` node typed Result, a match arm on Ok/Err, or a call to one of the
     total forms (which produce a Result). Emitted RevlResult is gated on this
     so non-Result modules and v1 goldens are unaffected."""
-    total division forms (which produce a Result). Emitted RevlResult is
-    gated on this so non-Result modules and v1 goldens are unaffected."""
     def walk(node) -> bool:
         if isinstance(node, dict):
             if node.get("kind") == "adt" and str(node.get("type", "")).startswith("Result"):
@@ -3633,7 +3564,6 @@ def _uses_builtin_result(ir: dict) -> bool:
             ):
                 return True
             if node.get("method") in _CHECKED_FORMS:
-            if node.get("method") in _CHECKED_DIVS:
                 return True
             return any(walk(v) for v in node.values())
         if isinstance(node, list):
@@ -3756,7 +3686,6 @@ def _uses_checked_arith(ir: dict) -> bool:
 
 #: The named integer-division forms whose java lowering is a static helper
 #: (`div_trunc` stays a stdlib-block helper, `revlDivTrunc`, which these call).
-#: (`div_trunc` stays inline: `Math.divideExact` is already total-or-throwing).
 #: The two `checked_*` forms below CALL those helpers, so their presence pulls
 #: the block in as well.
 _INT_ARITH_METHODS = ("div_floor", "div_euclid", "mod",
@@ -3789,7 +3718,6 @@ def _emit_int_arith_helpers() -> list[str]:
     * `Math.floorDiv(Long.MIN_VALUE, -1)` is documented to overflow and return
       `Long.MIN_VALUE`. The true quotient is 2^63, one past Int.MAX, so it must
       TRAP, which `revlDivTrunc` does, and which py/ts/go/rust all did.
-      TRAP — which `Math.divideExact` does, and which py/ts/go/rust all did.
     * div_euclid's negative-divisor arm was `-Math.floorDiv(a, -b)`. `-b` wraps
       for `b == Long.MIN_VALUE` and the leading `-` wraps for `b == -1`, so the
       one expression carried both a wrong answer and a missing trap. The shape
@@ -3807,13 +3735,11 @@ def _emit_int_arith_helpers() -> list[str]:
         "// the Int.MIN edges are named here rather than wrapping silently.",
         "private static long revlDivFloor(long a, long b) {",
         "    long q = revlDivTrunc(a, b);",
-        "    long q = Math.divideExact(a, b);",
         "    if (a % b != 0L && ((a < 0L) != (b < 0L))) { q -= 1L; }",
         "    return q;",
         "}",
         "private static long revlDivEuclid(long a, long b) {",
         "    long q = revlDivTrunc(a, b);",
-        "    long q = Math.divideExact(a, b);",
         "    if (a % b < 0L) { q = b > 0L ? q - 1L : q + 1L; }",
         "    return q;",
         "}",
@@ -4137,7 +4063,6 @@ def _emit_v3_types(types: dict) -> list[str]:
             shape = " implements RevlSecretShape" if _SECRET_MODE else ""
             lines.append(
                 f"public static final class {name}{_v3_type_params(spec)}{shape} {{")
-            lines.append(f"public static final class {name}{shape} {{")
             fields = spec.get("fields") or {}
             for field, ftype in fields.items():
                 field = _ident(field, "record field")
@@ -4170,14 +4095,12 @@ def _emit_v3_types(types: dict) -> list[str]:
             tparams = _v3_type_params(spec)
             owner = f"{name}{tparams}"
             lines.append(f"public sealed interface {owner} permits {permits} {{")
-            lines.append(f"public sealed interface {name} permits {permits} {{")
             for case in cases:
                 cname = _ident(case.get("name"), "case name")
                 payload = case.get("payload")
                 shape = ", RevlSecretShape" if _SECRET_MODE else ""
                 if payload is None:
                     lines.append(f"    final class {cname}{tparams} implements {owner}{shape} {{")
-                    lines.append(f"    final class {cname} implements {name}{shape} {{")
                     lines.append(f"        public {cname}() {{}}")
                     lines.extend(
                         "    " + line if line else line
@@ -4193,7 +4116,6 @@ def _emit_v3_types(types: dict) -> list[str]:
                 else:
                     ptype = _java_v3_type(payload)
                     lines.append(f"    final class {cname}{tparams} implements {owner}{shape} {{")
-                    lines.append(f"    final class {cname} implements {name}{shape} {{")
                     lines.append(f"        public final {ptype} value;")
                     lines.append(
                         f"        public {cname}({ptype} value) {{ this.value = value; }}"
@@ -4448,7 +4370,6 @@ def _has_emission_externs(externs: list) -> bool:
 def _emit_v3_externs(externs: list, journal: bool = False) -> list[str]:
     """`journal` (record mode with components, issue #2345) wraps each
     `extern emission fn` so its durable start record is written first."""
-def _emit_v3_externs(externs: list) -> list[str]:
     lines: list[str] = []
     # item 378 Stage 5: emit the config seam once, before the externs, when any
     # extern carries a config schema (byte-identical when none do).
@@ -4485,13 +4406,13 @@ def _emit_v3_externs(externs: list) -> list[str]:
             impl = f"_revl_secret_{name}"
             forward = ", ".join(_ident(p.get("name"), "extern parameter name")
                                 for p in ext.get("params") or [])
-            lines.append(f"public static {ret} {name}({params}) {{")
+            lines.append(f"public static {generics}{ret} {name}({params}) {{")
             lines.append(f"    return revlSecretResult({impl}({forward}));")
             lines.append("}")
             lines.append("")
             lines.append(f"private static {ret} {impl}({params}) {{")
         else:
-            lines.append(f"public static {ret} {name}({params}) {{")
+            lines.append(f"public static {generics}{ret} {name}({params}) {{")
         # item 378 Stage 5: a config extern binds `_revl_config` as the first
         # body line; None for a no-config extern (byte-identical body splice).
         config_bind = _java_extern_config_bind(ext)
@@ -4505,7 +4426,6 @@ def _emit_v3_externs(externs: list) -> list[str]:
             check_host_body("java", body,
                             where=f"extern `{ext.get('name')}`", error=EmitError)
             for line in body_lines(body):
-            for line in body.splitlines() or [""]:
                 lines.append("    " + line)
         else:
             lines.append("    // (empty @java body)")
@@ -4785,11 +4705,50 @@ def _pin_record_targets(body: object, params: object, ret_type: object,
     walk()
 
 
+
+
+_JAVA_TYPE_WORD = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
+
+
+def _v3_fn_type_params(fn: dict, types: dict) -> list[str]:
+    """The type parameters of a function signature, in first-use order.
+
+    The IR carries the author's spelling (`fn id[T](x: T) -> T` arrives as
+    params typed `T`, with no parameter list), so the emitter applies the
+    checker's implicit rule: a single-uppercase name that no `type` declares
+    is a type parameter. An explicit list (`fn first[Elem](xs: List[Elem])`)
+    rides the IR as `type_params` and is used instead, in declaration order;
+    a listed name no parameter or return mentions is dropped, as nothing at a
+    call could bind it. The go and rust tiers read the same rule (issue #2325).
+    """
+    surfaces = [p.get("type") for p in fn.get("params") or []] + [fn.get("returns")]
+    explicit = fn.get("type_params")
+    if isinstance(explicit, list) and explicit:
+        used = {w for s in surfaces if isinstance(s, str)
+                for w in _JAVA_TYPE_WORD.findall(s)}
+        return [t for t in explicit if isinstance(t, str) and t in used]
+    found: list[str] = []
+    declared = types if isinstance(types, dict) else {}
+    for surface in surfaces:
+        if not isinstance(surface, str):
+            continue
+        for word in _JAVA_TYPE_WORD.findall(surface):
+            if (len(word) == 1 and word.isupper() and word not in declared
+                    and word not in found):
+                found.append(word)
+    return found
+
+
 def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]:
     ctx = _V3Ctx(types, functions, externs)
     lines: list[str] = []
     for fn in functions:
         name = _fn_name(fn.get("name"))
+        tparams = _v3_fn_type_params(fn, types)
+        # issue #2325: a generic fn declares its type parameters, so `T` in a
+        # parameter or return names a type javac can resolve
+        generics = (f"<{ ', '.join(_ident(t, 'type parameter') for t in tparams)}> "
+                    if tparams else "")
         params = ", ".join(
             f"{_java_v3_type(p.get('type'))} {_ident(p.get('name'), 'parameter name')}"
             for p in fn.get("params") or []
@@ -4802,7 +4761,7 @@ def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]
                            if p.get("name") in ctx.param_names}
         _pin_value_map_locals(fn.get("body"), fn.get("params"), ctx)
         _pin_record_targets(fn.get("body"), fn.get("params"), fn.get("returns"), ctx)
-        lines.append(f"public static {ret} {name}({params}) {{")
+        lines.append(f"public static {generics}{ret} {name}({params}) {{")
         if not fn.get("body"):
             lines.append("    // (empty body)")
         else:
@@ -5078,7 +5037,6 @@ def _emit_lifecycle_no_residue_helper(provisions: str) -> list[str]:
         f"    new Class<?>[] {{{provisions}}};",
         "",
     ] + _journal_runtime_lines()
-    ]
 
 
 def _emit_v3_lifecycle_tests(tests: list, types: dict, functions: list,
@@ -5206,10 +5164,6 @@ def _v3_lifecycle_step(step: dict, ctx: _V3Ctx, where: str,
         call = (f"_revlRoot.get(ServiceKey.of({_ident(service, 'service')}.class, "
                 f"{_string(key)}))"
                 f".{_method_name(step['method'])}({args})")
-        # `get` throws when the key is not ACTIVE (R2) — the resolution IS the
-        # liveness check, the same read RunOnce's UP proof performs.
-        call = (f"_revlRoot.get({_ident(service, 'service')}.class)"
-                f".{_ident(step['method'], 'method')}({args})")
         bind = step.get("bind")
         if bind is None:
             return [f"    {call};"]
@@ -5257,8 +5211,6 @@ class _Env:
             binding: _ident(binding, "requirement") for binding in self.reqs
         }
         self.provides: dict[str, str] = dict(self.provides_raw)
-        self.reqs: dict[str, str] = dict(component.get("requires") or {})
-        self.provides: dict[str, str] = dict(component.get("provides") or {})
         # item 173: routed requires (item 162 `routes` IR): key -> {"realms":
         # [...], "strategy": ...}. A routed key resolves per named realm through
         # an emitted router class, never a single `ctx.get(...)` handle. Empty
@@ -5330,7 +5282,6 @@ def _emit_service_interfaces(services: dict) -> list[str]:
         out.append(f"public interface {sname} {{")
         for mname, method in (service.get("methods") or {}).items():
             jname = _method_name(mname)
-            _ident(mname, "method")
             params = ", ".join(
                 f"{_java_type(p.get('type'))} {_ident(p.get('name'), 'parameter')}"
                 for p in method.get("params") or []
@@ -5341,7 +5292,6 @@ def _emit_service_interfaces(services: dict) -> list[str]:
                 # runtime may auto-retry a transient failure of this emission
                 out.append("    /** idempotent: the runtime may auto-retry a transient failure. */")
             out.append(f"    {ret} {jname}({params});")
-            out.append(f"    {ret} {mname}({params});")
         out.append("}")
         out.append("")
     out.extend(_method_name_table(services))
@@ -7244,7 +7194,6 @@ def _map_value_expr_type(node: object, var_types: dict, env: _Env,
             return "Int"
         if method in ("charAt", "join", "repeat", "to_str", "to_char",
                       "slice"):
-        if method in ("charAt", "join", "repeat", "to_str", "slice"):
             return "Str"
         if method == "split":
             return "List[Str]"
@@ -7295,7 +7244,6 @@ def _map_value_expr_type(node: object, var_types: dict, env: _Env,
             return v3_ctx.record_type_for_fields(
                 [k for k, _ in node.get("fields") or []],
                 v3_ctx.record_targets.get(id(node)))
-                [k for k, _ in node.get("fields") or []])
         except EmitError:
             return None
     if kind == "adt":
@@ -7471,7 +7419,6 @@ def _bind_decl_type(component: dict, bind: str, render_type,
                     map_values: dict[str, str], env: "_Env | None" = None,
                     functions: list | None = None,
                     v3_ctx: "_V3Ctx | None" = None) -> str:
-                    map_values: dict[str, str]) -> str:
     """The Java type of a binding's declaration in the legacy (v1/v2) path:
     the host object's class, or a generic `Map<...>` whose value type comes
     from the IR (FR-4). `render_type` is the signature renderer in use
@@ -7509,14 +7456,11 @@ def _param_type(env: _Env, key: str, mname: str, p: str, names: list = None) -> 
     is the type of whichever name sits at `i`. The name test comes first in the
     `or`, so a program whose two spellings already agree is byte-identical, and
     the positional arm keeps the original arity guard."""
-def _param_type(env: _Env, key: str, mname: str, p: str) -> str:
     service = env.provides[key]
     declared = env.services[service]["methods"].get(mname, {}).get("params", [])
     for i, mp in enumerate(declared):
         if mp["name"] == p or (names is not None and len(names) == len(declared)
                                and names[i] == p):
-    for mp in env.services[service]["methods"].get(mname, {}).get("params", []):
-        if mp["name"] == p:
             return mp["type"]
     return "Object"
 
@@ -7550,10 +7494,8 @@ def _method_body(env: _Env, key: str, method: dict) -> str:
                 )
             return "return;"
         rename = {b: f"this.{_ident(b, 'binding')}" for b in _binds(env.component)}
-        rename = {b: f"this.{b}" for b in _binds(env.component)}
         # A required service is a field of the provider class, same as a bind.
         rename.update({local: f"this.{env.req_fields[local]}" for local in env.reqs})
-        rename.update({local: f"this.{local}" for local in env.reqs})
         value = _expr(steps[0]["expr"], None, rename, env)
         # A `void` service operation cannot `return <expr>;` in Java — run
         # the expression for its effect instead.
@@ -7626,7 +7568,6 @@ def _provider_config_fields(component: dict) -> list[dict]:
 
 def _component_needs_modern(component: dict,
                             declared: dict[str, dict] | None = None) -> bool:
-def _component_needs_modern(component: dict) -> bool:
     if component.get("isolate") or component.get("intercept"):
         return True
     # item 173: a routed require needs the modern path — its emitted router
@@ -7815,7 +7756,6 @@ def _witnessed_extern_for(acquire: object, witnessed: dict[str, dict]) -> dict |
 
 def _component_needs_frame(component: dict, witnessed: dict[str, dict],
                            declared: dict[str, dict] | None = None) -> bool:
-def _component_needs_frame(component: dict, witnessed: dict[str, dict]) -> bool:
     """True if this component registers at least one `transactional` (item
     243) or `compensation` (item 247) teardown entry — the two entry kinds
     beyond the plain `bracket`, per docs/design/teardown-contract.md. Gates
@@ -7864,13 +7804,11 @@ def _uses_revl_frame(ir: dict) -> bool:
     declared = _declared_externs(externs)
     return any(
         _component_needs_frame(component, witnessed, declared)
-        _component_needs_frame(component, witnessed)
         for component in ir.get("components") or []
     )
 
 
 def _emit_revl_frame_runtime(declared: bool = False) -> list[str]:
-def _emit_revl_frame_runtime() -> list[str]:
     """The shared two-phase teardown accumulator (docs/design/teardown-
     contract.md), emitted once per file when any component needs it.
 
@@ -7915,7 +7853,6 @@ def _emit_revl_frame_runtime() -> list[str]:
     outlives the process (a JVM subprocess writes it to `$REVL_WAL` and fsyncs
     per record), which `revl recover` reads tier-agnostically."""
     lines = [
-    return [
         "// docs/design/teardown-contract.md: the shared bracket/transactional/",
         "// compensation two-phase teardown loop (item 243 Slice 2b, item 247).",
         "private static final class RevlFrame {",
@@ -8481,8 +8418,6 @@ static {
 // that cannot be made durable, fails class initialisation (issue #2345), so no
 // component body runs without its log. REVL_WAL_ALLOW_UNSYNCED=1 is the
 // explicit opt-out for a target that cannot fsync; it is stamped into the log.
-// Runs once at class load. A failed open leaves the sink null (recording is
-// silently off) rather than crashing a composition that only wanted to run.
 private static void revlWalOpen() {
     String path = System.getenv("REVL_WAL");
     if (path == null || path.isEmpty()) {
@@ -8500,16 +8435,12 @@ private static void revlWalOpen() {
     if (revlWalUnsynced) {
         System.err.println("warning: REVL_WAL_ALLOW_UNSYNCED=1 disables the WAL fsync guarantee");
         durability = ",\"durability\":\"unsynced-opt-out\"";
-        revlWalOut = null;
-        revlWalChannel = null;
-        return;
     }
     revlWalWrite("{\"record\":\"header\",\"walVersion\":1,\"generation\":1,\"guarantee\":"
             + revlWalStr(REVL_WAL_GUARANTEE) + durability + "}");
     if (revlWalUnsynced) {
         revlWalWrite("{\"record\":\"durability-opt-out\",\"fromSeq\":0}");
     }
-            + revlWalStr(REVL_WAL_GUARANTEE) + "}");
 }
 
 // One durable JSON line: write, flush, and fsync (FileChannel.force(true))
@@ -8543,7 +8474,6 @@ private static void revlWalWrite(String json) {
                 revlWalCut(start);
                 throw new java.io.UncheckedIOException("revl: write-ahead log fsync failed", sync);
             }
-        } catch (java.io.IOException ignored) {
         }
     }
 }
@@ -8805,7 +8735,6 @@ def _body_holds_stream_event(node) -> bool:
 def _bind_type(component: dict, bind: str, v3_ctx: _V3Ctx,
                map_values: dict[str, str] | None = None,
                env: "_Env | None" = None, functions: list | None = None) -> str:
-               map_values: dict[str, str] | None = None) -> str:
     host = _host_of(component, bind)
     if host == "Map":
         # FR-4: the host Map is generic; the value type is learned from the
@@ -8922,8 +8851,6 @@ def _method_body_lines(
     _pin_value_map_locals(method.get("body"), method.get("params"), v3_ctx)
     rename = {b: f"this.{_ident(b, 'binding')}" for b in _binds(env.component)}
     rename.update({local: f"this.{env.req_fields[local]}" for local in env.reqs})
-    rename = {b: f"this.{b}" for b in _binds(env.component)}
-    rename.update({local: f"this.{local}" for local in env.reqs})
 
     def render(steps: list, lines: list[str], pad: str) -> None:
       for stmt in steps or []:
@@ -9040,7 +8967,6 @@ def _method_body_lines(
                 continue
             lines.append(_journal_service_stmt(
                 stmt.get("expr"), env, _site_compensated_call(stmt, v3_ctx, rename, env)))
-            lines.append(f"{_expr(stmt['expr'], v3_ctx, rename, env)};")
             if stmt.get("compensate") is not None:
                 _emit_compensation_track(
                     lines, "", stmt["expr"], stmt["compensate"], v3_ctx, env, frame_expr,
@@ -9252,7 +9178,6 @@ def _emit_compensation_track(
     reachable path)."""
     compensate_expr = _journal_service_comp(
         compensate, env, _expr(compensate, v3_ctx, rename, env))
-    compensate_expr = _expr(compensate, v3_ctx, rename, env)
     if frame_expr is None:  # pragma: no cover — _component_needs_frame forces frame_expr
         out.append(f"{pad}fx.track(Disposables.of(() -> {compensate_expr}));")
         return
@@ -9341,10 +9266,6 @@ def _emit_witnessed_step(
             f"{pad}    fx.track({frame_expr}.{entry}({crossing}, {attempted}, "
             f"() -> {undo_expr}));"
         )
-    out.append(
-        f"{pad}    fx.track({frame_expr}.{entry}({crossing}, {attempted}, "
-        f"() -> {undo_expr}));"
-    )
     out.append(f"{pad}}}")
     if bind is not None:
         out.append(f"{pad}var {bind} = {result_var};")
@@ -9418,7 +9339,6 @@ def _emit_component_stmts(
                 # the provider constructor's `Map<V>` parameter then rejects
                 # `Map<Object>` (issue #3095).
                 surface = (map_values or {}).get(step["bind"])
-                surface = (map_values or {}).get(bind)
                 decl = f"Map<{_java_v3_type(surface, boxed=True)}>" if surface else "var"
                 out.append(f"{pad}{decl} {bind} = {_expr(step['acquire'], v3_ctx, None, env)};")
             else:
@@ -9430,7 +9350,6 @@ def _emit_component_stmts(
         elif kind == "emit":
             out.append(pad + _journal_service_stmt(
                 step.get("expr"), env, _site_compensated_call(step, v3_ctx, None, env)))
-            out.append(f"{pad}{_expr(step['expr'], v3_ctx, None, env)};")
             if step.get("compensate") is not None:
                 _emit_compensation_track(
                     out, pad, step["expr"], step["compensate"], v3_ctx, env, frame_expr)
@@ -9438,12 +9357,10 @@ def _emit_component_stmts(
             key = step.get("name")
             service = step.get("service")
             struct = f"{cname}{_camel(_host_key(key))}"
-            struct = f"{cname}{_camel(key)}"
             ctor_args = ", ".join(
                 ["ctx", "fx"] + (["frame"] if frame_expr else [])
                 + [env.req_fields[b] for b in env.reqs]
                 + [_ident(b, "binding") for b in _binds(component)]
-                + list(env.reqs) + list(_binds(component))
                 + [_ident(f.get("name"), "config field")
                    for f in _provider_config_fields(component)]
             )
@@ -9685,7 +9602,6 @@ def _emit_java_router_class(env: "_Env", cname: str, key: str, service_name: str
     method's `<key>.<op>(..)` forwards through it (G2: one provider downstream).
     """
     struct = f"RevlRouter{cname}{_camel(_host_key(key))}"
-    struct = f"RevlRouter{cname}{_camel(key)}"
     realms = list(route.get("realms") or [])
     strategy = route.get("strategy") or "round_robin"
     realm_lits = ", ".join(_string(r) for r in realms)
@@ -9756,7 +9672,6 @@ def _emit_java_router_class(env: "_Env", cname: str, key: str, service_name: str
     out.append("    }")
     for mname, decl in methods.items():
         jname = _method_name(mname)
-        jname = _ident(mname, "method")
         params_decl = decl.get("params", []) or []
         params = ", ".join(f"{render_type(p.get('type'))} {_ident(p.get('name'), 'parameter')}"
                            for p in params_decl)
@@ -9801,7 +9716,6 @@ def _emit_component_modern(
     # exactly as before (see `_component_needs_frame`).
     witnessed = _witnessed_externs(externs)
     needs_frame = _component_needs_frame(component, witnessed, v3_ctx.declared)
-    needs_frame = _component_needs_frame(component, witnessed)
     frame_expr = "frame" if needs_frame else None
     # issue #1511: where a crossing of a compensate-declaring extern registers
     v3_ctx.crossing_frame = frame_expr
@@ -9810,11 +9724,9 @@ def _emit_component_modern(
     # `isolate`/`intercept` name the RAW wiring key, not the binding (issue #1914)
     for key in isolate:
         if key not in env.requires_raw and key not in env.provides_raw:
-        if key not in env.reqs and key not in env.provides:
             raise EmitError(f"{name}: isolate key {key!r} is not declared")
     for key in intercept:
         if key not in env.requires_raw:
-        if key not in env.reqs:
             raise EmitError(f"{name}: intercept key {key!r} is not a requirement")
 
     out: list[str] = []
@@ -9831,8 +9743,6 @@ def _emit_component_modern(
             continue
         _ident(_host_key(key), "provision")
         struct = f"{cname}{_camel(_host_key(key))}"
-        _ident(key, "provision")
-        struct = f"{cname}{_camel(key)}"
         out.append(f"public static final class {struct} implements {service} {{")
         out.append("    private final Context ctx;")
         out.append("    private final Context.EffectScope fx;")
@@ -9840,12 +9750,9 @@ def _emit_component_modern(
             out.append("    private final RevlFrame frame;")
         for local, service in env.reqs.items():
             out.append(f"    private final {service} {env.req_fields[local]};")
-            out.append(f"    private final {service} {local};")
         for b in _binds(component):
             btype = _bind_type(component, b, v3_ctx, map_values, env, functions)
             out.append(f"    private final {btype} {_ident(b, 'binding')};")
-            btype = _bind_type(component, b, v3_ctx, map_values)
-            out.append(f"    private final {btype} {b};")
         # A provide method that reads `config.<f>` needs the field HERE, not
         # only on the plugin (see `_provider_config_fields`).
         for f in provider_config:
@@ -9858,8 +9765,6 @@ def _emit_component_modern(
             + [f"{_bind_type(component, b, v3_ctx, map_values, env, functions)} "
                f"{_ident(b, 'binding')}"
                for b in _binds(component)]
-            + [f"{service} {local}" for local, service in env.reqs.items()]
-            + [f"{_bind_type(component, b, v3_ctx, map_values)} {b}" for b in _binds(component)]
             + [f"{_java_v3_type(f.get('type'))} {_ident(f.get('name'), 'config field')}"
                for f in provider_config]
         )
@@ -9871,11 +9776,9 @@ def _emit_component_modern(
         for local in env.reqs:
             field = env.req_fields[local]
             out.append(f"        this.{field} = {field};")
-            out.append(f"        this.{local} = {local};")
         for b in _binds(component):
             field = _ident(b, "binding")
             out.append(f"        this.{field} = {field};")
-            out.append(f"        this.{b} = {b};")
         for f in provider_config:
             fname = _ident(f.get("name"), "config field")
             out.append(f"        this.{fname} = {fname};")
@@ -9890,7 +9793,6 @@ def _emit_component_modern(
             # `mname` is its Java spelling
             contract = method.get("name")
             mname = _method_name(contract)
-            mname = _ident(method.get("name"), "method")
             # Provider-method signatures MUST render with the SAME renderer as
             # the service interface this class implements (`render_type`:
             # `_java_type` for IR v1/v2, `_java_v3_type` for v3) — the exact
@@ -9917,18 +9819,14 @@ def _emit_component_modern(
                 f"{render_type(_param_type(env, key, contract, p, pnames))} "
                 f"{_ident(p, 'parameter name')}"
                 for p in pnames
-                f"{render_type(_param_type(env, key, mname, p))} {p}"
-                for p in method.get("params") or []
             )
             ret = (render_type(_method_return(env, key, contract))
                    if _method_return(env, key, contract) else "void")
-            ret = render_type(_method_return(env, key, mname)) if _method_return(env, key, mname) else "void"
             out.append(f"    public {ret} {mname}({params}) {{")
             # item 421 F6: a parameter the service declared `Secret[T]` is a
             # declared DISCLOSURE RECEIVER; registering it at the head is what
             # lets every sink scrub it once the body hands it on.
             secret_params = _secret_method_params(env, key, contract, method.get("params") or [])
-            secret_params = _secret_method_params(env, key, mname, method.get("params") or [])
             if secret_params:
                 out.append(f"        revlMarkSecret({', '.join(secret_params)});")
             scope = _UI_SCOPES.get((name, key, contract))
@@ -9954,10 +9852,6 @@ def _emit_component_modern(
                 out.append("        } finally {")
                 out.append("            _revlUi.flush();")
                 out.append("        }")
-            for line in _method_body_lines(
-                env, method, v3_ctx, returns_void=ret == "void", frame_expr=frame_expr,
-            ):
-                out.append(("        " + line) if line else line)
             out.append("    }")
         out.append("}")
         out.append("")
@@ -9977,11 +9871,9 @@ def _emit_component_modern(
         out.append("    public Disposable apply(Context ctx) {")
     for key, realm in isolate.items():
         service = env.provides.get(key) or env.requires_raw[key]
-        service = env.provides.get(key) or env.reqs[key]
         out.append(f"        ctx = ctx.isolate({service}.class, {_string(realm)});")
     for key, metadata in intercept.items():
         service = env.requires_raw[key]
-        service = env.reqs[key]
         out.append(
             f"        ctx.intercept(ServiceKey.of({service}.class, {_string(key)}), "
             f"{_metadata_lit(metadata)});"
@@ -9996,19 +9888,14 @@ def _emit_component_modern(
         field = env.req_fields[local]
         raw = env.req_keys.get(local, local)
         if local in env.route_of:
-        if local in env.routes:
             # item 173: a routed require resolves per named realm through the
             # emitted router, never a single committed-view `ctx.get`.
             out.append(f"        {service} {field} = "
                        f"new RevlRouter{cname}{_camel(_host_key(raw))}(ctx);")
-            out.append(f"        {service} {local} = "
-                       f"new RevlRouter{cname}{_camel(local)}(ctx);")
             continue
         out.append(
             f"        {service} {field} = "
             f"ctx.get(ServiceKey.of({service}.class, {_string(raw)}));"
-            f"        {service} {local} = "
-            f"ctx.get(ServiceKey.of({service}.class, {_string(local)}));"
         )
     # A8 self-revert: cordis4j's ctx.effect() scope is NOT owned by the
     # fiber until apply returns it, so a failing activation must dispose
@@ -10064,7 +9951,6 @@ def _emit_component_modern(
     for rkey, route in env.routes.items():
         _emit_java_router_class(
             env, cname, rkey, env.requires_raw[rkey], route, services, render_type, out)
-            env, cname, rkey, env.reqs[rkey], route, services, render_type, out)
     return out
 
 
@@ -10111,7 +9997,6 @@ def _emit_component(
     """
     _refuse_required_stream(component, "cordis4j")
     if _component_needs_modern(component, _declared_externs(externs)):
-    if _component_needs_modern(component):
         return _emit_component_modern(
             component, services, types, functions, externs, components,
             render_type=render_type)
@@ -10141,8 +10026,6 @@ def _emit_component(
             continue
         _ident(_host_key(key), "provision")
         struct = f"{cname}{_camel(_host_key(key))}"
-        _ident(key, "provision")
-        struct = f"{cname}{_camel(key)}"
         out.append(f"public static final class {struct} implements {service} {{")
         # `requires` bindings are captured exactly like `let-effect` binds:
         # a final field, assigned from the constructor. `apply` resolves them
@@ -10151,26 +10034,20 @@ def _emit_component(
         # held it too (the rust/TypeScript instances of this same bug).
         for local, req_service in env.reqs.items():
             out.append(f"    private final {req_service} {env.req_fields[local]};")
-            out.append(f"    private final {req_service} {_ident(local, 'requirement')};")
         for b in _binds(component):
             out.append(
                 f"    private final {bind_decl(b)} {_ident(b, 'binding')};")
-                f"    private final {_bind_decl_type(component, b, render_type, map_values)} {b};")
         ctor_args = ", ".join(
             [f"{req_service} {env.req_fields[local]}"
-            [f"{req_service} {_ident(local, 'requirement')}"
              for local, req_service in env.reqs.items()]
             + [f"{bind_decl(b)} {_ident(b, 'binding')}"
-            + [f"{_bind_decl_type(component, b, render_type, map_values)} {b}"
                for b in _binds(component)]
         )
         out.append(f"    {struct}({ctor_args}) {{")
         for local in env.reqs:
             out.append(f"        this.{env.req_fields[local]} = {env.req_fields[local]};")
-            out.append(f"        this.{local} = {local};")
         for b in _binds(component):
             out.append(f"        this.{_ident(b, 'binding')} = {_ident(b, 'binding')};")
-            out.append(f"        this.{b} = {b};")
         out.append("    }")
         provide = next(
             (s for s in component.get("body") or []
@@ -10181,19 +10058,14 @@ def _emit_component(
             contract = method.get("name")   # the service-table key (issue #1512)
             mname = _method_name(contract)
             pnames = method.get("params") or []
-            mname = _ident(method.get("name"), "method")
             params = ", ".join(
                 f"{render_type(_param_type(env, key, contract, p, pnames))} "
                 f"{_ident(p, 'parameter name')}"
                 for p in pnames
-                f"{render_type(_param_type(env, key, mname, p))} {p}"
-                for p in method.get("params") or []
             )
             ret = (render_type(_method_return(env, key, contract))
                    if _method_return(env, key, contract) else "void")
             secret_params = _secret_method_params(env, key, contract, method.get("params") or [])
-            ret = render_type(_method_return(env, key, mname)) if _method_return(env, key, mname) else "void"
-            secret_params = _secret_method_params(env, key, mname, method.get("params") or [])
             mark = f"revlMarkSecret({', '.join(secret_params)}); " if secret_params else ""
             out.append(f"    public {ret} {mname}({params}) {{ {mark}{_method_body(env, key, method)} }}")
         out.append("}")
@@ -10212,8 +10084,6 @@ def _emit_component(
             f"        {service} {env.req_fields[local]} = "
             f"ctx.get(ServiceKey.of({service}.class, "
             f"{_string(env.req_keys.get(local, local))}));"
-            f"        {service} {local} = "
-            f"ctx.get(ServiceKey.of({service}.class, {_string(local)}));"
         )
     # A8 self-revert: undos accumulate as the steps land; if a later step
     # throws mid-activation, the accumulated inverses run (reverse order)
@@ -10228,7 +10098,6 @@ def _emit_component(
             bind = _ident(step["bind"], "binding")
             out.append(
                 f"            {bind_decl(step['bind'])} "
-                f"            {_bind_decl_type(component, step['bind'], render_type, map_values)} "
                 f"{bind} = {_expr(step['acquire'], None, None, env)};")
             undo = _expr(step['undo'], None, None, env)
             out.append(f"            undos.add(Disposables.of(() -> {undo}));")
@@ -10240,7 +10109,6 @@ def _emit_component(
         elif kind == "emit":
             out.append("            " + _journal_service_stmt(
                 step.get("expr"), env, _expr(step['expr'], None, None, env)))
-            out.append(f"            {_expr(step['expr'], None, None, env)};")
         elif kind == "provide":
             key = step.get("name")
             service = step.get("service")
@@ -10248,8 +10116,6 @@ def _emit_component(
             ctor_args = ", ".join(
                 [env.req_fields[b] for b in env.reqs]
                 + [_ident(b, "binding") for b in _binds(component)])
-            struct = f"{cname}{_camel(key)}"
-            ctor_args = ", ".join(list(env.reqs) + list(_binds(component)))
             # The provision's disposable joins the teardown list — the
             # modern path tracks it via fx.track(ctx.provide(...)); dropping
             # it would leave the provision registered after unload.
@@ -10287,14 +10153,12 @@ def _emit_service_interfaces_v3(services: dict) -> list[str]:
         out.append(f"public interface {sname} {{")
         for mname, method in (service.get("methods") or {}).items():
             jname = _method_name(mname)
-            _ident(mname, "method")
             params = ", ".join(
                 f"{_java_v3_type(p.get('type'))} {_ident(p.get('name'), 'parameter')}"
                 for p in method.get("params") or []
             )
             ret = _java_v3_type(method.get("returns")) if method.get("returns") else "void"
             out.append(f"    {ret} {jname}({params});")
-            out.append(f"    {ret} {mname}({params});")
         out.append("}")
         out.append("")
     out.extend(_method_name_table(services))
@@ -10329,10 +10193,8 @@ def _emit_v1(ir: dict, package_name: str) -> str:
         out.extend(["    " + line if line else line for line in _emit_ftoa_helper()])
     if _uses_revl_frame(ir):
         out.extend(["    " + line if line else line for line in _emit_revl_frame_runtime(_declared_crossings_used(ir))])
-        out.extend(["    " + line if line else line for line in _emit_revl_frame_runtime()])
         # item 322 Slice 2: the durable WAL sink rides alongside the
         # teardown frame, but ONLY under `--record`; off, this whole block
-        # teardown frame, but ONLY under `--record` — off, this whole block
         # is absent and the output is byte-identical. Mirrors `_emit_v3`'s
         # splice: a witnessed step's `revlRecordTransactional` calls are
         # emitted from the SHARED `_emit_witnessed_step`, so every ir_version
@@ -10388,10 +10250,8 @@ def _emit_v2(ir: dict, package_name: str) -> str:
         out.extend(["    " + line if line else line for line in _emit_ftoa_helper()])
     if _uses_revl_frame(ir):
         out.extend(["    " + line if line else line for line in _emit_revl_frame_runtime(_declared_crossings_used(ir))])
-        out.extend(["    " + line if line else line for line in _emit_revl_frame_runtime()])
         # item 322 Slice 2: the durable WAL sink rides alongside the
         # teardown frame, but ONLY under `--record`; off, this whole block
-        # teardown frame, but ONLY under `--record` — off, this whole block
         # is absent and the output is byte-identical. Mirrors `_emit_v3`'s
         # splice: a witnessed step's `revlRecordTransactional` calls are
         # emitted from the SHARED `_emit_witnessed_step`, so every ir_version
@@ -10612,7 +10472,6 @@ def _emit_v3(ir: dict, package_name: str) -> str:
     if externs:
         out.extend(["    " + line if line else line for line in _emit_v3_externs(
             externs, journal=_RECORD_MODE and bool(components))])
-        out.extend(["    " + line if line else line for line in _emit_v3_externs(externs)])
     if functions:
         out.extend(["    " + line if line else line for line in _emit_v3_functions(functions, types, externs)])
     if tests:
@@ -10644,12 +10503,6 @@ def _emit_v3(ir: dict, package_name: str) -> str:
         or _has_service_emits(components)))
     if _JOURNAL_SINK:
         out.extend(["    " + line if line else line for line in _emit_record_sink()])
-        out.extend(["    " + line if line else line for line in _emit_revl_frame_runtime()])
-        # item 322 Slice 2: the durable WAL sink rides alongside the teardown
-        # frame, but ONLY under `--record` — off, this whole block is absent and
-        # the output is byte-identical (the golden oracle + selfhost gate).
-        if _RECORD_MODE:
-            out.extend(["    " + line if line else line for line in _emit_record_sink()])
     for component in components:
         out.extend(["    " + line if line else line for line in _emit_component(
             component, services, types, functions, externs, components,
@@ -10878,7 +10731,6 @@ def emit(ir: dict, package_name: str = "revl", record: bool = False) -> str:
 
     global _RECORD_MODE, _JOURNAL_SINK, _LIFECYCLE_MODE, _V3_DECLARED_TYPES, _SECRET_MODE
     global _JOURNAL_MODE
-    global _RECORD_MODE, _LIFECYCLE_MODE, _V3_DECLARED_TYPES, _SECRET_MODE
     global _STREAM_ITER_COUNTER
     _STREAM_ITER_COUNTER = 0
     saved = _RECORD_MODE
