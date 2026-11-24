@@ -7056,6 +7056,29 @@ def _lower_try_return(stmt, scope: dict, callables: set, alias_fns: dict,
     body.append({"step": "return", "expr": value})
 
 
+def _reject_discarded_var_push(stmt: "ExprStmt", scope: dict, type_env: dict, filename: str | None) -> None:
+    """`xs.push(x)` as a statement on a `var` list is a silent no-op (issue
+    #3448): `push` returns a NEW list and does not mutate the receiver, so a
+    statement-position call discards the result and the list stays empty.
+    Refuse it here — one diagnostic in the shared compiler, so every tier
+    refuses identically — and name the supported spelling."""
+    expr = stmt.expr
+    if not (isinstance(expr, ExprCall) and isinstance(expr.callee, ExprField)):
+        return
+    if expr.callee.name != "push" or not isinstance(expr.callee.target, ExprVar):
+        return
+    name = expr.callee.target.name
+    if scope.get(name) is not True:
+        return  # not a `var` binding (host-valued names carry the string "host")
+    recv = type_env.get(name)
+    if recv is None or parse_type(recv)[0] != "List":
+        return
+    raise RevlError(filename, stmt.line,
+                    f"`{name}.push(...)` as a statement has no effect — `push` returns a new list "
+                    f"and does not modify `{name}` (issue #3448)",
+                    hint=f"reassign the `var`: `{name} = {name}.push(...)`")
+
+
 def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: list, filename: str,
                      type_env: dict | None = None, types: dict | None = None,
                      expected_return: str | None = None) -> None:
@@ -7234,6 +7257,7 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         body.append({"step": "for", "bind": _predeclared_mangle(stmt.bind),
                      "iterable": iterable, "body": inner_body})
     elif isinstance(stmt, ExprStmt):
+        _reject_discarded_var_push(stmt, scope, type_env, filename)
         infer_ast(stmt.expr, type_env, types, filename)
         body.append({"step": "expr", "expr": _lower_pure_expr(stmt.expr, scope, callables, alias_fns, filename, type_env, types)})
     elif isinstance(stmt, AssertStmt):
