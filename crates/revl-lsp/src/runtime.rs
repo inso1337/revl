@@ -206,7 +206,7 @@ fn from_extracted_dir(dir: &Path) -> Result<Runtime, String> {
 
 /// Extract `archive` into the pin's versioned cache directory, atomically.
 fn ensure_extracted(archive: &Path) -> Result<Runtime, String> {
-    ensure_extracted_into(archive, &runtime_dir())
+    ensure_extracted_into(archive, &runtime_dir()?)
 }
 
 /// Extract the runtime archive baked into the binary into ITS pin's versioned
@@ -214,7 +214,7 @@ fn ensure_extracted(archive: &Path) -> Result<Runtime, String> {
 /// extraction path runs. This is the single-distributed-file path (issue #102):
 /// the archive rides inside the executable, so there is no sibling file to ship.
 fn ensure_extracted_bytes(bytes: &[u8]) -> Result<Runtime, String> {
-    ensure_extracted_bytes_into(bytes, &runtime_dir_for(&embedded_pin()))
+    ensure_extracted_bytes_into(bytes, &runtime_dir_for(&embedded_pin())?)
 }
 
 /// Extract in-memory archive `bytes` into `dest` atomically. The bytes are
@@ -226,15 +226,11 @@ fn ensure_extracted_bytes_into(bytes: &[u8], dest: &Path) -> Result<Runtime, Str
     // `Embedded` shape itself; `locate` re-stamps with `embedded_pin()` (the same
     // value in production), and a direct unit-test caller sees the honest source.
     let pin = pin_of(dest);
-    if let Some(python) = interpreter_in(dest) {
+    if let Some(python) = trusted_interpreter(dest)? {
         // already populated by an earlier launch — no need to re-stage the bytes
         return Ok(resolved(python).tagged(Source::Embedded, pin));
     }
-    let parent = dest
-        .parent()
-        .ok_or_else(|| "the runtime cache has no parent directory".to_string())?;
-    std::fs::create_dir_all(parent)
-        .map_err(|err| format!("cannot create the runtime cache {}: {err}", parent.display()))?;
+    let parent = private_parent(dest)?;
     let staged_archive = parent.join(format!(
         ".embedded-runtime-{}-{}.tar",
         std::process::id(),
@@ -258,7 +254,7 @@ fn ensure_extracted_bytes_into(bytes: &[u8], dest: &Path) -> Result<Runtime, Str
 /// `dest` half-populated, and two racing extractors settle on whichever `rename`
 /// won.
 fn ensure_extracted_into(archive: &Path, dest: &Path) -> Result<Runtime, String> {
-    if let Some(python) = interpreter_in(dest) {
+    if let Some(python) = trusted_interpreter(dest)? {
         // already populated by an earlier launch (or a peer that just won)
         return Ok(resolved(python));
     }
@@ -268,11 +264,7 @@ fn ensure_extracted_into(archive: &Path, dest: &Path) -> Result<Runtime, String>
             archive.display()
         ));
     }
-    let parent = dest
-        .parent()
-        .ok_or_else(|| "the runtime cache has no parent directory".to_string())?;
-    std::fs::create_dir_all(parent)
-        .map_err(|err| format!("cannot create the runtime cache {}: {err}", parent.display()))?;
+    let parent = private_parent(dest)?;
 
     let staging = parent.join(format!(
         ".tmp-extract-{}-{}",
@@ -286,7 +278,7 @@ fn ensure_extracted_into(archive: &Path, dest: &Path) -> Result<Runtime, String>
         .map_err(|err| format!("cannot create the staging dir {}: {err}", staging.display()))?;
 
     let extracted = extract_into(archive, &staging).and_then(|()| runtime_root(&staging));
-    let root = match extracted {
+    let root = match extracted.and_then(|root| harden(&root).map(|()| root)) {
         Ok(root) => root,
         Err(err) => {
             let _ = std::fs::remove_dir_all(&staging);
@@ -301,7 +293,7 @@ fn ensure_extracted_into(archive: &Path, dest: &Path) -> Result<Runtime, String>
             // it, so drop our staging and use theirs. Any other rename failure
             // is real and surfaced.
             let _ = std::fs::remove_dir_all(&staging);
-            if interpreter_in(dest).is_none() {
+            if trusted_interpreter(dest)?.is_none() {
                 return Err(format!(
                     "cannot move the extracted runtime into {}: {err}",
                     dest.display()
@@ -311,7 +303,7 @@ fn ensure_extracted_into(archive: &Path, dest: &Path) -> Result<Runtime, String>
     }
     let _ = std::fs::remove_dir_all(&staging);
 
-    match interpreter_in(dest) {
+    match trusted_interpreter(dest)? {
         Some(python) => Ok(resolved(python)),
         None => Err(format!(
             "the runtime archive {} unpacked without a bin/python3",
@@ -324,6 +316,9 @@ fn extract_into(archive: &Path, into: &Path) -> Result<(), String> {
     let status = Command::new("tar")
         .arg("-xf")
         .arg(archive)
+        // the tree must end up owned by the user running the server, never by
+        // whatever uid the archive recorded, or the reuse check would refuse it
+        .arg("--no-same-owner")
         .arg("-C")
         .arg(into)
         .status()
@@ -375,7 +370,7 @@ fn interpreter_in(dir: &Path) -> Option<PathBuf> {
     None
 }
 
-fn runtime_dir() -> PathBuf {
+fn runtime_dir() -> Result<PathBuf, String> {
     runtime_dir_for(&pin())
 }
 
@@ -383,21 +378,168 @@ fn runtime_dir() -> PathBuf {
 /// a baked-in runtime cache under ITS OWN pin (`EMBEDDED_RUNTIME_PIN`) rather than
 /// the beside-exe default, so a build that bakes a runtime does not collide on
 /// disk with a differently-pinned one resolved another way (design A3).
-fn runtime_dir_for(pin: &str) -> PathBuf {
-    cache_root().join("revl-lsp").join("runtime").join(pin)
+fn runtime_dir_for(pin: &str) -> Result<PathBuf, String> {
+    Ok(cache_root()?.join("revl-lsp").join("runtime").join(pin))
 }
 
-fn cache_root() -> PathBuf {
-    if let Some(explicit) = env_path(CACHE_ENV) {
-        return explicit;
+/// The per-user cache root the versioned runtime lives under. It is never the
+/// shared temp directory: a runtime found there could have been planted by
+/// another local user, and the server would run it. With no per-user location
+/// to use the answer is an error the engine renders as a visible diagnostic.
+/// A relative `XDG_CACHE_HOME` or `HOME` is ignored (the XDG rule), since it
+/// would resolve against the editor's working directory, which a workspace
+/// controls; a relative `REVL_LSP_CACHE` is refused for the same reason.
+fn cache_root() -> Result<PathBuf, String> {
+    cache_root_from(env_path)
+}
+
+/// `cache_root` over an injected environment lookup, so it is testable without
+/// touching the process environment.
+fn cache_root_from(get: impl Fn(&str) -> Option<PathBuf>) -> Result<PathBuf, String> {
+    if let Some(explicit) = get(CACHE_ENV) {
+        if !explicit.is_absolute() {
+            return Err(format!(
+                "{CACHE_ENV} must be an absolute path, not {}",
+                explicit.display()
+            ));
+        }
+        return Ok(explicit);
     }
-    if let Some(xdg) = env_path("XDG_CACHE_HOME") {
-        return xdg;
+    if let Some(xdg) = get("XDG_CACHE_HOME").filter(|path| path.is_absolute()) {
+        return Ok(xdg);
     }
-    if let Some(home) = env_path("HOME") {
-        return home.join(".cache");
+    if let Some(home) = get("HOME").filter(|path| path.is_absolute()) {
+        return Ok(home.join(".cache"));
     }
-    std::env::temp_dir()
+    Err(format!(
+        "no per-user cache directory for the private runtime: {CACHE_ENV}, an absolute \
+         XDG_CACHE_HOME and an absolute HOME are all unset, and the shared temp directory \
+         is never used (set {CACHE_ENV} to a directory only you can write)"
+    ))
+}
+
+/// Create the versioned cache's parent directory and require that it is ours.
+fn private_parent(dest: &Path) -> Result<&Path, String> {
+    let parent = dest
+        .parent()
+        .ok_or_else(|| "the runtime cache has no parent directory".to_string())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|err| format!("cannot create the runtime cache {}: {err}", parent.display()))?;
+    require_dir(parent, false)?;
+    Ok(parent)
+}
+
+/// The interpreter of an already-populated `dest`, after proving the tree is
+/// not another user's: `None` when nothing is extracted there yet, an error
+/// when something is there that this user did not put there.
+fn trusted_interpreter(dest: &Path) -> Result<Option<PathBuf>, String> {
+    let Some(python) = interpreter_in(dest) else {
+        return Ok(None);
+    };
+    if let Some(parent) = dest.parent() {
+        require_dir(parent, false)?;
+    }
+    require_dir(dest, true)?;
+    require_dir(&dest.join("bin"), true)?;
+    require_file(&python)?;
+    Ok(Some(python))
+}
+
+#[cfg(unix)]
+mod owner {
+    use std::os::unix::fs::MetadataExt;
+    use std::path::Path;
+
+    extern "C" {
+        fn geteuid() -> u32;
+    }
+
+    fn euid() -> u32 {
+        // SAFETY: geteuid takes no arguments, has no preconditions and cannot fail.
+        unsafe { geteuid() }
+    }
+
+    /// Refuse `path` unless this user owns it and, with `private`, neither the
+    /// group nor others can write it.
+    pub fn check(meta: &std::fs::Metadata, path: &Path, private: bool) -> Result<(), String> {
+        if meta.uid() != euid() {
+            return Err(format!(
+                "refusing {}: it is owned by uid {}, not the user running the language \
+                 server (remove it to let the runtime be extracted again)",
+                path.display(),
+                meta.uid()
+            ));
+        }
+        if private && meta.mode() & 0o022 != 0 {
+            return Err(format!(
+                "refusing {}: it is writable by its group or by others (mode {:o}); \
+                 remove it to let the runtime be extracted again",
+                path.display(),
+                meta.mode() & 0o7777
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn require_dir(path: &Path, private: bool) -> Result<(), String> {
+    // lstat: a symlink standing in for the directory is not the directory
+    let meta = std::fs::symlink_metadata(path)
+        .map_err(|err| format!("cannot inspect the runtime cache {}: {err}", path.display()))?;
+    if !meta.is_dir() {
+        return Err(format!(
+            "refusing {}: it is not a plain directory",
+            path.display()
+        ));
+    }
+    owner::check(&meta, path, private)
+}
+
+#[cfg(unix)]
+fn require_file(path: &Path) -> Result<(), String> {
+    // `bin/python3` is a symlink in a python-build-standalone tree, so the
+    // target is what runs; the directory holding the link was checked above
+    let meta = std::fs::metadata(path)
+        .map_err(|err| format!("cannot inspect the interpreter {}: {err}", path.display()))?;
+    owner::check(&meta, path, true)
+}
+
+/// Strip group and other write from the directories and the interpreter the
+/// reuse check inspects, so a tree extracted under a permissive umask (002)
+/// still passes it on the next launch.
+#[cfg(unix)]
+fn harden(root: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut targets = vec![root.to_path_buf(), root.join("bin")];
+    if let Some(python) = interpreter_in(root) {
+        targets.push(python);
+    }
+    for path in targets {
+        let meta = std::fs::metadata(&path)
+            .map_err(|err| format!("cannot inspect {}: {err}", path.display()))?;
+        let mode = meta.permissions().mode();
+        if mode & 0o022 != 0 {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode & !0o022))
+                .map_err(|err| format!("cannot restrict {}: {err}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn require_dir(_path: &Path, _private: bool) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn require_file(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn harden(_root: &Path) -> Result<(), String> {
+    Ok(())
 }
 
 fn pin() -> String {
@@ -566,14 +708,132 @@ mod tests {
     fn the_pin_can_be_overridden_for_a_side_by_side_cache() {
         // guard the default without perturbing the process env for other tests
         assert_eq!(RUNTIME_PIN, "unpinned-dev");
-        assert!(runtime_dir().ends_with(pin()));
+        if let Ok(dir) = runtime_dir() {
+            assert!(dir.ends_with(pin()));
+        }
     }
 
     #[test]
     fn the_runtime_dir_is_under_the_cache_root_and_keyed_by_pin() {
-        let dir = runtime_dir();
-        assert!(dir.starts_with(cache_root()));
+        // a host with no usable cache root is covered by the tests below
+        let (Ok(dir), Ok(root)) = (runtime_dir(), cache_root()) else {
+            return;
+        };
+        assert!(dir.starts_with(root));
         assert!(dir.ends_with(pin()));
         assert!(dir.to_string_lossy().contains("revl-lsp"));
+    }
+
+    fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<PathBuf> {
+        let pairs: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |name| {
+            pairs
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| PathBuf::from(v))
+        }
+    }
+
+    #[test]
+    fn the_cache_root_never_falls_back_to_the_shared_temp_dir() {
+        let err = cache_root_from(env_of(&[])).expect_err("no home, no xdg, no override");
+        assert!(err.contains("REVL_LSP_CACHE"), "{err}");
+        assert!(err.contains("never used"), "{err}");
+    }
+
+    #[test]
+    fn the_cache_root_order_is_override_then_xdg_then_home() {
+        let all = [
+            ("REVL_LSP_CACHE", "/o"),
+            ("XDG_CACHE_HOME", "/x"),
+            ("HOME", "/h"),
+        ];
+        assert_eq!(cache_root_from(env_of(&all)).unwrap(), PathBuf::from("/o"));
+        assert_eq!(cache_root_from(env_of(&all[1..])).unwrap(), PathBuf::from("/x"));
+        assert_eq!(cache_root_from(env_of(&all[2..])).unwrap(), PathBuf::from("/h/.cache"));
+    }
+
+    #[test]
+    fn a_relative_cache_location_is_not_taken_from_the_working_directory() {
+        // a relative XDG_CACHE_HOME or HOME is skipped, as the XDG spec says
+        let root = cache_root_from(env_of(&[("XDG_CACHE_HOME", "rel"), ("HOME", "/h")])).unwrap();
+        assert_eq!(root, PathBuf::from("/h/.cache"));
+        assert!(cache_root_from(env_of(&[("XDG_CACHE_HOME", "rel"), ("HOME", "h")])).is_err());
+        // an explicit relative override is refused loudly, not silently dropped
+        let err = cache_root_from(env_of(&[("REVL_LSP_CACHE", "rel"), ("HOME", "/h")]))
+            .expect_err("relative override");
+        assert!(err.contains("absolute"), "{err}");
+    }
+
+    #[cfg(unix)]
+    fn planted_runtime(tag: &str, mode: u32) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = std::env::temp_dir().join(format!(
+            "revl-lsp-trust-{tag}-{}-{}",
+            std::process::id(),
+            nonce()
+        ));
+        let dest = scratch.join("revl-lsp").join("runtime").join("pin");
+        std::fs::create_dir_all(dest.join("bin")).unwrap();
+        let python = dest.join("bin").join("python3");
+        std::fs::write(&python, b"#!/bin/sh\nexit 0\n").unwrap();
+        for path in [&dest, &dest.join("bin"), &python] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        (scratch, dest)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_runtime_owned_by_us_and_private_is_reused() {
+        let (scratch, dest) = planted_runtime("ok", 0o755);
+        let found = trusted_interpreter(&dest).expect("a private tree is trusted");
+        assert_eq!(found, Some(dest.join("bin").join("python3")));
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_runtime_others_can_write_is_refused_not_launched() {
+        for (tag, mode) in [("group", 0o775), ("world", 0o757)] {
+            let (scratch, dest) = planted_runtime(tag, mode);
+            let err = trusted_interpreter(&dest).expect_err("a writable tree is not trusted");
+            assert!(err.contains("writable by its group or by others"), "{err}");
+            // the extraction entry points refuse too, rather than run or replace it
+            let archive = scratch.join("none.tar");
+            assert!(ensure_extracted_into(&archive, &dest).is_err());
+            assert!(ensure_extracted_bytes_into(b"", &dest).is_err());
+            let _ = std::fs::remove_dir_all(&scratch);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_runtime_directory_is_refused() {
+        let (scratch, dest) = planted_runtime("link", 0o755);
+        let link = scratch.join("revl-lsp").join("runtime").join("linked");
+        std::os::unix::fs::symlink(&dest, &link).unwrap();
+        let err = trusted_interpreter(&link).expect_err("a symlink is not the directory");
+        assert!(err.contains("not a plain directory"), "{err}");
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_extraction_under_a_group_writable_umask_is_reusable() {
+        // a tree whose directories are group-writable (umask 002) is hardened
+        // before it is moved into place, so the next launch trusts it
+        use std::os::unix::fs::PermissionsExt;
+        let (scratch, dest) = planted_runtime("harden", 0o775);
+        harden(&dest).unwrap();
+        for path in [&dest, &dest.join("bin"), &dest.join("bin").join("python3")] {
+            let mode = std::fs::metadata(path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o022, 0, "{} still writable: {mode:o}", path.display());
+        }
+        assert!(trusted_interpreter(&dest).unwrap().is_some());
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 }
