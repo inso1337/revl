@@ -62,14 +62,18 @@ def test_each_module_keeps_its_own_namespace(tmp_path):
     """The rule is per module, as the duplicate-function one is: a module's
     private names are its own (each is mangled per module in the IR), so an
     extern in one root file and a fn of the same name in another do not
-    collide, and neither does a local fn shadowing an imported extern."""
+    collide. A local fn of the name of an imported extern is the exception:
+    the import and the declaration are one name in one module, and it is
+    refused (issue #3364)."""
     (tmp_path / "a.rvl").write_text(EXTERN, encoding="utf-8")
     (tmp_path / "b.rvl").write_text(FN, encoding="utf-8")
     ir = compile_files([str(tmp_path / "a.rvl"), str(tmp_path / "b.rvl")])
     assert len(ir["functions"]) == 1 and len(ir["externs"]) == 1
     (tmp_path / "lib.rvl").write_text("pub " + EXTERN, encoding="utf-8")
     (tmp_path / "main.rvl").write_text('use "lib.rvl" { f }\n' + FN, encoding="utf-8")
-    compile_files([str(tmp_path / "main.rvl")])
+    with pytest.raises(RevlError, match="`f` is imported from lib.rvl on line 1 "
+                       "and declared on line 2; rename one of them"):
+        compile_files([str(tmp_path / "main.rvl")])
 
 
 def test_distinct_names_still_compile():

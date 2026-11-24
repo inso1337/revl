@@ -308,6 +308,15 @@ not be scored by the fence it widened. `tools/evolution_reward.py` and
 `tools/evolution_progress.py` were on none of the old lists, so a diff could
 edit the retention rule and no check named it.
 
+Every column above is a DIFF check, answered against a changed-file set. The
+capability side is the reserved `evaluator` namespace (`evaluator.reward`,
+`evaluator.progress`, `evaluator.controller`, `evaluator.heldout` and
+`evaluator.protocol`): a component that declares a reach into one is refused at
+compile time by that declaration, with the fold item 544 gave the kernel, so a
+candidate composed for another consumer cannot reach the judge by a route no
+diff shows. The members stand for the evaluator paths that are not kernel paths;
+`docs/design/545-kernel-boundary-capability.md` section 8 carries the design.
+
 The enumeration's identity is `protocol_digest`: `sha256:<hex>` over the
 evaluator's tracked bytes, read from the scorer's own checkout. It is written
 into every scorecard and every controller verdict, and the controller refuses a

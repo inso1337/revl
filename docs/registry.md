@@ -62,6 +62,9 @@ registry/
         compensation.json      #   the recovery surface: each reversible
                                #   crossing with its class and register
         provenance.json        #   assembled source/build provenance
+        promotion.json         #   the `revl promote` verdict this release was
+                               #   promoted on, supplied by the publisher and
+                               #   never produced at publish (issue #2804)
       releases/                # GENERATED at publish; append-only (§1.2)
         <version>/
           component.rvl        #   the bytes of that release, frozen
@@ -86,6 +89,17 @@ declared sink, since that reach could be any of them. `compensation` is the
 audit recovery surface: one row per reversible crossing, with its class and
 declaration register. A crossing absent from it has no declared inverse,
 compensation or deferred class.
+
+`promotion.json` is the one file here that is a decision and not a projection of
+the source: the verbatim `revl promote --json` verdict (`revl.shadow-promotion`)
+for the release. `build_evidence` never writes it. It binds it into the signed
+attestation when the entry ships one, so a verdict edited after signing breaks
+the signature like any other bound dossier. The `strength` facet grades it
+(`exact` > `sampled` > `not-promoted` > `unavailable` > `invalid`). Only a
+`PROMOTE` verdict licenses a strength, since a refused or reverted window is
+evidence against the candidate. No producer of `exact` exists yet: a document
+that states it is `invalid`, so a published file cannot claim it. `strength`
+stays out of the rank key, like the reviewer facets (issue #2804).
 
 `index.json` maps each component to what a resolver needs without opening
 sources: provided service shapes (canonicalized), required keys,
@@ -322,6 +336,25 @@ MCP tool `revl_resolve` and CLI `revl resolve`, same result object
   need. **With it, candidates are additionally checked admissible against
   that running composition** (G2 provision disjointness, G3 acyclicity) —
   the answer upgrades from "compatible somewhere" to "admissible *here*".
+
+- `release` (Python `registry.resolve(..., release=...)`) selects among
+  releases. Left out, a resolve reads the **current** release of each entry,
+  exactly as above. A version string (`"1.2.0"`) considers only the entries,
+  current or frozen under `releases/<version>/` (§1.2), that are that release;
+  `"*"` considers every release of every entry; the version is matched as an
+  exact string. Python API only: `revl_resolve` and a CLI do not forward it yet.
+  The registry must be loaded
+  with its history (`Registry.from_dir(dir, releases=True)`, which a path
+  argument does for you); asking a registry loaded without it is refused, not
+  answered about the wrong set. Each candidate then carries `version` and
+  `frozen`, and the result a `releaseSelection` block, none of which appear
+  without `release`. At equal fit the current release ranks above an older one.
+  This is what lets a consumer pinned to `cache@1` ask which releases still fit
+  its need after `cache@2` became the current one. A frozen release is checked,
+  not believed: it is recompiled by the current compiler, and bytes that no
+  longer hash to what its own `release.json` recorded refuse it (listed in
+  `refused` with its `version`). It carries no evidence bundle, so its evidence
+  reads `unavailable`; it is never credited with the current release's.
 
 **Matching is admission, never text.** A candidate matches iff its
 provided service is §5 structurally compatible with the need — the same
@@ -585,7 +618,8 @@ catches a name changing hands but proves nothing about who is behind it.
 **Deletion/yanking policy** (needs identity first). **Signatures** as a
 publish gate (the dossier is evidence — signing arrives with that identity, and
 unsigned-but-gate-verified beats signed-but-unverified). **Resolving by version
-range** — a resolve reads the current release; the frozen history is a record,
-not yet a selectable set (item 9 / multi-version coexistence). **Popularity
+range** — a resolve selects one release or all of them (§2, `release=`); there
+is no range grammar, no "newest that satisfies" and no per-consumer pin
+resolution, which is what a version range would add. **Popularity
 metrics** (see §2); **cross-registry federation** (there is one registry until
 that is a problem worth having).

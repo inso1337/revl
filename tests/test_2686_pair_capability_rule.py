@@ -188,14 +188,16 @@ def test_a_pair_rule_needs_exactly_two_capabilities():
         parse_policy("component Agent* may not reach fs.read together with")
 
 
-def test_the_composition_wide_form_is_not_part_of_this_slice():
-    """A realm-scoped pair rule needs a decision on how realms count, so it is
-    refused rather than silently read as per-component."""
+def test_a_realm_scoped_pair_rule_is_refused():
+    """A realm does not change what the composition holds, so a realm subject
+    is refused rather than silently read as per-component or composition."""
     with pytest.raises(PolicyError) as caught:
         parse_policy(
             "realm billing may not reach fs.read together with network.call")
-    assert "component <glob>" in str(caught.value)
-    assert "not part of this slice" in str(caught.value)
+    message = str(caught.value)
+    assert "component <glob>" in message
+    assert "composition may not reach" in message
+    assert "realm-scoped pair rule is not supported" in message
 
 
 def test_the_pair_rule_has_no_allow_form():

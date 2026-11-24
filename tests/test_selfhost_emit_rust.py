@@ -908,6 +908,56 @@ def test_selfhosted_emitter_component_bridge_scaffold(emitted):
     assert "<<UNSUPPORTED" not in src and "<<NONE>>" not in src
 
 
+_BRIDGE_KEYWORD_PARAMS = """
+service S { fn add(impl: Int, ref: Int, mod: Int) -> Int }
+
+component C provides s: S {
+  provide s {
+    fn add(impl, ref, mod) = impl + ref + mod
+  }
+}
+"""
+
+
+def _bridge_keyword_params_ir(tmp_path):
+    source = tmp_path / "bridge_keyword_params_3415.rvl"
+    source.write_text(_BRIDGE_KEYWORD_PARAMS, encoding="utf-8")
+    return compile_files([str(source)])
+
+
+def test_selfhosted_bridge_proxy_escapes_keyword_params(emitted, reference, tmp_path):
+    """The bridge proxy declaration and its argument vector share the
+    `value_ident` spelling used by service traits and provide methods."""
+    ir = _bridge_keyword_params_ir(tmp_path)
+    want = reference.emit(ir)
+    got = emitted["emit_rust_src"](ir)
+
+    assert got == want
+    assert "fn add(&self, impl_: i64, ref_: i64, mod_: i64) -> i64 {" in got
+    assert (
+        'vec![serde_json::json!(impl_), serde_json::json!(ref_), '
+        'serde_json::json!(mod_)]'
+    ) in got
+
+
+@pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
+def test_bridge_keyword_params_compile_under_cargo(reference, tmp_path):
+    """Compile the emitted module with rustc through Cargo; raw Rust keywords
+    in either the proxy declaration or argument vector are rejected."""
+    ir = _bridge_keyword_params_ir(tmp_path)
+    source = reference.emit(ir)
+    crate = tmp_path / "crate"
+    (crate / "src").mkdir(parents=True)
+    (crate / "Cargo.toml").write_text(
+        reference.cargo_toml("revl_bridge_keyword_params_3415"), encoding="utf-8"
+    )
+    (crate / "src" / "lib.rs").write_text(source, encoding="utf-8")
+    result = subprocess.run(
+        ["cargo", "build", "--quiet"], cwd=crate, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr[-4000:]
+
+
 def test_selfhosted_emitter_effectful_component_scaffold(emitted):
     """Pin the effectful/config/req surface (slice 4, item 218): the
     `_emit_component_new` path (effect/undo, `emit`, the `ctx: Arc<Context>`
