@@ -461,10 +461,9 @@ def test_f4_unresolved_nominal_in_a_record_update():
     stratum1 = ('pub type A = { v: Row }\n'
                 'pub fn f(a: A) -> A { return { a | v = { name: "x", n: 1 } } }\n')
     stratum3 = ('type A = { v: Row }\n'
-                'service S { fn go() -> Int }\n'
+                'service S { fn go(a: A) -> Int }\n'
                 'component C provides s: S {\n'
-                '  provide s { fn go() -> Int {\n'
-                '    let a: A = { v: { name: "x", n: 1 } }\n'
+                '  provide s { fn go(a: A) -> Int {\n'
                 '    let b = { a | v = { name: "x", n: 1 } }\n'
                 '    return 1\n'
                 '  } }\n'

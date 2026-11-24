@@ -8847,7 +8847,7 @@ fn emit_bridge(ir: Value) -> Vec<String> {
             let mut plist: Vec<String> = vec![];
             let mut argv: Vec<String> = vec![];
             for p in params.clone() {
-                let pname = value_str(value_field(p.clone(), String::from("name")));
+                let pname = value_ident(value_str(value_field(p.clone(), String::from("name"))));
                 let pty = rust_type_t(value_field(p.clone(), String::from("type")), tnames.clone());
                 plist.push(format!("{}: {}", pname, pty));
                 argv.push(bridge_arg_ser(&pname, pty.clone()));
@@ -16182,6 +16182,12 @@ fn mth_type_verdict(body: &[Stmt], i: i64, env: Vec<Bind>, cx: Ctx__m2, ret: Str
     let rq = if (s.edge == "subscribe") { ct_sub_head(s.e.clone(), cx.clone(), env.clone()) } else { ct_scan(s.e.clone(), cx.clone(), env.clone()) };
     if (rq != "") {
         return mk_verd(rq, ln.clone());
+    }
+    if (((((s.bind != "") && (s.bindTy != "")) && (!ct_crossing(s.clone()))) && (!is_bad(s.e.clone()))) && (tk_solid(s.bindTy.clone(), &env) != "")) {
+        let lc = tk_check(s.e.clone(), s.bindTy.clone(), env.clone(), &((((String::from("`let ").revl_concat(&s.bind)).revl_concat(": ")).revl_concat(&tk_render(s.bindTy.clone()))).revl_concat("`")));
+        if (lc.v != "") {
+            return mk_verd(lc.v.clone(), ln.clone());
+        }
     }
     let mut next = env.clone();
     if (s.bind != "") {
@@ -30800,6 +30806,20 @@ fn taint_source_qualifier(ty: String) -> String {
     return String::from("");
 }
 
+fn taint_source_qualifiers_json(ty: String) -> String {
+    let top = taint_top_qualifier(ty.clone());
+    if (((top != "") && (top != "Untrusted")) && (top != "Secret")) {
+        return String::from("");
+    }
+    if ((ty == "") || (ty_parse(ty.clone()).head == "Retained")) {
+        return String::from("");
+    }
+    if (taint_holds_qualifier(ty.clone(), "Untrusted") && taint_holds_qualifier(ty.clone(), "Secret")) {
+        return String::from(", \"returns_qualifiers\": [\"Untrusted\", \"Secret\"]");
+    }
+    return String::from("");
+}
+
 fn ir_service_params_json(ps: &[ParamN], raw: &[ParamN]) -> String {
     let mut out = String::from("");
     let mut i = 0i64;
@@ -30966,11 +30986,13 @@ fn ir_methods(ts: Vec<Token>, i: i64, end: i64, acc: String, v3: bool, al: std::
     let mut retJson = String::from("null");
     let mut term = String::from("");
     let mut retQual = String::from("");
+    let mut retQuals = String::from("");
     let mut rawRet = String::from("");
     let mut nexti = ps.i;
     if atk(&ts, ps.i, "arrow") {
         let tr = type_at(ts.clone(), (ps.i).checked_add(1i64).expect("revl: Int overflow"));
         retQual = taint_source_qualifier(tr.ty.clone());
+        retQuals = taint_source_qualifiers_json(tr.ty.clone());
         rawRet = taint_strip(alias_subst(tr.ty.clone(), al.clone()));
         if (rawRet == "Criterion") {
             term = String::from("criterion");
@@ -30989,6 +31011,7 @@ fn ir_methods(ts: Vec<Token>, i: i64, end: i64, acc: String, v3: bool, al: std::
     if (retQual != "") {
         mj = (mj.revl_concat(", \"returns_qualifier\": ")).revl_concat(&jstr(&retQual));
     }
+    mj.push_str(&retQuals);
     mj.push_str(&ir_doc_key(st.clone(), dline, dstarts));
     if (term != "") {
         mj = (mj.revl_concat(", \"termination\": ")).revl_concat(&jstr(&term));

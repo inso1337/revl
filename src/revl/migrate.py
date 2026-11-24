@@ -19,16 +19,27 @@ module joins them, and nothing else:
 
 The plan writes nothing and admits nothing: it is a report over its input
 documents (a `.rvl` source is compiled on the spot, exactly as `revl diff`
-does). Policy-driven rules (for example "refuse every widening") are a later
-slice and are deliberately not invented here.
+does).
+
+The second slice reads the operator's boundary policy (`--policy FILE`, see
+docs/boundary-policy.md). The policy is evaluated over the composition as it
+would stand AFTER the migration (the old version's components replaced by the
+new version's), by the same `policy.evaluate` and `policy.approval_admission`
+the gate runs, and only the violations the migration INTRODUCES count: a rule
+the composition already breaks before the change is reported as pre-existing,
+not blamed on the new version. No rule is invented here: "refuse every
+widening" is written in the policy file as an allow-list, as it is for
+admission.
 
 Classification is read off those facts only:
 
-  * `refused`: a real consumer cannot move, or the declared state hand-off is
-    incompatible (the swap would be refused, nothing changes);
+  * `refused`: a real consumer cannot move, the declared state hand-off is
+    incompatible, or the policy refuses the composition after the migration
+    (the swap would be refused, nothing changes);
   * `needs-approval`: the new version widens the measured authority surface (a
     new crossing or host backend, a weakened reach, a widened emission
-    capability or emission ceiling, a dropped or weakened recovery), a
+    capability or emission ceiling, a dropped or weakened recovery), the
+    policy requires an approval for a capability the new version reaches, a
     consumer needs an authored adapter, or the successor drops the
     predecessor's state;
   * `needs-handoff`: the successor declares a compatible state hand-off;
@@ -454,11 +465,229 @@ def handoffs(old_ir: dict, new_ir: dict) -> list[dict]:
     return entries
 
 
+# ------------------------------------------------- the composition after it
+
+# top-level IR keys `compose_after` rebuilds itself; every other table is merged
+# generically (see `_merge_table`).
+_COMPOSED_KEYS = frozenset({"components", "services", "manifest"})
+
+
+def _names(ir: dict) -> list[str]:
+    return [c["name"] for c in ir.get("components") or []]
+
+
+def _manifest_entries(ir: dict) -> list[dict]:
+    """The composition-manifest rows of `ir`, one per component.
+
+    The document's own `manifest.components` rows are preferred, because they
+    carry what the linker recorded (`intercept`, `routes`). A document without
+    them (a hand-built one) gets rows derived from its component records, in
+    the shape the linker writes, so the audit reads realms and keys the same way
+    either way."""
+    rows = (ir.get("manifest") or {}).get("components")
+    if rows:
+        return [dict(row) for row in rows]
+    out = []
+    for comp in ir.get("components") or []:
+        row = {"name": comp["name"], "file": comp.get("source", ""),
+               "inject": sorted(comp.get("requires") or {}),
+               "provides": list((comp.get("provides") or {}))}
+        if comp.get("isolate"):
+            row["isolate"] = dict(comp["isolate"])
+        out.append(row)
+    return out
+
+
+def _splice(existing: list, replaced: set, incoming: list, name) -> list:
+    """`existing` with every item named in `replaced` swapped for the incoming
+    item of the same name AT ITS ORIGINAL POSITION, the rest of the incoming
+    items appended. In place, because the audit and the policy walk components
+    in document order: a violation that names a pair of components names them
+    in that order, so moving the replaced component to the end would turn an
+    unchanged violation into a different one."""
+    incoming_by = {name(item): item for item in incoming}
+    placed: set = set()
+    out = []
+    for item in existing:
+        key = name(item)
+        if key not in replaced:
+            out.append(item)
+        elif key in incoming_by and key not in placed:
+            out.append(incoming_by[key])
+            placed.add(key)
+    out += [item for item in incoming if name(item) not in placed]
+    return out
+
+
+def _merge_table(retained, added):
+    """A top-level table of the composed document that has no better rule:
+    lists concatenate without repeats, mappings take the new version's entries
+    over the old, and anything else keeps the retained composition's value.
+    Components, services, the manifest and externs have their own rules in
+    `compose_after`."""
+    if isinstance(retained, list) and isinstance(added, list):
+        out = list(retained)
+        out += [item for item in added if item not in out]
+        return out
+    if isinstance(retained, dict) and isinstance(added, dict):
+        return {**retained, **added}
+    return retained if retained is not None else added
+
+
+def _composed_externs(old_ir: dict, new_ir: dict, against_ir: dict,
+                      retained: list[dict]) -> list[dict] | None:
+    """The extern declarations of the composition after the migration.
+
+    The new version's declarations replace a same-named one in place. A
+    declaration only the OLD version carried is withdrawn unless a component
+    that stays still reaches it, which the audit of the unchanged composition
+    says: an extern is shared host code, and a retained component may be what
+    keeps it reachable. Without the withdrawal a stale declaration of the old
+    version would keep feeding the register floors and the declared-host
+    surface after the version that owned it is gone."""
+    against_ext = against_ir.get("externs")
+    new_ext = new_ir.get("externs")
+    if against_ext is None and new_ext is None:
+        return None
+    against_ext = list(against_ext or [])
+    new_ext = list(new_ext or [])
+    new_names = {e["name"] for e in new_ext}
+    old_only = ({e["name"] for e in old_ir.get("externs") or []}
+                - new_names)
+    boundary = audit_report(against_ir).get("boundary") or {}
+    kept = {c["name"] for c in retained}
+    still_reached = {ext["name"] for comp, stats in boundary.items()
+                     if comp in kept
+                     for ext in stats.get("externs") or []}
+    withdrawn = old_only - still_reached
+    return _splice(against_ext, withdrawn | new_names, new_ext,
+                   lambda e: e["name"])
+
+
+def compose_after(old_ir: dict, new_ir: dict, against_ir: dict) -> dict:
+    """The composition as it would stand once the migration is applied: the
+    components of the OLD version (and any component the NEW version redeclares
+    by name, the way `compile_files(..., manifest=running)` withdraws one) are
+    replaced by the NEW version's, each in the position it held.
+
+    A document-level reconstruction over the three compiled inputs: nothing is
+    recompiled, linked or admitted (the manifest carries the rows and no
+    `loadOrder`). `components`, `services`, `manifest` and `externs` are rebuilt; every other table (types, secrets, environment
+    contracts) is merged by `_merge_table`, which adds the new version's
+    declarations and withdraws none, so for those tables the composed audit can
+    only see more of the composition, never less."""
+    replaced = set(_names(old_ir)) | set(_names(new_ir))
+    retained = [c for c in against_ir.get("components") or []
+                if c.get("name") not in replaced]
+    after = dict(against_ir)
+    after["components"] = _splice(
+        list(against_ir.get("components") or []), replaced,
+        list(new_ir.get("components") or []), lambda c: c["name"])
+    after["services"] = {**_services(against_ir), **_services(new_ir)}
+    rows = _splice(_manifest_entries(against_ir), replaced,
+                   _manifest_entries(new_ir), lambda row: row["name"])
+    manifest = dict(against_ir.get("manifest") or {})
+    manifest["components"] = rows
+    # the link order is the linker's to compute, and neither the audit nor the
+    # policy reads it; a stale order would claim a link that was never made
+    manifest.pop("loadOrder", None)
+    after["manifest"] = manifest
+    externs = _composed_externs(old_ir, new_ir, against_ir, retained)
+    if externs is not None:
+        after["externs"] = externs
+    for key in set(against_ir) | set(new_ir):
+        if key in _COMPOSED_KEYS or key == "externs":
+            continue
+        merged = _merge_table(against_ir.get(key), new_ir.get(key))
+        if merged is not None:
+            after[key] = merged
+    return after
+
+
+# --------------------------------------------------------------------- policy
+
+#: policy violation kinds that ask for an approval rather than forbid the reach
+#: (`capability X requires approval`, docs/boundary-policy.md): the policy says
+#: the capability may be reached once an approval is obtained and threaded, so
+#: the plan classifies them `needs-approval` and names what to obtain. The gate
+#: itself still refuses the composition until the approval edge is in the code,
+#: which is what "needs" means here. Every other kind is a refusal.
+_APPROVAL_KINDS = frozenset({"approval", "declassify-approval"})
+
+
+def _violation_json(violation) -> dict:
+    return {"kind": violation.kind, "component": violation.component,
+            "token": violation.token, "message": violation.message}
+
+
+def _violation_key(violation) -> tuple:
+    """What makes two violations the same violation across the migration: the
+    rule that fired, who breaks it and on what. Not the message, which embeds
+    the chain and the emission label and so changes when a new version renames
+    a require key without changing the breach. A tenant violation names a PAIR,
+    and the pair has no order."""
+    if violation.kind == "tenant":
+        pair = frozenset(step.name for step in violation.why.steps
+                         if step.kind == "component")
+        return (violation.kind, violation.token, pair)
+    return (violation.kind, violation.component, violation.token)
+
+
+def _composition_violations(policy, ir: dict) -> list:
+    """Every violation the gate would raise over `ir` that a composition
+    document can decide: the closed `policy.evaluate` legs (allow, deny, pair,
+    tenants, declassify, taint flow, idempotent teardown) plus the approval
+    admission. The evidence rules read the candidate's published evidence
+    bundle, which a compiled document does not carry, so they are withheld here
+    and reported as undecided instead of failing for want of evidence the gate
+    would have. Register floors read the audit alone and are decided. The
+    sandbox profile (`mcp`) applies to components admitted through the MCP
+    session, which a plan has none of, so it never selects."""
+    import dataclasses  # noqa: PLC0415
+    import warnings  # noqa: PLC0415
+
+    from .policy import approval_admission, evaluate  # noqa: PLC0415
+
+    decidable = dataclasses.replace(policy, evidence_rules=())
+    with warnings.catch_warnings():
+        # an inert-rule warning describes the policy, not the migration; it is
+        # `revl policy evaluate`'s to raise, once, against the real composition
+        warnings.simplefilter("ignore")
+        found = list(evaluate(decidable, audit_report(ir)))
+        found += approval_admission(decidable, ir)
+    return found
+
+
+def policy_verdict(policy, against_ir: dict, after_ir: dict) -> dict:
+    """What the boundary policy says about the migration.
+
+    The composition is evaluated before and after; only a violation the
+    migration INTRODUCES is `new`. A violation both states carry is
+    `preexisting`: the composition already breaks that rule, the new version
+    did not cause it, and blaming it on the new version would make every plan
+    over a composition that is already out of policy read as refused. A
+    violation the migration resolves is `resolved`."""
+    before = _composition_violations(policy, against_ir)
+    after = _composition_violations(policy, after_ir)
+    before_keys = {_violation_key(v) for v in before}
+    after_keys = {_violation_key(v) for v in after}
+    return {
+        "source": policy.source,
+        "new": [_violation_json(v) for v in after
+                if _violation_key(v) not in before_keys],
+        "preexisting": [_violation_json(v) for v in after
+                        if _violation_key(v) in before_keys],
+        "resolved": [_violation_json(v) for v in before
+                     if _violation_key(v) not in after_keys],
+        "undecided": {"evidenceRules": len(policy.evidence_rules)},
+    }
+
+
 # ------------------------------------------------------------- classification
 
 def _classification(consumer_plans: list[dict], authority_delta: dict,
-                    handoff_plans: list[dict],
-                    bump: dict) -> tuple[str, str]:
+                    handoff_plans: list[dict], bump: dict,
+                    policy: dict | None = None) -> tuple[str, str]:
     blocked = [c["component"] for c in consumer_plans
                if c["verdict"] == BLOCKED]
     if blocked:
@@ -471,10 +700,25 @@ def _classification(consumer_plans: list[dict], authority_delta: dict,
         return REFUSED, (
             "the declared state hand-off cannot cross the swap on "
             + ", ".join(f"`{key}`" for key in incompatible))
-    if authority_delta["widened"]:
-        return NEEDS_APPROVAL, (
-            "the new version widens authority: "
-            + ", ".join(f"`{token}`" for token in authority_delta["widened"]))
+    new_violations = (policy or {}).get("new") or []
+    refusing = [v for v in new_violations if v["kind"] not in _APPROVAL_KINDS]
+    if refusing:
+        return REFUSED, (
+            "the boundary policy refuses the composition after the migration: "
+            + "; ".join(f"{v['kind']} `{v['component']}` -> `{v['token']}`"
+                        for v in refusing))
+    approving = [v for v in new_violations if v["kind"] in _APPROVAL_KINDS]
+    if authority_delta["widened"] or approving:
+        reasons = []
+        if authority_delta["widened"]:
+            reasons.append(
+                "the new version widens authority: " + ", ".join(
+                    f"`{token}`" for token in authority_delta["widened"]))
+        if approving:
+            reasons.append(
+                "the boundary policy requires an approval for: " + ", ".join(
+                    f"`{v['token']}` ({v['component']})" for v in approving))
+        return NEEDS_APPROVAL, "; ".join(reasons)
     dropped = [h["key"] for h in handoff_plans
                if h["verdict"] == "state-dropped"]
     if dropped:
@@ -533,14 +777,16 @@ def _rollback(handoff_plans: list[dict], classification: str) -> dict:
 
 def plan(old_ir: dict, new_ir: dict, against_ir: dict, *,
          old_label: str = "OLD", new_label: str = "NEW",
-         against_label: str = "COMPOSITION") -> dict:
+         against_label: str = "COMPOSITION", policy=None) -> dict:
     """Build the read-only migration plan.
 
     `old_ir` and `new_ir` are the two compiled versions of the component
     (what `revl compile -o` emits); `against_ir` is the compiled composition
     whose real consumers decide compatibility, which must still run the OLD
-    version. Raises `ValueError` when an input cannot supply the facts the
-    plan needs.
+    version. `policy` is a loaded `policy.Policy`: when given, it is evaluated
+    over the composition as it would stand after the migration and the plan
+    carries the verdict under `policy`. Raises `ValueError` when an input
+    cannot supply the facts the plan needs.
     """
     _require_consumers(against_ir)
     old_surface = provided_surface(old_ir, "the OLD version")
@@ -553,8 +799,11 @@ def plan(old_ir: dict, new_ir: dict, against_ir: dict, *,
     consumer_plans = consumers(against_ir, changed, old_surface, new_surface,
                                new_ir)
     handoff_plans = handoffs(old_ir, new_ir)
+    policy_result = (policy_verdict(policy, against_ir,
+                                    compose_after(old_ir, new_ir, against_ir))
+                     if policy is not None else None)
     classification, reason = _classification(
-        consumer_plans, authority_delta, handoff_plans, bump)
+        consumer_plans, authority_delta, handoff_plans, bump, policy_result)
 
     added = [key for key in new_surface if key not in old_surface]
     surface = {
@@ -583,7 +832,7 @@ def plan(old_ir: dict, new_ir: dict, against_ir: dict, *,
     is_changed = bool(changed or surface["added"] or authority_delta["widened"]
                       or authority_delta["narrowed"]
                       or bump["bump"] != PATCH or handoff_plans)
-    return {
+    result = {
         "command": "migrate",
         "old": old_label,
         "new": new_label,
@@ -600,6 +849,11 @@ def plan(old_ir: dict, new_ir: dict, against_ir: dict, *,
         "rollback": _rollback(handoff_plans, classification),
         "structural": delta,
     }
+    if policy_result is not None:
+        # present only when a policy was given, so a plan without `--policy`
+        # keeps the exact shape it had before the policy slice
+        result["policy"] = policy_result
+    return result
 
 
 def _surface_json(surface: dict | None) -> dict | None:
@@ -687,6 +941,27 @@ def render(plan: dict) -> str:
         for entry in plan["handoff"]:
             lines.append(f"  {entry['key']}: {entry['verdict']}")
             lines.append(f"      {entry['reason']}")
+
+    # boundary policy
+    verdict = plan.get("policy")
+    if verdict is not None:
+        lines.append("")
+        lines.append(f"boundary policy ({verdict['source'] or 'policy'}):")
+        if not (verdict["new"] or verdict["preexisting"]
+                or verdict["resolved"]):
+            lines.append("  no violation before or after the migration")
+        for label, mark in (("new", "+"), ("preexisting", "="),
+                            ("resolved", "-")):
+            for item in verdict[label]:
+                lines.append(f"  {mark} {label}: {item['kind']} "
+                             f"`{item['component']}` -> `{item['token']}`")
+                lines.append(f"      {item['message']}")
+        undecided = verdict["undecided"]
+        if undecided["evidenceRules"]:
+            lines.append(
+                f"  not decided here: {undecided['evidenceRules']} evidence "
+                f"rule(s), which read the candidate's published evidence at "
+                f"the gate")
 
     lines.append("")
     lines.append(f"classification: {plan['classification']}")

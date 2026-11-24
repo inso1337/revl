@@ -125,6 +125,11 @@
 //        #3357): its host bodies gain a `@ts ref` into
 //        `backends/typescript/revl_socket_ts.ts`. A vendored copy under the
 //        old stamp has py bodies only, so its provider does not run on ts.
+//  16 -> `stdlib/channel.rvl` (issue #3418): `ChannelWire`, the same-origin
+//        page-to-page provider of `Wire` on the ts tier, with `Door`, `Hub`.
+//        A vendored copy under the old stamp has no page-to-page binding, so
+//        its author is still writing the hub as host code that `revl audit`
+//        cannot name.
 pub fn stdlib_version() -> Str {
-  return "15"
+  return "16"
 }

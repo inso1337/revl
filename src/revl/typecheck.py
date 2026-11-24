@@ -1503,6 +1503,108 @@ def nested_widening_error(filename: str, line: int, op: str,
         expected=left, actual=right)
 
 
+def nested_widening_flow_error(filename: str, line: int, where: str,
+                               expected: str | None, actual: str | None,
+                               inner: tuple[str, str]) -> RevlError:
+    """A value whose declared type nests a widening the position needs
+    (issue #2937): `List[Int]` into a `List[Float]` slot."""
+    want, got = render_type(expected), render_type(actual)
+    a, b = render_type(inner[0]), render_type(inner[1])
+    narrow, wide = (a, b) if _rank(a) < _rank(b) else (b, a)
+    if wide == "Float":
+        example = ("build it with `Float` elements (`3.0`, not `3`), or "
+                   "convert each element where you mean to")
+    else:
+        example = (f"build it with `{wide}` elements, or convert each "
+                   "element where you mean to (`.to_int()`)")
+    return RevlError(
+        filename, line,
+        f"{where} expects `{want}`, got `{got}`; the `{narrow}` inside is not "
+        f"widened to `{wide}` (only a bare value widens), so the tiers would "
+        "not agree on the program",
+        hint=example, code="T1", category="type-mismatch",
+        expected=want, actual=got)
+
+
+def _site_children(expr, expected: str | None, tenv: dict, types: dict):
+    """The parts of a constructor written at a value-flow site, each with the
+    type it is held to, or None when `expr` is a value rather than a
+    constructor.
+
+    A literal list, record or option is checked against the expected type
+    part by part, where each part is its own coercion site (issue #2938);
+    only a value that already carries its type (a variable, a field read, a
+    call result) has nothing to convert it elementwise. `Opt`'s payload,
+    `Result`'s two slots and a plain variant case are entered, so
+    `Some(ns)` is judged on `ns`."""
+    from .parser import ExprAsset, ExprCall, ExprIf, ExprList, ExprLit, \
+        ExprRecord, ExprVar
+
+    if isinstance(expr, ExprLit):
+        return []
+    ehead, eargs = parse_type(expected)
+    if isinstance(expr, ExprList):
+        if ehead == "List" and len(eargs) == 1:
+            return [(item, eargs[0]) for item in expr.items]
+        return []
+    if isinstance(expr, ExprRecord) and not isinstance(expr, ExprAsset):
+        slots = structural_fields(expected)
+        if slots is None:
+            slots = nominal_record_fields(expected, types)
+        return [(value, slots[name]) for name, value in expr.fields
+                if slots and name in slots]
+    if isinstance(expr, ExprIf):
+        return [(expr.then, expected), (expr.otherwise, expected)]
+    if isinstance(expr, ExprCall) and isinstance(expr.callee, ExprVar) \
+            and len(expr.args) == 1 and expr.callee.name not in tenv:
+        name = expr.callee.name
+        if name == "Some" and ehead == "Opt" and len(eargs) == 1:
+            return [(expr.args[0], eargs[0])]
+        if name in ("Ok", "Err") and ehead == "Result" and len(eargs) == 2:
+            return [(expr.args[0], eargs[0] if name == "Ok" else eargs[1])]
+        case = (types.get(CASES_KEY) or {}).get(name)
+        if case is not None:
+            payload = case.get("payload")
+            if generic_variant_params(case["adt"], types):
+                return None  # its payload type is bound by this very call
+            if payload:
+                return [(expr.args[0], payload)]
+            return []
+    return None
+
+
+def refuse_nested_widening(expr, expected: str | None, actual: str | None,
+                           tenv: dict, types: dict, filename: str | None,
+                           where: str) -> None:
+    """Refuse a value that would need its elements converted (issue #2937).
+
+    `compatible` recurses into type arguments, so a `List[Int]` value is
+    admitted where a `List[Float]` is declared (and `Opt[Int]` for
+    `Opt[Float]`, a record or a generic record the same way). The widening
+    marker sits on one node and cannot reach an element, so nothing converts
+    it: python and TypeScript ran the program (TypeScript with `bigint`
+    elements where `number` is declared), while go and java did not build.
+    Converting would copy every value that crosses a call, `let` or `return`,
+    so the checker refuses it, as it does inside `==` (`nested_widening`).
+    A constructor written at the site is entered and its parts judged on
+    their own."""
+    if not filename or not expected or not actual:
+        return
+    children = _site_children(expr, expected, tenv, types)
+    if children is not None:
+        for child, child_expected in children:
+            if child_expected is None:
+                continue
+            child_actual = infer_ast(child, tenv, types, None)
+            refuse_nested_widening(child, child_expected, child_actual, tenv,
+                                   types, filename, where)
+        return
+    inner = nested_widening(expected, actual, types)
+    if inner:
+        raise nested_widening_flow_error(
+            filename, getattr(expr, "line", 0), where, expected, actual, inner)
+
+
 def opt_escape_error(filename: str, line: int, what: str, target: str,
                      inner: str | None, alt: str | None = None) -> RevlError:
     """`Opt[T]` reached through as if it were `T`.
@@ -2747,6 +2849,10 @@ def _infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> st
                                    case["payload"], arg_types[0],
                                    why=unresolved_nominal_reason(
                                        case["payload"], arg_types[0], types))
+                if case["payload"] and arg_types and expr.args:
+                    refuse_nested_widening(
+                        expr.args[0], case["payload"], arg_types[0], tenv,
+                        types, filename, f"`{name}(...)` payload")
                 # A case call with NO argument. With a filename,
                 # `check_case_call_arity` above refuses it at a payload case
                 # (issue #2447). Without one (an inference-only probe) it still
@@ -2810,6 +2916,11 @@ def _infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> st
                                 raise mismatch(filename, line,
                                                f"argument {i + 1} of `{name}(...)`", p, a,
                                                why=unresolved_nominal_reason(p, a, types))
+                        for i, (p, a, arg) in enumerate(
+                                zip(params, arg_types, expr.args)):
+                            refuse_nested_widening(
+                                arg, p, a, tenv, types, filename,
+                                f"argument {i + 1} of `{name}(...)`")
                     return sig["returns"]
                 # generic: instantiate the signature against this call's
                 # arguments rather than letting every `T` position pass
@@ -2823,8 +2934,12 @@ def _infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> st
                     raise mismatch(filename, line,
                                    f"argument {i + 1} of `{name}(...)`", bound, a,
                                    why=unresolved_nominal_reason(bound, a, types))
-                _check_arrow_args(expr.args, [substitute(p, subst) for p in params],
-                                  tenv, types, filename, f"`{name}(...)`")
+                inst = [substitute(p, subst) for p in params]
+                _check_arrow_args(expr.args, inst, tenv, types, filename,
+                                  f"`{name}(...)`")
+                for i, (p, a, arg) in enumerate(zip(inst, arg_types, expr.args)):
+                    refuse_nested_widening(arg, p, a, tenv, types, filename,
+                                           f"argument {i + 1} of `{name}(...)`")
                 return substitute(sig["returns"], subst)
         if isinstance(expr.callee, ExprField):
             # a constructor form (`Map.new()`, `Pool.open(..)`) infers the
@@ -3320,8 +3435,12 @@ def call_function_value(expr, fn_type: str, what: str, arg_types: list,
     check_function_value_arity(what, fn_type, params, len(expr.args),
                                filename, line)
     _check_arrow_args(expr.args, params, tenv, types, filename, what)
-    return function_value_result(what, params, returns, arg_types, types,
-                                 filename, line)
+    result = function_value_result(what, params, returns, arg_types, types,
+                                   filename, line)
+    for i, (p, a, arg) in enumerate(zip(params, arg_types, expr.args)):
+        refuse_nested_widening(arg, p, a, tenv, types, filename,
+                               f"argument {i + 1} of {what}")
+    return result
 
 
 def local_function_call_type(node: dict, tenv: dict, types: dict,
@@ -3683,6 +3802,7 @@ def check_ast(expr, expected: str | None, tenv: dict, types: dict,
     if actual and not compatible(expected, actual, types):
         raise mismatch(filename, line, where, expected, actual,
                        why=unresolved_nominal_reason(expected, actual, types))
+    refuse_nested_widening(expr, expected, actual, tenv, types, filename, where)
 
 
 # ------------------------------------------------------- IR inference (components)

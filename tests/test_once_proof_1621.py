@@ -272,6 +272,9 @@ def test_the_harness_tags_its_wal_frames_with_the_runs_token(tmp_path):
     spec.write_text(json.dumps({
         "name": "run", "once": True, "record": True, "order": order,
         "modules": {name: modules[name] for name in order},
+        # the harness refuses to run without the policy's ceilings (#3189)
+        "limits": {"fuel": 1_000_000_000, "memoryBytes": 64 * 1024 * 1024,
+                   "wallSeconds": 120.0},
         SPEC_FLAG: True}), encoding="utf-8")
     env = dict(os.environ)
     env["CORDIS_WASM"] = str(run_wasm_module._cordis_wasm_dir())

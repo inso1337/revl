@@ -25,7 +25,7 @@ What is implemented
   attestation key itself, the 384-byte QE Report that certifies it, the QE
   Report's signature by the platform (PCK) key, the QE authentication data and
   the certification data.
-* **AMD SEV-SNP, ATTESTATION_REPORT v2/v3** (:func:`parse_sev_snp_report`). The
+* **AMD SEV-SNP, ATTESTATION_REPORT v2/v3/v5** (:func:`parse_sev_snp_report`). The
   real 0x4A0-byte layout, its 48-byte `measurement`, its 64-byte `report_data`,
   and the 512-byte trailing signature: ECDSA-P384 R and S as 72-byte
   LITTLE-endian integers, over the report's first 0x2A0 bytes, by the VCEK.
@@ -85,6 +85,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 import struct
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -115,6 +116,9 @@ __all__ = [
     "QuoteVerdict",
     "parse_tdx_quote",
     "parse_sev_snp_report",
+    "sev_tcb_layout",
+    "SEV_TCB_LAYOUT_MILAN_GENOA",
+    "SEV_TCB_LAYOUT_TURIN",
     "build_tdx_quote",
     "build_sev_snp_report",
     "AttestationRoot",
@@ -822,8 +826,19 @@ SEV_SNP_SIGNED_LEN = 0x2A0
 #: specification defines and the only one parsed here.
 SEV_SNP_SIG_ALGO_ECDSA_P384 = 1
 #: Report versions whose layout is the one below. A version outside this set is
-#: refused rather than read with this layout.
-SEV_SNP_VERSIONS = (2, 3)
+#: refused rather than read with this layout. Version 5 is what Turin firmware
+#: emits: it keeps every field this root reads where version 3 has it and adds
+#: the mitigation vectors in space version 3 leaves reserved.
+SEV_SNP_VERSIONS = (2, 3, 5)
+#: The two `TCB_VERSION` layouts this root can read, named by the processor
+#: generations that use them. `sev_tcb_layout` decides which one a report uses.
+SEV_TCB_LAYOUT_MILAN_GENOA = "milan-genoa"
+SEV_TCB_LAYOUT_TURIN = "turin"
+#: Report offsets of the CPUID family, model and stepping the firmware stamps
+#: into a version 3 or later report (reserved zero in version 2).
+_SEV_CPUID_FAMILY = 0x188
+_SEV_CPUID_MODEL = 0x189
+_SEV_CPUID_STEPPING = 0x18A
 #: Guest policy bit 19: the guest may be debugged, which means its memory is
 #: inspectable from the host, which means the enclave guarantee the placement is
 #: buying does not hold.
@@ -898,10 +913,38 @@ class SevSnpReport:
     chip_id: bytes
     signed_bytes: bytes
     signature: bytes
+    cpuid_family: int = 0
+    cpuid_model: int = 0
+    cpuid_stepping: int = 0
 
     @property
     def debug_enabled(self) -> bool:
         return bool(self.policy >> SEV_SNP_POLICY_DEBUG_BIT & 1)
+
+    @property
+    def tcb_layout(self) -> str:
+        """The `TCB_VERSION` layout of this report's processor generation, or the
+        empty string when this root does not know it (see :func:`sev_tcb_layout`)."""
+        return sev_tcb_layout(self.version, self.cpuid_family, self.cpuid_model)
+
+
+def sev_tcb_layout(version: int, cpuid_family: int, cpuid_model: int) -> str:
+    """Which `TCB_VERSION` layout a report uses, from what the firmware stamped.
+
+    A version 2 report predates the CPUID fields and comes from Milan or Genoa,
+    so it uses the Milan/Genoa layout. A later report names its processor: family
+    0x19 is Milan (models 0x00 to 0x0F) or Genoa (0x10 to 0x1F and 0xA0 to 0xAF),
+    family 0x1A models 0x00 to 0x1F is Turin. Anything else, Venice included,
+    returns the empty string: a layout this root does not know cannot be read
+    safely, so a caller that compares a TCB refuses rather than guesses."""
+    if version == 2:
+        return SEV_TCB_LAYOUT_MILAN_GENOA
+    if cpuid_family == 0x19 and (0x00 <= cpuid_model <= 0x1F
+                                 or 0xA0 <= cpuid_model <= 0xAF):
+        return SEV_TCB_LAYOUT_MILAN_GENOA
+    if cpuid_family == 0x1A and 0x00 <= cpuid_model <= 0x1F:
+        return SEV_TCB_LAYOUT_TURIN
+    return ""
 
 
 def parse_sev_snp_report(blob: Any) -> SevSnpReport:
@@ -952,6 +995,9 @@ def parse_sev_snp_report(blob: Any) -> SevSnpReport:
         chip_id=_slice(report, _SEV_CHIP_ID),
         signed_bytes=report[:SEV_SNP_SIGNED_LEN],
         signature=_sev_decode_signature(_slice(report, _SEV_SIGNATURE)),
+        cpuid_family=report[_SEV_CPUID_FAMILY] if version >= 3 else 0,
+        cpuid_model=report[_SEV_CPUID_MODEL] if version >= 3 else 0,
+        cpuid_stepping=report[_SEV_CPUID_STEPPING] if version >= 3 else 0,
     )
 
 
@@ -967,6 +1013,8 @@ def build_sev_snp_report(*, report_data: bytes, measurement: bytes,
                          chip_id: bytes = b"\x44" * 64,
                          current_tcb: int = 0, platform_info: int = 0,
                          reported_tcb: int = 0,
+                         cpuid_family: int = 0, cpuid_model: int = 0,
+                         cpuid_stepping: int = 0,
                          signature_algo: int = SEV_SNP_SIG_ALGO_ECDSA_P384,
                          signature: bytes | None = None) -> bytes:
     """The reference AMD-SP: assemble a well-formed `ATTESTATION_REPORT` and sign
@@ -992,6 +1040,9 @@ def build_sev_snp_report(*, report_data: bytes, measurement: bytes,
     body[0x110:0x140] = fixed("author_key_digest", author_key_digest, 48)
     body[0x140:0x160] = fixed("report_id", report_id, 32)
     struct.pack_into("<Q", body, 0x180, reported_tcb)
+    body[_SEV_CPUID_FAMILY] = cpuid_family
+    body[_SEV_CPUID_MODEL] = cpuid_model
+    body[_SEV_CPUID_STEPPING] = cpuid_stepping
     body[0x1A0:0x1E0] = fixed("chip_id", chip_id, 64)
     signed = bytes(body)
     raw = signature if signature is not None else ecdsa_sign(
@@ -1076,6 +1127,15 @@ class HardwareRoot(AttestationRoot):
     Either list may be empty; both may not, because a root that can name no key
     admits nothing and is more likely a configuration mistake than a policy.
 
+    ``revoked_platform_keys`` are the fingerprints (``PinnedKey.key_id``, or a
+    :class:`PinnedKey`) of platform keys the operator no longer trusts, for
+    instance a platform whose firmware is known to be vulnerable. A revoked key is
+    refused however it arrives: pinned directly, or certified by a pinned
+    endorsement root, which is the case revocation exists for, because one
+    endorsement root vouches for platforms the operator never named. Revocation
+    wins over a pin, so a key left in ``platform_keys`` by mistake is still
+    refused.
+
     ``permit_debug`` defaults to ``False``: a TD whose TDATTRIBUTES debug bit is
     set, or a SEV-SNP guest whose policy allows debug, is inspectable by the host
     that runs it, so the confidentiality the placement is buying does not hold
@@ -1084,6 +1144,7 @@ class HardwareRoot(AttestationRoot):
     is_production = True
 
     def __init__(self, *, platform_keys=(), endorsement_roots=(),
+                 revoked_platform_keys=(),
                  permit_debug: bool = False,
                  require_intel_qe_vendor: bool = True,
                  label: str = "pinned hardware attestation root") -> None:
@@ -1102,13 +1163,28 @@ class HardwareRoot(AttestationRoot):
                 "that decides nothing")
         self.platform_keys: dict[str, PinnedKey] = {p.key_id: p for p in platforms}
         self.endorsement_roots: dict[str, PinnedKey] = {r.key_id: r for r in roots}
+        if isinstance(revoked_platform_keys, (str, bytes, PinnedKey)):
+            raise RootError(
+                "revoked_platform_keys is a collection of key fingerprints or "
+                "PinnedKeys, not a single value")
+        revoked: set[str] = set()
+        for entry in tuple(revoked_platform_keys):
+            fingerprint = entry.key_id if isinstance(entry, PinnedKey) else entry
+            if (not isinstance(fingerprint, str)
+                    or not re.fullmatch(r"[0-9a-f]{16}", fingerprint)):
+                raise RootError(
+                    f"a revoked platform key is named by its fingerprint (16 "
+                    f"lowercase hex digits) or as a PinnedKey, got {entry!r}")
+            revoked.add(fingerprint)
+        self.revoked_platform_keys: frozenset[str] = frozenset(revoked)
         self.permit_debug = bool(permit_debug)
         self.require_intel_qe_vendor = bool(require_intel_qe_vendor)
         self.label = label
 
     def describe(self) -> str:
         return (f"{self.label} ({len(self.platform_keys)} pinned platform key(s), "
-                f"{len(self.endorsement_roots)} endorsement root(s))")
+                f"{len(self.endorsement_roots)} endorsement root(s), "
+                f"{len(self.revoked_platform_keys)} revoked platform key(s))")
 
     def resolve_platform_key(self, fingerprint: Any, curve: Curve, *,
                              vendor: str, endorsement: Any = None,
@@ -1123,6 +1199,11 @@ class HardwareRoot(AttestationRoot):
         if not isinstance(fingerprint, str) or not fingerprint:
             return None, ("the evidence names no platform key fingerprint, so the "
                           "root cannot be asked which key signed it")
+        if fingerprint in self.revoked_platform_keys:
+            return None, (
+                f"the platform key {fingerprint} is revoked by this root, so a "
+                f"quote it signed is refused whether the key is pinned or "
+                f"certified by an endorsement")
         pinned = self.platform_keys.get(fingerprint)
         if pinned is not None:
             if pinned.curve != curve.name:
@@ -1384,8 +1465,10 @@ class QuoteVerdict:
     The other hardware facts a requirement can compare are on the same terms:
     ``runtime_measurements`` (TDX RTMR0..3), ``tee_tcb_svn``/``qe_svn``/``pce_svn``
     and the quoting enclave's ``qe_mr_signer``/``qe_mr_enclave`` (TDX), and
-    ``sev_current_tcb``/``sev_reported_tcb`` (SEV-SNP) are empty or -1 on a
-    refusal, so no policy can be satisfied by a quote the root refused."""
+    ``sev_current_tcb``/``sev_reported_tcb`` and the ``sev_tcb_layout`` they are
+    packed in (SEV-SNP; the layout is empty when this root does not know the
+    report's processor generation) are empty or -1 on a refusal, so no policy can
+    be satisfied by a quote the root refused."""
 
     ok: bool
     reason: str
@@ -1402,6 +1485,7 @@ class QuoteVerdict:
     qe_mr_enclave: str = ""
     sev_current_tcb: int = -1
     sev_reported_tcb: int = -1
+    sev_tcb_layout: str = ""
 
 
 def _refused(reason: str, fmt: str = "") -> QuoteVerdict:
@@ -1553,4 +1637,5 @@ def _verify_sev_snp(blob: Any, root: HardwareRoot, platform_key: bytes,
         debug_enabled=report.debug_enabled,
         sev_current_tcb=report.current_tcb,
         sev_reported_tcb=report.reported_tcb,
+        sev_tcb_layout=report.tcb_layout,
     )

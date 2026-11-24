@@ -3258,6 +3258,25 @@ class WriteAheadLog:
         self._write(record)
         return record
 
+    def record_process_up(self, process: str, run: Optional[int],
+                          components: Optional[list] = None) -> dict:
+        """Append ``process-up``: this placement process came up (issue #3234).
+
+        Written once the process serves and just before it prints its `UP`
+        line, so its presence says the process crossed from activation into
+        being up. `revl recover` reads a placement index's `committed` line
+        (written once every process printed `UP`) as the run's commit
+        decision only for a process whose WAL carries this record for the
+        index's run: a `committed` line over a WAL with none is not trusted.
+        Consumes no seq: it names a fact, not an effect. Additive, so the WAL
+        format version is unchanged and a reader that does not know the record
+        ignores it."""
+        record = {"record": "process-up", "generation": self._generation,
+                  "process": process, "run": run,
+                  "components": list(components or [])}
+        self._write(record)
+        return record
+
     def commit_run(self) -> dict:
         """Mark the run's ORDERLY shutdown (issue #536).
 

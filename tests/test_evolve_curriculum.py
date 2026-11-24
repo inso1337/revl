@@ -464,6 +464,199 @@ def test_medium_tasks_name_a_dispatch_the_reference_really_has(curriculum):
 
 
 # --------------------------------------------------------------------------- #
+# Design documents (slice 4): a slice table row whose oracle is not there.      #
+# --------------------------------------------------------------------------- #
+def test_design_tasks_name_a_row_and_an_oracle_that_is_really_missing(
+        curriculum):
+    """Re-derived by looking at the document line the task points at, which is
+    what a reader would do, and at the tree: the line names the oracle and the
+    oracle is not there. The known live case is slice B of design 456."""
+    _, tasks = curriculum
+    design = [t for t in tasks if t.task_id.startswith("design/")]
+    assert design, "no design-document tasks; the source found nothing to read"
+    ids = {t.task_id for t in design}
+    assert "design/456-ambient-and-prog-export/B/test_selfhost_ambient" in ids
+    for task in design:
+        lineno = int(task.locator.split(",")[0].split()[-1])
+        line = (ROOT / task.artifact).read_text(
+            encoding="utf-8").splitlines()[lineno - 1]
+        assert line.lstrip().startswith("|"), (task.task_id, line)
+        assert task.subject in line, (task.task_id, line)
+        assert not (ROOT / task.subject).exists(), \
+            f"{task.task_id} names {task.subject}, which exists"
+
+
+def test_a_path_outside_a_slice_table_is_not_a_design_task(curriculum):
+    """The negative control. `backend-runtime-fork-status-2026-09.md` names
+    `tests/test_reentrancy.py`, which is not in this tree, in a COMMIT table.
+    It is a path in somebody else's repository, not a promise a slice plan
+    makes, and a task derived from it would be an invented one."""
+    _, tasks = curriculum
+    assert not (ROOT / "tests" / "test_reentrancy.py").exists()
+    assert not any("backend-runtime-fork-status" in t.artifact
+                   for t in tasks if t.task_id.startswith("design/"))
+
+
+def _staged_design(tmp_path, body):
+    docs = tmp_path / "design"
+    docs.mkdir(exist_ok=True)
+    (docs / "900-staged.md").write_text(body, encoding="utf-8")
+    return docs
+
+
+_SLICE_TABLE = """# staged
+
+| Slice | Green means |
+|---|---|
+| A | `{path}` green |
+"""
+
+
+def test_a_staged_slice_row_fills_the_rung_and_an_existing_oracle_empties_it(
+        derived, tmp_path):
+    """The source's vacuity oracle, in both directions, on documents this test
+    owns: a row naming a missing oracle is a task; the same row naming one that
+    exists is not, and the source still DECLARES its rung, so a tree with no
+    slice gap left reads as empty and reachable rather than as a source that
+    stopped reading."""
+    tool, _ = derived
+    missing = tool.adapter_design_docs(_staged_design(
+        tmp_path, _SLICE_TABLE.format(path="tests/test_selfhost_nope_900.py")))
+    assert [t.task_id for t in missing.tasks] == \
+        ["design/900-staged/A/test_selfhost_nope_900"]
+    task = missing.tasks[0]
+    assert task.tier == "medium" and task.mechanism == task.subject
+    assert missing.signals == (task.signal,)
+
+    present = tool.adapter_design_docs(_staged_design(
+        tmp_path, _SLICE_TABLE.format(path="tests/test_selfhost_lower.py")))
+    assert present.tasks == ()
+    assert present.signals == missing.signals         # the same measurement
+    assert present.rungs() == {"medium"}
+
+
+def test_a_table_that_is_not_a_slice_plan_is_not_read(derived, tmp_path):
+    tool, _ = derived
+    body = ("| Commit | Test |\n|---|---|\n"
+            "| abc | `tests/test_selfhost_nope_900.py` |\n")
+    result = tool.adapter_design_docs(_staged_design(tmp_path, body))
+    assert result.tasks == () and result.signals == ()
+
+
+def test_a_missing_design_directory_reds_instead_of_reading_as_empty(
+        derived, tmp_path):
+    tool, derivations = derived
+    missing = tool.adapter_design_docs(tmp_path / "does-not-exist")
+    assert missing.signals == () and missing.tasks == ()
+    live = [d for d in derivations if d.source != "design-docs"]
+    problems = tool.check(live + [missing])
+    assert any("'design-docs' ran and measured no signal" in p
+               for p in problems), problems
+
+
+# --------------------------------------------------------------------------- #
+# The tracker (slice 6): an offline snapshot, never the network.                #
+# --------------------------------------------------------------------------- #
+def _staged_snapshot(tmp_path, issues):
+    import json
+
+    path = tmp_path / "tracker_snapshot.json"
+    path.write_text(json.dumps({"repo": "x/y", "issues": issues}),
+                    encoding="utf-8")
+    return path
+
+
+def test_tracker_tasks_are_the_snapshot_issues_that_name_a_verifier_in_the_tree(
+        derived):
+    """Re-derived by reading the committed snapshot by hand: a task for every
+    open issue that names a verifier which is in the tree, and for no other."""
+    import json
+
+    tool, derivations = derived
+    snapshot = json.loads((ROOT / "tests" / "fixtures"
+                           / "tracker_snapshot.json").read_text(encoding="utf-8"))
+    expected = {f"tracker/{i['number']}": [v for v in i["verifiers"]
+                                           if (ROOT / v).is_file()][0]
+                for i in snapshot["issues"]
+                if any((ROOT / v).is_file() for v in i["verifiers"])}
+    assert expected, "no snapshot issue names an in-tree verifier; vacuous"
+    mine = {t.task_id: t for d in derivations if d.source == "tracker"
+            for t in d.tasks}
+    assert {k: t.mechanism for k, t in mine.items()} == expected
+    for task in mine.values():
+        assert task.artifact == "tests/fixtures/tracker_snapshot.json"
+        assert (ROOT / task.mechanism).is_file()
+
+
+def test_the_tracker_source_never_touches_the_network(derived, monkeypatch):
+    """Computable in a checkout with no network: the adapter reads the
+    snapshot and calls nothing that could reach GitHub."""
+    import socket
+    import subprocess
+
+    tool, _ = derived
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("the tracker source reached for the network")
+
+    monkeypatch.setattr(subprocess, "run", refuse)
+    monkeypatch.setattr(subprocess, "Popen", refuse)
+    monkeypatch.setattr(socket, "create_connection", refuse)
+    assert tool.adapter_tracker().tasks
+
+
+def test_a_staged_snapshot_fills_the_tracker_rung_and_a_gone_verifier_empties_it(
+        derived, tmp_path):
+    """The vacuity oracle, in both directions, on snapshots this test owns: an
+    issue naming a verifier in the tree is a task, one naming files that are
+    gone is not, and the source still declares the rung they would land on, so
+    a tracker with nothing left to verify is empty and reachable rather than a
+    source that stopped reading."""
+    tool, _ = derived
+    present = tool.adapter_tracker(_staged_snapshot(tmp_path, [
+        {"number": 1, "title": "a", "labels": [],
+         "verifiers": ["tests/test_selfhost_lower.py"]},
+        {"number": 2, "title": "b", "labels": [],
+         "verifiers": ["tests/test_gone_900.py"]},
+        {"number": 3, "title": "c", "labels": [], "verifiers": []}]))
+    assert [t.task_id for t in present.tasks] == ["tracker/1"]
+    assert present.tasks[0].tier == "medium"
+
+    gone_dir = tmp_path / "gone"
+    gone_dir.mkdir()
+    gone = tool.adapter_tracker(_staged_snapshot(gone_dir, [
+        {"number": 2, "title": "b", "labels": [],
+         "verifiers": ["tests/test_selfhost_gone_900.py"]}]))
+    assert gone.tasks == ()
+    assert gone.rungs() == {"medium"}, "an empty source must declare its rung"
+
+
+def test_a_missing_or_malformed_tracker_snapshot_is_not_an_empty_tracker(
+        derived, tmp_path):
+    tool, derivations = derived
+    missing = tool.adapter_tracker(tmp_path / "does-not-exist.json")
+    assert missing.signals == () and missing.tasks == ()
+    live = [d for d in derivations if d.source != "tracker"]
+    assert any("'tracker' ran and measured no signal" in p
+               for p in tool.check(live + [missing]))
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"issues": 3}', encoding="utf-8")
+    with pytest.raises(ValueError, match="no `issues` list"):
+        tool.adapter_tracker(bad)
+
+
+def test_the_tier_of_a_missing_oracle_is_read_off_its_named_path(derived):
+    """`_oracle_signal` is the one place a missing oracle's rung is decided,
+    and it is a total function of the path, not of a table of documents."""
+    tool, _ = derived
+    tier = lambda p: tool.tier(tool._oracle_signal(p))      # noqa: E731
+    assert tier("tests/test_diagnostics.py") == "easy"
+    assert tier("tests/test_selfhost_ambient.py") == "medium"
+    assert tier("tests/test_gate_crate_admit.py") == "medium"
+    assert tier("tests/test_selfhost_crate_admit.py") == "expert"
+
+
+# --------------------------------------------------------------------------- #
 # 4. The gate fires.                                                            #
 # --------------------------------------------------------------------------- #
 def test_check_is_green_on_the_whole_curriculum(derived):

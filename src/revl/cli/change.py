@@ -118,7 +118,11 @@ def _run_migrate(args) -> int:
     from ..composition_diff import load_composition  # noqa: PLC0415
     from ..migrate import plan as build_plan, render as render_plan  # noqa: PLC0415
 
+    policy = None
     try:
+        if getattr(args, "policy", None):
+            from ..policy import load_policy  # noqa: PLC0415
+            policy = load_policy(args.policy)
         old = load_composition(args.old)
         new = load_composition(args.new)
         against = load_composition(args.against)
@@ -128,7 +132,8 @@ def _run_migrate(args) -> int:
 
     try:
         result = build_plan(old, new, against, old_label=args.old,
-                            new_label=args.new, against_label=args.against)
+                            new_label=args.new, against_label=args.against,
+                            policy=policy)
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
