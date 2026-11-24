@@ -1837,13 +1837,26 @@ def revl_prompt_digest(args, arg_origins, taint_engaged: bool) -> "Optional[dict
 
 
 def _revl_hop_text(value):
-    """Issue #2527 backstop: redact a host-reported leaf when it is text.
+    """Issue #2527 backstop: redact every host-reported leaf that is text.
 
     A number passes through untouched, so the ordinary shape of
     `tokensIn`/`tokensOut`/`cost.amount` is byte-identical; a caller that hands
     a string into one of those numeric slots still cannot carry a registered
-    secret into either sink."""
-    return confidential.redact_text(value) if isinstance(value, str) else value
+    secret into either sink. A dict, list or tuple is rebuilt recursively
+    (keys included): the provider wires pass the endpoint's JSON through as
+    `usage.get(...)`, so a structured value is a real shape, and redacting
+    only top-level strings would let the secret survive one level down. The
+    rebuilt containers preserve their type and every non-secret value."""
+    if isinstance(value, str):
+        return confidential.redact_text(value)
+    if isinstance(value, dict):
+        return {_revl_hop_text(key): _revl_hop_text(item)
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [_revl_hop_text(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_revl_hop_text(item) for item in value)
+    return value
 
 
 def revl_model_hop(*, model, tokens_in, tokens_out, cost, latency_seconds,
@@ -1871,9 +1884,11 @@ def revl_model_hop(*, model, tokens_in, tokens_out, cost, latency_seconds,
     and the numeric slots `tokensIn`/`tokensOut`/`cost.amount` if a caller
     hands them text) is funnelled through `confidential.redact_text` before it
     can reach the trace or the WAL's model-decision record, the same
-    exact-value scrub the console trace applies at `_record`. A host body that
-    echoed a registered `Secret[T]` value into one of them would otherwise put
-    it in the trace. The match is exact against values a declared `Secret[T]`
+    exact-value scrub the console trace applies at `_record`. A structured
+    value in a usage slot is rebuilt leaf by leaf, so a secret nested in a
+    dict or list cannot pass through untouched. A host body that echoed a
+    registered `Secret[T]` value into one of them would otherwise put it in
+    the trace. The match is exact against values a declared `Secret[T]`
     marking registered, so a run with no secret is byte-identical. The WAL's
     read (`revl_host_usage`) refuses a non-numeric usage before it gets here;
     this backstop is what keeps the TRACE clean for a caller that does not go

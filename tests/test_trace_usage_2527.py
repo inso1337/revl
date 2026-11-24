@@ -12,8 +12,9 @@ Two reads of the same return, deliberately different at the edge:
   refuses a non-number by field name (`RevlUsageRefused`), so the durable
   record is never written with text in a numeric slot;
 * `runtime.revl_model_hop` keeps a `redact_text` backstop for every string leaf
-  it is handed, because the trace's read (`revl.run._host_usage`) is a
-  best-effort passthrough and both sinks serialize the hop's result.
+  it is handed, recursing through dicts and lists, because the trace's read
+  (`revl.run._host_usage`) is a best-effort passthrough and the provider wires
+  pass the endpoint's structured JSON through unchanged.
 
 An ordinary numeric return is byte-identical through both, so the exact-value
 scrub cannot fire on a run that registered no secret.
@@ -135,6 +136,43 @@ def test_a_secret_in_the_usage_fields_reaches_neither_sink(tmp_path):
     assert SECRET not in str(refusal)
     assert SECRET not in wal_text
     assert decisions == []
+
+
+def test_a_structured_usage_field_is_redacted_at_every_depth(tmp_path):
+    """The residual: a dict or list in a usage slot used to pass through
+    untouched because only a top-level `str` was scrubbed. The provider wires
+    forward the endpoint's JSON as-is, so the backstop must walk containers.
+    Every leaf is rebuilt, and a non-secret leaf keeps its exact value."""
+    rt.mark_secret(SECRET)
+    structured = {"x": SECRET, "nested": [SECRET, {SECRET: SECRET, "n": 3}],
+                  "safe": "USD"}
+    leaked = {"tokensIn": structured,
+              "tokensOut": [SECRET, {"z": SECRET}],
+              "cost": {"amount": {"n": SECRET},
+                       "currency": {"c": SECRET}}}
+
+    payload, trace_text = _trace_crossing(
+        tmp_path, lambda: _host_return(**leaked))
+    assert SECRET not in trace_text
+    assert payload["tokensIn"] == {
+        "x": REDACTED, "nested": [REDACTED, {REDACTED: REDACTED, "n": 3}],
+        "safe": "USD"}
+    assert payload["tokensOut"] == [REDACTED, {"z": REDACTED}]
+    assert payload["cost"]["amount"] == {"n": REDACTED}
+    assert payload["cost"]["currency"] == {"c": REDACTED}
+
+
+def test_structured_usage_is_byte_identical_when_no_secret_is_registered():
+    """The recursive rebuild is a no-op for a run with no registered secret:
+    containers keep their type and values, so the scrub cannot reshape an
+    ordinary trace."""
+    structured = {"x": 1, "nested": [2, {"y": "USD"}], "safe": None}
+    payload = rt.revl_model_hop(
+        model="openai:gpt-4o", tokens_in=structured, tokens_out=[1, {"n": 2}],
+        cost={"amount": 0.01, "currency": "USD"}, latency_seconds=0.5,
+        attempts=1, attempt_ceiling=2, verified_by=[])
+    assert payload["tokensIn"] == structured
+    assert payload["tokensOut"] == [1, {"n": 2}]
 
 
 def test_numeric_usage_is_byte_identical_when_no_secret_is_registered(tmp_path):
