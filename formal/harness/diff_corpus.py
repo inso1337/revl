@@ -7317,15 +7317,9 @@ class Verdicts(NamedTuple):
                 + len(self.councils) + len(self.g9) + len(self.retain)
                 + len(self.inv)
                 + len(self.sw) + len(self.a5) + len(self.gc)
-                + len(self.g1cov)
-<<<<<<< HEAD
-                + len(self.ev) + len(self.ir_disjoint) + len(self.ir_kept) + len(self.splits))
-=======
-                + len(self.ev) + len(self.ir_disjoint) + len(self.ir_kept))
                 + len(self.g1cov) + len(self.g1scope)
                 + len(self.g1class)
-                + len(self.ev))
->>>>>>> 31ebd7350 (formal: classify G1 access roots per scope in the model (refs #2744))
+                + len(self.ev) + len(self.ir_disjoint) + len(self.ir_kept) + len(self.splits))
 
 
 
@@ -7592,12 +7586,7 @@ def parse_verdicts(text: str) -> Verdicts:
                     a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
             places, model_reach, councils, g9, retain, inv, sw, a5, gc, g1cov,
-<<<<<<< HEAD
-            ev, ir_disjoint, ir_kept, splits)
-=======
-            ev, ir_disjoint, ir_kept)
-            g1scope, g1class, ev)
->>>>>>> 31ebd7350 (formal: classify G1 access roots per scope in the model (refs #2744))
+            g1scope, g1class, ev, ir_disjoint, ir_kept, splits)
 
 
 
@@ -8525,12 +8514,7 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
                     configs, a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
                     places, model_reach, councils, g9, retain, inv, sw, a5,
-<<<<<<< HEAD
-                    gc, g1cov, ev, ir_disjoint, ir_kept, splits)
-=======
-                    gc, g1cov, ev, ir_disjoint, ir_kept)
-                    gc, g1cov, g1scope, g1class, ev)
->>>>>>> 31ebd7350 (formal: classify G1 access roots per scope in the model (refs #2744))
+                    gc, g1cov, g1scope, g1class, ev, ir_disjoint, ir_kept, splits)
 
 
 #: What the REFERENCE decided for each config field, for the CD row's
