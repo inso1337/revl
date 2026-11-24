@@ -6477,6 +6477,36 @@ def _v3_ident(name, role: str) -> str:
     return name
 
 
+def _extern_param(name, ext_name: str) -> str:
+    """A bodied extern's parameter keeps its SOURCE spelling on this tier
+    (issue #3620): the `@go` body is host text copied verbatim, so the `func`
+    signature must bind the name the body reads. Renaming off a predeclared
+    builtin (`max`, `len`) left the body reading the builtin instead of the
+    argument — the #3604 python case in Go clothes.
+
+    A name that CANNOT be kept is refused here, naming the extern, the
+    parameter and the tier: a Go keyword (illegal as a parameter at all) or an
+    emitter scaffolding/helper name the wrapper around the body spells bare.
+    Predeclared builtins and package-scope type names CAN be kept: a parameter
+    shadows them only inside this one func, which is exactly what the host
+    body wants, and the emitter's own bare references sit outside it."""
+    if not isinstance(name, str) or not _RAW_IDENT_RE.match(name):
+        raise EmitError(
+            f"extern `{ext_name}`: invalid parameter identifier {name!r} (go tier)")
+    root = name
+    while root:
+        if (root in _GO_LANGUAGE_KEYWORDS or root in _EMITTER_RESERVED
+                or _REVL_HELPER_PREFIX_RE.match(root) is not None):
+            raise EmitError(
+                f"extern `{ext_name}` parameter {name!r} cannot keep its spelling on "
+                f"the go tier (a Go keyword or emitter scaffolding name), and a "
+                f"verbatim @go body cannot be renamed — refusing at emit")
+        if not root.endswith("_"):
+            break
+        root = root[:-1]
+    return name
+
+
 _RAW_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -9777,7 +9807,7 @@ def _emit_v3_go_externs(externs: list, ctx: _V3GoCtx,
     for ext in externs:
         name = _v3_ident(ext.get("name"), "extern name")
         params = ", ".join(
-            f"{_v3_ident(p.get('name'), 'extern parameter')} {_go_v3_type(p.get('type'), ctx.types)}"
+            f"{_extern_param(p.get('name'), ext.get('name'))} {_go_v3_type(p.get('type'), ctx.types)}"
             for p in ext.get("params") or []
         )
         ret = _go_v3_type(ext.get("returns"), ctx.types)
@@ -9809,7 +9839,7 @@ def _emit_v3_go_externs(externs: list, ctx: _V3GoCtx,
         # every call site is covered without the body being rewritten. Absent
         # unless the author declared it.
         arg_list = ", ".join(
-            _v3_ident(p.get("name"), "extern parameter")
+            _extern_param(p.get("name"), ext.get("name"))
             for p in ext.get("params") or [])
         if journal and ext.get("class") == "emission":
             # the WAL sink rides with the teardown preamble; ask for it

@@ -163,6 +163,46 @@ fn has_revl_prefix(name: Str) -> Bool {
   return c >= 65 && c <= 90
 }
 
+// The reference's `_GO_LANGUAGE_KEYWORDS` (backends/go/emit.py), exactly: the
+// full Go keyword set. `is_go_reserved` above is wider (predeclared and
+// package-scope type names); `_extern_param` refuses on the LANGUAGE set only,
+// so this mirror keeps its own list (issue #3620).
+fn is_go_language_keyword(name: Str) -> Bool {
+  return list_contains(["break", "case", "chan", "const", "continue", "default",
+                        "defer", "else", "fallthrough", "for", "func", "go", "goto",
+                        "if", "import", "interface", "map", "package", "range",
+                        "return", "select", "struct", "switch", "type", "var"], name)
+}
+
+// The reference's `_EMITTER_RESERVED` (backends/go/emit.py): the names the
+// emitted scaffolding spells bare. A bodied extern's parameter of one of these
+// cannot be kept either, because the wrapper around the verbatim body calls
+// them (issue #3620).
+fn is_emitter_scaffold(name: Str) -> Bool {
+  return list_contains(["revlT", "root", "_fibers", "_revlLoadOrder", "_revlAt",
+                        "_svc", "_err", "_r", "_ok", "ctx", "cfg", "err",
+                        "revlFrame", "revlJournal", "revlSelf", "_revlUi",
+                        "_revlApplyInv", "_revlApplyErr"], name)
+}
+
+// `extern_param`: mirrors `backends/go/emit.py::_extern_param` (issue #3620).
+// A bodied extern's parameter keeps its source spelling - the @go body is
+// verbatim host text and reads the parameter by that name - unless the name
+// cannot be kept at all (a Go keyword, emitter scaffolding, the revl* helper
+// namespace), which the reference refuses at emit; the port answers with the
+// named marker instead. Predeclared builtins (max, len) and package-scope
+// type names ARE kept: a parameter shadows those only inside this one func,
+// which is what the host body wants.
+pub fn extern_param_unkept(name: Str) -> Bool {
+  var root = name
+  while (root.length() > 0) {
+    if (is_go_language_keyword(root) || is_emitter_scaffold(root) || has_revl_prefix(root)) { return true }
+    if (root.charAt(root.length() - 1) != "_") { return false }
+    root = root.slice(0, root.length() - 1)
+  }
+  return false
+}
+
 // `_camel` verbatim (item 390): snake_or_lower / `-` -> UpperCamel, keeping the
 // tail of each part as-is. This is the reference `_camel` byte-for-byte
 // (`p[:1].upper() + p[1:]`, NOT `.capitalize()`, which would lowercase the tail

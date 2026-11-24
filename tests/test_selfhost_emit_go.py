@@ -113,6 +113,9 @@ CORPUS = [
     "stdlib_surface.rvl",
     # the item 378 extern `config` seam and the `//revl:import` hoist
     "extern_config.rvl",
+    # issue #3620: a bodied extern's parameters keep their source spelling
+    # (`max`, `len`, `max` beside `max_`) in both emitters, byte for byte
+    "extern_param_names.rvl",
     # the code-point scan rewrite and every near miss it must refuse, the
     # `.concat` string builder, and the destructive Map rebinds
     "loop_shapes.rvl",
@@ -1117,6 +1120,21 @@ def test_an_extern_with_no_go_body_is_a_named_refusal(emitted, reference, rel, e
         reference.emit(ir)
     got = emitted["emit_go_src"](ir)
     assert f"<<UNSUPPORTED-EXTERN-NO-GO-BODY:{extern}>>" in got
+
+
+def test_an_extern_param_that_cannot_keep_its_spelling_is_a_named_refusal(
+        emitted, reference):
+    """Issue #3620: `tests/fixtures/emit_go_refusals/extern_param_keyword.rvl` —
+    a bodied extern parameter that is a Go keyword cannot be kept in the `func`
+    signature, so the reference refuses at emit naming the extern, the
+    parameter and the tier; the port answers with the named marker."""
+    ir = compile_files([str(ROOT / "tests" / "fixtures" / "emit_go_refusals"
+                            / "extern_param_keyword.rvl")])
+    with pytest.raises(reference.EmitError,
+                       match=r"extern `bump` parameter 'func'.*go tier"):
+        reference.emit(ir)
+    got = emitted["emit_go_src"](ir)
+    assert "<<UNSUPPORTED-EXTERN-PARAM:bump:func>>" in got
 
 
 @pytest.mark.parametrize("rel", DEFERRED_EMISSION_REFUSALS)
