@@ -2302,6 +2302,7 @@ def main(argv: list[str] | None = None) -> int:
     # file back to the archive file it came from, in what is printed.
     source = read_roadmap(roadmap)
     text = source.text
+    text = roadmap.read_text(encoding="utf-8")
 
     git = Git(ROOT, args.base, allow_fetch=not args.no_fetch)
     if not git.ok("rev-parse", "--git-dir"):
@@ -2411,6 +2412,7 @@ def main(argv: list[str] | None = None) -> int:
         if audit["unexamined"]:
             print(source.relabel(
                 citation_unexamined_report(audit, roadmap, args.base, scanned)))
+            print(citation_unexamined_report(audit, roadmap, args.base, scanned))
             return 0
         print(f"roadmap markers OK: {scanned} in-progress marker(s) with a named "
               f"branch, all consistent with {args.base}.")

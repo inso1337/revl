@@ -588,6 +588,14 @@ class HttpTransport:
             print(f"error: {error}", file=stderr)
             return 1
         scheme = "https" if self.exposure.tls else "http"
+        print(f"revl mcp: MCP {PROTOCOL_VERSION} on {scheme}://{host}:{port}{ENDPOINT} "
+              f"(auth: {self.authenticator.mode}; one request at a time)", file=stderr)
+        if self.latch.path:
+            # revl_estop is accepted even while the profile settles or is broken
+            # (under the last adopted profile); the latch halts with no request
+            # at all, the one path that needs no adopted profile
+            print(f"revl mcp: out-of-band E-Stop: revl estop --latch {self.latch.path}",
+                  file=stderr)
         try:
             # inside the try: a SIGTERM (turned into KeyboardInterrupt) that
             # lands while these lines print must still reach the `finally`
@@ -670,6 +678,12 @@ class HttpTransport:
             if not is_estop(message):
                 return 503, _rpc_error(None, -32603, PROFILE_REFUSAL), [close]
             operator = estop_candidate
+            # the profile is settling or broken: every request is refused except
+            # an E-Stop from an operator authorized under the LAST ADOPTED
+            # profile. E-Stop is never fenced, and it only stops things.
+            operator = self._estop_fallback(message, request.headers, peer)
+            if operator is None:
+                return 503, _rpc_error(None, -32603, why), [close]
         # the reply may become an SSE stream, but only from here: the caller is
         # authenticated and its body read
         stream = RequestStream(request, enabled=accepts_sse(request.headers))
@@ -685,6 +699,13 @@ class HttpTransport:
         self._profile_refusal_logged = why
         print(f"revl mcp: every request is refused: {why}",
               file=self._stderr or sys.stderr, flush=True)
+    def _estop_fallback(self, message, headers, peer):
+        last = getattr(self.authenticator.source, "last_adopted", None)
+        if not is_estop(message) or last is None:
+            return None
+        operator, _why, _status = self.authenticator.authenticate(
+            headers, peer, registry=last)
+        return operator
 
     def process(self, message, operator, headers, *, peer=None,
                 stream: RequestStream | None = None) -> tuple[int, object, list]:
@@ -787,8 +808,10 @@ class HttpTransport:
             # keyed on a verb is tested, so a hatch call is held to the same
             # rules as the direct call it is
             name, arguments = _disclosure.resolved_call(params)
+            name = params.get("name")
             if name in CAST_TOOLS:
                 refused = self._cast_refusal(arguments, operator)
+                refused = self._cast_refusal(params.get("arguments"), operator)
                 if refused is not None:
                     return 200, self._result(request_id, refused), []
             if name == "revl_estop":
@@ -798,6 +821,8 @@ class HttpTransport:
             if method == "tools/call":
                 tools = {t.get("name"): t for t in self.dispatcher.advertised_tools()}
                 bad = _param_headers_refusal(tools.get(name), arguments, headers)
+                bad = _param_headers_refusal(tools.get(params.get("name")),
+                                             params.get("arguments"), headers)
                 if bad is not None:
                     return 400, _rpc_error(request_id, HEADER_MISMATCH, bad), []
             response = self.dispatcher.handle(message)
@@ -1013,6 +1038,7 @@ class HttpTransport:
         from . import operator as _operator  # noqa: PLC0415
 
         arguments = _disclosure.resolved_call(message.get("params"))[1] or {}
+        arguments = (message.get("params") or {}).get("arguments") or {}
         view = _CallerView(self.server.SESSION, operator, self.authenticator.registry)
         decision = _operator.decide(view, "revl_estop", arguments)
         if decision.gated and not decision.allowed:

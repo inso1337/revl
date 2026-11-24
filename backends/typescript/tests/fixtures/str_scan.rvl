@@ -39,6 +39,8 @@ pub fn checksum(s: Str) -> Int {
 // A pairwise scan: two distinct strings alternating through the helpers. This is
 // why the memo has more than one slot: with one it would thrash back to the
 // pre-435(c) cost on this shape, which is common (compare, merge, diff).
+// why the memo has two slots — with one it would thrash back to the pre-435(c)
+// cost on this shape, which is common (compare, merge, diff).
 pub fn common_prefix(a: Str, b: Str) -> Int {
   var i = 0
   while (i < a.length()) {

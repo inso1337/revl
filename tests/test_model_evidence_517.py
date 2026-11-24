@@ -347,6 +347,7 @@ def test_a_validly_signed_record_with_an_extra_member_is_refused():
 @pytest.mark.parametrize("member,value", [
     ("kind", "revl.attestation"),
     ("version", "9.9"),
+    ("version", "2.0"),
     ("sign_alg", "ed25519"),
     ("sign_alg", ""),
     ("hash_alg", "sha512"),
@@ -580,6 +581,7 @@ def test_an_outcome_outside_the_vocabulary_is_refused(outcome):
 def test_a_fallback_depth_that_is_not_a_ladder_depth_is_refused(depth):
     record = _resign(dict(sealed(), fallback_depth=depth,
                           fallback_reason="unavailable"))
+    record = _resign(dict(sealed(), fallback_depth=depth))
     verdict = me.verify(record, KEY)
     assert not verdict.ok
     assert verdict.link == me.EVIDENCE_VOCABULARY
@@ -633,6 +635,7 @@ def test_a_non_zero_fallback_depth_is_a_distinct_record():
     the ladder are different claims rather than the same silence."""
     first = sealed(fallback_depth=0)
     third = sealed(fallback_depth=3, fallback_reason="unavailable",
+    third = sealed(fallback_depth=3,
                    recorded_at=first["recorded_at"])
     assert me.verify(first, KEY).ok and me.verify(third, KEY).ok
     assert first[me.SIGNATURE_FIELD] != third[me.SIGNATURE_FIELD]
@@ -736,6 +739,7 @@ def test_a_ladder_refusal_records_no_choice(outcome):
     lower-quality completion. The record has a shape for that."""
     record = sealed(candidates=[], chosen=None, outcome=outcome,
                     fallback_depth=2, fallback_reason="unavailable")
+                    fallback_depth=2)
     assert me.verify(record, KEY).ok
 
 

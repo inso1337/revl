@@ -276,10 +276,13 @@ def block_mcp_count(current: str) -> str:
             "default `tools/list` advertises the core tier and `revl_verbs` "
             "returns the rest - or calls one, given `name` and `args`; see "
             "\"Find a verb\".")
+    n = len(mcp_tools())
+    return (f"The advertised list is exactly the {n} verbs below, one section each.")
 
 
 def block_agents_mcp_count(current: str) -> str:
     mcp_tools()
+    n = len(mcp_tools())
     return (
         "The complete verb set comes from\n"
         "`src/revl/mcp/server.py` and `query_tools.py`. `tools/list` shows the\n"
@@ -288,6 +291,10 @@ def block_agents_mcp_count(current: str) -> str:
         "verb reachable from the list you were given. The verbs are\n"
         "grouped below by what you reach for; each verb's exact inputs and\n"
         "outputs are in [mcp-reference.md](mcp-reference.md)."
+        f"The complete advertised verb set is {n} verbs, from\n"
+        "`src/revl/mcp/server.py` and `query_tools.py`. It is grouped below by what\n"
+        "you reach for; each verb's exact inputs and outputs are in\n"
+        "[mcp-reference.md](mcp-reference.md)."
     )
 
 
@@ -299,10 +306,16 @@ def block_authoring_mcp_count(current: str) -> str:
     points at the full list; the count is `--show mcp-verb-count` away
     (#1768)."""
     mcp_tools()
+    """docs/authoring-for-agents.md's verb total. It was hand-maintained and
+    drifted (issue #939): the page still claimed the authoring verbs were
+    CLI-only after item 345 exposed them over MCP, and its total lagged the
+    registry. Generating it ties the page to `TOOLS` like the other two."""
+    n = len(mcp_tools())
     return (
         "`revl mcp serve` lists its core tier by default. `revl_verbs` finds\n"
         "the rest and can call any verb when given `name` and `args`; every\n"
         "verb is listed in full in\n"
+        f"`revl mcp serve` advertises {n} verbs in total; the full list is in\n"
         "[mcp-reference.md](mcp-reference.md)."
     )
 
@@ -468,9 +481,11 @@ def block_mcp_test_count(current: str) -> str:
     module. `--show mcp-test-count` prints it."""
     if not test_count("tests/test_mcp.py"):
         raise SystemExit("docgen: tests/test_mcp.py defines no test")
+    n = test_count("tests/test_mcp.py")
     return (
         "The `mcp serve` tool surface, its annotations and its structured rejections\n"
         "are gated by `tests/test_mcp.py`."
+        f"are gated by `tests/test_mcp.py` ({n} tests)."
     )
 
 
@@ -766,11 +781,17 @@ def _residual_table(rows: list[tuple[str, int, int]]) -> list[str]:
 def residual_report(root: Path | None = None) -> str:
     """The per-tier residual table and its totals, printed by
     `python3 tools/docgen.py --show selfhost-residual`.
+def block_selfhost_residual(current: str, root: Path | None = None) -> str:
+    """The per-tier residual table and its total, for `docs/selfhost-compile.md`
+    and `docs/selfhost-findings.md`.
 
     Every cell is a count of a committed list, `LOWER_GAP_DOCS` and the six
     `CORPUS` lists. The middle column is the emitter half of roadmap item 146,
     and it reads 100% because `test_the_residual_is_located_in_lower_not_in_
     the_emitter` asserts it per document, for every document, on every run.
+    Nothing is carried: every cell is a count of a committed list, so the block
+    is a rendering of `LOWER_GAP_DOCS` and the six `CORPUS` lists and a reader
+    who wants the documents themselves can read the same tables.
 
     This table used to be the committed `selfhost-residual` block. Its corpus
     column and both totals moved with every corpus document a pull request
@@ -778,6 +799,12 @@ def residual_report(root: Path | None = None) -> str:
     landing (issue #1768). The committed block now states the finding and this
     command, and stores no count; the prose gate still reds a figure typed
     anywhere in `docs/` that disagrees with the ledger.
+    The middle column is the emitter half of roadmap item 146, and it reads
+    100% because `test_the_residual_is_located_in_lower_not_in_the_emitter`
+    asserts it per document, for every document, on every run. It is rendered
+    rather than counted separately on purpose: if that assertion ever fails the
+    suite is red, which is a louder answer than a column quietly dropping to
+    99%.
     """
     rows = selfhost_residual(root)
     corpus = sum(c for _, c, _ in rows)
@@ -815,6 +842,12 @@ def block_selfhost_residual(current: str, root: Path | None = None) -> str:
         "`selfhost/lower.rvl` gap, the native IR producer, and not an emitter gap;",
         "they are named document by document in",
         "[`LOWER_GAP_DOCS`](../" + NATIVE_CHAIN_TEST + ").",
+        f"Every one of the {corpus} documents is reproduced byte-for-byte by its",
+        "self-host emitter when the emitter is fed the **reference** IR. "
+        f"{corpus - gap} of",
+        f"them survive the **fully-native** chain, so all {gap} residual documents",
+        "are `selfhost/lower.rvl` gaps, the native IR producer, and not emitter",
+        "gaps.",
         "",
         "Tiers whose whole corpus survives the fully-native chain: "
         + (", ".join(f"`{t}`" for t in clean) if clean else "none") + ".",
@@ -824,6 +857,9 @@ def block_selfhost_residual(current: str, root: Path | None = None) -> str:
         "`python3 tools/docgen.py --show selfhost-residual`. This block is",
         "generated by `tools/docgen.py` from that ledger and from each tier's",
         "`tests/test_selfhost_emit_<tier>.py::CORPUS`. Do not edit it here:",
+        "Both columns and both totals are generated by `tools/docgen.py` from",
+        f"[`LOWER_GAP_DOCS`](../{NATIVE_CHAIN_TEST}) and from each tier's",
+        "`tests/test_selfhost_emit_<tier>.py::CORPUS`. Do not edit them here:",
         "change the ledger, then run `make docs-gen`.",
     ]
     return "\n".join(out)
@@ -847,6 +883,8 @@ def block_selfhost_residual_docs(current: str, root: Path | None = None) -> str:
         # No count in the header: it moved with every corpus document added to
         # the tier (issue #1768). The documents below are the residual.
         out.append(f"`{tier}`:")
+    for tier, corpus, gap in rows:
+        out.append(f"`{tier}`, {gap} residual of {corpus}:")
         out.append("")
         if not gap:
             out.append("- none; the fully-native chain reproduces the whole corpus.")
@@ -956,6 +994,7 @@ def check_verbs_in_guide() -> list[str]:
 # citations are gated by `tools/check_roadmap_claims.py`. Its closed items
 # moved verbatim to `docs/roadmap-archive/`, which is excluded for the same
 # reason (RESIDUAL_PROSE_EXCLUDED_DIRS).
+# citations are gated by `tools/check_roadmap_claims.py`.
 RESIDUAL_PROSE_EXCLUDED = frozenset({"docs/v2.0-roadmap.md"})
 RESIDUAL_PROSE_EXCLUDED_DIRS = ("docs/roadmap-archive/",)
 
@@ -1015,6 +1054,7 @@ def check_residual_claims(root: Path | None = None) -> list[str]:
         rel = path.relative_to(base).as_posix()
         if rel in RESIDUAL_PROSE_EXCLUDED or rel.startswith(
                 RESIDUAL_PROSE_EXCLUDED_DIRS):
+        if rel in RESIDUAL_PROSE_EXCLUDED:
             continue
         for para, line in _paragraphs(path.read_text(encoding="utf-8")):
             if not _RESIDUAL_ANCHOR.search(para):

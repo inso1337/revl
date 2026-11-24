@@ -15,6 +15,9 @@ The last tests run against the REAL docs/vision.md, the substrate-boundary
 policy page, and the REAL tree, because every fixture here is synthetic and a
 collector whose regex stopped matching a live document would still pass all
 of the pairs above.
+The last tests run against the REAL docs/vision.md and the REAL tree, because
+every fixture here is synthetic and a collector whose regex stopped matching
+the live document would still pass all of the pairs above.
 """
 from __future__ import annotations
 
@@ -188,6 +191,8 @@ def test_an_anchor_is_stripped_before_resolving(tree):
 def test_a_backticked_path_the_tree_does_not_have_bites(tree):
     verdict = _one("the ledger `formal/MISSING.md` names each gap", tree, "path")
     assert "formal/MISSING.md" in verdict
+    verdict = _one("the ledger `formal/STATUS.md` names each gap", tree, "path")
+    assert "formal/STATUS.md" in verdict
 
 
 def test_an_abbreviated_filename_resolves_by_suffix(tree):
@@ -725,3 +730,4 @@ def test_an_unproved_cell_in_another_table_does_not_make_an_unproved_row(tree):
 
 def test_an_unproved_guarantee_subrow_does_make_an_unproved_row():
     assert formal_wording.unproved_row_in(_HISTORICAL_LEDGER)
+    assert "claims checked over 4 rules" in proc.stdout

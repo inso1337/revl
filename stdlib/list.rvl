@@ -21,6 +21,7 @@
 // (`for … of`, `.push`, `.length()`, `.charCodeAt`). There is no `@py` block,
 // so — unlike value.rvl / str.rvl — there is NOTHING to defer per tier: the
 // first-order kit (`str_lt`/`list_contains`/`list_sort`/`list_dedup`/`list_reverse`) compiles
+// first-order kit (`str_lt`/`list_contains`/`list_sort`/`list_dedup`) compiles
 // and runs identically on EVERY backend (py/ts/rs/go/java/wasm) the moment they
 // emit the base List/Str builtins. The py tier is executed by the test suite
 // (tests/test_list_stdlib.py); the other tiers inherit for free.

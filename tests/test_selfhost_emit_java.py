@@ -26,6 +26,7 @@ Covered subset (what emits byte-identical):
     bare-expr, assert); and the base ``_expr`` algebra (lit, name, var incl
     ``None`` -> ``Optional.empty()``, bin incl ``??``/``==``/exact-arith/``/``/
     comparisons/``&&``, un incl ``revlNeg``, the 2.0 call and the
+    comparisons/``&&``, un incl ``Math.negateExact``, the 2.0 call and the
     ``fn`` call with ``Some``/``None``, the ``widen`` markers, field, index,
     ternary, list, empty ``maplit``, non-float ``${..}`` interpolation).
   * slice 2 (item 210) — the v3 TYPED-CORE: ``_emit_v3_types`` (a ``record`` type
@@ -66,6 +67,7 @@ Covered subset (what emits byte-identical):
     component ``needs_modern`` AND falls in the supported subset (every body step a
     ``provide``, every method step ``return``/``effect``/``emit``); anything else
     stays a loud ``<<UNSUPPORTED-component-nonsimple>>``.
+    stays a loud ``<<DEFER-component-nonsimple>>``.
 
   * slice 4 (item 235) — REALM placements on the modern path: an ``isolate <key>
     in realm("..")`` opens the ``apply()`` body with ``ctx = ctx.isolate(<Svc>.class,
@@ -92,14 +94,17 @@ Deliberately OUT (excluded from the corpus, deferred to Java Path B slice 6+):
   * spawn/instances (``_v3_spawn``/``instance-get``/``RevlSpawnHandle``), timers,
     routers, and the ``Pool`` host runtime (a ``Pool`` acquisition surfaces a loud
     ``<<UNSUPPORTED-host-stub:Pool>>``); ``setup`` blocks on effect steps, method-body
+    ``<<DEFER-host-stub:Pool>>``); ``setup`` blocks on effect steps, method-body
     ``let``/``assign``/``await``/arrow bindings, and body-level ``while``/``for``/
     ``let_pattern`` (a component outside the supported subset surfaces a loud
     ``<<UNSUPPORTED-component-nonsimple>>``);
+    ``<<DEFER-component-nonsimple>>``);
   * the built-in Result surface (``Ok``/``Err`` ctor
     and ``match``, ``_emit_result_type``, ``_emit_checked_div_helpers``) and the
     ``revlDivFloor``/``revlDivEuclid``/``revlMod`` int-arith block, so the
     ``checked_*`` and ``div_floor``/``div_euclid``/``mod`` builtin methods stay
     behind loud ``<<UNSUPPORTED-checked-div:..>>`` / ``<<UNSUPPORTED-int-arith:..>>``
+    behind loud ``<<DEFER-checked-div:..>>`` / ``<<DEFER-int-arith:..>>``
     markers;
   * functional record-update ``{r | f = e}`` (the Java reference itself RAISES on
     ``record_update`` — a structural exclusion);
@@ -426,6 +431,7 @@ def test_fn_type_param_refused(emitted, reference):
     parameter, and a declared function type is not representable on this tier.
     The reference RAISES EmitError; a pure self-host emitter fn cannot `fail`, so
     it refuses within the subset with a loud `<<UNSUPPORTED-fn-type>>` marker instead of
+    it refuses within the subset with a loud `<<DEFER-fn-type>>` marker instead of
     silently emitting a mis-typed signature. Both refuse the same construct, so
     tests/fixtures/emit_*_corpus/transforms.rvl stays OUT of the byte-identity
     CORPUS above (the reference would raise there) and is checked only here."""
@@ -434,6 +440,7 @@ def test_fn_type_param_refused(emitted, reference):
         reference.emit(ir)
     got = emitted["emit_java_src"](ir)
     assert "<<UNSUPPORTED-fn-type>>" in got
+    assert "<<DEFER-fn-type>>" in got
 
 
 def test_null_intercept_metadata_activates_on_jvm(reference, tmp_path):
@@ -481,12 +488,16 @@ public final class Harness {
     [
         ("backends/java/scenarios/instance_accessor.rvl",
          "static final class RevlSpawnHandle", "<<UNSUPPORTED-component-nonsimple:Supervisor>>"),
+         "static final class RevlSpawnHandle", "<<DEFER-component-nonsimple:Supervisor>>"),
         ("backends/go/scenarios/router.rvl",
          "class RevlRouter", "<<UNSUPPORTED-component-nonsimple:Router>>"),
+         "class RevlRouter", "<<DEFER-component-nonsimple:Router>>"),
         ("bench/results/baseline-deepseek-v4-pro/02-pg-pool/v1/attempt-1.rvl",
          "class Pool", "<<UNSUPPORTED-host-stub:Pool>>"),
+         "class Pool", "<<DEFER-host-stub:Pool>>"),
         ("backends/go/testdata/result_ctor_302.rvl",
          "new RevlResult.Ok<>", "<<UNSUPPORTED-result-ctor:Ok>>"),
+         "new RevlResult.Ok<>", "<<DEFER-result-ctor:Ok>>"),
         ("tests/fixtures/emit_py_corpus/control.rvl",
          "revlLength(", "<<UNSUPPORTED-EXPR:arrow>>"),
         # The stdlib half of this document now agrees byte-for-byte (see
@@ -494,6 +505,7 @@ public final class Harness {
         # `Pool` host runtime.
         ("backends/java/scenarios/runtime_values.rvl",
          "class Pool", "<<UNSUPPORTED-host-stub:Pool>>"),
+         "class Pool", "<<DEFER-host-stub:Pool>>"),
         ("tests/fixtures/emit_py_corpus/floats.rvl",
          "private static String revlFtoa(double x)", None),
         ("bench/codegen/java/cases/extern_config/case.rvl",
@@ -820,3 +832,4 @@ def test_a_bodyless_extern_is_named_before_a_required_stream(
     assert "<<UNSUPPORTED-REQUIRED-STREAM:" in markers, markers
     assert (markers.index("<<UNSUPPORTED-EXTERN-NO-JAVA-BODY:")
             < markers.index("<<UNSUPPORTED-REQUIRED-STREAM:")), markers
+                            "<<DEFER-component-nonsimple:")

@@ -14,6 +14,10 @@ seam (a UDS bridge, item 56's transport reused unchanged), so it needed none of
 the control plane a cross-machine deploy requires. The remote runner and the
 bundle staging have since landed for `via = ssh` under a pinned host key; a
 replicated WAL and a quorum coordinator remain deliberately absent (Slice 2b+).
+Slice 1 is the cut that is landable on today's tree: every seam is a LOCAL
+process seam (a UDS bridge, item 56's transport reused unchanged), so the
+control plane a cross-machine deploy would need — a replicated WAL, a quorum
+coordinator, a remote runner — is deliberately absent (Slice 2b+).
 What Slice 1 does build, in the four pieces the design names:
 
 1. **the attestation chain, verified at admission** (§2). `chain_bindings`
@@ -72,6 +76,9 @@ What Slice 1 does build, in the four pieces the design names:
    silently degrading atomicity. For a stranded participant the record
    chooses the direction (present, roll forward; absent, roll back) and
    `recovery.recover` performs it; a guess fails closed (:func:`settle_stranded`).
+   silently degrading atomicity. A stranded participant applies
+   `recovery.py`'s existing rule VERBATIM — record present, roll forward;
+   absent, roll back — and fails closed on a guess (:func:`settle_stranded`).
 
 **Slice 2a** (§5) adds the written form of a deploy and the plan-time
 admission of it. Slice 1 had no way to WRITE a deploy down — the caller built
@@ -88,6 +95,8 @@ only as `via = ssh` with both a `host` and a pinned `known_hosts` (the staging,
 transport and host-key pin have landed, and R4 makes trust-on-first-use a
 refusal), and is refused otherwise, not best-efforted. §5b then puts a real
 participant behind a container boundary
+Only the first two are opened here: a `machine` boundary is REFUSED, not
+best-efforted. §5b then puts a real participant behind a container boundary
 (:func:`launch_container_participant`), reusing item 411's container driver and
 speaking the same stdio control channel — because the protocol in §3 never held
 an inverse, it does not care what kind of boundary the other end is behind.
@@ -100,6 +109,15 @@ attestation is HMAC, which is honest while signer and host are one trust domain
 (the single-host case), and :func:`admit` REFUSES outright when a
 :class:`TrustStore` declares itself `cross_domain` under a symmetric algorithm,
 rather than pretending.
+Deliberately NOT here, and named so the boundary is explicit: cross-machine
+orchestration (bundle staging, a remote `deploy-admit` runner, a load-measured
+signed COMMIT receipt, a pinned SSH host key), a replicated WAL, a quorum
+coordinator, and the Ed25519 upgrade to `attest.py`. The last one is a HARD prerequisite for
+a cross-trust-domain deploy (§2.4/§5-A1): a symmetric HMAC verifier is also a
+forger, so "signer untrusted" would be a fiction. Slice 1 is single-host, where
+signer and host are the same trust domain, so HMAC is honest here — and
+:func:`admit` REFUSES outright when a :class:`TrustStore` declares itself
+`cross_domain` under a symmetric algorithm, rather than pretending.
 """
 
 from __future__ import annotations
@@ -122,6 +140,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 from . import _childproc, attest
+from . import attest
 from .errors import RevlError
 
 # ---------------------------------------------------------------------------
@@ -1394,6 +1413,9 @@ def compare_commit_receipt(admission_receipt: Mapping,
 # pinned host key of §1.3) rides on top of this protocol unchanged: it is
 # :meth:`StdioRunnerTransport.ssh` plus :func:`stage_bundle_over_ssh`, and the
 # ssh transport and command suites cover it end to end with fake ssh/scp shims.
+# pinned host key of §1.3) rides on top of this protocol unchanged and is a
+# following slice; it would be verified end-to-end on the two self-hosted
+# runners (azure-amd-1 + oracle-arm64).
 #
 # The protocol is deliberately thin — dict in, dict out — because a real runner
 # reads one JSON line off the orchestration channel and writes one back. The
@@ -1639,6 +1661,8 @@ def serve_deploy_request(request_wire: Mapping, *,
     request's (design S2.4): a request can ask for admission but never carry the
     trust that grants it. The receiver rules reach the PREPARE runner only; a
     commit-request measures bytes at load time and never re-runs the chain.
+    `runtime_versions`) is the RUNNER's, never the request's (design S2.4): a
+    request can ask for admission but never carry the trust that grants it.
     """
     kind = request_wire.get("kind") if isinstance(request_wire, Mapping) else None
     if kind == COMMIT_REQUEST_KIND:
@@ -1659,10 +1683,13 @@ def serve_deploy_request(request_wire: Mapping, *,
 class InProcessTransport:
     """The orchestration channel of §1.2, stubbed to run the runner IN THIS
     PROCESS: no second machine, no ssh, no subprocess. It stands in for the
+    PROCESS — no second machine, no ssh, no subprocess. It stands in for the
     real SSH/scp transport so the whole PREPARE→COMMIT handshake is buildable
     and testable on one host. :class:`StdioRunnerTransport` is the live
     transport, over a child process (`.local`) and over ssh (`.ssh`), and
     implements the same `send` contract.
+    and testable on one host; the live cross-machine transport is a following
+    slice that implements the same `send` contract.
 
     `send` carries the request through its canonical wire form and carries the
     reply back the same way (`to_wire` -> json text -> `from_wire`), so the stub
@@ -1671,6 +1698,8 @@ class InProcessTransport:
     rather than on the wire between two machines. It holds the runner-side trust
     configuration (the host's keys, evidence floor and receiver-side rules),
     exactly the state a real far host owns and the conductor never sees.
+    configuration (the host's keys and evidence floor), exactly the state a real
+    far host owns and the conductor never sees.
 
     One channel carries BOTH phases, exactly as a real orchestration channel
     does: `send` dispatches on the request `kind`, routing an admit-request to
@@ -1745,6 +1774,8 @@ class ProcessRunnerTransport:
     inside the conductor for a one-host test) and the live cross-machine leg
     (design R4/R5: scp/rsync staging, a pinned SSH host key), which has landed as
     the `.ssh` shape of :class:`StdioRunnerTransport`. It spawns `argv`
+    inside the conductor for a one-host test) and the deferred cross-machine leg
+    (design R4/R5: scp/rsync staging, a pinned SSH host key). It spawns `argv`
     and speaks the identical protocol regardless of what `argv` is: locally
     :meth:`local` builds ``[python, -m, revl, deploy-admit, ...]`` so the far
     "host" is a child on this machine, and the machine boundary rides on top
@@ -1833,8 +1864,11 @@ class ProcessRunnerTransport:
     def _ensure(self) -> subprocess.Popen:
         if self._proc is None or self._proc.poll() is not None:
             self._proc = _childproc.popen(  # noqa: S603 — argv is caller-built
+            self._proc = subprocess.Popen(  # noqa: S603 — argv is caller-built
                 self._argv, cwd=self._cwd, env=self._env,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                text=True, encoding="utf-8")
         return self._proc
 
     def send(self, request_wire: Mapping, *, now=None) -> dict:
@@ -2181,6 +2215,11 @@ def request_commit(transport, request: CommitRequest, *,
 # :func:`stage_bundle_over_ssh`), the replicated WAL, the partition-safe
 # distributed commit coordinator and its two-phase commit/ABORT over > 1 host
 # (S3), the container/microVM transport, and the Ed25519 migration a genuinely
+# [REMAINS] or Deferred): STAGING the sliced bundle over scp/rsync (this slice
+# assumes the bundle is already staged at the path the request names), the mTLS
+# staging identity (R5), the replicated WAL, the partition-safe distributed
+# commit coordinator and its two-phase commit/ABORT over > 1 host (S3), the
+# container/microVM transport, and the Ed25519 migration a genuinely
 # cross-trust-domain deploy needs (S2.4 / S5-A1).
 
 #: The subcommand the far host exposes as the runner. The conductor never trusts
@@ -2425,8 +2464,10 @@ class StdioRunnerTransport:
     def _exchange(self, payload: str) -> dict:
         try:
             completed = _childproc.run(
+            completed = subprocess.run(
                 self._argv, input=payload + "\n", capture_output=True,
                 timeout=self._timeout)
+                text=True, timeout=self._timeout)
         except FileNotFoundError as error:
             raise SshRunnerRefused(
                 f"the runner command {self._argv[0]!r} could not be launched: "
@@ -2595,6 +2636,8 @@ def stage_bundle_over_ssh(local_bundle: Path | str, *, host: str,
     try:
         completed = _childproc.run(  # noqa: S603 — argv built above, no shell
             argv, capture_output=True, timeout=timeout)
+        completed = subprocess.run(  # noqa: S603 — argv built above, no shell
+            argv, capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError as error:
         raise BundleStageRefused(
             f"the stage command {scp_exe!r} could not be launched: "
@@ -3401,6 +3444,7 @@ def _abort_proof(ledger: list, unresolved: list, residue: list) -> str:
 #: Deliberately the same spelling `recovery.py` already keys roll-forward off
 #: (`commit-approved`), prefixed for the federation scope, so `settle_stranded`
 #: can tell `recovery.recover` which direction to take rather than re-implementing it.
+#: can hand the rule to `recovery.recover` VERBATIM rather than re-deciding it.
 FEDERATION_APPROVED = "federation-commit-approved"
 FEDERATION_ABORTED = "federation-abort-decided"
 #: Written when a deploy run STARTS, before any participant is launched. It
@@ -3655,6 +3699,7 @@ def _fsync_append(path: str, record: dict) -> None:
 def write_commit_approval(path: str, *, federation_id: str, generation: int,
                           participants: Sequence[str],
                           writer: str | None = None) -> dict:
+                          participants: Sequence[str]) -> dict:
     """Make the federation's COMMIT decision durable, BEFORE any participant is
     allowed to flush a held irreversible emission. This record's existence is
     the whole anti-split-brain property: every stranded participant reads the
@@ -3671,6 +3716,7 @@ def write_commit_approval(path: str, *, federation_id: str, generation: int,
 def write_abort_decision(path: str, *, federation_id: str, generation: int,
                          reason: str | None, failed: str | None = None,
                          writer: str | None = None) -> dict:
+                         reason: str | None, failed: str | None = None) -> dict:
     """Make the federation's ABORT decision durable. Written BEFORE any abort
     message goes out, so a participant stranded during the abort still settles
     against a record."""
@@ -3718,6 +3764,10 @@ def read_decision(path: str) -> tuple[str | None, dict | None]:
     (roll back). A file that exists but cannot be parsed raises: that is NOT a
     definite answer, and guessing between roll-forward and roll-back is exactly
     the split-brain the record exists to prevent.
+    A file that does not exist is `None` — the decision was never made, which
+    is a definite answer (roll back). A file that exists but cannot be parsed
+    raises: that is NOT a definite answer, and guessing between roll-forward and
+    roll-back is exactly the split-brain the record exists to prevent.
     """
     if not os.path.exists(path):
         return None, None
@@ -3734,6 +3784,8 @@ def read_decision(path: str) -> tuple[str | None, dict | None]:
                         FEDERATION_PENDING):
                 decision = None if kind == FEDERATION_PENDING else kind
                 record = entry
+            if kind in (FEDERATION_APPROVED, FEDERATION_ABORTED):
+                decision, record = kind, entry
     return decision, record
 
 
@@ -3800,6 +3852,8 @@ def settle_stranded(wal_path: str, decision_path: str, *, world=None) -> dict:
     The durable federation decision chooses the direction and
     `recovery.recover` performs it; nothing here re-implements recovery's
     roll-forward or roll-back:
+    The rule is `recovery.py`'s, applied VERBATIM — this function decides
+    nothing on its own:
 
       * the durable `federation-commit-approved` record is PRESENT: the
         federation committed. The participant's own WAL is given the
@@ -3822,6 +3876,9 @@ def settle_stranded(wal_path: str, decision_path: str, *, world=None) -> dict:
         so its files keep recovery's rule.
         A missing file is not attributed to it: the apply writes its pending
         record before it launches any participant.
+      * the record is ABSENT (or an explicit abort decision): the federation did
+        not commit. `recovery.recover` reads the WAL unchanged and rolls back
+        LIFO, reporting residue exactly as it does today.
       * the record is UNREADABLE: there is no definite answer. Fails CLOSED with
         `unresolved` and settles nothing — a guess here is the split-brain.
       * the decision file's directory holds a `lock` another process holds
@@ -3849,6 +3906,7 @@ def settle_stranded(wal_path: str, decision_path: str, *, world=None) -> dict:
 
 def _settle_stranded(wal_path: str, decision_path: str, *, world) -> dict:
     from .recovery import recover  # noqa: PLC0415 (lazy, keeps import cheap)
+    from .recovery import recover  # noqa: PLC0415 — lazy, keeps import cheap
 
     try:
         decision, record = read_decision(decision_path)
@@ -3877,6 +3935,7 @@ def _settle_stranded(wal_path: str, decision_path: str, *, world) -> dict:
         settled = recover(wal_path, world=world, committed=False)
     else:
         settled = recover(wal_path, world=world)
+    settled = recover(wal_path, world=world)
     settled["federationDecision"] = decision or "none"
     return settled
 
@@ -4121,6 +4180,9 @@ TEARDOWN_PROMISE = {
         "and its deploy verdict is `unresolved`, never `rolled-back`; a "
         "deploy that cannot promise teardown must not be the thing that "
         "quietly discovers it."),
+        "That is why this slice REFUSES a machine boundary outright instead of "
+        "shipping a best-effort one — a deploy that cannot promise teardown "
+        "must not be the thing that quietly discovers it."),
 }
 
 
@@ -4380,6 +4442,7 @@ def _ssh_remote_shape_problem(target: "DeployTarget") -> Optional[str]:
 def admit_deploy_map(placement: Mapping, *,
                      seams: Optional[Mapping] = None,
                      ir: Optional[Mapping] = None) -> DeployMapVerdict:
+                     seams: Optional[Mapping] = None) -> DeployMapVerdict:
     """Admit a deploy map BEFORE any boundary is opened.
 
     `ir` is the lowered composition the map deploys. When it is supplied, every
@@ -4413,6 +4476,11 @@ def admit_deploy_map(placement: Mapping, *,
       have landed for that one shape, and host-key checking is never
       trust-on-first-use (R4). Per :data:`TEARDOWN_PROMISE` there is still no
       teardown to promise across it.
+    * a **machine** boundary is refused outright. Not "best effort", not
+      "unpinned but warned". There is no landed cross-machine control plane
+      (no staged bundle, no remote ``deploy-admit``, no load-measured signed
+      receipt, no pinned SSH host key), and per :data:`TEARDOWN_PROMISE` there
+      is no teardown to promise across it either.
     * a **container** target that carries a cross-boundary seam is refused with
       the measured fact behind it, the same one
       `sandbox_runtime.ContainerDriver.preflight` refuses on: the seam is a
@@ -4749,6 +4817,8 @@ def deploy_admit_command(args) -> int:
     [--capability-ceiling NAME]... [--revoked-key KEY_ID]... [--recheck-source]
     [--runtime-version NAME=VER]...`, the far-side runner of the deploy
     orchestration channel (design §1.3 steps 4-5 / step 7).
+    [--require-conformance] [--runtime-version NAME=VER]...` — the far-side runner
+    of the deploy orchestration channel (design §1.3 steps 4–5 / step 7).
 
     It reads one JSON request per line off stdin, serves each with the host's OWN
     trust configuration (the key files, evidence floor and receiver-side rules
@@ -4766,6 +4836,14 @@ def deploy_admit_command(args) -> int:
     source-re-check policy (:class:`TrustStore`). They are opt-in: a runner that
     names none keeps the Slice 1 behaviour, and a request can never set or lift
     one.
+    trust configuration (the key files and evidence floor named on THIS command
+    line, never anything the request carries — the S2.4 trust inversion), and
+    writes one JSON reply per line to stdout. A PREPARE admit-request runs the
+    chain verify (:func:`serve_admit_request`); a COMMIT commit-request runs the
+    load-time measurement (:func:`serve_commit_request`); the routing is
+    :func:`serve_deploy_request`, the same dispatch :class:`InProcessTransport`
+    uses, so this process and the one-host stub behave identically. One process
+    serves BOTH phases over its lifetime, exactly as a real channel does.
 
     This is the process a live transport spawns: locally as
     ``python -m revl deploy-admit ...`` (see :meth:`StdioRunnerTransport.local`),
@@ -4774,6 +4852,10 @@ def deploy_admit_command(args) -> int:
     under the pinned host key (design R4/R5, :func:`stage_bundle_over_ssh`) and
     this runner verifies what lands; it never drives the local `apply`, which is
     the conductor's coordinated protocol (:func:`run_deploy`), unchanged.
+    and across a machine boundary as the same command behind ``ssh <host>`` once
+    the deferred staging + pinned-host-key leg (design R4/R5) lands. It stages and
+    verifies; it never drives the local `apply` — that is the conductor's
+    coordinated protocol (:func:`run_deploy`), unchanged.
 
     A line that is not a JSON object is answered with a fail-closed
     :data:`LINK_TRANSPORT` refusal rather than skipped: a runner that could not
@@ -4890,6 +4972,7 @@ def deploy_command(args) -> int:
     verdict each target would return WITHOUT opening any boundary. A machine
     boundary without a pinned `known_hosts` is refused outright, an unknown
     `via` is refused rather than read
+    boundary is refused outright, an unknown `via` is refused rather than read
     as local, and a container target whose seam set this plan cannot prove
     seam-free fail-closes to `seam-set-unknown` — every rule refuses rather than
     downgrades, because the map is unauthenticated operator input (design R4).
@@ -4922,6 +5005,7 @@ def deploy_command(args) -> int:
         return 1
 
     bundle_arg = getattr(args, "bundle", None)
+    verdict = admit_deploy_map(placement)
     as_json = getattr(args, "json", False)
     dry_run = getattr(args, "dry_run", False)
 
@@ -4933,6 +5017,7 @@ def deploy_command(args) -> int:
     # of `revl plan` is meant to make observable.
     chain: Optional[dict] = None
     chain_ok = True
+    bundle_arg = getattr(args, "bundle", None)
     if bundle_arg is not None:
         try:
             chain = admit_bundle_chain(
@@ -5024,6 +5109,7 @@ def deploy_command(args) -> int:
             backend=getattr(args, "backend", None) or "python",
             state_dir=state_dir, approval_path=decision_path,
             federation_id=Path(args.map).stem, generation=0, ir=ir,
+            state_dir=state_dir, federation_id=Path(args.map).stem, generation=0,
             ssh_exe=getattr(args, "ssh_exe", None) or "ssh",
             scp_exe=getattr(args, "scp_exe", None) or "scp")
     else:
@@ -5031,6 +5117,7 @@ def deploy_command(args) -> int:
                                   approval_path=decision_path,
                                   federation_id=Path(args.map).stem,
                                   generation=0, ir=ir)
+                                  federation_id=Path(args.map).stem, generation=0)
     if as_json:
         print(json.dumps(report, indent=2))
     else:
@@ -5171,6 +5258,8 @@ def launch_container_participant(
                       check=False).returncode != 0:
         pull = _childproc.run([exe, "pull", target.image], capture_output=True,
                               timeout=max(timeout, 300), check=False)
+        pull = subprocess.run([exe, "pull", target.image], capture_output=True,
+                              text=True, timeout=max(timeout, 300), check=False)
         if pull.returncode != 0:
             return None, (
                 f"target {target.process!r}: image {target.image!r} is neither "
@@ -5209,8 +5298,10 @@ def launch_container_participant(
             + [target.image, "python3", str(module), str(spec_path)])
     try:
         process = _childproc.popen(  # noqa: S603 — argv built above, no shell
+        process = subprocess.Popen(  # noqa: S603 — argv built above, no shell
             argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE)
+            stderr=subprocess.PIPE, text=True)
     except OSError as error:
         return None, (f"target {target.process!r}: could not start the "
                       f"container ({error})")
@@ -5235,6 +5326,11 @@ def launch_container_participant(
 # with no seam set here) admits only `via = local` targets and that pinned-ssh
 # case, so every participant this path builds is the conductor's own child on
 # this kernel.
+# (`via = local`). A container target is opened by `launch_container_participant`
+# and a machine boundary never admits; both stay outside this entry point, which
+# is honest because `admit_deploy_map` (called with no seam set here) admits only
+# `via = local` targets, so every participant this path builds is the conductor's
+# own child on this kernel.
 #
 # What is deliberately NOT here, and named so the boundary is explicit:
 #   * the attested-bundle staging and the host-side chain verify (§2, `admit`):
@@ -5249,6 +5345,7 @@ def launch_container_participant(
 
 def _local_participant_spec(process: str, components: Sequence[str],
                             state_dir: Path, *, generation: int = 0) -> Path:
+                            state_dir: Path) -> Path:
     """Write one LOCAL process's participant spec, derived from its declared
     components.
 
@@ -5316,8 +5413,10 @@ def launch_local_participant(
     argv = [exe, "-u", str(module), str(spec_path)]
     try:
         process = _childproc.popen(  # noqa: S603 — argv built above, no shell
+        process = subprocess.Popen(  # noqa: S603 — argv built above, no shell
             argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE)
+            stderr=subprocess.PIPE, text=True)
     except OSError as error:
         return None, (f"target {target.process!r}: could not start the local "
                       f"participant ({error})")
@@ -5344,6 +5443,9 @@ def deploy_local_map(placement: Mapping, *, state_dir: Path | str,
          drives), an unknown `via`, a network provider, and (with no seam set
          supplied here) every container target, so the only thing left to build
          here is a process-boundary child;
+         refuses a machine boundary, an unknown `via`, a network provider, and
+         (with no seam set supplied here) every container target, so the only
+         thing left to build is a process-boundary child;
       2. builds one :class:`ProcessParticipant` per process from that process's
          declared components (:func:`_local_participant_spec`);
       3. hands the ordered list to :func:`run_deploy`, which owns the commit
@@ -5355,6 +5457,7 @@ def deploy_local_map(placement: Mapping, *, state_dir: Path | str,
     even spawn (a PREPARE-time refusal: nothing committed, nothing to undo).
     """
     verdict = admit_deploy_map(placement, ir=ir)
+    verdict = admit_deploy_map(placement)
     if not verdict.ok:
         return {
             "protocol": PROTOCOL,
@@ -5368,6 +5471,7 @@ def deploy_local_map(placement: Mapping, *, state_dir: Path | str,
     # `via = local` (a container needs a proven-seam-free set this entry point
     # does not supply, and a machine target is routed through
     # :func:`deploy_ssh_map`), so a process
+    # does not supply, and a machine boundary is refused outright), so a process
     # with no `[deploy]` table and one that wrote `via = local` are the same
     # process-boundary child here.
     processes = placement.get("processes") or {}
@@ -5380,6 +5484,7 @@ def deploy_local_map(placement: Mapping, *, state_dir: Path | str,
             process=pname, via=VIA_LOCAL, raw={})
         spec_path = _local_participant_spec(pname, components, state_dir,
                                             generation=generation)
+        spec_path = _local_participant_spec(pname, components, state_dir)
         participant, error = launch_local_participant(
             target, spec_path=spec_path, python=python)
         if error is not None:
@@ -5540,6 +5645,7 @@ def deploy_ssh_map(placement: Mapping, *, local_bundle: Path | str,
     committed) and returns a `DEPLOY_REFUSED` report.
     """
     verdict = admit_deploy_map(placement, ir=ir)
+    verdict = admit_deploy_map(placement)
     if not verdict.ok:
         return {
             "protocol": PROTOCOL,
@@ -5575,6 +5681,7 @@ def deploy_ssh_map(placement: Mapping, *, local_bundle: Path | str,
             components = pconf.get("components") or []
             spec_path = _local_participant_spec(pname, components, state_dir,
                                                 generation=generation)
+            spec_path = _local_participant_spec(pname, components, state_dir)
             participant, error = launch_local_participant(
                 target, spec_path=spec_path, python=python)
             if participant is not None:

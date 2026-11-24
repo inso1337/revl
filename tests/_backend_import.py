@@ -18,6 +18,8 @@ and refuses one bound to another backend's file (issue #1449).
 """
 from __future__ import annotations
 
+import importlib.util
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,3 +34,14 @@ def backend_emitter(backend: str):
     from revl.placement import backend_emit_module
 
     return backend_emit_module(backend, root=ROOT / "backends")
+    """The ``emit`` module of ``backends/<backend>/``, under a unique,
+    per-path-cached module name."""
+    name = f"revl_{backend}_emit"
+    if name not in sys.modules:
+        path = ROOT / "backends" / backend / "emit.py"
+        spec = importlib.util.spec_from_file_location(name, path)
+        assert spec.loader is not None, path
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        sys.modules[name] = module
+    return sys.modules[name]

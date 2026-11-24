@@ -25,6 +25,7 @@
           "capabilities": [
             "db"
           ]
+          "emission": true
         }
       }
     },
@@ -57,6 +58,7 @@
           "capabilities": [
             "db"
           ]
+          "emission": true
         }
       }
     }
@@ -269,6 +271,7 @@
                     ]
                   },
                   "inverse": "table"
+                  }
                 },
                 {
                   "step": "emit",

@@ -4,6 +4,7 @@ The revl admission gate as an embeddable rust library. Roadmap item 332,
 Stage 3; design: `docs/design/332-embeddable-gate-api.md`.
 
 **GENERATED - do not edit by hand.** Every file in this directory is written by
+**GENERATED — do not edit by hand.** Every file in this directory is written by
 `tools/build_gate_crate.py` from the self-host compiler sources. CI regenerates
 from the same tree and fails on any byte difference
 (`tests/test_gate_crate_drift.py`). To change the crate, change the generator.
@@ -20,6 +21,7 @@ match admit(source) {
     // Definitive, and byte-agreeing with the reference on the covered corpus.
     Verdict::Refused { code, message } => reject(code, message),
     // NOT an admission - see below.
+    // NOT an admission — see below.
     Verdict::NoObjection => ask_the_reference(source),
     // The gate declined to decide at all.
     Verdict::OutsideFrontier { reason } => ask_the_reference(source),
@@ -29,6 +31,8 @@ match admit(source) {
 `admit` is a pure function: no disk, no clock, no live state, no cordis runtime
 boot. It is `selfhost/lower.rvl`'s `admit_src` - the native lex / parse /
 composition-guarantee chain - compiled to rust through the reference rust
+boot. It is `selfhost/lower.rvl`'s `admit_src` — the native lex / parse /
+composition-guarantee chain — compiled to rust through the reference rust
 backend.
 
 `admit_into` is the same gate across a composition boundary: the verdict on a
@@ -58,22 +62,31 @@ Read this before wiring the crate into anything.
 
 The self-host compiler is behind the reference implementation (roadmap item
 391), and the gap is not "a few missing constructs" - it is a whole missing
+391), and the gap is not "a few missing constructs" — it is a whole missing
 LAYER. `admit_src` decides the composition and guarantee layer (`G1`..`G4`,
 `A1`, `PRELUDE`, and parse failures as `BAD`). It does **not** run the
 reference's type layer, of which it runs one slice - the fn-body statement
 layer, and not the rest. Measured, not assumed: the reference refuses
+reference's type layer, of which it runs one slice — the fn-body statement
+layer — and not the rest. Measured, not assumed: the reference refuses both of
 
     type P = { x: Int }
     fn f() -> P { return { y: 1 } }
+    fn f() -> Int { return undefined_name }
+    fn f() -> { }
 
 and the self-host gate raises no objection to it. A return-type mismatch,
 `fn f() -> Int { return "s" }`, used to head that list, followed by
 `fn f() -> Int { return undefined_name }` and `fn f() -> { }`; each is refused
 here now, in the reference's own words.
+and the self-host gate raises no objection to either. A return-type mismatch,
+`fn f() -> Int { return "s" }`, used to head that list; it is refused here now,
+in the reference's own words.
 
 So `Verdict` has no admitting arm and no `is_admitted()`. Its non-refusing arm
 is `Verdict::NoObjection`, meaning *"this gate found nothing it is able to
 refuse"* - never *"the reference would admit this"*. On the wire, `to_json()`
+refuse"* — never *"the reference would admit this"*. On the wire, `to_json()`
 emits `"admitted": false` for **every** arm, so a consumer written against the
 design's fixed `{admitted, code, message}` shape reads the verdict surface as
 "never admits" rather than misreading a no-objection. The arm itself travels in
@@ -100,15 +113,19 @@ match revl_gate::issue_admission("service Store { fn get(key: Str) -> Str }") {
 are necessary:
 
 1. `admit(source)` returned `Verdict::NoObjection` - the composition/guarantee
+1. `admit(source)` returned `Verdict::NoObjection` — the composition/guarantee
    gate ran and found nothing to refuse. An admission is never issued over a
    refusal or a frontier gap.
 2. the source is inside the ADMISSION SURFACE (`ADMISSION_SURFACE_ID`,
    `src/admission.rs`) - the region where the covered layer, plus the terms
    `src/admission.rs` types ITSELF, is the WHOLE question.
+   `src/admission.rs`) — the region where the covered layer is the WHOLE
+   question, because the source carries no term the type layer decides.
 
 The surface is deliberately tiny, and its one line is `ADMITTED_LAYER`:
 
     interface declarations, and components whose provide-method bodies are parameter reads and calls on a required service, over a closed scalar type vocabulary; every term in the region is one this gate types itself
+    interface declarations only: service method signatures and scalar type aliases, over a closed scalar type vocabulary; no term the reference type layer decides
 
 That is not the covered layer read optimistically; it is the sliver of it where
 reading a no-objection as an admission is sound. Two kinds of source are in it.
@@ -124,6 +141,11 @@ operation. A source outside it is `Admission::Withheld` carrying the verdict
 verbatim, so switching a consumer from `admit` to `issue_admission` can only ADD
 the admitted wire - every other answer is byte-identical to the one it already
 handled. Widening the surface further is the self-host type layer's lane
+reading a no-objection as an admission is sound. No body, no expression, no
+literal, no generic head. A source outside it is `Admission::Withheld` carrying
+the verdict verbatim, so switching a consumer from `admit` to `issue_admission`
+can only ADD the admitted wire — every other answer is byte-identical to the one
+it already handled. Widening the surface is the self-host type layer's lane
 (`docs/design/457-selfhost-type-layer.md`).
 
 `issue_admission_into(source, manifest)` asks the same question against a running
@@ -137,6 +159,11 @@ wire names, because a same-name component is a REPLACEMENT whose handoff and
 unmet-consumer reasoning belongs to the fold. In exchange the wire's service
 block is what a certified provide-method body's calls are TYPED against, which
 is how a candidate requiring an ambient service can be admitted at all.
+carries one obligation more: nothing it declares may REDECLARE a service the
+running composition already declares. That is the only interaction the reference
+has between an interface-only candidate and a running manifest, and it is gated
+there on the §5 compatibility relation — the type layer — so a redeclaration is
+withheld while a fresh interface is admitted.
 
 The running names arrive in the item-186 wire's SERVICE BLOCK: a `!services`
 header followed by one `:S,op,op` row per declared service
@@ -144,6 +171,7 @@ header followed by one `:S,op,op` row per declared service
 operations it declares. The header is the load-bearing half. A wire without it CLAIMS
 NOTHING about the running services, so the set is unknown rather than empty and
 any declared service is withheld, exactly as before the block existed - silence
+any declared service is withheld, exactly as before the block existed — silence
 is never read as "declares nothing". Two things the block still does not buy: a
 redeclaration stays withheld, because the block carries the service name and not
 its shape; and a wire carrying a WITHDRAWAL row (`-C`) is declined outright,
@@ -152,6 +180,7 @@ which provisions survive it.
 
 An issued admission serialises `{"verdict":"admitted","admitted":true,
 "code":null,"message":null}` - byte-identical to `revl.gate`'s own wire for a py
+"code":null,"message":null}` — byte-identical to `revl.gate`'s own wire for a py
 admission, so a seam comparing the two tiers compares equal bytes. The basis is
 off the wire on purpose: it is evidence for a log, not part of the contract.
 
@@ -165,6 +194,7 @@ crate returns it whenever:
   the deeply-recursive native front end ABORTS, and an abort cannot be turned
   back into a refusal);
 * the source has more items at one bracket level than the gate will decide -
+* the source has more items at one bracket level than the gate will decide —
   the emitted parser recurses once per SIBLING item, so a flat `g(1, 1, …)` a
   few KB long and one bracket deep exhausts the stack where neither the size
   bound nor the nesting bound can see it. The bound is
@@ -206,6 +236,7 @@ realms a running component routes a key across, `!services` + `:S,op,op` for
 the services the composition declares and the operations each offers,
 `!halted` for a halted composition, joined by `;`. The empty manifest is the empty composition,
 so `admit_into(source, "")` is `admit(source)` byte for byte - the arm
+so `admit_into(source, "")` is `admit(source)` byte for byte — the arm
 generalises `admit` rather than re-implementing it.
 
 Two honest limits, both fail-closed:
@@ -218,6 +249,7 @@ Two honest limits, both fail-closed:
   declare is refused `A6` in the reference's own words, and the same call to an
   operation it does declare is not. That resolution runs only where the wire made
   the claim - a `:S` row with no operation list says nothing about the running
+  the claim — a `:S` row with no operation list says nothing about the running
   surface, and silence decides nothing. Argument typing, arity and the §5
   compatibility relation on a redeclared SERVICE are still the type layer's. The
   reference remains the only tier that admits.
@@ -233,6 +265,7 @@ Two honest limits, both fail-closed:
   blocker is no longer packaging: the native rust emitter IS in this crate (see
   `emit_ir` below). What is missing is a native FRONTEND whose IR byte-agrees
   with the reference - the self-host's `lower_to_ir` is behind the reference's
+  with the reference — the self-host's `lower_to_ir` is behind the reference's
   (roadmap item 391). It is pinned byte-exact only on the document set
   `tests/test_selfhost_compile.py` names (`RUST_FUNCTION_DOCS` +
   `RUST_COMPONENT_DOCS`), which is far narrower than this crate's covered
@@ -273,6 +306,7 @@ Two honest limits, both fail-closed:
 
 `emit_ir(ir_document, Tier::Rust)` takes a staged interchange IR document as
 JSON TEXT - the shape `revl compile --emit-ir` writes - and returns rust source.
+JSON TEXT — the shape `revl compile --emit-ir` writes — and returns rust source.
 No Python, no reference compiler, no cordis runtime in the call.
 
 The emitter is `selfhost/emit_rust.rvl`, generated into the same `selfhost`
@@ -290,6 +324,7 @@ emitter. It is not an admission and never reads `admitted:true`.
 What it claims is scoped to what it was measured on: a document the REFERENCE
 frontend produced. It claims nothing about an IR document assembled some other
 way, and - see `compile_to` above - nothing about compiling revl source
+way, and — see `compile_to` above — nothing about compiling revl source
 end to end.
 
 ## Host obligations
@@ -297,6 +332,7 @@ end to end.
 * Build the calling profile with `panic = "unwind"`. Under `panic = "abort"` the
   fail-closed panic path cannot run and a native gate abort takes the process
   down instead. Loud, so still not a false admission - but not the intended
+  down instead. Loud, so still not a false admission — but not the intended
   behaviour.
 * The default panic hook prints to stderr when the fail-closed path fires.
   Install your own hook if that matters.
@@ -309,6 +345,7 @@ use revl_gate::symbols::{symbols, Symbols};
 match symbols(source) {
     // Every top-level declaration this crate will resolve, and the line each
     // was declared on. A name that is ABSENT is not "undeclared" - it is "not
+    // was declared on. A name that is ABSENT is not "undeclared" — it is "not
     // resolvable here", and the caller must ask the reference.
     Symbols::Table(rows) => navigate(rows),
     // Not entitled to answer for this document at all.
@@ -319,6 +356,7 @@ match symbols(source) {
 A second surface over the same front end, for editor navigation (roadmap item
 336 slice 2): go-to-definition and the signature half of hover. It issues no
 verdicts - a program the gate REFUSES still has declarations to navigate - so it
+verdicts — a program the gate REFUSES still has declarations to navigate — so it
 is versioned by `SYMBOLS_API_VERSION`, not by the gate api above.
 
 Its fail-closed rule mirrors the gate's, pointed at the risk navigation actually
@@ -336,6 +374,7 @@ signature it cannot spell the way the reference spells it comes back as
     // api      "1.0.0"
     // language "2.0.0"
     // frontier "selfhost-admit:<identity>"
+    // frontier "selfhost-admit:584fa3b051add6fc"
     // layer    "composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer"
 
 `api` is the gate surface semver (bumped by surface changes only); the
@@ -346,5 +385,6 @@ languages, and their agreement carries no information. `<identity>` is the
 first 16 hex digits of a sha256 that `build.rs` computes over this crate's
 `Cargo.toml`, `build.rs` and `src/**/*.rs` when cargo builds it, so it names the
 bytes compiled and no committed file stores it. `layer` says in prose
+languages, and their agreement carries no information. `layer` says in prose
 what the gate decides. Codes are append-only; message text is not promised
 stable across versions.

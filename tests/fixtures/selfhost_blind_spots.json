@@ -23,6 +23,8 @@
     "blind": {
       "The frontend lowers the `var` keyword to a `step` of `let` with `mutable=true`, so no corpus document can spell a `step=var` step. The reference's `_emit_method_body` renders both kinds (`s in (\"let\", \"var\")`), and `selfhost/emit_go.rvl` mirrors that arm for the provide-method slice, so the construct is mirrored rather than a port gap. It is reachable only from pre-lowered or hand-written IR; the live and combined documents this slice carries all bind through `step=let`.": [
         "step=var"
+      "Legacy component expression vocabulary: _expr uses name/fn/format and typed literal kinds, whereas canonical pure v3 IR uses var/call/interp/lit. emit_go.rvl has compatibility name lookup, but the corpus frontend does not emit these component encodings; their presence in this syntax census is not missing pure literal/call support.": [
+        "kind=name"
       ]
     },
     "unported": {
@@ -33,7 +35,10 @@
         "class=emission"
       ],
       "Legacy component expression vocabulary: _expr uses name/fn/format and typed literal kinds, whereas canonical pure v3 IR uses var/call/interp/lit. emit_go.rvl has compatibility name lookup, but the corpus frontend does not emit these component encodings; their presence in this syntax census is not missing pure literal/call support. Issue #106: a v3 provide method's own body does spell `name` and `fn` (a parameter, a module fn call), and the combined slice ports and reaches both, so they left this list.": [
+      "Legacy component expression vocabulary: _expr uses name/fn/format and typed literal kinds, whereas canonical pure v3 IR uses var/call/interp/lit. emit_go.rvl has compatibility name lookup, but the corpus frontend does not emit these component encodings; their presence in this syntax census is not missing pure literal/call support.": [
         "kind=bool",
+        "kind=fn",
+        "kind=format",
         "kind=int",
         "kind=str"
       ],
@@ -41,9 +46,13 @@
         "step=assert_no_residue"
       ],
       "Live stc-go component/lifecycle ABI: config, requires/provides, host acquisitions, spawn handles, streams/timers, effects and undo/load/unload harness steps. The pure selfhost emit_src entry does not assemble activation/service/runtime code; these are explicitly excluded by its module-only scope. item 130 Slice 2 added the derived-stream combinator chain (`map`/`filter`/`take`) to this reference emitter as nested `stage` links inside the subscription's acquisition, so the three `stage=` constructs join the same unported set for the same reason: the port emits no stream lowering at all. Issue #106 ports the combined path's provide-only slice (a `provide` block of single-`return` methods, required services and the service interfaces), so `step=provide`, `kind=req` and `idempotent` left this list. Its fourth slice ports a component `config` block read from provide bodies, so `kind=config` left too, and its fifth slice ports `emit` steps in provide bodies (a site `compensate` clause on the activation frame included), so `step=emit` left as well; the rest of the live ABI stays here.": [
+      "Live stc-go component/lifecycle ABI: config, requires/provides, host acquisitions, spawn handles, streams/timers, effects and undo/load/unload harness steps. The pure selfhost emit_src entry does not assemble activation/service/runtime code; these are explicitly excluded by its module-only scope. item 130 Slice 2 added the derived-stream combinator chain (`map`/`filter`/`take`) to this reference emitter as nested `stage` links inside the subscription's acquisition, so the three `stage=` constructs join the same unported set for the same reason: the port emits no stream lowering at all.": [
         "has_config=<true>",
+        "idempotent=<true>",
+        "kind=config",
         "kind=host",
         "kind=instance-get",
+        "kind=req",
         "kind=spawn",
         "kind=stream-merge",
         "kind=subscribe",
@@ -57,19 +66,25 @@
         "step=await",
         "step=call",
         "step=effect",
+        "step=emit",
         "step=fail",
         "step=intercept",
         "step=let-effect",
         "step=load",
+        "step=provide",
         "step=stream-iter",
         "step=timer",
         "step=unload",
+        "step=var",
         "subscribe=<true>"
       ],
       "Spellings of the built-in constructors the frontend never produces in pure v3 IR, so the reference's arms for them are unreachable and the port does not branch on them (issue #106 ported the built-in Opt/Result surface itself: construction, `??`, `match` on the two-value structs and optional chaining are all in the corpus). `Some`/`None` never lower to a tagged `adt` node (src/revl/lower.py keeps Opt untagged, so there is no `case=Some`/`case=None`), and `Ok`/`Err` always lower to a tagged `adt` node, never to a call on a bare `var` callee (so there is no `name=Ok`/`name=Err` from either). A user variant can still declare its own case named `Ok`: backends/java/scenarios/runtime_values.rvl's `Outcome` does, and that document joined the go corpus with issue #106's fifth slice, so `name=Ok` left this list.": [
+      "Spellings of the built-in constructors the frontend never produces in pure v3 IR, so the reference's arms for them are unreachable and the port does not branch on them (issue #106 ported the built-in Opt/Result surface itself: construction, `??`, `match` on the two-value structs and optional chaining are all in the corpus). `Some`/`None` never lower to a tagged `adt` node (src/revl/lower.py keeps Opt untagged, so there is no `case=Some`/`case=None`), and `Ok`/`Err` always lower to a tagged `adt` node, never to a call on a bare `var` callee (so there is no `name=Ok`/`name=Err`).": [
         "case=None",
         "case=Some",
         "name=Err"
+        "name=Err",
+        "name=Ok"
       ],
       "Surviving service/config/extern secret markings select runtime redaction through _declares_secret only after Go's pure-module early return. The corpus already covers a Secret extern return wrapper, but it does not establish parameter/call-descriptor or secret-witness WAL redaction parity (roadmap 421F6).": [
         "secret=<true>"
@@ -112,8 +127,12 @@
     },
     "unported": {
       "Existing built-in Result construction boundary: _uses_builtin_result and the constructor path read an Ok/Err adt case; the port defers construction behind <<UNSUPPORTED-result-ctor:..>>, and strict result_ctor_302.rvl preserves the family divergence. A match over a Result is ported and boxed_generics.rvl covers it.": [
+      "Existing built-in Result boundary: _v3_match_expr emits Ok/Err switch arms and _uses_builtin_result inspects cases/patterns; the port has no Result runtime. Strict result_ctor_302.rvl preserves the family divergence.": [
         "case=Err",
         "case=Ok"
+        "case=Ok",
+        "pattern=Err",
+        "pattern=Ok"
       ],
       "Existing destructuring boundary: _v3_stmt/_emit_setup_stmt handle let_pattern record/list bindings; the port v3_stmt has no destructuring arm and setup is rejected by its component gate.": [
         "pattern=record",
@@ -177,11 +196,45 @@
   },
   "py": {
     "blind": {},
+    "blind": {
+      "Retained Path B async boundary (items 146/391): emit_py.rvl::emit_externs can spell async def but does not reproduce emit.py::_py_yields_coroutine/_py_async_arrow or await insertion. emit_ts_corpus/async_module_local.rvl and services_async.rvl reproduce missing async def/metadata; test_named_runtime_and_harness_boundaries pins both. An async extern declaration alone would falsely imply complete async support.": [
+        "async=<true>"
+      ]
+    },
     "unported": {
+      "Async stream runtime boundary: emit.py::_stream_head/_stream_iter/_ComponentEmitter._expr implement merge, subscribe policy/capacity/drain and take stages, event windows and awaited iteration. emit_py.rvl::cexpr/body_step lacks those paths. backends/go/testdata/stream_130.rvl reproduces subscribe/await; tests/test_stream_reactive.py supplies merge/stage/event inputs. Item 130 \u00a74.9 adds `subscribe=<true>`: the durable-cursor subscription registers a self-describing disposer (`sub.durable_undo()`) so `revl recover` can re-issue it, and emit.py branches on the step flag to emit it. It is on the same stream path as the rest of this entry, and tests/test_crash_recovery.py pins the reference half.": [
+        "kind=stream-merge",
+        "kind=subscribe",
+        "stage=take",
+        "step=await",
+        "step=stream-iter",
+        "subscribe=<true>"
+      ],
+      "Async-runtime planner boundary: emit.py::_group_eligible requires idempotent emissions with safe compensation; _emit_parallel_group emits await/flush/raise ordering and emit adds service metadata. emit_py.rvl::emit_services_table/body_step has sequential dispatch only. tests/test_parallel_259.py::HDR and its commutative/disjoint cases reproduce the family. Witnessed undo_idempotent registration is separately supported.": [
+        "commutative=<true>",
+        "idempotent=<true>"
+      ],
       "Capability runtime boundary: emit.py::_ComponentEmitter._expr emits frame.acquire_lease and handle.revoke; _approval_step/_emit_fire implement approval handles/crossings. The port lacks capability-frame lowering. Representative accepted inputs: tests/test_capability_leases.py::_SOURCE and tests/test_approval_typed.py. This is not ordinary effect/witnessed registration.": [
         "kind=lease-acquire",
         "kind=lease-revoke",
         "step=approval"
+      ],
+      "Deferred delivery runtime boundary: emit.py::_deferred_step/_deferred_register_kwargs register emit_deferred with argument-position idempotency keys; emit_py.rvl::body_step/method_step issue ordinary calls. tests/test_standing_approval.py::_SOURCE declares extern emission deferred fn deliver. This is distinct from the now-ported witnessed transactional registration.": [
+        "deferred=<true>"
+      ],
+      "Existing deterministic-destructuring boundary: emit.py::_let_pattern_stmt emits record bindings and exact/rest list unpacking using _Lines.next_destructure_seq. emit_py.rvl::fn_stmt has no let_pattern arm. Representative let {a} = record and let [a, ...rest] = list forms are in tests/test_v2_language.py. Item 179 removed id-based naming, not this port omission.": [
+        "pattern=list",
+        "pattern=record",
+        "step=let_pattern"
+      ],
+      "In-file harness boundary: emit.py::_emit_tests/_emit_lifecycle_test/_lifecycle_step emit Context/clock/abort/load/unload/call/residue orchestration; emit_py.rvl::emit_py_src has no REVL_TESTS generation. examples/lifecycle_wasm.rvl and examples/durable_log.rvl reproduce omission; tests/test_lifecycle_abort.py covers abort. Named boundary tests pin the missing trailer.": [
+        "lifecycle=<true>",
+        "step=abort",
+        "step=advance",
+        "step=assert_no_residue",
+        "step=call",
+        "step=load",
+        "step=unload"
       ],
       "Intentional refusal, not missing positive emission: emit.py::_refuse_holes rejects kind=hole before rendering. tests/test_holes.py supplies ?? source inputs. A successful byte-oracle document cannot contain an unresolved hole; adding one would incorrectly require reference emission.": [
         "kind=hole"
@@ -191,6 +244,12 @@
       ],
       "UI transaction unit boundary (item 522): emit.py::_ui_transaction_facts groups a computer-use extern's crossings into per-method transaction units and _emit_externs decorates each such extern with `declared_crossing` (`ui=True`). Issue #1972 ported the unit into emit_py.rvl and added tests/fixtures/emit_py_corpus/ui_transaction_unit.rvl, so the decorator, the `uiTransaction`-style scope and the activation-plan skip are now byte-covered on both sides; the one construct this row still records is the activation-scoped plan's `key=<activation>`, and it is UNMEASURABLE rather than unported. This ratchet reads its reach from the COMPILED IR (`_pairs` over `compile_files`), while `key=<activation>` is a string `revl.ui_transaction.plans` writes at EMIT time (src/revl/ui_transaction.py:1183) - it never appears in any document's IR, so no corpus document can ever move this entry, and deleting it fails the gate with NEWLY UNREACHED. tests/test_ui_transaction_runtime_1369.py reproduces the family.": [
         "key=<activation>"
+      "Spawn/instance runtime boundary: emit.py::_ComponentEmitter._expr calls runtime spawn and handle.get; emit_py.rvl::cexpr emits markers. backends/go/scenarios/accessor.rvl reproduces both; the spawn marker is independently pinned by test_named_runtime_and_harness_boundaries.": [
+        "kind=instance-get",
+        "kind=spawn"
+      ],
+      "Validated runtime/model-flow boundary: emit.py::_validated_call/_ctor_map/_ComponentEmitter._expr wrap completion in validate_response/validate_retry with schema/constructors; emit_py.rvl::cexpr emits raw calls. Named inputs: tests/test_validated_boundary.py::test_emit_wraps_validated_call_and_is_byte_identical_when_absent and tests/test_validated_retry_257s2.py::test_emit_wraps_only_the_completion_call_in_the_retry_thunk. Ordinary ADT construction/Secret[T] marking are supported.": [
+        "validated=<true>"
       ]
     }
   },
@@ -200,6 +259,7 @@
         "class=emission"
       ],
       "Named only in order to REFUSE loudly. A witnessed-extern acquisition registers the extern's DECLARED inverse transactionally rather than the site-spelled bracket, and a `spawn` acquisition binds a live-instance handle over a runtime ABI this port does not assemble; both select an `<<UNSUPPORTED-*>>` marker instead (`<<DEFER-*>>` before issue #2367). Mirrored so the refusal is precise, not so the lowering is (issue 1153).": [
+      "Named only in order to REFUSE loudly. A witnessed-extern acquisition registers the extern's DECLARED inverse transactionally rather than the site-spelled bracket, and a `spawn` acquisition binds a live-instance handle over a runtime ABI this port does not assemble; both select a `<<DEFER-*>>` marker instead. Mirrored so the refusal is precise, not so the lowering is (issue 1153).": [
         "class=witnessed",
         "kind=spawn"
       ],
@@ -227,11 +287,19 @@
       ],
       "The reference emits record/list destructuring in _v3_let_pattern, including a temporary name derived from output position. The self-host emitter tracks let_pattern names for lexical analysis but deliberately has no matching statement renderer.": [
         "step=let_pattern"
+      ],
+      "The one entrance to the host-runtime gate the corpus cannot take. `emit_host_stubs` rides the R1 live-resource counter along for a lifecycle test as well as for a host object, an armed timer or a stream; the corpus reaches the gate through the host-`Map`, timer and stream doors, so the counter and the block selection ARE exercised. The lifecycle door is not reachable while agreeing, because the port defers the in-file test section that declares a lifecycle test (issue 1153).": [
+        "lifecycle=<true>"
+      ],
+      "The `advance` step, read ONLY to decide whether the clock/timer preamble rides along: a lifecycle test that drives the clock needs `revl_clock_advance`/`revl_clock_reset` even when no component arms a timer (item 112), so the preamble gate reads the step name. Nothing renders it. No corpus document can reach it while agreeing, for the same reason the lifecycle door above is unreachable: the port defers the in-file test section the step lives in, so a document declaring one diverges on the missing section rather than on this gate (issue 1153).": [
+        "step=advance"
       ]
     },
     "unported": {
       "Issue #1369 (item 522 slice 3): the UI transaction unit. emit.py::_ui_transaction_facts groups a computer-use extern's crossings into per-method transaction units, skipping the activation-scoped plan (`key=<activation>`, which the activation frame settles itself), and each unit method runs its body under `catch_unwind` in a `RevlUiScope`, each computer-use crossing through `revl_ui_cross`. emit_rust.rvl carries no UI transaction unit (the self-host gap of issue #1972). The corpus has no computer-use document with @rs bodies. The runtime proof is backends/rust/test_ui_transaction_rust_1369.py.": [
         "key=<activation>"
+      "Issue #1592: an extern of `class=emission` that declares `compensate` registers that compensation at every site it is emitted from: an activation `emit`, a provide-method `emit` and every other position of a provide method (a block expression registering on `revl_teardown_of(&self.ctx)` for a `let`, a `return`, an argument, a nested operand or an `if` arm), and a timer firing. selfhost/emit_rust.rvl ports no compensation registration, so no emit_rust_corpus document can carry it; the runtime proof is backends/rust/test_emit_rust.py (test_extern_declared_compensation_registers_at_every_site and test_declared_compensation_registers_in_every_value_position, real cordis-rs).": [
+        "class=emission"
       ],
       "Item 421 F6 (#392) added the declared-`Secret[T]` runtime registry to the reference rust backend (backends/rust/emit.py): a `secret` config field is registered at the head of the plugin closure, a `secret` provide-method parameter at the method head, and a `secret_return` extern is wrapped at its origin, with every emitted-runtime sink (the host trace `revl_stream_record` and the WAL descriptor args under `--record`) reading through `revl_redact_text`. The item-199 Path B self-host rust emitter (selfhost/emit_rust.rvl) has not been extended to it yet; a corpus document reaching these markings would trigger the reference's `_SECRET_MODE` redaction while the port emits none, reddening the byte-agreement oracle, so they stay a named unported baseline until emit_rust.rvl ports the registry (item-429(d)).": [
         "secret=<true>",
@@ -244,7 +312,11 @@
         "name=Map",
         "name=remove"
       ],
+      "The reference Rust builtin renderer implements these positional-string, mutable-collection, conversion, and repetition families. The self-host renderer's supported subset ends at covered length/to_str/read-only string operations and returns an explicit unsupported marker for these methods.": [
+        "method=set"
+      ],
       "These expression and destructuring forms are rejected before or inside the self-host pure-v3 renderer: unresolved holes, legacy format nodes, optional call/field chaining, record update, and list/record binding patterns all require lowering absent from the port.": [
+        "bind=_",
         "kind=hole",
         "kind=optcall",
         "kind=optfield",
@@ -294,6 +366,7 @@
         "op=??"
       ],
       "The WASM reference lowers Float operands as native f64 instructions since issue #3295, but selfhost/emit_wasm.rvl has no f64 lowering at all (issue #3425), so a Float-operand document is a named port gap rather than a byte-agreement case and no CORPUS document can reach this marker until the port learns f64. Named integer division builtins are a separate covered family.": [
+      "The WASM reference explicitly rejects operands=Float and Float-valued module types. Source / yields Float (including Int/Int), so its legacy integer WAT instruction entry is not evidence of supported source division; named integer division builtins are a separate covered family.": [
         "operands=Float"
       ],
       "parser._CANONICAL_OPS rewrites source ===/!== to ==/!= before typed IR. Compatibility aliases remain in cmp_suffix, but canonical source equality already exercises ==/!=.": [
@@ -310,6 +383,7 @@
         "kind=__wat"
       ],
       "Interpolation and indexOf/join/split/to_char demand helper bodies absent from the selfhost preamble and are explicit oracle deferrals. Component format is the older $0-template encoding rewritten to interp; ordinary binary Str concatenation is covered.": [
+      "Interpolation and indexOf/join/split demand helper bodies absent from the selfhost preamble and are explicit oracle deferrals. Component format is the older $0-template encoding rewritten to interp; ordinary binary Str concatenation is covered.": [
         "kind=format",
         "kind=interp",
         "method=indexOf",
@@ -322,11 +396,13 @@
       ],
       "Issues #1511, #1592 and #1979: an extern of `class=emission` that declares `compensate` registers that compensation at every site it is emitted from \u2014 an activation `emit` compiles it into the activation's static `entries` list, and a provide-method `emit` appends it to the RUNTIME `$__mc_*` accumulator (a method body runs once per request, so a fixed entry list cannot hold it), which `deactivate` drains newest-first on abort and never walks on commit. A declared `compensate` this tier still cannot register is refused by name. All of it is _ComponentEmitter (live component) emission, which the module-only selfhost port does not instantiate, so no emit_wasm_corpus document can carry it; the runtime proof is backends/wasm/test_declared_compensate_1979.py.": [
         "class=emission"
+        "method=split"
       ],
       "Legacy component reference spelling consumed by _ComponentEmitter; canonical pure source references lower to kind=var. This syntax-census mismatch does not mean variable reads are unsupported.": [
         "kind=name"
       ],
       "Live component activation/provide/job/spawn/resource and witnessed undo ABI is implemented by the separate _ComponentEmitter, which the module-only selfhost port does not instantiate. This includes teardown/transactional frames, secret-witness WAL metadata and the issue #1577 refusal of a witnessed extern that takes a `secret` parameter; runtime redaction remains a separate roadmap 421F6 boundary.": [
+      "Live component activation/provide/job/spawn/resource and witnessed undo ABI is implemented by the separate _ComponentEmitter, which the module-only selfhost port does not instantiate. This includes teardown/transactional frames and secret-witness WAL metadata; runtime redaction remains a separate roadmap 421F6 boundary.": [
         "async=<true>",
         "class=witnessed",
         "fn=Job.run",
@@ -367,6 +443,9 @@
         "pattern=_",
         "payload_type=Any"
       ],
+      "The WASM reference explicitly rejects operands=Float and Float-valued module types. Source / yields Float (including Int/Int), so its legacy integer WAT instruction entry is not evidence of supported source division; named integer division builtins are a separate covered family.": [
+        "op=/"
+      ],
       "The WASM reference explicitly rejects record update and optional field/call chaining. Plain records/field reads and Opt construction are covered but do not provide these operations.": [
         "kind=optcall",
         "kind=optfield",
@@ -376,6 +455,7 @@
         "kind=hole"
       ],
       "The whole checked-division family is unported on this tier: selfhost/emit_wasm.rvl carries the $int_* arithmetic helper bodies but not the _builtin_expr arm that lowers checked_div_trunc/floor/euclid/mod into tagged Ok/Err cells, and no wasm corpus document spells a checked division call. (The total arithmetic forms checked_add/sub/mul ARE ported, through the same tagged-cell machinery, and emit_py_corpus/checked_arith.rvl reaches them on this tier.) Only `checked_mod` shows up as a construct here because it is the one member the reference names by itself \u2014 it is the exception to the Int.MIN/-1 overflow Err the other three answer, since its own answer at that divisor is 0. The rest of the family reaches the reference through `method in _CHECKED_DIVS`, which is not a discriminant this census reads. A corpus case would need the tagged-union port first.": [
+      "The whole checked-division family is unported on this tier: selfhost/emit_wasm.rvl carries the $int_* arithmetic helper bodies but not the _builtin_expr arm that lowers checked_div_trunc/floor/euclid/mod into tagged Ok/Err cells, and no wasm corpus document spells a checked_* call. Only `checked_mod` shows up as a construct here because it is the one member the reference names by itself \u2014 it is the exception to the Int.MIN/-1 overflow Err the other three answer, since its own answer at that divisor is 0. The rest of the family reaches the reference through `method in _CHECKED_DIVS`, which is not a discriminant this census reads. A corpus case would need the tagged-union port first.": [
         "method=checked_mod"
       ]
     }

@@ -209,12 +209,21 @@ cordis-wasm tier carries `Int` as an **i64**, `Float` as a native **f64**, and
 `Str`, `Bytes`, lists, records, variants, `Opt` and `Result` cross its service
 boundary as canonical-ABI pointers into linear memory. What it refuses is
 **`Map` and declared function types**, and nothing else
+cordis-wasm tier carries `Int` as an **i64**, and `Str`, `Bytes`, lists,
+records, variants, `Opt` and `Result` cross its service boundary as
+canonical-ABI pointers into linear memory. What it refuses is **`Float`,
+`Map` and declared function types**, and nothing else
 (`backends/wasm/emit.py`, `_V3Emitter._check_type`, whose refusal reads "type
 'Map[Str, Int]' is not lowerable — this tier supports
 Int/Int32/Float/Bool/Str/Bytes/List/record/variant/Opt/Result values", with a
 separate message for a declared function type). WIT `f32`/`f64` map to `Float`,
 which now lowers, so a world reaching for a float is no longer the gap; a world
 of strings, records and lists imports *and* emits. With `--backend py`,
+'Float' is not lowerable — this tier supports
+Int/Bool/Str/Bytes/List/record/variant/Opt/Result values", with a separate
+message for a declared function type). WIT `f32`/`f64` map to `Float`, so a
+world reaching for a float is the remaining gap; a world of strings, records
+and lists imports *and* emits. With `--backend py`,
 `tests/fixtures/wit/catalog.wit` goes all the way to a cordis-py module
 instead.
 

@@ -785,6 +785,7 @@ is a translation layer at the three existing seams:
   spec and seam identity, and the compile-input FILES (never a directory that
   holds them) with no working-directory mount. The `docker run` CLIENT is the
   conductor's child
+  envelope and printed. The `docker run` CLIENT is the conductor's child
   process: stdout pumps through the existing `pump` thread (UP/DOWN/
   REPOINTED lines unchanged), stdin gives the rust stop mode a path, and
   signal proxying makes `_stop_all`'s terminate reach the runner inside.
@@ -883,8 +884,10 @@ byte-identical throughout (the 342/363/396 additivity discipline).
   passive interface list is not evidence, because a `--network=none`
   namespace still shows the kernel's address-less tunnel stubs. Every failure
   is a refusal: no driver for the rung, no runtime, an unresolvable image, a
+  is a refusal — no driver for the rung, no runtime, an unresolvable image, a
   non-py backend, an image that cannot host the runner, or any clause the
   canary cannot confirm, so a declared isolation is never downgraded to an
+  canary cannot confirm — so a declared isolation is never downgraded to an
   ordinary process. The rung ACHIEVED and its evidence print in the boot
   summary; the static `revl audit --placement` view says which rungs have a
   driver at all, and therefore which placements would refuse.

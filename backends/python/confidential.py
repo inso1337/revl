@@ -485,6 +485,7 @@ def redact_value(value: Any, _path: Optional[set] = None) -> Any:
             (REDACTED if is_secret_value(k) else str(k)): redact_value(v, _path)
             for k, v in value.items()
         }
+        rendered = {str(k): redact_value(v, _path) for k, v in value.items()}
         _path.discard(id(value))
         return rendered
     return repr(value)

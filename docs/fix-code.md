@@ -13,16 +13,20 @@ text range and its replacement — for the diagnostics whose rewrite is
 unambiguous.
 
 One engine produces the edit; three front doors expose it:
+One engine produces the edit; two front doors expose it:
 
 - the LSP quick fix (`textDocument/codeAction`), for a person in an editor;
 - the agent payload (`fix_code`), for a tool acting on a structured rejection;
 - the MCP verb `revl_apply_repair` (issue #2855), which applies the verified
   edit a refusal carries and returns the repaired candidate with its re-check.
+- the agent payload (`fix_code`), for a tool acting on a structured rejection.
 
 All three are in `src/revl/lsp/fixgen.py`. The LSP wiring is
 `compute_code_actions` in `src/revl/lsp/analysis.py`; the agent entry point is
 `fixgen.fix_code`; the MCP store and apply path is
 `src/revl/mcp/refusal_repair.py`.
+Both are in `src/revl/lsp/fixgen.py`. The LSP wiring is `compute_code_actions`
+in `src/revl/lsp/analysis.py`; the agent entry point is `fixgen.fix_code`.
 
 ## The stance: verified or nothing
 
@@ -260,6 +264,8 @@ installed. An id the session never minted is
 `UNKNOWN_REPAIR`; one minted before a load, swap, rollback or undo moved the
 unit of work is `STALE_REPAIR`. See
 [mcp-reference.md](mcp-reference.md#revl_apply_repair).
+the LSP code action and the agent payload carry byte-identical edits. (An MCP
+verb over `fix_code` is left for later; this item ships the engine.)
 
 ## Adding a code
 
@@ -268,5 +274,6 @@ A new fixable code is one entry in `_GENERATORS`, its generator, and a proof in
 both front doors need no change. A new code in the candidate-repair list is an
 entry in `_REPAIR_GENERATORS`, its generator, a kind tuple in
 `diagnostics.REPAIR_KINDS`, and a proof in `tests/test_repairs_2759.py`. The proof is end to end: the diagnostic, the
+both front doors need no change. The proof is end to end: the diagnostic, the
 generated edit, and a re-check of the *patched* source showing the rejection is
 gone — the same bar every code here already clears.

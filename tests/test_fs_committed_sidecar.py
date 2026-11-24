@@ -190,6 +190,7 @@ def _worker(case, base, api, ws):
         # Durable host ledger artifacts, outside the workspace; not runtime receipts.
         prepared = base / "prepared.json"
         with prepared.open("w", encoding="utf-8") as file:
+        with prepared.open("w") as file:
             json.dump(ownership, file)
             file.flush()
             os.fsync(file.fileno())
@@ -202,6 +203,7 @@ def _worker(case, base, api, ws):
         assert report["committed"], report
         assert all(e.discharged and not e.replayed for e in entries)
         with (base / "confirmed.json").open("w", encoding="utf-8") as file:
+        with (base / "confirmed.json").open("w") as file:
             json.dump(report, file)
             file.flush()
             os.fsync(file.fileno())

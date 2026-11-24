@@ -308,6 +308,7 @@ const REVL_WAL_GUARANTEE: &str = "the WAL records each committed effect's step i
 /// record that never became durable. `REVL_WAL_ALLOW_UNSYNCED=1` is the
 /// explicit opt-out for a target that cannot fsync; it is stamped into the
 /// log itself.
+/// matter. Mirrors the go tier's `revlWAL`.
 struct RevlWal {
     file: std::fs::File,
     seq: u64,
@@ -346,6 +347,10 @@ impl RevlWal {
             if self.file.set_len(start).is_ok() {
                 let _ = self.file.sync_all();
             }
+        if let Ok(mut line) = serde_json::to_string(rec) {
+            line.push('\n');
+            let _ = self.file.write_all(line.as_bytes());
+            let _ = self.file.sync_all(); // fsync per record
         }
     }
 }
@@ -368,10 +373,13 @@ fn revl_wal_sink() -> Option<&'static std::sync::Mutex<RevlWal>> {
             {
                 Ok(f) => f,
                 Err(e) => panic!("revl: cannot open the write-ahead log REVL_WAL: {e}"),
+                Err(_) => return None,
             };
             let unsynced = std::env::var("REVL_WAL_ALLOW_UNSYNCED").ok().as_deref() == Some("1");
             let mut wal = RevlWal { file, seq: 0, seqs: Vec::new(), unsynced };
             let mut header = serde_json::json!({
+            let mut wal = RevlWal { file, seq: 0, seqs: Vec::new() };
+            wal.write(&serde_json::json!({
                 "record": "header", "walVersion": 1, "generation": 1,
                 "guarantee": REVL_WAL_GUARANTEE,
             });
@@ -383,6 +391,7 @@ fn revl_wal_sink() -> Option<&'static std::sync::Mutex<RevlWal>> {
             if unsynced {
                 wal.write(&serde_json::json!({ "record": "durability-opt-out", "fromSeq": 0 }));
             }
+            }));
             Some(std::sync::Mutex::new(wal))
         })
         .as_ref()

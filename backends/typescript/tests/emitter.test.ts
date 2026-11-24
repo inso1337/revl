@@ -13,6 +13,7 @@ const fixtureIr = join(backend, 'tests', 'fixtures', 'user_cache.ir.json')
 
 function runEmit(irPath: string, extraArgs: string[] = []) {
   return spawnSync(pythonInterpreter(), ['emit.py', ...extraArgs, irPath], {
+  return spawnSync('python3', ['emit.py', ...extraArgs, irPath], {
     cwd: backend,
     encoding: 'utf-8',
   })
@@ -106,8 +107,10 @@ describe('emitter (docs/backend-ir.md §Acceptance item 1)', () => {
   // refusal; it now asserts the rename AND that the declaration and its use
   // agree without a symbol table, which is the property the rename has to have.
   it('renames binding names that would shadow emitter scaffolding', () => {
+  it('rejects binding names that would shadow emitter scaffolding', () => {
     const dir = mkdtempSync(join(tmpdir(), 'revl-emit-'))
     const shadowing = {
+    const bad = {
       ir_version: 1,
       services: {},
       components: [
@@ -157,6 +160,7 @@ describe('emitter (docs/backend-ir.md §Acceptance item 1)', () => {
       services: { ctx: { methods: {} } },
       components: [],
     }))
+    writeFileSync(path, JSON.stringify(bad))
     const result = runEmit(path)
     expect(result.status).not.toBe(0)
     expect(result.stderr).toContain('scaffolding')

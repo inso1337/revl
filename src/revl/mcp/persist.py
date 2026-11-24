@@ -77,6 +77,7 @@ class RestoreError(RuntimeError):
     def from_revl(cls, error: RevlError) -> "RestoreError":
         diagnostic = classify(error)
         refused = cls(
+        return cls(
             f"restore refused: a component the current checker rejects cannot be "
             f"re-admitted — {diagnostic.get('message', str(error))}",
             diagnostic=diagnostic,
@@ -97,6 +98,7 @@ def _materialize(origin: dict) -> dict:
     happen to hold at restore time. A file `revl_edit` has patched is not read:
     its edited text is what is running, and it is on the session, not on disk
     (issue #1690).
+    happen to hold at restore time.
     """
     sources: dict = {}
     if origin.get(ORIGIN_SOURCE) is not None:
@@ -104,6 +106,11 @@ def _materialize(origin: dict) -> dict:
     if origin.get(ORIGIN_MODULES):
         sources[ORIGIN_MODULES] = dict(origin[ORIGIN_MODULES])
     files = origin.get(ORIGIN_FILES)
+    if origin.get("source") is not None:
+        sources["source"] = origin["source"]
+    if origin.get("modules"):
+        sources["modules"] = dict(origin["modules"])
+    files = origin.get("files")
     if files:
         sources[ORIGIN_FILES] = list(files)
         held = origin.get(ORIGIN_FILES_CONTENT) or {}
@@ -114,6 +121,8 @@ def _materialize(origin: dict) -> dict:
     # carried as it stands — there is nothing to re-read from disk.
     if origin.get(ORIGIN_DEPENDENCIES):
         sources[ORIGIN_DEPENDENCIES] = dict(origin[ORIGIN_DEPENDENCIES])
+        sources["files"] = list(files)
+        sources["files_content"] = {path: _read_text(path) for path in files}
     return sources
 
 
@@ -126,6 +135,7 @@ def build_snapshot(ir: dict | None, origin: dict | None,
                    config: dict | None, record: bool = False,
                    approval: dict | None = None,
                    applied_release: dict | None = None) -> dict | None:
+                   approval: dict | None = None) -> dict | None:
     """`{sources, manifest, meta}` from *explicit* admission inputs, not a live
     session — the shared core of :func:`snapshot` and of the generation-history
     entries (roadmap item 65, docs/generation-history.md).
@@ -203,9 +213,11 @@ def snapshot(session) -> dict:
     the live composition has no recorded sources to reproduce it from.
     """
     from .session import NothingLoaded, SessionError  # noqa: PLC0415 — avoid an import cycle
+    from .session import SessionError  # noqa: PLC0415 — avoid an import cycle
 
     if not session.loaded:
         raise NothingLoaded("nothing is loaded — snapshot needs a live composition")
+        raise SessionError("nothing is loaded — snapshot needs a live composition")
     if not getattr(session, "origin", None):
         raise SessionError(
             "this composition has no recorded sources, so it cannot be "
@@ -218,6 +230,7 @@ def snapshot(session) -> dict:
                           approval=_approval_posture(session),
                           applied_release=getattr(session,
                                                   "applied_release", None))
+                          approval=_approval_posture(session))
     # component leases (item 61): reflect the active workspace claims into the
     # persisted meta, so a snapshot records who was iterating on what. Leases
     # are wall-clock TTL claims, so only the still-live ones are carried and
@@ -271,10 +284,16 @@ def read_digests(disk_reads: dict[str, str] | None) -> dict[str, str]:
 
 def _recompile(sources: dict, name: str = "<snapshot>.rvl",
                profile=None, report: dict | None = None) -> dict:
+def _recompile(sources: dict) -> dict:
     """Compile the snapshotted sources through the very entry points a live
     `revl_load` uses. This *is* the gate: parse + check + lower run here, so a
     component the current checker rejects raises `RevlError` right here.
     `name` is the file a single-`source` snapshot compiles as (`admitted_name`).
+    component the current checker rejects raises `RevlError` right here."""
+    source = sources.get("source")
+    modules = sources.get("modules")
+    if source is not None:
+        return compile_source(source, "<snapshot>.rvl", modules=modules)
 
     `profile` is the authoring trust the text is admitted under: `None` for the
     operator's own snapshot, the session's untrusted-author profile for one an
@@ -287,6 +306,7 @@ def _recompile(sources: dict, name: str = "<snapshot>.rvl",
                               report=report)
 
     files = sources.get(ORIGIN_FILES)
+    files = sources.get("files")
     if files:
         # reconstruct from the text captured at snapshot time, so restore
         # re-admits the snapshotted sources rather than trusting the disk
@@ -300,6 +320,8 @@ def _recompile(sources: dict, name: str = "<snapshot>.rvl",
                         (sources.get(ORIGIN_DEPENDENCIES) or {}).items()})
         return compile_files(list(files), sources=virtual or None,
                              profile=profile, report=report)
+                   for path, text in (sources.get("files_content") or {}).items()}
+        return compile_files(list(files), sources=virtual or None)
 
     from .session import SessionError  # noqa: PLC0415
 
@@ -363,6 +385,12 @@ def _origin_from(sources: dict) -> dict:
     # too, so a restored composition still anchors records reached through `use`
     if sources.get(ORIGIN_DEPENDENCIES):
         origin[ORIGIN_DEPENDENCIES] = dict(sources[ORIGIN_DEPENDENCIES])
+    if sources.get("source") is not None:
+        origin["source"] = sources["source"]
+    if sources.get("modules"):
+        origin["modules"] = dict(sources["modules"])
+    if sources.get("files"):
+        origin["files"] = list(sources["files"])
     return origin
 
 
@@ -405,6 +433,7 @@ def restore(session, snap: dict, profile=None,
             report: dict | None = None, *,
             gate_reads: dict[str, str] | None = None,
             agent_supplied: bool = False, compile_profile=None) -> dict:
+def restore(session, snap: dict) -> dict:
     """Re-admit a snapshot into `session`, replaying admission.
 
     Refuses if a composition is already loaded. Refuses a snapshot taken under an
@@ -460,6 +489,7 @@ def restore(session, snap: dict, profile=None,
         ir = recompile_snapshot(
             snap, profile=compile_profile if compile_profile is not None
             else profile, report=report)
+        ir = _recompile(sources)
     except RevlError as error:
         # the load-bearing failure: a snapshot whose component the current
         # checker refuses does not load — it fails here, with the diagnostic
@@ -487,6 +517,7 @@ def restore(session, snap: dict, profile=None,
     got = {entry.get("name")
            for entry in (ir.get("manifest") or {}).get("components") or []}
     if (claimed or agent_supplied) and claimed != got:
+    if claimed and claimed != got:
         raise RestoreError(
             f"restore refused: re-admission produced components {sorted(got)}, "
             f"but the snapshot claimed {sorted(claimed)} — the sources no "

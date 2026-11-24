@@ -32,6 +32,8 @@ The worker is embedded in the rust binary as a string and run with `-c` (with
 `-P`, PYTHONSAFEPATH, on the launch that is not already isolated, issue #3158,
 the regression of #317), so it has no install step and no path to resolve at
 runtime.
+The worker is embedded in the rust binary as a string and run with `-c`, so it
+has no install step and no path to resolve at runtime.
 """
 
 import sys
@@ -51,8 +53,10 @@ import sys
 # this file carries no `__future__` import; its annotations do not need one.
 if not sys.flags.safe_path and sys.path and sys.path[0] == "":
     del sys.path[0]
+from __future__ import annotations
 
 import json
+import sys
 
 
 def _dispatch(request: dict):

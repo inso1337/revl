@@ -134,6 +134,7 @@ from the function's result and threaded into `List[B]`. Full higher-kinded
 types are out of scope.
 
 ## What reaches the IR
+## The marker never reaches the IR
 
 The `?T` marking is the checker's internal view and never reaches the IR.
 `_signature_table` marks the declared parameters (`T` becomes `?T`) so the
@@ -218,3 +219,12 @@ These shapes are covered by `backends/go/test_type_params_go_2545.py`,
 `backends/rust/test_type_params_rust_2545.py`, the self-host IR agreement
 tests in `tests/test_selfhost_lower_ir.py`, and the `generic_fn.rvl` emitter
 corpus documents.
+Marking is purely the checker's internal view. `_signature_table` marks the
+declared parameters (`T` → `?T`) so the rest of the checker can tell a
+universally quantified `T` from a nominal type, but `_lower_fns` /
+`_lower_externs` emit the author's spelling. A function's IR is **byte-identical
+whether its parameter was implicit or explicit** — the explicit form is a
+front-end convenience that leaves lowering and every backend untouched. This is
+pinned by `test_explicit_and_implicit_emit_identical_ir` and
+`test_explicit_type_parameter_marker_never_reaches_the_ir` in
+`tests/test_generics_explicit.py`.

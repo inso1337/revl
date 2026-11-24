@@ -83,11 +83,14 @@ fn a_clean_program_gets_a_no_objection_which_is_not_an_admission() {
 /// reference's `type_` rule (issue #2396): it is a parse refusal now, asserted
 /// by `a_return_arrow_with_no_type_is_refused_as_a_parse_error` below. The rest
 /// of the type layer is still a gap.
+/// below. The rest of the type layer is still a gap.
 #[test]
 fn type_layer_programs_are_not_refused_here_and_must_not_read_as_admitted() {
     let reference_refuses_all_of_these = [
         // a record literal that misses a declared field and names an unknown one
         "type P = { x: Int }\nfn f() -> P { return { y: 1 } }",
+        // a return arrow with no return type at all
+        "fn f() -> { }",
     ];
     for src in reference_refuses_all_of_these {
         let verdict = admit(src);

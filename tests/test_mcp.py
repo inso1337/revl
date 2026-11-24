@@ -214,6 +214,7 @@ def _call(tool: str, arguments: dict) -> dict:
 
 
 def test_initialize_and_tools_list(all_mcp_tools):
+def test_initialize_and_tools_list():
     init = handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
     assert init["result"]["serverInfo"]["name"] == "revl"
     listed = handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
@@ -296,6 +297,7 @@ def test_initialize_and_tools_list(all_mcp_tools):
                           # the operator update surface (docs/updates.md)
                           "revl_update_check", "revl_update_apply",
                           "revl_update_status", "revl_update_rollback"}
+                          "revl_scaffold", "revl_fmt", "revl_explain"}
     # inspection tools are read-only; the ones that move a running system say so
     assert tools["revl_check"]["annotations"]["readOnlyHint"] is True
     assert tools["revl_swap"]["annotations"]["destructiveHint"] is True

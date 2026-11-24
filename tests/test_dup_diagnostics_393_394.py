@@ -13,6 +13,10 @@ mismatch.
 spelling and a vendored byte-identical copy) used to load as two modules. Issue
 #2873 makes byte-identical copies one module; different copies that claim the
 same public name still need a diagnostic naming BOTH resolved absolute paths.
+spelling and a vendored byte-identical copy) loads as two modules -> a
+`duplicate function` whose message named neither resolved path, reading as a
+bug in revl's own stdlib. The diagnostic must name BOTH resolved absolute
+paths (and, when it is the two-copies-of-one-file case, say so).
 """
 
 import sys
@@ -95,6 +99,7 @@ def _write_394(tmp_path: Path) -> tuple[str, Path, Path]:
 
 
 def test_394_byte_identical_copies_compose_once(tmp_path, monkeypatch):
+def test_394_duplicate_function_names_both_absolute_paths(tmp_path, monkeypatch):
     root, real, vendored = _write_394(tmp_path)
     monkeypatch.setenv("REVL_IMPORT_PATH", str(tmp_path / "sdk"))
     ir = compile_files([root])
@@ -115,8 +120,20 @@ def test_394_different_copies_still_name_both_paths(tmp_path, monkeypatch):
     monkeypatch.setenv("REVL_IMPORT_PATH", str(tmp_path / "sdk"))
     with pytest.raises(RevlError) as exc:
         compile_files([root, str(other_root)])
+        compile_files([root])
     msg = str(exc.value)
     assert "duplicate function" in msg, msg
     assert "is_space" in msg, msg
+    # BOTH resolved absolute paths named — not just the one that lost
     assert str(real.resolve()) in msg, msg
     assert str(vendored.resolve()) in msg, msg
+
+
+def test_394_two_copies_of_one_file_is_called_out(tmp_path, monkeypatch):
+    """The specific two-byte-identical-copies case is named as such."""
+    root, real, vendored = _write_394(tmp_path)
+    monkeypatch.setenv("REVL_IMPORT_PATH", str(tmp_path / "sdk"))
+    with pytest.raises(RevlError) as exc:
+        compile_files([root])
+    msg = str(exc.value).lower()
+    assert "identical" in msg or "same file" in msg or "two copies" in msg, msg

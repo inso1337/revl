@@ -6,6 +6,7 @@
 // inverse is cancellation, and the clock advances only when the harness drives
 // it — so firings are deterministic timeline steps, never wall-clock races.
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import {
   Clock,
   hostLog,

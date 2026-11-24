@@ -49,6 +49,7 @@ from revl import compile_source  # noqa: E402
 MAIN_RS = BACKEND / "placement_runner" / "src" / "main.rs"
 RUNNER_CONFIDENTIAL = BACKEND / "placement_runner" / "src" / "confidential.rs"
 SCENARIO = (BACKEND / "scenarios" / "secret_registry.rvl").read_text(encoding="utf-8")
+SCENARIO = (BACKEND / "scenarios" / "secret_registry.rvl").read_text()
 
 CANARY = "SEKRIT-RUST-CONSOLE-421-F6C"
 PUBLIC_URL = "pg://real-host-5432/app"
@@ -57,6 +58,7 @@ REDACTED_SECRET = "<redacted:secret>"
 
 def _main() -> str:
     return MAIN_RS.read_text(encoding="utf-8")
+    return MAIN_RS.read_text()
 
 
 def _compile(source: str) -> dict:
@@ -76,6 +78,7 @@ def test_the_runner_declares_the_registry_module():
     assert "mod confidential;" in _main()
     assert RUNNER_CONFIDENTIAL.exists()
     assert "pub fn revl_redact_text(text: String) -> String {" in RUNNER_CONFIDENTIAL.read_text(encoding="utf-8")
+    assert "pub fn revl_redact_text(text: String) -> String {" in RUNNER_CONFIDENTIAL.read_text()
 
 
 def test_the_log_channel_is_funnelled():
@@ -240,6 +243,7 @@ def test_the_runner_reads_the_registry_the_emitted_half_registers(tmp_path):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "confidential.rs").write_text(
         RUNNER_CONFIDENTIAL.read_text(encoding="utf-8"), encoding="utf-8")
+        RUNNER_CONFIDENTIAL.read_text(), encoding="utf-8")
     (tmp_path / "src" / "lib.rs").write_text(
         src + "\nmod confidential;\n" + _CONSOLE_HARNESS, encoding="utf-8")
     (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_check"), encoding="utf-8")

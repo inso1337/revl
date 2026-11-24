@@ -21,6 +21,12 @@
 //! expression, no literal, no generic head to instantiate, no alias pointing off
 //! the scalar vocabulary. For such a source, "the composition/guarantee gate
 //! found nothing to refuse" and "the reference admits this" are the same
+//! There is a region, though, in which the covered layer is the WHOLE question:
+//! a source that declares nothing but service method signatures and scalar type
+//! aliases carries NO TERM the reference type layer decides. No function body,
+//! no expression, no literal, no generic head to instantiate, no alias pointing
+//! off the scalar vocabulary. For such a source, "the composition/guarantee
+//! gate found nothing to refuse" and "the reference admits this" are the same
 //! statement, and the gate may say so.
 //!
 //! The second carries terms, and this module DECIDES them (issue #346,
@@ -53,6 +59,9 @@
 //! reference makes of a call and this module types calls; a marked operation is
 //! unspellable in a certified `service` block and arrives from the wire as
 //! silence. A source holding any of them is not certified, which costs a caller
+//! Everything that carries a term: `fn` bodies, `component`, `provide`, `realm`,
+//! `use`, `pub`, attributes, literals, record and generic types, aliases of
+//! aliases. A source holding any of them is not certified, which costs a caller
 //! nothing but the fallback to `NoObjection` — the direction this crate is
 //! allowed to err in.
 //!
@@ -61,6 +70,9 @@
 //! [`certify_into`] asks the same question against a RUNNING composition, which
 //! says two things about a candidate. The first is whether the candidate
 //! REDECLARES something it already holds. Measured on the reference
+//! [`certify_into`] asks the same question against a RUNNING composition, and
+//! the one thing the composition can say about a candidate's declarations is
+//! whether they REDECLARE something it already holds. Measured on the reference
 //! (`revl.admission._admit_service_replacement`, which `lower.py` reaches only
 //! when the declared name is already in the ambient service table):
 //!
@@ -97,6 +109,18 @@
 //! "declares nothing" would be the wave-through this module exists to prevent,
 //! so the claim is spelled on the wire instead of inferred from the absence of
 //! rows.
+//! So the certifier needs the running composition's service NAMES, and the
+//! item-186 row wire carries them: a `!services` header followed by one
+//! `:S,op,op` row per declared service (`revl.manifest.manifest_wire`) — an
+//! operation token optionally carrying its declared parameter list
+//! (`:S,op(k:Str)`, issue #346) — whose
+//! operation names this surface reads but does not use. The HEADER is the
+//! load-bearing half. A wire without it does not claim to enumerate anything, so
+//! the running service set is UNKNOWN rather than empty and a candidate that
+//! declares a service is withheld exactly as it was before the block existed.
+//! Reading an absent block as "declares nothing" would be the wave-through this
+//! module exists to prevent, so the claim is spelled on the wire instead of
+//! inferred from the absence of rows.
 //!
 //! Scalar `type` aliases are certified into a running composition unconditionally
 //! (a running composition's manifest carries no aliases for one to collide with,
@@ -214,6 +238,7 @@ pub(crate) const REFERENCE_KEYWORDS: &[&str] = &[
 /// before trusting it against a gate built from another tree.
 pub(crate) const SURFACE_ID: &str =
     concat!("admission-interface:", env!("REVL_GATE_IDENTITY"));
+pub(crate) const SURFACE_ID: &str = "admission-interface:584fa3b051add6fc";
 
 /// The tail every certificate carries, so the two halves of the basis line
 /// cannot drift apart.
@@ -263,6 +288,7 @@ struct Parsed<'a> {
     components: Vec<Comp<'a>>,
     declared_aliases: usize,
 }
+    "no term the reference type layer decides, and the composition/guarantee gate raised no objection";
 
 /// What a certified source turned out to contain. Counts only: the certificate
 /// is evidence that the walk ACCOUNTED for the whole source, and the counts are
@@ -300,6 +326,10 @@ fn is_ident_byte(byte: u8) -> bool {
 /// service through one (`store.get(key)`). It is the ONLY place the grammar
 /// below accepts it, so widening the alphabet did not widen what is certified:
 /// a `.` anywhere else fails the walk.
+/// operator, a `[`, a non-ASCII byte — every one of them returns `None` here,
+/// which is how "carries no term the type layer decides" is enforced at the
+/// bottom rather than argued about at the top. Comments and whitespace are the
+/// only things dropped.
 fn tokens(source: &str) -> Option<Vec<&str>> {
     let bytes = source.as_bytes();
     let n = bytes.len();
@@ -384,6 +414,8 @@ fn is_dunder_name(name: &str) -> bool {
 }
 
 /// A name as a MANIFEST WIRE field: a non-empty run of ASCII identifier bytes.
+/// A name as a MANIFEST WIRE field: every byte an identifier byte, and not a
+/// reference keyword.
 ///
 /// [`is_name`] is written for tokens that already came out of [`tokens`], where
 /// an identifier run is guaranteed and only the first byte has to be checked. A
@@ -403,6 +435,7 @@ fn is_dunder_name(name: &str) -> bool {
 /// declares or calls.
 fn is_wire_name(field: &str) -> bool {
     if field.is_empty() {
+    if field.is_empty() || REFERENCE_KEYWORDS.contains(&field) {
         return false;
     }
     let bytes = field.as_bytes();
@@ -495,6 +528,7 @@ fn matching_brace(toks: &[&str], open: usize) -> Option<usize> {
 }
 
 /// Walk the whole source into declarations, or refuse to certify it.
+/// Walk the whole source, or refuse to certify it.
 ///
 /// The walk is total by construction: every iteration either consumes a token
 /// and advances, or returns `None`. There is no "skip what I do not recognise"
@@ -502,20 +536,26 @@ fn matching_brace(toks: &[&str], open: usize) -> Option<usize> {
 /// It decides SHAPE only; the obligations that hold declarations against each
 /// other are [`check`]'s.
 fn parse<'a>(toks: &[&'a str]) -> Option<Parsed<'a>> {
+fn shape_of(source: &str) -> Option<Shape<'_>> {
+    let toks = tokens(source)?;
     let n = toks.len();
 
     // Pass one: the alias names, so a signature may name an alias declared
     // further down the file. Pass two validates every one of them, so a name
     // collected here that is not a real alias declaration still fails below.
     let mut aliases: Vec<&'a str> = Vec::new();
+    let mut aliases: Vec<&str> = Vec::new();
     for (i, tok) in toks.iter().enumerate() {
         if *tok == "type" && i + 1 < n {
             aliases.push(toks[i + 1]);
         }
     }
+    let known = |name: &str| SCALAR_TYPES.contains(&name) || aliases.contains(&name);
 
     let mut services: Vec<Svc<'a>> = Vec::new();
     let mut components: Vec<Comp<'a>> = Vec::new();
+    let mut services: Vec<&str> = Vec::new();
+    let mut methods_total = 0usize;
     let mut declared_aliases = 0usize;
     let mut i = 0usize;
     while i < n {
@@ -547,8 +587,10 @@ fn parse<'a>(toks: &[&'a str]) -> Option<Parsed<'a>> {
             return None;
         }
         let name = toks[i + 1];
+        services.push(toks[i + 1]);
         i += 3;
         let mut methods: Vec<Sig<'a>> = Vec::new();
+        let mut methods: Vec<&str> = Vec::new();
         while i < n && toks[i] != "}" {
             // An operation carrying a MARKING (`emission fn`, `async fn`, and
             // every other word the reference may put in front of `fn`) does not
@@ -563,23 +605,28 @@ fn parse<'a>(toks: &[&'a str]) -> Option<Parsed<'a>> {
             if toks[i] != "fn" || i + 1 >= n || !is_name(toks[i + 1])
                 || is_dunder_name(toks[i + 1])
             {
+            if toks[i] != "fn" || i + 1 >= n || !is_name(toks[i + 1]) {
                 return None;
             }
             let mname = toks[i + 1];
+            methods.push(toks[i + 1]);
             i += 2;
             if i >= n || toks[i] != "(" {
                 return None;
             }
             i += 1;
             let mut params: Vec<(&'a str, &'a str)> = Vec::new();
+            let mut params: Vec<&str> = Vec::new();
             while i < n && toks[i] != ")" {
                 if !is_name(toks[i]) || i + 2 >= n || toks[i + 1] != ":" {
                     return None;
                 }
                 if !is_known_type(toks[i + 2], &aliases) {
+                if !known(toks[i + 2]) {
                     return None;
                 }
                 params.push((toks[i], toks[i + 2]));
+                params.push(toks[i]);
                 i += 3;
                 if i < n && toks[i] == "," {
                     i += 1;
@@ -587,12 +634,14 @@ fn parse<'a>(toks: &[&'a str]) -> Option<Parsed<'a>> {
             }
             let names: Vec<&str> = params.iter().map(|p| p.0).collect();
             if i >= n || has_duplicate(&names) {
+            if i >= n || has_duplicate(&params) {
                 return None;
             }
             i += 1; // the `)`
             let mut ret: Option<&'a str> = None;
             if i < n && toks[i] == "->" {
                 if i + 1 >= n || !is_known_type(toks[i + 1], &aliases) {
+                if i + 1 >= n || !known(toks[i + 1]) {
                     return None;
                 }
                 ret = Some(toks[i + 1]);
@@ -603,9 +652,11 @@ fn parse<'a>(toks: &[&'a str]) -> Option<Parsed<'a>> {
                 params: Some(params),
                 ret,
             });
+            methods_total += 1;
         }
         let mnames: Vec<&str> = methods.iter().map(|m| m.name).collect();
         if i >= n || has_duplicate(&mnames) {
+        if i >= n || has_duplicate(&methods) {
             return None;
         }
         i += 1; // the `}`
@@ -628,6 +679,12 @@ fn parse_component<'a>(toks: &[&'a str], at: usize) -> Option<(Comp<'a>, usize)>
     let n = toks.len();
     let mut i = at + 1;
     if i >= n || !is_declarable(toks[i]) {
+    // The reference refuses a duplicate service and a duplicate method
+    // (`duplicate service `A``, `duplicate method `f` in service A`) and the
+    // native gate does not, so the certifier carries those two obligations
+    // itself. Without them the surface would admit two programs the reference
+    // refuses — measured, which is why they are here and not assumed away.
+    if has_duplicate(&services) || has_duplicate(&aliases) {
         return None;
     }
     let name = toks[i];
@@ -648,6 +705,7 @@ fn parse_component<'a>(toks: &[&'a str], at: usize) -> Option<(Comp<'a>, usize)>
         i += 4;
     }
     if i >= n || toks[i] != "{" {
+    if declared_aliases != aliases.len() {
         return None;
     }
     let close = matching_brace(toks, i)?;
@@ -916,6 +974,8 @@ fn check_component<'a>(
         let known = text.iter().any(|s| s.name == *svc)
             || running.is_some_and(|rs| rs.iter().any(|s| s.name == *svc));
         if !known {
+    for alias in &aliases {
+        if services.contains(alias) {
             return None;
         }
     }
@@ -974,6 +1034,8 @@ fn check<'a>(
         components,
         methods,
         bodies,
+        aliases,
+        methods: methods_total,
     })
 }
 
@@ -1011,6 +1073,12 @@ fn basis_line(shape: &Shape<'_>, running: Option<String>) -> String {
             BASIS_TAIL
         ),
     }
+    let shape = shape_of(source)?;
+    Some(format!(
+        "admission surface {}: services={} aliases={} methods={}; {}",
+        SURFACE_ID, shape.services.len(), shape.aliases.len(), shape.methods,
+        BASIS_TAIL
+    ))
 }
 
 /// `Some(basis)` when `source` may be admitted INTO the running composition
@@ -1031,6 +1099,14 @@ fn basis_line(shape: &Shape<'_>, running: Option<String>) -> String {
 /// * no component it declares may take the name of one the wire names. A
 ///   same-name component is a REPLACEMENT, whose handoff and unmet-consumer
 ///   reasoning is the fold's and the §5 relation's, not this surface's.
+/// The candidate has to clear `shape_of` exactly as it does standalone, and then
+/// one more obligation the running composition imposes: nothing it declares may
+/// REDECLARE a service the composition already declares. That is the only
+/// interaction the reference has between an interface-only candidate and a
+/// running manifest, and it is the one the item-186 service block
+/// (`!services` + `:S,op,op` rows) exists to make answerable. The operations a
+/// row carries are the FOLD's business (the member rule of docs/design/457 T4b);
+/// this surface decides redeclaration, which is decided by name.
 ///
 /// A wire with no service block does not say what the composition declares, so
 /// the set is UNKNOWN: any declared service is withheld, which is exactly the
@@ -1041,14 +1117,18 @@ fn basis_line(shape: &Shape<'_>, running: Option<String>) -> String {
 pub(crate) fn certify_into(source: &str, manifest: &str) -> Option<String> {
     let toks = tokens(source)?;
     let parsed = parse(&toks)?;
+    let shape = shape_of(source)?;
     let running = manifest_shape(manifest)?;
     let declared: &[Svc<'_>] = match running.services.as_ref() {
+    let declared = match running.services.as_ref() {
         // The wire is silent about the running services. A declared service could
         // be a redeclaration and this gate cannot tell, so it does not guess, and
         // a body reaching an ambient service has no declaration to be typed
         // against.
+        // be a redeclaration and this gate cannot tell, so it does not guess.
         None => {
             if !parsed.services.is_empty() {
+            if !shape.services.is_empty() {
                 return None;
             }
             &[][..]
@@ -1060,8 +1140,13 @@ pub(crate) fn certify_into(source: &str, manifest: &str) -> Option<String> {
     // service can redeclare one: an alias sharing a running service's name would
     // have the candidate's own signatures written over a name the ambient also
     // binds, and this gate does not resolve that.
+    // Aliases are held to the same disjointness even though only services can
+    // redeclare: an alias sharing a running service's name would have the
+    // candidate's own signatures written over a name the ambient also binds, and
+    // this gate does not resolve that.
     for name in shape.services.iter().chain(shape.aliases.iter()) {
         if declared.iter().any(|s| s.name == *name) {
+        if declared.contains(name) {
             return None;
         }
     }
@@ -1096,6 +1181,12 @@ pub(crate) fn certify_into(source: &str, manifest: &str) -> Option<String> {
     }
     let tail = format!(
         "none of them redeclaring one of the running composition's {}; its {} provision rows resolve its {} requirement rows",
+    Some(format!(
+        "admission surface {}: services={} aliases={} methods={}, none of them redeclaring one of the running composition's {}; its {} provision rows resolve its {} requirement rows; {}",
+        SURFACE_ID,
+        shape.services.len(),
+        shape.aliases.len(),
+        shape.methods,
         match running.services.as_ref() {
             Some(names) => format!("{} declared services", names.len()),
             None => "unenumerated services (the candidate declares none)".to_string(),
@@ -1104,6 +1195,8 @@ pub(crate) fn certify_into(source: &str, manifest: &str) -> Option<String> {
         running.requirements,
     );
     Some(basis_line(&shape, Some(tail)))
+        BASIS_TAIL
+    ))
 }
 
 /// What the admission surface reads off a manifest wire.
@@ -1111,6 +1204,7 @@ struct Running<'a> {
     provisions: usize,
     requirements: usize,
     /// The running composition's declared services, `None` when the wire
+    /// The running composition's declared service names, `None` when the wire
     /// carries no `!services` header and therefore makes no claim about them.
     /// `None` is NOT the empty set: see [`certify_into`].
     services: Option<Vec<Svc<'a>>>,
@@ -1120,6 +1214,7 @@ struct Running<'a> {
     /// The component names the wire's PRESENCE rows (`C`, issue #2289) carry:
     /// running components with no other row.
     present: Vec<&'a str>,
+    services: Option<Vec<&'a str>>,
 }
 
 /// The [`Running`] reading of a manifest wire every one of whose rows the
@@ -1168,6 +1263,8 @@ struct Running<'a> {
 /// One operation token of a `:S,…` row as a declaration: the bare name (`get`),
 /// the name with its declared parameter list (`get(key:Str|n:Int)`), or both
 /// with the declared RETURN (`get(key:Str):Str`, issue #346).
+/// One operation token of a `:S,…` row: the bare name (`get`), or the name
+/// followed by its declared parameter list (`get(key:Str|n:Int)`, issue #346).
 ///
 /// Each half is a CLAIM and its absence is silence. A token with no parameter
 /// list says nothing about the arguments; one with no return says nothing about
@@ -1176,6 +1273,14 @@ struct Running<'a> {
 /// wire has no spelling for (`revl.manifest._PLAIN_METHOD_KEYS`), so an
 /// `emission` or an `async` operation arrives here as silence and no certified
 /// body can call it.
+/// This surface reads only the NAME — its one obligation is that the candidate
+/// redeclares no running service, which is decided per service, not per
+/// operation. The parameter list is VALIDATED and dropped, for the reason every
+/// row on this wire is: a token this reader cannot parse is one the fold
+/// (`selfhost/lower.rvl`'s `parse_optok`) refuses the wire over, and a surface
+/// that admitted on a wire the fold rejects would be issuing a green nobody
+/// checked. The two sides accept the same shape, and this is the assertion of
+/// that.
 ///
 /// A token this reader cannot parse is one the fold (`selfhost/lower.rvl`'s
 /// `parse_optok`) refuses the WIRE over, and a surface that admitted on a wire
@@ -1193,6 +1298,12 @@ struct Running<'a> {
 /// need one (`revl.manifest._WIRE_STRUCTURE`), so one arriving here is a
 /// garbled row.
 fn parse_operation(token: &str) -> Option<Sig<'_>> {
+/// A parameter's TYPE is taken verbatim and not held to [`is_wire_name`]: it is
+/// a type spelling, not a name, exactly as a handoff row's state shape is. It
+/// may not be empty, and it may not carry the wire's own structural characters
+/// — the renderer withholds a signature that would need one
+/// (`revl.manifest._WIRE_STRUCTURE`), so one arriving here is a garbled row.
+fn is_operation(token: &str) -> bool {
     let (name, rest) = match token.split_once('(') {
         Some(split) => split,
         // no parameter list: the NAME claim alone.
@@ -1207,9 +1318,11 @@ fn parse_operation(token: &str) -> Option<Sig<'_>> {
                 None
             }
         }
+        None => return is_wire_name(token),
     };
     if !is_wire_name(name) {
         return None;
+        return false;
     }
     // Neither a parameter type nor a return type may spell a parenthesis, so
     // the first `)` closes the list and the rest is the return claim.
@@ -1223,6 +1336,9 @@ fn parse_operation(token: &str) -> Option<Sig<'_>> {
             }
             Some(ty)
         }
+    let params = match rest.strip_suffix(')') {
+        Some(params) => params,
+        None => return false,
     };
     if params.is_empty() {
         // `op()` is the EMPTY parameter list, which is a claim.
@@ -1231,6 +1347,7 @@ fn parse_operation(token: &str) -> Option<Sig<'_>> {
             params: Some(Vec::new()),
             ret,
         });
+        return true;
     }
     let mut out: Vec<(&str, &str)> = Vec::new();
     for one in params.split('|') {
@@ -1240,6 +1357,11 @@ fn parse_operation(token: &str) -> Option<Sig<'_>> {
             || pty.contains(|c| c == '(' || c == ')' || c == '|')
         {
             return None;
+    params.split('|').all(|one| match one.split_once(':') {
+        Some((pname, pty)) => {
+            is_wire_name(pname)
+                && !pty.is_empty()
+                && !pty.contains(|c| c == '(' || c == ')' || c == '|')
         }
         out.push((pname, pty));
     }
@@ -1247,6 +1369,7 @@ fn parse_operation(token: &str) -> Option<Sig<'_>> {
         name,
         params: Some(out),
         ret,
+        None => false,
     })
 }
 
@@ -1256,6 +1379,7 @@ fn manifest_shape(manifest: &str) -> Option<Running<'_>> {
     let mut services: Option<Vec<Svc<'_>>> = None;
     let mut components: Vec<&str> = Vec::new();
     let mut present: Vec<&str> = Vec::new();
+    let mut services: Option<Vec<&str>> = None;
     for row in manifest.split(';') {
         if row.is_empty() {
             return None;
@@ -1276,12 +1400,20 @@ fn manifest_shape(manifest: &str) -> Option<Running<'_>> {
             // provide-method body's calls are typed against, and a token this
             // reader cannot parse declines the whole wire here exactly as it
             // refuses it in the fold.
+            // `:S` or `:S,op,op` — the name, and optionally the operations the
+            // running service declares. THIS surface reads only the name: the
+            // one obligation it has is that the candidate redeclares no running
+            // service, and that is decided by name. The operations are read to
+            // VALIDATE them, so a garbled row declines the whole wire here
+            // exactly as it refuses it in the fold, rather than one reader
+            // admitting on a row the other cannot parse.
             let (name, ops) = match spec.split_once(',') {
                 Some((name, ops)) => (name, Some(ops)),
                 None => (spec, None),
             };
             let claimed = services.as_mut()?;
             if !is_wire_name(name) || claimed.iter().any(|s| s.name == name) {
+            if !is_wire_name(name) || claimed.contains(&name) {
                 return None;
             }
             let mut methods: Vec<Sig<'_>> = Vec::new();
@@ -1292,6 +1424,8 @@ fn manifest_shape(manifest: &str) -> Option<Running<'_>> {
                     for op in ops.split(',') {
                         methods.push(parse_operation(op)?);
                     }
+                if !ops.is_empty() && ops.split(',').any(|op| !is_operation(op)) {
+                    return None;
                 }
             }
             let names: Vec<&str> = methods.iter().map(|m| m.name).collect();
@@ -1302,6 +1436,7 @@ fn manifest_shape(manifest: &str) -> Option<Running<'_>> {
                 name,
                 methods,
             });
+            claimed.push(name);
             continue;
         }
         if row.starts_with('-') {
@@ -1328,6 +1463,7 @@ fn manifest_shape(manifest: &str) -> Option<Running<'_>> {
             }
             // an empty label is the shared realm, exactly as on a provision row
             if realms.split(',').any(|r| !r.is_empty() && !is_wire_realm(r)) {
+            if realms.split(',').any(|r| !r.is_empty() && !is_wire_name(r)) {
                 return None;
             }
             components.push(component);
@@ -1356,6 +1492,7 @@ fn manifest_shape(manifest: &str) -> Option<Running<'_>> {
                 None => (spec, ""),
             };
             if !is_wire_name(key) || (!realm.is_empty() && !is_wire_realm(realm)) {
+            if !is_wire_name(key) || (!realm.is_empty() && !is_wire_name(realm)) {
                 return None;
             }
             required.push(key);
@@ -1379,6 +1516,7 @@ fn manifest_shape(manifest: &str) -> Option<Running<'_>> {
             return None;
         }
         if !realm.is_empty() && !is_wire_realm(realm) {
+        if !realm.is_empty() && !is_wire_name(realm) {
             return None;
         }
         provided.push(key);
@@ -1711,6 +1849,7 @@ mod tests {
             "Kv/store/;!services;:Store;:Store",
             "Kv/store/;!services;:9bad",
             "Kv/store/;!services;:",
+            "Kv/store/;!services;:service",
             "Kv/store/;!services;:A/b",
         ] {
             assert!(certify_into("", wire).is_none(), "must not certify into {:?}", wire);

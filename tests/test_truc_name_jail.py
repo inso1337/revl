@@ -154,6 +154,7 @@ def test_vendor_dir_refuses_a_name_that_is_not_a_directory(tmp_path, name):
         _host._vendor_dir(str(tmp_path), name)
     assert "not a directory" in str(raised.value)
     assert squatter.read_text(encoding="utf-8") == "not a directory\n"
+    assert squatter.read_text() == "not a directory\n"
 
 
 # --------------------------------------------- the leaf: the destination entry
@@ -174,6 +175,7 @@ def test_a_write_refuses_a_symlinked_destination(tmp_path):
                                "trucs/pg_database/component.rvl")
     assert "symlink" in str(raised.value)
     assert victim.read_text(encoding="utf-8") == "ORIGINAL-VICTIM\n"
+    assert victim.read_text() == "ORIGINAL-VICTIM\n"
 
 
 def test_a_write_refuses_a_symlinked_destination_whose_target_is_missing(tmp_path):
@@ -214,6 +216,7 @@ def test_a_plain_write_still_writes(tmp_path):
     _host._write_no_follow(path, "// one\n", "trucs/pg_database/component.rvl")
     _host._write_no_follow(path, "// two\n", "trucs/pg_database/component.rvl")
     assert path.read_text(encoding="utf-8") == "// two\n"
+    assert path.read_text() == "// two\n"
     assert not path.is_symlink()
 
 

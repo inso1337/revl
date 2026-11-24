@@ -12,6 +12,8 @@ blocking lowerings, `every … in` async iteration, and typed events; §4.5
 (`replay`) and §6b (events) record inline what each slice shipped. Java
 graduated the whole v1 surface (S1-S5), so every tier but wasm (which refuses
 streams by design, having no async host seam) now lowers the type, the
+graduated the whole v1 surface (S1-S5), so every tier but wasm — which refuses
+streams by design, having no async host seam — now lowers the type, the
 subscribe/next/close bracket, `merge`, `every … in` and `on … as`. §4.5's
 provider-declared `replay(n)`/`replay(from: <durable>)` and the §4.9
 reconstructible crash-recovery case it gates have since landed on py, the tier
@@ -19,12 +21,15 @@ that owns the WAL. The last-n `replay(n)` backlog, which makes no recovery
 claim, has since landed on ts, go and java as well; rust refuses it by name
 until its lowering lands with a gate-crate regeneration, and every tier but py
 refuses the durable cursor by name. So has the
+that owns the WAL; every other tier refuses `replay` by name. So has the
 required-`Stream[T]` coeffect (§6c): `requires <k>: Stream[T]` on py, refused by
 name on every other tier, and with it the handler that resolves its source from
 the declaration instead of naming a subscription. Those two together close §4.9
 END TO END rather than at the WAL: the coeffect is what lets a source outlive
+END TO END rather than at the WAL — the coeffect is what lets a source outlive
 the activation that reads it, and the durable cursor is what lets a second
 activation resume where the first stopped, and the program that does it is
+activation resume where the first stopped — and the program that does it is
 §4.9's own.
 
 Base: `origin/main` @ `747046c`. Every `file:line` anchor below was read at
@@ -88,18 +93,23 @@ component Fulfiller requires orders: Stream[Order] {
 Core (Slice 1):
 
 - `subscribe <stream> undo <close>`: acquire a single-consumer subscription;
+- `subscribe <stream> undo <close>` — acquire a single-consumer subscription;
   an `effect`-position acquisition that registers a `bracket`.
 - `<sub>.next()`: await the next item or a terminal event; a suspension point,
+- `<sub>.next()` — await the next item or a terminal event; a suspension point,
   async-colored (item 90 / A1).
 - `<sub>.close()`: the declared inverse; trips the cancellation token and
+- `<sub>.close()` — the declared inverse; trips the cancellation token and
   releases the host listener. Synchronous, non-emitting, infallible (G5).
 
 Combinators (Slices 2-3), each a *derived stream* whose bracket chains to its
 source's, so teardown stays one LIFO stack:
 
 - `map(f)` / `filter(p)` / `take(n)`: pure transforms (`f`, `p` are G6-pure);
+- `map(f)` / `filter(p)` / `take(n)` — pure transforms (`f`, `p` are G6-pure);
   the derived subscription's `close` calls the source's `close`.
 - `merge(a, b)`: one consumer, two sources; the multi-source teardown ordering
+- `merge(a, b)` — one consumer, two sources; the multi-source teardown ordering
   is the reason it is its own slice (§7).
 
 Iteration (Slice 4): `every x in <sub> { <body> }`, an async-iteration form
@@ -149,6 +159,7 @@ as a service operation's element type. Two rules fix its meaning:
    subscription, exactly as a `Database` value is not a connection. This is why
    `provides orders: Stream[Order]` type-checks with no async color on the
    *provision*: the color attaches to `next`, the suspension, not to holding the
+   *provision* — the color attaches to `next`, the suspension, not to holding the
    stream. It also closes the leak G6 names: a `Stream[T]` cannot be stored,
    returned, or aliased out of the component that requires it (§5, no
    first-class context), so a subscription cannot escape its owner.
@@ -190,6 +201,7 @@ already emit.
    shape ("this position cannot suspend a fiber, A1"). The `undo`/`compensate`
    refusal is load-bearing: teardown never suspends (teardown-contract.md, the
    bound rule), so `close` (the inverse) must not itself `next`.
+   bound rule), so `close` — the inverse — must not itself `next`.
 
 4. **`close` is infallible and non-emitting (G5).** A `close` expression
    reaching an `emit`, a fallible host op, or another suspension is refused. This
@@ -215,15 +227,18 @@ already emit.
 Each is stated as a call plus its rationale, in the roadmap's order.
 
 ### 4.1 Single-consumer, not multicast: START SINGLE
+### 4.1 Single-consumer, not multicast — START SINGLE
 
 v1 is single-consumer. Rationale: multicast multiplies the teardown accounting
 that the core guarantee depends on: a fan-out needs refcounting, per-subscriber
+that the core guarantee depends on — a fan-out needs refcounting, per-subscriber
 buffers, and a "last consumer closes the source" rule, which is three brackets
 pretending to be one. A single consumer is one bracket, one `close`, one cancel
 path, and the §9 argument is tractable. Multicast is a later item; the refusal
 (rule 3.1) names the bridge (§4.8) for the genuine multi-consumer case.
 
 ### 4.2 Cancellation ownership: THE SUBSCRIPTION OWNER
+### 4.2 Cancellation ownership — THE SUBSCRIPTION OWNER
 
 The activation that ran `subscribe … undo close` owns cancellation. The bracket
 lives on *that* activation's LIFO stack; *that* activation's teardown runs
@@ -235,6 +250,7 @@ makes "unloading its owner closes the stream" true by G7 rather than by
 convention.
 
 ### 4.3 Provider-death behavior: A TERMINAL EVENT, NEVER SILENT PENDING
+### 4.3 Provider-death behavior — A TERMINAL EVENT, NEVER SILENT PENDING
 
 When a provider goes away, the consumer's next `next` resolves to a **terminal
 event** (`Closed` for an orderly provider teardown, `Faulted(err)` for a provider
@@ -243,6 +259,7 @@ distinction that matters:
 
 - The *component* requiring the stream may still go PENDING under R2
   (docs/syntax-2.0.md:646); that is the coeffect layer reacting to an unmet
+  (docs/syntax-2.0.md:646) — that is the coeffect layer reacting to an unmet
   requirement, and it is correct and unchanged. But the *subscription* is a
   different object: a live bracket with an outstanding `next`. R2 PENDING is
   reactivation-on-provider-return; a subscription whose provider died is not
@@ -253,6 +270,7 @@ distinction that matters:
   together so an implementer does not pick one for both.
 
 ### 4.4 Backpressure: BOUNDED BUFFER + EXPLICIT POLICY, DEFAULT ERROR-CLOSE
+### 4.4 Backpressure — BOUNDED BUFFER + EXPLICIT POLICY, DEFAULT ERROR-CLOSE
 
 Every subscription has a bounded buffer whose capacity and overflow policy are
 declared at `subscribe`; there are no unbounded buffers. Policies:
@@ -290,6 +308,7 @@ shares on the reference, so the window is LOWERED there: it arms on a pause,
 fires on `RevlClockAdvance`, re-arms while the buffer is still full, and is
 cancelled by the bracket inverse. rust carries a clock too, but `thread_local!`,
 deliberately, so parallel `cargo test` threads never share one; a window would
+deliberately, so parallel `cargo test` threads never share one — a window would
 be armed by the provider's thread and advanced by the consumer's, so it would
 never fire and the provider would stay suspended forever. java carries no clock
 at all: timers do not lower there and an `advance` step is refused by name, so
@@ -300,6 +319,8 @@ reference is worse than one that refuses.
 On go the only stream refusal left is the durable `replay(from: …)` cursor;
 java refuses the cursor and the `drain` window; rust refuses the window and,
 until its last-n lowering lands, both `replay` forms.
+`_refuse_unlowered_stream_surface` is now a single `replay` check on go, and a
+`replay` plus a `drain` check on rust and java.
 
 **A policy and a chain on one subscription share one signal.** The acceptance a
 `deliver` answers is the same boolean a `take(n)` link counts, and `take(n)`
@@ -313,6 +334,7 @@ the silent loss this section exists to rule out. Pinned on the reference by
 blocking tiers.
 
 ### 4.5 Replay: ONLY IF THE PROVIDER DECLARES IT
+### 4.5 Replay — ONLY IF THE PROVIDER DECLARES IT
 
 No replay by default: a consumer sees only items emitted after `subscribe`
 returns. A provider may declare `replay(n)` (last-n) or `replay(from:
@@ -406,11 +428,25 @@ different reasons, the window for the clock coeffect and the cursor for the
 recovery surface, and a stable answer is what keeps an author from fixing the
 wrong half. A last-n backlog beside an unlowered window is refused for the
 window, by name, so lowering the backlog did not turn that refusal into a drop.
+ts, go, rust and java REFUSE `replay` by name, at the declaration as well as at
+the request: the half of the claim that makes it worth anything is §4.9's, which
+is the WAL's, and a tier that delivered a backlog while calling it durable would
+run and quietly disagree with the reference. This is now the only unlowered half
+a `subscribe` head can carry alongside lowered ones — those tiers lower the
+combinator chain and all four §4.4 policies — so the refusal has to WIN over a
+head it shares. A tier that lowered the policy and let the backlog fall off the
+end would emit a program that runs, drops items by the rule the author declared,
+and never replays what the author also declared. Where a head carries both an
+unlowered `replay` and an unlowered `drain` window, the replay refusal is the
+one reported: the two are refused for different reasons, the window for the
+clock coeffect and replay for the recovery surface, and a stable answer is what
+keeps an author from fixing the wrong half.
 
 The `"replay"` slot §5 reserves is threaded only when declared, so a replay-free
 program's IR is byte-identical.
 
 ### 4.6 The minimal six-tier protocol: subscribe / next / close, wasm REFUSES
+### 4.6 The minimal six-tier protocol — subscribe / next / close, wasm REFUSES
 
 The protocol every tier that supports streams implements is exactly three
 seams: `subscribe` (open a host listener, register the bracket), `next` (await
@@ -432,8 +468,10 @@ the ONE bracket the `subscribe` registers. The transform is the part that needed
 a decision: go and java refuse an arrow VALUE in a component body (go has no
 arrow lowering there, java has no functional interface to target), and that
 limit stands. A combinator's transform is not a general arrow: one parameter,
+limit stands. A combinator's transform is not a general arrow — one parameter,
 one pure expression, and a known item type, since stream items are the tier's
 string on all three, so each emitter renders it against that known type and
+string on all three — so each emitter renders it against that known type and
 interface (`func(string) string`, `java.util.function.Function<String,String>`,
 `|x: String| -> String`) rather than through the general arrow arm. Nothing else
 in a component body gains an arrow lowering.
@@ -441,6 +479,8 @@ in a component body gains an arrow lowering.
 What those tiers still refuse is the `block`-policy drain window, on the two of
 them that cannot fire it (rust, whose clock is thread-local, and java, which
 has no clock), for the reasons §4.4 gives. The lossy backpressure policies came
+them that cannot fire it — rust, whose clock is thread-local, and java, which
+has no clock — for the reasons §4.4 gives. The lossy backpressure policies came
 off this list in their own landing and the window came off it on go, which
 carries a process-wide clock. A refusal is worse than a lowering; it is much
 better than a silent disagreement.
@@ -452,9 +492,12 @@ occupies its goroutine/thread is observably equivalent to the event-loop tiers'
 fiber. The cancel-channel-in-the-`select` shape on those three tiers is what
 makes `close` reachable off the teardown thread (the mechanism §9's fix
 requires) and it is why those tiers are Slice 3 (§7), not Slice 1: getting the
+makes `close` reachable off the teardown thread — the mechanism §9's fix
+requires — and it is why those tiers are Slice 3 (§7), not Slice 1: getting the
 select right is per-tier work the py reference should pin first.
 
 ### 4.7 Effectful callbacks: ALLOWED, CAPABILITY + LIFECYCLE CHECKED
+### 4.7 Effectful callbacks — ALLOWED, CAPABILITY + LIFECYCLE CHECKED
 
 The `every … in` body is a setup-mode effect context (the same mode a provide
 method body types in, DESIGN.md §5): it may `call` service ops, `emit`, and
@@ -470,11 +513,13 @@ unless it also carries its own per-iteration `undo` that discharges before the
 next `next` (the loop-body analogue of the activation rule). A **handler failure
 aborts the iteration** (A8): the exception propagates out of the loop, the
 activation fails, the accumulated prefix reverts LIFO, and because the
+activation fails, the accumulated prefix reverts LIFO — and because the
 subscription bracket is on that prefix, the failure CLOSES the subscription.
 That is precisely the typed-events obligation "a failed handler does not leave a
 subscription active" (§6), delivered by A8 with no events-specific machinery.
 
 ### 4.8 Cross-realm: ONLY VIA AN EXPLICIT BRIDGE
+### 4.8 Cross-realm — ONLY VIA AN EXPLICIT BRIDGE
 
 A `Stream[T]` may not cross a realm boundary (docs/design-v2-realms.md) by being
 required across it. A cross-realm stream is a `bridge` component: a consumer in
@@ -487,10 +532,12 @@ multi-consumer escape (§4.1): fan-out is composed from bridges, not built into
 `Stream[T]`.
 
 ### 4.9 Crash recovery: NON-RECONSTRUCTIBLE BY DEFAULT
+### 4.9 Crash recovery — NON-RECONSTRUCTIBLE BY DEFAULT
 
 A subscription's inverse is a live host listener (a socket, a Kafka consumer
 group), which is closure-only and does not serialize. So by default a
 subscription is **`unreconstructible`**, the exact residue kind the teardown
+subscription is **`unreconstructible`** — the exact residue kind the teardown
 contract already defines (teardown-contract.md merged residue schema:
 "`unreconstructible` ... a WAL entry whose descriptor cannot be re-issued
 ... is residue, never reported as run"). After a crash, `revl recover` reports
@@ -507,6 +554,7 @@ the honest report is the deliverable, not automatic resurrection.
 **The cross-process case, as one program.** Re-issuing that descriptor into a
 NEW process needs the source to be something the new process can be WIRED to,
 rather than something the old activation acquired, which is what the required
+rather than something the old activation acquired — which is what the required
 `Stream[T]` coeffect (§6c) supplies. Both halves are needed and neither is
 enough: with the cursor alone, a fresh process acquires a fresh provider and
 "resuming" a cursor into a log nobody else holds is not a resume; with the
@@ -527,6 +575,7 @@ component Fulfiller requires feed: Stream[OrderCreated] replay(from: "fulfiller-
 Process A handles two orders and is killed mid-stream; four more are emitted
 while nothing consumes; process B is a fresh activation of that same program
 wired to that same stream, and it resumes AT the cursor; it receives exactly
+wired to that same stream, and it resumes AT the cursor — it receives exactly
 the four it missed, in order, and is not re-delivered the two A had already
 handled. That run is
 `backends/python/tests/test_stream_runtime.py::test_a_crashed_consumer_resumes_from_its_durable_cursor_in_a_fresh_process`,
@@ -537,8 +586,10 @@ at the WAL.
 **Shipped (py).** The mechanism is one disposer, not a second teardown path. A
 cursor subscription registers `sub.durable_undo()` in place of the usual
 `lambda: sub.close()`. Calling it is exactly `close()`, the author's own
+`lambda: sub.close()`. Calling it is exactly `close()` — the author's own
 `undo`, so the in-process teardown a cursor subscription takes is the one every
 other bracket takes and §0 is not re-argued for it, but it can also state the
+other bracket takes and §0 is not re-argued for it — but it can also state the
 cursor, and the recorder asks it to (`replay.record_yield`, beside the point
 where it already reads the declared capability scope). So the WAL records
 `{"receiver": "Stream", "method": "close", "args": ["orders"]}` with a referent
@@ -553,6 +604,8 @@ The question crosses the runtime/recorder boundary as ONE declared seam,
 and asserted there to be defined exactly once with the arity its caller uses.
 The alternative (a pair of attributes the recorder reads off the disposer by
 string name) is the issue-#292 shape: nothing checks the two halves still
+The alternative — a pair of attributes the recorder reads off the disposer by
+string name — is the issue-#292 shape: nothing checks the two halves still
 agree, and a rename on either side does not raise, it just stops a durable
 subscription from claiming the reconstructibility this section grants it. A
 durability claim that can go missing without an error is the one thing §4.5 and
@@ -603,6 +656,8 @@ Rationale for the specialization over a distinct surface: a distinct events
 surface would duplicate the six-tier protocol (§4.6), the teardown accounting
 (§0), and the refusal set (§3) (three things whose correctness is the whole
 item) for a payload that differs only by a schema contract and a dedup key.
+(§0), and the refusal set (§3) — three things whose correctness is the whole
+item — for a payload that differs only by a schema contract and a dedup key.
 Events add exactly those two things on top of `Stream[T]` and nothing else.
 They are Slice 5 (§7), gated on the iteration form (Slice 4) they desugar to.
 
@@ -624,6 +679,7 @@ component Fulfiller requires ship: Ship {
 `stream-iter` step as `every … in`, with an additive `event` block carrying the
 name, the key, the window and the derived schema. One node, one lowering, one
 emitted loop, so the two properties the guarantee rests on (the iteration
+emitted loop — so the two properties the guarantee rests on (the iteration
 boundary immediately after the await, and a `Faulted` that is not caught) are
 literally the same code rather than a second implementation that could drift.
 The emitted loop gains one gate, `if not <contract>.admit(<x>): continue`, placed
@@ -633,6 +689,7 @@ itself is built ONCE above the loop.
 Three deviations from §6 as written, each stated rather than quiet:
 
 1. **The handler names its subscription (`in <sub>`)**: LIFTED, the clause is
+1. **The handler names its subscription (`in <sub>`)** — LIFTED, the clause is
    now optional. §6's `on <Event> as e { … }` resolves the event's stream
    through the provide/inject graph ("the event source is the provided
    `Stream[T]`"), which needed a REQUIRED `Stream[T]` capability the language
@@ -647,6 +704,8 @@ Three deviations from §6 as written, each stated rather than quiet:
    with no key delivers neither, so a key-less `event` is refused. The window is
    a fixed-size LRU of recently admitted keys (constant per handler, never one
    entry per delivered item), which bounds the claim as well as the memory: a
+   a fixed-size LRU of recently admitted keys — constant per handler, never one
+   entry per delivered item — which bounds the claim as well as the memory: a
    redelivery further apart than the window runs the handler again. This
    collapses redeliveries; it is not a durable exactly-once claim, which needs
    the §4.5 cursor.
@@ -659,6 +718,7 @@ Three deviations from §6 as written, each stated rather than quiet:
    with a vacuous guarantee. A violation raises the same `Faulted` terminal a
    provider abort does, so it takes the path that already closes the
    subscription, §6's last row with no events-specific teardown.
+   subscription — §6's last row with no events-specific teardown.
 
 §4.7's acquisition refusal is NOT lifted and the calculus is unchanged: the
 dedup window is per handler, so it bounds nothing an `effect … undo …` per
@@ -699,6 +759,8 @@ a required service rides: it lands in the component's `requires` under its
 declared type, enters the emitted inject set, and leaves an unmet component
 PENDING under R2. That is §4.3's two-layer split made concrete (the coeffect
 layer resolves the capability, the resource layer owns the subscription), and it
+PENDING under R2. That is §4.3's two-layer split made concrete — the coeffect
+layer resolves the capability, the resource layer owns the subscription — and it
 adds no second kind of wiring.
 
 What the declaration buys, in order of weight:
@@ -732,6 +794,8 @@ Three things the declaration does NOT change:
   two subscriptions to one required stream are refused exactly as two
   subscriptions to one local source are (including the case where one of them is
   a handler's implicit one).
+  subscriptions to one local source are — including the case where one of them is
+  a handler's implicit one.
 * **Rule 3.6 moves, it does not vanish.** There is no local acquisition to read an
   inverse off, so the no-silent-vanish obligation is discharged at the coeffect
   boundary: §4.3 already assigns the terminal to that layer, and the reference
@@ -740,17 +804,21 @@ Three things the declaration does NOT change:
   fails there, by name, instead of parking a `next` forever.
 * **A stream is a capability, not a value.** It is read in a `subscribe` head and
   nowhere else (not bound, not passed, not stored) because a second handle on a
+  nowhere else — not bound, not passed, not stored — because a second handle on a
   single-consumer resource with no bracket behind it is the shape §3 exists to
   refuse. Method calls on a required stream are refused by name for the same
   reason: it is a requirement, but it is not a service.
 
 **Where a required stream's replay declaration lives.** §4.5 gives replay one
 owner, the provider, and that does not change; only the place it is written
+owner, the provider, and that does not change — only the place it is written
 does. A locally acquired source states its backlog on its own acquisition; a
 required one is acquired by the wiring, so the declaration rides the
 REQUIREMENT: `requires <k>: Stream[T] replay(<n>)` or `replay(from: "<name>")`.
 That is the same statement made about the same thing (this stream holds this
 backlog), moved to the side the contract is now stated on, and it is what a
+That is the same statement made about the same thing — this stream holds this
+backlog — moved to the side the contract is now stated on, and it is what a
 `subscribe <k> replay(…)` in the body is admitted against. One rule reads both:
 `_admit_replay` resolves the declaration from the acquisition or from the
 requirement and then runs the identical comparisons, so the two sites cannot
@@ -761,6 +829,7 @@ requirement verbatim and names it.
 The declaration is an obligation on the WIRING, so it is also checked there. The
 frontend compared the body's request to the requirement, and nothing it can see
 knows what was actually injected, so the reference runtime refuses, by name, a
+knows what was actually injected — so the reference runtime refuses, by name, a
 stream that does not hold the declared backlog, at the same injection point the
 rule-3.6 shape check sits at. Unchecked, a resume against a provider holding no
 such cursor would answer an empty backlog and read as an uneventful outage: the
@@ -796,6 +865,7 @@ core guarantee and the refusal fence, on the reference tier.
 **Slice 1 is the landable unit.** It ships the type, the three core operations,
 the bracket lifecycle, and the core-guarantee exit tests (§10.1-10.3) on py,
 with wasm refusing, which is enough to prove "unloading the owner closes the
+with wasm refusing — which is enough to prove "unloading the owner closes the
 stream" and to prove the refusal fence, and it touches no blocking tier. ts
 rides Slice 1 only if it is the same `async function*` shape with no new runtime
 (the 131 precedent: py and ts land together when ts is free, else ts is its own
@@ -812,6 +882,8 @@ Time-based stream behavior (a `block`-policy drain interval, a future
 `Clock.advance(ms)` / the `advance <n><unit>` lifecycle statement (item 57/102,
 docs/time-coeffect.md:117). Item delivery itself is not clock-driven: a test
 provider `emit`s items explicitly, but any time-windowed buffering fires on
+docs/time-coeffect.md:117). Item delivery itself is not clock-driven — a test
+provider `emit`s items explicitly — but any time-windowed buffering fires on
 `advance`, "a step in the timeline, not wall-clock" (time-coeffect.md:97). This
 is also why wasm's refusal is consistent: wasm already skips `advance`
 (lifecycle.py:134), so a tier that cannot advance the clock cannot run a
@@ -824,6 +896,7 @@ process-wide scheduler with a mutex). rust carries a clock that is
 `thread_local!` by design, so the provider's thread arms a window the consumer's
 `advance` cannot reach; java carries none at all. Those two refuse the window by
 name, the way wasm refuses the whole surface, never lowering it against a
+name, the way wasm refuses the whole surface — never lowering it against a
 substitute clock, because a resume at the wrong time is a program that runs and
 answers differently rather than one that says it cannot.
 
@@ -839,6 +912,7 @@ owner's teardown. Walk the failure:
    emit. `next` (before this fix) resolves only when an item or a terminal event
    arrives.
 2. The provider dies *silently*: the process holding the socket vanishes, or a
+2. The provider dies *silently* — the process holding the socket vanishes, or a
    provider abort forgets to notify its single consumer. No item, no terminal.
 3. The owner is withdrawn. Teardown must run the bracket inverse `close`.
 
@@ -851,6 +925,7 @@ core guarantee is violated outright.
 
 On the **event-loop tiers** (py/ts) it is subtler and still a violation: the
 teardown loop runs on the event loop and can execute `close`, but if `close` is
+teardown loop runs on the event loop and can execute `close` — but if `close` is
 modeled as "deliver a terminal to the consumer and wait for `next` to drain it,"
 it enqueues *behind* a `next` that will never resolve, so teardown either hangs
 or the fiber leaks. The owner reports gone (R4 sees its provisions withdrawn)
@@ -863,11 +938,14 @@ reachability. The bracket contract assumes the inverse is always runnable; a
 `next` that never resolves breaks that assumption. This is the same blind spot
 item 131's review named in a different position: a name-based walk letting an
 async operation through, surfacing here as a *liveness* failure of the core
+item 131's review named in a different position — a name-based walk letting an
+async operation through — surfacing here as a *liveness* failure of the core
 guarantee rather than a soundness failure of an inverse.
 
 ### The fix (two parts, both folded into §3-§4 above)
 
 **Part A: `close` is cancellation-first, never delivery-behind.** The awaited
+**Part A — `close` is cancellation-first, never delivery-behind.** The awaited
 object a consumer parks on in `next` is a RACE between (a) the next item/terminal
 and (b) the subscription's own cancellation token. `close` (the bracket inverse)
 trips the token synchronously and returns; it never waits for `next` to drain.
@@ -876,6 +954,7 @@ outcome. In the lowering (§4.6) this is: py/ts race the queue-get against a
 cancel future; go/java/rust `select` the item channel against a cancel channel.
 So on every tier `close` is reachable *without* the parked `next` having to
 resolve on its own: on the blocking tiers because the cancel channel is a
+resolve on its own — on the blocking tiers because the cancel channel is a
 separate `select` case the teardown side closes, on the event-loop tiers because
 the cancel future is resolved by teardown, not by the consumer. This is the A1
 divert-boundary reading (async-extern.md §4.3) applied to stream iteration:
@@ -886,11 +965,13 @@ itself suspend") plus the §4.6 cancel-channel/cancel-future lowering, now
 load-bearing rather than incidental.
 
 **Part B: provider death is a terminal event, never silence (admission rule
+**Part B — provider death is a terminal event, never silence (admission rule
 3.6).** Refuse to admit a `Stream[T]` provision whose provider can vanish while a
 `next` is outstanding without delivering a terminal. Mechanically: the provider
 side is itself a bracket, and the checker requires the provider's teardown to
 deliver `Closed` (orderly) or `Faulted(err)` (abort) to its single consumer as
 part of its inverse, a host-local channel close, so G5-compatible (non-emitting
+part of its inverse — a host-local channel close, so G5-compatible (non-emitting
 on the audit surface, cannot fail). Because provider and consumer teardown is one
 LIFO cascade, the dangerous order is provider-first withdrawal; Part B guarantees
 that even then the consumer's outstanding `next` resolves to `Faulted`/`Closed`
@@ -917,12 +998,15 @@ guarantee is a comment, not a fact.
    host listener is released, `no_residue` holds.
 3. **Use-after-close and double-subscribe refused.** `next` on a `Stream[T,
    Closed]`; a second `subscribe` on one required stream; both compile errors
+   Closed]`; a second `subscribe` on one required stream — both compile errors
    (rule 3.1), the second naming the bridge.
 4. **The CRITICAL Part A: cancel reaches a parked `next`.** Consumer parked in
+4. **The CRITICAL Part A — cancel reaches a parked `next`.** Consumer parked in
    `next` on a provider that never emits; withdraw the owner; assert the park
    resolves as `Closed`, `close` runs, `no_residue` holds, and (on the go/java/
    rust twins once Slice 3 lands) the teardown does not deadlock the worker.
 5. **The CRITICAL Part B: provider death is terminal.** Provider aborts with an
+5. **The CRITICAL Part B — provider death is terminal.** Provider aborts with an
    outstanding consumer `next`; assert the consumer's `next` resolves to
    `Faulted`, the consumer's bracket closes, residue is empty; a provider that
    the fixture forces to exit silently must FAIL COMPILE with rule 3.6.
@@ -937,6 +1021,7 @@ guarantee is a comment, not a fact.
 9. **Byte-identity.** Every program not using streams emits byte-identically on
    all six tiers (per-backend golden suites, run per-backend; `pytest tests/`
    alone does not run them: the standing wave gap).
+   alone does not run them — the standing wave gap).
 
 ## 11. Judgment calls a human should confirm
 

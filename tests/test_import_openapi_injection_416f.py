@@ -31,6 +31,9 @@ that did not pass `_comment_safe`. The path is now forced single-line like the
 metadata, and the separator set also covers the characters the emitters split a
 verbatim body on (issue #3131), so a path cannot carry a statement into the
 emitted module either.
+comment to a single line (CR/LF/U+2028/U+2029/U+0085 collapse to a space), so a
+newline can no longer terminate the comment. It narrows comment text only and
+does not touch the typed boundary the importer generates.
 """
 
 import copy
@@ -44,6 +47,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from revl.compiler import compile_source  # noqa: E402
 from revl.import_openapi import _comment_safe, _snake, import_openapi  # noqa: E402
+from revl.import_openapi import _comment_safe, import_openapi  # noqa: E402
 
 # a payload that, once a `//` comment is broken, is legal top-level revl: an
 # `@py` extern whose body would run arbitrary code, plus a bare component so a
@@ -170,8 +174,12 @@ def test_path_control_separator_cannot_reach_a_stub_body(sep):
 def test_comment_safe_collapses_every_line_terminator():
     for sep in ("\n", "\r", "\r\n", "\x0b", "\x0c", "\x1c", "\x1d",
                 "\x1e", "\x85", "\u2028", "\u2029"):
+    for sep in ("\n", "\r", "\r\n", " ", " ", "\x85"):
         got = _comment_safe(f"a{sep}b")
         assert got == "a b", repr(sep)
+        assert "\n" not in got and "\r" not in got
+        assert " " not in got and " " not in got and "\x85" not in got
+        assert got == "a b"
 
 
 def test_benign_document_is_unchanged_and_compiles():

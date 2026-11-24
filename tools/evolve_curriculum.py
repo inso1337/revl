@@ -39,6 +39,7 @@ docs/design/533-evolution-curriculum.md for the argument, the measured
 populations, and the cases the signal gets wrong.
 
 SOURCES. The review names eight. This module reads seven of them; the rest are
+SOURCES. The review names eight. This module reads four of them; the rest are
 staged in the design doc's slice plan. Each adapter below states the artifact
 it reads, and every task it emits carries that artifact by path, so a reader
 can go and look.
@@ -329,6 +330,7 @@ def adapter_census_bypass(baseline_path=None) -> Derivation:
     baseline = json.loads(
         (Path(baseline_path) if baseline_path
          else ROOT / CENSUS_BASELINE).read_text(encoding="utf-8"))
+         else ROOT / CENSUS_BASELINE).read_text())
     tasks: list[Task] = []
     for bucket, cases in sorted(baseline.get("buckets", {}).items()):
         head = bucket.split("/")[0]

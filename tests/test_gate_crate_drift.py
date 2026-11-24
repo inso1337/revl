@@ -88,6 +88,8 @@ def test_provenance_records_what_the_crate_was_built_from():
     assert meta["frontier"] == "selfhost-admit:<identity>"
     assert meta["identity_files"] == list(GEN.IDENTITY_GLOBS)
     assert "source_digest" not in meta
+    assert meta["frontier"] == f"selfhost-admit:{meta['source_digest'][:16]}"
+    assert meta["source_digest"] == GEN.source_digest()
     # every digest input is a real file, or the digest is measuring nothing
     for rel in meta["digest_inputs"]:
         assert (ROOT / rel).is_file(), f"digest input {rel} does not exist"
@@ -316,6 +318,8 @@ def test_the_admission_tables_are_derived_not_hand_written():
     assert meta["admission_scalar_types"] == tables["scalars"]
     assert meta["admission_reserved_type_names"] == tables["reserved"]
     assert meta["admission_surface"] == "admission-interface:<identity>"
+    assert meta["admission_surface"] == \
+        GEN.admission_surface_id(meta["source_digest"])
     assert meta["admitted_layer"] == GEN.ADMITTED_LAYER
     admission_rs = (CRATE / "src" / "admission.rs").read_text(encoding="utf-8")
     for name in tables["scalars"]:
@@ -389,6 +393,7 @@ def test_the_covered_layer_is_stated_identically_everywhere():
 
 @pytest.mark.parametrize("relpath", [
     "Cargo.toml", "build.rs", "GENERATED.json", "README.md",
+    "Cargo.toml", "GENERATED.json", "README.md",
     "src/lib.rs", "src/admission.rs", "src/frontier.rs", "src/ir.rs",
     "src/selfhost.rs",
     "src/session.rs", "src/symbols.rs",

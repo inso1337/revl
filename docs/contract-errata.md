@@ -567,6 +567,7 @@ This goes in the compiler spec, not the runtimes.
     call sites.
   - **python — CLOSED, and the one case with a RUNTIME effect.**
     `_emit_builtin_result` injected `class Ok:` / `class Err:` at module scope,
+    `_emit_builtin_result` injects `class Ok:` / `class Err:` at module scope,
     guarded only by `user_cases` — a set of user VARIANT CASE names, which a
     user *type* name does not enter. Python class redefinition is silent and the
     later class wins, so a user `type Ok` replaced the runtime's own `Ok`
@@ -585,6 +586,7 @@ This goes in the compiler spec, not the runtimes.
     carries, so the hijack this errata records is now an import shadow, and
     `_TYPE_RESERVED` is the ladder that keeps a user `type Ok` off the imported
     name.
+    confined to the build.
   - **Corrected sweep — why the earlier list was short.** The first pass
     filtered candidate names against fixtures that merely *mention* the name,
     which hid every case whose collision needs the name DECLARED in the same

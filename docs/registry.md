@@ -46,6 +46,7 @@ registry/
       component.rvl            # source, canonical formatting (the current release)
       version                  # the release this entry is, one line (§1.1)
       meta.json                # description + tags + mediator (§1.3, §1.5)
+      meta.json                # description + tags, publisher-declared (§1.3)
       manifest.json            # the compiled manifest (item 28 format)
       dossier.json             # evidence: audit --json today; the item 31
                                # gauntlet dossier when it exists
@@ -76,6 +77,7 @@ registry/
 ```
 
 The evidence bundle is assembled by `registry_evidence.build_evidence` (the publish
+The evidence bundle is assembled by `registry.build_evidence` (the publish
 path, run after `build_index`) from the **existing producers' verbatim output**
 - it re-implements no evidence. A missing facet is `unavailable`, never faked;
 the runtime-tested facets (`fault-sweep`, `inverse-roundtrip`) are written when
@@ -185,12 +187,14 @@ verified. Registry-side identity is still phase 2's remaining half.
 of frozen releases, so a consumer can see which releases exist and derive a
 changelog across them without opening the tree (`indexVersion` is `"3"`; `"3"`
 added the per-entry `mediator` row in issue #2697).
+changelog across them without opening the tree (`indexVersion` is `"2"`).
 
 The derived changelog (item 261) is stored as `releases/<version>/changelog.json`
 and its headline is item 64's computed bump. A *first* release has nothing to
 diff against and carries no changelog rather than an invented one.
 
 ### 1.3 `meta.json` — the fields the compiler cannot derive
+### 1.3 `meta.json` — the two fields the compiler cannot derive
 
 What a component *is* (`description`), how to find it (`tags`) and whether it is
 a trusted mediator for one capability (`mediator`, §1.5) cannot all be read off
@@ -200,6 +204,11 @@ others — and `build_index` copies them verbatim into the row, exactly as it
 copies `version` from the `version` file. The `mediator` value is the one that
 is *checked* rather than merely copied: `build_index` verifies it against the
 compiled audit (§1.5), and the field is an authority field at read time.
+What a component *is* (`description`) and how to find it (`tags`) cannot be read
+off its source, and `truc ship` refuses an under-described component for that
+reason. They are declared in `meta.json` — a JSON object with those two keys and
+no others — and `build_index` copies them verbatim into the row, exactly as it
+copies `version` from the `version` file.
 
 The point of the file is the check. `index.json` is generated and **a stale
 index fails CI**, which only means something while every key in a row is
@@ -410,6 +419,7 @@ lookup) is a regression against this document.
    facets are carried and reported in `evidence.facets`, but they do not enter
    the rank key: they are facts for a consumer, or for a later ranking or
    policy slice, not a score (issue #2697);
+   inverse-roundtrip pass;
 5. smaller source (less for the agent to hold in context).
 
 Interface compatibility (§5) is a **hard filter**, never a ranking term: an
@@ -621,5 +631,7 @@ unsigned-but-gate-verified beats signed-but-unverified). **Resolving by version
 range** — a resolve selects one release or all of them (§2, `release=`); there
 is no range grammar, no "newest that satisfies" and no per-consumer pin
 resolution, which is what a version range would add. **Popularity
+range** — a resolve reads the current release; the frozen history is a record,
+not yet a selectable set (item 9 / multi-version coexistence). **Popularity
 metrics** (see §2); **cross-registry federation** (there is one registry until
 that is a problem worth having).

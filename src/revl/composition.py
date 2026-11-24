@@ -31,6 +31,7 @@ the body is recorded beside the header: which config fields the body spells
 panel reads it only to tell a field the body never reads (provably pure) from
 one it does (where §8.4's flow to an emission or extern argument cannot be
 decided header-only, so the panel fails closed).
+and stays cheap when the fold (S2) lands on top of it.
 
 Not in this slice, and deliberately: layers and the four patch operations (S2),
 incremental admission (S3), the confinement split and the per-root profile
@@ -55,6 +56,8 @@ from .lower import _config_default_type
 from .parser import (SLO_IR_KEYS, Address, CompositionDecl, ExprField, ExprVar,
                      GrantDecl, IsolateStmt, LayerDecl, PlaceDecl, Postfix,
                      Program, RowDecl, parse_file)
+from .parser import (SLO_IR_KEYS, Address, CompositionDecl, IsolateStmt,
+                     LayerDecl, PlaceDecl, Program, RowDecl, parse_file)
 from .synthesize import (
     HOST_SHIMS, OBSERVER_METHOD, cap_token, check_address, check_remotable,
     synthesize_provider)
@@ -85,6 +88,7 @@ def origin_of(path: str, root: str | None = None) -> str:
     """
     root = os.path.abspath(root or os.getcwd())
     rel = relpath_or_abs(os.path.abspath(path), root)
+    rel = os.path.relpath(os.path.abspath(path), root)
     parts = rel.split(os.sep)
     if len(parts) >= 3 and parts[0] == _VENDOR_DIR:
         return parts[1]
@@ -132,9 +136,12 @@ class _Header:
     """The header half of one `component` declaration: what §1.3 needs, plus
     the syntax-only record of which config fields the body reads. Built from the
     parse tree, with no body lowered."""
+    """The header half of one `component` declaration: what §1.3 needs and
+    nothing else. Built from the parse tree, with no body lowered."""
 
     __slots__ = ("name", "source", "provides", "requires", "config", "realms",
                  "line", "config_uses")
+                 "line")
 
     def __init__(self, decl, source: str):
         self.name = decl.name
@@ -194,11 +201,13 @@ class Row:
                  "extra_claims", "requires", "config", "granted", "line",
                  "provenance", "remote", "seam", "open", "reach", "place",
                  "host", "services", "config_uses")
+                 "host")
 
     def __init__(self, label, origin, source, component, claims, extra_claims,
                  requires, config, granted, line, provenance=None, remote=None,
                  seam=None, open=None, reach=None, place=None, host=None,
                  services=None, config_uses=None):
+                 seam=None, open=None, reach=None, place=None, host=None):
         self.label = label
         self.origin = origin
         self.source = source
@@ -420,6 +429,7 @@ def _relative(path: str, root: str) -> str:
     """Provenance recorded relative to `root`, so an IR document stays
     machine-independent (the same rule `parse_file` follows)."""
     return relpath_or_abs(os.path.abspath(path), os.path.abspath(root)) \
+    return os.path.relpath(os.path.abspath(path), os.path.abspath(root)) \
         .replace(os.sep, "/")
 
 
@@ -501,6 +511,7 @@ def _row_value_type(value: object, declared: str | None) -> str | None:
 def _check_config(row: RowDecl, header: _Header, doc: str,
                   rel: str, *, rowless: bool = False,
                   required: bool = True) -> dict[str, object]:
+                  rel: str) -> dict[str, object]:
     """A config value that does not fit the declared type does not admit, and
     the refusal names the field and the declared type (426 §3.2). Same shape as
     `_lower_lifecycle_config` (lower.py:4197), one tier up.
@@ -511,6 +522,7 @@ def _check_config(row: RowDecl, header: _Header, doc: str,
     that the host table does not supply is refused too, naming the component,
     the field and its type (issue #3596); `required=False` leaves it to a
     caller that runs its own required-config preflight (`revl run`)."""
+    `_lower_lifecycle_config` (lower.py:4197), one tier up."""
     given: dict[str, object] = {}
     owner = (f"component `{header.name}`" if rowless
              else f"row `@{row.label}`")
@@ -522,8 +534,10 @@ def _check_config(row: RowDecl, header: _Header, doc: str,
                 doc, line,
                 f"`{name}` is not a config field of `{header.name}` "
                 f"({'host config' if rowless else owner})",
+                f"(row `@{row.label}`)",
                 hint=f"config fields of `{header.name}` in `{rel}`: {known}")
         actual = _row_value_type(value, cfg.type)
+        actual = _config_default_type(value)
         if actual is not None and not compatible(cfg.type, actual):
             raise RevlError(
                 doc, line,
@@ -531,6 +545,8 @@ def _check_config(row: RowDecl, header: _Header, doc: str,
                 f"`{cfg.type}` but the "
                 f"{'host config' if rowless else 'composition'} supplies "
                 f"`{actual}`",
+                f"config field `{name}` of row `@{row.label}` is declared "
+                f"`{cfg.type}` but the composition supplies `{actual}`",
                 hint="a config typo is a refusal here, not a runtime surprise "
                      "(426 §3.2)")
         given[name] = value
@@ -580,6 +596,9 @@ def _check_granted(row: RowDecl, header: _Header, doc: str) -> list[str] | None:
     stack-layer row gets its reach from a `grant` statement (`_apply_grants`,
     issue #1921), since it cannot carry the clause itself. A row that writes
     `granted { }` is asking for the empty grant and gets it.
+    A row that writes NO clause is unconfined (first-party) and the subset check
+    does not apply to it: wiring the profile is 426 S4 and waits on 425 F1. A
+    row that writes `granted { }` is asking for the empty grant and gets it.
     """
     if row.granted is None:
         return None
@@ -600,14 +619,20 @@ def _require_granted(label: str, requires, allowed: list[str], doc: str,
     (424 R2): every key the row `requires` is among its granted keys, or the
     row is refused naming the first ungranted key."""
     for key in requires:
+    for key, (_svc, line) in header.requires.items():
         if key not in allowed:
             listed = ", ".join(f"`{k}`" for k in allowed) or "<empty>"
             raise RevlError(
                 doc, line,
                 f"row `{label}` requires `{key}`, which {where} does not list",
                 hint=f"granted on `{label}`: {listed}. `granted` defaults "
+                doc, row.line,
+                f"row `@{row.label}` requires `{key}`, which its `granted` "
+                f"clause does not list",
+                hint=f"granted on `@{row.label}`: {listed}. `granted` defaults "
                      "to EMPTY, so every key the row reaches is listed "
                      "explicitly (424 R2, 426 §9.3 Part 2)")
+    return allowed
 
 
 def _check_open_reach(row: RowDecl, header: _Header, doc: str,
@@ -658,6 +683,10 @@ def _host_of(value: object) -> str | None:
     an empty host, or a port that does not parse returns `None`, which the
     caller treats as UNCLASSIFIABLE and refuses on a bounded field, the
     fail-closed direction §8.5 conjunct 5 requires, never silence.
+    (host, and port when present). The extraction is deliberately syntactic and
+    conservative: anything it cannot parse to a host returns `None` and is
+    treated by the caller as UNCLASSIFIABLE, which is the fail-closed direction
+    §8.5 conjunct 5 requires — never silence.
     """
     if not isinstance(value, str) or not value:
         return None
@@ -674,6 +703,15 @@ def _host_of(value: object) -> str | None:
     if ":" in host:
         host = f"[{host}]"
     return host if port is None else f"{host}:{port}"
+    text = value.strip()
+    if "://" in text:
+        text = text.split("://", 1)[1]
+    # drop any path/query and any userinfo
+    text = text.split("/", 1)[0].split("?", 1)[0]
+    if "@" in text:
+        text = text.rsplit("@", 1)[1]
+    text = text.strip()
+    return text or None
 
 
 def _check_reach_bounds(label: str, config: dict, reach: dict[str, str] | None,
@@ -703,6 +741,7 @@ def _check_reach_bounds(label: str, config: dict, reach: dict[str, str] | None,
                      "authority (no backslash, empty host or bad port); fix "
                      "the value or refuse the layer (426 §8.3)")
         if got != want:
+        if got is not None and got != want:
             raise RevlError(
                 doc, line,
                 f"row `@{label}` configures `{field}` ({where}) to a value "
@@ -800,6 +839,7 @@ def _vendor_truc_of(abspath: str, root: str) -> str | None:
     if the path is the project's own (426 §7). Distribution facts key off where
     the bytes physically live, not off which document named them."""
     rel = relpath_or_abs(abspath, root)
+    rel = os.path.relpath(abspath, root)
     parts = rel.split(os.sep)
     if len(parts) >= 2 and parts[0] == _VENDOR_DIR and parts[1] not in ("", ".."):
         return parts[1]
@@ -935,6 +975,10 @@ def _resolve_row(row: RowDecl, origin: str, doc: str, base: str,
     introduce and withdraw rows in any order and still reach one answer
     (426 §3.3). The cross-row check is `_check_disjoint`, and it runs ONCE,
     over the folded result.
+    Pure with respect to the rest of the table: nothing here looks at another
+    row, which is what lets the fold (S2) introduce and withdraw rows in any
+    order and still reach one answer (426 §3.3). The cross-row check is
+    `_check_disjoint`, and it runs ONCE, over the folded result.
     """
     source = os.path.abspath(os.path.join(base, row.path))
     shipped = False
@@ -955,6 +999,7 @@ def _resolve_row(row: RowDecl, origin: str, doc: str, base: str,
     # the project's own sources and launder them as its own row. Project-local
     # documents (origin `.`) are the operator's and are not jailed.
     if origin != PROJECT_ORIGIN and not shipped:
+    if origin != PROJECT_ORIGIN:
         jail = os.path.abspath(os.path.join(root, _VENDOR_DIR, origin))
         if os.path.commonpath([source, jail]) != jail:
             raise RevlError(
@@ -971,6 +1016,7 @@ def _resolve_row(row: RowDecl, origin: str, doc: str, base: str,
     # internal reference (its composition reading its sibling component) needs
     # no project lock — the pin is the CONSUMING project's integrity proof (§7).
     vendored = None if shipped else _vendor_truc_of(source, root)
+    vendored = _vendor_truc_of(source, root)
     if vendored is not None and _vendor_truc_of(base, root) != vendored:
         _require_pin(vendored, root, doc, row.line)
 
@@ -980,6 +1026,7 @@ def _resolve_row(row: RowDecl, origin: str, doc: str, base: str,
     rel = _SHIPPED + row.path if shipped else _relative(source, root)
     if not shipped:
         _refuse_shipped_look_alike(rel, row.path, doc, row.line, "row source")
+    rel = _relative(source, root)
     header = _pick_component(row, _headers(source), doc, rel)
     claims, extra = _check_claims(row, header, doc, rel)
     config = _check_config(row, header, doc, rel)
@@ -1045,6 +1092,7 @@ def _resolve_uses(decl: CompositionDecl, doc: str, base: str,
         rel = _relative(target, root)
         _refuse_shipped_look_alike(rel, path, doc, line, "`use`")
         uses.append(rel)
+        uses.append(_relative(target, root))
     return uses
 
 
@@ -1074,6 +1122,7 @@ def _service_catalog(paths: list[str], root: str) -> dict:
     catalog: dict = {}
     for rel in dict.fromkeys(paths):
         program = parse_file(_at(root, rel))
+        program = parse_file(os.path.join(root, rel))
         for svc in program.services:
             catalog.setdefault(svc.name, (svc, rel))
     return catalog
@@ -1130,6 +1179,7 @@ def _resolve_remote(remote, catalog: dict, decl: CompositionDecl, doc: str,
         "on_failure": remote.on_failure, "transport": remote.transport,
         "redirect": remote.redirect, "pin": pin,
         "pin_line": remote.pin_line,
+        "redirect": remote.redirect,
         "long_running": remote.long_running,
         "long_running_line": remote.long_running_line,
         "doc": doc, "line": remote.line,
@@ -1291,6 +1341,7 @@ def _edge_provider(rows: list["Row"], root: str, key: str,
     skipped: a seam wraps a placed provider, not another synthesized one."""
     for row in rows:
         source = _at(root, row.source)
+        source = os.path.join(root, row.source)
         if not os.path.isfile(source):
             continue
         for header in _headers(source):
@@ -1310,6 +1361,7 @@ def _observer_provision(rows: list["Row"], root: str,
         if row.label != label:
             continue
         source = _at(root, row.source)
+        source = os.path.join(root, row.source)
         if not os.path.isfile(source):
             return None, None
         for header in _headers(source):
@@ -1400,6 +1452,7 @@ def _resolve_seams(decl: CompositionDecl, doc: str, origin: str, root: str,
         return sources
     file_paths = [*uses, *(r.source for r in rows
                            if os.path.isfile(_at(root, r.source)))]
+                           if os.path.isfile(os.path.join(root, r.source)))]
     catalog = _service_catalog(file_paths, root)
     for seam in decl.seams:
         rows.append(_resolve_seam(seam, catalog, rows, decl, doc, origin, root,
@@ -1573,6 +1626,7 @@ def _slo_ceilings(rows: list["Row"], uses: list[str], sources: dict,
         try:
             program = (Parser(text, rel).parse() if text is not None
                        else parse_file(_at(root, rel)))
+                       else parse_file(os.path.join(root, rel)))
         except RevlError:
             continue
         for svc in program.services:
@@ -1580,6 +1634,7 @@ def _slo_ceilings(rows: list["Row"], uses: list[str], sources: dict,
                 for capstr in (method.capabilities or ()):
                     try:
                         cap = cap_order.parse_stored_cap(capstr)
+                        cap = cap_order.parse_cap(capstr)
                         _, ceils = cap_order.split_ceilings(cap)
                     except cap_order.CapError:
                         continue
@@ -1693,6 +1748,8 @@ def resolve(decl: CompositionDecl, doc_path: str,
     numeric/bool field pure only when nothing reads it (§8.4). Every failure is a
     REFUSAL naming the row (426 §2.4: an address that resolves to nothing is a
     refusal, never a no-op).
+    no body is lowered. Every failure is a REFUSAL naming the row (426 §2.4:
+    an address that resolves to nothing is a refusal, never a no-op).
 
     This is the BASE table (level 0). `fold` (S2) starts from it and applies the
     layers the document declares; a document declaring none folds to itself.
@@ -1910,6 +1967,7 @@ def _place_ir(spec: PlaceDecl) -> dict:
 
 def _place_target(address: Address, own_origin: str, rows_by_qual: dict,
                   source: str, name: str, verb: str = "place") -> str:
+                  source: str, name: str) -> str:
     """The qualified label a `place` address names, refusing (426 §2.4) if it
     names nothing. Like `_resolve_address` but reports against the placing
     document/layer `source` rather than a `LayerDecl`, so a base-composition
@@ -1926,6 +1984,7 @@ def _place_target(address: Address, own_origin: str, rows_by_qual: dict,
         raise RevlError(
             source, address.line,
             f"`{verb} {address.spelling()}` names row `{address.spelling()}`, "
+            f"`place {address.spelling()}` names row `{address.spelling()}`, "
             f"which is no row in composition {name}",
             hint=hint + " (426 §2.4: an address that resolves to nothing is a "
                         "refusal, never a no-op)")
@@ -1936,6 +1995,7 @@ def _place_target(address: Address, own_origin: str, rows_by_qual: dict,
     raise RevlError(
         source, address.line,
         f"`{verb} {address.spelling()}` names a key no row claims in composition "
+        f"`place {address.spelling()}` names a key no row claims in composition "
         f"{name}",
         hint="keys claimed here: "
              + (", ".join(sorted({claim_str(c) for row in rows_by_qual.values()
@@ -2791,6 +2851,7 @@ def _row_profiles(table: RowTable, root: str,
     # and two rows of one file each keep their own grant instead of the last
     # one overwriting the first.
     reach: dict[str, tuple[set, set]] = {}
+    profiles: dict[str, AdmissionProfile] = {}
     for row in table.rows:
         if row_trust(row) != "non-first-party":
             continue
@@ -2802,6 +2863,8 @@ def _row_profiles(table: RowTable, root: str,
         pairs.update(_granted_requires(row))
     profiles = {path: AdmissionProfile.untrusted_author(services, requires=pairs)
                 for path, (services, pairs) in reach.items()}
+        profiles[os.path.join(root, row.source)] = \
+            AdmissionProfile.untrusted_author(row.granted or ())
     return profiles or None
 
 
@@ -2853,6 +2916,7 @@ def _admit_full(table: RowTable, root: str, **kwargs) -> dict:
     for rel, text in table.sources.items():
         sources[os.path.join(root, rel)] = text
     document = compile_files([_at(root, p) for p in table.paths()],
+    document = compile_files([os.path.join(root, p) for p in table.paths()],
                              sources=sources or None, **kwargs)
     return _carry_rows(document, table)
 
@@ -2903,6 +2967,7 @@ def _delta_sources(rows: list[Row], final: RowTable,
         text = final.sources.get(row.source)
         if text is not None:
             synth[_at(root, row.source)] = text
+            synth[os.path.join(root, row.source)] = text
     return paths, synth
 
 
@@ -2986,6 +3051,7 @@ def admit_composition(path: str, root: str | None = None,
         profiles = _row_profiles(final, root, trust_host_code)
     document = compile_files(
         [_at(root, p) for p in paths],
+        [os.path.join(root, p) for p in paths],
         manifest=base_doc, replacing=replacing,
         sources=extra or None, profiles=profiles, **kwargs)
     return _carry_rows(document, final)

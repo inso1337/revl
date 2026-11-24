@@ -79,6 +79,7 @@ from .. import _childproc
 from ..admit_profile import AdmissionProfile
 from ..compiler import compile_files, compile_source, escaping_use_path
 from ..diagnostics import FIXES, GUARANTEES, classify, explain, report
+from ..diagnostics import FIXES, GUARANTEES, explain, report
 from .. import grammar_summary as _grammar_summary
 from .. import source_grammar as _source_grammar
 from . import boolargs as _boolargs
@@ -109,6 +110,7 @@ from . import stdlib as _stdlib
 from . import undo_record as _undo_record
 from . import deploy as _mcp_deploy
 from .persist import ORIGIN_DEPENDENCIES, RestoreError
+from .persist import RestoreError
 from .approval import (ApprovalRequired, two_step_payload, _sha as _approval_sha,
                        _canon as _approval_canon)
 from .. import query as Q
@@ -127,6 +129,7 @@ from . import repeat as _repeat
 from .session import (AUTHORED_HOST_BODIES_KEY, ApprovalRefused,
                       NothingLoaded, Session, SessionError, has_host_code,
                       host_body_entries, host_code_of)
+from .session import Session, SessionError
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"name": "revl", "version": "2.0"}
@@ -165,6 +168,8 @@ class AuthoringTrust:
                     own `modules` so an untrusted turn can COMPOSE host-backed
                     services without authoring them. An agent module that
                     resolves to a provider's file is refused (issue #2763).
+                    merged under the agent's own `modules` so an untrusted turn
+                    can COMPOSE host-backed services without authoring them.
                     This is `Gate.propose`'s granted-providers map, same shape,
                     same rule: reaching their externs directly is still refused
                     by `check_no_host_extern_reach`; only their SERVICES compose.
@@ -203,6 +208,7 @@ class AuthoringTrust:
         if self.granted is not None:
             return AdmissionProfile.untrusted_author(self.granted,
                                                      self.realm_bindings)
+            return AdmissionProfile.untrusted_author(self.granted)
         # the untrusted-author profile with the reach allowlist left OFF, and
         # nothing else off: `no_extern` (+ its transitive reach sweep),
         # `no_declassify`, `taint_strict` and `no_realm_placement` are all
@@ -211,6 +217,7 @@ class AuthoringTrust:
         # reach — so the operator declares it with `--grant` or it is inert.
         return replace(AdmissionProfile.untrusted_author((), self.realm_bindings),
                        granted=None)
+        return replace(AdmissionProfile.untrusted_author(()), granted=None)
 
 
 # The live trust level. `revl mcp serve` sets it from its flags; a test or an
@@ -279,6 +286,7 @@ _PATH_ARGUMENTS = frozenset({"files", "candidateFiles", "baselineFiles",
 _NESTED_PATH_ARGUMENTS = frozenset({"files", "candidateFiles",
                                     "baselineFiles", "traceFile",
                                     "known_hosts", "host_key"})
+                             "traceFile", "registry", "policy"})
 
 
 def _file_roots() -> tuple[str, ...]:
@@ -301,6 +309,7 @@ def _within_roots(path: str, roots: tuple[str, ...]) -> bool:
     `open`, so resolving against the cwd there would be a lie. A caller-supplied
     path ARGUMENT never arrives here relative — `_jail_refusal` absolutises it
     against the roots first (`_absolutise_path_arguments`, issue #2038)."""
+    check itself is not the oracle it is closing."""
     real = os.path.realpath(os.path.abspath(path))
     for root in roots:
         if real == root or real.startswith(root + os.sep):
@@ -354,6 +363,9 @@ def _absolutise_path_arguments(node, roots: tuple[str, ...]) -> list[str]:
 def _walk_path_arguments(node, roots: tuple[str, ...], unadmitted: list,
                          *, nested: bool = False) -> None:
     keys = _NESTED_PATH_ARGUMENTS if nested else _PATH_ARGUMENTS
+def _collect_path_arguments(node, out: list) -> None:
+    """Every caller-supplied path anywhere in a tool's arguments, including the
+    ones nested inside a `revl_restore` snapshot document (`sources.files`)."""
     if isinstance(node, dict):
         for key, value in node.items():
             if key in keys and isinstance(value, str):
@@ -364,12 +376,18 @@ def _walk_path_arguments(node, roots: tuple[str, ...], unadmitted: list,
                     if isinstance(v, str) else v for v in value]
                 for item in value:
                     _walk_path_arguments(item, roots, unadmitted, nested=True)
+            if key in _PATH_ARGUMENTS:
+                if isinstance(value, str):
+                    out.append(value)
+                elif isinstance(value, list):
+                    out.extend(v for v in value if isinstance(v, str))
             else:
                 # issue #2528: a container under ANY key is walked, including
                 # one whose key is also a path-argument name (a process called
                 # `policy` holding a deploy table); a bare string under a key
                 # that is not a path here is left as written.
                 _walk_path_arguments(value, roots, unadmitted, nested=True)
+                _collect_path_arguments(value, out)
     elif isinstance(node, list):
         for item in node:
             _walk_path_arguments(item, roots, unadmitted, nested=True)
@@ -418,6 +436,7 @@ def _collect_path_arguments(node, out: list, *, nested: bool = False) -> None:
     elif isinstance(node, list):
         for item in node:
             _collect_path_arguments(item, out, nested=True)
+            _collect_path_arguments(item, out)
 
 
 def _escaping_use(path: str) -> bool:
@@ -469,12 +488,14 @@ def _transport_use_escapes(arguments: dict) -> list[str]:
         return []
     supplied: set[str] = set()
     _collect_module_keys(arguments, supplied)
+    from ..parser import Parser  # noqa: PLC0415
 
     escapes: list[str] = []
     for text in sources:
         try:
             # issue #2194: read-only, so the parse is shared within the call
             program = _shared_parse.program(text, "<candidate>.rvl")
+            program = Parser(text, "<candidate>.rvl").parse()
         except Exception:  # noqa: BLE001 — not parseable: the handler reports it
             continue
         for use in program.uses:
@@ -587,6 +608,7 @@ def _nul_path_refusal(name: str | None, arguments: dict) -> dict | None:
 
 
 def _jail_refusal(arguments: dict, name: str | None = None) -> dict | None:
+def _jail_refusal(arguments: dict) -> dict | None:
     """The refusal payload when a tool call names a path outside the sanctioned
     roots, or `None` when every path is inside. Fails CLOSED: refused before the
     handler runs, so nothing is opened, stat-ed or compiled, and the message
@@ -608,9 +630,14 @@ def _jail_refusal(arguments: dict, name: str | None = None) -> dict | None:
         return nul_refusal
     roots = _file_roots()
     unadmitted = _absolutise_path_arguments(arguments, roots)
+    Two carriers, one jail: a path ARGUMENT (`files`, `traceFile`, ...) and a
+    `use` path written inside transport-carried source (`_transport_use_escapes`,
+    roadmap 425 F2)."""
     paths: list = []
     _collect_path_arguments(arguments, paths)
     escaped = [p for p in paths if not _within_roots(p, roots)] + unadmitted
+    roots = _file_roots()
+    escaped = [p for p in paths if not _within_roots(p, roots)]
     imports = _transport_use_escapes(arguments) if not escaped else []
     if not escaped and not imports:
         return None
@@ -666,6 +693,7 @@ _SOURCE_ARGUMENTS = frozenset({"source", "candidate", "baseline", "replacement"}
 # `use`-reached modules it lays over `files_content` (`persist._recompile`)
 _SOURCE_MAP_ARGUMENTS = frozenset({"modules", "files_content",
                                    ORIGIN_DEPENDENCIES})
+_SOURCE_MAP_ARGUMENTS = frozenset({"modules", "files_content"})
 
 
 def _collect_sources(node, out: list) -> None:
@@ -697,6 +725,7 @@ def _authoring_refusal(arguments: dict) -> dict | None:
     if profile is None:
         return None
     from ..admit_profile import enforce_source  # noqa: PLC0415
+    from ..parser import Parser  # noqa: PLC0415
 
     sources: list = []
     _collect_sources(arguments, sources)
@@ -704,6 +733,7 @@ def _authoring_refusal(arguments: dict) -> dict | None:
         try:
             # issue #2194: the jail's parse of the same text, which it only read
             program = _shared_parse.program(text, "<candidate>.rvl")
+            program = Parser(text, "<candidate>.rvl").parse()
         except Exception:  # noqa: BLE001 — not parseable: the handler reports it
             continue
         try:
@@ -783,6 +813,18 @@ def _transport_authored(source: str | None, files: list[str] | None,
     if any(_export_jail.in_export_area(path) for path in paths):
         return True
     return AUTHORING.host_code
+    """Every extern in `ir` that carries a verbatim host body, as
+    `{extern, classification, backends}`. This is the surface G8 does not check
+    inside (item 24) and the item-246 classifier never looks at."""
+    out = []
+    for extern in ir.get("externs") or []:
+        bodies = extern.get("bodies") or {}
+        if not bodies:
+            continue
+        out.append({"extern": extern.get("name"),
+                    "classification": extern.get("class"),
+                    "backends": sorted(bodies)})
+    return sorted(out, key=lambda e: str(e["extern"]))
 
 
 def compile_under_authoring(source: str | None, files: list[str] | None,
@@ -791,6 +833,7 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
                             replacing: tuple = (),
                             over_the_transport: bool = True,
                             report: dict | None = None) -> dict:
+                            over_the_transport: bool = True) -> dict:
     """Compile inline source or paths through the same entry points the CLI
     uses, so the admission gate is literally the same code.
 
@@ -839,6 +882,13 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
     authored, exactly as if it had been sent inline.
     Inline `source` and `modules` always carry the profile: they arrived over
     the transport, whatever path they claim to sit at.
+    `files` are the exception, and the path jail is what earns it: a `.rvl` file
+    inside an operator-sanctioned root was not written by the agent — no MCP verb
+    writes to disk, so the only way bytes reach a jailed path is a human putting
+    them there. Those compile unprofiled, exactly as `Gate._compile_base` (the
+    embedder's own sources) does while `Gate.propose` (the agent's source) does
+    not. Inline `source` and `modules` always carry the profile: they arrived
+    over the transport, whatever path they claim to sit at.
 
     With operator-sanctioned `providers` this is item 334's two-compile shape,
     not one compile with a flag, and for `Gate.propose`'s reasons:
@@ -866,6 +916,7 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
     not `AUTHORING.profile()`.
     """
     base = AUTHORING.profile() if over_the_transport else None
+    # jailed `files` with no transport-carried text are operator-authored.
     inline = source is not None or bool(modules)
     # issue #2524: a `files` entry an export wrote is agent text, not the
     # operator's. So is one a compile reaches by `use`, which only the compile
@@ -1050,6 +1101,7 @@ def _compile_candidate(source, files, manifest, modules, replacing, profile,
                        report) -> dict:
     """One pass of `compile_under_authoring`: the decision compile and, with
     operator-sanctioned providers, the composition compile."""
+    profile = AUTHORING.profile() if inline and over_the_transport else None
     providers = dict(AUTHORING.providers or {})
     # Issue #2763: an agent-supplied module may not take a provider's place.
     # Providers are keyed by absolute path (`set_authoring_trust`), and the
@@ -1061,9 +1113,12 @@ def _compile_candidate(source, files, manifest, modules, replacing, profile,
     # learns which provider it collided with and sends its module elsewhere.
     if modules:
         _refuse_provider_displacement(modules, providers)
+    # operator-sanctioned modules ride UNDER the agent's own `modules`: an
+    # agent-supplied entry can never displace a provider the operator granted.
     merged = dict(providers)
     if modules:
         merged.update(modules)
+        merged.update({k: v for k, v in modules.items() if k not in merged})
 
     # every in-memory module, keyed the way `compile_files` resolves a `use`:
     # by absolute path. The agent's own modules ride here in BOTH compiles of
@@ -1075,6 +1130,7 @@ def _compile_candidate(source, files, manifest, modules, replacing, profile,
     in_memory = {os.path.abspath(p): text for p, text in merged.items()}
 
     def _compile_once(prof, co_roots: dict, into: dict | None = None) -> dict:
+    def _compile_once(prof, co_roots: dict) -> dict:
         if co_roots:
             virtual = dict(in_memory)
             paths = [os.path.abspath(p) for p in co_roots]
@@ -1088,10 +1144,12 @@ def _compile_candidate(source, files, manifest, modules, replacing, profile,
                 raise ValueError("provide `source` or `files`")
             return compile_files(paths, manifest=manifest, replacing=replacing,
                                  sources=virtual, profile=prof, report=into)
+                                 sources=virtual, profile=prof)
         if source is not None:
             return compile_source(source, "<candidate>.rvl", manifest=manifest,
                                   replacing=replacing, modules=merged or None,
                                   profile=prof, report=into)
+                                  profile=prof)
         if files:
             return compile_files(list(files), manifest=manifest,
                                  replacing=replacing, profile=prof,
@@ -1100,6 +1158,7 @@ def _compile_candidate(source, files, manifest, modules, replacing, profile,
                                      _operator_text_of(in_memory, providers)
                                      if prof is not None else None),
                                  report=into)
+                                 sources=in_memory or None)
         raise ValueError("provide `source` or `files`")
 
     if providers and profile is not None:
@@ -1131,6 +1190,8 @@ def _restore_gate_profile() -> AdmissionProfile | None:
     if not AUTHORING.realm_bindings:
         return None
     return _bound_only(None)
+        return _compile_once(None, providers)   # 2. what loads
+    return _compile_once(profile, providers)
 
 
 def _candidate_of(arguments: dict) -> tuple:
@@ -1163,9 +1224,11 @@ def _compile(source: str | None, files: list[str] | None,
     ir = compile_under_authoring(source, files, manifest=manifest,
                                  modules=modules, replacing=replacing,
                                  report=compile_report)
+                                 modules=modules, replacing=replacing)
     global _AUTHORED_HOST_BODIES
     _AUTHORED_HOST_BODIES = _authored_host_bodies(
         ir, source, modules, files=files, report=compile_report)
+    _AUTHORED_HOST_BODIES = _authored_host_bodies(ir, source, modules)
     return ir
 
 
@@ -1219,6 +1282,12 @@ def _authored_host_bodies(ir: dict, source: str | None,
     }
     return [body for body in _host_bodies(ir)
             if body.get("extern") in authored_externs]
+                          modules: dict | None) -> list:
+    """The agent-authored host bodies `ir` carries: empty unless the candidate
+    came over the transport under an open authoring trust."""
+    over_the_transport = source is not None or bool(modules)
+    return (_host_bodies(ir) if over_the_transport and AUTHORING.host_code
+            else [])
 
 
 def _summary(ir: dict) -> dict:
@@ -1392,6 +1461,11 @@ def _resolve_handle(name: str, arguments: dict) -> tuple[dict, dict | None]:
                 if key != _artifacts.ARTIFACT_KEY}
     resolved["source"] = text
     return resolved, None
+def _session_error(message: str, **extra) -> dict:
+    return {"ok": False, "diagnostics": [{
+        "severity": "error", "code": "REVL", "category": "session",
+        "message": message,
+    }], **extra}
 
 
 # -- operator capabilities (roadmap item 55, docs/operator-capabilities.md) ---
@@ -1501,6 +1575,7 @@ def _tool_lease(arguments: dict) -> dict:
             book.claim(component, holder, arguments.get("ttl"))
     except _leases.LeaseError as error:
         return _session_error(error)
+        return _session_error(str(error))
     events = book.drain_events()
     _record_lease_trace(events)
     payload = {
@@ -1517,6 +1592,7 @@ def _tool_lease(arguments: dict) -> dict:
 
 
 def _origin(arguments: dict, dependencies: dict | None = None) -> dict:
+def _origin(arguments: dict) -> dict:
     """The admission inputs of a load/swap, kept so the composition can later
     be snapshotted for re-admission (docs/persistence.md).
 
@@ -1529,6 +1605,7 @@ def _origin(arguments: dict, dependencies: dict | None = None) -> dict:
 
     `dependencies` (issue #1779) are the read-only buffers of the files the
     compile reached through `use`, as `_dependency_buffers` filtered them."""
+    be snapshotted for re-admission (docs/persistence.md)."""
     origin = {}
     for key in ("source", "files", "modules"):
         value = arguments.get(key)
@@ -1648,6 +1725,13 @@ def _remember_live_host_bodies() -> None:
     provenance computed by the compile that admitted the generation; walking
     the merged IR here would mislabel operator provider bodies as agent code.
     """
+    """Re-read the host bodies the LIVE composition carries, so a later
+    class-(c) ticket can name them. Called after every completed tool call, so
+    load / swap / edit / restore / undo / rollback / unload are all covered by
+    one line rather than five that could drift apart. Empty under a closed
+    authoring trust: the profile refused every agent-authored host body, so the
+    only bodies that can be live came from the operator's own jailed files and
+    there is nothing to warn about."""
     global _LIVE_HOST_BODIES
     origin = getattr(SESSION, "origin", None) or {}
     if _ORIGIN_AUTHORED_HOST_BODIES in origin:
@@ -1665,6 +1749,7 @@ def _remember_live_host_bodies() -> None:
 
 
 def _tool_load(arguments: dict, compiled=None) -> dict:
+def _tool_load(arguments: dict) -> dict:
     """Boot a composition in memory (nothing is written to disk).
 
     `compiled` (issue #2407) is a compile the caller already ran on exactly
@@ -1786,13 +1871,23 @@ def _boot(ir: dict, source, modules, config, record: bool, origin: dict,
         ir, source, modules, files=files, report=compile_report,
         include_trusted_files=True)
     _with_authored_host_bodies(origin, authored)
+    source, files, modules = _candidate_of(arguments)
     try:
         # issue #3293: the generation records who wrote it, as a forward swap
         # does, so an undo back to it applies the agent-authored rules
         state = SESSION.load(ir, config, record=record, origin=origin,
                              agent_authored=bool(compile_report.get("authored")))
+        ir = compile_under_authoring(source, files, modules=modules)
+    except RevlError as error:
+        return report(error)
+    authored = _authored_host_bodies(ir, source, modules)
+    try:
+        state = SESSION.load(ir, arguments.get("config"),
+                             record=bool(arguments.get("record")),
+                             origin=_origin(arguments))
     except SessionError as error:
         return _session_error(error)
+        return _session_error(str(error))
     except ApprovalRequired as exc:
         return _approval_required(exc, host_bodies=authored)
     global _AUTHORED_HOST_BODIES
@@ -1827,6 +1922,7 @@ def _boot_draft(vs: dict, config, record, verify=None) -> dict:
     if not booted.get("ok"):
         return _draft.still_a_draft(booted)
     return {**booted, "draft": False, "booted": True, "loaded": True}
+    return {"ok": True, **_summary(ir), **state}
 
 
 def _tool_call(arguments: dict) -> dict:
@@ -1838,6 +1934,7 @@ def _tool_call(arguments: dict) -> dict:
         return {"ok": True, **SESSION.call(key, method, arguments.get("args") or [])}
     except SessionError as error:
         return _session_error(error)
+        return _session_error(str(error))
     except ApprovalRequired:
         # item 246: the class-(c) ticket two-step is a RESULT, shaped by
         # `handle`. Re-raised past the catch-all below, which used to swallow it
@@ -1903,6 +2000,7 @@ def _tool_swap(arguments: dict) -> dict:
     """
     if not SESSION.loaded:
         return _session_error(NothingLoaded("nothing is loaded — call revl_load first"))
+        return _session_error("nothing is loaded — call revl_load first")
     replacing = tuple(arguments.get("replacing") or ())
 
     # component leases (item 61): under a policy that enforces leases, refuse a
@@ -1927,6 +2025,9 @@ def _tool_swap(arguments: dict) -> dict:
     before = _edit.running_source(SESSION)
     if all(part is None for part in _candidate_of(arguments)):
         return _with_touched(_swap_server_side(replacing), before)
+    inline = any(arguments.get(k) is not None for k in ("source", "files", "modules"))
+    if not inline:
+        return _swap_server_side(replacing)
 
     # issue #1700: compiled as sent, stored canonical, and the answer says which
     sent, stored, canon = _canonical.prepare(arguments)
@@ -1956,6 +2057,7 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
     try:
         full = compile_under_authoring(source, files, modules=modules,
                                        report=compile_report)
+        full = compile_under_authoring(source, files, modules=modules)
     except RevlError as error:
         rejected = report(error)
         rejected["admitted"] = True
@@ -2029,11 +2131,14 @@ def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dic
     # file on disk. A trusted host-code author is still the agent, and its text
     # may not re-seat live operator instance state without the disclosure gate.
     agent_authored = bool(compile_report.get("authored"))
+    authored = _authored_host_bodies(full, source, modules)
     try:
         state = SESSION.swap(full, origin=origin,
                              agent_authored=agent_authored)
+        state = SESSION.swap(full, origin=_origin(arguments))
     except SessionError as error:
         return _session_error(error, **_refusal_code(error))
+        return _session_error(str(error))
     except ApprovalRequired as exc:
         # the candidate's own host bodies: a yes admits the candidate, so its
         # ticket names the candidate's host code, never the running one's
@@ -2253,15 +2358,20 @@ def _realm_removal_refused(running: dict, full: dict,
                         note="the running composition is untouched")
         return rejected
     return None
+    return {"ok": True, "admitted": True, "swapped": True, **_summary(full), **state}
 
 
 def _swap_server_side(replacing: tuple) -> dict:
     """Swap the source the session already holds — no inline source resent."""
     vs = _edit.virtual_source(SESSION)
     if vs.get("source") is None and not vs.get("files"):
+    if vs.get("source") is None:
         return _session_error(
             "no server-side source to swap by name — there is nothing the "
             "session can re-admit without you passing `source`/`files`")
+            "no server-side source to swap by name — this composition was not "
+            "loaded from inline source, so there is nothing the session can "
+            "re-admit without you passing `source`/`files`")
     try:
         _edit.compile_virtual(vs, manifest=SESSION.ir, replacing=replacing)
     except RevlError as error:
@@ -2273,6 +2383,7 @@ def _swap_server_side(replacing: tuple) -> dict:
     compile_report: dict = {}
     try:
         full = _edit.compile_virtual(vs, report=compile_report)
+        full = _edit.compile_virtual(vs)
     except RevlError as error:
         rejected = report(error)
         rejected["admitted"] = True
@@ -2310,11 +2421,14 @@ def _swap_server_side(replacing: tuple) -> dict:
                              agent_authored=bool(compile_report.get("authored")))
     except ApprovalRequired as exc:
         return _approval_required(exc, host_bodies=authored)
+        state = SESSION.swap(full, origin=_edit._origin_from(vs))
     except SessionError as error:
         return _session_error(error, **_refusal_code(error))
+        return _session_error(str(error))
     return {"ok": True, "admitted": True, "swapped": True,
             "fromServerSide": True, "blastRadius": radius, **_summary(full), **state,
             **_effect_classes.report(full, running, against=True)}
+            "fromServerSide": True, **_summary(full), **state}
 
 
 # -- a load over a held draft (issue #2111) ---------------------------------
@@ -2368,6 +2482,9 @@ def _held_draft_phrase() -> str:
     draft = _draft.pending(SESSION)
     if draft is None:
         return "the held draft"
+def _tool_edit(arguments: dict) -> dict:
+    """Patch the server-side source of the running composition and re-admit —
+    deltas, not documents (roadmap item 50, docs/mcp-bridge.md)."""
     try:
         ir = _edit.compile_virtual(draft["vs"])
     except RevlError:
@@ -2587,6 +2704,10 @@ def _tool_knowledge(arguments: dict) -> dict:
                     "note": _notes.served(_notes.notes(SESSION)[target])}
         raise _notes.NoteError("`op` is one of add, query, confirm, retire, supersede")
     except _notes.NoteError as error:
+        return _edit.apply_edit(SESSION, arguments)
+    except _edit.EditError as error:
+        return _session_error(str(error), edited=False, swapped=False)
+    except SessionError as error:
         return _session_error(str(error))
 
 
@@ -3256,6 +3377,7 @@ def _tool_rollback(_arguments: dict) -> dict:
         previous = SESSION.previous_origin or {}
         return _approval_required(
             error, host_bodies=previous.get(_ORIGIN_AUTHORED_HOST_BODIES, []))
+        return {"ok": True, **SESSION.rollback()}
     except SessionError as error:
         # a rollback refused after its teardown restarted the running
         # generation cold, and says which state that dropped (issue #2424)
@@ -3270,6 +3392,7 @@ def _tool_rollback(_arguments: dict) -> dict:
             raise
         return _session_error(f"{type(error).__name__}: {error}",
                               category="internal", stateDropped=dropped)
+        return _session_error(str(error))
 
 
 def _tool_undo(arguments: dict) -> dict:
@@ -3287,13 +3410,16 @@ def _tool_undo(arguments: dict) -> dict:
     (docs/generation-history.md)."""
     if not SESSION.loaded:
         return _session_error(NothingLoaded("nothing is loaded — call revl_load first"))
+        return _session_error("nothing is loaded — call revl_load first")
     try:
         result = SESSION.undo(arguments.get("to"), profile=AUTHORING.profile())
     except ApprovalRequired as error:
         return _approval_required(
             error, host_bodies=getattr(error, "host_bodies", []))
+        result = SESSION.undo(arguments.get("to"))
     except SessionError as error:
         return _session_error(error)
+        return _session_error(str(error))
     # a gate refusal is a result, not an error: surface it as ok:False with the
     # diagnostic, matching how revl_restore reports a rejected re-admission.
     if result.get("refused"):
@@ -3314,6 +3440,7 @@ def _tool_unload(arguments: dict) -> dict:
     `disk` block says which files are stale either way. `noResidue` is left to
     its runtime-teardown meaning — it is not overloaded to carry this answer.
     """
+    its own. The holder may unload what it holds."""
     if SESSION.loaded:
         refusal = _leases.check(SESSION, "unload", arguments)
         if refusal is not None:
@@ -3330,8 +3457,10 @@ def _tool_unload(arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.unload(), "disk": disk,
                 **({"note": lost} if lost else {})}
+        return {"ok": True, **SESSION.unload()}
     except SessionError as error:
         return _session_error(error)
+        return _session_error(str(error))
 
 
 def _tool_commit(_arguments: dict) -> dict:
@@ -3342,6 +3471,7 @@ def _tool_commit(_arguments: dict) -> dict:
         return {"ok": True, "manifest": SESSION.commit()}
     except SessionError as error:
         return _session_error(error)
+        return _session_error(str(error))
 
 
 def _tool_commit_confirm(arguments: dict) -> dict:
@@ -3362,6 +3492,7 @@ def _tool_commit_confirm(arguments: dict) -> dict:
         result = SESSION.commit_confirm(manifest_hash)
     except SessionError as error:
         return _session_error(error)
+        return _session_error(str(error))
     if result.get("refused"):
         return {"ok": False, **result}
     return {"ok": True, **result}
@@ -3383,6 +3514,7 @@ def _tool_fork(arguments: dict) -> dict:
         # a refused fork (a KIND_OPAQUE tail, a non-idempotent span, a committed
         # boundary below k) is a RESULT the caller reads, not a crash
         return _session_error(error, refused=True)
+        return _session_error(str(error), refused=True)
 
 
 def _tool_fork_confirm(arguments: dict) -> dict:
@@ -3408,6 +3540,7 @@ def _tool_fork_confirm(arguments: dict) -> dict:
         return _approval_required(error, host_bodies=authored_host_bodies)
     except SessionError as error:
         return _session_error(error)
+        return _session_error(str(error))
     if result.get("refused"):
         return {"ok": False, **{k: v for k, v in result.items()
                                 if k != "branchSession"}}
@@ -3461,6 +3594,9 @@ def _approval_required(exc: ApprovalRequired,
         # candidate provenance to the exception so the shared handler can
         # disclose it without falling back to the currently running bodies.
         host_bodies = getattr(exc, "host_bodies", None)
+    `host_bodies` is the candidate's own, from a verb that has not recorded
+    them: `revl_load` and `revl_swap`, which record them only once the load or
+    swap succeeds (issues #1444, #1446)."""
     ticket = exc.ticket
     fields = _ticket_host_code(exc, host_bodies)
     if fields:
@@ -3489,11 +3625,15 @@ def _ticket_host_code(exc: ApprovalRequired, host_bodies: list | None) -> dict:
     candidate = exc.candidate
     if candidate is None:
         bodies = (host_bodies if host_bodies is not None else _LIVE_HOST_BODIES)
+        bodies = (host_bodies if host_bodies is not None
+                  else _LIVE_HOST_BODIES or _AUTHORED_HOST_BODIES)
         return _host_code_fields(bodies) if bodies else {}
     # A merged candidate IR also includes operator providers. If the caller did
     # not carry the compile's provenance report, omit the disclosure instead of
     # claiming every host body was candidate-authored.
     bodies = host_bodies or []
+    bodies = (host_bodies if host_bodies is not None
+              else _host_bodies(candidate) if AUTHORING.host_code else [])
     if not bodies:
         return {}
     fields = _host_code_fields(bodies)
@@ -3531,6 +3671,10 @@ def _host_body_texts(ir: dict) -> dict:
     sha256 moved is new host code (issue #3347)."""
     return {extern.get("name"): (extern.get("class"), host_code_of(extern))
             for extern in ir.get("externs") or [] if has_host_code(extern)}
+    """Each host-bodied extern in `ir` by name, as its classification and its
+    verbatim bodies, so two compositions' host code compares by content."""
+    return {extern.get("name"): (extern.get("class"), extern.get("bodies"))
+            for extern in ir.get("externs") or [] if extern.get("bodies")}
 
 
 def _host_code_fields(bodies: list) -> dict:
@@ -3610,6 +3754,7 @@ def _tool_approve(arguments: dict) -> dict:
                 uses=uses, ttl_ms=ttl_ms)}
         except SessionError as error:
             return _session_error(error)
+            return _session_error(str(error))
     if not ticket_hash:
         return _session_error("provide `hash` — the ticket hash from the "
                               "approvalRequired response — or a `capability` "
@@ -3618,9 +3763,11 @@ def _tool_approve(arguments: dict) -> dict:
         return {"ok": True, **SESSION.approve_ticket(
             ticket_hash, vote=vote or "approve",
             proposer=arguments.get("proposer"), as_token=as_token,
+            ticket_hash, vote=vote or "approve", as_token=as_token,
             as_secret=as_secret, as_proof=as_proof)}
     except SessionError as error:
         return _session_error(error)
+        return _session_error(str(error))
 
 
 def _tool_revoke(arguments: dict) -> dict:
@@ -3653,8 +3800,10 @@ def _tool_revoke(arguments: dict) -> dict:
             capability=capability, request_id=request_id)}
     except ValueError as error:
         return _session_error(error)
+        return _session_error(str(error))
     except SessionError as error:
         return _session_error(error)
+        return _session_error(str(error))
 
 
 def _tool_escalate(arguments: dict) -> dict:
@@ -3676,8 +3825,10 @@ def _tool_escalate(arguments: dict) -> dict:
         return {"ok": True, **_quorum.escalate(SESSION, arguments)}
     except ValueError as error:
         return _session_error(error)
+        return _session_error(str(error))
     except SessionError as error:
         return _session_error(error)
+        return _session_error(str(error))
 
 
 def _tool_override(arguments: dict) -> dict:
@@ -3701,6 +3852,7 @@ def _tool_override(arguments: dict) -> dict:
         return {"ok": True, **_quorum.override(SESSION, arguments)}
     except ValueError as error:
         return _session_error(error)
+        return _session_error(str(error))
     except SessionError as error:
         return _session_error(error)
 
@@ -3741,6 +3893,7 @@ def _tool_approvals(arguments: dict) -> dict:
             f"`stats` (issue #2991)"))
     except (ValueError, SessionError) as error:
         return _session_error(error)
+        return _session_error(str(error))
 
 
 def _tool_quorum(arguments: dict) -> dict:
@@ -3757,8 +3910,10 @@ def _tool_quorum(arguments: dict) -> dict:
         return {"ok": True, **_quorum.decision_report(SESSION, arguments)}
     except ValueError as error:
         return _session_error(error)
+        return _session_error(str(error))
     except SessionError as error:
         return _session_error(error)
+        return _session_error(str(error))
 
 
 def _tool_distillation_offers(_arguments: dict) -> dict:
@@ -3769,6 +3924,7 @@ def _tool_distillation_offers(_arguments: dict) -> dict:
         return {"ok": True, **SESSION.distillation_offers()}
     except SessionError as error:
         return _session_error(error)
+        return _session_error(str(error))
 
 
 def _tool_apply_distillation(arguments: dict) -> dict:
@@ -3784,6 +3940,7 @@ def _tool_apply_distillation(arguments: dict) -> dict:
         return {"ok": True, **SESSION.apply_distillation(offer_id)}
     except SessionError as error:
         return _session_error(error)
+        return _session_error(str(error))
 
 
 def _tool_revoke_distillation(arguments: dict) -> dict:
@@ -3798,6 +3955,7 @@ def _tool_revoke_distillation(arguments: dict) -> dict:
         return {"ok": True, **SESSION.revoke_distillation(rule)}
     except SessionError as error:
         return _session_error(error)
+        return _session_error(str(error))
 
 
 def _tool_abort(arguments: dict) -> dict:
@@ -3813,6 +3971,7 @@ def _tool_abort(arguments: dict) -> dict:
         return {"ok": True, **SESSION.abort()}
     except SessionError as error:
         return _session_error(error)
+        return _session_error(str(error))
 
 
 def _tool_estop(arguments: dict) -> dict:
@@ -3829,6 +3988,7 @@ def _tool_estop(arguments: dict) -> dict:
                 getattr(SESSION, "operator", None), "token", None))}
     except SessionError as error:
         return _session_error(error)
+        return _session_error(str(error))
 
 
 def _tool_estop_report(_arguments: dict) -> dict:
@@ -3845,6 +4005,7 @@ def _tool_brief(_arguments: dict) -> dict:
     every field, so this handler is the projection plus the `ok` flag the
     response shape carries."""
     return {"ok": True, **_brief.project(SESSION)}
+        return _session_error(str(error))
 
 
 def _tool_state(_arguments: dict) -> dict:
@@ -3862,6 +4023,7 @@ def _tool_state(_arguments: dict) -> dict:
             holes = None
         state["draft"] = {"holes": holes}
     return state
+    return {"ok": True, **SESSION.state(drain=True)}
 
 
 def _tool_gauntlet(arguments: dict) -> dict:
@@ -4105,6 +4267,8 @@ def _tool_quarantine(arguments: dict) -> dict:
     a report whose `verdict` is passed | trapped | timeout | rejected | deferred
     | unavailable | refused, plus the policy admission decision. The live
     composition is never touched (docs/quarantine-tier.md)."""
+    | unavailable, plus the policy admission decision. The live composition is
+    never touched (docs/quarantine-tier.md)."""
     if arguments.get("source") is None and not arguments.get("files"):
         return _session_error("provide `source` or `files` — quarantine proves "
                               "a candidate component in the sandbox")
@@ -4156,6 +4320,7 @@ def _tool_snapshot(_arguments: dict) -> dict:
         return {"ok": True, "snapshot": SESSION.snapshot()}
     except SessionError as error:
         return _session_error(error)
+        return _session_error(str(error))
 
 
 def _restore_has_provider_dependency(snap: dict | None) -> bool:
@@ -4180,6 +4345,15 @@ def _restore_has_provider_dependency(snap: dict | None) -> bool:
 
 def _restore_provider_dependency_refusal_note(snap: dict | None) -> str | None:
     if not _restore_has_provider_dependency(snap):
+def _restore_authoring_refusal(snap) -> dict | None:
+    """The full decision compile for a `revl_restore`, or `None` when the
+    snapshot's sources admit under the session's authoring trust. Mirrors
+    `persist._recompile`'s inputs exactly (virtual file contents included) so the
+    decision is taken over the same text the restore will compile, and adds the
+    profile `persist` deliberately does not carry (its other caller is the
+    operator's own `--restore`)."""
+    profile = AUTHORING.profile()
+    if profile is None or not isinstance(snap, dict):
         return None
     return (
         "nothing was restored — this snapshot includes a dependency path also "
@@ -4214,6 +4388,29 @@ def _restore_authoring_refusal(error: RevlError, snap: dict | None = None) -> di
 #: issue #3197: the operator gate's restore disk reads for the call in flight
 #: (path -> sha256), set by `handle` around the handler; None outside one.
 _RESTORE_GATE_READS: dict | None = None
+    sources = snap.get("sources") or {}
+    if not isinstance(sources, dict):
+        return None
+    try:
+        source = sources.get("source")
+        if source is not None:
+            compile_source(source, "<snapshot>.rvl",
+                           modules=sources.get("modules") or None, profile=profile)
+        elif sources.get("files"):
+            virtual = {os.path.abspath(path): text for path, text
+                       in (sources.get("files_content") or {}).items()}
+            compile_files(list(sources["files"]), sources=virtual or None,
+                          profile=profile)
+    except RevlError as error:
+        payload = report(error)
+        payload["restored"] = False
+        payload["reAdmitted"] = False
+        payload["authoringTrust"] = "untrusted"
+        payload["note"] = ("nothing was restored — a snapshot is agent-supplied "
+                           "source and admits under the same authoring trust "
+                           "`revl_load` does")
+        return payload
+    return None
 
 
 def _tool_restore(arguments: dict) -> dict:
@@ -4233,6 +4430,10 @@ def _tool_restore(arguments: dict) -> dict:
     Snapshot dependency buffers remain agent-supplied even when their path
     matches an operator `--provider`: restore re-admits the captured buffers and
     does not merge the live provider map."""
+    authored source like any other and gets the same decision compile
+    `Gate.propose` runs before it swaps: a snapshot may no more smuggle a host
+    body past the authoring trust than `revl_load` may. (The operator's own
+    `revl mcp serve --restore` path is not agent-supplied and is unaffected.)"""
     snap = arguments.get("snapshot")
     if snap is None:
         return _session_error("`snapshot` (a document from revl_snapshot) is required")
@@ -4243,12 +4444,16 @@ def _tool_restore(arguments: dict) -> dict:
         # bindings, as the operator gate's does
         leased = _leases.check(SESSION, "restore", arguments,
                                restore_profile=_restore_gate_profile())
+        leased = _leases.check(SESSION, "restore", arguments)
         if leased is not None:
             return _refused_by_lease(leased)
     profile = AUTHORING.profile()
     sources = snap.get("sources") if isinstance(snap, dict) else {}
     sources = sources or {}
     compile_report: dict = {"authored": True}
+    refusal = _restore_authoring_refusal(snap)
+    if refusal is not None:
+        return refusal
     try:
         # issue #3197: with an operator bound, the boot compile reads from
         # disk exactly what the gate's compile read (none when no gate ran
@@ -4270,6 +4475,7 @@ def _tool_restore(arguments: dict) -> dict:
             report=compile_report, include_trusted_files=True,
             source_name=admitted_name(snap))
         return _approval_required(error, host_bodies=authored)
+        return {"ok": True, **SESSION.restore(snap)}
     except RestoreError as error:
         if profile is not None and error.revl_error is not None:
             return _restore_authoring_refusal(error.revl_error, snap)
@@ -4302,6 +4508,7 @@ def _tool_restore(arguments: dict) -> dict:
     global _AUTHORED_HOST_BODIES
     _AUTHORED_HOST_BODIES = authored
     return {"ok": True, **result}
+        return _session_error(str(error))
 
 
 # -- backwards replay (docs/replay.md) ------------------------------------
@@ -4311,6 +4518,7 @@ def _tool_timeline(arguments: dict) -> dict:
         return {"ok": True, **SESSION.timeline(arguments.get("component"))}
     except SessionError as error:
         return _session_error(error)
+        return _session_error(str(error))
 
 
 def _tool_inspect_step(arguments: dict) -> dict:
@@ -4321,6 +4529,7 @@ def _tool_inspect_step(arguments: dict) -> dict:
                                                    arguments["at"])}
     except SessionError as error:
         return _session_error(error)
+        return _session_error(str(error))
 
 
 def _tool_step_back(arguments: dict) -> dict:
@@ -4330,6 +4539,7 @@ def _tool_step_back(arguments: dict) -> dict:
         return _session_error("`to` is required (-1 unwinds everything recorded); "
                               "with no arguments at all, step_back reverts the "
                               "last change this session made")
+        return _session_error("`to` is required (-1 unwinds everything recorded)")
     try:
         return {"ok": True, **SESSION.step_back(arguments.get("component"),
                                                 arguments["to"],
@@ -4369,6 +4579,7 @@ def _step_back_last_change() -> dict:
 
 def _change_of(entry: dict) -> dict:
     return {"tool": entry["tool"], "arguments": entry["arguments"]}
+        return _session_error(str(error), refused=True)
 
 
 def _tool_replay_bisect(arguments: dict) -> dict:
@@ -4382,6 +4593,7 @@ def _tool_replay_bisect(arguments: dict) -> dict:
                                              predicate)}
     except SessionError as error:
         return _session_error(error)
+        return _session_error(str(error))
 
 
 def _tool_replay_forward(arguments: dict) -> dict:
@@ -4392,6 +4604,7 @@ def _tool_replay_forward(arguments: dict) -> dict:
                                                      arguments["from"])}
     except SessionError as error:
         return _session_error(error)
+        return _session_error(str(error))
 
 
 # -- verified canary (docs/verified-canary.md, roadmap item 59) ------------
@@ -4432,6 +4645,8 @@ def _tool_live_query(arguments: dict) -> dict:
         return _session_error(NothingLoaded(
             "nothing is loaded — a live query answers against the running "
             "composition; call revl_load first"))
+        return _session_error("nothing is loaded — a live query answers against "
+                              "the running composition; call revl_load first")
     verb = arguments.get("verb")
     if verb not in Q._VERB_FN:
         return _session_error(f"unknown verb {verb!r}; one of "
@@ -4467,6 +4682,7 @@ def _tool_history_emitted_between(arguments: dict) -> dict:
             timeline = SESSION.timeline(None)
         except SessionError as error:
             return _session_error(error)
+            return _session_error(str(error))
     return Q.emitted_between(timeline, frm, to, arguments.get("component"))
 
 
@@ -4888,6 +5104,7 @@ def _check_as_sent(arguments: dict, held: dict | None = None) -> tuple:
     source, _files, modules = _candidate_of(arguments)
     try:
         ir = _compile(source, _files, modules)
+        ir = _compile(*_candidate_of(arguments))
     except RevlError as error:
         # issue #2684: hand the fixgen repair engine the text this compile read,
         # so a G4 record's mechanical repair carries a verified `fix_code`
@@ -4900,6 +5117,7 @@ def _check_as_sent(arguments: dict, held: dict | None = None) -> tuple:
             sources=sources,
             verifier=lambda patched, one: _verify_repair(
                 patched, one, source, _files, modules))
+        rejected = report(error)
         # issue #1704: every guarantee in the same answer, not only the one
         # that refused, so the self-check is one call
         refused["selfCheck"] = _authoring_loop.self_check(refused["diagnostics"])
@@ -4916,6 +5134,8 @@ def _check_as_sent(arguments: dict, held: dict | None = None) -> tuple:
                 "revl_apply_repair",
                 {_refusal_repair.REPAIR_KEY: repair_id})
         return _with_candidate_knowledge(refused, arguments, refused, held), None
+        rejected["selfCheck"] = _authoring_loop.self_check(rejected["diagnostics"])
+        return rejected
     # `holes` is the agent's own remaining work on this draft: every
     # placeholder it wrote that still has a type and no implementation
     # (docs/holes.md). `ok: true` with a non-empty `holes` means "checked,
@@ -4923,6 +5143,7 @@ def _check_as_sent(arguments: dict, held: dict | None = None) -> tuple:
     # `fillSpec` — the expected type, the emission upper bound, the in-scope
     # bindings and the reachable service signatures the checker already knew at
     # that position — so the hole can be filled directly (docs/holes.md §8).
+    source, _files, modules = _candidate_of(arguments)
     inline = source is not None or bool(modules)
     holes = (fillspec.enrich(ir, untrusted=inline and _untrusted_author())
              if ir.get("holes") else [])
@@ -4964,6 +5185,9 @@ def _with_candidate_knowledge(payload: dict, arguments: dict, refused,
     except Exception:  # noqa: BLE001 — an index failure never fails the check
         pass
     return payload
+    return {"ok": True, **_summary(ir), "boundary": _boundary_of(ir),
+            "holes": holes,
+            "selfCheck": _authoring_loop.self_check(None, holes)}
 
 
 def _untrusted_author() -> bool:
@@ -5064,6 +5288,7 @@ def _tool_plan(arguments: dict) -> dict:
                         "approval gate raises one. When the plan computes an "
                         "emission surface, it names the host code the "
                         "composition would reach, but not who wrote it")}
+               "note": "nothing was admitted, swapped or written — this is a plan"}
     warnings = _leases.advise_plan(SESSION, arguments)
     if warnings:
         payload["leaseWarnings"] = warnings
@@ -5404,6 +5629,7 @@ def _tool_idiom(arguments: dict) -> dict:
     expression standing at the construct's position inside the example, so it
     carries the example's own names and is NOT a fill to submit (issue #2115);
     a hole's `fillable.producers[].write` carries the fills."""
+    this is for asking about a construct before there is a hole in it."""
     from .. import idioms  # noqa: PLC0415 - reads the idiom files on first use
 
     name = arguments.get("name")
@@ -5423,6 +5649,7 @@ def _tool_grammar(arguments: dict) -> dict:
     `revl grammar --format/--category`), for a grammar-constrained decoder;
     with `prompt`, the complete prompt-pinnable grammar (issue #2167, the MCP
     twin of `revl grammar --prompt`), byte-identical to `PROMPT_GRAMMAR`."""
+    `revl grammar --format/--category`), for a grammar-constrained decoder."""
     fmt = arguments.get("format")
     category = arguments.get("category")
     if arguments.get("prompt"):
@@ -5485,6 +5712,7 @@ def _tool_scaffold(arguments: dict) -> dict:
         )
     except ScaffoldError as error:
         return _session_error(error)
+        return _session_error(str(error))
     filename = arguments.get("filename") or f"{spec.component}.rvl"
     return scaffold_document(spec, filename, untrusted=_untrusted_author())
 
@@ -5499,8 +5727,10 @@ def _tool_fmt(arguments: dict) -> dict:
     With `handle: true` the answer names the formatted text (`artifactId`)
     instead of returning it, for a caller that hands it to `revl_check`
     without reading it (issue #2852)."""
+    what the compiler sees is refused, never silently written."""
     from ..fmt import migrate_source
     from ..formatter import FormatError, format_admitted, ir_equivalent
+    from ..formatter import FormatError, ir_equivalent, format_source
 
     source = arguments.get("source")
     if source is None:
@@ -5517,6 +5747,7 @@ def _tool_fmt(arguments: dict) -> dict:
     else:
         try:
             rewritten, _gate = format_admitted(source, filename)
+            rewritten = format_source(source, filename)
         except FormatError as error:
             return _session_error(f"cannot format: {error}")
 
@@ -5536,6 +5767,8 @@ def _tool_fmt(arguments: dict) -> dict:
     else:
         result = {"ok": True, "admitted": True, "formatted": rewritten,
                   "changed": rewritten != source, "proof": gate.proof}
+    result = {"ok": True, "admitted": True, "formatted": rewritten,
+              "changed": rewritten != source, "proof": gate.proof}
     # a check the gate could not run to completion travels with the result, so
     # a weakened proof is as visible to an agent as it is on the CLI.
     if gate.warning:
@@ -5801,6 +6034,8 @@ TOOLS = [
                                           "by name. Takes no `source`/`files` "
                                           "of its own"},
             **_RETURN_CANONICAL}},
+                       "refused at admission until every hole is filled.",
+        "inputSchema": {"type": "object", "properties": dict(_SOURCE_INPUT)},
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_check,
     },
@@ -5870,6 +6105,7 @@ TOOLS = [
                        "`source`/`files` it plans the working set the session "
                        "holds, as `revl_swap {}` would re-admit it, and answers "
                        "`planned: \"session\"`.",
+                       "server has loaded, so it is the rehearsal for revl_swap.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -5885,6 +6121,7 @@ TOOLS = [
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _with_held_candidate(
             _tool_plan, "planned", refuse_empty=True),
+        "handler": _tool_plan,
     },
     {
         "name": "revl_ship",
@@ -5945,6 +6182,7 @@ TOOLS = [
                        "after `revl_approve` fires exactly once. Host/user/port/"
                        "known_hosts/host_key/remote_bundle/runner flags "
                        "(`extra_args`) are the "
+                       "known_hosts/host_key/remote_bundle/ssh options are the "
                        "`[processes.<p>.deploy]` table inside `placement` (the "
                        "shape `parse_deploy_map` and `DeployTarget` read), not "
                        "top-level arguments.",
@@ -6025,6 +6263,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {**_SOURCE_INPUT, **_RETURN_CANONICAL,
+            "properties": {**_SOURCE_INPUT,
                            "config": {"type": "object",
                                       "description": "per-component config tables"},
                            "record": {"type": "boolean",
@@ -6147,9 +6386,11 @@ TOOLS = [
                        "class rose, naming the crossing that raised it. A swap that "
                        "lands carries `blastRadius`, as revl_edit does: the "
                        "revl_query_withdraw cascade for every component it touched.",
+                       "generation, need not re-serialize the whole file.",
         "inputSchema": {
             "type": "object",
             "properties": {**_SOURCE_INPUT, **_RETURN_CANONICAL,
+            "properties": {**_SOURCE_INPUT,
                            "replacing": {"type": "array", "items": {"type": "string"},
                                          "description": "components withdrawn in this swap"},
                            # issue #2532: read by the quarantine gate a swap
@@ -6159,6 +6400,7 @@ TOOLS = [
                                                       "candidate's Str-surface functions "
                                                       "under (default: the sole declared "
                                                       "service, else `Candidate`)"}},
+                                         "description": "components withdrawn in this swap"}},
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": True},
         "handler": _tool_swap,
@@ -6174,6 +6416,7 @@ TOOLS = [
                        "block says whether the loaded files still match the bytes "
                        "on disk, and revl_export writes the held source out (issue "
                        "#2032). Instead of re-sending the "
+                       "component the edit touches, so preflight comes with it. Instead of re-sending the "
                        "whole composition to change one line (revl_swap's cost, which "
                        "scales with the running system), send a small structured patch "
                        "against a named buffer the server already holds. Each edit is "
@@ -6202,6 +6445,7 @@ TOOLS = [
                        "that edited lists the `touched` symbols, plus "
                        "`effectClassChanges` and `effectClassWarnings` against the "
                        "running composition, as revl_swap does.",
+                       "never the whole source.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -6259,6 +6503,7 @@ TOOLS = [
                                           "basename or trailing path that matches "
                                           "exactly one loaded file), or name an "
                                           "in-memory module"},
+                                          "main inline source, or name an in-memory module"},
                 "replacing": {"type": "array", "items": {"type": "string"},
                               "description": "components withdrawn in this admission"},
                 "files": {"type": "array", "items": {"type": "string"},
@@ -6585,6 +6830,8 @@ TOOLS = [
                        "produced bytes, or a policy that asks for wasm "
                        "confinement without limits; nothing ran). It also "
                        "reports the "
+                       "follow-on) or `unavailable` (wasm-tools/wasmtime absent; "
+                       "the grade + lowering still ran). It also reports the "
                        "policy admission decision (`admission`): where a bound "
                        "policy declares `quarantine required` (item 33), a "
                        "candidate is admissible only after it passes — unless the "
@@ -6694,6 +6941,7 @@ TOOLS = [
                        "component the restored generation withdraws, with a "
                        "`note` when state was lost. A rollback refused after "
                        "its teardown carries it too.",
+        "description": "Restore the generation that was running before the last swap.",
         "inputSchema": {"type": "object", "properties": {}},
         "annotations": {"readOnlyHint": False, "destructiveHint": True},
         "handler": _tool_rollback,
@@ -6722,6 +6970,7 @@ TOOLS = [
                        "an exported change leaves disk holding the retracted text: "
                        "the answer carries a `disk` block (issue #2037) naming the "
                        "stale path and pointing at `revl_export`. "
+                       "(compensation is not inversion — paper §6.1). "
                        "See docs/generation-history.md.",
         "inputSchema": {
             "type": "object",
@@ -6751,6 +7000,8 @@ TOOLS = [
                       "description": "unload even though the held source of "
                                      "loaded file(s) never reached disk, "
                                      "discarding that work (issue #2036)"}}},
+                       "leaves nothing behind before you commit it to disk.",
+        "inputSchema": {"type": "object", "properties": {}},
         "annotations": {"readOnlyHint": False, "destructiveHint": True},
         "handler": _tool_unload,
     },
@@ -7545,6 +7796,13 @@ TOOLS = [
                        "carries a `disk` block (issue #2037) naming the retracted "
                        "change disk still holds, and `revl_export` when the revert "
                        "is not yet durable.",
+        "description": "Unwind the accumulator to step k by running the registered "
+                       "inverses from the top down, newest first — leaving the "
+                       "component LIVE, not torn down. Refuses if the range crosses "
+                       "an emission with no `compensate` (an emission cannot be "
+                       "undone); `force` crosses anyway and reports what was crossed. "
+                       "The guarantee is 'the inverses ran in order', never 'state "
+                       "was restored'.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -7553,9 +7811,11 @@ TOOLS = [
                        "description": "unwind down to this step; -1 unwinds "
                                       "everything. Omit every argument to revert "
                                       "the last change instead"},
+                       "description": "unwind down to this step; -1 unwinds everything"},
                 "force": {"type": "boolean",
                           "description": "cross uncompensated emissions anyway"},
             },
+            "required": ["to"],
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": True},
         "handler": _tool_step_back,
@@ -7615,6 +7875,7 @@ TOOLS = [
                        "`ebnf`; `category` scopes it to one hole's slot. With "
                        "`prompt`, instead the complete grammar, the text to pin "
                        "verbatim into an authoring system prompt.",
+                       "`ebnf`; `category` scopes it to one hole's slot.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -7646,6 +7907,7 @@ TOOLS = [
                        "`exampleExpression`: it stands inside the example and "
                        "carries the example's own names, so it is not a fill to "
                        "submit — a hole's `fillable.producers[].write` has those.",
+                       "the list.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -7713,6 +7975,7 @@ TOOLS.extend([
                                             "family whose Unit-returning "
                                             "operations a Unit method's fill "
                                             "spec lists"},
+                                            "type (default: <Service>Resource)"},
                 "effect": {"type": "boolean",
                            "description": "include the acquire/undo effect "
                                           "block (default true)"},
@@ -7738,6 +8001,7 @@ TOOLS.extend([
                        "answer names the formatted text (`artifactId`) instead "
                        "of returning it, for a caller that hands it to "
                        "`revl_check` without reading it.",
+                       "`formatted` is NOT returned.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -8212,6 +8476,9 @@ def handle(message: dict) -> dict | None:
             # it drives is the revision it pinned, before it asks anything.
             "serverInfo": {**SERVER_INFO, **_identity.identity()},
             "instructions": _instructions(),
+            "serverInfo": SERVER_INFO,
+            "instructions": _INSTRUCTIONS if runtime_available()
+                            else f"{_INSTRUCTIONS} {_runtime_gate.announcement()}",
         }
         # issue #2990: the server names its key and its tool manifest in the
         # same result that names its revision. A client that pinned a key
@@ -8222,10 +8489,13 @@ def handle(message: dict) -> dict | None:
         # One list, so the signed digests and the served tools cannot drift.
         tools = listed_tools()
         result = _attested({"tools": tools}, tools)
+        result = {"tools": _ADVERTISED}
     elif method == "tools/call":
         params = message.get("params") or {}
         name = params.get("name")
         if _HANDLERS.get(name) is None:
+        handler = _HANDLERS.get(name)
+        if handler is None:
             return _error(request_id, -32602, f"unknown tool: {name}")
         arguments = params.get("arguments") or {}
         # issue #2073: the escape hatch. `revl_verbs` with `name` is not a
@@ -8234,10 +8504,31 @@ def handle(message: dict) -> dict | None:
         # tiered list therefore stays exactly `CORE`: every verb is one listed
         # tool away, and the hatch itself adds no listed verb.
         payload = _unknown_arguments(name, arguments)
+        # the path jail and the authoring gate run BEFORE the operator gate and
+        # before any handler: a refusal here has read nothing, compiled nothing
+        # and run nothing, so neither can be used as an oracle.
+        payload = _jail_refusal(arguments) or _authoring_refusal(arguments)
+        # operator capabilities (roadmap item 55): gate a mutating management
+        # verb against the session's bound operator before it can run. No
+        # profile bound -> ungated, today's behaviour unchanged. Skipped when the
+        # call is already refused, so a refused path is never even resolved
+        # against an operator's grants.
+        decision = None if payload is not None \
+            else _operator.decide(SESSION, name, arguments)
         if payload is not None:
             pass
         elif name == _disclosure.DISCOVERY and _disclosure.is_hatch(arguments):
             payload = _hatch_call(arguments)
+            pass                    # refused above; the handler never runs
+        elif decision.gated and not decision.allowed:
+            payload = _refused_by_operator(decision)
+        elif not runtime_available() and _runtime_gate.is_refused(name, arguments):
+            # issue #1692: a verb that needs a live composition, on an
+            # interpreter that cannot boot one, refuses by name with the fix in
+            # `next`, instead of failing on an import error or on "nothing is
+            # loaded". After the operator gate: "you may not" outranks "this
+            # server cannot".
+            payload = _runtime_gate.refusal(name)
         else:
             payload = _call_tool(name, arguments)
         # issue #1693: every response, success or refusal, says what the
@@ -8261,8 +8552,32 @@ def handle(message: dict) -> dict | None:
         _brief.observe(SESSION, _called_verb(name, params.get("arguments") or {}),
                        payload)
         payload = _ambient.stamp(payload, state)
+            ir_before = getattr(SESSION, "ir", None)
+            try:
+                payload = handler(arguments)
+                _remember_live_host_bodies()
+            except ApprovalRequired as exc:
+                # item 246: a class-(c) crossing the decision inside Session.call
+                # (or the activation gate in load/swap) refused. This is a result,
+                # not an error — shape the ticket two-step. Caught before the
+                # generic handler so it never reads as an internal fault.
+                payload = _approval_required(exc)
+            except Exception as exc:  # a tool failure is a result, not a transport error
+                payload = {"ok": False, "diagnostics": [{
+                    "severity": "error", "code": "REVL", "category": "internal",
+                    "message": f"{type(exc).__name__}: {exc}",
+                }]}
+            if decision.gated and decision.allowed:
+                _stamp_authority(payload, decision)
+            # issue #1738: the loop axes read every call that reached a handler
+            # (preflight queries, composition edits, and refusals before and at
+            # run time).
+            record_tool_call = getattr(SESSION, "record_tool_call", None)
+            if record_tool_call is not None:
+                record_tool_call(name, arguments, payload, ir_before)
         result = {
             "content": [{"type": "text", "text": json.dumps(_actionable_first(payload), indent=2)}],
+            "content": [{"type": "text", "text": json.dumps(payload, indent=2)}],
             "isError": not payload.get("ok", False),
             "structuredContent": payload,
         }

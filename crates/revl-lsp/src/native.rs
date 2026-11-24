@@ -180,6 +180,12 @@ pub const NATIVE_SOURCE: &str = "revl-native";
 /// A construct the native gate DOES decide is mirrorable instead, and
 /// `extra_diagnostics` adds it only when the reference reported no row with the
 /// same code (`verified fn` totality, issue #3107, is one such row).
+/// end does not cover the construct (`verified fn`, `pub`, ...), not that the
+/// reference would refuse the program — so it is never shown. Measured on the
+/// corpus: `examples/rejections/v2_verified_direct_recursion.rvl` draws a `BAD`
+/// from the native gate and a real `G7` from the reference, and surfacing the
+/// `BAD` would put a second, meaningless squiggle on a correctly-diagnosed
+/// document.
 const NATIVE_PARSE_FAILURE: &str = "BAD";
 
 /// The native gate's ADDITIONAL squiggles for a document — never a replacement
@@ -290,10 +296,18 @@ mod tests {
         // now parses both, so it decides such documents rather than declining
         // them.)
         let source = "commutative service S { fn op() -> Int }\n";
+        // `verified fn` is lexed but is not a declaration the self-host front
+        // end parses (the front end records a parse problem and the gate fails
+        // closed), so the whole document is handed back to the reference. (`pub
+        // fn` used to sit here, but the self-host front end now parses `pub`
+        // visibility, so it decides such a document rather than declining it.)
+        let source = "verified fn f() -> Int {\n  return 1\n}\n";
         let table = table_for(source);
         assert!(table.is_undecided(), "{table:?}");
         assert!(definition(&table, source, &json!("file:///a.rvl"), 0, 26).is_none());
         assert!(hover(&table, source, 0, 26).is_none());
+        assert!(definition(&table, source, &json!("file:///a.rvl"), 0, 12).is_none());
+        assert!(hover(&table, source, 0, 12).is_none());
     }
 
     #[test]
@@ -301,6 +315,9 @@ mod tests {
         // the second half of the fixture pair above: a construct the self-host
         // parser cannot read is a frontier gap, not a refusal
         let source = "fn broken( {\n";
+        // `verified` is not a construct the self-host front end parses, so the
+        // native gate answers `BAD` — a frontier gap, not a refusal
+        let source = "verified fn recurse(n: Int) -> Int {\n  return recurse(n)\n}\n";
         assert!(extra_diagnostics(source, &json!([])).is_empty());
     }
 

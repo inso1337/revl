@@ -560,10 +560,12 @@ def _activating(frame):
     class _Ctx:
         def __enter__(self):
             self.token = rt._ACTIVATING.set(rt._ACTIVATING.get() + (frame,))
+            rt._ACTIVATING.append(frame)
             return frame
 
         def __exit__(self, *_exc):
             rt._ACTIVATING.reset(self.token)
+            rt._ACTIVATING.pop()
             return False
     return _Ctx()
 

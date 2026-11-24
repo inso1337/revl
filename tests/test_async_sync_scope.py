@@ -174,6 +174,7 @@ def _run_emitted_lifecycle(src: str, filename: str, expected_passes: int, tmp_pa
     for _module in ("runtime.py", "confidential.py"):
         (tmp_path / _module).write_text(
             (ROOT / "backends" / "python" / _module).read_text(encoding="utf-8"))
+            (ROOT / "backends" / "python" / _module).read_text())
     (tmp_path / "app.py").write_text(_emit("python", compile_source(src, filename)))
     (tmp_path / "driver.py").write_text(
         "import warnings\n"

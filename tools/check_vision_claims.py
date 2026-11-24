@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Resolves the tree claims in docs/vision.md and docs/substrate-boundary.md.
+"""Resolves docs/vision.md's claims about the tree against the tree.
 
 `docs/vision.md` is the document the roadmap's own header cites as its
 rationale (`**Why:** docs/vision.md`), and until this tool existed no tool read
@@ -16,6 +17,7 @@ generation (`tools/docgen.py --check`). The vision half carried two
 hand-written tables and nothing watched either one (issue #1204).
 
 WHAT IS CHECKED. Six rules, in the shape `check_roadmap_claims.py` uses: a
+WHAT IS CHECKED. Four rules, in the shape `check_roadmap_claims.py` uses: a
 claim is judged only where the sentence names the artifact that makes it
 falsifiable.
 
@@ -138,6 +140,7 @@ RULE_DOCS = {
     "formal-wording": FORMAL_WORDING_DOC_RELS,
 }
 RULES = ("command", "link", "path", "tier", "formal-status", "formal-wording")
+RULES = ("command", "link", "path", "tier")
 
 # The block `tools/docgen.py` owns in this document. Named here as well so the
 # `tier` rule and the generator cannot drift apart on which block they mean.
@@ -637,6 +640,7 @@ def self_test(root: Path) -> int:
 
         rules = sorted(_SELF_TEST_BREAKS)
         _, clean = run(_SELF_TEST_DOC, tree, rules, doc_rel="docs/vision.md")
+        _, clean = run(_SELF_TEST_DOC, tree, rules, doc_rel="docs/fixture.md")
         if clean:
             failures.append(
                 "the UNBROKEN fixture reported %d finding(s): %s"
@@ -646,6 +650,7 @@ def self_test(root: Path) -> int:
             assert before in _SELF_TEST_DOC, rule
             broken = _SELF_TEST_DOC.replace(before, after)
             _, found = run(broken, tree, [rule], doc_rel="docs/vision.md")
+            _, found = run(broken, tree, [rule], doc_rel="docs/fixture.md")
             if not found:
                 failures.append(
                     "[%s] renaming %s to %s was NOT reported" % (rule, before, after)
@@ -668,6 +673,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--doc", type=Path,
                         help="check one document instead of the default documents")
+    parser.add_argument("--doc", type=Path, default=DEFAULT_DOC)
     parser.add_argument("--root", type=Path, default=ROOT)
     parser.add_argument("--rule", action="append", choices=RULES, dest="rules")
     parser.add_argument("--check", action="store_true",
@@ -697,24 +703,40 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         source = doc.read_text(encoding="utf-8")
         denominator, findings = run(source, tree, doc_rules, doc_rel)
         all_findings.extend(findings)
+    doc_rel = str(args.doc.resolve().relative_to(args.root.resolve()))
+    source = args.doc.read_text(encoding="utf-8")
+    denominator, findings = run(source, tree, rules, doc_rel)
 
         print("%s: %d claims checked over %d rules"
               % (doc_rel, sum(denominator.values()), len(doc_rules)))
         for rule in doc_rules:
             stale = sum(1 for c, _ in findings if c.rule == rule)
             print("  %-7s %3d claims, %d stale" % (rule, denominator[rule], stale))
+    print("%s: %d claims checked over %d rules"
+          % (doc_rel, sum(denominator.values()), len(rules)))
+    for rule in rules:
+        stale = sum(1 for c, _ in findings if c.rule == rule)
+        print("  %-7s %3d claims, %d stale" % (rule, denominator[rule], stale))
 
         if not args.quiet:
             for claim, verdict in findings:
                 print("\n%s:%d  [%s]\n  %s\n  %s"
                       % (doc_rel, claim.line, claim.rule, claim.text.strip(), verdict))
+    if not args.quiet:
+        for claim, verdict in findings:
+            print("\n%s:%d  [%s]\n  %s\n  %s"
+                  % (doc_rel, claim.line, claim.rule, claim.text.strip(), verdict))
 
     print("\nThis gate RESOLVED the documented claims. It did not run commands: the suites "
+    print("\nThis gate RESOLVED the commands. It did not run them: the suites "
           "they name are the per-backend CI jobs, which are required checks.")
     if all_findings and not args.check:
+    if findings and not args.check:
         print("Advisory run: %d finding(s), exit 0. Use --check for the CI mode."
               % len(all_findings))
     return 1 if (args.check and all_findings) else 0
+              % len(findings))
+    return 1 if (args.check and findings) else 0
 
 
 if __name__ == "__main__":

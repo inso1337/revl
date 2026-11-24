@@ -25,6 +25,7 @@ prefers an enum edge and why this latent read-site defect only surfaced once
 
 These tests live here rather than in ``tests/fixtures/emit_rust_corpus/`` on
 purpose. The corpus is cross-checked byte-for-byte against the self-hosted
+purpose: the corpus is cross-checked byte-for-byte against the self-hosted
 emitter (``tests/test_selfhost_emit_rust.py``), and ``selfhost/emit_rust.rvl``
 mirrors only the DECLARATION half of the pass (the `Box<..>` a recursive case
 payload or record field gets). The construction side (`Box::new(..)`), the
@@ -32,6 +33,8 @@ match-arm unboxing and the read-side unboxing (``_boxed_field_read``) are not
 ported, so the documents below, which build and read the boxed values, stay
 outside the corpus until they are. Its declaration half is held there by
 ``emit_rust_corpus/recursive_variant.rvl`` and ``recursive_record_field.rvl``.
+has no boxing pass at all, so a recursive fixture in the corpus would fail the
+byte-compare for a reason unrelated to this fix.
 """
 
 from __future__ import annotations

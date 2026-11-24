@@ -118,6 +118,9 @@ is a named function so that the assertion "the coverage matches
   produces. The agreement half (`N agree, 0 mismatches`) is the formal gate's,
   which fails on any mismatch, exactly as the rendered paragraph's was. A package
   with no harness beside it, or a run that measures nothing, is a refusal.
+- `cert.oracle_census`, `cert.injection_proofs` and `cert.injection_sweep` read
+  the oracle census, the injection table and the mutation sweep paragraph out of
+  `formal/STATUS.md`.
 
 `cert.certifiable(state, guarantees)` is the gate on the build side. It refuses
 to produce a certificate whose statuses are asserted rather than checked: a
@@ -161,8 +164,10 @@ where they do not account for the catalogue exactly once:
   per-code row. These rows get a `REQ_NAMED` requirement each, and a caveat
   apiece when they are not `proved`, which today is all of them but `A8`;
 - `unrecorded`, the catalogued codes with no row at all, derived from the
+- `unrecorded`, the catalogued codes with no row at all — derived from the
   catalogue and the map rather than listed here, so a code catalogued without a
   ledger row appears in the certificate instead of falling out of it, carried
+  ledger row appears in the certificate instead of falling out of it — carried
   as a `REQ_UNRECORDED` requirement and a caveat. Stated silence is a weaker
   claim than an unproved status and a stronger one than an absence.
 
@@ -198,6 +203,7 @@ plus one step, and the user-facing statement of it lives in
   oracle cell, the registered theorem names, the contentless findings); every
   caveat; every requirement with both the `detail` and the `check` recorded
   behind it; all three members of the proof model: the toolchain pin, the
+  behind it; all three members of the proof model — the toolchain pin, the
   manifest digest and the dependency pins the manifest names; the checker
   identity; the
   subject's source digest; the commit, as a revision of this history; and

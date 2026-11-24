@@ -558,6 +558,7 @@ def test_the_direct_leg_recipes_cover_every_unmodelled_leg():
     assert set(UNMODELLED) == {leg.leg for leg in policy_diff.LEGS
                                if leg.state == "unmodelled"}
     assert len(UNMODELLED) == len(set(UNMODELLED)) == 11
+    assert len(UNMODELLED) == len(set(UNMODELLED)) == 9
     assert {"capability", "deny"}.isdisjoint(UNMODELLED)
 
 

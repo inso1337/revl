@@ -42,6 +42,7 @@ _CONFORMANCE = _RECORD.format(what="conformance")
 # The hook refuses a pytest run that passed no test (issue #2208), so the stub
 # reports one.
 _PYTEST_MAIN = _RECORD.format(what="pytest") + "print('1 passed in 0.01s')\n"
+_PYTEST_MAIN = _RECORD.format(what="pytest")
 
 
 def _run(args, cwd, env=None):

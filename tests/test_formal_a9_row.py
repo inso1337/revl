@@ -52,6 +52,10 @@ ROUTED = "tests/formal_corpus/a9_routes_installs_key.rvl"
 #: emitter corpora each carry a routed component of the same shape (#106). A
 #: new `PR` row anywhere else is either a new routed fixture (add it here) or
 #: an export that invents a route.
+#: fixture above is the one this module is about; the ts emitter corpus
+#: carries a second routed component of the same shape (#106). A new `PR`
+#: row anywhere else is either a new routed fixture (add it here) or an
+#: export that invents a route.
 ROUTES = sorted([
     (ROUTED, "RoundRobin", "worker"),
     ("tests/fixtures/emit_ts_corpus/routed_timers.rvl", "Balancer", "worker"),
@@ -351,9 +355,11 @@ def test_the_oracle_decides_the_row_with_the_model_a9b():
     """The verdict row is the L2 file's own `a9B` over blocks AND routes,
     bridged by `a9RowB_iff`, and that bridge is under the axioms gate."""
     src = ORACLE.read_text(encoding="utf-8")
+    src = ORACLE.read_text()
     assert re.search(r"def a9RowB .*:=\s*\n\s*RevL\.A9\.a9B ⟨c, blocks, routed⟩", src)
     assert "#print axioms RevLOracle.a9RowB_iff" in src
     assert "RevLOracle.a9RowB_iff" in GATE.read_text(encoding="utf-8")
+    assert "RevLOracle.a9RowB_iff" in GATE.read_text()
 
 
 def test_the_l2_file_states_both_directions_and_the_caveats():
@@ -361,6 +367,7 @@ def test_the_l2_file_states_both_directions_and_the_caveats():
     refusals, the double install beside them, and the two things the model
     does not claim written down."""
     src = LEAN.read_text(encoding="utf-8")
+    src = LEAN.read_text()
     assert re.search(r"def BlocksDeclared .*:= ∀ k ∈ i\.blocks, k ∈ i\.comp\.provides", src)
     assert re.search(r"def DeclaredInstalled .*:=\s*\n\s*∀ k ∈ i\.comp\.provides, "
                      r"k ∈ i\.blocks ∨ k ∈ i\.routed", src)

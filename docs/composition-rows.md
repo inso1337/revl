@@ -197,6 +197,11 @@ grant records_kit::@records with { approvals, writer }
 ```
 
 See [composition layers](composition-layers.md#grant-the-owner-or-the-operator-grants-a-confined-row-its-reach).
+A row that writes no `granted` clause at all is unconfined: it is the project's
+own code, and confining it would be wrong. Wiring the untrusted-author profile
+per row is the confinement slice, and it waits on the trust decision recorded in
+roadmap 425 F1. Until then the clause and its subset check are enforced and the
+profile is not, which is exactly the split roadmap item 424 slice A1 states.
 
 ## `place`: which process a row runs on
 
@@ -308,6 +313,8 @@ and the failure mode. A `pinned` clause narrows the address to one TLS key; it i
 still not an admission of what the peer runs. If both sides are revl and both
 want a mutual guarantee, that is `revl contract export` / `revl contract check`,
 or 337's seam.
+and the failure mode. If both sides are revl and both want a mutual guarantee,
+that is `revl contract export` / `revl contract check`, or 337's seam.
 
 The generated source carries all of this in its header, so the statement travels
 with the artifact rather than living only here.
@@ -573,6 +580,8 @@ in the artifact itself.
 
 `remote`, `at`, `host`, `pinned`, `through`, `on_failure` and `redirect` are
 CONTEXTUAL keywords,
+`remote`, `at`, `host`, `through`, `on_failure` and `redirect` are CONTEXTUAL
+keywords,
 recognised only in this one position inside a `composition` block. The lexer's
 `KEYWORDS` set is untouched, so the self-host lexer needs no sync and a program
 using any of those words as a provision key, a require alias or a config field
@@ -849,6 +858,7 @@ layer, or refuse the layer"). The host is read with a URL parser
 not count as the authority. A value whose host cannot be read (a backslash,
 whitespace, an empty host, a port that does not parse, a non-string value) is
 refused on a bounded field too: it fails closed rather than passing unchecked. One recorded deviation from §8.3's sketch: the
+layer, or refuse the layer"). One recorded deviation from §8.3's sketch: the
 `reach` clause is keyed by CONFIG FIELD, not by extern name. Resolution is
 header-only and cannot trace a value from a field to the extern it feeds
 without lowering the body; the operator-facing bound is naturally written on the

@@ -64,6 +64,8 @@ boundary shapes the substrate carries, with the exact refusal each emits — is
 | method-time effects / compensation | the accumulator is fixed at activation | hosted backends |
 | `Map` / function-typed values (any position) | `Map` needs a keyed persistent value model the canonical ABI does not carry (a stated design decision, docs/wasm-capabilities.md); function values need closures/references, absent from wasm MVP | hosted backends / WIT tier |
 | `repeat` builtin, `List.indexOf` over records/lists/Floats | `repeat` and the List per-element search over an element with no comparison here are not lowered yet (List[Str]/Int/Int32/Bool lower: `$list_index_of_str`/`$list_index_of_slot`) (`Str.split`/`join`/`indexOf` now DO lower — the reader trio, `$str_split`/`$str_join`/`$str_index_of`) | hosted backends |
+| `Float` / `Map` / function-typed values (any position) | no value representation in the canonical-ABI model (Float has only the interpolation subset) | hosted backends / WIT tier |
+| `repeat` builtin, `List.indexOf` | `repeat` and the List per-element search not lowered yet (`Str.split`/`join`/`indexOf` now DO lower — the reader trio, `$str_split`/`$str_join`/`$str_index_of`) | hosted backends |
 | non-scalar instance-accessor payloads (`spawn`) | a pointer would cross into memory the spawner does not own | hosted backends |
 
 ## Now supported (v2 + typed v3)
@@ -96,8 +98,11 @@ boundary shapes the substrate carries, with the exact refusal each emits — is
   a required call to a host-provided key may pass one too. A required call to
   a key another component of the composition provides stays scalar
   (Int/Bool/Float): that provider is another instance with its own memory, so a
+  (Int/Bool): that provider is another instance with its own memory, so a
   compound value would arrive as an address in the wrong one, and it is
   refused by name (issue #1601).
+  service param or return crosses as a pointer into the module's memory —
+  the v3 value model widened the boundary beyond scalars.
 - **`await Job.run(name)`** continues to lower to the runtime's async host op.
 - **`lifecycle test` blocks (item 142)** — `revl test --backend wasm` boots the
   emitted components on the live cordis-wasm runtime, calls through provision
@@ -107,6 +112,7 @@ boundary shapes the substrate carries, with the exact refusal each emits — is
   runs over the tier's **scalar** boundary as the lifecycle driver marshals it
   (Int i64 / Bool i32; a Float service is lowerable but that step interpreter
   does not parse f64 yet); a test that
+  runs over the tier's **scalar** boundary (Int i64 / Bool i32); a test that
   needs a `config` load, a non-scalar service boundary, or a timer skips *per
   test, with a reason* (never a false pass). Driver: `src/revl/test.py`
   (`run_wasm`) + `lifecycle.py` (classifier) + `lifecycle_harness.py` (the
@@ -191,6 +197,7 @@ boundary shapes the substrate carries, with the exact refusal each emits — is
   extern that takes a `Secret[...]` parameter and returns an Ok witness not
   declared confidential is refused by name (issue #1577, see
   docs/wasm-capabilities.md). This is the durable channel the `revl:teardown`
+  than silently narrowed). This is the durable channel the `revl:teardown`
   static section (a compile-time index of seq/kind/dispatch) always pointed at
   but deliberately did not itself carry: "a host wanting to build a real WAL on
   this tier" is exactly `run_wasm`'s drain.

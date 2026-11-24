@@ -69,6 +69,7 @@ import json
 import textwrap
 
 from . import a2a_boundary, tls_pin
+from . import a2a_boundary
 from .crossing_redirect import CROSSING_TIMEOUT, py_policy
 
 #: The four suffixes the projection speaks, in the LIFO-sane order the design
@@ -411,6 +412,7 @@ def _message_obj(skill_ref: str, *, with_task_id: bool) -> str:
 
 
 def _event_from_result(fault, drop: str = "") -> str:
+def _event_from_result(fault) -> str:
     """The lines that turn a JSON-RPC `result` (a `Task` or a `Message`) into a
     `TaskEvent`, shared by `_poll` and `_reply`.
 
@@ -433,6 +435,7 @@ def _event_from_result(fault, drop: str = "") -> str:
             + '        return Status(_st)\n')
     else:
         status_tail = '        return Status(task_state_from_wire(_state))\n'
+    `use`s `stdlib/a2a.rvl`."""
     return (
         '    _kind = _result.get("kind")\n'
         '    if _kind == "task":\n'
@@ -446,6 +449,9 @@ def _event_from_result(fault, drop: str = "") -> str:
         + '            return Done(_text)\n'
         + status_tail
         + '    if _kind == "message":\n'
+        '            return Done(_text)\n'
+        '        return Status(task_state_from_wire(_state))\n'
+        '    if _kind == "message":\n'
         + a2a_boundary.py_message_parts_gate(fault, indent=8)
         + '        _text = "".join(p.get("text", "") for p in _parts\n'
         '                        if p.get("kind") == "text" and isinstance(p.get("text"), str))\n'
@@ -457,6 +463,7 @@ def task_body(kind: str, endpoint: str, base_or_skill: str, *,
               follow_redirects: bool = False, label: str = "",
               rest: bool = False, pin: str | None = None,
               push: bool = True) -> str:
+              rest: bool = False) -> str:
     """One four-op crossing, Python tier, over A2A 1.0.0.
 
     `kind` is one of `SUFFIXES`; `endpoint` is the agent's HTTPS endpoint (the
@@ -481,6 +488,7 @@ def task_body(kind: str, endpoint: str, base_or_skill: str, *,
     policy = py_policy(
         "a2a", follow=follow_redirects,
         extra_handlers=", _PinnedHTTPSHandler()" if pin else "")
+    policy = py_policy("a2a", follow=follow_redirects)
     faults = transport_fault_class(label, op_name(base_or_skill, kind))
 
     def fault(indent: int, expr: str, cause: str = "") -> str:
@@ -565,6 +573,8 @@ def task_body(kind: str, endpoint: str, base_or_skill: str, *,
                 else:
                     request = ('    _payload = _json.dumps({"message": '
                                + message_obj + '}).encode()\n' + post_headers)
+            request = ('    _payload = _json.dumps({"message": ' + message_obj
+                       + '}).encode()\n' + post_headers)
         elif kind == "poll":
             wire = "HTTP+JSON/REST `GET /v1/tasks/{id}`"
             url_src = a2a_boundary.py_rest_task_url(base, fault)
@@ -588,6 +598,7 @@ def task_body(kind: str, endpoint: str, base_or_skill: str, *,
             method = "message/send"
             params = ('_params' if (kind == "start" and push)
                       else '{"message": ' + message_obj + '}')
+            method, params = "message/send", '{"message": ' + message_obj + '}'
         elif kind == "poll":
             method, params = "tasks/get", '{"id": _task["id"]}'
         else:  # cancel
@@ -651,13 +662,16 @@ def task_body(kind: str, endpoint: str, base_or_skill: str, *,
         tail = ("    try:\n" + textwrap.indent(tail, "    ")
                 + "    except BaseException:\n" + _push_start_cleanup(8)
                 + "        raise\n")
+        handle = _event_from_result(fault)
 
     funnel = a2a_boundary.py_funnel("_args")
     header = f"    # A2A 1.0.0, {wire}, task op `{kind}`. ONE crossing.\n"
     return f"""
 {pin_imports}    import json as _json, urllib.request as _req, urllib.parse as _urlp
+    import json as _json, urllib.request as _req, urllib.parse as _urlp
     import uuid as _uuid
 {push_imports}{faults}{pin_src}{funnel}{correlation}{header}{bind}{push_setup}{push_drain}{url_src}{request}{policy}    try:
+{faults}{funnel}{correlation}{header}{bind}{url_src}{request}{policy}    try:
         # A crossing that never returns is not a crossing.
 {unwrap}    except _RedirectRefused:
         # NOT a transport failure: the peer declining to be the declared
@@ -665,3 +679,6 @@ def task_body(kind: str, endpoint: str, base_or_skill: str, *,
 {push_cleanup}        raise
 {pin_catch}    except Exception as _exc:
 {push_cleanup}{fault(8, '"a2a: transport failure"', cause="_exc")}{tail}    """
+        raise
+    except Exception as _exc:
+{fault(8, '"a2a: transport failure"', cause="_exc")}{gates}{handle}    """

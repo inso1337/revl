@@ -293,6 +293,7 @@ def test_live_query_reads_the_running_session_after_a_swap():
         _server.SESSION.load(ir_a)
         assert _server.SESSION.live_state()["generation"] == 1
         _server.SESSION.swap(ir_b, agent_authored=False)
+        _server.SESSION.swap(ir_b)
         assert _server.SESSION.live_state()["generation"] == 2
 
         live = _server._tool_live_query({"verb": "withdraw", "component": "Pg"})

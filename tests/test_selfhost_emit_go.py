@@ -32,11 +32,15 @@ Deliberately OUT, each answered with a named ``<<UNSUPPORTED-...>>`` marker:
 the rest of the go LIVE-COMPONENT world (an ir_version 1/2 document, a
 component with an activation step or a signature past the slice, an
 observable component beside declarations past the combined slice, a
+the go LIVE-COMPONENT world (an ir_version 1/2 document, a component with no
+top-level declarations, an observable component beside declarations, a
 ``lifecycle test``), ``fault test`` blocks (the reference refuses them), the
 item 388 colour-erased extern clone, and an extern body whose line breaks
 Python ``splitlines()`` reads differently. Functional record-update, an extern
 with no ``@go`` body and a call to a ``deferred`` emission are reference
 refusals, each named by the port (issue #2316).
+Python ``splitlines()`` reads differently. Functional record-update is a
+reference refusal.
 """
 
 import importlib.util
@@ -53,6 +57,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_files, compile_source  # noqa: E402
+from revl import compile_files  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "tests"))
 
@@ -600,6 +605,7 @@ def test_a_witness_token_both_sides_emit_is_rejected(emitted, reference, tmp_pat
     the port) still passes. The document carries a lifecycle test because a
     provide-only component, with or without config, is on the combined slice
     the port carries now (issue #106).
+    the port) still passes.
     """
     path = tmp_path / "planted.rvl"
     path.write_text("fn f() -> Int { return 1 }\n"
@@ -610,6 +616,7 @@ def test_a_witness_token_both_sides_emit_is_rejected(emitted, reference, tmp_pat
                     "  unload C\n"
                     "  assert no_residue\n"
                     "}\n")
+                    "component C provides s: S { provide s { fn g() = 1 } }\n")
     ir = compile_files([str(path)])
     want, got = reference.emit(ir), emitted["emit_go_src"](ir)
     assert "func f()" in want and "func f()" in got, (
@@ -824,6 +831,9 @@ def test_a_key_the_reference_mangles_is_named_on_either_component_path(emitted, 
     got = emitted["emit_go_src"](ir)
     assert "<<UNSUPPORTED-COMPONENT:C>>" in got
     assert "::" not in got.split("<<", 1)[0]
+    assert 'Name: "C",' in want, "the reference carries the component"
+    assert "func f() int64 {" in want, "and the declaration it was routed for"
+    assert_boundary_witness(want, got, "stc.Component", "<<UNSUPPORTED-COMPONENT:C>>")
 
 
 def test_an_incidental_component_on_the_pure_path_is_not_marked(emitted, reference,

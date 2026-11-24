@@ -72,6 +72,10 @@ reuses the gauntlet verbatim, then adds the substrate battery:
    (`timeout`), and the battery stops at the first such probe rather than
    paying the wall-clock budget for every remaining one. Neither is ever
    re-raised.
+   is likewise recorded, not raised: the guest is bounded by a fuel budget, so
+   a boundary function that does not terminate is graded (`timeout`), and the
+   battery stops at the first such probe rather than paying the wall-clock
+   budget for every remaining one. Neither is ever re-raised.
 
 ### Verdicts
 
@@ -148,6 +152,9 @@ Exit status: `0` when the candidate passed (or was deferred/unavailable —
 nothing to fail on), `1` when it was trapped, timed out, rejected, or refused
 (unconfined), and — with `--require-runtime` — `3` when the toolchain is absent
 so the candidate could not actually be proven.
+nothing to fail on), `1` when it was trapped, timed out, or rejected, and — with
+`--require-runtime` — `3` when the toolchain is absent so the candidate could
+not actually be proven.
 
 ## Scope: what the boundary carries
 

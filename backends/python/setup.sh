@@ -33,10 +33,13 @@ CORDIS_PY="${CORDIS_PY:-.cordis-py}"
 # (roadmap 74b) on top of the 1316174 A8 async-body fiber-FAILED fix, and
 # 70a8ce7 on top of 1c5e6f1 = the outer stack an effect records for its
 # failure note, taken by a plain frame walk and formatted lazily (#3390). A
+# validated against this exact vintage — 1c5e6f1 = the dict-plugin Config fix
+# (roadmap 74b) on top of the 1316174 A8 async-body fiber-FAILED fix. A
 # fresh clone must not drift onto the branch's moving HEAD (roadmap 76c);
 # bump this pin deliberately when the runtime moves, and record why.
 # Override with CORDIS_PY_PIN.
 CORDIS_PY_PIN="${CORDIS_PY_PIN:-70a8ce7129b4b5c171743644557cbd37810bf524}"
+CORDIS_PY_PIN="${CORDIS_PY_PIN:-1c5e6f17abf538bf01012f9d72ce0cfa978d91b3}"
 if [ ! -d "$CORDIS_PY" ]; then
     git clone --branch harden-fiber-lifecycle https://github.com/inso1337/cordis-py "$CORDIS_PY"
 fi
@@ -59,6 +62,7 @@ else
     VPY=.venv/bin/python
 fi
 uv pip install --python "$VPY" pip
+uv pip install --python .venv/bin/python pip
 # `coverage` is here for the same reason `pytest` is: this venv runs the WHOLE
 # `tests/` root in the `frontend-cordis` job, and that root includes the item
 # 429 self-host coverage ratchets, which need a real tracer. The names are
@@ -78,6 +82,11 @@ uv pip install --python "$VPY" pip
 # report SKIPPED. It is installed from the hashed lock rather than in the
 # pytest line, so the exact artifact is pinned per platform; `revl` itself
 # imports nothing from it, and the differentials assert that too.
+# OpenSSL's, and it imports the library HARD rather than through an
+# `importorskip`, so that the one independent check on the quote verifier's
+# crypto cannot report SKIPPED. Without it here, that file ERRORS in this job
+# instead of running. `revl` itself imports nothing from it; the differential
+# asserts that too.
 #
 # `requirements.txt` pins `cryptography==50.0.2` with its cffi and pycparser
 # dependencies and the sha256 of every wheel the universal resolution covers.
@@ -92,12 +101,18 @@ uv pip install --python "$VPY" --require-hashes -r requirements.txt
 # checks in tests/test_constrained_decoding_1462.py skip.
 uv pip install --python "$VPY" pytest pytest-asyncio pyyaml watchdog coverage \
     llguidance --editable "$CORDIS_PY"
+uv pip install --python .venv/bin/python pytest pytest-asyncio pyyaml watchdog coverage \
+    cryptography llguidance --editable "$CORDIS_PY"
 # Re-install revl through stock pip so `[project.scripts]` (the `revl` and
 # `truc` console-script entries) are written to $VBIN. `uv pip install -e`
+# `truc` console-script entries) are written to .venv/bin/. `uv pip install -e`
 # resolves the editable to a `.pth` and skips the entry-point step; issue #336.
 "$VPY" -m pip install --no-deps -e ../..
+.venv/bin/python -m pip install --no-deps -e ../..
 
 echo
 echo "setup complete — run the suite with:  $VBIN/pytest"
 echo "                 run the demo with:   $VPY demo.py"
+echo "setup complete — run the suite with:  .venv/bin/pytest"
+echo "                 run the demo with:   .venv/bin/python demo.py"
 echo "                 run a composition:   revl run ../../examples/user_cache.rvl"

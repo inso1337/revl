@@ -3,6 +3,9 @@
 **Status:** implemented (2026-08-26). Companion to docs/holes.md, which owns
 the `hole` construct and the scaffold-then-fill loop (§8); this page owns the
 command that writes the scaffold. If you are building an agent
+**Status:** implemented (2026-08-26). Companion to docs/holes.md — that
+document owns the `hole` construct and the scaffold-then-fill loop (§8); this
+one owns the command that writes the scaffold. If you are building an agent
 that authors revl, [authoring-for-agents.md](authoring-for-agents.md) names
 this command alongside `fmt` and `explain` as one loop.
 
@@ -42,6 +45,9 @@ component AnalysisProvider requires filesystem: Filesystem provides analysis: An
   // The acquire/undo pairing is real; the resource and its release are obligations.
   let resource = effect hole[AnalysisResource] "acquire the resource AnalysisProvider manages"
                  undo hole[Unit] "release `resource` fully (no residue): the inverse its acquisition declares"
+  // The acquire/undo scaffolding is real; the resource it yields is an obligation.
+  let resource = effect hole[AnalysisResource] "acquire the resource AnalysisProvider manages; the undo must fully release it (no residue)"
+                 undo resource.release()
 
   provide analysis {
     fn run(input) = hole[Str] "produce run's Str result (a fill here may emit through the declared boundary)"
@@ -73,6 +79,7 @@ scaffold with the minimal fill its spec offers and compiles the result.
 | `--emits 'name(p: T) -> R'` | an emission service method, bound to the wired capabilities; repeatable |
 | `--config name:Type` | a component config field; repeatable |
 | `--resource Type` | the effect-acquired resource's type (default: `<Service>Resource`). A type application like `Map[Str, Str]` names a host family whose `Unit`-returning operations a `Unit` method's fill spec lists (issue #1948) |
+| `--resource Type` | the effect-acquired resource's type (default: `<Service>Resource`) |
 | `--no-effect` | omit the acquire/undo effect block |
 | `-o, --out PATH` | write the skeleton here (default: stdout) |
 | `--json` | print the skeleton, its obligations, and each hole's fill spec as one document |
@@ -99,6 +106,8 @@ language: the generator never grants authority the spec did not ask for.
   granularity, so it survives in the obligation prose as documentation, not as a
   distinct capability, and the bound stays exactly `filesystem`; this preserves
   the spec's injected boundary without widening it.
+  distinct capability, and the bound stays exactly `filesystem` — the boundary
+  the spec injected, never wider.
 * **A missing boundary stays a hole, not a permission.** If the spec asks for a
   capability whose boundary it did not inject, the generator does not invent the
   wiring. The operation that would need it is left as a pure `hole`, and the gap

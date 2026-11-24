@@ -11,6 +11,7 @@ certificate of section 7), `src/revl/__main__.py` (`revl attest`),
 item 474 (issue #826) and is documented in section 7. A chain-neutral anchor
 over a set of existing digests is a separate record, documented in
 [revl-anchor.md](revl-anchor.md).
+item 474 (issue #826) and is documented in section 7.
 
 ---
 
@@ -96,6 +97,7 @@ file on disk; the canonical IR spelling is a project invariant that
 Identity is location-independent, not content-independent: the same basename in
 another directory over different bytes is a different composition and still
 refuses. `revl bundle`, `registry_evidence.build_evidence` and `truc reproduce` each
+refuses. `revl bundle`, `registry.build_evidence` and `truc reproduce` each
 applied this normalization already (`docs/bundle.md` resolves it as a named
 design decision, and item 305 records the bundle's own version of the omission
 as a bug it fixed), but each from its own copy of the rule, which is how the

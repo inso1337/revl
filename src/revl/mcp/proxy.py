@@ -156,8 +156,10 @@ class Upstream:
     def start(self) -> None:
         try:
             self._process = _childproc.popen(
+            self._process = subprocess.Popen(
                 self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=None, bufsize=1)
+                stderr=None, text=True, encoding="utf-8", bufsize=1)
         except OSError as error:
             raise UpstreamError(f"cannot start the upstream server "
                                 f"{self.command!r}: {error}") from error
@@ -297,6 +299,7 @@ class Proxy:
     def __init__(self, upstream: Upstream, *, undo: dict | None = None,
                  trust_read_only: bool = False, stdout=None,
                  pin: dict | None = None) -> None:
+                 trust_read_only: bool = False, stdout=None) -> None:
         from . import server  # noqa: PLC0415 - the session the verbs act on
 
         self.server = server
@@ -352,6 +355,7 @@ class Proxy:
         single tool is classified: an upstream that cannot prove it is the
         server the operator pinned is refused by name, not proxied and then
         judged (issue #2990)."""
+        """Initialize the upstream, list its tools, classify and load them."""
         result = self.upstream.request("initialize", {
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {},
@@ -539,6 +543,7 @@ class Proxy:
         return render_imported_source(proxied, service=SERVICE, key=KEY,
                                       backend="py", host_body=_host_body,
                                       signature="json", origin="net")
+                                      signature="json")
 
     @staticmethod
     def _compile(source: str) -> dict:
@@ -588,6 +593,7 @@ class Proxy:
                 for tool in self.tools:
                     self.refused[tool["name"]] = reason
                 return
+            self.manifest = {"tools": self._list_upstream_tools()}
         try:
             proxied, excluded = self._classify()
         except ValueError as error:
@@ -624,6 +630,7 @@ class Proxy:
                 self.session.rehold_compensation_residue(
                     self.session.swap(ir, origin={"source": source},
                                       agent_authored=False))
+                self.session.swap(ir, origin={"source": source})
         except (RevlError, SessionError, ApprovalRequired) as error:
             reason = (f"the proxy could not put its reclassified surface live "
                       f"({type(error).__name__}: {error}), so this tool is refused "
@@ -728,6 +735,7 @@ class Proxy:
             self._ensure_loaded()
             call_result = self.session.call(
                 KEY, tool["op"], [json.dumps(arguments, sort_keys=True)])
+            self.session.call(KEY, tool["op"], [json.dumps(arguments, sort_keys=True)])
         except ApprovalRequired as exc:
             return _payload_result(self.server._approval_required(exc))
         except SessionError as error:
@@ -849,6 +857,7 @@ class Proxy:
                 capabilities[passthrough] = self.upstream_capabilities[passthrough]
         name = self.upstream_info.get("name") or "the upstream server"
         result = {
+        return {
             "protocolVersion": requested if requested in _KNOWN_PROTOCOLS
             else PROTOCOL_VERSION,
             "capabilities": capabilities,
@@ -1060,6 +1069,7 @@ def run(command: list[str], *, undo: dict | None = None,
         trust_read_only: bool = False, timeout: float = 120.0,
         stdin=None, stdout=None, stderr=None, http: dict | None = None,
         live=None, pin: dict | None = None) -> int:
+        live=None) -> int:
     """`revl mcp proxy -- COMMAND...`: serve until the client closes stdin, or,
     with `http` (`{"exposure", "auth", and "profile_path" or "registry"}`),
     until interrupted. `live` is the stdio loop's per-message hook
@@ -1068,6 +1078,7 @@ def run(command: list[str], *, undo: dict | None = None,
     upstream = Upstream(command, timeout=timeout)
     proxy = Proxy(upstream, undo=undo, trust_read_only=trust_read_only,
                   stdout=_Discard() if http is not None else stdout, pin=pin)
+                  stdout=_Discard() if http is not None else stdout)
     proxy.activate()
     try:
         upstream.start()

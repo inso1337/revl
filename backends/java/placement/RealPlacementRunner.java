@@ -311,6 +311,7 @@ public final class RealPlacementRunner {
                         } catch (Throwable failure) {
                             unconfirm(domainNames.get(i), failure);
                         }
+                        try { domains.get(i).dispose(); } catch (Throwable ignored) {}
                     }
                 };
             });
@@ -421,6 +422,8 @@ public final class RealPlacementRunner {
                 // when a dispose was unconfirmed: that unwind is not a clean
                 // unload, and `run` refuses to say `DOWN` for it (issue #2339).
                 if (UNCONFIRMED.isEmpty()) recordCleanUnload(container);
+                // the real-cordis4j sibling of RunOnce.recordCleanUnload.
+                recordCleanUnload(container);
                 return;
             }
             Disposable binding = bindings.remove((String) event);
@@ -502,6 +505,7 @@ public final class RealPlacementRunner {
             } catch (Throwable failure) {
                 unconfirm(labels.get(i), failure);
             }
+            try { all.get(i).dispose(); } catch (Throwable ignored) {}
         }
     }
 
@@ -933,6 +937,7 @@ public final class RealPlacementRunner {
         String javaName = toJavaMethod.apply(name); // the contract name, as declared (#1512)
         for (Method m : iface.getMethods()) {
             if (m.getName().equals(javaName) && m.getParameterCount() == arity) return m;
+            if (m.getName().equals(name) && m.getParameterCount() == arity) return m;
         }
         throw new RuntimeException("no method " + name + "/" + arity + " on " + iface.getName());
     }
@@ -982,6 +987,7 @@ public final class RealPlacementRunner {
             // its value or `null`, never as its `toString()`
             if (args != null) for (Object a : args) callArgs.add(BridgeCodec.encode(a));
             return BridgeCodec.decode(client.call(key, toContractMethod.apply(method.getName()), callArgs), method.getGenericReturnType());
+            return BridgeCodec.decode(client.call(key, method.getName(), callArgs), method.getGenericReturnType());
         }
 
         Object coerceReturn(Object value, Class<?> ret) {

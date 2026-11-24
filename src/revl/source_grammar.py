@@ -25,6 +25,8 @@ union of its paths:
   resolved from the parser source, so the vocabulary can be declared once and
   imported by lowering. Likewise a method called with a constant flag
   (`self.stmt(in_method=False)`)
+  distinct argument list, so its `self.next()` reads one of those operators;
+  likewise a method called with a constant flag (`self.stmt(in_method=False)`)
   is compiled once per flag, with the branches the flag decides cut;
 * a value read off the cursor and tested against a constant set
   (`choice = tok.value if tok.kind == "ident" else None`, then
@@ -284,6 +286,7 @@ def _settle(term):
 class _Compiler:
     def __init__(self, methods: dict, entries: dict | None = None,
                  constants: dict | None = None):
+    def __init__(self, methods: dict, entries: dict | None = None):
         self.methods = methods
         self.entries = entries or {}
         # Module-level string tuples in the parser (`EQUALITY_OPS`), so a
@@ -334,6 +337,7 @@ class _Compiler:
         for param in relevant:
             if param in bound:
                 desc = _describe(bound[param], env, self.constants)
+                desc = _describe(bound[param], env)
                 if desc is not None:
                     callee_env[param] = desc
         if not callee_env:
@@ -855,6 +859,8 @@ def _describe(arg, env, constants=None):
     import (the vocabulary-mirror gate), while the grammar derivation still
     reads the operators.
     """
+def _describe(arg, env):
+    """A call argument as a specialisation descriptor, or None."""
     if (isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name)
             and arg.value.id == "self"):
         return ("methods", (arg.attr,))
@@ -871,6 +877,8 @@ def _describe(arg, env, constants=None):
             return env[arg.id]
         if constants and arg.id in constants:
             return ("consts", constants[arg.id])
+    if isinstance(arg, ast.Name) and arg.id in env:
+        return env[arg.id]
     return None
 
 
@@ -946,6 +954,7 @@ def derive(source: str | None = None):
     methods = parser_methods(source)
     constants = parser_constants(source)
     first = _Compiler(methods, constants=constants)
+    first = _Compiler(methods)
     first.specs.update(_START_SPECS)
     first.reach(_STARTS)
     entries = {}
@@ -957,6 +966,7 @@ def derive(source: str | None = None):
             if merged is not None:
                 entries[rule] = merged
     second = _Compiler(methods, entries, constants=constants)
+    second = _Compiler(methods, entries)
     second.specs.update(first.specs)
     second.reach(_STARTS)
     return second.rules, second.notes, second.unguarded

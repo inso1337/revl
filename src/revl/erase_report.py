@@ -436,6 +436,7 @@ def _crossings(index: Composition, members: list[str],
                 unregistered_witness = (fact.get("class") == "witnessed"
                                         and fact["name"] not in registered)
                 if not fact.get("emission") and not unregistered_witness:
+                if not fact.get("emission"):
                     # item 246 (closing the noted gap): a witnessed extern crosses
                     # the boundary too (item 243), but it is REVERTIBLE by its
                     # registered inverse — class (a), auto-approved silently. It is

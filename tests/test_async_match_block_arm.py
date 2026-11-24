@@ -128,6 +128,7 @@ def test_block_arm_py_emits_awaited_call():
     # an emission in value position fires through the recording seam (issue
     # #1603); the `await` stays outside it, so the call is still awaited
     assert "await _revl_extern_emit(_revl_ctx, 'engine_run', engine_run, " in out
+    assert "await engine_run(" in out
 
 
 # -- execution: the harness repro RUNS on py and ts -------------------------

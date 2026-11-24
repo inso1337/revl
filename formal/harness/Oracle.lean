@@ -82,6 +82,7 @@ proved model itself**, not from a private restatement of it (roadmap item
     `attenuatesB` over the component's held set and a consulted role's
     reach (`ME`, `MRC`), with `modelReachB_iff` (G-MODEL-PLACE, issue
     #1811).
+    both directions of the rule (issues 1167 and #1172).
 
 The components are `RevL.Manifest.LComponent` values built from the `M`
 rows, so `slots`/`needs` — the `(key, realm)` slot the linker's
@@ -100,6 +101,7 @@ overstated:
    restatement: the `DF` row decides `RevL.G4Deferred.deferredB`, issue
    #1742; nor is the fifth, the EMISSION VALUE rule: the `EV` row decides
    `RevL.G4EmissionValue.emissionValueB`, issues #2842 and #2834.) `g4OK` is the MARKER rule; the G4 model
+   guarantee. `g4OK` is the MARKER rule; the G4 model
    (`RevL.Theorems.G4_InverseOrEmit` over `RevL.Syntax.Stmt`) is indexed
    by statement syntax, and the export carries call FACTS — receiver,
    service, method, marker context — so no model definition takes its
@@ -165,6 +167,7 @@ Fact rows in (tab-separated, one fact per line):
   A <file> <comp> <cap>                      activation emit-step surface,
                                              named by the DECLARED boundary
   F <file> <comp> <key> <svc> <meth> <cap> <bound> <via>
+  F <file> <comp> <key> <svc> <meth> <cap> <bound>
                                              provide-method emission reach.
                                              TWO spellings of the same
                                              crossing: `cap` is the declared
@@ -191,6 +194,9 @@ Fact rows in (tab-separated, one fact per line):
                                              via). `A` and `K` feed the fold
                                              alone and carry the boundary
                                              spelling only
+                                             `emission[...]`). `A` and `K`
+                                             feed the fold alone and carry
+                                             the boundary spelling only
   S <file> <comp> <child>                    activation spawn edge
   H <file> <comp> <var> <child>              spawn handle var
   U <file> <comp> <ctx> <root> <svc> <meth>  call fact + marker context:
@@ -1496,6 +1502,8 @@ def parseF (f : List String) : Option FRow :=
   match f with
   | ["F", path, comp, key, svc, meth, cap, bound, via] =>
       some ⟨path, comp, key, svc, meth, cap, bound, via⟩
+  | ["F", path, comp, key, svc, meth, cap, bound] =>
+      some ⟨path, comp, key, svc, meth, cap, bound⟩
   | _ => none
 
 def parseK (f : List String) : Option KRow :=
@@ -1716,6 +1724,7 @@ declaration-versus-reach bound. -/
 def methodBoundOK (t : CapTable)
                    (bounds : List (String × String × String × List String))
                    (svc meth : String) (reach : List (String × String)) : Bool :=
+                   (svc meth : String) (caps : List String) : Bool :=
   let b := bounds.find? (fun x => x.1 == svc && x.2.1 == meth)
   let mode := match b with | some x => x.2.2.1 | none => "plain"
   let entries := match b with | some x => x.2.2.2 | none => []
@@ -1727,6 +1736,8 @@ def methodBoundOK (t : CapTable)
         || ((reach.filter (fun r => r.1 == k)).map (·.2)).all
              (fun via => via != "*" && entries.contains via)
   else keys.isEmpty
+    (caps.map (capToken t)).all fun tk => entries.contains tk
+  else caps.isEmpty
 
 /-- Component -> capability set, as an association list. -/
 abbrev CapMap := List (String × List String)
@@ -3492,6 +3503,7 @@ def main (args : List String) : IO UInt32 := do
               (·.cap)))
         owns
       let closed := closeN (edges.length + 1) edges base
+      let closed := closeN (edges.length + 1) edges owns
       -- G verdicts (marker rule) per component
       for cn in fm.map (·.name) do
         let markerOK := g4OK ems (uu.filter (fun r => r.comp == cn))
@@ -3527,6 +3539,10 @@ def main (args : List String) : IO UInt32 := do
                                  && r.svc == k.2.2.1 && r.meth == k.2.2.2))
                      |>.map (fun r => (r.bound, r.via)) |>.eraseDups
         let ok := methodBoundOK capTable bounds k.2.2.1 k.2.2.2 reach
+        let caps := (uf.filter (fun r => r.comp == k.1 && r.key == k.2.1
+                                && r.svc == k.2.2.1 && r.meth == k.2.2.2))
+                    |>.map (·.bound) |>.eraseDups
+        let ok := methodBoundOK capTable bounds k.2.2.1 k.2.2.2 caps
         let pv := if ok then "ok" else "fail"
         out := out ++ s!"P\t{p}\t{k.1}\t{k.2.1}\t{k.2.2.1}\t{k.2.2.2}\tbound={pv}\n"
       -- MPV / MAV verdicts (G-MODEL-PLACE, issue #1811)

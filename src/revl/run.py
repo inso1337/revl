@@ -53,6 +53,8 @@ from . import taint
 from . import why_runtime
 from ._run_backends import KNOWN_BACKENDS, RUNNABLE_BACKENDS  # noqa: F401 - re-exported
 
+KNOWN_BACKENDS = ("py", "ts", "rust", "java", "wasm", "go")
+
 # item 1046 (#1046): driver identity for the `sys.modules` key `_emit_module`
 # registers each emitted generation under. `sys.modules` is process-global, so
 # that key has to carry the identity of the driver that emitted the generation,
@@ -148,6 +150,15 @@ class ActivationError(RuntimeError):
 # rest, so it is worth one causal-trace record. UNLOADING/LOADING are
 # in-flight and never recorded on their own.
 _SETTLED_DOWN = ("DISPOSED", "PENDING", "FAILED")
+# py boots cordis-py in-process (the _Driver below); ts/rust/java/wasm/go each
+# boot the composition as a *separate process* over the same bridge seam
+# (run_ts.py, run_rust.py, run_java.py, run_wasm.py, run_go.py): ts a node
+# process on cordis v4, rust a cordis-rs binary, java a JVM on cordis4j, wasm
+# the cordis-wasm runtime on wasmtime, go the stc-go placement runner. On every
+# non-py tier --once (boot -> LIFO teardown -> no-residue proof -> exit) is
+# wired, each behind its own runtime-availability gate (skip-with-reason, never
+# a green run that booted nothing).
+RUNNABLE_BACKENDS = ("py", "ts", "rust", "java", "wasm", "go")
 
 
 # --------------------------------------------------------------------------
@@ -475,6 +486,7 @@ def _required_config_problem(ir: dict, config: dict) -> str | None:
     for name in _load_order(ir):
         fields = (by_name.get(name) or {}).get("config") or []
         supplied = component_config(ir, config, name)
+        supplied = config.get(name) or {}
         for field in fields:
             if field.get("default") is None and field["name"] not in supplied:
                 # item 350: a boot component's fields arrive through `--env`, the
@@ -548,6 +560,8 @@ def _secret_rows(ir: dict) -> list[dict]:
 def _resolve_secrets(ir: dict, source: dict | None = None, *,
                      allow_absent: bool = False) -> dict:
     """Resolve each bound secret's VALUE at plug (item 256, §3), keyed by the
+def _resolve_secrets(ir: dict, source: dict | None = None) -> dict:
+    """Resolve each bound secret's VALUE once at plug (item 256, §3), keyed by the
     secret NAME. Sourced from `source` (a caller-supplied name->value store) or,
     by default, the environment variable `REVL_SECRET_<NAME>` (NAME upper-cased),
     so a secret store or a `--secret-file` seam can front it later without moving
@@ -571,6 +585,7 @@ def _resolve_secrets(ir: dict, source: dict | None = None, *,
     surfaces (as a call-time refusal naming the declared secret). The caller then
     installs the value through `_Driver.set_secret`, which is the same
     name-keyed, value-free audit surface as plug-time resolution."""
+    echoed by `--plan`, and never serialized into any trace."""
     rows = _secret_rows(ir)
     if not rows:
         return {}
@@ -708,6 +723,7 @@ def _print_plan(ir: dict, config: dict, backend: str) -> None:
         requires = ", ".join(comp.get("requires") or {}) or "-"
         provides = ", ".join(comp.get("provides") or {}) or "-"
         cfg = component_config(ir, config, name)
+        cfg = config.get(name)
         print(f"\ncomponent {name}")
         print(f"  requires: {requires}")
         print(f"  provides: {provides}")
@@ -1254,6 +1270,7 @@ class _Driver:
                  secrets_may_be_absent: bool = False,
                  estop_latch: str | None = None, ambient: dict | None = None,
                  ambient_check=None, run_header: dict | None = None):
+                 ambient_check=None):
         self.ir = ir
         self.config = config
         # item 256 Slice 1: an optional caller-supplied secret store (name ->
@@ -1470,6 +1487,7 @@ class _Driver:
                 cause: dict) -> None:
         # ts (v2): a monotonic reading, meaningful for durations within the run.
         self._events.append(self._stamp_header(why_runtime.make_event(
+        self._events.append(why_runtime.make_event(
             self._seq, self.generation, event, component, transition, cause,
             ts=time.monotonic())))
         self._seq += 1
@@ -1482,6 +1500,7 @@ class _Driver:
             self._seq, self.generation, checks,
             why_runtime.cause_trigger("teardown left residue"),
             ts=time.monotonic())))
+            ts=time.monotonic()))
         self._seq += 1
 
     def _record_emit(self, component: str, capability: str, key: str,
@@ -1496,14 +1515,17 @@ class _Driver:
         its record is byte-identical to a pre-121 v2 emit — the same additive
         discipline `make_emit_event` already documents."""
         self._events.append(self._stamp_header(why_runtime.make_emit_event(
+        self._events.append(why_runtime.make_emit_event(
             self._seq, self.generation, component, capability, key, cause,
             ts=time.monotonic(), llm=llm, activation_id=activation_id)))
+            ts=time.monotonic(), llm=llm, activation_id=activation_id))
         self._seq += 1
 
     def _model_crossing_payload(self, *, args=None, arg_origins=None,
                                 taint_engaged: bool = False,
                                 verified_by=None, crossing=None,
                                 contract=None) -> dict | None:
+                                verified_by=None, crossing=None) -> dict | None:
         """Item 121: assemble the `llm` payload for a model-completion crossing,
         or ``None`` when this crossing is not one.
 
@@ -1548,6 +1570,7 @@ class _Driver:
         have any subset of them: an unvalidated crossing has no schema or
         grammar, and a crossing with no declared `model.<role>` token has no
         residence. An absent key stays absent in the payload, never empty."""
+        Slice 2); a hop nothing derives from keeps the field absent."""
         take = getattr(self.runtime, "revl_take_model_call", None)
         if take is None:
             obs = None
@@ -1652,6 +1675,7 @@ class _Driver:
             if chosen:
                 return chosen[-1]["residence"]
         return None
+            verified_by=verified_by or [], prompt_digest=digest)
 
     @staticmethod
     def _link_produced(crossing: dict, hop_event: dict | None,
@@ -1776,6 +1800,7 @@ class _Driver:
         loop = asyncio.get_running_loop()
         _track_executor_work(loop)
         for _ in range(_FLUSH_TURNS):
+        for _ in range(20):
             await asyncio.sleep(0)
             if not _loop_has_runnable(loop):
                 return
@@ -1846,6 +1871,8 @@ class _Driver:
         # runs, so a traceback and the replay recorder quote `<revl-run genN>`
         # with the new N, and it is executed into a fresh module like any
         # other. Only the code object is reused, never a module or namespace.
+    def _emit_module(self, ir: dict,
+                     source: str | None = None) -> types.ModuleType:
         # `source` is the emitter's output for `ir` when the caller has already
         # rendered it. A session swap renders the successor BEFORE it tears the
         # running generation down, so an emitter refusal leaves that generation
@@ -1904,6 +1931,7 @@ class _Driver:
         # a later swap onto the same document (issue #3383)
         self.emitted_code = code
         exec(code, module.__dict__)
+        exec(compile(source, filename, "exec"), module.__dict__)
         # item 379 / option (b) of docs/design/378-sync-extern-service-reach.md:
         # install the resolved config for each document-global config extern into
         # the module's `_REVL_EXTERN_CONFIG` map, so a host body reads typed
@@ -1927,6 +1955,14 @@ class _Driver:
         secrets = _resolve_secrets(
             ir, getattr(self, "secrets", None),
             allow_absent=getattr(self, "secrets_may_be_absent", False))
+        # item 256 Slice 1: resolve each bound secret's value once at plug and
+        # install it into the module's `_REVL_SECRETS` map, so a bound extern body
+        # reads the key as its first local at the sanctioned seam - resolved ONCE
+        # here, never per call, never logged. A composition with no bound secret
+        # leaves the map (which the emitter only defines when one exists)
+        # untouched. Sourced from `self.secrets` (the caller-supplied store) or the
+        # environment; fail-loud when a declared secret has no value.
+        secrets = _resolve_secrets(ir, getattr(self, "secrets", None))
         if secrets and hasattr(module, "_REVL_SECRETS"):
             module._REVL_SECRETS.update(secrets)
         # remember the live module so `set_secret` can reach its map after plug.
@@ -1944,6 +1980,7 @@ class _Driver:
                 # ahead of it mattering (docs/crash-recovery.md)
                 self.recorder.open_wal(self.wal_path, self.generation,
                                        allow_unsynced=self.allow_unsynced_wal)
+                self.recorder.open_wal(self.wal_path, self.generation)
         return module
 
     def set_secret(self, name: str, value: str) -> dict:
@@ -2042,6 +2079,7 @@ class _Driver:
             fiber = self.runtime.plug(
                 self.root, getattr(module, name),
                 component_config(ir, self.config, name))
+                self.root, getattr(module, name), self.config.get(name, {}))
             self.fibers[name] = fiber
             await self._flush()
             # roadmap item 372: DRIVE the deferred activation to completion and
@@ -2694,6 +2732,7 @@ class _Driver:
                         taint_engaged=taint_engaged,
                         crossing=(timeline.component, step.get("index")),
                         contract=contract)
+                        crossing=(timeline.component, step.get("index")))
                     self._record_emit(
                         timeline.component,
                         detail.get("service") or "",
@@ -3302,9 +3341,21 @@ def run_command(args, hold_once: bool = False) -> int:
         # enforces the least-authority chain over the emitted import section
         # (host imports subset-of declared caps subset-of policy-allowed) before
         # booting, on top of the every-tier gate above (issue #3185).
+        # item 289: with a boundary policy in force, the wasm tier enforces the
+        # full least-authority chain (host imports subset-of declared caps
+        # subset-of policy-allowed) before booting; all three sets are
+        # statically decidable for a wasm module.
+        policy = None
+        if getattr(args, "policy", None):
+            from .policy import load_policy  # noqa: PLC0415
+            try:
+                policy = load_policy(args.policy)
+            except (RevlError, OSError) as exc:
+                return _fail(f"cannot load policy: {exc}", lifecycle.CONFIG)
         from .run_wasm import run_wasm  # noqa: PLC0415 — lazy: no wasmtime needed to compile/plan
         return run_wasm(ir, config, args.files, once=once,
                         interactive=interactive, policy=run_policy)
+                        interactive=interactive, policy=policy)
 
     backend_dir = backends_root() / "python"
     try:
@@ -3384,6 +3435,7 @@ def run_command(args, hold_once: bool = False) -> int:
     except UnsettledWalError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+                         ambient_check=_model_host_check(args, model_hosts))
     except Exception as exc:
         # item 515 S2: a model provision that cannot load its member where the
         # schedule placed it refuses the boot, named, before anything loads
@@ -3400,6 +3452,7 @@ def run_command(args, hold_once: bool = False) -> int:
         # not wait on the prompt. `revl dev` still passes `hold_once` itself.
         return asyncio.run(driver.hold_repl(
             once=hold_once or bool(getattr(args, "once", False))))
+        return asyncio.run(driver.hold_repl(once=hold_once))
     except refusals(emit) as exc:
         # issue #1393: an emit-time refusal is an ANSWER, not a crash. The py
         # emitter refuses a document it cannot lower rather than silently

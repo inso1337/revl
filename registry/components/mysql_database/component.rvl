@@ -2,10 +2,12 @@
 // different body. A second §5-compatible candidate for a Database need, so the
 // resolve exit test has more than one provider to rank. `execute` declares the
 // `[db]` scope it reaches, matching the running manifest.
+// resolve exit test has more than one provider to rank.
 
 service Database {
   fn query(sql: Str) -> List[Row]
   emission[db] fn execute(sql: Str) -> Int
+  emission fn execute(sql: Str) -> Int
 }
 
 component MysqlDatabase provides db: Database {

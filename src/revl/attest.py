@@ -211,6 +211,7 @@ def path_normalized_ir(ir):
     another — could not work while it was.
 
     This is not a new decision. `revl bundle`, `registry_evidence.build_evidence` and
+    This is not a new decision. `revl bundle`, `registry.build_evidence` and
     `truc reproduce` each already normalized these exact fields for exactly
     this reason, and each did it in its own copy; two of those copies drifted
     apart and left `truc reproduce`'s attestation tier structurally dead
@@ -471,6 +472,7 @@ RULESET_MODULES = ("parser", "lower", "compiler", "admission", "activation",
                    "cardinality", "decode_grammar", "model_profile",
                    "operator_text", "type_schema", "realm_placeholders",
                    "gen_types", "export_area", "type_arity")
+                   "cardinality", "decode_grammar", "model_profile")
 
 #: The sibling modules a rule module imports that are NOT rules, each with the
 #: reason it is not one. This is the argued half of the membership question and
@@ -630,6 +632,8 @@ def compiler_version() -> str:
     `revl._version.version()`, the one definition (the source tree's
     `pyproject.toml`, else installed metadata, else "unknown"). `revl.gate`
     reports the same value as `gate_version().language`.
+    """The revl toolchain version recorded as `checker.compiler`."""
+    from .gate import _language_version  # noqa: PLC0415 — lazy, avoids an import cycle
 
     Defined here, not in `revl.gate`: the compiler's import chain reaches this
     module, and importing `revl.gate` from it put the gate, and through the
@@ -638,6 +642,7 @@ def compiler_version() -> str:
     from ._version import version  # noqa: PLC0415
 
     return version()
+    return _language_version()
 
 
 def checker_identity() -> dict:

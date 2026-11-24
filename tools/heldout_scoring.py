@@ -24,6 +24,8 @@ and the attacks each one left open.
 
 THE FOUR ENFORCEMENTS
 ---------------------
+THE THREE ENFORCEMENTS
+----------------------
 1. THE SET IS NOT A FILE. `draw()` generates programs in memory. Nothing here
    writes a `.rvl` anywhere, which also keeps the draw out of the globbed
    fixture directories that would make it readable on the next run.
@@ -37,6 +39,12 @@ THE FOUR ENFORCEMENTS
    a check instead of a promise: the repository is readable, so the seed file
    is required to be outside it and that requirement is tested rather than
    asserted.
+2. THE SEED IS PROVED ABSENT FROM THE TREE. `--seed` / `REVL_HELDOUT_SEED` is
+   checked with `git grep --fixed-strings` over the tracked tree, and a seed
+   that is found there is REFUSED. This is the enforcement that makes "the
+   candidate cannot read it" a check instead of a promise: the repository is
+   readable, so the seed is required to be outside it and that requirement is
+   tested rather than asserted.
 
 3. THE SEED IS CONSUMED ONCE, AND THE CONSUMPTION IS VISIBLE. Every scored run
    appends the seed's digest (never the seed) to a rotation ledger outside the
@@ -48,6 +56,8 @@ THE FOUR ENFORCEMENTS
 4. THE CANDIDATE'S DIFF MUST NOT REACH THE SCORER. `HELD_OUT_FENCE` is the
    `held_out` view of the one evaluator enumeration (issue #2802), and it lists
    the paths that decide what is drawn and what counts as a divergence. The
+3. THE CANDIDATE'S DIFF MUST NOT REACH THE SCORER. `HELD_OUT_FENCE` lists the
+   paths that decide what is drawn and what counts as a divergence. The
    candidate's changed-file set is required, and a diff that touches a fenced
    path is REFUSED rather than scored, because a candidate that edited the
    scorer has not been scored by it. Refused is not failed: it is the verdict
@@ -80,6 +90,12 @@ a named refusal and NO score. There is deliberately no path on which this tool
 falls back to scoring against the in-tree corpus: a gate that silently scores
 a readable set when the held-out one is unavailable is the fail-open shape,
 and it is the shape this tool refuses to have.
+Every unknown refuses. No seed, a seed found in the tree, no diff, a diff that
+reaches the fence, an engine that will not build, a draw that raises -- each
+exits non-zero with a named refusal and NO score. There is deliberately no
+path on which this tool falls back to scoring against the in-tree corpus: a
+gate that silently scores a readable set when the held-out one is unavailable
+is the fail-open shape, and it is the shape this tool refuses to have.
 
 WHAT IS SCORED
 --------------
@@ -119,6 +135,9 @@ USAGE
         --diff-paths src/revl/lower.py
     tools/heldout_scoring.py --seed-file ... --diff-base origin/main \\
         --json verdict.json
+    tools/heldout_scoring.py --diff-base origin/main --count 200
+    REVL_HELDOUT_SEED=... tools/heldout_scoring.py --diff-paths src/revl/lower.py
+    tools/heldout_scoring.py --diff-base origin/main --json verdict.json
 
 Exit status: 0 scored clean, 1 scored and a zero-tolerance bucket is
 non-empty, 2 REFUSED (no score was produced).
@@ -219,6 +238,21 @@ HELD_OUT_FENCE = _PROTOCOL.HELD_OUT_FENCE
 
 #: `sha256:<hex>` over this scorer's evaluator, recorded in every verdict.
 protocol_digest = _PROTOCOL.protocol_digest
+HELD_OUT_FENCE = (
+    "tools/heldout_scoring.py",
+    "tests/test_heldout_scoring.py",
+    "tools/gate_reference_census.py",
+    "tools/build_gate_crate.py",
+    "tests/test_selfhost_lower.py",
+    # Slice 2 reads this: it is the ALLOWANCE the `false-admit` direction is
+    # compared against, so it decides what counts as a divergence and belongs
+    # on the fence by the same rule as the tools above. Before slice 2 it was
+    # in `SCORING_UNREACHED` -- a scoring run never opened it -- and moving it
+    # here is the visible consequence of starting to read it. A candidate that
+    # widens its own allowance by re-recording the baseline is REFUSED, which
+    # is the routing item 537 asks for rather than a silent pass.
+    "tools/gate_reference_census_baseline.json",
+)
 
 # The subject: the top-level directories a candidate is allowed to change and
 # that the gate measures. `tests` is one of them on purpose -- a candidate that
@@ -331,6 +365,11 @@ GRAMMAR = "admission-surface/v1"
 ROTATION = (
     "per scored run; the seed is a file outside every git repository, its digest is "
     "recorded, and a digest the rotation ledger has already seen is refused")
+# in the artifact rather than in prose: one draw per invocation, its identity
+# fixed by an operator-supplied seed that is not in the tree. Nothing here
+# holds a seed between runs, so a repeated seed is the operator's choice and
+# `seed_digest` in the verdict is what makes that choice visible.
+ROTATION = "per-invocation; seed supplied by the operator, proved absent from the tracked tree"
 
 
 # ------------------------------------------------------------- the refusal type
@@ -350,8 +389,14 @@ def seed_file_material(argv_seed_file, env):
     if argv_seed_file:
         return Path(argv_seed_file).expanduser(), "argv"
     from_env = env.get(SEED_FILE_ENV, "")
+def seed_material(argv_seed, env):
+    """The seed and where it came from, or a refusal."""
+    if argv_seed:
+        return argv_seed, "argv"
+    from_env = env.get("REVL_HELDOUT_SEED", "")
     if from_env:
         return Path(from_env).expanduser(), "env"
+        return from_env, "env"
     raise Refusal("no-seed")
 
 
@@ -410,6 +455,7 @@ def seed_is_in_tree(seed: str, root: Path) -> bool:
             ["git", "-C", str(root), "grep", "--fixed-strings", "--quiet",
              "--no-color", "-I", "--", seed],
             capture_output=True, text=True, timeout=120, env=_git_env())
+            capture_output=True, text=True, timeout=120)
     except (OSError, subprocess.SubprocessError) as exc:
         raise Refusal("seed-check-unavailable:" + type(exc).__name__)
     if done.returncode == 0:
@@ -421,12 +467,17 @@ def seed_is_in_tree(seed: str, root: Path) -> bool:
 
 def checked_seed(argv_seed_file, env, root: Path):
     """`(seed, source, seed_file)` for a seed that is usable, or a refusal.
+def checked_seed(argv_seed, env, root: Path):
+    """`(seed, source)` for a seed that is usable, or a refusal.
 
     These refusals are the whole of enforcement 2, and they are all
     fail-closed: no seed file refuses, a file inside a repository refuses, a
     file another user can read refuses, a file that cannot be read refuses, a
     short seed refuses, a seed that is in the tree refuses, and a tree that
     cannot be searched refuses.
+    The three refusals here are the whole of enforcement 2, and they are all
+    fail-closed: no seed refuses, a short seed refuses, a seed that is in the
+    tree refuses, and a tree that cannot be searched refuses.
     """
     path, source = seed_file_material(argv_seed_file, env)
     if _in_git_work_tree(path, root):
@@ -448,11 +499,13 @@ def checked_seed(argv_seed_file, env, root: Path):
         raise Refusal("seed-file-unreadable:" + type(exc).__name__)
     if not seed:
         raise Refusal("seed-empty")
+    seed, source = seed_material(argv_seed, env)
     if len(seed) < MIN_SEED_CHARS:
         raise Refusal("seed-too-short")
     if seed_is_in_tree(seed, root):
         raise Refusal("seed-in-tree")
     return seed, source, path
+    return seed, source
 
 
 def seed_digest(seed: str) -> str:
@@ -567,6 +620,7 @@ def is_regenerated(path: str) -> bool:
 
 
 def fence_verdict(changed, fence=HELD_OUT_FENCE, diff_lines=None):
+def fence_verdict(changed, fence=HELD_OUT_FENCE):
     """The fenced paths a candidate's changed-file set reaches, in order.
 
     `changed` is repo-relative. A path outside the fence is not inspected: this
@@ -577,6 +631,7 @@ def fence_verdict(changed, fence=HELD_OUT_FENCE, diff_lines=None):
     count over the size limit, on a diff that does not reach the fence, refuses
     with the limit named; the line half is skipped when no base supplied it
     (`--diff-paths`), never assumed to be zero.
+    is a reachability question about the scorer, not a review of the diff.
     """
     reached = []
     for path in changed:
@@ -606,6 +661,7 @@ def changed_from_base(root: Path, base: str):
         done = subprocess.run(
             ["git", "-C", str(root), "diff", "--name-only", base + "..HEAD"],
             capture_output=True, text=True, timeout=120, env=_git_env())
+            capture_output=True, text=True, timeout=120)
     except (OSError, subprocess.SubprocessError) as exc:
         raise Refusal("diff-unavailable:" + type(exc).__name__)
     if done.returncode != 0:
@@ -652,6 +708,8 @@ def diff_lines_from_base(root: Path, base: str):
 # also holds components whose provide-method bodies the certifier types itself
 # (docs/design/457 T6); drawing those is a separate generator and not this one,
 # so a program from here is inside the surface but does not exhaust it.
+# for, which is the region carrying no term the reference type layer decides.
+# Interface declarations and transparent scalar aliases, and nothing else.
 _SCALARS = ("Int", "Int32", "Float", "Str", "Bool", "Bytes")
 
 # Deliberately ordinary words. A generated program that is obviously generated
@@ -696,6 +754,7 @@ _RESERVED = frozenset((
     "pure", "realm", "requires", "return", "service", "spawn", "subscribe",
     "test", "true", "try", "type", "undo", "use", "var", "verified", "while",
     "with",
+    "test", "true", "type", "undo", "use", "var", "verified", "while", "with",
 ))
 
 # The near-miss families. Each is one token outside the admission surface, and
@@ -1178,6 +1237,7 @@ def _protocol_or_none():
 
 def verdict_record(buckets, liveness, *, seed, source, count, fence,
                    changed_count, allowance, tells, rotation_count, protocol):
+                   changed_count, allowance, tells):
     findings = {name: buckets.get(name, []) for name in ZERO_TOLERANCE}
     families = bypass_families(buckets)
     new_families = {tag: ids for tag, ids in families.items()
@@ -1242,12 +1302,15 @@ def refusal_record(reason: str):
 
 def run(*, seed_file=None, env, count, changed, diff_lines=None,
         root=ROOT, census=None, engine=None, reference=None):
+def run(*, argv_seed, env, count, changed, root=ROOT, census=None,
+        engine=None, reference=None):
     """The whole gate as one function: a verdict record and an exit status.
 
     Every branch that cannot answer the question returns a refusal record. No
     branch returns a score computed from anything other than the draw. The seed
     arrives only as a file path; a scored run consumes its digest in the
     rotation ledger beside that path and records the resulting count.
+    branch returns a score computed from anything other than the draw.
     """
     try:
         protocol = protocol_digest(ROOT)
@@ -1262,9 +1325,11 @@ def run(*, seed_file=None, env, count, changed, diff_lines=None,
         ledger = rotation_ledger_path(seed_path)
         if seed_digest_was_used(ledger, digest):
             raise Refusal("seed-digest-reused")
+        seed, source = checked_seed(argv_seed, env, root)
         if changed is None:
             raise Refusal("no-diff")
         reached = fence_verdict(changed, diff_lines=diff_lines)
+        reached = fence_verdict(changed)
         if reached:
             raise Refusal("diff-reaches-fence:" + ",".join(sorted(reached)))
         allowance = bypass_allowance(root)
@@ -1305,6 +1370,7 @@ def run(*, seed_file=None, env, count, changed, diff_lines=None,
         buckets,
         liveness,
         seed=digest,
+        seed=seed_digest(seed),
         source=source,
         count=len(cases),
         fence=HELD_OUT_FENCE,
@@ -1375,6 +1441,8 @@ def main(argv):
         "--seed-file", default="",
         help="owner-only seed file outside every git repository; "
              "REVL_HELDOUT_SEED_FILE otherwise")
+    parser.add_argument("--seed", default="",
+                        help="the held-out seed; REVL_HELDOUT_SEED otherwise")
     parser.add_argument("--count", type=int, default=200,
                         help="programs in the draw (default 200)")
     parser.add_argument("--diff-base", default="",
@@ -1398,6 +1466,8 @@ def main(argv):
         record, status = run(
             seed_file=args.seed_file or None, env=os.environ,
             count=args.count, changed=changed, diff_lines=diff_lines)
+        record, status = run(argv_seed=args.seed, env=os.environ,
+                             count=args.count, changed=changed)
     except Refusal as exc:
         record, status = refusal_record(exc.reason), REFUSED
 

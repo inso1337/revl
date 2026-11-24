@@ -765,6 +765,7 @@ def test_only_the_observation_property_reads_slo():
     that shows up in this list. It exists so a SERIALIZER can write the block
     into a window document without consulting it, and the counter half of the
     claim is measured below rather than asserted by the name."""
+    into the decision."""
     tree = module_ast()
     readers = []
     for node in ast.walk(tree):
@@ -800,6 +801,7 @@ def test_the_slo_read_counter_is_incremented_in_exactly_one_function():
                  else initialised).append(node.name)
     assert sorted(set(incremented)) == ["slo"]
     assert sorted(set(initialised)) == ["__init__"]
+    assert sorted(set(readers)) == ["__init__", "has_slo", "slo"]
 
 
 def test_accumulate_is_called_after_the_precondition_walk_returns():
@@ -1164,6 +1166,7 @@ def test_a_window_of_really_sealed_records_promotes():
             template_digest=DIGEST_A,
             origins=["input"], reasoning=_model_evidence.reasoning_span(),
             candidates=[DIGEST_A], chosen=0,
+            origins=["input"], candidates=[DIGEST_A], chosen=0,
             outcome="validated",
             sampling={"max_tokens": 256, "seed": 7, "stop_digest": None,
                       "temperature": 0.0, "top_k": None, "top_p": 1.0},
@@ -1192,6 +1195,7 @@ def test_a_really_sealed_record_that_was_edited_refuses():
             template_digest=DIGEST_A,
             origins=["input"], reasoning=_model_evidence.reasoning_span(),
             candidates=[DIGEST_A], chosen=0,
+            origins=["input"], candidates=[DIGEST_A], chosen=0,
             outcome="validated",
             sampling={"max_tokens": 256, "seed": 7, "stop_digest": None,
                       "temperature": 0.0, "top_k": None, "top_p": 1.0},

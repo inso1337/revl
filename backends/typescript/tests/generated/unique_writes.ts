@@ -7,6 +7,7 @@ const REVL_I64_MIN = -(2n ** 63n)
 const REVL_I64_MAX = 2n ** 63n - 1n
 function revlI64(v: bigint): bigint {
   if (BigInt.asIntN(64, v) !== v) throw new RangeError('revl: Int overflow')
+  if (v < REVL_I64_MIN || v > REVL_I64_MAX) throw new RangeError('revl: Int overflow')
   return v
 }
 
@@ -22,6 +23,7 @@ export function built(n: bigint): bigint[] {
     while ((i < n)) {
       xs.push(i)
       i = (BigInt.asIntN(64, $revl_i64 = i + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
+      i = revlI64(i + 1n)
     }
     return xs
 }
@@ -50,6 +52,7 @@ export function moved(n: bigint): Pt {
     while ((i < n)) {
       Object.assign(p, { x: p.y, y: p.x })
       i = (BigInt.asIntN(64, $revl_i64 = i + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
+      i = revlI64(i + 1n)
     }
     return p
 }
@@ -63,6 +66,7 @@ export function snapshots(n: bigint): bigint[][] {
       out.push(xs)
       xs = [...xs, i]
       i = (BigInt.asIntN(64, $revl_i64 = i + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
+      i = revlI64(i + 1n)
     }
     return out
 }
@@ -77,9 +81,12 @@ export function chunked(n: bigint): bigint[][] {
       while ((j < 2n)) {
         res.push((BigInt.asIntN(64, $revl_i64 = (BigInt.asIntN(64, $revl_i64 = i * 2n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64)) + j) === $revl_i64 ? $revl_i64 : revlI64($revl_i64)))
         j = (BigInt.asIntN(64, $revl_i64 = j + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
+        res.push(revlI64(revlI64(i * 2n) + j))
+        j = revlI64(j + 1n)
       }
       out.push(res)
       i = (BigInt.asIntN(64, $revl_i64 = i + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
+      i = revlI64(i + 1n)
     }
     return out
 }

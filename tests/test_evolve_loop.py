@@ -23,6 +23,7 @@ Levels:
   6. the bounded `ProposerPacket` and its digest on every proposal call;
   7. `rounds`: fresh-context restarts from the retained component, with the
      original brief and no refusal text carried across the round boundary.
+  5. the seam plumbing (register_proposer, budget guards).
 All pure frontend — the in-memory compile is the only runtime touched.
 """
 
@@ -198,6 +199,9 @@ def test_evolve_budget_one_is_a_single_admit_no_propose():
     def spy(packet):
         calls.append(packet)
         return packet.candidate
+    def spy(candidate, why_trace):
+        calls.append(why_trace)
+        return candidate
 
     result = evolve(_collide_candidate(), proposer=spy, budget=1)
     assert result.admitted is False
@@ -213,6 +217,7 @@ def test_evolve_clean_candidate_admits_on_attempt_one():
     calls = []
     result = evolve(clean, proposer=lambda p: calls.append(p) or p.candidate,
                     budget=3)
+    result = evolve(clean, proposer=lambda c, w: calls.append(w) or c, budget=3)
     assert result.admitted is True
     assert len(result.attempts) == 1
     assert calls == []                              # no refusal, no propose

@@ -91,6 +91,7 @@ component PgDatabase provides db: Database {
   let sock = effect open_sock() undo close_sock(0)
   provide db {
     fn query(sql) = sock
+    fn query(sql) = open_sock()
     fn execute(sql) = 1
   }
 }

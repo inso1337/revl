@@ -87,6 +87,7 @@ CANDIDATES = [
         "name": "@modelcontextprotocol/sdk",
         "ecosystem": "npm",
         "version": "1.32.0",
+        "version": "1.30.0",
         "role": "candidate",
         "registration_api": "McpServer.registerTool(name, config, handler)",
         "claims": [
@@ -348,10 +349,12 @@ def _safe_extract_tar(tar: tarfile.TarFile, dest: Path) -> None:
     root = dest.resolve()
     for member in tar.getmembers():
         if not (root / member.name).resolve().is_relative_to(root):
+        if not str((root / member.name).resolve()).startswith(str(root)):
             raise SurveyError(f"archive member escapes the root: {member.name}")
         if member.issym() or member.islnk():
             raise SurveyError(f"archive member is a link: {member.name}")
     tar.extractall(dest, filter="data")
+    tar.extractall(dest)
 
 
 def _safe_extract_zip(zf: zipfile.ZipFile, dest: Path) -> None:
@@ -360,6 +363,7 @@ def _safe_extract_zip(zf: zipfile.ZipFile, dest: Path) -> None:
     root = dest.resolve()
     for name in zf.namelist():
         if not (root / name).resolve().is_relative_to(root):
+        if not str((root / name).resolve()).startswith(str(root)):
             raise SurveyError(f"archive member escapes the root: {name}")
     zf.extractall(dest)
 
@@ -425,6 +429,7 @@ def survey(fetch: bool) -> dict:
             raise SurveyError(f"no committed survey at {SURVEY.relative_to(ROOT)}; "
                               f"run with --fetch")
         return json.loads(SURVEY.read_text(encoding="utf-8"))
+        return json.loads(SURVEY.read_text())
 
     rows = []
     tmp = Path(tempfile.mkdtemp(prefix="unload-survey-"))

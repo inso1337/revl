@@ -62,6 +62,7 @@ from .lower import _service_compatible, _service_equal, _service_from_ir
 from .parser import MethodDecl, ServiceDecl
 
 INDEX_VERSION = "3"          # "1": the per-entry `version` row (428 F12)
+INDEX_VERSION = "2"          # "1": the per-entry `version` row (428 F12)
 #                              "2": the per-entry `releases` row (item 49 phase 2)
 #                              "3": the per-entry `mediator` row (issue #2697)
 INDEX_FILENAME = "index.json"
@@ -108,6 +109,7 @@ ENTRY_META_FILENAME = "meta.json"
 # (`_mediator_problem`). It is a declaration, not a trust score - `resolve`
 # reads it to demand stronger evidence before a candidate displaces it.
 ENTRY_META_FIELDS = ("description", "tags", "mediator")
+ENTRY_META_FIELDS = ("description", "tags")
 
 # The frozen release history of one entry: `<entry>/releases/<version>/`, written
 # by `publish_release` and never rewritten (roadmap item 49 phase 2).
@@ -749,6 +751,7 @@ def _capabilities_of(boundary: dict) -> tuple[tuple[str, ...], int]:
     """The union of emission-capability labels a composition reaches, and the
     number of boundary crossings — the raw material for the least-authority
     ranking (docs/registry.md §2). `*` (unscoped) is carried through so it can
+    ranking (docs/registry.md §2.1). `*` (unscoped) is carried through so it can
     rank a candidate last."""
     labels: set[str] = set()
     emissions = 0
@@ -949,6 +952,9 @@ def _mediator_problem(value, boundary: dict | None, ir: dict | None = None
 def _entry_meta(entry_dir: Path, *, ir: dict | None = None) -> dict | None:
     """The publisher-declared metadata of one entry, from `<entry>/meta.json`,
     or None when the entry declares none.
+def _entry_meta(entry_dir: Path) -> dict | None:
+    """The publisher-declared discoverability fields of one entry, from
+    `<entry>/meta.json`, or None when the entry declares none.
 
     Fails closed the way `_entry_version` does. A file that is present but
     unusable — not an object, an unrecognised key, a description that is not a
@@ -962,6 +968,11 @@ def _entry_meta(entry_dir: Path, *, ir: dict | None = None) -> dict | None:
     `ir` is the compiled entry. Pass it whenever it is available: only then is
     the `mediator` claim CHECKED against the composition rather than merely
     parsed (issue #2697).
+    string, a tag list that is not a list of strings — is a REFUSAL, not a
+    shrug: this file is the only thing that puts `description`/`tags` under
+    `verify`, so a publisher who meant to describe a component and wrote
+    something the regenerator cannot copy must hear about it now rather than
+    ship an entry whose row nothing can reproduce.
     """
     path = entry_dir / ENTRY_META_FILENAME
     if not path.exists():
@@ -1125,6 +1136,7 @@ def _write_knowledge(entry_dir: Path, records: list) -> None:
 
 def build_index(registry_dir: str | os.PathLike, *, write: bool = True,
                 exclude: Iterable[str] = ()) -> dict:
+def build_index(registry_dir: str | os.PathLike, *, write: bool = True) -> dict:
     """Regenerate ``index.json`` (and each component's ``manifest.json``) from
     the component sources. This is the CI regenerator — never hand-edit the
     index; run this and commit its output (docs/registry.md §1).
@@ -1151,6 +1163,7 @@ def build_index(registry_dir: str | os.PathLike, *, write: bool = True,
     rows: dict = {}
     for entry_dir in sorted(p for p in comps.iterdir()
                             if p.is_dir() and p.name not in excluded):
+    for entry_dir in sorted(p for p in comps.iterdir() if p.is_dir()):
         name = entry_dir.name
         source_path = entry_dir / "component.rvl"
         source = _read(source_path)
@@ -1163,6 +1176,7 @@ def build_index(registry_dir: str | os.PathLike, *, write: bool = True,
                                       _entry_version(entry_dir),
                                       released_versions(entry_dir),
                                       _entry_meta(entry_dir, ir=ir))
+                                      _entry_meta(entry_dir))
     index = {"indexVersion": INDEX_VERSION, "components": rows}
     if write:
         index_text = json.dumps(index, indent=2, sort_keys=True) + "\n"
@@ -1174,9 +1188,12 @@ def _unhoused_meta(registry_dir: Path, committed_index: dict) -> list[str]:
     """Entries whose committed row carries a publisher-declared field
     (`description`/`tags`/`mediator`) that no `meta.json` beside the component
     accounts for.
+    """Entries whose committed row carries `description`/`tags` that no
+    `meta.json` beside the component accounts for.
 
     This is the shape of a registry published by the pre-`meta.json` write path,
     which patched those keys into the row after the regenerator had run. It
+    which patched those two keys into the row after the regenerator had run. It
     needs naming SEPARATELY, because the obvious response to a stale index —
     regenerate and commit — would silently DELETE fields nothing else records.
     """
@@ -1222,6 +1239,7 @@ def migrate_meta(registry_dir: str | os.PathLike, *, write: bool = True) -> list
     # committed index is an authority field, and a build_index that refuses it
     # must not leave an unverified meta.json behind.
     pending: list[tuple[str, Path, dict]] = []
+    migrated: list[str] = []
     for name, row in sorted((committed_index.get("components") or {}).items()):
         if not isinstance(row, dict):
             continue
@@ -1252,9 +1270,13 @@ def migrate_meta(registry_dir: str | os.PathLike, *, write: bool = True) -> list
     migrated = [name for name, _, _ in pending]
     if write:
         for _name, entry_dir, meta in pending:
+        migrated.append(name)
+        if write:
             _write_meta(entry_dir, meta)
         if migrated:
             build_index(registry_dir)
+    if migrated and write:
+        build_index(registry_dir)
     return migrated
 
 
@@ -1377,6 +1399,7 @@ def released_versions(entry_dir: str | os.PathLike) -> list[str]:
 
 def _compile_source(name: str, source: str,
                     source_path: str | os.PathLike | None = None) -> dict:
+def _compile_source(name: str, source: str) -> dict:
     """Compile an in-memory component source under a stable virtual path, so the
     IR (and therefore the manifest and the bump) does not depend on where the
     publisher's working copy happens to live.
@@ -1432,6 +1455,8 @@ def _compile_stored(entry_dir: Path, source: str) -> dict:
     here: the text rides in memory and only the imports it names are loaded.
     """
     path = str(entry_dir / "component.rvl")
+    publisher's working copy happens to live."""
+    path = f"/__revl_registry__/{name}/component.rvl"
     return compile_files([path], sources={path: source})
 
 
@@ -1482,6 +1507,7 @@ def release_facts(registry_dir: str | os.PathLike, name: str, source: str,
                   scheme: str = SCHEME_SEMVER,
                   publisher: str | None = None,
                   source_path: str | os.PathLike | None = None) -> dict:
+                  publisher: str | None = None) -> dict:
     """Everything a publish gate needs to decide whether this publish may
     proceed, computed from the registry exactly as it stands. Writes nothing.
 
@@ -1545,6 +1571,7 @@ def release_facts(registry_dir: str | os.PathLike, name: str, source: str,
     # exactly the half-written state the empty-guard exists to prevent.
     try:
         new_ir = _compile_source(name, source, source_path)
+        new_ir = _compile_source(name, source)
     except RevlError as error:
         refusals.append(f"{name} does not compile, so it cannot be published:\n{error}")
         return facts
@@ -1616,6 +1643,7 @@ def release_facts(registry_dir: str | os.PathLike, name: str, source: str,
         try:
             prior_ir = _compile_source(name, prior_source,
                                        entry_dir / "component.rvl")
+            prior_ir = _compile_source(name, prior_source)
         except RevlError as error:
             facts["bumpCheck"] = BUMP_UNVERIFIABLE
             facts["bumpCheckReason"] = (
@@ -1734,6 +1762,7 @@ def publish_release(registry_dir: str | os.PathLike, name: str, source: str, *,
                     dossier_text: str | None = None,
                     knowledge: list | None = None,
                     source_path: str | os.PathLike | None = None) -> dict:
+                    dossier_text: str | None = None) -> dict:
     """Publish `source` as `name` (a first release or an update), and return the
     release record. Raises `RevlError` on any refusal, having written nothing.
 
@@ -1764,6 +1793,7 @@ def publish_release(registry_dir: str | os.PathLike, name: str, source: str, *,
                           source_path=source_path)
     if knowledge:
         check_knowledge(source, knowledge)   # before anything is written
+                          scheme=scheme, publisher=publisher)
     if facts["refusals"]:
         raise RevlError(
             str(Path(registry_dir) / "components" / name), 0,
@@ -1868,6 +1898,8 @@ def publish_release(registry_dir: str | os.PathLike, name: str, source: str, *,
         if surviving_mediator is not None:
             new_meta["mediator"] = surviving_mediator
         _write_meta(entry_dir, new_meta)
+        _write_meta(entry_dir, {"description": description or "",
+                                "tags": [str(t) for t in (tags or [])]})
     if dossier_text:
         (entry_dir / "dossier.json").write_text(dossier_text, encoding="utf-8")
     if knowledge is not None:
@@ -1889,6 +1921,7 @@ def publish_release(registry_dir: str | os.PathLike, name: str, source: str, *,
             changelog = derive_changelog(
                 _compile_source(name, prior_source, entry_dir / "component.rvl"),
                 _compile_source(name, source, source_path),
+                _compile_source(name, prior_source), _compile_source(name, source),
                 previous if _semver(previous) else None,
                 from_label=f"{name}@{previous}", to_label=f"{name}@{declared}")
         except (RevlError, ValueError):
@@ -1949,14 +1982,108 @@ def _provenance_document(source: str, manifest: dict, manifest_text: str,
     return doc
 
 
+def build_evidence(registry_dir: str | os.PathLike, *, key: bytes | None = None,
+                   signer: str | None = None, now=None,
+                   publisher: str | None = None, write: bool = True) -> dict:
+    """Assemble each component's evidence bundle (roadmap item 293) - the second
+    half of the publish path, run after `build_index` has written the manifests.
+
+    Nothing here re-implements evidence: it calls the existing producers and
+    writes their verbatim output under ``<component>/evidence/``. `capabilities`
+    (the G8 boundary) and `provenance` are always reproducible from source and
+    are always written; `attestation` is written when a signing `key` is given;
+    `fault-sweep` and `inverse-roundtrip` are the runtime-tested facets - written
+    when the cordis-py runtime is present, and honestly skipped (left
+    `unavailable`) when it is absent, never faked. Returns a per-component map of
+    the facets that were assembled.
+    """
+    from .boundary import _boundary  # noqa: PLC0415
+
+    comps = _components_dir(registry_dir)
+    produced: dict = {}
+    for entry_dir in sorted(p for p in comps.iterdir() if p.is_dir()):
+        name = entry_dir.name
+        source_path = entry_dir / "component.rvl"
+        source = _read(source_path)
+        # ONE frontend run, kept as a verdict rather than discarded: the
+        # attestation below records what this run measured (item 127 F2). A
+        # refusal is re-raised verbatim, so publishing an inadmissible component
+        # fails with the compiler's own diagnostic, as before.
+        from .attest import run_gate  # noqa: PLC0415
+        gate_verdict = run_gate(paths=[str(source_path)],
+                                normalize=_normalize_ir_for_attest)
+        if gate_verdict.error is not None:
+            raise gate_verdict.error
+        ir = gate_verdict.ir
+        manifest = _audit_document(ir)
+        manifest_text = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+        facets: list[str] = []
+
+        # The dossiers are computed BEFORE the attestation is signed (item 290,
+        # §6.2), because the attestation binds their hashes into its signed
+        # payload; a dossier written after signing could never be bound. capsule
+        # + provenance are always reproducible with no runtime; the runtime-
+        # tested facets are honestly skipped (left unavailable) when cordis-py is
+        # absent, never faked.
+        dossiers: dict[str, tuple[str, dict]] = {}
+        dossiers["capabilities"] = (
+            EVIDENCE_CAPABILITIES,
+            {"kind": "revl.capabilities", "boundary": _boundary(ir)})
+        from . import fault  # noqa: PLC0415
+        try:
+            dossiers["fault-sweep"] = (EVIDENCE_FAULT_SWEEP,
+                                       fault.sweep_dossier(ir))
+        except (ModuleNotFoundError, ImportError):
+            pass  # cordis-py absent: honestly unavailable, never faked
+        try:
+            dossiers["inverse-roundtrip"] = (EVIDENCE_INVERSE_ROUNDTRIP,
+                                             fault.roundtrip_dossier(ir))
+        except (ModuleNotFoundError, ImportError):
+            pass
+
+        # write the bound dossiers, and collect their hashes for the signature.
+        bindings: dict = {}
+        for facet, (filename, doc) in sorted(dossiers.items()):
+            _write_evidence_file(entry_dir, filename, doc, write=write)
+            facets.append(facet)
+            if facet in _BOUND_FACETS:
+                bindings[facet] = _facet_hash(doc)
+
+        # provenance - reproducible source/build facts (not itself bound: it
+        # carries the source/manifest hashes the composition hash already roots).
+        _write_evidence_file(
+            entry_dir, EVIDENCE_PROVENANCE,
+            _provenance_document(source, manifest, manifest_text, publisher),
+            write=write)
+        facets.append("provenance")
+
+        # attestation - a signed admission record binding the dossier hashes,
+        # when a key is supplied (item 127 + item 290, §6.2).
+        if key is not None:
+            from .attest import make_attestation  # noqa: PLC0415
+            att = make_attestation(_normalize_ir_for_attest(ir), bytes(key),
+                                   verdict=gate_verdict,
+                                   now=now, signer=signer,
+                                   evidence_bindings=bindings or None)
+            _write_evidence_file(entry_dir, EVIDENCE_ATTESTATION, att,
+                                 write=write)
+            facets.append("attestation")
+
+        produced[name] = sorted(facets)
+    return produced
+
+
 # --------------------------------------------------------------- read-time verify
 
 # The index fields that carry AUTHORITY - what a resolve ranks and filters on.
 # Every one of them is derivable from `component.rvl` (or, for `mediator`, from
 # the `meta.json` beside it) by the current compiler, so every one of them can be
 # checked rather than believed.
+# Every one of them is derivable from `component.rvl` by the compiler, so every
+# one of them can be checked rather than believed.
 _AUTHORITY_FIELDS = ("provides", "requires", "services", "capabilities",
                      "emissions", "sourceHash", "manifestHash", "mediator")
+                     "emissions", "sourceHash", "manifestHash")
 
 
 def _normalized_claim(fieldname: str, value):
@@ -1974,6 +2101,8 @@ def _normalized_claim(fieldname: str, value):
 def _verified_facts(entry_dir: Path, name: str, source_path: Path, source: str,
                     row: dict, recorded_manifest_text: str,
                     recorded_manifest: dict, *, claims: bool = True
+def _verified_facts(name: str, source_path: Path, source: str, row: dict,
+                    recorded_manifest_text: str, recorded_manifest: dict
                     ) -> tuple[dict, dict, list[str]]:
     """Recompile one entry and return `(facts, manifest, problems)`.
 
@@ -1988,6 +2117,11 @@ def _verified_facts(entry_dir: Path, name: str, source_path: Path, source: str,
     `claims=False` skips the comparison against `row`: a frozen release has no
     index row to disagree with, so only the compile, the `meta.json` and the
     manifest reproducibility are checked.
+    `component.rvl` - the authority a resolve is entitled to act on. `problems`
+    names every field where the committed `index.json` claimed something else,
+    plus a `manifest.json` that is not byte-reproducible from the source. A
+    source that no longer compiles is itself a problem: nothing can vouch for
+    what the gate would refuse anyway.
     """
     try:
         ir = compile_files([str(source_path)])
@@ -1997,6 +2131,8 @@ def _verified_facts(entry_dir: Path, name: str, source_path: Path, source: str,
             f"be verified: {error.message}"]
     manifest = _audit_document(ir)
     manifest_text = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    facts = _entry_index_row(name, ir, source, manifest, manifest_text)
+
     problems: list[str] = []
     try:
         # a frozen release (`claims=False`) is not described by the CURRENT
@@ -2011,6 +2147,7 @@ def _verified_facts(entry_dir: Path, name: str, source_path: Path, source: str,
                              meta=meta)
 
     for fieldname in _AUTHORITY_FIELDS if claims else ():
+    for fieldname in _AUTHORITY_FIELDS:
         claimed = _normalized_claim(fieldname, row.get(fieldname))
         actual = _normalized_claim(fieldname, facts.get(fieldname))
         if claimed != actual:
@@ -2187,6 +2324,7 @@ class Registry:
 
     def __init__(self, entries: list[RegistryEntry], *,
                  verified: bool = True, releases_loaded: bool = False) -> None:
+                 verified: bool = True) -> None:
         self.entries = entries
         # True when `from_dir(releases=True)` loaded the frozen release history
         # beside the current releases, which `resolve(release=...)` needs.
@@ -2199,6 +2337,7 @@ class Registry:
     def from_dir(cls, registry_dir: str | os.PathLike, *,
                  verify_entries: bool = True,
                  releases: bool = False) -> "Registry":
+                 verify_entries: bool = True) -> "Registry":
         """Load a registry from disk.
 
         `index.json` is a DISCOVERY list, not an authority. With
@@ -2236,6 +2375,7 @@ class Registry:
             # directory, and a relative name would then answer the wrong
             # file (or none) and the entry would compile unprofiled.
             source_path = (entry_dir / "component.rvl").resolve()
+            source_path = entry_dir / "component.rvl"
             source = _read(source_path)
             manifest_path = entry_dir / "manifest.json"
             recorded_manifest_text = (_read(manifest_path)
@@ -2252,6 +2392,8 @@ class Registry:
                 facts, manifest, problems = _verified_facts(
                     entry_dir, name, source_path, source, row,
                     recorded_manifest_text, manifest)
+                    name, source_path, source, row, recorded_manifest_text,
+                    manifest)
             else:
                 problems = [
                     "index rows were not cross-checked against component.rvl "
@@ -2290,17 +2432,20 @@ class Registry:
                     entry_dir, name, verify_entries=verify_entries,
                     current_version=version, current_source=source))
         return cls(entries, verified=verify_entries, releases_loaded=releases)
+        return cls(entries, verified=verify_entries)
 
     def resolve(self, need, manifest: dict | None = None,
                 limit: int = 5, *, verify_required: bool = False,
                 key: bytes | None = None, trusted_publishers=(),
                 adapt: bool = True, adapt_opt_ins: dict | None = None,
                 policy=None, release: str | None = None) -> dict:
+                policy=None) -> dict:
         return resolve(self, need, manifest=manifest, limit=limit,
                        verify_required=verify_required, key=key,
                        trusted_publishers=trusted_publishers,
                        adapt=adapt, adapt_opt_ins=adapt_opt_ins,
                        policy=policy, release=release)
+                       policy=policy)
 
 
 # --------------------------------------------------------------- the need
@@ -2556,6 +2701,7 @@ def _compiled_entry_ir(entry: RegistryEntry, ir_cache: dict) -> dict:
     caches as `{}` - nothing can be proposed against what the gate would refuse
     anyway."""
     ir = ir_cache.get(entry.ident)
+    ir = ir_cache.get(entry.name)
     if ir is None:
         from .compiler import compile_source  # noqa: PLC0415
         try:
@@ -2566,11 +2712,16 @@ def _compiled_entry_ir(entry: RegistryEntry, ir_cache: dict) -> dict:
             # still `component.rvl`, so the audit-normalized `file` (and thus
             # the attested composition hash) matches what `build_evidence`
             # signed from component.rvl.
+            # compile under the stable published filename so the audit-
+            # normalized `file` basename (and thus the attested composition
+            # hash) matches what `build_evidence` signed from component.rvl.
             ir = _normalize_ir_for_attest(
                 compile_source(entry.source, entry.source_path))
+                compile_source(entry.source, "component.rvl"))
         except RevlError:
             ir = {}
         ir_cache[entry.ident] = ir
+        ir_cache[entry.name] = ir
     return ir
 
 
@@ -2830,6 +2981,7 @@ def resolve(registry, need, manifest: dict | None = None,
             key: bytes | None = None, trusted_publishers=(),
             adapt: bool = True, adapt_opt_ins: dict | None = None,
             policy=None, release: str | None = None) -> dict:
+            policy=None) -> dict:
     """Rank the registry's §5-admissible providers for a need (docs/registry.md §2).
 
     `registry` is a `Registry` or a directory path. `need` is a service
@@ -2906,6 +3058,7 @@ def resolve(registry, need, manifest: dict | None = None,
             "<resolve>", 0,
             "selecting a release needs the registry's release history: load it "
             "with Registry.from_dir(..., releases=True)")
+        registry = Registry.from_dir(registry)
     needs = _needs(need)
     taken = _manifest_provided_keys(manifest)
     key_bytes = bytes(key) if key is not None else None
@@ -3017,6 +3170,8 @@ def resolve(registry, need, manifest: dict | None = None,
                 1 if frozen else 0,
                 0 if frozen else len(match.entry.source),
                 match.entry.name, match.entry.age)
+        return (match.authority_fit_key(), evidence,
+                len(match.entry.source), match.entry.name)
 
     graded.sort(key=_rank)
 
@@ -3213,6 +3368,8 @@ def resolve(registry, need, manifest: dict | None = None,
                 (f"{c['name']}@{c['version']}" if release is not None
                  and c.get("frozen") else c["name"])
                 for c in candidates if "wouldBeRefused" in c],
+            "predicted": [c["name"] for c in candidates
+                          if "wouldBeRefused" in c],
             "unpredicted": unpredicted_rules(policy),
             "caveat":
                 "a one-sided PREDICTION over each candidate's PUBLISHED evidence: "
@@ -3243,6 +3400,7 @@ def resolve(registry, need, manifest: dict | None = None,
 
 __all__ = ["Registry", "RegistryEntry", "EvidenceBundle", "EvidenceAssessment",
            "build_index", "verify", "resolve",
+           "build_index", "build_evidence", "verify", "resolve",
            "load_evidence_bundle", "assess_evidence", "INDEX_VERSION",
            "ENTRY_VERSION_FILENAME", "ENTRY_META_FILENAME", "ENTRY_META_FIELDS",
            "migrate_meta",
@@ -3253,3 +3411,4 @@ __all__ = ["Registry", "RegistryEntry", "EvidenceBundle", "EvidenceAssessment",
            "EVIDENCE_DIRNAME", "EVIDENCE_FILES",
            "EVIDENCE_CEILINGS", "EVIDENCE_SECRET_SINKS", "EVIDENCE_COMPENSATION",
            "EVIDENCE_PROMOTION", "strength_statement"]
+           "EVIDENCE_DIRNAME", "EVIDENCE_FILES"]

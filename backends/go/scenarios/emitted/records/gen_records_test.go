@@ -433,6 +433,7 @@ func (m *Map[V]) Drop() {
 	m.mu.Unlock()
 	revlHostRelease()
 }
+func (m *Map[V]) Drop() { hostRecord("map.drop"); revlHostRelease() }
 func (m *Map[V]) Insert(k string, v V) {
 	m.journalNote(k, "insert")
 	m.mu.Lock()
@@ -647,6 +648,7 @@ func TestRecordsListsVariantsRoundTripThroughALiveProvideMethod(revlT *testing.T
 		if err := _f.Ready(stdctx.Background()); err != nil {
 			revlT.Fatalf("%s: %v", "lifecycle test \"records/lists/variants round-trip through a live provide method\": load Registry", err)
 		}
+		_fibers["Registry"] = _f
 	}
 	_revlAt = "load Front"
 	{
@@ -656,6 +658,7 @@ func TestRecordsListsVariantsRoundTripThroughALiveProvideMethod(revlT *testing.T
 		if err := _f.Ready(stdctx.Background()); err != nil {
 			revlT.Fatalf("%s: %v", "lifecycle test \"records/lists/variants round-trip through a live provide method\": load Front", err)
 		}
+		_fibers["Front"] = _f
 	}
 	_revlAt = "call dir.make"
 	var ada Person

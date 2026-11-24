@@ -972,8 +972,11 @@ def drift(ir: dict, service: str, gains=(), losses=()) -> dict:
         providers=providers, callSites=scoped_sites,
         callSitesScope=sorted(asked) if asked else "all declared methods",
         existingCallSites=call_sites,
+        providers=providers, callSites=call_sites,
         gains=gained, losses=lost,
         impacted=sorted(touched | {s["component"] for s in scoped_sites}),
+        impacted=sorted({p["component"] for p in providers}
+                        | {s["component"] for s in call_sites}),
     )
 
 

@@ -237,6 +237,8 @@ DeclaredMap = Mapping[str, Declared]
 # is not in scope". It is deliberately NOT a mapping - `declared_order` returns
 # None for it, so nothing can accidentally treat it as a declaration.
 _ADMIT_UNKNOWN = object()
+def is_registered(name: str) -> bool:
+    return _normalize(name) in _REGISTRY
 
 
 def declarations_of(decls: "Iterable[object] | None") -> dict[str, Declared]:
@@ -255,6 +257,8 @@ def declarations_of(decls: "Iterable[object] | None") -> dict[str, Declared]:
     for decl in decls or ():
         out[decl.token] = {name: kind for name, kind, _line in decl.parameters}
     return out
+def registered_names() -> list[str]:
+    return sorted(set(_REGISTRY) | set(_ALIASES))
 
 
 def declared_order(name: str, declared: "Declared | None") -> tuple[str, str] | None:
@@ -341,13 +345,18 @@ def registered_names(declared: "Declared | None" = None) -> list[str]:
 def is_ceiling(name: str, declared: "Declared | None" = None) -> bool:
     """Whether a parameter is ceiling-kind (`calls`/`requests`, `size`/`bytes`,
     `time`, or a declared `ceiling`): compared declaration-to-declaration and
+def is_ceiling(name: str) -> bool:
+    """Whether a registered parameter is ceiling-kind (`calls`/`requests`,
+    `size`/`bytes`, `time`): compared declaration-to-declaration and
     mint-vs-declaration, ERASED from a grant's valuation at mint (translated into
     `remainingUses`), and EXEMPT from crossing-coverage. Resource kinds (`path`,
     `host`, `table`, and every declared `path`/`discrete`) are compared at
     crossings (Slice 2)."""
+    `host`, `table`) are compared at crossings (Slice 2)."""
     name = _normalize(name)
     row = _REGISTRY.get(name) or declared_order(name, declared)
     return row is not None and row[0] == _CEILING
+    return name in _REGISTRY and _REGISTRY[name][0] == _CEILING
 
 
 def split_ceilings(cap: "Cap") -> "tuple[Cap, dict[str, int]]":
@@ -368,10 +377,12 @@ def split_ceilings(cap: "Cap") -> "tuple[Cap, dict[str, int]]":
     (`_canon_value` refuses a `Symbol` on a ceiling), so the two kinds are
     disjoint by construction and a DECLARED ceiling strips exactly like a core
     one with no declaration in scope."""
+    peeled off."""
     ceilings: dict[str, int] = {}
     kept: list[tuple[str, object]] = []
     for name, value in cap.params:
         if isinstance(value, int) and not isinstance(value, bool):
+        if is_ceiling(name):
             ceilings[name] = value  # already an int by canonicalization
         else:
             kept.append((name, value))
@@ -393,6 +404,14 @@ def _canon_value(name: str, value: object,
     declaration in scope refuses here, which is what keeps a DECLARED spelling
     from being re-read at a guessed order."""
     kind, order = _order_of(name, declared)
+def _canon_value(name: str, value: object) -> object:
+    """Canonicalize (and validate) a raw parameter value for its registered
+    order. String literals are expected for resource kinds, integers for
+    ceilings. The path order stores a component tuple; discrete stores the
+    string; ceiling stores the int. A `Symbol` (a per-instance `config.` value)
+    is stored as-is on a resource kind and refused on a ceiling (a ceiling is a
+    STATIC bound, item 294 Slice 2)."""
+    kind, order = _REGISTRY[name]
     if isinstance(value, Symbol):
         if kind == _CEILING:
             what = ("an argument-bound" if value.is_arg
@@ -400,9 +419,12 @@ def _canon_value(name: str, value: object,
             raise CapError(
                 f"capability parameter `{name}` is a ceiling and takes a static "
                 f"integer, not {what} value",
+                f"integer, not a per-instance `{value.ref}` value",
                 hint=f"write `{name}=10` (a static bound); a per-instance "
                      "`config.` value or a caller argument bounds a destination "
                      "(`path`/`host`/`table`), not a count")
+                     "`config.` value bounds a resource (`path`/`host`/`table`), "
+                     "not a count")
         return value
     if order == "ceiling":
         if not isinstance(value, int) or isinstance(value, bool):
@@ -472,6 +494,7 @@ class Symbol:
     `path="/tmp"` is refused UNLESS the spawn resolves the symbol into the
     parent's cone. This is the design's first symbol rule - only a literal
     binding substitutes; anything else leaves the parameter symbolic.
+    binding substitutes; anything else leaves the parameter symbolic."""
 
     The SAME opacity carries the argument-bound destination (issue #1985):
     `emission[network.call(host=host)] fn get(url: Str, host: Str)` binds the
@@ -495,12 +518,14 @@ class Symbol:
         never interchangeable: the distinction is carried by the spelling the
         parser produced, and re-read by `_parse_value`."""
         return not self.ref.startswith("config.")
+    ref: str   # the source spelling, e.g. "config.job_root"
 
     @property
     def field(self) -> str:
         """The config field the symbol names (`job_root` for `config.job_root`),
         the key a spawn-site `with { }` binds; for an argument symbol, the
         parameter's name."""
+        the key a spawn-site `with { }` binds."""
         return self.ref.split(".", 1)[1] if "." in self.ref else self.ref
 
     def to_str(self) -> str:
@@ -534,6 +559,7 @@ class Cap:
         if not self.params:
             return self.token
         rendered = ",".join(f"{n}={_render_value(v)}" for n, v in self.params)
+        rendered = ",".join(f"{n}={_render_value(n, v)}" for n, v in self.params)
         return f"{self.token}({rendered})"
 
 
@@ -548,14 +574,18 @@ def _render_value(value: object) -> str:
     spelling - without the declaration in scope. Both string-shaped orders
     render as a quoted literal, so a path and a discrete of the same characters
     are one spelling, which is what makes the round-trip total."""
+def _render_value(name: str, value: object) -> str:
     if isinstance(value, Symbol):
         # unquoted, so it re-reads as a symbol and never as a discrete string
         return value.ref
     if isinstance(value, int) and not isinstance(value, bool):
+    _kind, order = _REGISTRY[name]
+    if _kind == _CEILING:
         # every ceiling stores its canonical integer (a count, bytes, or ms);
         # rendering it as the bare integer round-trips through `_canon_value`.
         return str(value)
     if isinstance(value, tuple):
+    if order == "path":
         return '"/' + "/".join(value) + '"'
     return f'"{value}"'
 
@@ -570,6 +600,7 @@ def _render_value(value: object) -> str:
 
 def _make_cap(token: str, raw_params: list[tuple[str, object]],
               declared: "Declared | None" = None) -> Cap:
+def _make_cap(token: str, raw_params: list[tuple[str, object]]) -> Cap:
     if not token:
         raise CapError("empty capability token")
     seen: set[str] = set()
@@ -604,18 +635,22 @@ def _make_cap(token: str, raw_params: list[tuple[str, object]],
                 canon.append((name, value))
                 continue
             names = ", ".join(f"`{n}`" for n in registered_names(declared))
+        if not is_registered(raw_name):
+            names = ", ".join(f"`{n}`" for n in registered_names())
             raise CapError(
                 f"unknown capability parameter `{name}`",
                 hint=f"the capability parameter registry is closed; known "
                      f"parameters are {names} (a typo narrows nothing and is "
                      "refused rather than silently ignored)")
         canon.append((name, _canon_value(name, value, declared)))
+        canon.append((name, _canon_value(name, value)))
     canon.sort(key=lambda kv: kv[0])
     return Cap(token, tuple(canon))
 
 
 def make_cap(token: str, raw_params: list[tuple[str, object]] | None = None,
              declared: "Declared | None" = None) -> Cap:
+def make_cap(token: str, raw_params: list[tuple[str, object]] | None = None) -> Cap:
     """Build a validated `Cap` from a token and raw `(name, value)` pairs (the
     parser's entry point: values are already python `str`/`int`/`Symbol`).
 
@@ -624,10 +659,13 @@ def make_cap(token: str, raw_params: list[tuple[str, object]] | None = None,
     declaration chose. Omitting it is not a permissive default - every name
     outside the core registry still refuses."""
     return _make_cap(token, list(raw_params or []), declared)
+    parser's entry point: values are already python `str`/`int`/`Symbol`)."""
+    return _make_cap(token, list(raw_params or []))
 
 
 def substitute(cap: Cap, bindings: dict[str, str],
                declared: "Declared | None" = None) -> Cap:
+def substitute(cap: Cap, bindings: dict[str, str]) -> Cap:
     """Resolve a Cap's per-instance `config.` symbols against a spawn site's
     literal `with { }` bindings (item 294, Slice 2).
 
@@ -649,12 +687,14 @@ def substitute(cap: Cap, bindings: dict[str, str],
     would let `with { host: "/tmp" }` silently narrow a declaration whose
     destination nothing but the caller names - so only a `config.` symbol is
     resolved here."""
+    unless a per-instance symbol is actually present and actually bound."""
     if not any(isinstance(v, Symbol) for _n, v in cap.params):
         return cap
     raw: list[tuple[str, object]] = []
     for name, value in cap.params:
         if (isinstance(value, Symbol) and not value.is_arg
                 and value.field in bindings):
+        if isinstance(value, Symbol) and value.field in bindings:
             raw.append((name, bindings[value.field]))
         else:
             raw.append((name, value))
@@ -667,9 +707,11 @@ def substitute(cap: Cap, bindings: dict[str, str],
     # `_REGISTRY`.
     return _make_cap(cap.token, raw,
                      _ADMIT_UNKNOWN if declared is None else declared)
+    return _make_cap(cap.token, raw)
 
 
 def parse_cap(text: str, declared: "Declared | None" = None) -> Cap:
+def parse_cap(text: str) -> Cap:
     """Re-read a canonical capability spelling into a `Cap` (a fold's entry
     point over a stored `capabilities` string). A bare dotted token with no `(`
     is `Cap(token, ())`, so every pre-294 token round-trips unchanged.
@@ -682,9 +724,11 @@ def parse_cap(text: str, declared: "Declared | None" = None) -> Cap:
     `split_ceilings` deliberately need no declaration at all (they read the
     order off the canonical value's type), so a comparison over an
     already-canonical pair is declaration-free."""
+    is `Cap(token, ())`, so every pre-294 token round-trips unchanged."""
     open_i = text.find("(")
     if open_i < 0:
         return _make_cap(text, [], declared)
+        return _make_cap(text, [])
     if not text.endswith(")"):
         raise CapError(f"malformed capability parameter list in `{text}`")
     token = text[:open_i]
@@ -728,6 +772,7 @@ def parse_stored_cap(text: str) -> Cap:
     Admission is untouched: `make_cap`/`parse_cap` still refuse an undeclared
     name at the frontend, which is where the typo hazard lives."""
     return parse_cap(text, _ADMIT_UNKNOWN)  # type: ignore[arg-type]
+    return _make_cap(token, raw)
 
 
 def _split_params(inner: str) -> list[str]:
@@ -805,6 +850,7 @@ def _leq_path(narrow: tuple, wide: tuple) -> bool:
 
 
 def _param_leq(narrow: object, wide: object) -> bool:
+def _param_leq(name: str, narrow: object, wide: object) -> bool:
     """`narrow <=_k wide` in parameter `k`'s value order (narrow is at-or-below
     wide, i.e. narrower authority).
 
@@ -814,6 +860,7 @@ def _param_leq(narrow: object, wide: object) -> bool:
     disjoint by construction and the comparison needs no declaration in scope.
     A declared `path`/`discrete`/`ceiling` therefore compares exactly like the
     core parameter of the same order."""
+    wide, i.e. narrower authority)."""
     if isinstance(narrow, Symbol) or isinstance(wide, Symbol):
         # a per-instance symbol is comparable ONLY to the identical symbol
         # (item 294, Slice 2): a symbol vs a literal - on either side - is
@@ -821,9 +868,12 @@ def _param_leq(narrow: object, wide: object) -> bool:
         # compare equal by frozen-dataclass identity of `ref`.
         return narrow == wide
     if isinstance(narrow, tuple) and isinstance(wide, tuple):
+    _kind, order = _REGISTRY[name]
+    if order == "path":
         return _leq_path(narrow, wide)
     if isinstance(narrow, int) and isinstance(wide, int) \
             and not isinstance(narrow, bool) and not isinstance(wide, bool):
+    if order in ("ceiling", "bytes", "duration"):
         return narrow <= wide          # a smaller ceiling is narrower
     return narrow == wide               # discrete: equality only
 
@@ -852,6 +902,7 @@ def covers(a: Cap, b: Cap) -> bool:
         if k not in bmap:
             return False              # b drops a parameter a binds: b is wider
         if not _param_leq(bmap[k], av):
+        if not _param_leq(k, bmap[k], av):
             return False
     return True
 

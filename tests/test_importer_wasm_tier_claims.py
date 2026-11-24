@@ -78,6 +78,7 @@ def _tier_split() -> tuple[set[str], set[str]]:
 # ------------------------------------------------------- the tier's own answer
 
 def test_the_wasm_tier_lowers_rich_values_and_refuses_only_map_and_fns():
+def test_the_wasm_tier_lowers_rich_values_and_refuses_only_float_map_and_fns():
     """The premise the importers' text rests on, measured at the emitter.
 
     If this fails the tier moved, and the importers' note (plus
@@ -87,6 +88,8 @@ def test_the_wasm_tier_lowers_rich_values_and_refuses_only_map_and_fns():
     assert {"Int", "Bool", "Str", "Bytes", "List", "record", "Opt", "Result",
             "Float"} <= lowers
     assert refused == {"Map", "function types"}
+    assert {"Int", "Bool", "Str", "Bytes", "List", "record", "Opt", "Result"} <= lowers
+    assert refused == {"Float", "Map", "function types"}
 
 
 def test_an_int_crosses_the_wasm_service_boundary_as_an_i64():

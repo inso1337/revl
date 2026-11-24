@@ -161,6 +161,7 @@ def test_v3_functions_golden_is_byte_identical():
     ir = compile_source((BACKEND / "golden" / "functions.revl").read_text(encoding="utf-8"))
     wat = emit.emit(ir)["functions"]
     golden = (BACKEND / "golden" / "functions.wat").read_text(encoding="utf-8")
+    golden = (BACKEND / "golden" / "functions.wat").read_text()
     assert wat == golden, (
         "backends/wasm/golden/functions.wat drifted from the emitter. If the change "
         "is intended: python3 tools/regen_goldens.py wasm, then review the diff.")
@@ -200,6 +201,7 @@ def test_diverging_if_else_body_validates_and_runs(tmp_path):
     wat = emit.emit(compile_source(source))["functions"]
     # the diverging-if body is closed with a trailing `unreachable`
     pick = wat[wat.index("(func $fn.pick"):wat.index("(func $fn.nested")]
+    pick = wat[wat.index("(func $pick"):wat.index("(func $nested")]
     assert "unreachable)" in pick.rstrip()
 
     # the module type-checks (wasm-tools if present)
@@ -288,6 +290,7 @@ def test_v3_externs_are_documented_and_tests_lower_to_exports():
     wat = modules["functions"]
     assert "unsupported on this tier: externs host_call" in wat
     assert '(func $fn.revl_test_would_run_on_a_hosted_backend ' \
+    assert '(func $revl_test_would_run_on_a_hosted_backend ' \
         '(export "revl_test_would_run_on_a_hosted_backend")' in wat
     # deterministic export list, shared with the host-side runner
     assert emit.test_export_names(ir["tests"]) == [
@@ -750,6 +753,13 @@ def test_v3_list_indexof_lowers_for_comparable_elements_only():
     (Str by bytes, Int/Int32/Bool by slot) and stays a named refusal for an
     element that has none (a record, a nested list). Issue #3145; executed in
     `test_list_index_str_cmp_empty_3145.py`."""
+def test_v3_list_indexof_rejected_by_tier():
+    """DELIBERATE BOUNDARY: `List.indexOf` is still not lowerable on this tier —
+    the per-element comparison (str_eq per slot for List[Str], i64 compare for
+    List[Int]) is the reader shape the harness never reaches. `Str.indexOf`
+    DOES lower now (see the execution test below); List does not, and a
+    boundary that silently started emitting would be as much a regression as a
+    miscompile."""
     emit = _emitter()
     wat = emit.emit(compile_source(
         'fn f(xs: List[Int]) -> Int { return xs.indexOf(3) }\n'
@@ -759,6 +769,12 @@ def test_v3_list_indexof_lowers_for_comparable_elements_only():
     with pytest.raises(emit.EmitError, match="indexOf is not lowerable"):
         emit.emit(compile_source(
             'fn f(xs: List[List[Int]]) -> Int { return xs.indexOf([1]) }'))
+    for src in (
+        'fn f(xs: List[Int]) -> Int { return xs.indexOf(3) }',
+        'fn f(xs: List[Str]) -> Int { return xs.indexOf("a") }',
+    ):
+        with pytest.raises(emit.EmitError, match="indexOf is not lowerable"):
+            emit.emit(compile_source(src))
 
 
 def test_v3_str_reader_builtins_emit():
@@ -1021,6 +1037,7 @@ def test_component_boundary_carries_a_64_bit_int(tmp_path):
         "component C provides s: S { provide s { fn f(x) = x - 1 } }"
     ))["C"], encoding="utf-8")
     assert '(param $p_x i64) (result i64)' in wat.read_text(encoding="utf-8")
+    assert '(param $p_x i64) (result i64)' in wat.read_text()
     out = subprocess.run(
         ["wasmtime", "--invoke", "provide:s.f", str(wat), str(INT_MAX)],
         capture_output=True, text=True, timeout=60)

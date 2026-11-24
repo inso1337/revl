@@ -53,6 +53,7 @@ A composition is three things at once, and `revl diff` reports a delta on each:
    ``host extern `engine_run` reach weakened (its bound was loosened or
    moved)``. A component whose scope moved, or that reaches such an extern,
    is listed as changed (issue #3182).
+   ``component `UserCache` gained emission `put` [bus]``.
 
 3. **Wiring** — the composition's dependency graph: which key each component
    *provides* (and with which providing component/service) and which keys it
@@ -113,6 +114,7 @@ an agent can consume:
                   "reach_weakened": [...], "scope_widened": [...],
                   "scope_tightened": [...], "backends_added": [...],
                   "backends_removed": [...] },
+  "crossings":  { "added": ["emit:UserCache:put"], "removed": [...] },
   "guarantees": [ "component `UserCache` gained emission `put` [bus]", ... ],
   "changed": true
 }

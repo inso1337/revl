@@ -41,6 +41,10 @@
 //     the item 434 (e) string builders and the item 445 destructive
 //     self-rebind), return, if/else, while (with the item 434 (c) code-point
 //     scan as `range`), for, break/continue, expr, assert.
+//   * statements: let (with the int64/float64 and interface/two-value pins),
+//     assign (with the item 434 (e) string builders and the item 445
+//     destructive self-rebind), return, if/else, while (with the item 434 (c)
+//     code-point scan as `range`), for, break/continue, expr, assert.
 //   * expressions: the scalar algebra, structural `==` through `revlEq`, the
 //     `??` coalesce, built-in Opt/Result construction and `match`, user ADT
 //     construction and type-switch `match`, records and field access, lists,
@@ -116,8 +120,11 @@
 // self-host file crosses it or its census bucket moves unrecorded.
 use "../stdlib/value.rvl" {
   value_is_null, value_field, value_list, value_str, value_keys
+  value_kind, value_is_null, value_field,
+  value_list, value_at, value_str, value_int, value_bool, value_keys
 }
 use "../stdlib/str.rvl" { rstrip, str_tab }
+use "../stdlib/str.rvl" { split_top, rstrip, trim, str_tab }
 // The list kit (item 194): `list_sort` is the codepoint-lexicographic `sorted(..)`
 // the reference uses to canonicalise a record's field set into a `record_by_fields`
 // key — no re-hand-roll (byte-fuzz-pinned against Python `sorted()`).
@@ -127,6 +134,50 @@ use "./emit_go_core.rvl" {
   go_type, ind, is_addsubmul, is_go_reserved, is_scalar, line, map_get,
   newline, record_type_for_fields, render_construct, sorted_key, stdlib_mark,
   strip_marks, v3_ident
+
+// ------------------------------------------------- host formatting (kept @py)
+// A single tab / newline byte — the one genuine U+0009 / U+000A. Go indents with
+// tabs and the module is `"\n".join(out)`; both are char output, the item-180
+// "NOT obsoleted" category (rust's emitter bridges `newline()` the same way).
+extern pure fn tab() -> Str = @py { return chr(9) }
+extern pure fn newline() -> Str = @py { return chr(10) }
+// The literal-body host numerals: `_go_v3_lit` renders an int as `str(value)`.
+extern pure fn num_str(v: Any) -> Str = @py { return str(v) }
+// A Float literal: the reference renders it as `revlF({value!r})` — Python's
+// repr of the float, so the numeral text is exactly the reference's. The call
+// is what keeps the literal out of Go's CONSTANT world, where a fold has no
+// signed zero and no infinity (issue #721).
+extern pure fn float_lit(v: Any) -> Str = @py { return "revlF(%r)" % v }
+// The same call around an Int literal that a `widen` marker sends to Float:
+// `float64(3)` is still a Go constant.
+extern pure fn widen_float_lit(v: Any) -> Str = @py { return "revlF(%r)" % v }
+// `_go_string` verbatim: a Go double-quoted string literal escaped FROM code
+// points (docs/strings.md) — printable ASCII/BMP verbatim, a `\uXXXX` (4 hex)
+// for a BMP non-ASCII scalar and `\UXXXXXXXX` (8 hex) for an astral one. A
+// tuple-free body keeps the @py raw-brace balancer happy.
+extern pure fn go_string(v: Any) -> Str = @py {
+    s = str(v)
+    out = ['"']
+    for ch in s:
+        cp = ord(ch)
+        if ch == '"':
+            out.append('\\"')
+        elif ch == "\\":
+            out.append("\\\\")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif 0x20 <= cp <= 0x7E:
+            out.append(ch)
+        elif cp <= 0xFFFF:
+            out.append("\\u%04x" % cp)
+        else:
+            out.append("\\U%08x" % cp)
+    out.append('"')
+    return "".join(out)
 }
 use "./emit_go_module.rvl" {
   Eout, any_index_helper, collect_flags, emit_externs, emit_functions,
@@ -135,6 +186,44 @@ use "./emit_go_module.rvl" {
   is_extra_linebreak, is_import_directive, list_index_of_eq,
   map_index_helper, map_preamble, opt_preamble, overflow32_preamble,
   overflow_preamble, parse_int_helper, result_preamble, stdlib_preamble
+
+// The reference sets `ctx.used_stdlib` as a side effect of RENDERING a stdlib
+// node (a builtin, a `len`, a `??`, an optional chain), and the helper text those
+// nodes render is not unique to them: `x.to_str()` on an Int is the same
+// `strconv.FormatInt(..)` an interpolation renders, and `to_int` on an Int32 is
+// the same `int64(..)` a widen renders. So a rendered stdlib node carries this
+// one-byte flag in front of its text, `emit_go_src` reads the flag off the
+// rendered lines and strips every copy before assembly. U+0001 is never Go
+// source, and the one place rendered text is turned back into data (the
+// `assert` message) strips it first.
+extern pure fn stdlib_mark() -> Str = @py { return chr(1) }
+fn strip_marks(s: Str) -> Str { return s.split(stdlib_mark()).join("") }
+fn marked(text: Str) -> Str { return stdlib_mark().concat(text) }
+fn replace_all(s: Str, needle: Str, repl: Str) -> Str { return s.split(needle).join(repl) }
+
+// ---------------------------------------------------------------- small utils
+fn ind(n: Int) -> Str { return tab().repeat(n) }
+fn line(indent: Int, text: Str) -> Str { return ind(indent).concat(text) }
+fn node_kind(n: Any) -> Str { return value_str(value_field(n, "kind")) }
+fn node_op(n: Any) -> Str { return value_str(value_field(n, "op")) }
+fn node_operands(n: Any) -> Str { return value_str(value_field(n, "operands")) }
+fn node_step(n: Any) -> Str { return value_str(value_field(n, "step")) }
+
+// `_v3_ident`: rename a Go reserved word so a valid revl identifier that is a
+// Go keyword still emits (mirrors `_v3_ident`; the fixtures use `use_add`,
+// itself not reserved, so this is exercised only defensively). The rename is
+// INJECTIVE: escape a name iff the name or any name reachable from it by
+// dropping trailing `_` is reserved, by exactly one `_`, so the whole
+// `kw`/`kw_`/`kw__` ladder shifts up a rung (`func` -> `func_`, `func_` ->
+// `func__`) instead of collapsing two distinct revl identifiers onto one.
+fn v3_ident(name: Str) -> Str {
+  var root = name
+  while (root.length() > 0) {
+    if (is_go_reserved(root)) { return name.concat("_") }
+    if (root.charAt(root.length() - 1) != "_") { return name }
+    root = root.slice(0, root.length() - 1)
+  }
+  return name
 }
 use "./emit_go_comp.rvl" {
   colour_clone_markers, combined_ok, components_in_slice,
@@ -142,6 +231,3137 @@ use "./emit_go_comp.rvl" {
   emit_live_module, has_text, host_runtime_for, ir_has_method, ir_text_has,
   ir_text_is, live_tier_markers, takes_live_path, teardown_preamble,
   text_has_any, uncarried_components
+
+fn is_go_reserved(name: Str) -> Bool {
+  if (name == "break" || name == "case" || name == "chan" || name == "const") { return true }
+  if (name == "continue" || name == "default" || name == "defer" || name == "else") { return true }
+  if (name == "fallthrough" || name == "for" || name == "func" || name == "go") { return true }
+  if (name == "goto" || name == "if" || name == "import" || name == "interface") { return true }
+  if (name == "map" || name == "package" || name == "range" || name == "return") { return true }
+  if (name == "select" || name == "struct" || name == "switch" || name == "type") { return true }
+  if (name == "var" || name == "nil" || name == "true" || name == "false" || name == "iota") { return true }
+  // The package-scope TYPE names the runtime declares, which a user type of the
+  // same name would redeclare (#553 cluster C).
+  if (name == "RevlResult" || name == "RevlOk" || name == "RevlErr" || name == "RevlOpt") { return true }
+  if (name == "RevlFrame" || name == "RevlTimer" || name == "RevlTeardownRecord") { return true }
+  if (name == "Stream" || name == "Subscription" || name == "EventContract") { return true }
+  if (name == "RevlSpawnHandle") { return true }
+  // The predeclared identifiers the emitted code spells by bare name, which a
+  // user binding of the same name would shadow.
+  if (name == "any" || name == "append" || name == "bool" || name == "byte") { return true }
+  if (name == "comparable" || name == "copy" || name == "delete" || name == "error") { return true }
+  if (name == "float64" || name == "int" || name == "int32" || name == "int64") { return true }
+  if (name == "len" || name == "make" || name == "panic" || name == "rune") { return true }
+  return name == "string" || name == "uint32"
+}
+
+// `_camel` verbatim (item 390): snake_or_lower / `-` -> UpperCamel, keeping the
+// tail of each part as-is. This is the reference `_camel` byte-for-byte
+// (`p[:1].upper() + p[1:]`, NOT `.capitalize()`, which would lowercase the tail
+// and diverge on a lowerCamel field name).
+extern pure fn camel(name: Str) -> Str = @py {
+    return "".join(p[:1].upper() + p[1:] for p in str(name).replace("-", "_").split("_") if p)
+}
+
+// `_v3_field_ident`: a record struct field name, EXPORTED (UpperCamel) on every
+// path (item 390) so `encoding/json` marshals it — an unexported field made
+// `json_stringify(record)` return `{}` on go. Paired with `json_tag` below,
+// which pins the wire key to the source field name. Used at EVERY field site
+// (struct decl, literal construction, field read) so records round-trip.
+fn v3_field_ident(field: Str) -> Str { return camel(field) }
+
+// The struct tag ``json:"<field>"`` (a backtick-delimited Go raw string). Built
+// with double-quoted literals because a template `..` cannot embed a backtick.
+fn json_tag(field: Str) -> Str { return "`json:\"".concat(field).concat("\"`") }
+
+// `_V3_GO_ATOMIC`: a postfix-safe primary appends `.field`/`[i]`/`(…)` without a
+// wrapping paren.
+fn is_atomic(kind: Str) -> Bool {
+  if (kind == "var") { return true }
+  if (kind == "name") { return true }
+  if (kind == "lit") { return true }
+  if (kind == "call") { return true }
+  if (kind == "field") { return true }
+  if (kind == "index") { return true }
+  return kind == "builtin"
+}
+
+// `_V3_GO_BIN_OPS`: revl operator -> Go operator, "" when unmapped.
+fn go_bin_op(op: Str) -> Str {
+  if (op == "==") { return "==" }
+  if (op == "===") { return "==" }
+  if (op == "!=") { return "!=" }
+  if (op == "!==") { return "!=" }
+  if (op == "<") { return "<" }
+  if (op == ">") { return ">" }
+  if (op == "<=") { return "<=" }
+  if (op == ">=") { return ">=" }
+  if (op == "+") { return "+" }
+  if (op == "-") { return "-" }
+  if (op == "*") { return "*" }
+  if (op == "/") { return "/" }
+  if (op == "%") { return "%" }
+  if (op == "&&") { return "&&" }
+  if (op == "||") { return "||" }
+  // Int32 bitwise operators (item 366, docs/arithmetic.md). `& | ^` are native
+  // on int32. The shifts are rendered specially (render_bin): Go does not mask
+  // the shift count and panics on a negative signed one, so the count is taken
+  // as `uint32(n) & 31` to match the spec's mod-32 rule and wasm/JS.
+  if (op == "&") { return "&" }
+  if (op == "|") { return "|" }
+  if (op == "^") { return "^" }
+  if (op == "<<") { return "<<" }
+  if (op == ">>") { return ">>" }
+  return ""
+}
+
+fn is_eq_op(op: Str) -> Bool { return op == "==" || op == "===" || op == "!=" || op == "!==" }
+fn is_negated_eq(op: Str) -> Bool { return op == "!=" || op == "!==" }
+fn is_addsubmul(op: Str) -> Bool { return op == "+" || op == "-" || op == "*" }
+fn is_scalar(t: Str) -> Bool {
+  return t == "Int" || t == "Int32" || t == "Float" || t == "Str" || t == "Bool"
+}
+
+// ---------------------------------------------------------------- lowering ctx
+// `_V3GoCtx` (subset): a binding's surface type (seeded from params, updated on
+// `let`/`for`) types a `let`'s `var T =` pin, the scalar-`==` split, and the
+// Str `+` / Float-interp routing; a free function's declared return type types a
+// `let` bound to its call, and `rt` is the enclosing fn's return (the `expected`
+// pin a `return` threads onto a list literal). The user-type tables mirror the
+// reference's `_V3GoCtx`:
+//   * `ca` (`case_adt`)     — variant case name -> its sealed-interface type name
+//     (the `<<AMBIG>>` sentinel marks a case shared by two variants, where the
+//     reference stores `None` and refuses at use);
+//   * `cp` (`case_payload`) — case name -> its payload SURFACE type ("" for a
+//     nullary case, where the reference stores `None`), so a construction picks
+//     `TreeLeaf{}` vs `TreeNode{Value: ..}` and a bound match arm types `_m.Value`;
+//   * `rbf` (`record_by_fields`) — the sorted-field KEY of a record -> its struct
+//     type name (`<<AMBIG>>` when two records share the exact field set), so a
+//     record literal `{ a: .., b: .. }` infers its nominal Go struct;
+//   * `rf` (record fields) — `"<Type>.<field>"` -> the field's surface type, so a
+//     field access `r.f` infers its type (the `var z int64 =` let pin).
+//   * `tnames`: every declared type name (`ctx.types`' keys), which a host
+//     family root such as `Map` must not be for `Map.new()` to be the host call;
+//   * `sc` / `scan_seq` / `body`: the code-point scan lowering (item 434 (c)
+//     stage two): `sc` maps `"<text>|<index>"` to the rune variable of the scan
+//     loop being rendered, `scan_seq` numbers those variables per function, and
+//     `body` is the enclosing function body the scan shape is checked against.
+type Ctx = {
+  vt: Map[Str, Str], fr: Map[Str, Str], er: Map[Str, Str],
+  signatures: List[Any],
+  ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], rf: Map[Str, Str],
+  variants: List[Str], tnames: List[Str],
+  rt: Str, builders: Map[Str, Str], builder_seq: Int,
+  reserved: Map[Str, Str], strings_alias: Str,
+  sc: Map[Str, Str], scan_seq: Int, body: List[Any], tn: Str,
+  fh: Map[Str, Str]
+}
+// The user-type tables, built once from the document's `types` and shared by
+// every function's ctx (the reference builds one `_V3GoCtx` for the function list,
+// reusing the same type tables).
+type TypeTables = {
+  ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], rf: Map[Str, Str],
+  variants: List[Str], tnames: List[Str]
+}
+// A statement-emission result: the lines produced AND the threaded ctx, since
+// revl has no shared mutable state and a `let` inside an `if`/`while`/`for` block
+// is visible to every later statement (the reference mutates one `ctx`).
+type Sout = { lines: List[Str], ctx: Ctx }
+type Fout = { lines: List[Str], uses_strings: Bool, reserved: Map[Str, Str] }
+
+fn map_get(m: Map[Str, Str], k: Str) -> Str {
+  return match m.lookup(k) { Some(v) => v, None => "" }
+}
+fn set_vt(ctx: Ctx, k: Str, v: Str) -> Ctx {
+  return {
+    vt: ctx.vt.set(k, v), fr: ctx.fr, er: ctx.er,
+    signatures: ctx.signatures,
+    ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rf: ctx.rf, variants: ctx.variants,
+    tnames: ctx.tnames, rt: ctx.rt,
+    builders: ctx.builders, builder_seq: ctx.builder_seq,
+    reserved: ctx.reserved, strings_alias: ctx.strings_alias,
+    sc: ctx.sc, scan_seq: ctx.scan_seq, body: ctx.body, tn: ctx.tn,
+    fh: ctx.fh
+  }
+}
+
+// The scan-loop state, threaded like `vt`: the cursor table in force and the
+// per-function rune counter.
+fn with_scan(ctx: Ctx, sc: Map[Str, Str], seq: Int) -> Ctx {
+  return {
+    vt: ctx.vt, fr: ctx.fr, er: ctx.er,
+    signatures: ctx.signatures,
+    ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rf: ctx.rf, variants: ctx.variants,
+    tnames: ctx.tnames, rt: ctx.rt,
+    builders: ctx.builders, builder_seq: ctx.builder_seq,
+    reserved: ctx.reserved, strings_alias: ctx.strings_alias,
+    sc: sc, scan_seq: seq, body: ctx.body, tn: ctx.tn,
+    fh: ctx.fh
+  }
+}
+
+fn collect_reserved(node: Any, reserved: Map[Str, Str]) -> Map[Str, Str] {
+  var out = reserved
+  if (value_kind(node) == "record") {
+    let name = value_field(node, "name")
+    let bind = value_field(node, "bind")
+    if (value_kind(name) == "str" && value_str(name) != "") {
+      out = out.set(v3_ident(value_str(name)), "1")
+    }
+    if (value_kind(bind) == "str" && value_str(bind) != "") {
+      out = out.set(v3_ident(value_str(bind)), "1")
+    }
+  }
+  for (child of value_children(node)) { out = collect_reserved(child, out) }
+  return out
+}
+
+fn fresh_ident(base: Str, reserved: Map[Str, Str]) -> Str {
+  var candidate = base
+  var suffix = 0
+  while (map_get(reserved, candidate) != "") {
+    candidate = `${base}${suffix}`
+    suffix = suffix + 1
+  }
+  return candidate
+}
+// Whether a `ca`/`rbf` entry names a usable (unique) type; the `<<AMBIG>>`
+// sentinel and a missing key both mean "not a byte-exact target here".
+fn resolved(name: Str) -> Bool { return name != "" && name != "<<AMBIG>>" }
+
+// `record_by_fields`' key: the field NAMES sorted (Python `tuple(sorted(..))`),
+// joined with a `,`. Both the type-decl side (`fields.keys()`) and the record
+// literal side (`[k for k, _ in fields]`) reduce to the same key.
+fn sorted_key(names: List[Str]) -> Str { return list_sort(names).join(",") }
+
+// `_V3GoCtx`'s type-table construction: fold the document `types` into the case /
+// record lookups. Ambiguity (a case name / field set shared by two decls) is
+// marked `<<AMBIG>>`, exactly where the reference stores `None`.
+fn build_type_tables(types: Any) -> TypeTables {
+  var ca: Map[Str, Str] = Map.empty()
+  var cp: Map[Str, Str] = Map.empty()
+  var rbf: Map[Str, Str] = Map.empty()
+  var rf: Map[Str, Str] = Map.empty()
+  var variants: List[Str] = []
+  let tnames = value_keys(types)
+  for (name of tnames) {
+    let spec = value_field(types, name)
+    let kind = value_str(value_field(spec, "kind"))
+    if (kind == "record") {
+      let fields = value_field(spec, "fields")
+      let names = value_keys(fields)
+      let key = sorted_key(names)
+      if (rbf.has(key)) { rbf = rbf.set(key, "<<AMBIG>>") } else { rbf = rbf.set(key, name) }
+      for (field of names) {
+        rf = rf.set(`${name}.${field}`, value_str(value_field(fields, field)))
+      }
+    }
+    if (kind == "variant") {
+      variants = variants.push(name)
+      for (case of value_list(value_field(spec, "cases"))) {
+        let cn = value_str(value_field(case, "name"))
+        let payload = value_field(case, "payload")
+        if (value_is_null(payload)) { cp = cp.set(cn, "") } else { cp = cp.set(cn, value_str(payload)) }
+        if (ca.has(cn)) { ca = ca.set(cn, "<<AMBIG>>") } else { ca = ca.set(cn, name) }
+      }
+    }
+  }
+  return { ca: ca, cp: cp, rbf: rbf, rf: rf, variants: variants, tnames: tnames }
+}
+
+// `_V3GoCtx.record_type_for_fields`: a record literal's nominal struct type, from
+// its (sorted) field set. Reference RAISES on no-unique-match; here the marker
+// keeps the emitter total (no in-corpus literal is ambiguous or unknown).
+fn record_type_for_fields(ctx: Ctx, names: List[Str]) -> Str {
+  let name = map_get(ctx.rbf, sorted_key(names))
+  if (!resolved(name)) { return "<<DEFER-record>>" }
+  return v3_ident(name)
+}
+
+// -------------------------------------------------------------------- types
+fn split_fn_type(name: Str) -> List[Str] {
+  // `(A, B) -> C` -> ["A", "B", "C"] with the RETURN last (always non-empty for
+  // a function type); `[]` when `name` is not a function type. The top-level
+  // `->` splits params (a parenthesised list) from the return.
+  let arrow = top_arrow(name)
+  if (arrow < 0) { return [] }
+  let params_src = trim_str(name.slice(0, arrow))
+  let returns = trim_str(name.slice(arrow + 2, name.length()))
+  if (!(params_src.startsWith("(") && params_src.endsWith(")"))) { return [] }
+  let inner = trim_str(params_src.slice(1, params_src.length() - 1))
+  var parts = []
+  if (inner != "") { parts = split_top(inner, ",") }
+  parts = parts.push(returns)
+  return parts
+}
+
+fn trim_str(s: Str) -> Str {
+  var a = 0
+  var b = s.length()
+  var go = true
+  while (go && a < b) { if (s.charCodeAt(a) == 32) { a = a + 1 } else { go = false } }
+  go = true
+  while (go && b > a) { if (s.charCodeAt(b - 1) == 32) { b = b - 1 } else { go = false } }
+  return s.slice(a, b)
+}
+
+// The index of the top-level `->` (depth 0 over `[]`/`()`), or -1.
+fn top_arrow(name: Str) -> Int {
+  var depth = 0
+  var i = 0
+  let n = name.length()
+  while (i < n - 1) {
+    let ch = name.charAt(i)
+    if (ch == "[" || ch == "(") { depth = depth + 1 }
+    else {
+      if (ch == "]" || ch == ")") { depth = depth - 1 }
+      else {
+        if (ch == "-" && name.charAt(i + 1) == ">" && depth == 0) { return i }
+      }
+    }
+    i = i + 1
+  }
+  return 0 - 1
+}
+
+fn erase_async(ret: Str) -> Str {
+  let r = trim_str(ret)
+  if (r.startsWith("Async[") && r.endsWith("]")) {
+    return trim_str(r.slice(6, r.length() - 1))
+  }
+  return ret
+}
+
+fn prim_go(t: Str) -> Str {
+  if (t == "Int") { return "int64" }
+  if (t == "Int32") { return "int32" }
+  if (t == "Str") { return "string" }
+  if (t == "Bool") { return "bool" }
+  if (t == "Float") { return "float64" }
+  if (t == "Bytes") { return "[]byte" }
+  return ""
+}
+
+// `_go_v3_type`: a surface type -> its Go spelling. "" for None/""/Unit.
+fn go_type(tv: Any) -> Str {
+  let raw = value_str(tv)
+  if (raw == "" || raw == "Unit") { return "" }
+  let t = trim_str(raw)
+  let pg = prim_go(t)
+  if (pg != "") { return pg }
+  // `Any` is revl's wildcard; the lowercase `any` is this emitter's own spelling
+  // of an unpinned Opt/Result type parameter. Both are Go's `any`, and the
+  // second must not reach `v3_ident`, which escapes a USER `any` to `any_`.
+  if (t == "Any" || t == "any") { return "any" }
+  let ft = split_fn_type(t)
+  if (ft.length() > 0) {
+    let np = ft.length()
+    var ps = []
+    var i = 0
+    while (i < np - 1) { ps = ps.push(go_type(ft[i])); i = i + 1 }
+    let ret = go_type(erase_async(ft[np - 1]))
+    let head = "func(".concat(ps.join(", ")).concat(") ").concat(ret)
+    return rstrip(head)
+  }
+  if (t.endsWith("]") && contains_ch(t, "[")) {
+    let lb = t.indexOf("[")
+    let head = t.slice(0, lb)
+    let inner = t.slice(lb + 1, t.length() - 1)
+    if (head == "List") { return "[]".concat(go_type(inner)) }
+    if (head == "Opt") { return `RevlOpt[${go_type(inner)}]` }
+    if (head == "Result") {
+      let ps = split_top(inner, ",")
+      return `RevlResult[${go_type(ps[0])}, ${go_type(ps[1])}]`
+    }
+    if (head == "Map") {
+      let ps = split_top(inner, ",")
+      return `map[${go_type(ps[0])}]${go_type(ps[1])}`
+    }
+  }
+  return v3_ident(t)
+}
+
+fn contains_ch(s: Str, ch: Str) -> Bool { return s.indexOf(ch) >= 0 }
+
+// `_go_v3_lit`: a v3 literal.
+fn go_v3_lit(node: Any) -> Str {
+  let v = value_field(node, "value")
+  let k = value_kind(v)
+  if (k == "bool") { if (value_bool(v)) { return "true" } return "false" }
+  if (k == "null") { return "nil" }
+  if (k == "str") { return go_string(v) }
+  if (k == "int") { return num_str(v) }
+  if (k == "float") { return float_lit(v) }
+  return "<<UNSUPPORTED-LIT>>"
+}
+
+// --------------------------------------------------- type inference (subset)
+fn ref_name(node: Any) -> Str {
+  let nm = value_str(value_field(node, "name"))
+  if (nm != "") { return nm }
+  return value_str(value_field(node, "id"))
+}
+
+// `_go_v3_infer_type`: the surface type of an expression when knowable, else "".
+fn infer_type(node: Any, ctx: Ctx) -> Str {
+  if (value_kind(node) != "record") { return "" }
+  let w = value_str(value_field(node, "widen"))
+  if (w == "Float") { return "Float" }
+  if (w == "Int") { return "Int" }
+  let k = node_kind(node)
+  if (k == "lit") {
+    let vk = value_kind(value_field(node, "value"))
+    if (vk == "bool") { return "Bool" }
+    if (vk == "int") { return "Int" }
+    if (vk == "float") { return "Float" }
+    if (vk == "str") { return "Str" }
+    return ""
+  }
+  if (k == "var" || k == "name") { return map_get(ctx.vt, ref_name(node)) }
+  if (k == "interp") { return "Str" }
+  if (k == "list") {
+    let pin = value_str(value_field(node, "expected"))
+    if (pin.startsWith("List[") && pin.endsWith("]")) { return pin }
+    let items = value_list(value_field(node, "items"))
+    if (items.length() > 0) {
+      let elem = infer_type(items[0], ctx)
+      if (elem != "") { return `List[${elem}]` }
+    }
+    return ""
+  }
+  if (k == "index") {
+    // a Map subscript answers the map's declared VALUE type (#957)
+    let value_type = value_str(value_field(node, "value_type"))
+    if (value_type != "") { return value_type }
+    let tt = infer_type(value_field(node, "target"), ctx)
+    if (tt.startsWith("List[") && tt.endsWith("]")) { return tt.slice(5, tt.length() - 1) }
+    return ""
+  }
+  // `xs.length` in a pure fn body: Int, whatever the sized receiver.
+  if (k == "len") { return "Int" }
+  if (k == "builtin") {
+    return builtin_ret_type(value_str(value_field(node, "method")),
+                            infer_type(value_field(node, "target"), ctx))
+  }
+  // `Map.empty()` carries its pin when the author's annotation supplied one.
+  if (k == "maplit") { return value_str(value_field(node, "expected")) }
+  if (k == "call") {
+    let callee = value_field(node, "callee")
+    if (node_kind(callee) == "var") {
+      let nm = value_str(value_field(callee, "name"))
+      if (is_builtin_ctor(nm)) { return infer_ctor(nm, value_list(value_field(node, "args")), ctx) }
+      let fr = map_get(ctx.fr, nm)
+      if (fr != "") { return fr }
+      let er = map_get(ctx.er, nm)
+      if (er != "") { return er }
+      return fn_value_ret(map_get(ctx.vt, nm))
+    }
+    return ""
+  }
+  if (k == "bin") {
+    let op = node_op(node)
+    if (is_eq_op(op) || op == "<" || op == ">" || op == "<=" || op == ">=" || op == "&&" || op == "||") { return "Bool" }
+    if (node_operands(node) == "Int32" && is_addsubmul(op)) { return "Int32" }
+    if (op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>") { return "Int32" }
+    if (node_operands(node) == "Float" && is_addsubmul(op)) { return "Float" }
+    if (op == "+") {
+      let lt = infer_type(value_field(node, "left"), ctx)
+      let rt = infer_type(value_field(node, "right"), ctx)
+      if (lt == "Str" || rt == "Str") { return "Str" }
+      if (lt != "") { return lt }
+      return rt
+    }
+    if (op == "/") { return "Float" }
+    if (op == "-" || op == "*" || op == "%") {
+      if (node_operands(node) == "Float") { return "Float" }
+      return "Int"
+    }
+    return ""
+  }
+  if (k == "un") {
+    if (node_op(node) == "!") { return "Bool" }
+    if (node_op(node) == "~") { return "Int32" }
+    return infer_type(value_field(node, "operand"), ctx)
+  }
+  if (k == "if") {
+    let t = infer_type(value_field(node, "then"), ctx)
+    if (t != "") { return t }
+    return infer_type(value_field(node, "else"), ctx)
+  }
+  if (k == "field") {
+    // A record field access `r.f`: infer the receiver's record type, then read
+    // the field's declared surface type from the `rf` table (a non-record
+    // receiver, or an unknown field, misses and yields "").
+    let tt = infer_type(value_field(node, "target"), ctx)
+    return map_get(ctx.rf, `${tt}.${value_str(value_field(node, "name"))}`)
+  }
+  if (k == "record") {
+    var names = []
+    for (f of value_list(value_field(node, "fields"))) { names = names.push(value_str(value_at(f, 0))) }
+    let tn = record_type_for_fields(ctx, names)
+    if (tn == "<<DEFER-record>>") { return "" }
+    return tn
+  }
+  if (k == "adt") {
+    let adt_case = value_str(value_field(node, "case"))
+    if (is_builtin_ctor(adt_case)) { return infer_ctor(adt_case, value_list(value_field(node, "args")), ctx) }
+    let a = map_get(ctx.ca, adt_case)
+    if (resolved(a)) { return a }
+    return ""
+  }
+  return ""
+}
+
+// `_go_v3_infer_ctor`: a built-in Opt/Result construction's surface type, when
+// the argument reveals the element type (`Some(7)` is `Opt[Int]`); the side the
+// argument says nothing about stays the erased `any` (item 280).
+fn infer_ctor(case: Str, args: List[Any], ctx: Ctx) -> Str {
+  var el = ""
+  if (args.length() > 0) { el = infer_type(args[0], ctx) }
+  if (el == "") { el = "any" }
+  if (case == "Some" || case == "None") { return `Opt[${el}]` }
+  if (case == "Ok") { return `Result[${el}, any]` }
+  return `Result[any, ${el}]`
+}
+
+// `_v3_builtin_ret_type`: a builtin call's surface result type, from its method
+// and its receiver's surface type ("" when unknown).
+fn builtin_ret_type(method: Str, recv: Str) -> Str {
+  if (method == "length" || method == "indexOf" || method == "charCodeAt" || method == "codepoint_at") { return "Int" }
+  if (method == "div_trunc" || method == "div_floor" || method == "div_euclid" || method == "mod") { return "Int" }
+  // `to_int` is BOTH the Int32 widen and the Str parse (FR-9).
+  if (method == "to_int") { return recv == "Str" ? "Opt[Int]" : "Int" }
+  if (method == "to_str") { return "Str" }
+  if (method == "to_int32") { return "Int32" }
+  if (method == "startsWith" || method == "endsWith") { return "Bool" }
+  if (is_checked_div(method)) { return "Result[Int, Str]" }
+  if (method == "charAt" || method == "repeat" || method == "join") { return "Str" }
+  if (method == "split") { return "List[Str]" }
+  if (method == "slice" || method == "concat" || method == "push") { return recv }
+  if (method == "set" || method == "remove") { return recv }
+  if (method == "size") { return "Int" }
+  if (method == "keys") { return "List[Str]" }
+  if (method == "has") { return "Bool" }
+  if (method == "lookup") {
+    if (recv.startsWith("Map[") && recv.endsWith("]")) {
+      let kv = split_top(recv.slice(4, recv.length() - 1), ",")
+      return `Opt[${kv[1]}]`
+    }
+  }
+  return ""
+}
+
+// The total, value-returning division forms (docs/arithmetic.md).
+fn is_checked_div(method: Str) -> Bool {
+  if (method == "checked_div_trunc" || method == "checked_div_floor") { return true }
+  return method == "checked_div_euclid" || method == "checked_mod"
+}
+
+// -------------------------------------------------------------- expressions
+// `_infer_arrow_param`: recover an untyped lambda parameter's type from its
+// first use as a binary operand in the body (pre-order DFS), or "".
+fn arrow_param_hint(node: Any, name: Str, ctx: Ctx) -> Str {
+  if (node_kind(node) == "bin") {
+    let l = value_field(node, "left")
+    let r = value_field(node, "right")
+    if (is_ref_named(l, name)) {
+      let o = infer_type(r, ctx)
+      if (o != "") { return o }
+    }
+    if (is_ref_named(r, name)) {
+      let o = infer_type(l, ctx)
+      if (o != "") { return o }
+    }
+  }
+  for (c of value_children(node)) {
+    let h = arrow_param_hint(c, name, ctx)
+    if (h != "") { return h }
+  }
+  return ""
+}
+
+fn is_ref_named(node: Any, name: Str) -> Bool {
+  let k = node_kind(node)
+  if (k != "var" && k != "name") { return false }
+  return ref_name(node) == name
+}
+
+fn is_builtin_ctor(name: Str) -> Bool {
+  return name == "Some" || name == "None" || name == "Ok" || name == "Err"
+}
+
+// `_v3_has_any`: whether a surface type has an erased `any` component, as a
+// WHOLE WORD, so a user type that merely embeds the letters (`Company`) is not
+// mistaken for one.
+fn has_any_word(t: Str) -> Bool {
+  var i = t.indexOf("any")
+  while (i >= 0) {
+    let prev = i == 0 ? "" : t.charAt(i - 1)
+    let next = i + 3 >= t.length() ? "" : t.charAt(i + 3)
+    if (!is_word_char(prev) && !is_word_char(next)) { return true }
+    let rest = t.slice(i + 1, t.length()).indexOf("any")
+    if (rest < 0) { return false }
+    i = i + 1 + rest
+  }
+  return false
+}
+
+fn is_word_char(ch: Str) -> Bool {
+  if (ch == "") { return false }
+  let c = ch.charCodeAt(0)
+  if (c >= 48 && c <= 57) { return true }
+  if (c >= 65 && c <= 90) { return true }
+  if (c >= 97 && c <= 122) { return true }
+  return c == 95
+}
+
+fn render_bin(node: Any, ctx: Ctx) -> Str {
+  let op = node_op(node)
+  if (op == "??") {
+    // `revlOptOr` lives in the Opt preamble; the reference flags the stdlib too.
+    let l = render_expr(value_field(node, "left"), ctx, "")
+    let r = render_expr(value_field(node, "right"), ctx, "")
+    return marked(`revlOptOr(${l}, ${r})`)
+  }
+  let goop = go_bin_op(op)
+  if (goop == "") { return `<<UNSUPPORTED-BIN:${op}>>` }
+  if (is_eq_op(op)) {
+    let lt = infer_type(value_field(node, "left"), ctx)
+    let rt = infer_type(value_field(node, "right"), ctx)
+    if (!(is_scalar(lt) && is_scalar(rt))) {
+      // Structural equality (syntax-2.0 §3.4) through `revlEq`, both operands
+      // pinned to whichever side's type is fully concrete (item 302).
+      var exp = ""
+      if (lt != "" && !has_any_word(lt)) { exp = lt }
+      else { if (rt != "" && !has_any_word(rt)) { exp = rt } }
+      if (exp == "") {
+        // Neither side is fully concrete (`Ok(g(2)) == Ok(2)`): fill each
+        // side's erased type arguments from the other, so both emit as ONE
+        // instantiation (issue #1631).
+        let merged = fill_erased(lt, rt)
+        if (merged != lt || merged != rt) { exp = merged }
+      }
+      let el = render_expr(value_field(node, "left"), ctx, exp)
+      let er = render_expr(value_field(node, "right"), ctx, exp)
+      let call = `revlEq(${el}, ${er})`
+      if (is_negated_eq(op)) { return `(!${call})` }
+      return call
+    }
+  }
+  var left = render_expr(value_field(node, "left"), ctx, "")
+  var right = render_expr(value_field(node, "right"), ctx, "")
+  let opnd = node_operands(node)
+  if (opnd == "Float") {
+    let lt = infer_type(value_field(node, "left"), ctx)
+    let rt = infer_type(value_field(node, "right"), ctx)
+    if (lt == "Int" || lt == "Int32") { left = `float64(${left})` }
+    if (rt == "Int" || rt == "Int32") { right = `float64(${right})` }
+  }
+  if (is_addsubmul(op) && opnd == "Int") {
+    var h = "revlMul"
+    if (op == "+") { h = "revlAdd" }
+    if (op == "-") { h = "revlSub" }
+    return `${h}(${left}, ${right})`
+  }
+  if (is_addsubmul(op) && opnd == "Int32") {
+    var h = "revlMulI32"
+    if (op == "+") { h = "revlAddI32" }
+    if (op == "-") { h = "revlSubI32" }
+    return `${h}(${left}, ${right})`
+  }
+  if (op == "/") {
+    if (opnd == "Int" || opnd == "Int32") {
+      return `revlDiv(float64(${left}), float64(${right}))`
+    }
+    return `revlDiv(${left}, ${right})`
+  }
+  if (op == "%" && opnd == "Float") {
+    // Go has no `%` on float64 at all; math.Mod is the IEEE fmod the other
+    // tiers compute (issue #721).
+    return `math.Mod(${left}, ${right})`
+  }
+  if (op == "<<" || op == ">>") {
+    // Int32 shift: mask the count to 0..31 as an unsigned value, because Go
+    // neither masks the count nor accepts a negative signed one. `<<` drops the
+    // high bits (int32 two's complement); `>>` on the signed int32 is
+    // arithmetic (docs/arithmetic.md, item 366).
+    return `(${left} ${goop} (uint32(${right}) & 31))`
+  }
+  return `(${left} ${goop} ${right})`
+}
+
+fn render_un(node: Any, ctx: Ctx) -> Str {
+  let op = node_op(node)
+  let operand = render_expr(value_field(node, "operand"), ctx, "")
+  if (op == "!") { return `(!${operand})` }
+  if (op == "~") {
+    // Int32 bitwise complement (item 366): Go spells bitwise NOT as unary `^`.
+    return `(^${operand})`
+  }
+  if (op == "-") {
+    let opnd = node_operands(node)
+    if (opnd == "Int") { return `revlSub(0, ${operand})` }
+    if (opnd == "Int32") { return `revlSubI32(0, ${operand})` }
+    return `(-${operand})`
+  }
+  return `<<UNSUPPORTED-UN:${op}>>`
+}
+
+fn render_call(node: Any, ctx: Ctx, expected: Str) -> Str {
+  let callee = value_field(node, "callee")
+  if (value_is_null(callee)) { return "<<UNSUPPORTED-EXPR:component-call>>" }
+  let cn = value_str(value_field(callee, "name"))
+  var param_types = []
+  if (node_kind(callee) == "var") {
+    if (resolved(map_get(ctx.ca, cn))) { param_types = [map_get(ctx.cp, cn)] }
+    else if (!is_builtin_ctor(cn)) {
+      for (sig of ctx.signatures) {
+        if (value_str(value_field(sig, "name")) == cn) {
+          for (p of value_list(value_field(sig, "params"))) {
+            param_types = param_types.push(value_str(value_field(p, "type")))
+          }
+        }
+      }
+    }
+  }
+  var args = []
+  var i = 0
+  for (a of value_list(value_field(node, "args"))) {
+    var flow = ""
+    if (i < param_types.length()) { flow = param_types[i] }
+    args = args.push(render_expr(a, ctx, flow))
+    i = i + 1
+  }
+  if (node_kind(callee) == "var") {
+    // A constructor arriving as `call(callee=var Case, ..)`: a user variant or a
+    // built-in Opt/Result constructor.
+    if (ctx.ca.has(cn) || is_builtin_ctor(cn)) {
+      return render_construct(ctx, cn, args, expected, value_list(value_field(node, "args")))
+    }
+  }
+  let host = host_constructor(callee, ctx)
+  if (host != "") { return `${host}(${args.join(", ")})` }
+  let csrc = render_expr(callee, ctx, "")
+  return `${csrc}(${args.join(", ")})`
+}
+
+// `_v3_host_constructor` (issue #1356): `Pool.open(..)` in a plain top-level fn
+// is the host runtime's FREE function `PoolOpen`, not a method on the family
+// root. "" for anything that is not one of the four roots, or is a root name the
+// document itself bound or declared.
+fn host_constructor(callee: Any, ctx: Ctx) -> Str {
+  if (node_kind(callee) != "field") { return "" }
+  let target = value_field(callee, "target")
+  let tk = node_kind(target)
+  if (tk != "var" && tk != "name") { return "" }
+  let root = ref_name(target)
+  if (!(root == "Map" || root == "Pool" || root == "Job" || root == "Stream")) { return "" }
+  if (ctx.vt.has(root) || list_contains(ctx.tnames, root)) { return "" }
+  let verb = value_str(value_field(callee, "name"))
+  let go = camel(root).concat(camel(verb))
+  // item 113: the host Map is generic and Go cannot infer `V` from the
+  // argument-less constructor, so a pure-fn `Map.new()` takes the historical
+  // surface.
+  if (root == "Map" && verb == "new") { return go.concat("[string]") }
+  return go
+}
+
+fn render_index(node: Any, ctx: Ctx) -> Str {
+  let tn = value_field(node, "target")
+  var target = render_expr(tn, ctx, "")
+  if (!is_atomic(node_kind(tn))) { target = `(${target})` }
+  let index = render_expr(value_field(node, "index"), ctx, "")
+  // A Map subscript: a MISS faults through the helper instead of answering
+  // the value type's zero value (issue #957).
+  if (!value_is_null(value_field(node, "key_type"))) { return `revlMapIndex(${target}, ${index})` }
+  // `v[k]` on a statically `Any` receiver: Go's index operator is
+  // type-directed, so the read goes through reflection (issue #1356).
+  if (go_type(infer_type(tn, ctx)) == "any") { return `revlAnyIndex(${target}, ${index})` }
+  return `${target}[${index}]`
+}
+
+fn render_list(node: Any, ctx: Ctx, expected: Str) -> Str {
+  var elem = ""
+  let pin = expected == "" ? value_str(value_field(node, "expected")) : expected
+  if (pin.startsWith("List[") && pin.endsWith("]")) {
+    elem = pin.slice(5, pin.length() - 1)
+  }
+  let items = value_list(value_field(node, "items"))
+  if (elem == "" && items.length() > 0) { elem = infer_type(items[0], ctx) }
+  var goelem = "any"
+  if (elem != "") { goelem = go_type(elem) }
+  var parts = []
+  for (it of items) { parts = parts.push(render_expr(it, ctx, elem)) }
+  return `[]${goelem}{${parts.join(", ")}}`
+}
+
+fn render_arrow(node: Any, ctx: Ctx) -> Str {
+  let names = value_list(value_field(node, "params"))
+  let ptypes = value_list(value_field(node, "param_types"))
+  var declared = []
+  var i = 0
+  while (i < names.length()) {
+    var d = ""
+    if (i < ptypes.length()) { d = value_str(ptypes[i]) }
+    if (d == "") { d = arrow_param_hint(value_field(node, "body"), value_str(names[i]), ctx) }
+    declared = declared.push(d)
+    i = i + 1
+  }
+  // Bind inferred param types so the body renders/infers against them.
+  var bodyctx = ctx
+  i = 0
+  while (i < names.length()) {
+    if (declared[i] != "") { bodyctx = set_vt(bodyctx, value_str(names[i]), declared[i]) }
+    i = i + 1
+  }
+  var ps = []
+  i = 0
+  while (i < names.length()) {
+    var gt = go_type(declared[i])
+    if (gt == "") { gt = "any" }
+    ps = ps.push(`${v3_ident(value_str(names[i]))} ${gt}`)
+    i = i + 1
+  }
+  let body = render_expr(value_field(node, "body"), bodyctx, "")
+  let bodyt = go_type(infer_type(value_field(node, "body"), bodyctx))
+  var ret = ""
+  if (bodyt != "") { ret = " ".concat(bodyt) }
+  let rendered = `func(${ps.join(", ")})${ret} { return ${body} }`
+  // By-value capture (docs/closures.md, syntax-2.0 §3.5). The arrow snapshots
+  // the mutable names it READS at arrow-creation time; the front end names them
+  // on the node (`captures`) so no backend re-derives them. A Go closure
+  // captures the enclosing VARIABLE rather than its value, so without a pin this
+  // tier read whatever the `var` held when the arrow RAN. `n := n` in an
+  // enclosing scope is Go's own by-value snapshot, spelled as an IIFE around the
+  // arrow because an arrow is an expression and a statement-level shadow would
+  // cover the rest of the body. Mirrors `_go_v3_expr`'s arrow arm in
+  // backends/go/emit.py.
+  let captures = value_list(value_field(node, "captures"))
+  if (captures.length() > 0) {
+    var sigs = []
+    i = 0
+    while (i < names.length()) {
+      var st = go_type(declared[i])
+      if (st == "") { st = "any" }
+      sigs = sigs.push(st)
+      i = i + 1
+    }
+    var pins = []
+    for (cn of captures) {
+      let cm = v3_ident(value_str(cn))
+      pins = pins.push(`${cm} := ${cm}; _ = ${cm};`)
+    }
+    return `func() func(${sigs.join(", ")})${ret} { ${pins.join(" ")} return ${rendered} }()`
+  }
+  return rendered
+}
+
+// `_go_v3_interp`: a `${..}` template, rendered from the operand types the
+// emitter already knows (roadmap item 434 (f)). `fmt.Sprintf` with `%v` takes
+// `...any`, so every operand is boxed: `${a}/${b}` over two `Str` measured 3
+// allocs / 48 B where the SAME emitter's `a + "/" + b` measured 1 / 16. Where
+// every part's type is known each renders to a `string`-typed piece and the
+// template is a `+` chain: one allocation for the result and no boxing;
+// `fmt.Sprintf` with `%v` stays as the fallback for a part whose type could
+// not be inferred. A Float part routes through the canonical `revlFtoa`
+// (DEFERRED: such a part is excluded from the corpus, since it pulls in the
+// `revlFtoa` helper the scaffold omits).
+fn render_interp(node: Any, ctx: Ctx) -> Str {
+  var fmt = []
+  var args = []
+  var pieces = []
+  var typed = true
+  for (part of value_list(value_field(node, "parts"))) {
+    let k = value_str(value_at(part, 0))
+    let v = value_at(part, 1)
+    if (k == "text") {
+      fmt = fmt.push(double_pct(value_str(v)))
+      pieces = pieces.push(go_string(value_str(v)))
+    } else {
+      let vt = infer_type(v, ctx)
+      let rendered = render_expr(v, ctx, "")
+      if (vt == "Float") {
+        fmt = fmt.push("%s")
+        args = args.push(`revlFtoa(${rendered})`)
+        pieces = pieces.push(`revlFtoa(${rendered})`)
+      } else {
+        fmt = fmt.push("%v")
+        args = args.push(rendered)
+        if (vt == "Str") {
+          pieces = pieces.push(rendered)
+        } else if (vt == "Int") {
+          pieces = pieces.push(`strconv.FormatInt(${rendered}, 10)`)
+        } else if (vt == "Int32") {
+          pieces = pieces.push(`strconv.FormatInt(int64(${rendered}), 10)`)
+        } else if (vt == "Bool") {
+          pieces = pieces.push(`strconv.FormatBool(${rendered})`)
+        } else {
+          typed = false
+        }
+      }
+    }
+  }
+  let joined = fmt.join("")
+  if (args.length() == 0) { return go_string(joined) }
+  if (typed) {
+    if (pieces.length() == 1) { return pieces[0] }
+    return `(${pieces.join(" + ")})`
+  }
+  return `fmt.Sprintf(${go_string(joined)}, ${args.join(", ")})`
+}
+
+// Double every `%` in interpolation text (Go verb escaping).
+fn double_pct(s: Str) -> Str {
+  var out = ""
+  var i = 0
+  while (i < s.length()) {
+    let ch = s.charAt(i)
+    if (ch == "%") { out = out.concat("%%") } else { out = out.concat(ch) }
+    i = i + 1
+  }
+  return out
+}
+
+// `_go_v3_construct` (user-variant subset): an ADT construction from a case name
+// and rendered args. A user variant is `<Variant><Case>{}` (nullary) or
+// `<Variant><Case>{Value: arg}` (payload) — the variant name is `_v3_ident`ed and
+// the case name is used RAW, exactly as the reference. The built-in Opt/Result
+// constructors (`Some`/`None`/`Ok`/`Err`) pull the Opt/Result preambles this
+// slice omits, so they are DEFERRED.
+fn render_construct(ctx: Ctx, case: Str, args: List[Str], expected: Str, arg_nodes: List[Any]) -> Str {
+  let adt = map_get(ctx.ca, case)
+  if (resolved(adt)) {
+    let struct = `${v3_ident(adt)}${case}`
+    if (map_get(ctx.cp, case) == "") {
+      if (args.length() > 0) { return `<<UNSUPPORTED-CTOR-ARITY:${case}>>` }
+      return `${struct}{}`
+    }
+    if (args.length() != 1) { return `<<UNSUPPORTED-CTOR-ARITY:${case}>>` }
+    return `${struct}{Value: ${args[0]}}`
+  }
+  if (ctx.ca.has(case)) { return `<<UNSUPPORTED-CTOR-AMBIGUOUS:${case}>>` }
+  let exp = trim(expected)
+  if (case == "Some" || case == "None") {
+    var inner = "any"
+    if (exp.startsWith("Opt[") && exp.endsWith("]")) { inner = exp.slice(4, exp.length() - 1) }
+    else {
+      // No expected Opt type here: recover the element type from the argument
+      // so `Some(7)` keeps its `int64` (item 280).
+      if (case == "Some" && arg_nodes.length() > 0) {
+        let it = infer_type(arg_nodes[0], ctx)
+        if (it != "") { inner = it }
+      }
+    }
+    var got = go_type(inner)
+    if (got == "") { got = "any" }
+    if (case == "None") {
+      if (args.length() > 0) { return "<<UNSUPPORTED-CTOR-ARITY:None>>" }
+      // item 434 (d): the zero value of the two-value struct (Ok false).
+      return `RevlOpt[${got}]{}`
+    }
+    return `RevlOpt[${got}]{Value: ${args[0]}, Ok: true}`
+  }
+  if (case == "Ok" || case == "Err") {
+    var ok = "any"
+    var err = "any"
+    if (exp.startsWith("Result[") && exp.endsWith("]")) {
+      let parts = split_top(exp.slice(7, exp.length() - 1), ",")
+      ok = parts[0]
+      err = parts[1]
+    } else {
+      if (arg_nodes.length() > 0) {
+        var side = infer_type(arg_nodes[0], ctx)
+        if (side == "") { side = "any" }
+        if (case == "Ok") { ok = side } else { err = side }
+      }
+    }
+    var got_ok = go_type(ok)
+    if (got_ok == "") { got_ok = "any" }
+    var got_err = go_type(err)
+    if (got_err == "") { got_err = "any" }
+    var payload = ""
+    if (args.length() > 0) { payload = args[0] }
+    // item 434 (d): Ok sets OkV and the flag; Err sets ErrV, flag false.
+    if (case == "Ok") { return `RevlResult[${got_ok}, ${got_err}]{OkV: ${payload}, Ok: true}` }
+    return `RevlResult[${got_ok}, ${got_err}]{ErrV: ${payload}}`
+  }
+  return `<<UNSUPPORTED-CTOR:${case}>>`
+}
+
+// `_go_v3_expr` field branch: a record field access. A non-atomic receiver is
+// parenthesised so the `.field` selector binds correctly; the field name is the
+// EXPORTED spelling (`_v3_field_ident` = `_camel`, item 390) — the same spelling
+// the struct decl and literal use, so the read resolves the exported field.
+fn render_field(node: Any, ctx: Ctx) -> Str {
+  let tn = value_field(node, "target")
+  var target = render_expr(tn, ctx, "")
+  if (!is_atomic(node_kind(tn))) { target = `(${target})` }
+  return `${target}.${v3_field_ident(value_str(value_field(node, "name")))}`
+}
+
+// `_go_v3_expr` record branch: a nominal `Struct{f: v, ..}` literal. Go copies by
+// value, so there is no clone (unlike the rust tier); the struct name is inferred
+// from the (sorted) field set. Declared field types pin empty nested collections.
+fn render_record(node: Any, ctx: Ctx) -> Str {
+  let fields = value_list(value_field(node, "fields"))
+  var names = []
+  for (f of fields) { names = names.push(value_str(value_at(f, 0))) }
+  let tn = record_type_for_fields(ctx, names)
+  let raw_type = map_get(ctx.rbf, sorted_key(names))
+  var body = []
+  for (f of fields) {
+    let k = value_str(value_at(f, 0))
+    let vnode = value_at(f, 1)
+    body = body.push(`${v3_field_ident(k)}: ${render_expr(vnode, ctx, map_get(ctx.rf, `${raw_type}.${k}`))}`)
+  }
+  return `${tn}{${body.join(", ")}}`
+}
+
+// `_go_v3_match`: a `match` over a user variant as a Go type switch wrapped in an
+// IIFE (`func() T { switch _m := scrut.(type) { .. } }()`). The switch/case/body
+// lines carry a LITERAL one/two-tab indent (the reference builds them with a
+// fixed `\t` prefix; the enclosing `_go_v3_stmt` pads only the first `func()`
+// line). A bound arm reads `_m.Value` and types the bind from its case payload; an
+// unmatched `_` gets the non-exhaustive panic unless an arm already wilds. The
+// built-in Opt/Result match surface pulls the deferred preambles, so it is
+// DEFERRED (an `Opt[`/`Result[` scrutinee is out of corpus).
+fn render_match(node: Any, ctx: Ctx, expected: Str) -> Str {
+  let scrut_node = value_field(node, "scrutinee")
+  let scrutinee = render_expr(scrut_node, ctx, "")
+  let st = infer_type(scrut_node, ctx)
+  let arms = value_list(value_field(node, "arms"))
+  var exp_t = ""
+  if (expected != "") { exp_t = go_type(expected) }
+  if (exp_t == "") {
+    var i = 0
+    while (i < arms.length() && exp_t == "") {
+      exp_t = go_type(infer_type(value_field(arms[i], "body"), ctx))
+      i = i + 1
+    }
+  }
+  if (exp_t == "") { exp_t = "any" }
+  // Concrete Go values cannot be type-switch operands; evaluate and discard
+  // the scrutinee before the wildcard body instead.
+  if (st != "" && !is_interface(st, ctx)) {
+    for (arm of arms) {
+      if (value_str(value_field(arm, "pattern")) == "_") {
+        var direct = [`func() ${exp_t} {`]
+        let bind = value_str(value_field(arm, "bind"))
+        var armctx = ctx
+        if (bind != "" && bind != "_") {
+          armctx = set_vt(ctx, bind, st)
+          direct = direct.push(line(1, `${v3_ident(bind)} := ${scrutinee}`))
+          direct = direct.push(line(1, `_ = ${v3_ident(bind)}`))
+        } else {
+          direct = direct.push(line(1, `_ = ${scrutinee}`))
+        }
+        direct = direct.push(line(1, `return ${render_expr(value_field(arm, "body"), armctx, expected)}`))
+        direct = direct.push("}()")
+        return direct.join(newline())
+      }
+    }
+  }
+  // item 434 (d): Opt and Result are two-value structs, so their match
+  // discriminates on `.Ok` in an if/else rather than a type switch.
+  if (st.startsWith("Opt[") && st.endsWith("]")) {
+    let inner = st.slice(4, st.length() - 1)
+    return match_two_value(node, ctx, expected, scrutinee, st, exp_t,
+                           ["Some", "Value", inner], ["None", "", ""])
+  }
+  if (st.startsWith("Result[") && st.endsWith("]")) {
+    let parts = split_top(st.slice(7, st.length() - 1), ",")
+    return match_two_value(node, ctx, expected, scrutinee, `Result[${parts[0]}, ${parts[1]}]`,
+                           exp_t, ["Ok", "OkV", parts[0]], ["Err", "ErrV", parts[1]])
+  }
+  var lines = [`func() ${exp_t} {`]
+  var switch_operand = scrutinee
+  if (node_kind(scrut_node) != "var" && node_kind(scrut_node) != "name") {
+    let iface_t = st == "" ? "any" : go_type(st)
+    lines = lines.push(line(1, `var _s ${iface_t} = ${scrutinee}`))
+    switch_operand = "_s"
+  }
+  lines = lines.push(line(1, `switch _m := ${switch_operand}.(type) {`))
+  var hasWild = false
+  for (arm of arms) {
+    let pattern = value_str(value_field(arm, "pattern"))
+    if (pattern == "_") {
+      hasWild = true
+      lines = lines.push(line(1, "default:"))
+      lines = lines.push(line(2, "_ = _m"))
+      lines = lines.push(line(2, `return ${render_expr(value_field(arm, "body"), ctx, expected)}`))
+    } else {
+      var adt = st
+      if (!resolved(adt)) { adt = map_get(ctx.ca, pattern) }
+      lines = lines.push(line(1, `case ${v3_ident(adt)}${pattern}:`))
+      let bindn = value_field(arm, "bind")
+      var armctx = ctx
+      if (!value_is_null(bindn) && value_str(bindn) != "" && value_str(bindn) != "_") {
+        let bind = value_str(bindn)
+        armctx = set_vt(ctx, bind, map_get(ctx.cp, pattern))
+        lines = lines.push(line(2, `${v3_ident(bind)} := _m.Value`))
+        // a payload bound but never read in the arm body is a Go
+        // `declared and not used` build error; pin it so an unused
+        // payload compiles (roadmap item 304)
+        lines = lines.push(line(2, `_ = ${v3_ident(bind)}`))
+      } else {
+        lines = lines.push(line(2, "_ = _m"))
+      }
+      lines = lines.push(line(2, `return ${render_expr(value_field(arm, "body"), armctx, expected)}`))
+    }
+  }
+  if (!hasWild) {
+    lines = lines.push(line(1, "default:"))
+    lines = lines.push(line(2, "_ = _m"))
+    lines = lines.push(line(2, `panic("unreachable: non-exhaustive match")`))
+  }
+  lines = lines.push(line(1, "}"))
+  lines = lines.push("}()")
+  return lines.join(newline())
+}
+
+// `_go_v3_is_interface`: whether a scrutinee needs discriminated `match`
+// handling rather than the concrete-value wildcard shortcut: Go's `any`, a
+// built-in Opt/Result (two-value structs that discriminate on `.Ok`), or a
+// declared user variant.
+fn is_interface(surface: Str, ctx: Ctx) -> Bool {
+  let s = trim(surface)
+  if (s == "any") { return true }
+  if (s.startsWith("Opt[") && s.endsWith("]")) { return true }
+  if (s.startsWith("Result[") && s.endsWith("]")) { return true }
+  return list_contains(ctx.variants, s)
+}
+
+fn arm_named(arms: List[Any], pattern: Str) -> List[Any] {
+  for (arm of arms) {
+    if (value_str(value_field(arm, "pattern")) == pattern) { return [arm] }
+  }
+  return []
+}
+
+fn has_bind(bind: Str) -> Bool { return bind != "" && bind != "_" }
+
+// A wildcard arm on a two-value match: it binds the WHOLE value (`_m`) at
+// `depth` tabs and returns its body.
+fn wild_arm_lines(arm: Any, ctx: Ctx, expected: Str, st: Str, depth: Int) -> List[Str] {
+  let bind = value_str(value_field(arm, "bind"))
+  var armctx = ctx
+  var out = []
+  if (has_bind(bind)) {
+    armctx = set_vt(ctx, bind, st)
+    out = out.push(line(depth, `${v3_ident(bind)} := _m`))
+    out = out.push(line(depth, `_ = ${v3_ident(bind)}`))
+  } else {
+    out = out.push(line(depth, "_ = _m"))
+  }
+  return out.push(line(depth, `return ${render_expr(value_field(arm, "body"), armctx, expected)}`))
+}
+
+// A payload arm: binds `_m.<field>` (typed `ptype`) at `depth` tabs.
+fn payload_arm_lines(arm: Any, ctx: Ctx, expected: Str, field: Str, ptype: Str, depth: Int) -> List[Str] {
+  let bind = value_str(value_field(arm, "bind"))
+  var armctx = ctx
+  var out = []
+  if (has_bind(bind)) {
+    armctx = set_vt(ctx, bind, ptype)
+    out = out.push(line(depth, `${v3_ident(bind)} := _m.${field}`))
+    out = out.push(line(depth, `_ = ${v3_ident(bind)}`))
+  } else {
+    out = out.push(line(depth, `_ = _m.${field}`))
+  }
+  return out.push(line(depth, `return ${render_expr(value_field(arm, "body"), armctx, expected)}`))
+}
+
+// `_go_v3_match_opt` / `_go_v3_match_result`, which differ only in their
+// patterns and payload fields: `yes` / `no` are `[pattern, field, type]` for the
+// present (`.Ok`) and absent sides. Opt's absent side carries no payload (an
+// empty field), so its arm binds nothing.
+fn match_two_value(node: Any, ctx: Ctx, expected: Str, scrutinee: Str, st: Str,
+                   exp_t: Str, yes: List[Str], no: List[Str]) -> Str {
+  let arms = value_list(value_field(node, "arms"))
+  let yes_arm = arm_named(arms, yes[0])
+  let no_arm = arm_named(arms, no[0])
+  let wild = arm_named(arms, "_")
+  var lines = [`func() ${exp_t} {`, line(1, `_m := ${scrutinee}`)]
+  // A wildcard is the ONLY arm: no discrimination, evaluate its body once.
+  if (yes_arm.length() == 0 && no_arm.length() == 0 && wild.length() > 0) {
+    lines = lines.concat(wild_arm_lines(wild[0], ctx, expected, st, 1))
+    return lines.push("}()").join(newline())
+  }
+  lines = lines.push(line(1, "if _m.Ok {"))
+  if (yes_arm.length() > 0) {
+    lines = lines.concat(payload_arm_lines(yes_arm[0], ctx, expected, yes[1], yes[2], 2))
+  } else {
+    if (wild.length() > 0) { lines = lines.concat(wild_arm_lines(wild[0], ctx, expected, st, 2)) }
+    else { lines = lines.push(line(2, `panic("unreachable: non-exhaustive match")`)) }
+  }
+  lines = lines.push(line(1, "}"))
+  if (no_arm.length() > 0) {
+    if (no[1] == "") {
+      lines = lines.push(line(1, `return ${render_expr(value_field(no_arm[0], "body"), ctx, expected)}`))
+    } else {
+      lines = lines.concat(payload_arm_lines(no_arm[0], ctx, expected, no[1], no[2], 1))
+    }
+  } else {
+    if (wild.length() > 0) { lines = lines.concat(wild_arm_lines(wild[0], ctx, expected, st, 1)) }
+    else { lines = lines.push(line(1, `panic("unreachable: non-exhaustive match")`)) }
+  }
+  return lines.push("}()").join(newline())
+}
+
+// ----------------------------------------------- erased type arguments (#1631)
+// `_v3_fn_value_ret`: the declared return of a function-typed binding
+// (`g: (Int) -> Int` -> `Int`), or "". Calling a function VALUE answers its
+// declared return just as calling a module fn does.
+fn fn_value_ret(surface: Str) -> Str {
+  let ft = split_fn_type(surface)
+  if (ft.length() == 0) { return "" }
+  return erase_async(ft[ft.length() - 1])
+}
+
+// `_v3_fill_erased`: `surface` with each erased top-level `any` type argument
+// of a built-in Opt/Result filled from `declared`, a type of the same family
+// (else `surface` unchanged).
+fn fill_erased(surface: Str, declared: Str) -> Str {
+  if (surface == "" || declared == "") { return surface }
+  for (head of ["Opt[", "Result["]) {
+    if (surface.startsWith(head) && surface.endsWith("]")
+        && declared.startsWith(head) && declared.endsWith("]")) {
+      let have = split_top(surface.slice(head.length(), surface.length() - 1), ",")
+      let want = split_top(declared.slice(head.length(), declared.length() - 1), ",")
+      if (have.length() != want.length()) { return surface }
+      var merged = []
+      var i = 0
+      while (i < have.length()) {
+        merged = merged.push(have[i] == "any" ? want[i] : have[i])
+        i = i + 1
+      }
+      return `${head}${merged.join(", ")}]`
+    }
+  }
+  return surface
+}
+
+// The `let` arm's flow refinement: a bare `None` infers nothing and is an `Opt`
+// of what it flows into; an Opt/Result value with an erased type argument
+// takes the missing part from the binding's flow hint.
+fn flow_typed(valnode: Any, inferred: Str, hint: Str) -> Str {
+  var t = inferred
+  let vk = node_kind(valnode)
+  if (t == "" && (vk == "var" || vk == "name") && ref_name(valnode) == "None") {
+    let filled = fill_erased("Opt[any]", hint)
+    if (filled != "Opt[any]") { t = filled }
+  }
+  if (has_any_word(t)) { t = fill_erased(t, hint) }
+  return t
+}
+
+// The declared parameter types a call hands an argument to: the module fn's,
+// else the extern's (the reference's `function_params or extern_params`).
+fn declared_params(signatures: List[Any], name: Str) -> List[Str] {
+  var fn_params = []
+  var ext_params = []
+  for (sig of signatures) {
+    if (value_str(value_field(sig, "name")) == name) {
+      var ps = []
+      for (p of value_list(value_field(sig, "params"))) { ps = ps.push(value_str(value_field(p, "type"))) }
+      if (value_is_null(value_field(sig, "bodies"))) { fn_params = ps } else { ext_params = ps }
+    }
+  }
+  return fn_params.length() > 0 ? fn_params : ext_params
+}
+
+// `_v3_flow_hints`: `{binding: declared type}` for each local a body hands on
+// whole. `return x` flows into the declared return, `f(x)` into `f`'s declared
+// parameter; the first occurrence in document order wins.
+fn flow_hints(body: List[Any], ret_type: Str, signatures: List[Any]) -> Map[Str, Str] {
+  var hints: Map[Str, Str] = Map.empty()
+  for (n of walk_nodes(body)) {
+    if (node_step(n) == "return" && ret_type != "") {
+      let e = value_field(n, "expr")
+      if (node_kind(e) == "var") {
+        let x = value_str(value_field(e, "name"))
+        if (!hints.has(x)) { hints = hints.set(x, ret_type) }
+      }
+    }
+    if (node_kind(n) == "call") {
+      let callee = value_field(n, "callee")
+      if (node_kind(callee) == "var") {
+        let params = declared_params(signatures, value_str(value_field(callee, "name")))
+        let args = value_list(value_field(n, "args"))
+        var i = 0
+        while (i < args.length() && i < params.length()) {
+          if (node_kind(args[i]) == "var" && params[i] != "") {
+            let x = value_str(value_field(args[i], "name"))
+            if (!hints.has(x)) { hints = hints.set(x, params[i]) }
+          }
+          i = i + 1
+        }
+      }
+    }
+  }
+  return hints
+}
+
+// The kind dispatch, mirroring `_go_v3_expr`'s branch order (post-widen).
+fn render_inner(node: Any, ctx: Ctx, expected: Str) -> Str {
+  let kind = node_kind(node)
+  if (kind == "lit") { return go_v3_lit(node) }
+  if (kind == "var" || kind == "name") {
+    // A bare `None` is the built-in Opt constructor, typed from the flow
+    // target (item 280), not an identifier.
+    if (ref_name(node) == "None") { return render_construct(ctx, "None", [], expected, []) }
+    return v3_ident(ref_name(node))
+  }
+  if (kind == "adt") {
+    let case = value_str(value_field(node, "case"))
+    let payload = map_get(ctx.cp, case)
+    let arg_nodes = value_list(value_field(node, "args"))
+    var aa = []
+    for (a of arg_nodes) { aa = aa.push(render_expr(a, ctx, payload)) }
+    return render_construct(ctx, case, aa, expected, arg_nodes)
+  }
+  if (kind == "bin") { return render_bin(node, ctx) }
+  if (kind == "un") { return render_un(node, ctx) }
+  if (kind == "call") { return render_call(node, ctx, expected) }
+  if (kind == "field") { return render_field(node, ctx) }
+  if (kind == "index") { return render_index(node, ctx) }
+  if (kind == "record") { return render_record(node, ctx) }
+  if (kind == "match") { return render_match(node, ctx, expected) }
+  if (kind == "list") { return render_list(node, ctx, expected) }
+  if (kind == "arrow") { return render_arrow(node, ctx) }
+  if (kind == "if") {
+    var expt = ""
+    if (expected != "") { expt = go_type(expected) }
+    else { expt = go_type(infer_type(value_field(node, "then"), ctx)) }
+    if (expt == "") { expt = "any" }
+    let cond = render_expr(value_field(node, "cond"), ctx, "")
+    let then = render_expr(value_field(node, "then"), ctx, expected)
+    let els = render_expr(value_field(node, "else"), ctx, expected)
+    return `func() ${expt} { if ${cond} { return ${then} }; return ${els} }()`
+  }
+  if (kind == "interp") { return render_interp(node, ctx) }
+  if (kind == "len") {
+    // Go's `len()` is bytes on a string; revl length is code points, so the
+    // sized-value helpers answer it, exactly as the `length` builtin does.
+    let tn = value_field(node, "target")
+    let target = render_expr(tn, ctx, "")
+    if (infer_type(tn, ctx) == "Str") { return marked(`revlStrLen(${target})`) }
+    return marked(`revlListLen(${target})`)
+  }
+  if (kind == "maplit") { return render_maplit(node, expected) }
+  if (kind == "builtin") { return render_builtin(node, ctx) }
+  if (kind == "optfield" || kind == "optcall") { return render_optchain(node, ctx, kind) }
+  return `<<UNSUPPORTED-EXPR:${kind}>>`
+}
+
+// `_go_v3_expr`'s builtin arm: a scan-loop read is answered from the rune in
+// hand; anything else renders its receiver (parenthesised when not atomic) and
+// its arguments, then dispatches on the method.
+fn render_builtin(node: Any, ctx: Ctx) -> Str {
+  let scanned = scan_read(node, ctx)
+  if (scanned != "") { return scanned }
+  let tn = value_field(node, "target")
+  var target = render_expr(tn, ctx, "")
+  if (!is_atomic(node_kind(tn))) { target = `(${target})` }
+  var args = []
+  for (a of value_list(value_field(node, "args"))) { args = args.push(render_expr(a, ctx, "")) }
+  return builtin_call(value_str(value_field(node, "method")), infer_type(tn, ctx), target, args, ctx.strings_alias)
+}
+
+// `_go_v3_builtin`: one stdlib method call, dispatched on the method and the
+// receiver's surface type `rt`. Every helper it names lives in the stdlib,
+// Opt, Map or integer-arithmetic preamble, and the module assembly reads which
+// of those it needs off the rendered text (the stdlib one off the mark).
+fn builtin_call(method: Str, rt: Str, target: Str, args: List[Str], alias: Str) -> Str {
+  let text = builtin_text(method, rt, target, args, alias)
+  if (text == "") { return `<<UNSUPPORTED-BUILTIN:${method}>>` }
+  return marked(text)
+}
+
+fn builtin_text(method: Str, rt: Str, target: Str, args: List[Str], alias: Str) -> Str {
+  let is_str = rt == "Str"
+  if (method == "length") { return is_str ? `revlStrLen(${target})` : `revlListLen(${target})` }
+  if (method == "push") { return `revlListPush(${target}, ${args[0]})` }
+  if (method == "concat") {
+    return is_str ? `revlStrConcat(${target}, ${args[0]})` : `revlListConcat(${target}, ${args[0]})`
+  }
+  if (method == "slice") {
+    if (is_str) { return `revlStrSlice(${target}, ${args[0]}, ${args[1]})` }
+    return `revlListSlice(${target}, ${args[0]}, ${args[1]})`
+  }
+  if (method == "indexOf") { return index_of_text(rt, target, args[0]) }
+  if (method == "split") { return `revlStrSplit(${target}, ${args[0]})` }
+  if (method == "join") { return `revlJoin(${target}, ${args[0]})` }
+  if (method == "repeat") { return `revlStrRepeat(${target}, ${args[0]})` }
+  if (method == "charAt") { return `revlStrCharAt(${target}, ${args[0]})` }
+  if (method == "charCodeAt" || method == "codepoint_at") { return `revlStrCharCodeAt(${target}, ${args[0]})` }
+  return builtin_text_tail(method, rt, target, args, alias)
+}
+
+// The structural `indexOf` on a List: a scalar element keeps the native `==`
+// helper, anything else goes through `revlEq` (reflect.DeepEqual), since Go `==`
+// is a compile error on a slice element.
+fn index_of_text(rt: Str, target: Str, arg: Str) -> Str {
+  if (rt == "Str") { return `revlStrIndexOf(${target}, ${arg})` }
+  var elem = ""
+  if (rt.startsWith("List[") && rt.endsWith("]")) { elem = trim(rt.slice(5, rt.length() - 1)) }
+  if (is_scalar(elem)) { return `revlListIndexOf(${target}, ${arg})` }
+  return `revlListIndexOfEq(${target}, ${arg})`
+}
+
+fn builtin_text_tail(method: Str, rt: Str, target: Str, args: List[Str], alias: Str) -> Str {
+  if (method == "startsWith") { return `${alias}.HasPrefix(${target}, ${args[0]})` }
+  if (method == "endsWith") { return `${alias}.HasSuffix(${target}, ${args[0]})` }
+  if (method == "to_str") {
+    // A Float renders through the canonical `revlFtoa`, as `${aFloat}` does.
+    if (rt == "Float") { return `revlFtoa(${target})` }
+    if (rt == "Int32") { return `strconv.FormatInt(int64(${target}), 10)` }
+    return `strconv.FormatInt(${target}, 10)`
+  }
+  if (method == "set") { return `revlMapSet(${target}, ${args[0]}, ${args[1]})` }
+  if (method == "lookup") { return `revlMapGet(${target}, ${args[0]})` }
+  if (method == "has") { return `revlMapHas(${target}, ${args[0]})` }
+  if (method == "size") { return `int64(len(${target}))` }
+  if (method == "keys") { return `revlMapKeys(${target})` }
+  if (method == "remove") { return `revlMapRemove(${target}, ${args[0]})` }
+  if (method == "to_int") { return rt == "Str" ? `revlParseInt(${target})` : `int64(${target})` }
+  if (method == "to_int32") { return `revlToI32(${target})` }
+  if (method == "div_trunc") { return `revlDivTrunc(${target}, ${args[0]})` }
+  if (method == "div_floor") { return `revlDivFloor(${target}, ${args[0]})` }
+  if (method == "div_euclid") { return `revlDivEuclid(${target}, ${args[0]})` }
+  if (method == "mod") { return `revlMod(${target}, ${args[0]})` }
+  if (is_checked_div(method)) { return checked_div_text(method, target, args[0]) }
+  return ""
+}
+
+// The total division forms (docs/arithmetic.md): the faulting quotient, but a
+// zero divisor answers Err(reason). An immediately-applied func literal
+// evaluates each operand exactly once.
+fn checked_div_text(method: Str, target: Str, arg: Str) -> Str {
+  var quotient = "revlMod(_a, _b)"
+  if (method == "checked_div_trunc") { quotient = "_a / _b" }
+  if (method == "checked_div_floor") { quotient = "revlDivFloor(_a, _b)" }
+  if (method == "checked_div_euclid") { quotient = "revlDivEuclid(_a, _b)" }
+  var overflow_err = ""
+  if (method != "checked_mod") {
+    overflow_err = "if _a == (-9223372036854775807 - 1) && _b == -1 { return RevlResult[int64, string]{ErrV: \"revl: Int overflow\"} }; "
+  }
+  let head = "func(_a, _b int64) RevlResult[int64, string] { if _b == 0 { return RevlResult[int64, string]{ErrV: \"revl: division by zero\"} }; "
+  return `${head}${overflow_err}return RevlResult[int64, string]{OkV: ${quotient}, Ok: true} }(${target}, ${arg})`
+}
+
+// `_go_v3_optchain`: `?.field` / `?.method(..)` as `revlOptMap` over the Opt
+// payload. The closure's result type is inferred so Go can infer `B`.
+fn render_optchain(node: Any, ctx: Ctx, kind: Str) -> Str {
+  let tn = value_field(node, "target")
+  let target = render_expr(tn, ctx, "")
+  let tt = infer_type(tn, ctx)
+  if (!(tt.startsWith("Opt[") && tt.endsWith("]"))) { return `<<UNSUPPORTED-EXPR:${kind}-receiver>>` }
+  let payload = tt.slice(4, tt.length() - 1)
+  let go_payload = go_type(payload)
+  var ret_surface = ""
+  var body = ""
+  if (kind == "optfield") {
+    let field = value_str(value_field(node, "name"))
+    ret_surface = map_get(ctx.rf, `${payload}.${field}`)
+    body = `_x.${v3_field_ident(field)}`
+  } else {
+    let method = value_str(value_field(node, "method"))
+    var args = []
+    for (a of value_list(value_field(node, "args"))) { args = args.push(render_expr(a, ctx, "")) }
+    ret_surface = builtin_ret_type(method, payload)
+    body = builtin_call(method, payload, "_x", args, ctx.strings_alias)
+  }
+  var go_ret = "any"
+  if (ret_surface != "") { go_ret = go_type(ret_surface) }
+  return marked(`revlOptMap(${target}, func(_x ${go_payload}) ${go_ret} { return ${body} })`)
+}
+
+// `Map.empty()` (docs/stdlib-2.0.md §Map). Go infers composite literals
+// positionally, so the literal needs its expected Map type (the flow target,
+// else the annotation the frontend threaded onto the node); the reference
+// refuses an unpinned one, and so does this port, by name.
+fn render_maplit(node: Any, expected: Str) -> Str {
+  var exp = expected
+  if (exp == "") { exp = value_str(value_field(node, "expected")) }
+  if (exp.startsWith("Map[") && exp.endsWith("]")) {
+    let kv = split_top(exp.slice(4, exp.length() - 1), ",")
+    return `map[${go_type(kv[0])}]${go_type(kv[1])}{}`
+  }
+  return "<<UNSUPPORTED-EXPR:maplit-unpinned>>"
+}
+
+// The `widen` coercion markers (docs/arithmetic.md): render the conversion the
+// reference makes visible, then dispatch the un-widened node.
+fn render_expr(node: Any, ctx: Ctx, expected: Str) -> Str {
+  let w = value_str(value_field(node, "widen"))
+  if (w == "Float") {
+    if (node_kind(node) == "lit") {
+      let lv = value_field(node, "value")
+      if (value_kind(lv) == "int") { return widen_float_lit(lv) }
+    }
+    return `float64(${render_inner(node, ctx, expected)})`
+  }
+  if (w == "Int") { return `int64(${render_inner(node, ctx, expected)})` }
+  return render_inner(node, ctx, expected)
+}
+
+// -------------------------------------------------------------- statements
+fn emit_stmts(nodes: List[Any], ctx: Ctx, indent: Int) -> Sout {
+  var lines = []
+  var c = ctx
+  var preceding = []
+  for (n of nodes) {
+    let r = v3_stmt(n, c, indent, preceding)
+    lines = lines.concat(r.lines)
+    c = r.ctx
+    preceding = preceding.push(n)
+  }
+  return { lines: lines, ctx: c }
+}
+
+// ------------------------------------------- the code-point scan (434 (c) two)
+// A `while (i < s.length())` loop whose index starts at 0 and only steps by a
+// trailing `i = i + 1` runs exactly once per code point of `s`, so it lowers to
+// `for _, r := range s` and each `s.charCodeAt(i)` / `charAt(i)` /
+// `codepoint_at(i)` inside it reads the rune in hand instead of walking the
+// string again. Mirrors `_v3_scan_shape` / `_go_v3_scan_read`.
+fn walk_nodes(node: Any) -> List[Any] {
+  var out = []
+  if (value_kind(node) == "record") { out = out.push(node) }
+  for (child of value_children(node)) { out = out.concat(walk_nodes(child)) }
+  return out
+}
+
+fn writes_to(name: Str, node: Any) -> List[Any] {
+  var out = []
+  for (n of walk_nodes(node)) {
+    let step = node_step(n)
+    if ((step == "let" || step == "assign") && value_str(value_field(n, "name")) == name) { out = out.push(n) }
+  }
+  return out
+}
+
+fn is_int_lit(node: Any, v: Int) -> Bool {
+  if (node_kind(node) != "lit") { return false }
+  let lv = value_field(node, "value")
+  return value_kind(lv) == "int" && value_int(lv) == v
+}
+
+// The name `x` for an argument-less `x.length()`, else "".
+fn len_receiver(node: Any) -> Str {
+  if (node_kind(node) != "builtin" || value_str(value_field(node, "method")) != "length") { return "" }
+  if (value_list(value_field(node, "args")).length() > 0) { return "" }
+  let target = value_field(node, "target")
+  if (node_kind(target) != "var") { return "" }
+  return value_str(value_field(target, "name"))
+}
+
+// Whether `body` holds a `continue` bound to its OWN loop (one inside a nested
+// loop binds to that loop instead).
+fn own_continue(body: List[Any]) -> Bool {
+  for (stmt of body) {
+    let step = node_step(stmt)
+    if (step == "continue") { return true }
+    if (step != "while" && step != "for") {
+      if (own_continue(value_list(value_field(stmt, "body")))) { return true }
+      if (own_continue(value_list(value_field(stmt, "then")))) { return true }
+      if (own_continue(value_list(value_field(stmt, "else")))) { return true }
+    }
+  }
+  return false
+}
+
+fn is_scan_read_method(method: Str) -> Bool {
+  return method == "charCodeAt" || method == "codepoint_at" || method == "charAt"
+}
+
+// `[text, index]` when `loop` is a code-point scan, else `[]`.
+fn scan_shape(loop: Any, preceding: List[Any], fn_body: List[Any]) -> List[Str] {
+  let cond = value_field(loop, "cond")
+  if (node_kind(cond) != "bin" || node_op(cond) != "<") { return [] }
+  let left = value_field(cond, "left")
+  if (node_kind(left) != "var") { return [] }
+  let index = value_str(value_field(left, "name"))
+  let body = value_list(value_field(loop, "body"))
+  // the bound: `s.length()` inline, or a local bound to it once
+  let right = value_field(cond, "right")
+  var text = len_receiver(right)
+  if (text == "" && node_kind(right) == "var") {
+    let writes = writes_to(value_str(value_field(right, "name")), fn_body)
+    if (writes.length() != 1 || node_step(writes[0]) != "let") { return [] }
+    text = len_receiver(value_field(writes[0], "value"))
+  }
+  if (text == "" || text == index) { return [] }
+  if (writes_to(text, fn_body).length() > 0) { return [] }
+  // `index` is 0 on entry: every earlier write is at this block's top level,
+  // and the last of them assigns the literal 0
+  var top = []
+  for (st of preceding) {
+    let step = node_step(st)
+    if ((step == "let" || step == "assign") && value_str(value_field(st, "name")) == index) { top = top.push(st) }
+  }
+  if (top.length() == 0 || top.length() != writes_to(index, preceding).length()) { return [] }
+  if (!is_int_lit(value_field(top[top.length() - 1], "value"), 0)) { return [] }
+  // the only write inside the loop is its trailing `index = index + 1`
+  if (body.length() == 0 || writes_to(index, body).length() != 1) { return [] }
+  let last = body[body.length() - 1]
+  let last_step = node_step(last)
+  if (!((last_step == "let" || last_step == "assign") && value_str(value_field(last, "name")) == index)) { return [] }
+  let step_value = value_field(last, "value")
+  if (node_kind(step_value) != "bin" || node_op(step_value) != "+") { return [] }
+  let step_left = value_field(step_value, "left")
+  if (node_kind(step_left) != "var" || value_str(value_field(step_left, "name")) != index) { return [] }
+  if (!is_int_lit(value_field(step_value, "right"), 1)) { return [] }
+  if (own_continue(body)) { return [] }
+  // something to gain: a code-point read of `text` at `index`
+  for (n of walk_nodes(body)) {
+    if (node_kind(n) == "builtin" && is_scan_read_method(value_str(value_field(n, "method")))) {
+      let target = value_field(n, "target")
+      let args = value_list(value_field(n, "args"))
+      if (node_kind(target) == "var" && value_str(value_field(target, "name")) == text
+          && args.length() == 1 && node_kind(args[0]) == "var"
+          && value_str(value_field(args[0], "name")) == index) { return [text, index] }
+    }
+  }
+  return []
+}
+
+// `_go_v3_scan_read`: the rune already in hand for a read inside a scan loop,
+// or "" when this read is not one.
+fn scan_read(node: Any, ctx: Ctx) -> Str {
+  if (ctx.sc.keys().length() == 0) { return "" }
+  let method = value_str(value_field(node, "method"))
+  if (!is_scan_read_method(method)) { return "" }
+  let target = value_field(node, "target")
+  let args = value_list(value_field(node, "args"))
+  if (node_kind(target) != "var" || args.length() != 1) { return "" }
+  if (node_kind(args[0]) != "var") { return "" }
+  let rune = map_get(ctx.sc, `${value_str(value_field(target, "name"))}|${value_str(value_field(args[0], "name"))}`)
+  if (rune == "") { return "" }
+  if (method == "charAt") { return `string(${rune})` }
+  return `int64(${rune})`
+}
+
+// `_go_v3_self_rebind`: a write the frontend proved uniquely owned (item 445)
+// lowers to Go's destructive form instead of the persistent helper's copy.
+// "" when the assignment does not qualify.
+fn self_rebind(node: Any, ctx: Ctx, name: Str) -> Str {
+  if (!value_bool(value_field(node, "unique"))) { return "" }
+  let value = value_field(node, "value")
+  if (node_kind(value) != "builtin") { return "" }
+  let method = value_str(value_field(value, "method"))
+  if (!(method == "push" || method == "set" || method == "remove")) { return "" }
+  if (value_str(value_field(value_field(value, "target"), "name")) != value_str(value_field(node, "name"))) { return "" }
+  var args = []
+  for (a of value_list(value_field(value, "args"))) { args = args.push(render_expr(a, ctx, "")) }
+  if (method == "push") { return `${name} = append(${name}, ${args[0]})` }
+  if (method == "set") { return `${name}[${args[0]}] = ${args[1]}` }
+  return `delete(${name}, ${args[0]})`
+}
+
+// `_go_v3_stmt`: one fn-body step -> its emitted (indented) lines and threaded
+// ctx. `t` is the assert receiver — the reference uses "t" in a fn body (there
+// is no such binding in scope, but the byte-check holds it to the reference).
+// Only the leftmost self-reference is permitted: all appended pieces, loop
+// conditions and nested statements must remain independent of the accumulator.
+fn concat_pieces(node: Any, name: Str) -> List[Any] {
+  if (node_kind(node) == "bin" && node_op(node) == "+" &&
+      node_operands(node) != "Int" && node_operands(node) != "Int32" &&
+      node_operands(node) != "Float") {
+    let left = value_field(node, "left")
+    let right = value_field(node, "right")
+    if (node_kind(left) == "var" && value_str(value_field(left, "name")) == name) { return [right] }
+    let pieces = concat_pieces(left, name)
+    if (pieces.length() > 0) { return pieces.push(right) }
+  }
+  if (node_kind(node) == "builtin" && value_str(value_field(node, "method")) == "concat") {
+    let args = value_list(value_field(node, "args"))
+    if (args.length() == 1) {
+      let target = value_field(node, "target")
+      if (node_kind(target) == "var" && value_str(value_field(target, "name")) == name) { return args }
+      let pieces = concat_pieces(target, name)
+      if (pieces.length() > 0) { return pieces.concat(args) }
+    }
+  }
+  return []
+}
+
+fn builder_candidates(node: Any, ctx: Ctx) -> List[Str] {
+  var names = []
+  let name = value_str(value_field(node, "name"))
+  if (value_str(value_field(node, "step")) == "assign" && map_get(ctx.vt, name) == "Str" &&
+      concat_pieces(value_field(node, "value"), name).length() > 0) { names = names.push(name) }
+  for (child of value_children(node)) { names = names.concat(builder_candidates(child, ctx)) }
+  return names
+}
+
+fn builder_safe(node: Any, name: Str) -> Bool {
+  let step = value_str(value_field(node, "step"))
+  if (step == "return") { return false }
+  if (node_kind(node) == "var" && value_str(value_field(node, "name")) == name) { return false }
+  if ((step == "let" || step == "assign") && value_str(value_field(node, "name")) == name) {
+    if (step == "let") { return false }
+    let pieces = concat_pieces(value_field(node, "value"), name)
+    if (pieces.length() == 0) { return false }
+    for (piece of pieces) { if (!builder_safe(piece, name)) { return false } }
+    return true
+  }
+  for (child of value_children(node)) { if (!builder_safe(child, name)) { return false } }
+  return true
+}
+
+fn with_builders(ctx: Ctx, builders: Map[Str, Str], seq: Int) -> Ctx {
+  return {
+    vt: ctx.vt, fr: ctx.fr, er: ctx.er, signatures: ctx.signatures,
+    ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rf: ctx.rf, variants: ctx.variants,
+    tnames: ctx.tnames, rt: ctx.rt,
+    builders: builders, builder_seq: seq,
+    reserved: ctx.reserved, strings_alias: ctx.strings_alias,
+    sc: ctx.sc, scan_seq: ctx.scan_seq, body: ctx.body, tn: ctx.tn,
+    fh: ctx.fh
+  }
+}
+
+// A generated builder name joins the reserved set, as the reference's
+// `reserved_idents.add(builder)` does; the set outlives the function it was
+// built for, which is what an in-file test's builders see (`emit_tests`).
+fn with_reserved(ctx: Ctx, reserved: Map[Str, Str]) -> Ctx {
+  return {
+    vt: ctx.vt, fr: ctx.fr, er: ctx.er, signatures: ctx.signatures,
+    ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rf: ctx.rf, variants: ctx.variants,
+    tnames: ctx.tnames, rt: ctx.rt,
+    builders: ctx.builders, builder_seq: ctx.builder_seq,
+    reserved: reserved, strings_alias: ctx.strings_alias,
+    sc: ctx.sc, scan_seq: ctx.scan_seq, body: ctx.body, tn: ctx.tn,
+    fh: ctx.fh
+  }
+}
+
+fn open_builders(node: Any, ctx: Ctx, indent: Int) -> Sout {
+  var c = ctx
+  var out = []
+  for (name of builder_candidates(value_field(node, "body"), ctx)) {
+    if (map_get(c.builders, name) == "" && builder_safe(node, name)) {
+      var seq = c.builder_seq
+      var builder = `_revlSB${seq}`
+      while (map_get(c.reserved, builder) != "") {
+        seq = seq + 1
+        builder = `_revlSB${seq}`
+      }
+      out = out.push(line(indent, `var ${builder} ${c.strings_alias}.Builder`))
+      out = out.push(line(indent, `${builder}.WriteString(${v3_ident(name)})`))
+      c = with_builders(c, c.builders.set(name, builder), seq + 1)
+      c = with_reserved(c, c.reserved.set(builder, "1"))
+    }
+  }
+  return { lines: out, ctx: c }
+}
+
+fn close_builders(before: Ctx, current: Ctx, indent: Int) -> Sout {
+  var out = []
+  var seq = before.builder_seq
+  while (seq < current.builder_seq) {
+    let builder = `_revlSB${seq}`
+    for (name of current.builders.keys()) {
+      if (map_get(current.builders, name) == builder) {
+        out = out.push(line(indent, `${v3_ident(name)} = ${builder}.String()`))
+      }
+    }
+    seq = seq + 1
+  }
+  return { lines: out, ctx: with_builders(current, before.builders, current.builder_seq) }
+}
+
+fn v3_stmt(node: Any, ctx: Ctx, indent: Int, preceding: List[Any]) -> Sout {
+  let step = node_step(node)
+  if (step == "let") {
+    let raw = value_str(value_field(node, "name"))
+    let nm = v3_ident(raw)
+    let valnode = value_field(node, "value")
+    let inferred = flow_typed(valnode, infer_type(valnode, ctx), map_get(ctx.fh, raw))
+    var nctx = ctx
+    if (inferred != "") { nctx = set_vt(ctx, raw, inferred) }
+    let value = render_expr(valnode, ctx, inferred)
+    var got = ""
+    if (inferred != "") { got = go_type(inferred) }
+    var out = []
+    // A variant / Opt / Result binding holds its declared (interface or
+    // two-value struct) type, not the concrete case `:=` would infer (item 280).
+    let pinned = inferred != "" && is_interface(inferred, ctx)
+    if (got == "int64" || got == "float64" || pinned) {
+      out = out.push(line(indent, `var ${nm} ${got} = ${value}`))
+    } else {
+      out = out.push(line(indent, `${nm} := ${value}`))
+    }
+    out = out.push(line(indent, `_ = ${nm}`))
+    return { lines: out, ctx: nctx }
+  }
+  if (step == "assign") {
+    let raw = value_str(value_field(node, "name"))
+    let nm = v3_ident(raw)
+    let builder = map_get(ctx.builders, raw)
+    if (builder != "") {
+      let pieces = concat_pieces(value_field(node, "value"), raw)
+      if (pieces.length() > 0) {
+        var out = []
+        for (piece of pieces) { out = out.push(line(indent, `${builder}.WriteString(${render_expr(piece, ctx, "")})`)) }
+        return { lines: out, ctx: ctx }
+      }
+    }
+    let destructive = self_rebind(node, ctx, nm)
+    if (destructive != "") { return { lines: [line(indent, destructive)], ctx: ctx } }
+    let value = render_expr(value_field(node, "value"), ctx, map_get(ctx.vt, raw))
+    return { lines: [line(indent, `${nm} = ${value}`)], ctx: ctx }
+  }
+  if (step == "return") {
+    let e = value_field(node, "expr")
+    if (value_is_null(e)) { return { lines: [line(indent, "return")], ctx: ctx } }
+    return { lines: [line(indent, `return ${render_expr(e, ctx, ctx.rt)}`)], ctx: ctx }
+  }
+  if (step == "if") {
+    var out = [line(indent, `if ${render_expr(value_field(node, "cond"), ctx, "")} {`)]
+    let thenR = emit_stmts(value_list(value_field(node, "then")), ctx, indent + 1)
+    out = out.concat(thenR.lines)
+    var c = thenR.ctx
+    let els = value_list(value_field(node, "else"))
+    if (els.length() > 0) {
+      out = out.push(line(indent, "} else {"))
+      let elseR = emit_stmts(els, c, indent + 1)
+      out = out.concat(elseR.lines)
+      c = elseR.ctx
+    }
+    out = out.push(line(indent, "}"))
+    return { lines: out, ctx: c }
+  }
+  if (step == "while") {
+    let opened = open_builders(node, ctx, indent)
+    let scan = scan_shape(node, preceding, ctx.body)
+    if (scan.length() == 0) {
+      var out = opened.lines.push(line(indent, `for ${render_expr(value_field(node, "cond"), opened.ctx, "")} {`))
+      let bodyR = emit_stmts(value_list(value_field(node, "body")), opened.ctx, indent + 1)
+      out = out.concat(bodyR.lines)
+      out = out.push(line(indent, "}"))
+      let closed = close_builders(ctx, bodyR.ctx, indent)
+      return { lines: out.concat(closed.lines), ctx: closed.ctx }
+    }
+    // item 434 (c) stage two: `range` is the same loop and hands the rune over.
+    let key = `${scan[0]}|${scan[1]}`
+    let rune = `_revlR${opened.ctx.scan_seq}`
+    let inner = with_scan(opened.ctx, opened.ctx.sc.set(key, rune), opened.ctx.scan_seq + 1)
+    var out = opened.lines.push(line(indent, `for _, ${rune} := range ${v3_ident(scan[0])} {`))
+    out = out.push(line(indent + 1, `_ = ${rune}`))
+    let bodyR = emit_stmts(value_list(value_field(node, "body")), inner, indent + 1)
+    out = out.concat(bodyR.lines)
+    out = out.push(line(indent, "}"))
+    let closed = close_builders(ctx, bodyR.ctx, indent)
+    let done = with_scan(closed.ctx, closed.ctx.sc.remove(key), closed.ctx.scan_seq)
+    return { lines: out.concat(closed.lines), ctx: done }
+  }
+  if (step == "for") {
+    let raw = value_str(value_field(node, "bind"))
+    let bind = v3_ident(raw)
+    let itnode = value_field(node, "iterable")
+    let itt = infer_type(itnode, ctx)
+    var fctx = ctx
+    if (itt.startsWith("List[") && itt.endsWith("]")) {
+      fctx = set_vt(ctx, raw, itt.slice(5, itt.length() - 1))
+    }
+    let opened = open_builders(node, fctx, indent)
+    var out = opened.lines.push(line(indent, `for _, ${bind} := range ${render_expr(itnode, opened.ctx, "")} {`))
+    out = out.push(line(indent + 1, `_ = ${bind}`))
+    let bodyR = emit_stmts(value_list(value_field(node, "body")), opened.ctx, indent + 1)
+    out = out.concat(bodyR.lines)
+    out = out.push(line(indent, "}"))
+    let closed = close_builders(fctx, bodyR.ctx, indent)
+    return { lines: out.concat(closed.lines), ctx: closed.ctx }
+  }
+  if (step == "expr") {
+    return { lines: [line(indent, `_ = ${render_expr(value_field(node, "expr"), ctx, "")}`)], ctx: ctx }
+  }
+  if (step == "assert") {
+    let expr = render_expr(value_field(node, "expr"), ctx, "")
+    var out = [line(indent, `if !(${expr}) {`)]
+    if (ctx.tn != "") {
+      // inside an in-file `test`: the `*testing.T` receiver fails the case
+      out = out.push(line(indent + 1, `${ctx.tn}.Fatalf("assertion failed: %s", ${go_string(strip_marks(expr))})`))
+    } else {
+      // issue #1356: an assert in an ORDINARY `fn` body, where no
+      // `*testing.T` is in scope, is a runtime fault: go's is `panic`.
+      out = out.push(line(indent + 1, `panic("assertion failed: " + ${go_string(strip_marks(expr))})`))
+    }
+    out = out.push(line(indent, "}"))
+    return { lines: out, ctx: ctx }
+  }
+  // item 379 / 391: bare loop control -> the host keyword (frame-neutral).
+  if (step == "break") { return { lines: [line(indent, "break")], ctx: ctx } }
+  if (step == "continue") { return { lines: [line(indent, "continue")], ctx: ctx } }
+  return { lines: [line(indent, `<<UNSUPPORTED-STEP:${step}>>`)], ctx: ctx }
+}
+
+// `_emit_v3_go_types`: user `type` decls as Go items. A record is a `struct`
+// whose fields are EXPORTED + json-tagged (item 390: `_v3_field_ident` = camel,
+// plus `json:"<source>"` — `encoding/json` ignores unexported fields, so this is
+// what makes `json_stringify(record)` non-empty and byte-identical to py/ts); a
+// variant is a sealed interface (`isX()` seal) plus one struct per case (nullary
+// `struct{}`, payload `struct { Value T }`) with the seal method. Each decl is
+// followed by a blank line, exactly as the reference does.
+fn emit_v3_types(types: Any) -> List[Str] {
+  var out = []
+  for (name of value_keys(types)) {
+    let spec = value_field(types, name)
+    let kind = value_str(value_field(spec, "kind"))
+    let gname = v3_ident(name)
+    if (kind == "record") {
+      out = out.push(`type ${gname} struct {`)
+      let fields = value_field(spec, "fields")
+      for (field of value_keys(fields)) {
+        out = out.push(line(1, `${v3_field_ident(field)} ${go_type(value_field(fields, field))} ${json_tag(field)}`))
+      }
+      out = out.push("}")
+      out = out.push("")
+    } else {
+      if (kind == "variant") {
+        let marker = `is${gname}`
+        out = out.push(`// ${gname} is a sealed sum type (revl ADT); ${marker}() seals it.`)
+        out = out.push(`type ${gname} interface { ${marker}() }`)
+        for (case of value_list(value_field(spec, "cases"))) {
+          let cname = value_str(value_field(case, "name"))
+          let cstruct = `${gname}${cname}`
+          let payload = value_field(case, "payload")
+          if (value_is_null(payload)) { out = out.push(`type ${cstruct} struct{}`) }
+          else { out = out.push(`type ${cstruct} struct { Value ${go_type(payload)} }`) }
+          out = out.push(`func (${cstruct}) ${marker}() {}`)
+        }
+        out = out.push("")
+      } else {
+        out = out.push(`<<UNSUPPORTED-TYPE:${kind}>>`)
+      }
+    }
+  }
+  return out
+}
+
+// `_emit_v3_go_externs`: each extern as a Go `func` carrying its verbatim `@go`
+// body, blank-line separated, in declaration order and BEFORE the free functions.
+//
+// item 421 F6 (ported per item 429(d)): an extern whose DECLARED return was
+// `Secret[T]` is the ORIGIN end of a declared marking — where a confidential
+// value enters the value world. `taint.py` strips the `Secret[...]` qualifier
+// before lowering, so `secret_return` is the only surviving record of it. The
+// verbatim `@go` body owns its own `return` statements, so it moves into an
+// inner `revlSecret_<name>` and the DECLARED name becomes a one-line
+// `revlSecretResult(..)` wrapper: every call site is covered without the body
+// being rewritten. Emitted only for an extern that carries the stamp, so every
+// other extern is byte-identical to the plain form.
+//
+// The `config` schema (item 378 Stage 5) and the `//revl:import` hoist are
+// ported: a config extern binds `_revl_config` as its first body line, with the
+// scaffold emitted once ahead of the externs, and a directive line leaves the
+// body for the module import block. Two shapes keep a loud marker: an extern
+// with no `@go` body (the reference RAISES, a portability boundary), and a body
+// carrying a line break Python `splitlines()` honours that a plain
+// `split("\n")` does not, since the two would cut the body differently.
+// Every code point Python `str.splitlines()` breaks on that a plain
+// `split("\n")` does not: VT, FF, CR, the three file/group/record separators,
+// NEL, and the two Unicode line/paragraph separators.
+fn is_extra_linebreak(code: Int) -> Bool {
+  if (code >= 11 && code <= 13) { return true }
+  if (code >= 28 && code <= 30) { return true }
+  if (code == 133) { return true }
+  return code == 8232 || code == 8233
+}
+
+fn has_extra_linebreak(s: Str) -> Bool {
+  let n = s.length()
+  var i = 0
+  while (i < n) {
+    if (is_extra_linebreak(s.charCodeAt(i))) { return true }
+    i = i + 1
+  }
+  return false
+}
+
+// The reference's `_go_literal`, over a config default. The frontend only
+// admits a scalar literal there (a `null` default marks the field required and
+// never reaches this), so the reference's list and record arms, which serve its
+// component tier, are not mirrored and answer by name.
+fn go_literal(v: Any) -> Str {
+  let shape = value_kind(v)
+  if (shape == "bool") { return value_bool(v) ? "true" : "false" }
+  if (shape == "str") { return go_string(v) }
+  if (shape == "int" || shape == "float") { return num_str(v) }
+  return `<<UNSUPPORTED-CONFIG-DEFAULT:${shape}>>`
+}
+
+fn has_config(ext: Any) -> Bool { return value_list(value_field(ext, "config")).length() > 0 }
+
+// `_go_extern_config_bind`: the `_revl_config := ..` first body line of a
+// config extern, from its schema's required names and defaults.
+fn config_bind(ext: Any) -> Str {
+  var required = []
+  var defaults = []
+  for (f of value_list(value_field(ext, "config"))) {
+    let fname = value_str(value_field(f, "name"))
+    let d = value_field(f, "default")
+    if (value_is_null(d)) { required = required.push(go_string(fname)) }
+    else { defaults = defaults.push(`${go_string(fname)}: ${go_literal(d)}`) }
+  }
+  let name = go_string(value_str(value_field(ext, "name")))
+  return `_revl_config := _revlExternConfig(${name}, []string{${required.join(", ")}}, map[string]any{${defaults.join(", ")}})`
+}
+
+// Only ever handed one character of a line.
+fn is_ws_char(ch: Str) -> Bool {
+  let c = ch.charCodeAt(0)
+  return c == 32 || (c >= 9 && c <= 13)
+}
+
+// `_GO_IMPORT_DIRECTIVE` (`^\s*//revl:import\s+(.+?)\s*$`): `[path]` for a
+// directive line (the path may be empty, and the line is dropped either way),
+// `[]` for an ordinary body line.
+fn import_directive(l: Str) -> List[Str] {
+  var a = 0
+  while (a < l.length() && is_ws_char(l.charAt(a))) { a = a + 1 }
+  let t = l.slice(a, l.length())
+  if (!t.startsWith("//revl:import")) { return [] }
+  let rest = t.slice(13, t.length())
+  if (rest.length() < 2 || !is_ws_char(rest.charAt(0))) { return [] }
+  var path = trim(rest)
+  while (path.startsWith("\"")) { path = path.slice(1, path.length()) }
+  while (path.endsWith("\"")) { path = path.slice(0, path.length() - 1) }
+  return [path]
+}
+
+type Eout = { lines: List[Str], imports: List[Str] }
+
+fn emit_externs(externs: List[Any]) -> Eout {
+  var out = []
+  var imports = []
+  var any_config = false
+  for (ext of externs) { if (has_config(ext)) { any_config = true } }
+  if (any_config) { out = out.concat(extern_config_scaffold()) }
+  for (ext of externs) {
+    let raw_name = value_str(value_field(ext, "name"))
+    var name = v3_ident(raw_name)
+    var ps = []
+    var args = []
+    for (p of value_list(value_field(ext, "params"))) {
+      let pname = v3_ident(value_str(value_field(p, "name")))
+      ps = ps.push(`${pname} ${go_type(value_field(p, "type"))}`)
+      args = args.push(pname)
+    }
+    let params = ps.join(", ")
+    let arg_list = args.join(", ")
+    let ret = go_type(value_field(ext, "returns"))
+    var sigret = ""
+    if (ret != "") { sigret = " ".concat(ret) }
+    let bodies = value_field(ext, "bodies")
+    let go_body = value_field(bodies, "go")
+    if (value_is_null(go_body)) {
+      out = out.push(`<<EXTERN-NO-GO-BODY:${name}>>`)
+      out = out.push("")
+    } else {
+      let body = trim(value_str(go_body))
+      if (has_extra_linebreak(body)) {
+        out = out.push(`<<UNSUPPORTED-EXTERN-linebreak:${name}>>`)
+        out = out.push("")
+      } else {
+        // The wrapper needs a result to hand back, so a `Unit` extern takes no
+        // marking (the reference gates on `ret` too).
+        if (value_bool(value_field(ext, "secret_return")) && ret != "") {
+          out = out.push(`func ${name}(${params})${sigret} {`)
+          out = out.push(line(1, `return revlSecretResult(revlSecret_${name}(${arg_list}))`))
+          out = out.push("}")
+          out = out.push("")
+          name = "revlSecret_".concat(name)
+        }
+        out = out.push(`func ${name}(${params})${sigret} {`)
+        if (has_config(ext)) { out = out.push(line(1, config_bind(ext))) }
+        var kept = []
+        if (body != "") {
+          for (bl of body.split(newline())) {
+            let directive = import_directive(bl)
+            if (directive.length() == 0) { kept = kept.push(bl) }
+            else { if (directive[0] != "") { imports = imports.push(directive[0]) } }
+          }
+        }
+        if (kept.length() == 0) {
+          out = out.push(line(1, "// (empty extern body)"))
+        } else {
+          for (bl of kept) { out = out.push(tab().concat(rstrip(bl))) }
+        }
+        out = out.push("}")
+        out = out.push("")
+      }
+    }
+  }
+  return { lines: out, imports: imports }
+}
+
+// `_emit_v3_go_functions`: each module fn as a Go `func`, blank-line separated.
+fn emit_functions(functions: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t: TypeTables, signatures: List[Any], strings_alias: Str) -> Fout {
+  var out = []
+  var uses_strings = false
+  var last_reserved: Map[Str, Str] = Map.empty()
+  for (fnode of functions) {
+    let name = v3_ident(value_str(value_field(fnode, "name")))
+    let params = value_list(value_field(fnode, "params"))
+    var vt: Map[Str, Str] = Map.empty()
+    for (p of params) { vt = vt.set(value_str(value_field(p, "name")), value_str(value_field(p, "type"))) }
+    let rt = value_str(value_field(fnode, "returns"))
+    let reserved = collect_reserved(fnode, Map.empty())
+    let body = value_list(value_field(fnode, "body"))
+    let ctx = {
+      vt: vt, fr: fr, er: er, signatures: signatures,
+      ca: t.ca, cp: t.cp, rbf: t.rbf, rf: t.rf, variants: t.variants, tnames: t.tnames,
+      rt: rt, builders: Map.empty(), builder_seq: 0,
+      reserved: reserved, strings_alias: strings_alias,
+      sc: Map.empty(), scan_seq: 0, body: body, tn: "",
+      fh: flow_hints(body, rt, signatures)
+    }
+    var ps = []
+    for (p of params) {
+      ps = ps.push(`${v3_ident(value_str(value_field(p, "name")))} ${go_type(value_field(p, "type"))}`)
+    }
+    let ret = go_type(value_field(fnode, "returns"))
+    var sigret = ""
+    if (ret != "") { sigret = " ".concat(ret) }
+    out = out.push(`func ${name}(${ps.join(", ")})${sigret} {`)
+    let r = emit_stmts(body, ctx, 1)
+    if (r.ctx.builder_seq > 0) { uses_strings = true }
+    last_reserved = r.ctx.reserved
+    out = out.concat(r.lines)
+    out = out.push("}")
+    out = out.push("")
+  }
+  return { lines: out, uses_strings: uses_strings, reserved: last_reserved }
+}
+
+// `_go_v3_test_name`: `Test` + each alphanumeric run of the test's name with
+// its first character upper-cased, numbered on a clash.
+fn test_name(name: Str, used: List[Str]) -> Str {
+  var base = "Test"
+  var part = ""
+  var i = 0
+  while (i <= name.length()) {
+    let ch = i < name.length() ? name.charAt(i) : ""
+    if (ch != "" && is_alnum_ascii(ch)) { part = part.concat(ch) }
+    else {
+      if (part != "") { base = base.concat(upper_first(part)) }
+      part = ""
+    }
+    i = i + 1
+  }
+  if (base == "Test") { base = "TestCase" }
+  var candidate = base
+  var n = 1
+  while (list_contains(used, candidate)) {
+    n = n + 1
+    candidate = `${base}${n}`
+  }
+  return candidate
+}
+
+fn is_alnum_ascii(ch: Str) -> Bool {
+  let c = ch.charCodeAt(0)
+  return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+}
+
+fn upper_first(part: Str) -> Str {
+  let c = part.charCodeAt(0)
+  if (c >= 97 && c <= 122) {
+    return "ABCDEFGHIJKLMNOPQRSTUVWXYZ".charAt(c - 97).concat(part.slice(1, part.length()))
+  }
+  return part
+}
+
+// `_emit_v3_go_tests`: each in-file `test` as a `func TestX(revlT *testing.T)`,
+// whose asserts fail through the receiver. The ctx carries no parameters and
+// no return type; the reserved names and the strings alias are the ones the
+// last function left behind, exactly as the reference's shared ctx does.
+fn emit_tests(tests: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t: TypeTables, signatures: List[Any], strings_alias: Str, reserved: Map[Str, Str]) -> Fout {
+  var out = []
+  var used = []
+  var uses_strings = false
+  var res = reserved
+  for (tcase of tests) {
+    let tname = test_name(value_str(value_field(tcase, "name")), used)
+    used = used.push(tname)
+    let body = value_list(value_field(tcase, "body"))
+    let ctx = {
+      vt: Map.empty(), fr: fr, er: er, signatures: signatures,
+      ca: t.ca, cp: t.cp, rbf: t.rbf, rf: t.rf, variants: t.variants, tnames: t.tnames,
+      rt: "", builders: Map.empty(), builder_seq: 0,
+      reserved: res, strings_alias: strings_alias,
+      sc: Map.empty(), scan_seq: 0, body: body, tn: "revlT",
+      fh: flow_hints(body, "", signatures)
+    }
+    // `revlT` (not `t`) so a user binding named `t` can't shadow it.
+    out = out.push(`func ${tname}(revlT *testing.T) {`)
+    let r = emit_stmts(body, ctx, 1)
+    if (r.ctx.builder_seq > 0) { uses_strings = true }
+    res = r.ctx.reserved
+    out = out.concat(r.lines)
+    out = out.push("}")
+    out = out.push("")
+  }
+  return { lines: out, uses_strings: uses_strings, reserved: res }
+}
+
+// ------------------------------------------------------------- feature flags
+// Which runtime preambles the pure path prepends is a deterministic function of
+// the IR: the reference sets each flag while RENDERING a node, and every node in
+// a function body (arrow bodies included) is rendered, so a structural pass over
+// the IR sees exactly the same set. `_go_string`-escaping and type spellings set
+// no flag; only these do, in-slice. The `fmt`/`strconv` IMPORT flags are NOT
+// here: since item 434 (f) an interpolation picks between them from the operand
+// types it infers as it renders, so `emit_go_src` reads them off the rendered
+// lines instead of re-deriving that inference structurally.
+type Flags = { fdiv: Bool, ovf: Bool, ovf32: Bool }
+
+fn flags_or(a: Flags, b: Flags) -> Flags {
+  return { fdiv: a.fdiv || b.fdiv, ovf: a.ovf || b.ovf, ovf32: a.ovf32 || b.ovf32 }
+}
+
+fn flag_walk(node: Any, acc: Flags) -> Flags {
+  var f = acc
+  if (value_kind(node) == "record") {
+    let k = node_kind(node)
+    if (k == "bin") {
+      let op = node_op(node)
+      let opnd = node_operands(node)
+      if (op == "/") { f = { fdiv: true, ovf: f.ovf, ovf32: f.ovf32 } }
+      if (is_addsubmul(op) && opnd == "Int") { f = { fdiv: f.fdiv, ovf: true, ovf32: f.ovf32 } }
+      if (is_addsubmul(op) && opnd == "Int32") { f = { fdiv: f.fdiv, ovf: f.ovf, ovf32: true } }
+    }
+    if (k == "un" && node_op(node) == "-") {
+      let opnd = node_operands(node)
+      if (opnd == "Int") { f = { fdiv: f.fdiv, ovf: true, ovf32: f.ovf32 } }
+      if (opnd == "Int32") { f = { fdiv: f.fdiv, ovf: f.ovf, ovf32: true } }
+    }
+  }
+  for (c of value_children(node)) { f = flag_walk(c, f) }
+  return f
+}
+
+fn collect_flags(functions: List[Any]) -> Flags {
+  var f = { fdiv: false, ovf: false, ovf32: false }
+  for (fnode of functions) { f = flag_walk(fnode, f) }
+  return f
+}
+
+// ------------------------------------------------------------- runtime preambles
+// The trapping Int arithmetic trio (docs/arithmetic.md): Go has no checked
+// arithmetic, so the helpers detect overflow. Built line-by-line to match the
+// reference's `out.append(...)` sequence byte-for-byte.
+fn overflow_preamble() -> List[Str] {
+  var o = []
+  o = o.push("func revlAdd(a, b int64) int64 {")
+  o = o.push(line(1, "s := a + b"))
+  o = o.push(line(1, "if (a > 0 && b > 0 && s < 0) || (a < 0 && b < 0 && s >= 0) {"))
+  o = o.push(line(2, `panic("revl: Int overflow")`))
+  o = o.push(line(1, "}"))
+  o = o.push(line(1, "return s"))
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("func revlSub(a, b int64) int64 {")
+  o = o.push(line(1, "d := a - b"))
+  o = o.push(line(1, "if (b < 0 && d < a) || (b > 0 && d > a) {"))
+  o = o.push(line(2, `panic("revl: Int overflow")`))
+  o = o.push(line(1, "}"))
+  o = o.push(line(1, "return d"))
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("func revlMul(a, b int64) int64 {")
+  o = o.push(line(1, "if a == 0 || b == 0 {"))
+  o = o.push(line(2, "return 0"))
+  o = o.push(line(1, "}"))
+  // `p/b != a` cannot see Int.MIN * -1: the product wraps back to Int.MIN and
+  // Go DEFINES `Int.MIN / -1` as Int.MIN, so the readback equals `a`.
+  o = o.push(line(1, "if a == (-9223372036854775807 - 1) && b == -1 {"))
+  o = o.push(line(2, `panic("revl: Int overflow")`))
+  o = o.push(line(1, "}"))
+  o = o.push(line(1, "p := a * b"))
+  o = o.push(line(1, "if p/b != a {"))
+  o = o.push(line(2, `panic("revl: Int overflow")`))
+  o = o.push(line(1, "}"))
+  o = o.push(line(1, "return p"))
+  o = o.push("}")
+  o = o.push("")
+  return o
+}
+
+// The Int32 trap block: each op is computed in int64 and range-checked before
+// narrowing (Go's int32 wraps). Mirrors the reference append sequence.
+fn overflow32_preamble() -> List[Str] {
+  var o = []
+  o = o.push("func revlAddI32(a, b int32) int32 { return revlToI32(int64(a) + int64(b)) }")
+  o = o.push("func revlSubI32(a, b int32) int32 { return revlToI32(int64(a) - int64(b)) }")
+  o = o.push("func revlMulI32(a, b int32) int32 { return revlToI32(int64(a) * int64(b)) }")
+  o = o.push("func revlToI32(v int64) int32 {")
+  o = o.push(line(1, "if v < -2147483648 || v > 2147483647 {"))
+  o = o.push(line(2, `panic("revl: Int32 overflow")`))
+  o = o.push(line(1, "}"))
+  o = o.push(line(1, "return int32(v)"))
+  o = o.push("}")
+  o = o.push("")
+  return o
+}
+
+// ------------------------------------------- the stdlib / Opt / Result / Map
+// The reference's preamble constants, line for line (a constant appended as one
+// element of the module's line list joins exactly as its own lines do). The two
+// that spell `strings.` take the module's strings alias at assembly, by the same
+// whole-text replace the reference makes.
+fn stdlib_preamble(alias: Str) -> List[Str] {
+  var out = []
+  for (l of stdlib_preamble_raw()) { out = out.push(replace_all(l, "strings.", alias.concat("."))) }
+  return out
+}
+
+fn ftoa_helper(alias: Str) -> List[Str] {
+  var out = []
+  for (l of ftoa_helper_raw()) { out = out.push(replace_all(l, "strings.", alias.concat("."))) }
+  return out
+}
+
+// The integer-division helpers (`div_trunc`/`div_floor`/`div_euclid`/`mod` and
+// the total forms built on them), in the reference's append order.
+fn int_arith_preamble() -> List[Str] {
+  return [
+    "func revlDivTrunc(a, b int64) int64 {",
+    line(1, "if a == (-9223372036854775807 - 1) && b == -1 {"),
+    line(2, "panic(\"revl: Int overflow\")"),
+    line(1, "}"),
+    line(1, "return a / b"),
+    "}",
+    "",
+    "func revlDivFloor(a, b int64) int64 {",
+    line(1, "if a == (-9223372036854775807 - 1) && b == -1 {"),
+    line(2, "panic(\"revl: Int overflow\")"),
+    line(1, "}"),
+    line(1, "q := a / b"),
+    line(1, "if a%b != 0 && ((a < 0) != (b < 0)) {"),
+    line(2, "q--"),
+    line(1, "}"),
+    line(1, "return q"),
+    "}",
+    "",
+    "func revlDivEuclid(a, b int64) int64 {",
+    line(1, "q := revlDivTrunc(a, b)"),
+    line(1, "if a%b < 0 {"),
+    line(2, "if b > 0 {"),
+    line(3, "q--"),
+    line(2, "} else {"),
+    line(3, "q++"),
+    line(2, "}"),
+    line(1, "}"),
+    line(1, "return q"),
+    "}",
+    "",
+    "func revlMod(a, b int64) int64 {",
+    line(1, "m := b"),
+    line(1, "if m < 0 {"),
+    line(2, "m = -m"),
+    line(1, "}"),
+    line(1, "r := a % m"),
+    line(1, "if r < 0 {"),
+    line(2, "r += m"),
+    line(1, "}"),
+    line(1, "return r"),
+    "}",
+    ""
+  ]
+}
+
+// `_V3_OPT_PREAMBLE`
+fn opt_preamble() -> List[Str] {
+  return [
+    "// ---- built-in Opt as a two-value struct (item 434 (d)) ----------------",
+    "// A present-flag + value struct, not a sealed interface: a Some carrying a",
+    "// non-pointer payload no longer heap-boxes to satisfy an interface, so an Opt",
+    "// that escapes a function or lands in a collection costs no allocation. `Ok`",
+    "// discriminates; `None` is the zero value (Ok == false), matching the (T, bool)",
+    "// return shape the component (v1/v2) tier already uses.",
+    "type RevlOpt[T any] struct {",
+    line(1, "Value T"),
+    line(1, "Ok    bool"),
+    "}",
+    "",
+    "func revlOptMap[A any, B any](o RevlOpt[A], f func(A) B) RevlOpt[B] {",
+    line(1, "if o.Ok {"),
+    line(2, "return RevlOpt[B]{Value: f(o.Value), Ok: true}"),
+    line(1, "}"),
+    line(1, "return RevlOpt[B]{}"),
+    "}",
+    "",
+    "func revlOptOr[T any](o RevlOpt[T], d T) T {",
+    line(1, "if o.Ok {"),
+    line(2, "return o.Value"),
+    line(1, "}"),
+    line(1, "return d"),
+    "}",
+    ""
+  ]
+}
+
+// `_V3_PARSE_INT_HELPER`
+fn parse_int_helper() -> List[Str] {
+  return [
+    "// ---- Str.to_int (FR-9, docs/stdlib-2.0.md §Str.to_int) ----------------",
+    "func revlParseInt(s string) RevlOpt[int64] {",
+    line(1, "if s == \"\" {"),
+    line(2, "return RevlOpt[int64]{}"),
+    line(1, "}"),
+    line(1, "neg := false"),
+    line(1, "i := 0"),
+    line(1, "if s[0] == '-' {"),
+    line(2, "neg = true"),
+    line(2, "i = 1"),
+    line(2, "if len(s) == 1 {"),
+    line(3, "return RevlOpt[int64]{}"),
+    line(2, "}"),
+    line(1, "}"),
+    line(1, "const lim = uint64(9223372036854775808) // Int.MAX + 1"),
+    line(1, "var n uint64"),
+    line(1, "for ; i < len(s); i++ {"),
+    line(2, "c := s[i]"),
+    line(2, "if c < '0' || c > '9' {"),
+    line(3, "return RevlOpt[int64]{}"),
+    line(2, "}"),
+    line(2, "d := uint64(c - '0')"),
+    line(2, "if n > (lim-d)/10 {"),
+    line(3, "return RevlOpt[int64]{}"),
+    line(2, "}"),
+    line(2, "n = n*10 + d"),
+    line(1, "}"),
+    line(1, "if neg {"),
+    line(2, "if n == lim {"),
+    line(3, "return RevlOpt[int64]{Value: -9223372036854775807 - 1, Ok: true}"),
+    line(2, "}"),
+    line(2, "return RevlOpt[int64]{Value: -int64(n), Ok: true}"),
+    line(1, "}"),
+    line(1, "if n == lim {"),
+    line(2, "return RevlOpt[int64]{}"),
+    line(1, "}"),
+    line(1, "return RevlOpt[int64]{Value: int64(n), Ok: true}"),
+    "}",
+    ""
+  ]
+}
+
+// `_V3_RESULT_PREAMBLE`
+fn result_preamble() -> List[Str] {
+  return [
+    "// ---- built-in Result as a two-value struct (item 434 (d)) -------------",
+    "// An Ok/Err-flag + two payload struct, not a sealed interface: an Ok or Err",
+    "// carrying a non-pointer payload no longer heap-boxes to satisfy an interface,",
+    "// so a Result that escapes a function or lands in a collection costs no",
+    "// allocation (the same argument, and the same shape, as the Opt conversion",
+    "// above). `Ok` discriminates; `OkV` holds the Ok payload and `ErrV` the Err",
+    "// payload, each the zero value on the other arm. reflect.DeepEqual stays a",
+    "// correct value equality: two Ok values compare their `OkV` (matching `ErrV`",
+    "// zero), an Ok and an Err differ on `Ok`.",
+    "type RevlResult[T any, E any] struct {",
+    line(1, "OkV  T"),
+    line(1, "ErrV E"),
+    line(1, "Ok   bool"),
+    "}",
+    ""
+  ]
+}
+
+// `_V3_MAP_PREAMBLE`
+fn map_preamble() -> List[Str] {
+  return [
+    "// ---- Map value type (docs/stdlib-2.0.md §Map): persistent Go maps -----",
+    "func revlMapSet[K comparable, V any](m map[K]V, k K, v V) map[K]V {",
+    line(1, "out := make(map[K]V, len(m)+1)"),
+    line(1, "for kk, vv := range m {"),
+    line(2, "out[kk] = vv"),
+    line(1, "}"),
+    line(1, "out[k] = v"),
+    line(1, "return out"),
+    "}",
+    "",
+    "func revlMapGet[K comparable, V any](m map[K]V, k K) RevlOpt[V] {",
+    line(1, "if v, ok := m[k]; ok {"),
+    line(2, "return RevlOpt[V]{Value: v, Ok: true}"),
+    line(1, "}"),
+    line(1, "return RevlOpt[V]{}"),
+    "}",
+    "",
+    "func revlMapHas[K comparable, V any](m map[K]V, k K) bool {",
+    line(1, "_, ok := m[k]"),
+    line(1, "return ok"),
+    "}",
+    "",
+    "func revlMapRemove[K comparable, V any](m map[K]V, k K) map[K]V {",
+    line(1, "out := make(map[K]V, len(m))"),
+    line(1, "for kk, vv := range m {"),
+    line(2, "if kk != k {"),
+    line(3, "out[kk] = vv"),
+    line(2, "}"),
+    line(1, "}"),
+    line(1, "return out"),
+    "}",
+    "",
+    "// revlMapKeys yields the keys in ascending canonical Str order (UTF-8 byte",
+    "// lexicographic, which go `string <` is exactly, and slices.Sort orders",
+    "// []string by `<`, so the emitted order is identical to the hand-rolled",
+    "// insertion sort this replaced). Map.keys() IS the iteration surface for Map",
+    "// (docs/stdlib-2.0.md §Map), so it sits on the path of every map traversal a",
+    "// program does: O(n log n), not the O(n^2) the \"keys come in small sets\"",
+    "// premise assumed (roadmap item 434 (h)).",
+    "func revlMapKeys[V any](m map[string]V) []string {",
+    line(1, "keys := make([]string, 0, len(m))"),
+    line(1, "for k := range m {"),
+    line(2, "keys = append(keys, k)"),
+    line(1, "}"),
+    line(1, "slices.Sort(keys)"),
+    line(1, "return keys"),
+    "}",
+    ""
+  ]
+}
+
+// `_V3_MAP_INDEX_HELPER`
+fn map_index_helper() -> List[Str] {
+  return [
+    "// revlMapIndex is the Map subscript `m[k]`: a miss FAULTS (#957), where",
+    "// `m.lookup(k)` is the total form that answers Opt.",
+    "func revlMapIndex[K comparable, V any](m map[K]V, k K) V {",
+    line(1, "v, ok := m[k]"),
+    line(1, "if !ok {"),
+    line(2, "panic(\"revl: map index: no entry for key\")"),
+    line(1, "}"),
+    line(1, "return v"),
+    "}",
+    ""
+  ]
+}
+
+// `_V3_ANY_INDEX_HELPER`
+fn any_index_helper() -> List[Str] {
+  return [
+    "// revlAnyIndex is the subscript `v[k]` where `v` is statically `Any` (issue",
+    "// #1356). Go's index operator is type-directed and an interface value has",
+    "// none, so the read goes through reflection, exactly as python and typescript",
+    "// read a value whose shape only the runtime knows. A miss, an out-of-range",
+    "// position and a value that is not indexable all FAULT, which is the answer",
+    "// the same subscript gives on every other tier.",
+    "func revlAnyIndex(v any, k any) any {",
+    line(1, "rv := reflect.ValueOf(v)"),
+    line(1, "switch rv.Kind() {"),
+    line(1, "case reflect.Map:"),
+    line(2, "kv := reflect.ValueOf(k)"),
+    line(2, "if kv.IsValid() && kv.Type().ConvertibleTo(rv.Type().Key()) {"),
+    line(3, "if e := rv.MapIndex(kv.Convert(rv.Type().Key())); e.IsValid() {"),
+    line(4, "return e.Interface()"),
+    line(3, "}"),
+    line(2, "}"),
+    line(2, "panic(\"revl: map index: no entry for key\")"),
+    line(1, "case reflect.Slice, reflect.Array:"),
+    line(2, "i, ok := k.(int64)"),
+    line(2, "if !ok {"),
+    line(3, "panic(\"revl: list index: position is not an Int\")"),
+    line(2, "}"),
+    line(2, "if i < 0 || i >= int64(rv.Len()) {"),
+    line(3, "panic(\"revl: list index: out of range\")"),
+    line(2, "}"),
+    line(2, "return rv.Index(int(i)).Interface()"),
+    line(1, "}"),
+    line(1, "panic(\"revl: index: value is not indexable\")"),
+    "}",
+    ""
+  ]
+}
+
+// `_V3_FTOA_HELPER` (`strings.` spelled raw; see `ftoa_helper`)
+fn ftoa_helper_raw() -> List[Str] {
+  return [
+    "// revlFtoa renders a Float as ECMAScript Number::toString does (the canonical",
+    "// cross-tier Float -> Str form, docs/strings.md): shortest round-trip digits,",
+    "// \"1e+21\"/\"NaN\"/\"Infinity\", a whole-number float as \"0\", negative zero as \"0\".",
+    "func revlFtoa(x float64) string {",
+    line(1, "if math.IsNaN(x) {"),
+    line(2, "return \"NaN\""),
+    line(1, "}"),
+    line(1, "if math.IsInf(x, 1) {"),
+    line(2, "return \"Infinity\""),
+    line(1, "}"),
+    line(1, "if math.IsInf(x, -1) {"),
+    line(2, "return \"-Infinity\""),
+    line(1, "}"),
+    line(1, "if x == 0 {"),
+    line(2, "return \"0\""),
+    line(1, "}"),
+    line(1, "sign := \"\""),
+    line(1, "if x < 0 {"),
+    line(2, "sign = \"-\""),
+    line(2, "x = -x"),
+    line(1, "}"),
+    line(1, "s := strconv.FormatFloat(x, 'e', -1, 64) // shortest mantissa: d[.ddd]e±dd"),
+    line(1, "mant := s"),
+    line(1, "exp := 0"),
+    line(1, "if e := strings.IndexByte(s, 'e'); e >= 0 {"),
+    line(2, "mant = s[:e]"),
+    line(2, "exp, _ = strconv.Atoi(s[e+1:])"),
+    line(1, "}"),
+    line(1, "intpart := mant"),
+    line(1, "frac := \"\""),
+    line(1, "if d := strings.IndexByte(mant, '.'); d >= 0 {"),
+    line(2, "intpart = mant[:d]"),
+    line(2, "frac = mant[d+1:]"),
+    line(1, "}"),
+    line(1, "digits := intpart + frac"),
+    line(1, "point := len(intpart) + exp"),
+    line(1, "i := 0"),
+    line(1, "for i < len(digits)-1 && digits[i] == '0' {"),
+    line(2, "i++"),
+    line(2, "point--"),
+    line(1, "}"),
+    line(1, "digits = digits[i:]"),
+    line(1, "j := len(digits)"),
+    line(1, "for j > 1 && digits[j-1] == '0' {"),
+    line(2, "j--"),
+    line(1, "}"),
+    line(1, "digits = digits[:j]"),
+    line(1, "if digits == \"0\" {"),
+    line(2, "return \"0\""),
+    line(1, "}"),
+    line(1, "k := len(digits)"),
+    line(1, "n := point"),
+    line(1, "var body string"),
+    line(1, "switch {"),
+    line(1, "case k <= n && n <= 21:"),
+    line(2, "body = digits + strings.Repeat(\"0\", n-k)"),
+    line(1, "case 0 < n && n <= 21:"),
+    line(2, "body = digits[:n] + \".\" + digits[n:]"),
+    line(1, "case -6 < n && n <= 0:"),
+    line(2, "body = \"0.\" + strings.Repeat(\"0\", -n) + digits"),
+    line(1, "default:"),
+    line(2, "e := n - 1"),
+    line(2, "m := digits"),
+    line(2, "if k > 1 {"),
+    line(3, "m = digits[:1] + \".\" + digits[1:]"),
+    line(2, "}"),
+    line(2, "esign := \"+\""),
+    line(2, "if e < 0 {"),
+    line(3, "esign = \"-\""),
+    line(3, "e = -e"),
+    line(2, "}"),
+    line(2, "body = m + \"e\" + esign + strconv.Itoa(e)"),
+    line(1, "}"),
+    line(1, "return sign + body"),
+    "}"
+  ]
+}
+
+// `_V3_LIST_INDEX_OF_EQ`
+fn list_index_of_eq() -> List[Str] {
+  return [
+    "func revlListIndexOfEq[T any](xs []T, x T) int64 {",
+    line(1, "for i, v := range xs {"),
+    line(2, "if revlEq(v, x) {"),
+    line(3, "return int64(i)"),
+    line(2, "}"),
+    line(1, "}"),
+    line(1, "return -1"),
+    "}"
+  ]
+}
+
+// `_V3_STDLIB_PREAMBLE` (`strings.` spelled raw; see `stdlib_preamble`)
+fn stdlib_preamble_raw() -> List[Str] {
+  return [
+    "// ---- stdlib builtins (docs/stdlib-2.0.md); positions are code-point based",
+    "func revlStrLen(s string) int64 { return int64(utf8.RuneCountInString(s)) }",
+    "",
+    "// revlStrSlice walks to the byte offsets of code points a and b and returns",
+    "// the substring between them. A Go substring shares the receiver's bytes, so",
+    "// the slice itself allocates nothing (item 434 (g): the `[]rune(s)` form",
+    "// measured 2 allocs / 328 B against 0 / 0 for the hand-written byte walk).",
+    "// Code-point indexing and clamping are unchanged: `[]rune(s)` and this walk",
+    "// both count one index per invalid byte, so the offsets agree. Only the",
+    "// CONTENT of an invalid byte differs — `[]rune` substitutes U+FFFD — so an",
+    "// invalid byte inside the requested range falls back to the old materializing",
+    "// form and answers exactly what it always did.",
+    "func revlStrSlice(s string, a, b int64) string {",
+    line(1, "n := int64(utf8.RuneCountInString(s))"),
+    line(1, "// JS/Python slice semantics (docs/stdlib-2.0.md §slice): a negative bound"),
+    line(1, "// counts from the end, then both bounds clamp into range; never panics."),
+    line(1, "if a < 0 {"),
+    line(2, "a += n"),
+    line(1, "}"),
+    line(1, "if a < 0 {"),
+    line(2, "a = 0"),
+    line(1, "}"),
+    line(1, "if a > n {"),
+    line(2, "a = n"),
+    line(1, "}"),
+    line(1, "if b < 0 {"),
+    line(2, "b += n"),
+    line(1, "}"),
+    line(1, "if b < 0 {"),
+    line(2, "b = 0"),
+    line(1, "}"),
+    line(1, "if b > n {"),
+    line(2, "b = n"),
+    line(1, "}"),
+    line(1, "if b < a {"),
+    line(2, "b = a"),
+    line(1, "}"),
+    line(1, "lo, hi, i := len(s), len(s), int64(0)"),
+    line(1, "for off := 0; off < len(s); {"),
+    line(2, "if i == a {"),
+    line(3, "lo = off"),
+    line(2, "}"),
+    line(2, "if i == b {"),
+    line(3, "hi = off"),
+    line(3, "break"),
+    line(2, "}"),
+    line(2, "r, w := utf8.DecodeRuneInString(s[off:])"),
+    line(2, "if r == utf8.RuneError && w == 1 && i >= a {"),
+    line(3, "return string([]rune(s)[a:b])"),
+    line(2, "}"),
+    line(2, "off += w"),
+    line(2, "i++"),
+    line(1, "}"),
+    line(1, "return s[lo:hi]"),
+    "}",
+    "",
+    "// revlStrIndexOf answers the code-point index of sub in s. Valid UTF-8 is",
+    "// self-synchronizing — the first byte of a valid needle is never a",
+    "// continuation byte — so a byte match found by strings.Index always starts on",
+    "// a code-point boundary and answers the same question as the code-point scan,",
+    "// with no copy and with the standard library's search instead of the naive",
+    "// O(n*m) one (item 434 (g): 1 alloc / 320 B before, 0 / 0 hand-written).",
+    "// Invalid UTF-8 on either side keeps the old `[]rune` scan, where each invalid",
+    "// byte compares as U+FFFD.",
+    "func revlStrIndexOf(s, sub string) int64 {",
+    line(1, "if sub == \"\" {"),
+    line(2, "return 0"),
+    line(1, "}"),
+    line(1, "if utf8.ValidString(s) && utf8.ValidString(sub) {"),
+    line(2, "b := strings.Index(s, sub)"),
+    line(2, "if b < 0 {"),
+    line(3, "return -1"),
+    line(2, "}"),
+    line(2, "return int64(utf8.RuneCountInString(s[:b]))"),
+    line(1, "}"),
+    line(1, "rs := []rune(s)"),
+    line(1, "rn := []rune(sub)"),
+    line(1, "if len(rn) > len(rs) {"),
+    line(2, "return -1"),
+    line(1, "}"),
+    line(1, "for i := 0; i+len(rn) <= len(rs); i++ {"),
+    line(2, "ok := true"),
+    line(2, "for j := range rn {"),
+    line(3, "if rs[i+j] != rn[j] {"),
+    line(4, "ok = false"),
+    line(4, "break"),
+    line(3, "}"),
+    line(2, "}"),
+    line(2, "if ok {"),
+    line(3, "return int64(i)"),
+    line(2, "}"),
+    line(1, "}"),
+    line(1, "return -1"),
+    "}",
+    "",
+    "func revlStrConcat(a, b string) string { return a + b }",
+    "",
+    "// revlStrSplit's empty-separator branch walks bytes and hands out substrings,",
+    "// which share s's bytes, instead of materializing `[]rune(s)` and allocating a",
+    "// fresh one-code-point string per element (item 434 (g)). An invalid byte",
+    "// still yields U+FFFD, exactly as `[]rune(s)` did.",
+    "func revlStrSplit(s, sep string) []string {",
+    line(1, "if sep == \"\" {"),
+    line(2, "out := make([]string, 0, utf8.RuneCountInString(s))"),
+    line(2, "for off := 0; off < len(s); {"),
+    line(3, "r, w := utf8.DecodeRuneInString(s[off:])"),
+    line(3, "if r == utf8.RuneError && w == 1 {"),
+    line(4, "out = append(out, string(utf8.RuneError))"),
+    line(3, "} else {"),
+    line(4, "out = append(out, s[off:off+w])"),
+    line(3, "}"),
+    line(3, "off += w"),
+    line(2, "}"),
+    line(2, "return out"),
+    line(1, "}"),
+    line(1, "return strings.Split(s, sep)"),
+    "}",
+    "",
+    "func revlStrRepeat(s string, n int64) string {",
+    line(1, "if n < 0 {"),
+    line(2, "n = 0"),
+    line(1, "}"),
+    line(1, "return strings.Repeat(s, int(n))"),
+    "}",
+    "",
+    "// revlStrCharAt / revlStrCharCodeAt walk to the code point at index i with",
+    "// utf8.DecodeRuneInString instead of materializing `[]rune(s)`. Both are",
+    "// code-point indexed exactly as before (docs/strings.md); the difference is",
+    "// that one read no longer allocates a copy of the whole string, so a scan loop",
+    "// stops being quadratic in bytes (item 434 (c): a 780-code-point scan measured",
+    "// 781 allocs / 2,496,127 B, one whole-string rune copy per character, against",
+    "// 0 / 0 for the hand-written `for _, r := range s`). An out-of-range index",
+    "// falls through to the `[]rune(s)[i]` it always was, so it panics with the",
+    "// same Go index-out-of-range error on exactly the same inputs.",
+    "func revlStrCharAt(s string, i int64) string {",
+    line(1, "if i >= 0 {"),
+    line(2, "t := s"),
+    line(2, "for j := int64(0); len(t) > 0; j++ {"),
+    line(3, "r, w := utf8.DecodeRuneInString(t)"),
+    line(3, "if j == i {"),
+    line(4, "if r == utf8.RuneError && w == 1 {"),
+    line(5, "// invalid encoding: []rune(s) substitutes U+FFFD, so"),
+    line(5, "// answer the replacement character, not the raw byte"),
+    line(5, "return string(utf8.RuneError)"),
+    line(4, "}"),
+    line(4, "return t[:w] // a substring shares s's bytes: no allocation"),
+    line(3, "}"),
+    line(3, "t = t[w:]"),
+    line(2, "}"),
+    line(1, "}"),
+    line(1, "return string([]rune(s)[i])"),
+    "}",
+    "",
+    "func revlStrCharCodeAt(s string, i int64) int64 {",
+    line(1, "if i >= 0 {"),
+    line(2, "t := s"),
+    line(2, "for j := int64(0); len(t) > 0; j++ {"),
+    line(3, "r, w := utf8.DecodeRuneInString(t)"),
+    line(3, "if j == i {"),
+    line(4, "return int64(r)"),
+    line(3, "}"),
+    line(3, "t = t[w:]"),
+    line(2, "}"),
+    line(1, "}"),
+    line(1, "return int64([]rune(s)[i])"),
+    "}",
+    "",
+    "func revlJoin(xs []string, sep string) string { return strings.Join(xs, sep) }",
+    "",
+    "func revlListLen[T any](xs []T) int64 { return int64(len(xs)) }",
+    "",
+    "func revlListSlice[T any](xs []T, a, b int64) []T {",
+    line(1, "n := int64(len(xs))"),
+    line(1, "// JS/Python slice semantics (docs/stdlib-2.0.md §slice): a negative bound"),
+    line(1, "// counts from the end, then both bounds clamp into range; never panics."),
+    line(1, "if a < 0 {"),
+    line(2, "a += n"),
+    line(1, "}"),
+    line(1, "if a < 0 {"),
+    line(2, "a = 0"),
+    line(1, "}"),
+    line(1, "if a > n {"),
+    line(2, "a = n"),
+    line(1, "}"),
+    line(1, "if b < 0 {"),
+    line(2, "b += n"),
+    line(1, "}"),
+    line(1, "if b < 0 {"),
+    line(2, "b = 0"),
+    line(1, "}"),
+    line(1, "if b > n {"),
+    line(2, "b = n"),
+    line(1, "}"),
+    line(1, "if b < a {"),
+    line(2, "b = a"),
+    line(1, "}"),
+    line(1, "out := make([]T, b-a)"),
+    line(1, "copy(out, xs[a:b])"),
+    line(1, "return out"),
+    "}",
+    "",
+    "func revlListConcat[T any](a, b []T) []T {",
+    line(1, "out := make([]T, 0, len(a)+len(b))"),
+    line(1, "out = append(out, a...)"),
+    line(1, "out = append(out, b...)"),
+    line(1, "return out"),
+    "}",
+    "",
+    "func revlListPush[T any](xs []T, x T) []T {",
+    line(1, "out := make([]T, 0, len(xs)+1)"),
+    line(1, "out = append(out, xs...)"),
+    line(1, "out = append(out, x)"),
+    line(1, "return out"),
+    "}",
+    "",
+    "func revlListIndexOf[T comparable](xs []T, x T) int64 {",
+    line(1, "for i, v := range xs {"),
+    line(2, "if v == x {"),
+    line(3, "return int64(i)"),
+    line(2, "}"),
+    line(1, "}"),
+    line(1, "return -1"),
+    "}",
+    ""
+  ]
+}
+
+// `_GO_EXTERN_CONFIG_SCAFFOLD`
+fn extern_config_scaffold() -> List[Str] {
+  return [
+    "var _REVL_EXTERN_CONFIG = map[string]map[string]any{}",
+    "",
+    "func _revlExternConfig(name string, required []string, defaults map[string]any) map[string]any {",
+    line(1, "out := map[string]any{}"),
+    line(1, "for k, v := range defaults {"),
+    line(2, "out[k] = v"),
+    line(1, "}"),
+    line(1, "cfg, ok := _REVL_EXTERN_CONFIG[name]"),
+    line(1, "if !ok {"),
+    line(2, "if len(required) > 0 {"),
+    line(3, "msg := \"\""),
+    line(3, "for i, f := range required {"),
+    line(4, "if i > 0 {"),
+    line(5, "msg += \", \""),
+    line(4, "}"),
+    line(4, "msg += f"),
+    line(3, "}"),
+    line(3, "panic(\"config extern `\" + name + \"` called before plug-time \" +"),
+    line(4, "\"configuration was installed (required config: \" + msg + \"); \" +"),
+    line(4, "\"configure it through the run driver's config seam\")"),
+    line(2, "}"),
+    line(2, "return out"),
+    line(1, "}"),
+    line(1, "missing := \"\""),
+    line(1, "n := 0"),
+    line(1, "for _, f := range required {"),
+    line(2, "if _, present := cfg[f]; !present {"),
+    line(3, "if n > 0 {"),
+    line(4, "missing += \", \""),
+    line(3, "}"),
+    line(3, "missing += f"),
+    line(3, "n++"),
+    line(2, "}"),
+    line(1, "}"),
+    line(1, "if n > 0 {"),
+    line(2, "panic(\"config extern `\" + name + \"` called before plug-time \" +"),
+    line(3, "\"configuration was installed (missing required config: \" + missing + \")\")"),
+    line(1, "}"),
+    line(1, "for k, v := range cfg {"),
+    line(2, "out[k] = v"),
+    line(1, "}"),
+    line(1, "return out"),
+    "}",
+    ""
+  ]
+}
+
+
+// ----------------------------------------------- the uncarried component tier
+// A `component` belongs to the go LIVE tier (the v1/v2 stc-go path in the
+// reference's `emit`), which this slice does not mirror — see WHAT IT DEFERS
+// above. What follows is about SAYING SO, not about carrying it.
+//
+// The rule is: NAME every `components` entry this file does not carry, except
+// where naming it would break a byte agreement the REFERENCE itself produces.
+//
+// That exception is real on this tier and on no other. The reference has two
+// document-level answers. Its PURE typed-core path — the one this slice mirrors
+// — routes PAST the components of a document that also carries top-level
+// declarations and emits ordinary Go for those declarations alone; both sides
+// then drop the same thing, and the documents that reach it are byte-identical
+// on this tier for exactly that reason. A marker there would name a gap that is
+// not there and cost every one of those agreements.
+//
+// Issue #1321 narrowed which documents reach it. The reference carries an
+// OBSERVABLE component, one with an activation body or a provide method, on
+// its combined renderer now, declarations AND components in one package, and
+// routes past only an INCIDENTAL one. So the exception narrows with it: where
+// the reference carries, there is no agreement left for a marker to cost, and
+// staying silent would mean answering a 6-kilobyte reference module with a
+// component-free one and no sign that anything was missing. That is the exact
+// failure the marker convention exists to prevent, so `component_is_observable`
+// below mirrors the reference predicate the routing now branches on.
+//
+// Everywhere else the marker is free, and it was badly needed. A document whose
+// components are ALL it declares never reaches the pure path: the reference
+// answers it with a whole stc-go module, and this slice used to answer with its
+// three-line banner and nothing else — 144 bytes against the reference's 40502
+// on backends/go/testdata/stream_130.rvl, with no marker anywhere in the output.
+// A refusal that is silent is indistinguishable from a lowering that is missing,
+// which is the one direction the byte-agreement oracle exists to rule out.
+//
+// A component beside an in-file `test` section is named too. Plain `test`
+// blocks are emitted now (`emit_tests`), but a `lifecycle test` is a script over
+// a live composition and keeps its document on the live path, and telling the
+// two apart would mean reading the per-test lifecycle flag, which this file
+// does not (see `deferred_test_markers`). For a plain-test document whose
+// component is incidental that is a refusal where the reference agrees: it
+// costs an agreement, never a silent divergence.
+//
+// So the suppression is narrow and checkable without reading a component STEP:
+// pure declarations present, no test section, and no observable component. `component_is_observable` reads the LENGTH of a component's `body`
+// (not the discriminant of any step inside it), so it states the reference's
+// routing without claiming a port of a lowering this slice does not have. That
+// matters because tools/selfhost_coverage.py takes a port's construct table
+// straight off the `value_str(value_field(n, "kind"))` spellings: reading a
+// `subscribe` or `stream-iter` discriminant here would move them out of the
+// blind-spot ledger's `unported` baseline and claim a stream port. A marker is
+// a refusal, not an implementation.
+//
+// The observable arm also subsumes item 130's STREAM DIVERSION, which the
+// suppression used to leave silent: a document that holds a stream is sent to
+// the reference's live path even when it carries top-level declarations, which
+// a typed-event program always does (the event's record declaration is what
+// puts a `types` entry in the document). Its components have bodies, so they
+// are observable, so they are named now, without this file reading a single
+// stream spelling.
+//
+// Markers are one per entry, in document order — the same total-dispatch
+// convention every expression- and step-level arm in this file already uses.
+fn carries_pure_declarations(ir: Any) -> Bool {
+  if (value_list(value_field(ir, "functions")).length() > 0) { return true }
+  if (value_keys(value_field(ir, "types")).length() > 0) { return true }
+  return value_list(value_field(ir, "externs")).length() > 0
+}
+
+// The reference's `_component_is_observable`: does routing past this component
+// lose something the author wrote? An activation step or a provide method puts
+// something in the component's `body`; an empty `component C { }` renders to
+// nothing anyone can call. The reference's own helper also walks a `provides`
+// entry for `methods`, which is unreachable on a frontend-produced document:
+// a `provides` clause with no `provide` block is refused at compile time (A9)
+// and a provide method IS a `body` step, so the length of `body` is the whole
+// predicate here.
+fn component_is_observable(c: Any) -> Bool {
+  return value_list(value_field(c, "body")).length() > 0
+}
+
+fn any_component_is_observable(comps: List[Any]) -> Bool {
+  for (c of comps) {
+    if (component_is_observable(c)) { return true }
+  }
+  return false
+}
+
+fn uncarried_components(ir: Any) -> List[Str] {
+  let comps = value_list(value_field(ir, "components"))
+  if (comps.length() == 0) { return [] }
+  let has_tests = value_list(value_field(ir, "tests")).length() > 0
+  if (carries_pure_declarations(ir) && !has_tests
+      && !any_component_is_observable(comps)) { return [] }
+  var out = []
+  for (c of comps) {
+    out = out.push(`<<UNSUPPORTED-COMPONENT:${value_str(value_field(c, "name"))}>>`)
+  }
+  return out
+}
+
+// ------------------------------------------ the deferred fault-test section
+// Plain in-file `test` blocks are emitted (`emit_tests`). A `fault test` is
+// not: the reference refuses the document, and this port names each entry
+// instead of dropping the section in silence (issue #1123, which measured all
+// six self-host emitters doing exactly that).
+//
+// Nothing here reads the per-test lifecycle discriminant that tells a
+// `lifecycle test` from a plain one. `tools/selfhost_coverage.py` reads "this tier ports construct X"
+// straight off the boolean-flag read spelling in the self-host source, so
+// branching on that flag here would claim a port of the lifecycle-driver arm
+// this slice does not have, and would move that tier/construct pair out of the
+// ledger's `unported` baseline on the strength of a marker. A marker is a
+// refusal, not an implementation; it says only what it knows. (That scan is
+// over the raw file text, comments included, so naming the spelling in prose
+// registers it too, which is why this note does not.)
+fn deferred_test_markers(ir: Any) -> List[Str] {
+  var out = []
+  for (t of value_list(value_field(ir, "fault_tests"))) {
+    out = out.push(`<<UNSUPPORTED-FAULT-TEST:${value_str(value_field(t, "name"))}>>`)
+  }
+  return out
+}
+
+// ------------------------------------------------------- the IR text probes
+// The reference gates the Opt / Result / Map preambles on substrings of
+// `json.dumps({types, functions, externs, tests})`. A probe that only names
+// ASCII and no quote is a substring of that text exactly when it is a
+// substring of one of its keys or string values, so these walk those.
+fn ir_text_has(node: Any, needles: List[Str]) -> Bool {
+  let shape = value_kind(node)
+  if (shape == "str") { return text_has_any(value_str(node), needles) }
+  if (shape == "record") {
+    for (key of value_keys(node)) {
+      if (text_has_any(key, needles)) { return true }
+      if (ir_text_has(value_field(node, key), needles)) { return true }
+    }
+    return false
+  }
+  for (child of value_children(node)) { if (ir_text_has(child, needles)) { return true } }
+  return false
+}
+
+fn text_has_any(text: Str, needles: List[Str]) -> Bool {
+  for (n of needles) { if (text.indexOf(n) >= 0) { return true } }
+  return false
+}
+
+// `'"maplit"' in blob`: a key or a string value that IS one of `words`.
+fn ir_text_is(node: Any, words: List[Str]) -> Bool {
+  let shape = value_kind(node)
+  if (shape == "str") { return list_contains(words, value_str(node)) }
+  if (shape == "record") {
+    for (key of value_keys(node)) {
+      if (list_contains(words, key)) { return true }
+      if (ir_text_is(value_field(node, key), words)) { return true }
+    }
+    return false
+  }
+  for (child of value_children(node)) { if (ir_text_is(child, words)) { return true } }
+  return false
+}
+
+// `'"method": "set"' in blob`: a record whose `method` is one of `methods`.
+fn ir_has_method(node: Any, methods: List[Str]) -> Bool {
+  if (value_kind(node) == "record") {
+    let m = value_field(node, "method")
+    if (value_kind(m) == "str" && list_contains(methods, value_str(m))) { return true }
+  }
+  for (child of value_children(node)) { if (ir_has_method(child, methods)) { return true } }
+  return false
+}
+
+// The live stc-go tier: an ir_version 1/2 document never reaches the pure
+// typed-core path this file mirrors (the reference renders a whole stc-go
+// module for it), so the port names the routing instead of answering with a
+// bare banner.
+fn live_tier_markers(ir: Any) -> List[Str] {
+  let ver = value_int(value_field(ir, "ir_version"))
+  if (ver == 3) { return [] }
+  var out = [`<<UNSUPPORTED-LIVE-TIER:ir_version ${ver}>>`]
+  for (c of value_list(value_field(ir, "components"))) {
+    out = out.push(`<<UNSUPPORTED-COMPONENT:${value_str(value_field(c, "name"))}>>`)
+  }
+  return out
+}
+
+// item 388 stage 6: the reference collapses a caller-decided-colour extern's
+// sync clone (`X_revl_sync`, same bodies as its twin `X`) into `X` and rewrites
+// its call sites. This port does not rewrite the IR, so it names the clone.
+fn colour_clone_markers(externs: List[Any]) -> List[Str] {
+  var out = []
+  for (e of externs) {
+    let name = value_str(value_field(e, "name"))
+    if (name.endsWith("_revl_sync")) {
+      let origin = name.slice(0, name.length() - 10)
+      for (twin of externs) {
+        if (value_str(value_field(twin, "name")) == origin) {
+          out = out.push(`<<UNSUPPORTED-EXTERN-COLOUR-CLONE:${name}>>`)
+        }
+      }
+    }
+  }
+  return out
+}
+
+fn has_text(lines: List[Str], needle: Str) -> Bool {
+  for (l of lines) { if (l.indexOf(needle) >= 0) { return true } }
+  return false
 }
 
 pub fn emit_go_src(ir: Any) -> Str {
@@ -155,6 +3375,7 @@ pub fn emit_go_src(ir: Any) -> Str {
 // runtime, the Opt/Result gates and the component section after the body.
 fn emit_module(ir: Any, combined: Bool) -> Str {
   var banner = [
+  let banner = [
     "// Code generated by backends/go/emit.py — DO NOT EDIT.",
     "// revl -> cordis-go (ir_version 3, pure typed-core tier): ordinary Go.",
     "package emitted",
@@ -209,6 +3430,7 @@ fn emit_module(ir: Any, combined: Bool) -> Str {
   if (value_keys(types).length() > 0) { type_lines = emit_v3_types(types) }
   var ext: Eout = { lines: [], imports: [] }
   if (externs.length() > 0) { ext = emit_externs(externs, tables.gv) }
+  if (externs.length() > 0) { ext = emit_externs(externs) }
   let emitted_functions = emit_functions(functions, fr, er, tables, functions.concat(externs), strings_alias)
   let emitted_tests = emit_tests(value_list(value_field(ir, "tests")), fr, er, tables,
                                  functions.concat(externs), strings_alias, emitted_functions.reserved)
@@ -221,6 +3443,7 @@ fn emit_module(ir: Any, combined: Bool) -> Str {
   var comp_frem = false
   var comp_teardown = false
   var comp_result = false
+  let used_stdlib = has_text(marked_lines, stdlib_mark())
   var fnlines = []
   for (l of marked_lines) { fnlines = fnlines.push(strip_marks(l)) }
   var body = type_lines.concat(ext.lines).concat(fnlines)
@@ -250,11 +3473,14 @@ fn emit_module(ir: Any, combined: Bool) -> Str {
     comp_result = has_text(comp_lines, "RevlResult[")
     body = body.concat(comp_lines)
   }
+  let body = type_lines.concat(ext.lines).concat(fnlines)
   let rendered = fnlines.join(newline())
   let uses_fmt = rendered.indexOf("fmt.Sprintf(") >= 0
   let uses_strconv = rendered.indexOf("strconv.Format") >= 0 || comp_strconv
+  let uses_strconv = rendered.indexOf("strconv.Format") >= 0
   let uses_strings = emitted_functions.uses_strings || emitted_tests.uses_strings
   let uses_float_rem = rendered.indexOf("math.Mod(") >= 0 || comp_frem
+  let uses_float_rem = rendered.indexOf("math.Mod(") >= 0
   let uses_float_lit = rendered.indexOf("revlF(") >= 0
   let uses_any_index = rendered.indexOf("revlAnyIndex(") >= 0
   let uses_reflect = uses_any_index || rendered.indexOf("revlEq(") >= 0 || rendered.indexOf("revlListIndexOfEq(") >= 0
@@ -262,6 +3488,7 @@ fn emit_module(ir: Any, combined: Bool) -> Str {
   let uses_parse_int = rendered.indexOf("revlParseInt(") >= 0
   let uses_int_arith = text_has_any(rendered, ["revlDivTrunc(", "revlDivFloor(", "revlDivEuclid(", "revlMod("])
   let uses_ovf32 = flags.ovf32 || rendered.indexOf("revlToI32(") >= 0 || comp_ovf32
+  let uses_ovf32 = flags.ovf32 || rendered.indexOf("revlToI32(") >= 0
   let sections = [types, value_field(ir, "functions"), value_field(ir, "externs"), value_field(ir, "tests")]
   var used_map = false
   var used_opt = uses_parse_int
@@ -272,6 +3499,7 @@ fn emit_module(ir: Any, combined: Bool) -> Str {
     // The total forms produce a Result without the source ever spelling
     // `Result[`: a node whose `method` is one of them puts Result in too.
     if (ir_text_has(sec, ["Result["]) || ir_has_method(sec, ["checked_add", "checked_sub", "checked_mul", "checked_div_trunc", "checked_div_floor", "checked_div_euclid", "checked_mod"])) { used_result = true }
+    if (ir_text_has(sec, ["Result[", "checked_div_", "checked_mod"])) { used_result = true }
   }
   if (used_map) { used_opt = true }
   if (comp_result) { used_result = true }
@@ -279,6 +3507,8 @@ fn emit_module(ir: Any, combined: Bool) -> Str {
   // without `Opt[`/`Result[` spelled in the IR; the combined one does not.
   if (!combined && (has_text(body, "RevlOpt[") || has_text(body, "RevlSome[") || has_text(body, "RevlNone["))) { used_opt = true }
   if (!combined && (has_text(body, "RevlResult[") || has_text(body, "RevlOk[") || has_text(body, "RevlErr["))) { used_result = true }
+  if (has_text(body, "RevlOpt[") || has_text(body, "RevlSome[") || has_text(body, "RevlNone[")) { used_opt = true }
+  if (has_text(body, "RevlResult[") || has_text(body, "RevlOk[") || has_text(body, "RevlErr[")) { used_result = true }
   let used_map_index = has_text(body, "revlMapIndex(")
   // Past this slice of the combined path: an aliased `strings` import (the
   // combined module imports it plain), a `//revl:import` an extern hoists
@@ -311,6 +3541,7 @@ fn emit_module(ir: Any, combined: Bool) -> Str {
   } else {
     for (spec of ext.imports) { imports = imports.push(line(1, spec)) }
   }
+  for (path of ext.imports) { imports = imports.push(line(1, `"${path}"`)) }
   var unique = []
   for (imp of imports) { if (!list_contains(unique, imp)) { unique = unique.push(imp) } }
 
@@ -331,6 +3562,7 @@ fn emit_module(ir: Any, combined: Bool) -> Str {
   }
   if (uses_any_index) { out = out.concat(any_index_helper()) }
   if (flags.fdiv || comp_fdiv) {
+  if (flags.fdiv) {
     out = out.push("func revlDiv(a, b float64) float64 { return a / b }")
     out = out.push("")
   }
@@ -340,6 +3572,7 @@ fn emit_module(ir: Any, combined: Bool) -> Str {
   }
   if (uses_ftoa) { out = out.concat(ftoa_helper(strings_alias)).push("") }
   if (flags.ovf || comp_ovf) { out = out.concat(overflow_preamble()) }
+  if (flags.ovf) { out = out.concat(overflow_preamble()) }
   if (uses_ovf32) { out = out.concat(overflow32_preamble()) }
   if (uses_int_arith) { out = out.concat(int_arith_preamble()) }
   if (used_opt) { out = out.concat(opt_preamble()) }
@@ -354,6 +3587,7 @@ fn emit_module(ir: Any, combined: Bool) -> Str {
   out = out.concat(colour_clone_markers(externs))
   // What this file did not carry, named — never dropped on the floor.
   if (!combined) { out = out.concat(uncarried_components(ir)) }
+  out = out.concat(uncarried_components(ir))
   // The deferred in-file test section: one named marker per test instead of
   // silence (issue #1123).
   let test_markers = deferred_test_markers(ir)
@@ -370,6 +3604,12 @@ test "go_type covers the scalar and generic surface" {
   assert go_type("List[Int]", Map.empty()) == "[]int64"
   assert go_type("Map[Str, Int]", Map.empty()) == "map[string]int64"
   assert go_type("Opt[Str]", Map.empty()) == "RevlOpt[string]"
+  assert go_type("Int") == "int64"
+  assert go_type("Str") == "string"
+  assert go_type("Bool") == "bool"
+  assert go_type("List[Int]") == "[]int64"
+  assert go_type("Map[Str, Int]") == "map[string]int64"
+  assert go_type("Opt[Str]") == "RevlOpt[string]"
 }
 
 test "the go bin-op table maps the longest revl ops" {
@@ -414,11 +3654,13 @@ fn typed_ctx() -> Ctx {
     vt: Map.empty(), fr: Map.empty(), er: Map.empty(),
     ca: ca, cp: cp, rbf: rbf, rf: Map.empty(), variants: ["Tree"], tnames: ["Tree", "Point"],
     gv: Map.empty(), rt: "", signatures: [],
+    rt: "", signatures: [],
     builders: Map.empty(), builder_seq: 0,
     reserved: Map.empty(), strings_alias: "strings",
     sc: Map.empty(), scan_seq: 0, body: [], tn: "",
     fh: Map.empty(),
     et: Map.empty(), keys: [], key_i: 0
+    fh: Map.empty()
   }
 }
 
@@ -446,9 +3688,11 @@ test "a declared Secret[T] extern return wraps its verbatim body" {
   // end-to-end byte check lives in the corpus.
   let plain = emit_externs([{ name: "tag", params: [], returns: "Str",
                               bodies: { go: `return "n"` } }], Map.empty()).lines
+                              bodies: { go: `return "n"` } }]).lines
   assert plain.join("|") == `func tag() string {|${str_tab()}return "n"|}|`
   let stamped = emit_externs([{ name: "mint", params: [], returns: "Str",
                                 secret_return: true, bodies: { go: `return "s"` } }], Map.empty()).lines
+                                secret_return: true, bodies: { go: `return "s"` } }]).lines
   assert stamped[0] == "func mint() string {"
   assert stamped[1] == str_tab().concat("return revlSecretResult(revlSecret_mint())")
   assert stamped[4] == "func revlSecret_mint() string {"
@@ -485,6 +3729,10 @@ test "a hoisted alias the import block already binds is a clash" {
   assert import_alias_clash([line(1, `"fmt"`), line(1, `fmt "strings"`)], [`fmt "strings"`]) == "fmt"
   assert import_alias_clash([line(1, `tm "time"`)], [`tm "time"`]) == ""
   assert import_alias_clash([line(1, `_ "embed"`), line(1, `_ "x/y"`)], [`_ "embed"`, `_ "x/y"`]) == ""
+  assert import_directive("//revl:import encoding/json") == ["encoding/json"]
+  assert import_directive(`${str_tab()}//revl:import "bytes"  `) == ["bytes"]
+  assert import_directive("return x") == []
+  assert import_directive("//revl:importx") == []
 }
 
 test "a body Python splitlines would break differently takes a marker" {
@@ -500,6 +3748,9 @@ test "go_type passes user record/variant names through" {
   assert go_type("Point", Map.empty()) == "Point"
   assert go_type("List[Point]", Map.empty()) == "[]Point"
   assert go_type("Opt[Point]", Map.empty()) == "RevlOpt[Point]"
+  assert go_type("Point") == "Point"
+  assert go_type("List[Point]") == "[]Point"
+  assert go_type("Opt[Point]") == "RevlOpt[Point]"
 }
 
 // --------------------------------------------------------------- component wrap

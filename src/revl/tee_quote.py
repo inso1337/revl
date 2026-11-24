@@ -26,6 +26,7 @@ What is implemented
   Report's signature by the platform (PCK) key, the QE authentication data and
   the certification data.
 * **AMD SEV-SNP, ATTESTATION_REPORT v2/v3/v5** (:func:`parse_sev_snp_report`). The
+* **AMD SEV-SNP, ATTESTATION_REPORT v2/v3** (:func:`parse_sev_snp_report`). The
   real 0x4A0-byte layout, its 48-byte `measurement`, its 64-byte `report_data`,
   and the 512-byte trailing signature: ECDSA-P384 R and S as 72-byte
   LITTLE-endian integers, over the report's first 0x2A0 bytes, by the VCEK.
@@ -255,6 +256,10 @@ def _mul(curve: Curve, scalar: int, point: _Point) -> _Point:
     installed, and why a network-exposed signer refuses to reach this loop at
     all (issue #1460). Hand-rolling a hardened ladder in Python integers would
     not fix it: big-integer arithmetic is itself variable time."""
+    """Double-and-add. Not constant time, and deliberately so: every scalar this
+    module multiplies by is PUBLIC (a verification scalar, or a fixture key that
+    signs nothing secret), so there is no secret to leak through the timing and
+    no reason to hand-roll a hardened ladder in a compiler."""
     result: _Point = None
     addend = point
     while scalar:
@@ -306,6 +311,8 @@ def _encode_public_key(curve: Curve, point: tuple[int, int]) -> bytes:
 
 
 def _check_private_key(curve: Curve, private_key: int) -> None:
+def derive_public_key(curve: Curve, private_key: int) -> bytes:
+    """The raw `X || Y` public key for a private scalar."""
     if not isinstance(private_key, int) or isinstance(private_key, bool):
         raise QuoteFormatError("a private key is an integer scalar")
     if not 1 <= private_key < curve.n:
@@ -434,6 +441,7 @@ def require_signing_backend(purpose: str, curve: Curve = CURVE_P256) -> None:
 
 def ecdsa_sign(curve: Curve, private_key: int, message: bytes, *,
                network_exposed: bool = False) -> bytes:
+def ecdsa_sign(curve: Curve, private_key: int, message: bytes) -> bytes:
     """Deterministic ECDSA (RFC 6979) over ``message``, as raw `R || S`.
 
     Signs through `cryptography` when it is installed and through
@@ -462,6 +470,10 @@ def ecdsa_sign_pure(curve: Curve, private_key: int, message: bytes) -> bytes:
     and the byte-compatibility tests can name the implementation they check;
     production code calls :func:`ecdsa_sign`."""
     _check_private_key(curve, private_key)
+    The signer exists for the reference attester and for the fixtures: a test
+    that mutates a quote and RE-SIGNS it proves the accept path is unreachable
+    with a well-formed forgery, which a test that only corrupts a signature
+    cannot show. The verifier is the part a deployment runs."""
     digest = curve.hash(message)
     e = _bits2int(digest, curve.n.bit_length()) % curve.n
     k = _rfc6979_k(curve, private_key, digest)
@@ -572,6 +584,10 @@ class TdxQuote:
     :func:`~revl.tee_attestation.tee_admits` (a permitted set that is re-attested
     as it moves is roadmap item 469, not this one). ``report_data`` is the 64
     bytes the workload chose, and the only place a challenge can be bound."""
+    the four ``rtmrs`` are the runtime-extended registers, carried so a policy
+    that needs them has them (a permitted-set that is re-attested as it moves is
+    roadmap item 469, not this one). ``report_data`` is the 64 bytes the workload
+    chose, and the only place a challenge can be bound."""
 
     version: int
     att_key_type: int
@@ -839,6 +855,8 @@ SEV_TCB_LAYOUT_TURIN = "turin"
 _SEV_CPUID_FAMILY = 0x188
 _SEV_CPUID_MODEL = 0x189
 _SEV_CPUID_STEPPING = 0x18A
+#: refused rather than read with this layout.
+SEV_SNP_VERSIONS = (2, 3)
 #: Guest policy bit 19: the guest may be debugged, which means its memory is
 #: inspectable from the host, which means the enclave guarantee the placement is
 #: buying does not hold.
@@ -1185,6 +1203,7 @@ class HardwareRoot(AttestationRoot):
         return (f"{self.label} ({len(self.platform_keys)} pinned platform key(s), "
                 f"{len(self.endorsement_roots)} endorsement root(s), "
                 f"{len(self.revoked_platform_keys)} revoked platform key(s))")
+                f"{len(self.endorsement_roots)} endorsement root(s))")
 
     def resolve_platform_key(self, fingerprint: Any, curve: Curve, *,
                              vendor: str, endorsement: Any = None,
@@ -1469,6 +1488,7 @@ class QuoteVerdict:
     packed in (SEV-SNP; the layout is empty when this root does not know the
     report's processor generation) are empty or -1 on a refusal, so no policy can
     be satisfied by a quote the root refused."""
+    ``report_data`` is the 64 bytes the workload bound into the quote."""
 
     ok: bool
     reason: str

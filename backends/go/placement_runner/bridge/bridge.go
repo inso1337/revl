@@ -372,6 +372,7 @@ func serveConn(conn net.Conn, invoke Invoke) {
 				// text a recovered activation carries), so it goes through
 				// `SeamFailure` below like any other provider failure.
 				value, ierr := func() (value any, ierr error) {
+				value, ierr := func() (any, error) {
 					seq := estop.BeginCrossing(req.Key, req.Method, "accept")
 					defer estop.EndCrossing(seq)
 					defer func() {

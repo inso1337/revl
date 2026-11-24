@@ -272,6 +272,9 @@ func disposeAwaited(ctx stdctx.Context, lf labeledFiber,
 // the panic value quotes whatever the failing frame held. A crossing's own
 // goroutine needs no guard: `bridge.Serve` recovers its handler's panic into
 // the error reply (issue #2481).
+// the panic value quotes whatever the failing frame held. The frame that holds
+// a crossing's own arguments is `bridge.Serve`'s per-connection goroutine,
+// which is where a declared `Secret[T]` travels.
 //
 // The indirection is load-bearing: `recover` stops a panic only when the
 // DEFERRED FUNCTION calls it directly, so the closure returned here — never a
@@ -388,6 +391,8 @@ func main() {
 			// unwrap does. The fault sweep never targets a proxy, so `--once`
 			// gets no exception: a dead provider must not read as NO-RESIDUE.
 			fatalBoot(name, "proxy dial failed for key "+key+": "+err.Error(), fibers, log)
+			log("proxy", key, "dial failed: "+err.Error())
+			continue
 		}
 		clients = append(clients, client)
 		comp, ok := emitted.RevlProxyComponent(key, info.Service, client)
@@ -396,11 +401,14 @@ func main() {
 			// same spec/build mismatch as an unknown component (#2223).
 			fatalBoot(name, "unsupported proxy service "+info.Service+" for key "+
 				key+": the spec names a proxy this build does not have", fibers, log)
+			log("proxy", key, "UNSUPPORTED service "+info.Service)
+			continue
 		}
 		fiber := root.Load(comp)
 		if err := fiber.Ready(ready); err != nil {
 			// issue #2254: fatal in both modes, as for a failed dial above.
 			fatalBoot(name, "boot failed loading proxy for key "+key+": "+err.Error(), fibers, log)
+			log("proxy", key, "load error: "+err.Error())
 		}
 		fibers = append(fibers, labeledFiber{key + "-proxy", fiber})
 		log("proxy", key, "-> "+info.Socket+" ["+info.Service+"]")
@@ -421,6 +429,8 @@ func main() {
 			// so the teardown below never prints `DOWN` for a failed boot.
 			fatalBoot(name, "unknown component "+cname+": the spec names a "+
 				"component this build does not have", fibers, log)
+			log("load", cname, "UNKNOWN component")
+			continue
 		}
 		if err := fiber.Ready(ready); err != nil {
 			// issue #2254: outside `--once` a failed activation is fatal, as
@@ -452,6 +462,12 @@ func main() {
 				// reply, scrubbed by `bridge.SeamFailure` like any returned
 				// error, and keeps serving, as the py, ts and java runners do.
 				// A guard deferred here would run first and halt the process.
+				// The crossing goroutine's own funnel. `bridge.Serve` answers
+				// each connection on a goroutine of its own, so a panic raised
+				// in a provider method reaches the top of THAT goroutine and
+				// never main's defer. `args` is where a declared `Secret[T]`
+				// travels, and a panicking frame's value quotes what it held.
+				defer guard(&name)()
 				if err := surface.check(key, method, sortedOps(s.Serve.Methods[key])); err != nil {
 					return nil, err
 				}
@@ -569,11 +585,21 @@ func main() {
 	//    must replay before `DOWN`, and in once mode the residue proof below
 	//    reads a settled runtime, not an in-flight one.
 	goneCtx, cancel := stdctx.WithTimeout(stdctx.Background(), teardownBound())
+	// 6. teardown, consumers first (reverse load order). In once mode each
+	//    dispose is awaited out of the fiber registry, so the residue proof
+	//    below reads a settled runtime, not an in-flight one.
+	goneCtx, cancel := stdctx.WithTimeout(stdctx.Background(), 5*time.Second)
 	defer cancel()
 	var unconfirmed []string
 	for i := len(fibers) - 1; i >= 0; i-- {
 		if !disposeAwaited(goneCtx, fibers[i], log) {
 			unconfirmed = append(unconfirmed, fibers[i].label)
+		fibers[i].fiber.Dispose()
+		if s.Once {
+			log("swap", fibers[i].label, "dispose -> inverses replay (LIFO)")
+			_ = fibers[i].fiber.Gone(goneCtx)
+		} else {
+			log("swap", fibers[i].label, "dispose")
 		}
 	}
 	if listener != nil {

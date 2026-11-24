@@ -484,6 +484,13 @@ def bind_workspace_root(root_fd: int, expected_dev: int, expected_ino: int,
                 "EBOUND", "workspace binding must precede all filesystem use "
                 "and cannot be repeated", _sanitized(root_label))
         if not pinned_workspace_supported():
+        required = (os.open, os.stat, os.mkdir, os.unlink, os.rmdir,
+                    os.rename)
+        if (not _O_DIRECTORY or not _O_NOFOLLOW
+                or any(fn not in os.supports_dir_fd for fn in required)
+                or os.stat not in os.supports_follow_symlinks
+                or os.utime not in os.supports_fd
+                or not hasattr(os, "pread")):
             raise ConfinementError(
                 "ENOTSUP", "pinned workspace requires directory-fd and "
                 "no-follow filesystem support", _sanitized(root_label))
@@ -956,6 +963,7 @@ def resolve_within(path: str) -> str:
         return _resolve_bound(path)
     target = path if os.path.isabs(path) else os.path.join(root, path)
     real = os.path.realpath(os.path.normpath(target))
+    real = os.path.realpath(target)
     if not _is_within(root, real):
         raise ConfinementError(
             "EOUTSIDE",
@@ -964,6 +972,7 @@ def resolve_within(path: str) -> str:
             # every symlink outside the root, a fact about what lives there
             # (#3184)
             _sanitized(path),
+            real,
         )
     return real
 
@@ -1730,6 +1739,10 @@ def _clone_from_fd(src_fd: int, dst_dirfd: int, dst_leaf: str) -> bool:
 #: relative to the tamper window all seven fields stay equal (issue #2647). That
 #: is why the snapshot capture also records the sidecar's content digest, which
 #: does not depend on clock resolution.
+#: shape, and `mtime_ns`/`ctime_ns` the modification stamps. `ctime_ns` is what
+#: makes an IN-PLACE rewrite visible without re-reading the bytes: a write to
+#: the snapshot bumps it, and unlike `mtime_ns` an unprivileged writer cannot
+#: set it back with `utimes`.
 SIDECAR_CAPTURE_FIELDS: tuple[str, ...] = (
     "dev", "ino", "mode", "nlink", "size", "mtime_ns", "ctime_ns")
 
@@ -1759,6 +1772,7 @@ def _capture_of(st) -> dict:
     Stat only. The content digest the snapshot also records is added by
     `_capture_open_sidecar`, the one helper that holds the sidecar's bytes
     open."""
+    """The captured identity of one sidecar inode, as WAL-serializable data."""
     return {"dev": st.st_dev, "ino": st.st_ino, "mode": st.st_mode,
             "nlink": st.st_nlink, "size": st.st_size,
             "mtime_ns": st.st_mtime_ns, "ctime_ns": st.st_ctime_ns}
@@ -1794,15 +1808,18 @@ def _capture_open_sidecar(fd: int) -> dict:
 def _capture_sidecar(dirfd: int, leaf: str) -> dict:
     """`_capture_of` the sidecar `leaf` inside the already-verified `dirfd`,
     plus the sha256 of its contents (issue #2647).
+    """`_capture_of` the sidecar `leaf` inside the already-verified `dirfd`.
 
     Opened `O_NOFOLLOW` and fstat'd through the fd, never stat'd by name, for
     the same reason the forward path holds its target fd: a name re-walked at
     the syscall is a name a competing writer can swap first. The bytes are read
     through that same fd, so the digest names the inode whose identity the stat
     fields recorded, not a name that may have been swapped since."""
+    the syscall is a name a competing writer can swap first."""
     fd = os.open(leaf, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK, dir_fd=dirfd)
     try:
         return _capture_open_sidecar(fd)
+        return _capture_of(os.fstat(fd))
     finally:
         os.close(fd)
 
@@ -1827,6 +1844,8 @@ def snapshot_preimage(handle: WriteHandle) -> str:
     this snapshot refuses after the file was created as well as when a LATER
     step refuses; the capture itself goes through the fd that holds the bytes,
     never a reopen after `fchmod` to the target's mode."""
+    (item 422 F6) or to write irreversibly. The sidecar is recorded on the
+    handle so `discard_write` can remove it when a LATER step refuses."""
     directory = preimage_dir()
     dst = fresh_sidecar(directory, "pre")
     # Record the name before anything is created under it. A failure between
@@ -1846,6 +1865,7 @@ def snapshot_preimage(handle: WriteHandle) -> str:
                 # mode is fixed at open, so the later `fchmod` to the target's
                 # mode cannot revoke the read this open was granted.
                 out = os.open(dst_leaf, os.O_RDWR | os.O_CREAT | os.O_EXCL,
+                out = os.open(dst_leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
                               0o600, dir_fd=dirfd)
                 try:
                     offset = 0
@@ -1872,6 +1892,11 @@ def snapshot_preimage(handle: WriteHandle) -> str:
             else:
                 capture = _capture_sidecar(dirfd, dst_leaf)
             handle.capture = capture
+            # capture the snapshot's own identity LAST, after the copy and
+            # after the mode/mtime restoration above, so what is recorded is
+            # the sidecar as it is left behind (issue #1016). The inverse
+            # re-checks the file it is about to install against this.
+            handle.capture = _capture_sidecar(dirfd, dst_leaf)
         finally:
             os.close(dirfd)
     except OSError as exc:
@@ -1883,6 +1908,7 @@ def snapshot_preimage(handle: WriteHandle) -> str:
             f"a path no other writer is racing",
             handle.real,
         ) from None
+    handle.preimage = dst
     return dst
 
 
@@ -1938,6 +1964,7 @@ def _checked_stat(real: str, what: str, *, digest: bool = False,
                   capture=None, fields: tuple[str, ...] = (),
                   sentence: str = "",
                   noun: str = "the captured preimage"):
+def _checked_stat(real: str, what: str):
     """`fstat` of `real` taken through its parent's directory fd on an
     `O_NOFOLLOW` open, refusing anything that is not a regular single-linked
     file.
@@ -1964,6 +1991,7 @@ def _checked_stat(real: str, what: str, *, digest: bool = False,
     link-count and stat-identity refusals and through the fd whose identity was
     just verified. An open or read this process cannot complete (`EACCES`,
     `EIO`) is `EIDENTITY`, not a raw `OSError`."""
+    writer keeps a handle on after the rename."""
     parent, leaf = _split(real)
     try:
         dirfd = _open_dirfd(parent)
@@ -1984,6 +2012,7 @@ def _checked_stat(real: str, what: str, *, digest: bool = False,
                 raise ConfinementError(
                     "EOUTSIDE", f"the {what} may not be a symlink", real) from None
             raise _unreadable_identity(what, exc, real) from None
+            raise
         try:
             try:
                 st = os.fstat(fd)
@@ -2005,12 +2034,21 @@ def _checked_stat(real: str, what: str, *, digest: bool = False,
                         digest=content_digest)
             except OSError as exc:
                 raise _unreadable_identity(what, exc, real) from None
+            st = os.fstat(fd)
         finally:
             os.close(fd)
     finally:
         os.close(dirfd)
     if digest:
         return st, content_digest
+    if not stat.S_ISREG(st.st_mode):
+        raise ConfinementError(
+            "EOUTSIDE", f"the {what} must be a regular file", real)
+    if st.st_nlink != 1:
+        raise FsOpError(
+            "EMULTILINK", f"the {what} is linked from a second name "
+            f"({st.st_nlink} links), so installing it would hand a live alias "
+            "to whoever holds the other name", real)
     return st
 
 
@@ -2029,6 +2067,7 @@ def install_captured_sidecar(src_real: str, dst_real: str, capture) -> None:
     inverse would install the result and report a clean reversal.
 
     Checks on the way in and again on the way out:
+    Three checks, on the way in and again on the way out:
 
     * the sidecar is a regular file (`EOUTSIDE` otherwise),
     * its link count is 1 (`EMULTILINK` otherwise, the same control the forward
@@ -2054,6 +2093,8 @@ def install_captured_sidecar(src_real: str, dst_real: str, capture) -> None:
     replacement that already differs on inode or size is refused without
     reading it: a sidecar can be made huge or sparse, and the refuser should
     not do whatever work the replacer chose.
+      catches a swap, `size`/`mtime_ns`/`ctime_ns` catch an in-place rewrite,
+      and `mode` catches a re-permissioning.
 
     The check runs again on the INSTALLED result, because the rename itself is
     by name: re-checking afterwards is what closes the window between the first
@@ -2065,6 +2106,7 @@ def install_captured_sidecar(src_real: str, dst_real: str, capture) -> None:
     the rename, so the installed bytes are read and hashed once more. One extra
     full read at snapshot, one on the way in and one on the installed result are
     the whole cost.
+    bumps (`INSTALLED_CAPTURE_FIELDS`).
 
     A refusal RAISES, so the teardown loop records it as `restore-residue`
     against the crossing it was reverting — the outcome item 243 rule 6 already
@@ -2082,17 +2124,25 @@ def install_captured_sidecar(src_real: str, dst_real: str, capture) -> None:
         src_real, "preimage sidecar", digest=True, capture=capture,
         fields=SIDECAR_CAPTURE_FIELDS,
         sentence="the preimage sidecar changed since it was captured")
+    against, and refusing every such replay would strand a recoverable WAL."""
+    before = _checked_stat(src_real, "preimage sidecar")
+    _refuse_drifted_identity(before, capture, SIDECAR_CAPTURE_FIELDS, src_real,
+                             "the preimage sidecar changed since it was captured")
     replace_confined(src_real, dst_real)
     _checked_stat(
         dst_real, "restored target", digest=True, capture=capture,
         fields=INSTALLED_CAPTURE_FIELDS,
         sentence="the restored target is not the captured preimage")
+    after = _checked_stat(dst_real, "restored target")
+    _refuse_drifted_identity(after, capture, INSTALLED_CAPTURE_FIELDS, dst_real,
+                             "the restored target is not the captured preimage")
 
 
 def _refuse_drifted_identity(st, capture, fields: tuple[str, ...], real: str,
                              sentence: str,
                              noun: str = "the captured preimage",
                              digest: str | None = None) -> None:
+                             noun: str = "the captured preimage") -> None:
     """Compare `st` against a recorded `capture` over `fields`, or do nothing
     when the witness recorded none. Named separately so the two stages of
     `install_captured_sidecar` state the same comparison twice rather than
@@ -2111,6 +2161,7 @@ def _refuse_drifted_identity(st, capture, fields: tuple[str, ...], real: str,
     read) and stays stat-only so an older WAL still restores. The `unrm` call
     passes no digest here; `_refuse_drifted_digest` compares the parked bytes
     instead."""
+    differs between the preimage sidecar and the garbage one."""
     if not isinstance(capture, dict) or not capture:
         return
     observed = _capture_of(st)
@@ -2348,6 +2399,7 @@ def park_captured_sidecar(src_real: str, dst_real: str) -> dict:
     `_parked_digest` cannot read it and `rm` honestly accepts it. The key is
     additive JSON: the witness version does not change, and an install that
     predates the key ignores it."""
+    could still have."""
     replace_confined(src_real, dst_real)
     st = _parked_stat(dst_real, "garbage sidecar")
     capture = _capture_of(st)
@@ -2356,6 +2408,7 @@ def park_captured_sidecar(src_real: str, dst_real: str) -> dict:
         if digest is not None:
             capture["sha256"] = digest
     return capture
+    return _capture_of(_parked_stat(dst_real, "garbage sidecar"))
 
 
 def install_parked_sidecar(src_real: str, dst_real: str, capture) -> None:
@@ -2374,6 +2427,7 @@ def install_parked_sidecar(src_real: str, dst_real: str, capture) -> None:
     clean, residue-free reversal.
 
     The same three stat refusals as the preimage side, with the same codes:
+    The same three refusals as the preimage side, with the same codes:
     `EOUTSIDE` for a symlink or a different file type, `EMULTILINK` for a link
     added since the park, `EIDENTITY` for drifted `(dev, ino)` or `mode`/`size`/
     `mtime_ns`/`ctime_ns`. `(dev, ino)` is what a same-bytes replacement cannot
@@ -2395,6 +2449,9 @@ def install_parked_sidecar(src_real: str, dst_real: str, capture) -> None:
     are the same refusal: the check never falls back to stat-only. A capture
     with no `sha256` (a legacy record written before the key existed) keeps the
     stat-only behaviour, so an older WAL still replays.
+    forge; `ctime_ns` is what makes an in-place rewrite visible without
+    re-reading the bytes, and unlike `mtime_ns` an unprivileged writer cannot
+    set it back with `utimes`.
 
     The one difference from `install_captured_sidecar` is where the type and
     link-count expectations come from. The preimage sidecar is a file this

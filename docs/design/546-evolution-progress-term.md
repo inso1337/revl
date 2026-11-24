@@ -173,6 +173,7 @@ What this cannot see: a record whose `base` names an OLDER commit than the newes
 trunk commit its tree contains moves the merge base back and credits the
 difference. Nothing here can tell that a named commit is stale. The record's
 `base` must be written by the loop, never by the candidate. The other twelve components
+`base` must be written by the loop, never by the candidate. The other nine components
 still read `candidate.base` verbatim. Against a moving ref, their errors run
 toward failing (for example, `scope` would count the trunk's changes as the
 candidate's), and no other component credits anything. That is why only

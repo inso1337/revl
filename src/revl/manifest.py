@@ -180,6 +180,8 @@ def _operation(name: str, method: object) -> str:
     parameter list, or both followed by ``:Return``. Each half is a claim and
     its absence is silence, so a reader may believe what is there and must
     decide nothing about what is not."""
+    """One operation token: the bare name, or the name followed by its declared
+    parameter list. The parameter list is the claim; its absence is silence."""
     if not _wire_name(name):
         return name
     signature = _signature(method.get("params")) if isinstance(method, dict) \
@@ -189,6 +191,7 @@ def _operation(name: str, method: object) -> str:
     returns = _return_type(method)
     return f"{name}{signature}" if returns is None \
         else f"{name}{signature}:{returns}"
+    return name if signature is None else f"{name}{signature}"
 
 
 def _operations(entry: object) -> list[str]:
@@ -201,6 +204,7 @@ def _operations(entry: object) -> list[str]:
     ``commutative``) has every return WITHHELD, for the reason a marked
     operation does: the entry-level marking is a fact about the operations that
     the wire has no spelling for."""
+    legal (if idle) declaration."""
     if not isinstance(entry, dict):
         return []
     methods = entry.get("methods")
@@ -209,9 +213,11 @@ def _operations(entry: object) -> list[str]:
         return [_operation(name, method if plain else {"params":
                            (method or {}).get("params")})
                 for name, method in methods.items()]
+        return [_operation(name, method) for name, method in methods.items()]
     if isinstance(methods, list):
         return [_operation(m.get("name", ""),
                            m if plain else {"params": m.get("params")})
+        return [_operation(m.get("name", ""), m)
                 for m in methods if isinstance(m, dict)]
     return []
 

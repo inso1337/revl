@@ -266,6 +266,7 @@ def _reads(sink: str) -> int:
     if not os.path.exists(sink):
         return 0
     return sum(1 for line in Path(sink).read_text(encoding="utf-8").splitlines()
+    return sum(1 for line in Path(sink).read_text().splitlines()
                if line.startswith("r:"))
 
 
@@ -535,6 +536,7 @@ def test_surface_h_follows_the_transitive_service_closure():
         # registers no inverse and is refused (issue #2044, G4). The subject
         # here is the transitive `requires` closure, not the registration.
         "component I provides inner: Inner { provide inner { fn go(x) = emit rm(x) } }\n"
+        "component I provides inner: Inner { provide inner { fn go(x) = rm(x) } }\n"
         "component O provides outer: Outer requires inner: Inner {\n"
         "  provide outer { fn get(x) = emit inner.go(x) }\n"
         "}\n"))
@@ -571,6 +573,8 @@ def test_surface_h_refuses_the_star_widening():
     The compiler refuses this source since issue #2842, so the fold is measured
     on the IR an earlier compiler emitted (`tests/_legacy_emission_ir.py`)."""
     src = (
+    the authority that covered its miss."""
+    problem = _surface_h(
         "extern emission fn ship(x: Str) -> Str = @py { return x }\n"
         "fn indirect(f: (Str) -> Str, x: Str) -> Str { return f(x) }\n"
         "service S { emission fn loud(a: Str) -> Str cache capability }\n"
@@ -591,8 +595,11 @@ def test_surface_h_refuses_an_acquire_in_the_closure():
     from revl.mcp.approval import ClassMap, cache_applicability_refusal
     from revl.mcp.session import Session
     ir = compile_source(
+    problem = _surface_h(
         "type Sock = { fd: Int }\n"
         "extern pure fn open() -> Sock = @py { pass }\n"
+        "extern pure fn shut(s: Sock) -> Unit = @py { pass }\n"
+        "extern acquire fn open() -> Sock undo shut(result) = @py { pass }\n"
         "extern emission fn ping(s: Sock) -> Str = @py { return 'ok' }\n"
         "service S { emission fn get() -> Str cache capability }\n"
         "component C provides s: S { provide s { fn get() { "
@@ -602,6 +609,7 @@ def test_surface_h_refuses_an_acquire_in_the_closure():
             ext["class"] = "acquire"
     index = Session._build_cache_index(Session.__new__(Session), ir)
     problem = cache_applicability_refusal(ClassMap(ir), index)
+        "let s = open() return emit ping(s) } } }\n")
     assert problem is not None
     assert "`acquire` extern `open`" in problem and "teardown would leak" in problem
 
@@ -706,6 +714,7 @@ def test_cache_pure_fn_memoizes_in_the_emitted_body(tmp_path):
     assert module.double(sink, 3) == 6          # served from the table
     assert module.double(sink, 4) == 8
     lines = Path(sink).read_text(encoding="utf-8").splitlines()
+    lines = Path(sink).read_text().splitlines()
     assert len(lines) == 2                      # one host call per distinct args
 
 
@@ -720,6 +729,7 @@ def test_a_first_class_reference_reaches_the_memo(tmp_path):
     assert module.apply(module.double, sink, 5) == 10
     assert module.apply(module.double, sink, 5) == 10
     assert len(Path(sink).read_text(encoding="utf-8").splitlines()) == 1
+    assert len(Path(sink).read_text().splitlines()) == 1
 
 
 def test_an_unmemoizable_argument_shape_falls_back_to_the_call(tmp_path):

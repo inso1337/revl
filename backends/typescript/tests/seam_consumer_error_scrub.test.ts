@@ -87,6 +87,7 @@ function callOnce(sock: string, request: unknown): Promise<any> {
  *  socket path. A unix socket file appears at bind(), before listen() is
  *  accepting, so treating it as ready lets the consumer connect in that window
  *  and fail with ECONNREFUSED (issue #3094). */
+ *  421 F5. */
 const HOSTILE_PROVIDER = `
 const fs = require('node:fs')
 const net = require('node:net')
@@ -104,6 +105,7 @@ net.createServer((conn) => {
     conn.write(JSON.stringify({ ok: false, error }) + '\\n')
   })
 }).listen(sock, () => fs.writeFileSync(ready, 'listening\\n'))
+}).listen(sock)
 `
 
 /** A hostile peer, in its OWN process. It has to be its own process: `seamCall`
@@ -116,11 +118,13 @@ async function hostileSeam(): Promise<string> {
   const ready = `${sock}.ready`
   const peer = spawn(process.execPath, ['-e', HOSTILE_PROVIDER], {
     env: { ...process.env, HOSTILE_SOCK: sock, HOSTILE_READY: ready, HOSTILE_HELD: HELD_CANARY },
+    env: { ...process.env, HOSTILE_SOCK: sock, HOSTILE_HELD: HELD_CANARY },
     stdio: 'ignore',
   })
   peers.push(peer)
   for (let i = 0; i < 200; i += 1) {
     if (fs.existsSync(ready)) return sock
+    if (fs.existsSync(sock)) return sock
     await new Promise((r) => setTimeout(r, 25))
   }
   throw new Error('the hostile peer never came up')

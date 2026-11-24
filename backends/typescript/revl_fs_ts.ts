@@ -386,11 +386,30 @@ function pathComponents(p: string): string[] {
  * runs out: `ConfinementError('EOUTSIDE')` naming `spelled`, the caller's own
  * path, never the outside link the walk had reached. */
 function realpathish(p: string, spelled: string = p): string {
+ * target). node's `fs.realpathSync` throws ENOENT on a missing path, so this
+ * resolves the longest existing prefix (symlinks and all) and re-appends the
+ * non-existent tail, exactly as py's `os.path.realpath` normalizes a missing
+ * leaf. Symlinks in every existing component are therefore resolved BEFORE the
+ * membership test (must #1). */
+function realpathish(p: string): string {
   const abs = path.resolve(p)
   try {
     return fs.realpathSync.native(abs)
   } catch {
     // a missing leaf, a dangling link or a loop: walk it as py does
+  const tail: string[] = []
+  let cur = abs
+  for (;;) {
+    try {
+      const real = fs.realpathSync.native(cur)
+      if (tail.length === 0) return real
+      return path.join(real, ...tail.slice().reverse())
+    } catch {
+      const parent = path.dirname(cur)
+      if (parent === cur) return path.normalize(abs)
+      tail.push(path.basename(cur))
+      cur = parent
+    }
   }
   // a stack of components still to walk; the next one is at the end
   const rest = pathComponents(abs).reverse()
@@ -486,6 +505,7 @@ function rawResolveWithin(p: string): string {
   const root = workspaceRoot()
   const target = path.isAbsolute(p) ? p : path.join(root, p)
   const real = realpathish(target, p)
+  const real = realpathish(target)
   if (!isWithin(root, real)) {
     throw new ConfinementError(
       'EOUTSIDE',
@@ -494,6 +514,7 @@ function rawResolveWithin(p: string): string {
       // case and the target of every symlink, which would answer "does this
       // exist" for any path outside the root (#3184)
       sanitized(p),
+      real,
     )
   }
   return real
@@ -978,6 +999,8 @@ function rawWriteThrough(handle: WriteHandle, contents: string): void {
  * seven fields stay equal (issues #2652, #2666). That is why a capture can also
  * record the sha256 of the sidecar's bytes, which does not depend on clock
  * resolution.
+ * `ctimeNs` is what makes an IN-PLACE rewrite visible without re-reading the
+ * bytes, and unlike `mtimeNs` an unprivileged writer cannot set it back.
  *
  * Peer of py `SIDECAR_CAPTURE_FIELDS`, recorded as decimal STRINGS: node's only
  * nanosecond-resolution stat is the `bigint` one, and a bigint is not
@@ -1012,6 +1035,7 @@ export interface SidecarCapture {
  * would refuse every honest restore. Peer of py `INSTALLED_CAPTURE_FIELDS`.
  * The content digest IS compared on that pass as well: the window it exists for
  * is exactly a rewrite between the first read and the rename. */
+ * would refuse every honest restore. Peer of py `INSTALLED_CAPTURE_FIELDS`. */
 const INSTALLED_CAPTURE_FIELDS = [
   'dev', 'ino', 'mode', 'nlink', 'size', 'mtimeNs'] as const
 const SIDECAR_CAPTURE_FIELDS = [...INSTALLED_CAPTURE_FIELDS, 'ctimeNs'] as const
@@ -1047,6 +1071,7 @@ function sha256OfFd(fd: number): string {
  * callers that hold the sidecar's bytes open: `snapshotPreimage`, which just
  * wrote them, and `parkCapturedSidecar`, which can open the parked inode
  * read-only. */
+ * so it reaches no syscall of its own. */
 function captureOf(st: fs.BigIntStats): SidecarCapture {
   return {
     dev: String(st.dev),
@@ -1068,6 +1093,7 @@ function rawSnapshotPreimage(handle: WriteHandle): string {
     out = fs.openSync(
       dst,
       fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL
       | O_NOFOLLOW,
       0o600,
     )
@@ -1094,6 +1120,8 @@ function rawSnapshotPreimage(handle: WriteHandle): string {
     const capture = captureOf(fs.fstatSync(out, { bigint: true }))
     capture[SIDECAR_DIGEST_FIELD] = sha256OfFd(out)
     handle.capture = capture
+    // the name. The inverse re-checks the file it installs against this.
+    handle.capture = captureOf(fs.fstatSync(out, { bigint: true }))
   } catch (e) {
     if (out >= 0) {
       // The sidecar was created but never reached `handle.preimage`, so
@@ -1111,6 +1139,7 @@ function rawSnapshotPreimage(handle: WriteHandle): string {
       }
       fs.closeSync(out)
     }
+    if (out >= 0) fs.closeSync(out)
     const message = (e as { message?: string })?.message ?? String(e)
     throw new FsOpError(
       'ESNAPSHOT',
@@ -1173,6 +1202,7 @@ function rawReplaceConfined(srcReal: string, dstReal: string): void {
  * and report a clean reversal.
  *
  * Checks on the way in and again on the installed result: a regular file
+ * Three checks, on the way in and again on the installed result: a regular file
  * (`EOUTSIDE`), one link (`EMULTILINK`, the control the forward
  * `openConfinedWrite` applies to its target), an unchanged captured identity
  * (`EIDENTITY`), and an unchanged content digest (`EIDENTITY`, issue #2652).
@@ -1195,6 +1225,11 @@ function rawReplaceConfined(srcReal: string, dstReal: string): void {
  * record, refused as `EIDENTITY` before the read rather than compared
  * stat-only, because dropping the digest would drop the one check that does not
  * depend on the clock.
+ * `openConfinedWrite` applies to its target), and an unchanged captured
+ * identity (`EIDENTITY`). The second pass is what closes the window between the
+ * first check and the rename, which is by NAME, exactly as `confirmLanded`
+ * re-establishes the forward write rather than trusting its pre-syscall check;
+ * it drops `ctimeNs`, which the rename legitimately bumps.
  *
  * A refusal THROWS, which the teardown loop records as `restore-residue` — the
  * outcome item 243 rule 6 already defines for an inverse that cannot complete.
@@ -1210,6 +1245,7 @@ function rawInstallCapturedSidecar(
   const observe = (real: string, what: string, sentence: string,
     noun: string):
     { capture: SidecarCapture; digest: string | null } => {
+  const observe = (real: string, what: string): SidecarCapture => {
     const [parent] = splitLeaf(real)
     try {
       assertRealDirChain(parent)
@@ -1234,6 +1270,7 @@ function rawInstallCapturedSidecar(
         real,
       )
     }
+    let st: fs.BigIntStats
     try {
       const st = fs.fstatSync(fd, { bigint: true })
       if (!st.isFile()) {
@@ -1301,13 +1338,29 @@ function rawInstallCapturedSidecar(
         }
       }
       return { capture: captureOf(st), digest }
+      st = fs.fstatSync(fd, { bigint: true })
     } finally {
       fs.closeSync(fd)
     }
+    if (!st.isFile()) {
+      throw new FsOpError(
+        'EOUTSIDE', `the ${what} must be a regular file`, real)
+    }
+    if (st.nlink !== 1n) {
+      throw new FsOpError(
+        'EMULTILINK',
+        `the ${what} is linked from a second name (${st.nlink} links), so `
+        + 'installing it would hand a live alias to whoever holds the other '
+        + 'name',
+        real,
+      )
+    }
+    return captureOf(st)
   }
   const refuse = (observed: SidecarCapture,
     fields: readonly (keyof SidecarCapture)[],
     real: string, sentence: string, digest?: string | null): void => {
+    real: string, sentence: string): void => {
     if (capture === null || capture === undefined) return
     const drifted = fields.filter((f) => capture[f] !== undefined
       && capture[f] !== observed[f])
@@ -1334,11 +1387,15 @@ function rawInstallCapturedSidecar(
     'the preimage sidecar changed since it was captured', 'the captured preimage')
   refuse(before.capture, SIDECAR_CAPTURE_FIELDS, srcReal,
     'the preimage sidecar changed since it was captured', before.digest)
+  refuse(observe(srcReal, 'preimage sidecar'), SIDECAR_CAPTURE_FIELDS, srcReal,
+    'the preimage sidecar changed since it was captured')
   replaceConfined(srcReal, dstReal)
   const after = observe(dstReal, 'restored target',
     'the restored target is not the captured preimage', 'the captured preimage')
   refuse(after.capture, INSTALLED_CAPTURE_FIELDS, dstReal,
     'the restored target is not the captured preimage', after.digest)
+  refuse(observe(dstReal, 'restored target'), INSTALLED_CAPTURE_FIELDS, dstReal,
+    'the restored target is not the captured preimage')
 }
 
 /** `lstat` of `real` with the parent chain checked, refusing a symlink. The
@@ -1580,6 +1637,7 @@ function refuseDriftedDigest(
  * `parkedDigest` cannot read it and `fsRm` honestly accepts it. The key is
  * additive JSON: the witness shape does not change, and an install that
  * predates the key ignores it. */
+ * honest sidecar could still have. */
 function rawParkCapturedSidecar(
   srcReal: string, dstReal: string,
 ): SidecarCapture {
@@ -1590,6 +1648,7 @@ function rawParkCapturedSidecar(
     if (digest !== null) capture.sha256 = digest
   }
   return capture
+  return captureOf(parkedStat(dstReal, 'garbage sidecar'))
 }
 
 /** Install `fsRm`'s garbage sidecar back over its target, but only while the
@@ -1631,12 +1690,22 @@ function rawParkCapturedSidecar(
  * replays and an honest `fsRm` of a directory or of a write-only file still
  * installs. A parked hardlinked file that is readable is still a readable
  * regular file, so it carries a digest and both passes compare it.
+ * The same three refusals as the preimage side, with the same codes: `EOUTSIDE`
+ * for a symlink or a different file type, `EMULTILINK` for a link added since
+ * the park, `EIDENTITY` for drifted `(dev, ino)` or `mode`/`size`/`mtimeNs`/
+ * `ctimeNs`. The one difference is where the type and link-count expectations
+ * come from: the preimage sidecar is a file this module created, so they are
+ * constants there; the garbage sidecar is the caller's own file, so they are
+ * facts `parkCapturedSidecar` recorded and are compared against the record.
+ * That is the difference between refusing a substitution and refusing an honest
+ * `fsRm` of a directory or of an already-hardlinked file.
  *
  * The check runs again on the INSTALLED result, because the rename is by name,
  * exactly as `rawInstallCapturedSidecar` re-checks; the second pass drops
  * `ctimeNs`, which the rename legitimately bumps, but compares the digest
  * again: the window that pass exists for is exactly a rewrite between the first
  * read and the rename.
+ * `ctimeNs`, which the rename legitimately bumps.
  *
  * A refusal THROWS, which the teardown loop records as `restore-residue` — the
  * outcome item 243 rule 6 already defines for an inverse that cannot complete.
@@ -2057,6 +2126,7 @@ export function fsRm(p: string): FsResult<RmWitness> {
     // back is the file that was parked. A SUPERSET key, like `fsWrite`'s; when
     // the parked file opens read-only the capture also carries its sha256
     // (issue #2666), which no same-tick rewrite can hide.
+    // back is the file that was parked. A SUPERSET key, like `fsWrite`'s.
     const capture = parkCapturedSidecar(target, parked)
     return { kind: 'Ok', value: { path: target, garbage: parked, capture } }
   } catch (e) {
@@ -2155,6 +2225,7 @@ export function fsUnrm(w: RmWitness): void {
   // prove the FILE in it is still the file `fsRm` parked there. So the install
   // re-checks the sidecar against the identity captured at park time, including
   // the content digest when the capture carries one (issue #2666), and
+  // re-checks the sidecar against the identity captured at park time and
   // re-checks the installed result afterwards, exactly as `fsRestore` does for
   // its preimage sidecar (issue #1038). A drifted sidecar throws, which the
   // teardown loop records as restore-residue; it is never silently installed

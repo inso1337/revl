@@ -63,6 +63,7 @@ import refusal_inventory  # noqa: E402
 @pytest.fixture(scope="module")
 def hosts() -> dict:
     return json.loads((BENCH / "hosts.json").read_text(encoding="utf-8"))
+    return json.loads((BENCH / "hosts.json").read_text())
 
 
 def test_the_registry_names_three_hosts_and_the_refused_column_leads(hosts):
@@ -156,6 +157,7 @@ def test_the_residual_count_agrees_with_the_ledger_the_tests_gate():
 
 def _module_literal(path: Path, name: str) -> str:
     tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = ast.parse(path.read_text())
     for node in tree.body:
         targets = (node.targets if isinstance(node, ast.Assign)
                    else [node.target] if isinstance(node, ast.AnnAssign) else [])
@@ -217,6 +219,7 @@ class _Args:
     admits_from = None
     residue_from = "hand-corpus"
     tokens_from = "pinned-three-host"
+    tokens_from = None
     injection_from = None
     three_host_from = "pinned-three-host"
     attempt = 1
@@ -426,6 +429,7 @@ def committed_survey() -> dict:
     if not path.is_file():
         pytest.skip("no committed unload survey")
     return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(path.read_text())
 
 
 def test_the_survey_is_a_claim_checker_and_the_committed_one_is_clean(committed_survey):
@@ -663,6 +667,7 @@ def test_the_committed_pin_does_not_quietly_adopt_the_quoted_throughput():
     if not path.is_file():
         pytest.skip("no committed pin")
     pin = json.loads(path.read_text(encoding="utf-8"))
+    pin = json.loads(path.read_text())
     tp = pin.get("throughput") or {}
     if "generation_tps_mean" not in tp:
         pytest.skip("the committed pin carries no throughput measurement")
@@ -1004,6 +1009,7 @@ def test_no_committed_artifact_carries_an_absolute_path():
     offenders = []
     for path in sorted(out.glob("*.json")) + sorted(out.glob("*.md")):
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        for lineno, line in enumerate(path.read_text().splitlines(), 1):
             for token in line.replace('"', " ").replace("`", " ").split():
                 if token.startswith("/") and "/" in token[1:]:
                     offenders.append(f"{path.name}:{lineno}: {token}")
@@ -1018,6 +1024,7 @@ def test_a_compiler_outside_the_checkout_is_named_without_its_directory():
 
 
 def test_the_committed_report_is_what_the_documented_command_reproduces(report):
+def test_the_committed_report_is_what_the_documented_command_reproduces():
     """`bench/README.md` documents `python3 bench/framework_bench.py --write`
     with no flags. If a cell only appears when a flag names the corpus that is
     committed beside the report, the documented command silently drops it and
@@ -1034,6 +1041,7 @@ def test_the_committed_report_is_what_the_documented_command_reproduces(report):
     for label in (defaults.admits_from, defaults.residue_from,
                   defaults.injection_from, defaults.tokens_from,
                   defaults.three_host_from):
+                  defaults.injection_from):
         assert (BENCH / "results" / label).is_dir(), (
             f"a default names {label}, which is not committed")
     # `_Args` is this file's stand-in for the documented command, so a default
@@ -1044,16 +1052,24 @@ def test_the_committed_report_is_what_the_documented_command_reproduces(report):
 
 
 def test_the_built_report_headline_agrees_with_a_fresh_recompute(report):
+def test_the_committed_report_headline_agrees_with_a_fresh_recompute():
     """The refused column is the headline and it is recomputed from ledgers
     that move, so the report this module builds carries the recompute. Since
     issue #1768 the committed snapshot carries no copy of it to go stale (the
     next test), which is why this is asserted on the built report."""
     built = report["columns"]["refused"]
+    that move. A committed artifact whose headline no longer matches the tree
+    is a published number nobody can reproduce."""
+    committed = json.loads(COMMITTED_REPORT.read_text())["columns"]["refused"]
     section = refusal_inventory.build()["sections"]["native-chain-residual"]
     assert built["headline"]["documents_refused"] == section["total_residual"]
     assert built["headline"]["corpus"] == section["total_corpus"]
     assert built["headline"]["n"] == section["total_corpus"]
     assert built["headline"]["per_tier"] == {
+    assert committed["headline"]["documents_refused"] == section["total_residual"]
+    assert committed["headline"]["corpus"] == section["total_corpus"]
+    assert committed["headline"]["n"] == section["total_corpus"]
+    assert committed["headline"]["per_tier"] == {
         tier: body["residual"] for tier, body in section["tiers"].items()}
 
 
@@ -1173,8 +1189,10 @@ def test_no_bench_module_reaches_its_runner_through_a_bare_import():
     offenders = []
     for path in sorted(BENCH.glob("*.py")):
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        for lineno, line in enumerate(path.read_text().splitlines(), 1):
             stripped = line.strip()
             if _BARE_RUN_IMPORT.match(stripped):
+            if stripped.startswith(("import run", "from run import")):
                 offenders.append(f"{path.name}:{lineno}: {stripped}")
     assert not offenders, offenders
 

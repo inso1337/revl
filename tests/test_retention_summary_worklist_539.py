@@ -28,6 +28,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_source  # noqa: E402
 from _compiled_ir import compiled_ir  # noqa: E402
+from revl import compile_files, compile_source  # noqa: E402
 from revl.ownership import (  # noqa: E402
     _FRESH,
     _bound_names,
@@ -87,6 +88,8 @@ def _functions(doc: str):
     if doc.startswith("selfhost/"):
         return compiled_ir(ROOT / doc).get("functions") or []
     return compile_source((CORPUS_DIR / doc).read_text(encoding="utf-8")).get("functions") or []
+        return compile_files([str(ROOT / doc)]).get("functions") or []
+    return compile_source((CORPUS_DIR / doc).read_text()).get("functions") or []
 
 
 @pytest.mark.parametrize("doc", _FIXTURE_DOCS + _SELFHOST_DOCS)

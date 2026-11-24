@@ -67,6 +67,7 @@ component Replayed requires sink: Sink {
 def _emit_go() -> str:
     return emit.emit(compile_source(FIXTURE.read_text(encoding="utf-8")
                                     + _REPLAYED),
+    return emit.emit(compile_source(FIXTURE.read_text(encoding="utf-8")),
                      package="stream130")
 
 
@@ -150,6 +151,7 @@ def test_stream_host_gets_no_no_op_stub():
     src = _emit_go()
     assert "func StreamSource(_args ...any) any {" not in src
     assert "func StreamSource(replay ...int) *Stream {" in src
+    assert "func StreamSource() *Stream {" in src
 
 
 def test_iteration_lowers_as_a_blocking_next_loop():

@@ -11,10 +11,13 @@ returns the file list for the composition it describes.
 
 A downstream project does exactly this. Its `src/manifest.rvl` declares the
 project's shared core plus every interface, and exports `mf_files(mode: Str) ->
+revl-harness does exactly this. `src/manifest.rvl` declares the harness's
+shared core plus every interface, and exports `mf_files(mode: Str) ->
 List[Str]`, resolved by boot mode (`voice`, `code`, `cli`). Its own header
 states the intent plainly: the host's only role left is to bootstrap-compile
 this one file, call `mf_files`/`mf_config` with the mode flag, and append the
 environment tier chosen by CLI flags. Everything the downstream project is lives in
+environment tier chosen by CLI flags. Everything the harness is lives in
 revl from there.
 
 ## The two-stage bootstrap
@@ -23,6 +26,8 @@ Resolving a manifest-driven composition takes the host two compiles, not one.
 
 1. **Compile the manifest alone.** That project's `_manifest_module()`
    (in its server host) runs `compile_files(["src/manifest.rvl"])`, emits
+1. **Compile the manifest alone.** `revl-harness`'s `_manifest_module()`
+   (`tools/server/app.py`) runs `compile_files(["src/manifest.rvl"])`, emits
    it to Python, and execs the result as a module, so `mf_files` and
    `mf_config` become callable Python functions. This step cannot be revl
    code calling revl code: nothing has compiled the manifest yet, so nothing
@@ -30,6 +35,7 @@ Resolving a manifest-driven composition takes the host two compiles, not one.
 2. **Ask it for the mode's files, then compile the rest.** `_composition()`
    calls `man.mf_files(mode)` to get the real file list, appends whatever the
    environment tier adds (in that project's case, the model provider and the
+   environment tier adds (in the harness's case, the model provider and the
    persistence layer; see the comment above `_composition` for the exact
    fields), and compiles that list as the actual, running composition.
 
@@ -47,6 +53,7 @@ necessarily driven by a runtime that already exists outside revl: host code,
 by construction.
 
 This is not specific to that project's design, and it is not a gap this
+This is not specific to revl-harness's design, and it is not a gap this
 project can close by shipping more revl. **It is true of every composition
 framework that lets the composition describe its own shape.** The host
 runtime that will eventually run the composition necessarily precedes the
@@ -61,6 +68,7 @@ zero one, because a zero one is not reachable.
 
 The manifest keeps being the single source of truth for the file list once
 step 1 has run. In that project's case that already holds: `mf_files`
+step 1 has run. In revl-harness's case that already holds: `mf_files`
 decides core plus interface, and the Python host only appends the
 environment tier (model provider, durable store), which is runtime-selected
 (CLI flags), not part of the composition's own shape. The host does not
@@ -78,6 +86,7 @@ Step 2's "append whatever the environment tier adds" is the second thing the
 host knows before the composition exists: the port, the auth token, the data
 dir, which model provider to boot against. That half has its own declaration
 now: a `boot` component, whose `config {}` block is the typed, bounded,
+now — a `boot` component, whose `config {}` block is the typed, bounded,
 audited contract for exactly those values, with `revl run --env` as its one
 door. The floor described above is unchanged (something still has to compile the
 first document); what moves is that the environment values crossing it are no
@@ -89,6 +98,9 @@ longer an undeclared host-authored map. See
 - `src/manifest.rvl` and `_composition()` / `_manifest_module()` in the
   server host of a downstream project, the worked instance this doc
   generalizes from
+- `src/manifest.rvl` and `_composition()` / `_manifest_module()` in
+  `tools/server/app.py`, both in the revl-harness repository, the worked
+  instance this doc generalizes from
 - [v2.0-roadmap.md](v2.0-roadmap.md) item 348, where this finding was filed
 - [environment-binding.md](environment-binding.md), the environment contract
   the host injects across this same boundary (roadmap item 350)

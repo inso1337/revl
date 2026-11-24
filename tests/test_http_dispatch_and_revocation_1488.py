@@ -11,6 +11,8 @@
    changes, checked on every request, and a profile that no longer parses
    refuses every request (503, with a fixed text; the reason goes to the
    server's stderr log) instead of serving on under the old one.
+   refuses every request (503, naming the error) instead of serving on under
+   the old one.
 """
 
 import hashlib
@@ -185,9 +187,12 @@ def _settle(port, who="alice"):
     """The first request after an edit sees the new content once and is refused;
     one SETTLE later the second identical read adopts it. The refusal no longer
     names the state, so it is told apart by the fixed text it carries."""
+    """The first request after an edit sees the new content once and is refused
+    ("changing"); one SETTLE later the second identical read adopts it."""
     status, body = _list(port, who)
     assert status == 503, (status, body)
     assert body["error"]["message"] == REFUSAL, body
+    assert status == 503 and "changing" in body["error"]["message"], (status, body)
     time.sleep(SETTLE_S)
 
 
@@ -303,6 +308,8 @@ def test_an_edit_the_stat_signature_cannot_see_is_still_read(from_file, monkeypa
 ])
 def test_a_broken_profile_refuses_every_request_with_fixed_text_and_logs_why(
         from_file, capsys, breakage, reason):
+@pytest.mark.parametrize("breakage", ["garbage", "delete"])
+def test_a_broken_profile_refuses_every_request_and_names_why(from_file, breakage):
     path, port = from_file
     assert _list(port, "alice")[0] == 200
     if breakage == "delete":
@@ -320,6 +327,8 @@ def test_a_broken_profile_refuses_every_request_with_fixed_text_and_logs_why(
     assert "revl mcp: every request is refused:" in logged, logged
     assert str(path) in logged, logged
     assert reason in logged, logged
+        assert "operator profile" in body["error"]["message"]
+        assert "changing" not in body["error"]["message"]
     # fixing the file restores service without a restart
     path.write_text(_profile({}), encoding="utf-8")
     _settle(port)

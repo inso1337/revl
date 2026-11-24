@@ -58,6 +58,7 @@ import argparse
 import copy
 import hashlib
 import json
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -84,6 +85,8 @@ NOT_RUN = "not-run"
 def compiler_digest() -> str:
     """The scoring compiler, by content: `src/revl@sha256:<12 hex>` over the
     name and sha256 of every `src/revl/**/*.py`, in sorted order.
+def git_sha() -> str:
+    """The commit, with `-dirty` when the COMPILER is uncommitted.
 
     This field used to be `git rev-parse HEAD` (with `-dirty`). A commit sha
     names a branch tip that a squash merge never puts on main, it moved on
@@ -92,6 +95,11 @@ def compiler_digest() -> str:
     of the compiler's own files moves only when the compiler does, needs no
     git, and is recomputable from any checkout, the same identity
     `tools/census_artifact.py` publishes.
+    The dirty check is scoped to `src/revl` the way `bench/rescore.py` scopes
+    it, and for the same reason: the question this field answers is which
+    compiler produced the numbers. Writing this report dirties the tree by
+    definition, so a whole-tree check would mark every report dirty and the
+    flag would stop meaning anything.
     """
     h = hashlib.sha256()
     src = ROOT / "src" / "revl"
@@ -99,6 +107,16 @@ def compiler_digest() -> str:
         rel = path.relative_to(ROOT).as_posix()
         h.update(f"{rel}:{hashlib.sha256(path.read_bytes()).hexdigest()}\n".encode())
     return f"src/revl@sha256:{h.hexdigest()[:12]}"
+    try:
+        out = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+                             capture_output=True, text=True, timeout=30)
+        sha = out.stdout.strip() or "unknown"
+        dirty = subprocess.run(
+            ["git", "-C", str(ROOT), "status", "--porcelain", "--", "src/revl"],
+            capture_output=True, text=True, timeout=30)
+        return sha + ("-dirty" if dirty.stdout.strip() else "")
+    except Exception:
+        return "unknown"
 
 
 def _compiler_path(parent: Path) -> str:
@@ -140,6 +158,7 @@ def checker_version() -> dict:
         "frontier": version.get("frontier"),
         "compiler_path": _compiler_path(Path(revl.__file__).parent),
         "compiler_commit": compiler_digest(),
+        "compiler_commit": git_sha(),
         "report_schema": REPORT_SCHEMA,
     }
 
@@ -155,6 +174,7 @@ def _rel(path: Path) -> str:
 
 def load_hosts() -> dict:
     return json.loads((BENCH / "hosts.json").read_text(encoding="utf-8"))
+    return json.loads((BENCH / "hosts.json").read_text())
 
 
 def load_unload_survey() -> dict:
@@ -169,6 +189,7 @@ def load_unload_survey() -> dict:
                 "reason": f"no survey at {_rel(path)}; run "
                           "bench/framework_unload_survey.py --fetch --write"}
     doc = json.loads(path.read_text(encoding="utf-8"))
+    doc = json.loads(path.read_text())
     doc["present"] = True
     doc["path"] = _rel(path)
     return doc
@@ -181,6 +202,7 @@ def load_pin(path: Path | None) -> dict:
                 "reason": f"no pin at {_rel(target)}; "
                           "run bench/model_pin.py --write"}
     pin = json.loads(target.read_text(encoding="utf-8"))
+    pin = json.loads(target.read_text())
     pin["present"] = True
     pin["path"] = _rel(target)
     return pin
@@ -294,6 +316,7 @@ def corpus_models(run: str) -> list:
         return []
     seen = []
     for line in path.read_text(encoding="utf-8").splitlines():
+    for line in path.read_text().splitlines():
         if not line.strip():
             continue
         try:
@@ -413,6 +436,7 @@ def _unanswered_cells(run: str, attempt: int) -> set:
     if not path.is_file():
         return out
     for line in path.read_text(encoding="utf-8").splitlines():
+    for line in path.read_text().splitlines():
         if not line.strip():
             continue
         try:
@@ -421,6 +445,7 @@ def _unanswered_cells(run: str, attempt: int) -> set:
             continue
         if (not row.get("summary") and row.get("attempt") == attempt
                 and row.get("answer_from_reasoning")):
+        if row.get("attempt") == attempt and row.get("answer_from_reasoning"):
             out.add((row.get("spec"), row.get("variant")))
     return out
 
@@ -438,6 +463,7 @@ def column_residue(run: str) -> dict:
         return {"status": NOT_RUN,
                 "blocked_on": f"no committed records at bench/results/{run}/results.jsonl"}
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
     raw = [r for r in rows if r.get("variant") == "raw-ts"] or rows
     if not raw:
         return {"status": NOT_RUN, "blocked_on": f"bench/results/{run} holds no raw-ts cells"}
@@ -876,6 +902,7 @@ def column_injection_escape(run: str | None) -> dict:
                 "nearest_existing": "tests/test_adversarial_gate.py (docs/threat-model.md)",
                 "note": "not filled with the nearest available number"}
     doc = json.loads(path.read_text(encoding="utf-8"))
+    doc = json.loads(path.read_text())
     if not doc.get("reportable"):
         return {"status": NOT_RUN,
                 "blocked_on": (f"bench/results/{run} was produced by the "
@@ -924,6 +951,7 @@ def briefs_from_residue(residue: dict, run: str) -> list[dict]:
         return []
     path = BENCH / "results" / run / "results.jsonl"
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
     raw = [r for r in rows if r.get("variant") == "raw-ts"] or rows
     return [{
         "spec": f"{r.get('spec', '?')}/raw-ts",
@@ -1144,12 +1172,15 @@ def remaining_gates(hosts: dict, report_columns: dict, pin: dict) -> list[dict]:
                         "every three-host number carries n=" + str(three["n"])),
             })
     elif pinned_cells:
+    if pinned_cells:
         gates.append({
             "gate": "a pinned-model run across all three hosts",
             "what": (f"the pinned model produced {', '.join(pinned_cells)}; every "
                      "other cell is a re-score of a corpus another model "
                      "generated, or not run"),
             "why": THREE_HOST_NEEDS,
+            "why": ("the raw-ts and framework hosts have not been generated with "
+                    "the pinned model"),
         })
     else:
         gates.append({
@@ -1158,6 +1189,7 @@ def remaining_gates(hosts: dict, report_columns: dict, pin: dict) -> list[dict]:
                      "admission and token cells are re-scores of corpora generated "
                      "by other models"),
             "why": THREE_HOST_NEEDS,
+            "why": "the three-host generation run has not been executed",
         })
     gates.append({
         "gate": "independent reproduction",
@@ -1293,6 +1325,7 @@ def _unload_section(cell: dict) -> list:
 
 def _third_host_section(framework: dict | None, survey: dict,
                         three_host: dict | None = None) -> list:
+def _third_host_section(framework: dict | None, survey: dict) -> list:
     """Which framework, why, what was rejected, and what is still not run."""
     if not framework or not framework.get("name"):
         return []
@@ -1331,6 +1364,9 @@ def _third_host_section(framework: dict | None, survey: dict,
             "What that check says and does not say: a confirmed claim means the "
             "symbol is in the published file. It says nothing about what calling "
             f"it releases, {probe}", "",
+            "it releases, which is the residue probe's question and is why the "
+            "framework residue cell is not-run rather than filled from the "
+            "survey.", "",
         ]
     else:
         lines += [f"No unload survey is committed: {survey.get('reason', '')}.", ""]
@@ -1363,6 +1399,8 @@ def _third_host_section(framework: dict | None, survey: dict,
             lines += [f"- `{s}`" for s in fw["could_not_load"]]
             lines += [""]
     elif blocked:
+    blocked = framework.get("blocked_on")
+    if blocked:
         lines += ["### Why its cells are still empty", ""] + list(blocked) + [""]
     return lines
 
@@ -1536,6 +1574,8 @@ def render(report: dict) -> str:
                   "`python3 bench/refusal_inventory.py`.", ""]
     elif refused.get("status") == SNAPSHOT_REFUSED["status"]:
         lines += [textwrap.fill(refused["why"], width=70), ""]
+                  "behind each count, is `refusals.json` beside this file and",
+                  "is regenerated by `python3 bench/refusal_inventory.py`.", ""]
     else:
         lines += ["The inventory could not be read. Sections unavailable: "
                   + ", ".join(sorted(refused.get("unavailable", {}))), ""]
@@ -1703,6 +1743,7 @@ def render(report: dict) -> str:
     lines += _three_host_section(cols.get("three-host") or {})
     lines += _third_host_section(framework, report.get("unload_survey") or {},
                                  cols.get("three-host") or {})
+    lines += _third_host_section(framework, report.get("unload_survey") or {})
 
     lines += ["## Claims and their rung", "",
               "| claim | rung |", "|---|---|"]
@@ -1737,6 +1778,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--tokens-from", default=THREE_HOST_LABEL,
                     help="committed corpus for the tokens-to-green column "
                          "('none' to skip)")
+    ap.add_argument("--tokens-from", default=None,
+                    help="committed corpus for the tokens-to-green column")
     ap.add_argument("--injection-from", default="injection-ornith",
                     help="committed bench/injection_escape.py run label "
                          "for the injection-escape column ('none' to skip)")
@@ -1781,6 +1824,14 @@ def main(argv: list[str] | None = None) -> int:
         (OUT_DIR / "report.md").write_text(render(frozen))
         print(f"wrote {_rel(OUT_DIR)}/report.json, report.md (the refused "
               "column is recomputed on every build and not committed)")
+        (OUT_DIR / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+        (OUT_DIR / "report.md").write_text(render(report))
+        inv = report["columns"]["refused"].get("inventory")
+        if inv:
+            (OUT_DIR / "refusals.json").write_text(json.dumps(inv, indent=2) + "\n")
+            (OUT_DIR / "refusals.md").write_text(refusal_inventory.render(inv))
+        print(f"wrote {_rel(OUT_DIR)}/report.json, report.md, "
+              "refusals.json, refusals.md")
     elif args.json:
         print(json.dumps(report, indent=2))
     else:

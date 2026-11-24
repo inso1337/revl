@@ -64,6 +64,7 @@ stays dependency-light and imports no OTel code on any core path.
 
 ```bash
 pip install ".[otel]"          # from a checkout of the repository
+pip install revl[otel]
 ```
 
 Point the exporter at a recorded trace:

@@ -107,6 +107,7 @@ def _wal_records(session: Session) -> list:
     wal_path = session.recorder.wal.path
     session.unload()
     return [json.loads(line) for line in Path(wal_path).read_text(encoding="utf-8").splitlines()
+    return [json.loads(line) for line in Path(wal_path).read_text().splitlines()
             if line.strip()]
 
 
@@ -469,6 +470,8 @@ def test_a_short_or_default_registered_value_never_over_redacts():
 #     hashed into the ticket (`argsDigest`) EXCEPT at a parameter whose name is a
 #     resource kind — one in `cap_order._REGISTRY`, or one a capability DECLARES
 #     for itself (issue #1938) — whose runtime value is lifted out and, on a yes,
+#     hashed into the ticket (`argsDigest`) EXCEPT at a parameter whose name sits
+#     in `cap_order._REGISTRY`, whose runtime value is lifted out and, on a yes,
 #     written verbatim to a durable cross-session log. The ticket now says so, and
 #     names the `Secret[Str]` declaration that changes it;
 #   * and the durability becomes an OPERATOR decision

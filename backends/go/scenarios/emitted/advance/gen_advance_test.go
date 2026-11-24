@@ -433,6 +433,7 @@ func (m *Map[V]) Drop() {
 	m.mu.Unlock()
 	revlHostRelease()
 }
+func (m *Map[V]) Drop() { hostRecord("map.drop"); revlHostRelease() }
 func (m *Map[V]) Insert(k string, v V) {
 	m.journalNote(k, "insert")
 	m.mu.Lock()
@@ -674,6 +675,7 @@ func TickCounter() stc.Component {
 			}); err != nil {
 				return nil, err
 			}
+		Apply: func(ctx *stc.Context) (stc.Inverse, error) {
 			var store *Map[string]
 			if err := ctx.Effect(func() stc.Inverse {
 				store = MapNew[string]()
@@ -682,6 +684,7 @@ func TickCounter() stc.Component {
 				return nil, err
 			}
 			_implCounter := &TickCounter_counter{ctx: ctx, revlJournal: _revlJournal, store: store}
+			_implCounter := &TickCounter_counter{ctx: ctx, store: store}
 			if _, err := ctx.Provide(_keyCounter, Counter(_implCounter)); err != nil {
 				return nil, err
 			}
@@ -695,6 +698,8 @@ type TickCounter_counter struct {
 	ctx         *stc.Context
 	revlJournal *revlJournalFrame
 	store       *Map[string]
+	ctx   *stc.Context
+	store *Map[string]
 }
 
 func (revlSelf *TickCounter_counter) Count() int64 {
@@ -708,6 +713,7 @@ func (revlSelf *TickCounter_counter) Tick() {
 		revlSelf.revlJournal.Begin()
 		revlSelf.store.Insert(key, "fired")
 		return revlSelf.revlJournal.Guard(func() error { revlSelf.store.Remove(key); return nil })
+		return func() error { revlSelf.store.Remove(key); return nil }
 	})
 }
 
@@ -721,6 +727,7 @@ func Heartbeat() stc.Component {
 					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
 				}
 			}()
+		Apply: func(ctx *stc.Context) (stc.Inverse, error) {
 			counter, err := stc.Service[Counter](ctx, _keyCounter)
 			if err != nil {
 				return nil, err
@@ -750,6 +757,7 @@ func Warmup() stc.Component {
 					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
 				}
 			}()
+		Apply: func(ctx *stc.Context) (stc.Inverse, error) {
 			counter, err := stc.Service[Counter](ctx, _keyCounter)
 			if err != nil {
 				return nil, err
@@ -837,6 +845,7 @@ func TestAnEveryTimerFiresOnEachAdvancedTick(revlT *testing.T) {
 		if err := _f.Ready(stdctx.Background()); err != nil {
 			revlT.Fatalf("%s: %v", "lifecycle test \"an every-timer fires on each advanced tick\": load TickCounter", err)
 		}
+		_fibers["TickCounter"] = _f
 	}
 	_revlAt = "load Heartbeat"
 	{
@@ -846,6 +855,7 @@ func TestAnEveryTimerFiresOnEachAdvancedTick(revlT *testing.T) {
 		if err := _f.Ready(stdctx.Background()); err != nil {
 			revlT.Fatalf("%s: %v", "lifecycle test \"an every-timer fires on each advanced tick\": load Heartbeat", err)
 		}
+		_fibers["Heartbeat"] = _f
 	}
 	_revlAt = "call counter.count"
 	var before int64
@@ -966,6 +976,7 @@ func TestAnAfterTimerFiresOnceWhenItsDelayElapses(revlT *testing.T) {
 		if err := _f.Ready(stdctx.Background()); err != nil {
 			revlT.Fatalf("%s: %v", "lifecycle test \"an after-timer fires once when its delay elapses\": load TickCounter", err)
 		}
+		_fibers["TickCounter"] = _f
 	}
 	_revlAt = "load Warmup"
 	{
@@ -975,6 +986,7 @@ func TestAnAfterTimerFiresOnceWhenItsDelayElapses(revlT *testing.T) {
 		if err := _f.Ready(stdctx.Background()); err != nil {
 			revlT.Fatalf("%s: %v", "lifecycle test \"an after-timer fires once when its delay elapses\": load Warmup", err)
 		}
+		_fibers["Warmup"] = _f
 	}
 	_revlAt = "advance 30000ms"
 	RevlClockAdvance(30000)

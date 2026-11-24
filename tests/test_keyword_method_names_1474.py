@@ -50,6 +50,7 @@ NAMES = sorted(set(keyword.kwlist) | set(keyword.softkwlist) | {"self"})
 FRONTEND_KEYWORDS = {
     "as", "assert", "async", "await", "break", "continue", "else", "for",
     "if", "in", "match", "return", "try", "type", "while", "with",
+    "if", "in", "match", "return", "type", "while", "with",
 }
 
 ADMITTED = [n for n in NAMES if n not in FRONTEND_KEYWORDS]

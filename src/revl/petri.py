@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+from fractions import Fraction
 from math import gcd
 
 
@@ -327,3 +328,11 @@ def structurally_bounded(net: Net, places: list[str] | None = None) -> bool:
     """True when every place is covered by a positive P-semiflow."""
     order = places if places is not None else sorted(net.places)
     return set(order) <= covered_places(net, order)
+
+
+# A tiny rational helper kept for callers that want exact arithmetic on
+# incidence rows; the semiflow path above stays in integers on purpose (Farkas
+# combinations are integral), but exposing Fraction keeps the module honest
+# about the field the null space actually lives in.
+def as_fraction_row(row: dict[str, int]) -> dict[str, Fraction]:
+    return {k: Fraction(v) for k, v in row.items()}

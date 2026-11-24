@@ -58,6 +58,8 @@ classifiers = [
 # same artifact version the backend verifies its signature vectors against.
 # The consumer-facing `crypto` extra below stays a range: it is the optional
 # signing surface, not a test toolchain.
+# machine that happens not to have the library (issue #266). Nothing in
+# `src/revl` imports it, and tests/test_ecdsa_differential.py asserts that.
 # `llguidance`: a TEST dependency too, so the grammar-engine checks in
 # tests/test_constrained_decoding_1462.py run in CI instead of skipping, and
 # tests/test_source_grammar_1661.py runs the grammar `revl grammar --format
@@ -65,6 +67,8 @@ classifiers = [
 # so that check cannot skip). At run time it is the optional `constrain` extra
 # below and never required; `src/revl` never imports it for the grammar export.
 test = ["pytest>=8.0", "pytest-asyncio", "coverage>=7.0", "pyyaml", "cryptography==50.0.2",
+test = ["pytest>=8.0", "pytest-asyncio", "coverage>=7.0", "pyyaml", "cryptography>=42.0",
+test = ["pytest>=8.0", "pytest-asyncio", "coverage>=7.0", "pyyaml", "cryptography>=44.0",
         "llguidance>=1.0"]
 # `crypto`: constant-time ECDSA SIGNING (issue #1460). The pure-Python signer in
 # src/revl/tee_quote.py takes time that depends on the secret nonce, so with this
@@ -201,12 +205,16 @@ exclude = [
 # The one place tracked content sits UNDER an ignore rule. `.gitignore:36` is
 # `backends/typescript/tests/generated/` (the TS harness writes throwaway
 # modules there) but nineteen fixtures in that directory were force-added and
+# `backends/typescript/tests/generated/` — the TS harness writes throwaway
+# modules there — but seventeen fixtures in that directory were force-added and
 # ARE tracked. Without this, hatchling's ignore handling drops them from the
 # sdist, and a wheel built out of that sdist (`pip install revl-2.0.0.tar.gz`)
 # comes out nineteen files short of one built in a checkout.
+# comes out seventeen files short of one built in a checkout.
 #
 # `artifacts` is hatchling's "include even though VCS ignores it" hook. It lists
 # the nineteen by exact path ON PURPOSE rather than as `*.ts`: a glob would
+# the seventeen by exact path ON PURPOSE rather than as `*.ts`: a glob would
 # also sweep up whatever the harness last wrote there, which is the
 # non-determinism this whole section exists to remove. Add a tracked fixture to
 # that directory and `tools/check_wheel_manifest.py` reds until the path is

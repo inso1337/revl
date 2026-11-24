@@ -119,6 +119,10 @@ evidence-gated and the revert real rather than a report.
 `live` is the register's statement, so what selects the cutover is the
 register's own derivation and not a caller's flag: an unpromoted class is
 scheduled a shadow and cannot change an answer.
+is still called only on selected crossings, counted at the call site, and the
+incumbent's answer is still the one served, and at the tier seam that is
+structural, because the hook's return value is discarded. And the verdict is
+still a replay comparison: an unresolvable comparator DIVERGES.
 
 ONE THING THAT IS NOT INHERITED, AND WHY
 ----------------------------------------
@@ -130,12 +134,20 @@ candidate and `None` when it served the incumbent — and :class:`TierShadow`
 passes that to `Scheduler.offer` as a fact rather than letting it be inferred.
 So the ledger's side and the answer the body received are one statement here,
 and `tests/test_shadow_cutover_1192.py` is the measurement that they are.
+offline caller has nothing better to go on. A seam does. This hook's return is
+discarded, so the incumbent answered every crossing this module records, and
+:class:`TierShadow` passes that to `Scheduler.offer` as a fact rather than
+letting it be inferred. A route served through here is a shadow whatever its
+`live` flag says; `live` selects the gate's RULE (the first attributed
+divergence reverts) and not who answered. A route whose successor really
+answers is a cutover, and this seam does not perform one.
 
 PUBLIC SURFACE
 --------------
 ``world_for(ir, component)``        : the recorded world, BUILT from the IR
 ``answered(ir, component, record, value)`` : one side's answer, with its world
                                      built and the answer it serves carried
+``answered(ir, component, record)`` : one side's answer with its world built
 ``declared_actions(ir, component)`` : the provide-method names, from the IR
 ``crossing_actions(ir, component)`` : `{step_index: action}`, the derivation
 ``resolve(ir, route)``              : realm, slice and crossings, or a refusal
@@ -265,6 +277,7 @@ def world_for(ir: Mapping[str, Any], component: str):
 def answered(ir: Mapping[str, Any], component: str,
              record: Mapping[str, Any],
              value: Any = None) -> routing.Answered:
+             record: Mapping[str, Any]) -> routing.Answered:
     """One side's :class:`~revl.shadow_routing.Answered`: its sealed item 517
     record, its recorded world BUILT from that side's generation, and the
     answer a caller receives when THIS side serves the crossing.
@@ -276,6 +289,8 @@ def answered(ir: Mapping[str, Any], component: str,
     a ledger and an answer that disagree."""
     return routing.Answered(record=record, world=world_for(ir, component),
                             value=value)
+    record, and its recorded world BUILT from that side's generation."""
+    return routing.Answered(record=record, world=world_for(ir, component))
 
 
 # ---------------------------------------------------------------------------
@@ -637,6 +652,8 @@ class TierShadow:
        that IS live is not a shadow: it is the cutover a landed promotion
        bought, and this hook returns the candidate's answer for it — which is
        measured in `tests/test_shadow_cutover_1192.py`.
+    1. The value the body receives is the incumbent's, always. The hook's
+       return is discarded by the seam, so there is no path from here to it.
     2. The candidate's own completion does not re-enter the seam: the tier
        holds a re-entrancy register for the duration of the hook.
     3. An observer fault stops the shadow and not the run. The tier catches
@@ -696,6 +713,9 @@ class TierShadow:
         and its completion is not skipped — the comparison that can revert the
         promotion is made from both answers, so the shadow continues under the
         cutover.
+    def observe(self, crossing: tuple, value: Any) -> None:
+        """What the tier calls. Returns nothing, deliberately: the seam
+        discards this return and the body gets the incumbent's answer.
 
         A crossing the composition does not attribute to this route's action
         is counted and dropped. That is the derivation acting rather than
@@ -715,6 +735,10 @@ class TierShadow:
             # answer the seam already validated.
             return None
         return answer.value
+            return
+        self._scheduler.offer(crossing,
+                              answered=self._incumbent(crossing, value),
+                              served=routing.INCUMBENT)
 
     # -- attaching ---------------------------------------------------------
 

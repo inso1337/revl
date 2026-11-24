@@ -334,6 +334,7 @@ def _boundary(ir: dict) -> dict:
                  # so there is no provenance fact at all. `unknown` is a value,
                  # never a missing field.
                  "inverse": inverse_class(None)}
+                 "backends": []}
                 if name == _UNKNOWN_DISPATCH else
                 {"name": name,
                  "class": extern_class.get(name, {}).get("class"),

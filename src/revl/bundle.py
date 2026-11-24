@@ -82,6 +82,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import importlib.util
 import json
 import os
 import posixpath
@@ -217,6 +218,7 @@ def _unshipped_backend(backend: str) -> str | None:
         return None
     return (f"backend {backend!r} is not a backend this toolchain ships "
             f"(known: {', '.join(DEFAULT_BACKENDS)}); it was not imported")
+_EMITTERS: dict = {}
 
 
 def _emitter(backend: str):
@@ -238,6 +240,19 @@ def _emitter(backend: str):
     from .placement import backend_emit_module  # noqa: PLC0415 - off the compile graph
 
     return backend_emit_module(backend, root=_BACKENDS_ROOT)
+    """Load a backend emitter module under a unique name (a bare `import emit`
+    collides across backends). Mirrors `revl.test._emitter`."""
+    if backend not in _EMITTERS:
+        path = _BACKENDS_ROOT / backend / "emit.py"
+        if not path.exists():
+            return None
+        spec = importlib.util.spec_from_file_location(f"revl_bundle_{backend}_emit", path)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _EMITTERS[backend] = module
+    return _EMITTERS[backend]
 
 
 # The three-way emitter outcome (absent / refused / faulted) is decided the same
@@ -670,6 +685,52 @@ def build_bundle(sources: list[str], out: str, *, backends=DEFAULT_BACKENDS,
     # existing bundle exactly as it was. A STDLIB-kind ref carries nothing: the
     # verifier re-resolves it from its own install (item 410).
     host_files = _collect_host_files(ir, sources)
+    # item 396 stage 4 (interim clean refusal): `revl bundle` copies sources
+    # flat by basename (below) and `revl verify` recompiles the bundled source,
+    # so a root-relative external host-body file would not travel with the
+    # bundle and verify could not reproduce it. Refuse cleanly, naming the gap,
+    # rather than emit a bundle that cannot verify. Full body-file bundle
+    # support (carrying the files under their root-relative paths and
+    # re-hashing them in verify) is the follow-up.
+    file_externs = sorted(
+        e.get("name") for e in (ir.get("externs") or []) if e.get("body_files"))
+    if file_externs:
+        raise RevlError(
+            sources[0], 0,
+            "cannot bundle a composition whose extern splices an external "
+            "host-body file (`= @backend file \"path\"`): "
+            f"{', '.join(file_externs)}",
+            hint="`revl bundle` copies sources flat by basename, so a "
+                 "root-relative body file would not travel with the bundle and "
+                 "`revl verify` could not reproduce it. Inline the body "
+                 "(`= @backend { ... }`) to bundle for now; carrying body files "
+                 "through the bundle is the item 396 stage 4 follow-up.")
+    # item 396 option B / 410: a USER host-module ref names a root-relative file
+    # that the flat basename copy would not carry, so a bundled user-ref program
+    # could not resolve or re-hash the module at verify. Refuse it cleanly (396's
+    # stage-4 gap, still open). A STDLIB-kind ref is different: its helper is a
+    # versioned FIRST-PARTY install dependency the verifier resolves from ITS OWN
+    # install (re-resolve, carry nothing), exactly as verify already re-resolves
+    # the bundled `stdlib/fs.rvl` source itself — so a stdlib ref bundles, and the
+    # `stdlib refs` verify tier re-hashes it against the pin on the verifier.
+    user_ref_externs = sorted(
+        e.get("name") for e in (ir.get("externs") or [])
+        if any(r.get("root") != "stdlib"
+               for r in (e.get("refs") or {}).values()))
+    if user_ref_externs:
+        raise RevlError(
+            sources[0], 0,
+            "cannot bundle a composition whose extern references a USER external "
+            "host module (`= @backend ref sym from \"path\"`): "
+            f"{', '.join(user_ref_externs)}",
+            hint="`revl bundle` copies sources flat by basename, so a "
+                 "root-relative user ref'd module would not travel with the "
+                 "bundle and `revl verify` could not reproduce it. Inline the "
+                 "body (`= @backend { ... }`) to bundle for now; carrying user "
+                 "ref files through the bundle is the item 396 stage 4 follow-up. "
+                 "A STDLIB ref (a shipped module referencing a shipped helper) "
+                 "bundles fine — the verifier re-resolves it from its own install "
+                 "(item 410).")
 
     norm_ir = _canonical_ir(ir)
     ir_text = _ir_text(norm_ir)
@@ -824,8 +885,13 @@ def build_bundle(sources: list[str], out: str, *, backends=DEFAULT_BACKENDS,
 def _toolchain_version() -> str:
     """The current revl toolchain version, `revl._version.version()`."""
     from ._version import version  # noqa: PLC0415
+    """The current revl toolchain version, the pyproject version through the
+    installed metadata when present, else a stable fallback (verbatim from
+    `truc.reproduce._toolchain_version`)."""
+    from .truc.reproduce import _toolchain_version as tv  # noqa: PLC0415
 
     return version()
+    return tv()
 
 
 # --------------------------------------------------------------- one-file bundle
@@ -857,6 +923,7 @@ def _pack_document(bundle_dir: Path) -> dict:
     files: dict[str, str] = {}
     for path in sorted(p for p in bundle_dir.rglob("*") if p.is_file()):
         files[_relposix(bundle_dir, path)] = path.read_bytes().decode("utf-8")
+        files[_relposix(bundle_dir, path)] = path.read_text(encoding="utf-8")
     return {"kind": ONEFILE_KIND, "version": ONEFILE_VERSION, "files": files}
 
 
@@ -919,6 +986,7 @@ def unpack_bundle(one_file: str, out_dir: str) -> str:
         # bytes, not write_text: a carried host file is pinned by the hash of
         # its exact bytes, which a newline translation would change.
         target.write_bytes(text.encode("utf-8"))
+        target.write_text(text, encoding="utf-8")
     return out_dir
 
 
@@ -942,6 +1010,8 @@ def _stdlib_refs_of(ir: dict) -> list[dict]:
     `[{"extern", "tier", "path", "sha256"}, ...]`. A user ref (no `"root"`) is
     excluded, those carry their file in `source/` and are checked by
     `_check_host_files`, so only stdlib refs reach the verify tier below."""
+    excluded — those never bundle (build-time refusal), so only stdlib refs reach
+    the verify tier below."""
     out: list[dict] = []
     # The IR is the bundle's own text. A malformed shape is skipped here and
     # reported as a MISMATCH by `_check_host_files`, which reads the same IR.
@@ -952,6 +1022,9 @@ def _stdlib_refs_of(ir: dict) -> list[dict]:
             if (isinstance(ref, dict) and ref.get("root") == "stdlib"
                     and isinstance(ref.get("path"), str)
                     and isinstance(ref.get("sha256"), str)):
+    for ext in ir.get("externs") or []:
+        for tier, ref in (ext.get("refs") or {}).items():
+            if ref.get("root") == "stdlib":
                 out.append({"extern": ext.get("name"), "tier": tier,
                             "path": ref["path"], "sha256": ref["sha256"]})
     return out

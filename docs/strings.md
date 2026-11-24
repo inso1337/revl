@@ -171,8 +171,12 @@ wasm lowers `<`, `<=`, `>` and `>=` on two `Str` values through `$str_cmp`, a
 byte comparison over the UTF-8 form. Bytes ordered as unsigned values are
 code-point order, so it matches the reference on the boundary above (issue
 #3145); a `Str` compared with a non-`Str` is still refused by name.
+wasm refuses `<` on a `Str` by name (*"relational operator '<' is only
+lowerable for Int/Int32"*) and keeps refusing it. A tier that cannot match the
+reference should say so; a silent wrong answer is the worse outcome.
 
 ### Literal syntax: two escapes, plus a triple-quoted verbatim form (item 85)
+### Literal syntax — no escapes, plus a triple-quoted verbatim form (item 85)
 
 A plain double-quoted string `"..."` has exactly **two escape sequences** (item
 183): `\"` is a literal `"`, and `\\` is one literal `\`. So `"a\"b"` is the
@@ -183,6 +187,11 @@ characters `a`, `\`, `n`, `b` (a backslash and an `n`), not a newline.
 A `$` is an **ordinary literal character** too (item 203): every `$`-shape
 inside a plain string (`$name`, `$$`, and the WAT/target fragments the
 self-host tiers emit like `"call $int_add"`) is literal text, because in
+A plain double-quoted string `"..."` has **no escape sequences**: `"a\nb"` is
+the five literal characters `a`, `\`, `n`, `b` (a backslash and an `n`), not a
+newline. A `$` is an **ordinary literal character** too (item 203): every
+`$`-shape inside a plain string — `$name`, `$$`, and the WAT/target fragments
+the self-host tiers emit like `"call $int_add"` — is literal text, because in
 2.0 interpolation lives *only* in backtick templates (`` `${name}` ``). The old
 1.x meanings (`$name` = interpolation, `$$` = an escaped dollar) are gone; a 1.x
 file still migrates with `revl fmt --migrate`, which rewrites `"$name"` to a
@@ -198,6 +207,11 @@ For multi-line content there is a **triple-quoted** form, `"""..."""`:
   `\\` (`\n` is a backslash and an `n`), and no `${...}` interpolation (`$` is
   an ordinary character). When you need interpolation, use a backtick
   template; when you need a verbatim block, use `"""`.
+  newlines and all. There is still no escape processing (`\n` is a backslash
+  and an `n`) and no `${...}` interpolation (`$` is an ordinary character) — the
+  same no-escape rule as `"..."`, extended over line breaks. When you need
+  interpolation, use a backtick template; when you need a verbatim block, use
+  `"""`.
 - **Closing.** Only `"""` closes the string. A lone `"` or `""` inside the body
   is ordinary text, so most quoted content needs no care.
 - **Leading newline.** A single newline immediately after the opening `"""` is

@@ -238,6 +238,7 @@ The `revl_check` MCP result enriches every open hole with one:
     "construct": "provide-method",
     "idiom": {"name": "provide-method", "summary": "…", "rules": ["G4: …", "A6: …"],
               "exampleExpression": "db.get(key)", "example": "service Db { … }\n…"},
+              "fill": "db.get(key)", "example": "service Db { … }\n…"},
     "capability": {"permitsCrossing": false, "mayEmit": false, "bound": [],
                    "reason": "a non-emission provide-method — pure"},
     "crossing": {"permitted": false, "required": false, "form": null,
@@ -276,6 +277,12 @@ reads `expected` and `message` keeps working; `fillSpec` is purely additive.
   serve them by name. Each one compiles and admits, and with its internal
   `fill` marker replaced by a hole yields a fillSpec naming that same
   construct, so the table cannot drift from the compiler.
+  that make it correct (`{name, summary, rules, fill, example}`; `fill` is
+  what stands at the construct's position in the example). The idioms live
+  in `src/revl/idioms/`; `revl idiom NAME` and the MCP `revl_idiom` tool
+  serve them by name. Each one compiles and admits, and with its `fill`
+  replaced by a hole yields a fillSpec naming that same construct, so the
+  table cannot drift from the compiler.
 * **`grammarCategory`** (additive, still version 2): the syntactic category a fill is a
   document of, one of `program`, `component-body`, `statements`, `expression`,
   `type`. Pass it to `revl grammar --format lark|gbnf|ebnf --category <it>` or
@@ -335,6 +342,7 @@ reads `expected` and `message` keeps working; `fillSpec` is purely additive.
   `acquire`/`witnessed` one only in the acquisition slot of an `effect`. In
   that slot the hole already follows `effect`, so the form there is the bare
   call (`open_it(<n: Int>)`).
+  `acquire`/`witnessed` one only in the acquisition slot of an `effect`.
   `mayDeclare` is false for an untrusted author (the MCP server's default,
   `--author-trust`), who may neither declare nor reach an extern (G8): the
   spec then lists every extern as not callable and offers none as a

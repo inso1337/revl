@@ -112,11 +112,17 @@ FOUR_COMPONENT_BODY_CONSTRUCTS = """
 type Outcome = Found(Int) | Missing
 fn double(n: Int) -> Int { return n * 2 }
 fn maybe(n: Int) -> Opt[Int] { return (n > 0) ? Some(n) : None }
+service Bus { fn maybe(n: Int) -> Opt[Int] }
 service S { fn f(x: Int) -> Int  fn g(x: Int) }
 component C provides s: S {
+component Env provides bus: Bus {
+  provide bus { fn maybe(n) = (n > 0) ? Some(n) : None }
+}
+component C requires bus: Bus provides s: S {
   provide s {
     fn f(x) {
       let a = maybe(x) ?? 0
+      let a = bus.maybe(x) ?? 0
       let b = double(a)
       let o = Found(b)
       return match o { Found(v) => v, Missing => 0 }

@@ -43,6 +43,7 @@ use "stdlib/str.rvl" {
   is_space, trim, lstrip, rstrip, contains, index_of, last_index_of,
   ident_tokens, split_top, dedent, str_utf8_bytes,
   str_newline, str_tab, str_char, str_crlf
+  str_newline, str_tab, str_char
 }
 
 fn t_str_utf8_bytes(s: Str) -> List[Int] { return str_utf8_bytes(s) }
@@ -130,6 +131,7 @@ def test_module_imports_and_is_pure_revl(consumer_ir):
                 "last_index_of", "ident_tokens", "split_top", "dedent",
                 "str_utf8_bytes", "str_newline", "str_tab", "str_char",
                 "str_crlf"):
+                "str_utf8_bytes", "str_newline", "str_tab", "str_char"):
         assert pub in names, pub
     assert consumer_ir["ir_version"] == 3
 
@@ -370,6 +372,7 @@ def test_str_tab_exact_code_point(ns):
 
 
 @pytest.mark.parametrize("code", [0, 1, 8, 9, 10, 11, 12, 13, 27, 31, 127])
+@pytest.mark.parametrize("code", [9, 10])
 def test_str_char_control_round_trips(ns, code):
     # every control character, CR (13) and NUL (0) included, is one code
     # point: the pure table covers 9/10 and `Int.to_char` the rest (#2285).
@@ -406,6 +409,12 @@ def test_str_char_non_scalar_returns_empty(ns, code):
     # a value that is not a Unicode scalar (negative, a surrogate, above
     # U+10FFFF) returns "" rather than faulting; documented in
     # docs/stdlib-str.md and the same on every tier.
+@pytest.mark.parametrize("code", [0, 1, 8, 11, 12, 13, 31, 127, 128, 0x1F600, -1])
+def test_str_char_unsupported_returns_empty(ns, code):
+    # a code point with no pure-revl spelling (no chr/fromCharCode builtin)
+    # returns "" rather than faulting; documented in docs/stdlib-str.md. CR (13)
+    # is here on purpose: the source reader folds a literal CR byte to LF, so a
+    # real carriage return cannot be authored in pure revl at all.
     assert ns["t_str_char"](code) == ""
 
 

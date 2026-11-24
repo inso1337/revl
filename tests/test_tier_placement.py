@@ -305,6 +305,7 @@ service Ctl { async fn go() -> Str }
 component Store provides db: Db {
   let sock = effect open_sock() undo close_sock(0)
   provide db { async fn run() = sock }
+  provide db { async fn run() = open_sock() }
 }
 component Front requires db: Db provides ctl: Ctl {
   provide ctl { async fn go() = "z" }

@@ -212,6 +212,8 @@ def test_json_shape_is_the_computed_document():
     assert set(metrics) == {"events", "emissions", "failures", "residue",
                             "lifecycleDuration"}
     assert set(metrics["residue"]) == {"total", "by_check"}
+    # the machine-readable document carries all three metrics under stable keys
+    assert set(metrics) == {"events", "emissions", "failures", "lifecycleDuration"}
     assert set(metrics["emissions"]) == {"total", "by_capability", "by_key"}
     assert set(metrics["failures"]) == {"total", "by_code"}
     assert set(metrics["lifecycleDuration"]) == {"count", "avg_seconds", "by_component"}

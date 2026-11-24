@@ -63,6 +63,7 @@ The record schema a durable WAL speaks (all a tier must emit to be recoverable):
   its ABSENCE (the crash) is roll-back. The whole decision, scoped to the
   OPENING it belongs to: a ``generation`` record starts a later opening, whose
   crash must not borrow an earlier opening's marker (issue #3147).
+  its ABSENCE (the crash) is roll-back. The whole decision.
 """
 
 from __future__ import annotations
@@ -520,6 +521,8 @@ def read_wal(path: str) -> dict:
     (``--wal PATH`` reuses it, #641/#642) still carries the PRIOR opening's
     marker, and that marker proves only that the prior opening finished, never
     the opening that crashed (issue #3147). A trailing half-written line (a
+    subprocess identically. ``complete`` is whether the terminal
+    ``activation-complete`` marker is present. A trailing half-written line (a
     genuine ``kill -9`` can leave one) is tolerated and reported as ``torn``
     rather than crashing the recovery that exists to handle exactly that.
 
@@ -639,6 +642,7 @@ def _last_newline_offset(handle, size: int) -> int:
 
 
 def seal_torn_tail(path: str, *, require_sync: bool = False) -> None:
+def seal_torn_tail(path: str) -> None:
     """Truncate a never-acknowledged partial trailing write so the WAL ends at a
     clean record boundary before it is appended to (issue #535).
 
@@ -683,6 +687,7 @@ def seal_torn_tail(path: str, *, require_sync: bool = False) -> None:
         except (OSError, ValueError):  # pragma: no cover — e.g. a pipe target
             if require_sync:
                 raise
+            pass
 
 
 def _check_version(header: dict, path: str) -> None:
@@ -839,6 +844,7 @@ def resolve_wal_dir() -> WALDirResolution:
     checking anything, so a candidate that exists but is not writable (mode bits,
     a read-only mount, a restrictive file sandbox) is also recorded in
     ``attempts`` and the walk moves on to the next candidate.
+    exactly when it can be created ``0o700``.
     """
     attempts: list[tuple[str, str]] = []
     for directory in wal_dir_candidates():

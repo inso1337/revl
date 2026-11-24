@@ -370,6 +370,7 @@ def _run_check(tmp_path, need_src, cand_src, *extra):
         with contextlib.redirect_stdout(handle):
             code = main(["adapt", str(need_file), str(cand_file), *extra])
     return code, json.loads(out_file.read_text(encoding="utf-8"))
+    return code, json.loads(out_file.read_text())
 
 
 def test_check_flattens_a_committed_chain_end_to_end(tmp_path):
@@ -583,5 +584,6 @@ def test_resolve_and_revl_adapt_derive_the_same_adapter_identity(tmp_path):
                          "KVAdapter"])
     assert code == 0
     printed = json.loads(out_file.read_text(encoding="utf-8"))
+    printed = json.loads(out_file.read_text())
     assert printed["derivation"] == from_resolve
     assert printed["chainDepth"] == 1

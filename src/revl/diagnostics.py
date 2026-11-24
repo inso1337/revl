@@ -601,6 +601,16 @@ def explain(code: str) -> dict:
         record["fix"] = entry["fix"]
     if known in REPAIR_KINDS:
         record["repairs"] = list(REPAIR_KINDS[known])
+    payload. Unknown codes answer with the roster rather than nothing, so a
+    typo is one command from the right code."""
+    normalized = (code or "").strip().upper()
+    if normalized not in GUARANTEES:
+        return {"ok": False, "code": normalized,
+                "message": f"no diagnostic code `{normalized}`",
+                "known": sorted(GUARANTEES)}
+    record = {"ok": True, "code": normalized, "guarantee": GUARANTEES[normalized]}
+    if normalized in FIXES:
+        record["fix"] = FIXES[normalized]
     return record
 
 
@@ -618,6 +628,7 @@ _PATTERNS: list[tuple[re.Pattern, str, str]] = [
     (re.compile(r"cannot reassign|already (declared|bound)"), "G6", "binding"),
     (re.compile(r"is not declared in this (function|component)"), "G1", "binding"),
     (re.compile(r"is not a declared requirement"), "G1", "requirement"),
+    (re.compile(r"is not a declared requirement"), "G1", "binding"),
     (re.compile(r"acquisition after `provide`"), "A2", "ordering"),
     (re.compile(r"no builtin method"), "T1", "stdlib"),
     (re.compile(r"verified fn .* is not total"), "G7", "totality"),
@@ -658,10 +669,12 @@ def classify(error: RevlError) -> dict:
     record = {
         "severity": "error",
         "code": effective,
+        "code": code or "REVL",
         "category": category or "check",
         # relativize at the JSON boundary so no raise site can leak the
         # loader-resolved absolute path (issue #2222)
         "file": relpath_or_abs(error.filename),
+        "file": error.filename,
         "line": error.line,
         "message": error.message,
     }
@@ -688,6 +701,7 @@ def classify(error: RevlError) -> dict:
         declared = OTHER_CODES.get(effective, {}).get("guarantee")
         if declared is not None:
             record["guarantee"] = declared
+        record["guarantee"] = GUARANTEES[code]
     if getattr(error, "fix", None):
         # a rewrite specific to this rejection (a corrected line) outranks the
         # per-code one: the code's fix is written for its commonest shape
@@ -767,6 +781,7 @@ def obligations(holes: list[dict]) -> dict:
 
 def report(error: RevlError, *, sources: dict[str, str] | None = None,
            verifier=None, widens_authority: bool = False) -> dict:
+def report(error: RevlError) -> dict:
     """A failed compile as an agent-consumable document.
 
     A multi-refusal compile raises a `RevlErrors` carrier (item 386) whose
@@ -957,6 +972,7 @@ def _compiled_text(error: RevlError, sources: dict[str, str]) -> str | None:
     if name in sources:
         return sources[name]
     return sources.get(os.path.abspath(name))
+    return {"ok": False, "diagnostics": [classify(e) for e in errors]}
 
 
 def ok(**payload) -> dict:
