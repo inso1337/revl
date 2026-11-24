@@ -1795,6 +1795,17 @@ def select(changed, root) -> dict:
             pytest_nodes |= hits
             reasons.append(f"src/revl/{module} (leaf)")
             continue
+        # --- claims (issue #2846) ------------------------------------------- #
+        # The root registry and the repository gate have no `test_<stem>.py`
+        # for the generic tools/ rule to find, so without this arm each falls
+        # to FULL. The compiler-side parser needs no arm: the `src/revl/**`
+        # block above selects the tests that import `revl.claims`.
+        if f in ("claims.toml", "tools/check_claims.py"):
+            pytest_nodes.add("tests/test_claims.py")
+            pytest_nodes.add("tests/test_claims_gate.py")
+            reasons.append(f"{f} (claims registry + repo gate)")
+            continue
+
         if f.startswith("src/"):
             return _full(f"unmapped source path {f} -> full")
 
