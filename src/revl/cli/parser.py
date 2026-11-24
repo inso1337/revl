@@ -816,6 +816,12 @@ def build_parser() -> argparse.ArgumentParser:
              "must carry each consumer's required service, not just key lists, "
              "and must still run the old version")
     migrate_cmd.add_argument(
+        "--policy", metavar="POLICY_FILE", default=None,
+        help="a boundary policy file (docs/boundary-policy.md): evaluated over "
+             "the composition as it would stand after the migration; a "
+             "violation the migration introduces refuses it, an approval-"
+             "required capability it reaches needs approval")
+    migrate_cmd.add_argument(
         "--json", action="store_true",
         help="machine-readable plan an agent or a CI gate can consume")
 
