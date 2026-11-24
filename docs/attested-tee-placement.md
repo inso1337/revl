@@ -47,9 +47,12 @@ qe_mr_enclaves = ["<64 hex>"]      # optional permitted QE images
 # accept_mrtd_only = true          # the explicit narrower choice, instead of
                                    # runtime_measurements
 
-# SEV-SNP: optional TCB floor (microcode 0x73, SNP 0x16, TEE 0x01,
-# bootloader 0x04)
+# SEV-SNP: the TCB floor for the report's processor generation; a SEV-SNP report
+# is refused without one, and 0 is the explicit "any TCB".
+# Milan and Genoa: microcode 0x73, SNP 0x16, TEE 0x01, bootloader 0x04
 sev_min_tcb = 0x7316000000000104
+# Turin: microcode 0x73, SNP 0x16, TEE 0x01, bootloader 0x04, FMC 0x02
+sev_turin_min_tcb = 0x7300000016010402
 ```
 
 `bundle` is a 64-hex SHA-256, `measurements` is a non-empty list of hex digests,
@@ -63,14 +66,18 @@ root file system and application extend, and the quote's registers must equal on
 of them. A table that states any TDX key (`min_qe_svn` included) must name the
 permitted registers or say `accept_mrtd_only = true`: a TDX quote whose runtime
 registers are not compared is admitted only by that explicit acknowledgement, not
-by an omitted key. `sev_min_tcb` is the SEV-SNP TCB floor, compared on the report's
-SVN components, each on its own: the TCB version is read little-endian, so byte 0
-is the least significant, and on Milan and Genoa the bootloader SVN is byte 0, TEE
-byte 1, SNP byte 6 and microcode byte 7, with bytes 2 to 5 reserved. A report below
-the floor in any one component is refused, whatever the others carry, and a floor
-that sets a reserved byte is refused when the table is read. Turin lays the TCB
-version out differently, and the report's processor family is not read, so a
-Turin-layout report is not covered by this floor.
+by an omitted key. `sev_min_tcb` and `sev_turin_min_tcb` are the SEV-SNP TCB floors
+for the two layouts AMD uses, compared on the report's SVN components, each on its
+own: the TCB version is read little-endian, so byte 0 is the least significant. On
+Milan and Genoa the bootloader SVN is byte 0, TEE byte 1, SNP byte 6 and microcode
+byte 7, with bytes 2 to 5 reserved; on Turin the FMC SVN is byte 0, bootloader byte
+1, TEE byte 2, SNP byte 3 and microcode byte 7, with bytes 4 to 6 reserved. A report
+below the floor in any one component is refused, whatever the others carry, and a
+floor that sets a reserved byte of its layout is refused when the table is read. The
+layout comes from the CPUID family and model the firmware stamped into the report. A
+SEV-SNP report is refused unless the table states the floor for its own layout, and
+`0` says explicitly that no minimum is demanded; a report of a generation whose
+layout is not known (Venice) is refused outright.
 
 `nonce` is the challenge the attestation must answer. A placement may pin it; a
 caller may supply one instead; failing both, the surface mints a fresh one. An
