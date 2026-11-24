@@ -73,6 +73,7 @@ from .typecheck import (
     null_error,
     parse_type,
     POISON,
+    refuse_nested_widening,
     structural_fields,
     substitute,
     unify,
@@ -7148,6 +7149,12 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
                                declared, inferred)
             type_env[stmt.name] = widened
             declared = widened
+        elif declared and inferred:
+            # issue #2937: `compatible` admits a `List[Int]` value into a
+            # `List[Float]` variable; no marker converts the elements
+            refuse_nested_widening(
+                value, declared, inferred, type_env, types, filename,
+                f"assignment to `{stmt.name}` (a `{render_type(declared)}` variable)")
         if inferred is not None and declared is None:
             type_env[stmt.name] = inferred
         lowered_value = _lower_pure_expr(value, scope, callables, alias_fns, filename, type_env, types)
@@ -9824,6 +9831,15 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     _collect(_check_kernel_boundary, live_components, services,
              program.filename, untrusted=untrusted, manifest=manifest)
 
+    # THE EVALUATOR as a capability (issue #2802, slice 3): the same fold with
+    # the evaluator's own held set on the left. A candidate composed for another
+    # consumer that DECLARES a reach into the judge of the evolution loop is
+    # refused by that declaration and not only by its diff. Inert for every
+    # composition that declares no `evaluator.*` token, which is every program on
+    # the tree (docs/design/545-kernel-boundary-capability.md, section 8).
+    _collect(_check_evaluator_boundary, live_components, services,
+             program.filename, manifest=manifest)
+
     # lifecycle tests are lowered last: they check against the component
     # declarations, so a broken component must report itself first
     tests = _collect(_lower_tests, program, program.filename, types, services)
@@ -9937,6 +9953,12 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
                         # Absent unless declared, so existing IR is unchanged.
                         **({"returns_qualifier": m.returns_qualifier}
                            if getattr(m, "returns_qualifier", None) else {}),
+                        # issue #3238: every qualifier of a return that holds
+                        # both, in the order `Untrusted`, `Secret`. Absent for
+                        # a single-qualifier return.
+                        **({"returns_qualifiers": list(m.returns_qualifiers)}
+                           if len(getattr(m, "returns_qualifiers", ()) or ()) > 1
+                           else {}),
                         # issue #1952: the comment block directly above the
                         # operation — contiguous `//` lines with the prefix
                         # stripped and line breaks kept. Documentation a host
@@ -10197,6 +10219,10 @@ def _lower_component_block_arm(expr, env: Env, scope: dict[str, str],
             inner[st.name] = safe
             if st.type is not None:
                 check_type_wellformed(filename, st.line, st.type)
+                # issue #3212: the declared type is checked, not trusted
+                check_ir(value, st.type, env.type_env, env.types,
+                         env.services, filename, st.line,
+                         f"`let {st.name}: {render_type(st.type)}`")
                 env.type_env[safe] = st.type
                 _pin_record_expected(st.type, value, env.types)
             else:
@@ -13307,11 +13333,13 @@ def _lower_effect_step(acquire: dict, undo_expr, env: "Env", filename: str, line
 # safe direction, since every wrong answer is a false positive, not an unsound
 # admission).
 #
-# Deferred, each with its landing place named in the design doc:
-#   TODO(308-followup): `shared` mode (a 294 lease binding); `shared`/`transfer`
-#     are reserved contextual keywords, not implemented in v1.
-#   TODO(308-followup): explicit `transfer` (a source marker that moves the
-#     bracket; the only honest future for a handoff of resource-carrying state).
+# Deferred (each with its landing place named in the design doc):
+#   `shared` landed in #698 (the 294 lease binding; S1 in the design doc), so
+#   the only remaining deferred mode is `transfer`.
+#   TODO(308-followup): explicit `transfer` (TR1: a resource-typed `handoff`
+#     across a same-realm swap, where the bracket migrates; the only honest
+#     future for a handoff of resource-carrying state). Design decided; the
+#     implementation slice is next.
 #
 # F10 (the retaining-extern audit) SHIPPED as `resources.retention_surface`,
 # read by `revl audit` and its `--json` document: report-only, because the
@@ -13641,6 +13669,98 @@ def _d4_delegate_no_recrossing(node, env: "Env", filename: str, line: int) -> No
                      "directly from the holder (design §6.2 D4)",
                 code="G8", category="delegation",
             )
+
+
+def _mark_delegate_calls(node, env: "Env", filename: str, line: int) -> None:
+    """Mark every call on a received `Delegate[S]` parameter with the service it
+    exposes (item 442, issue #2693; design §4.3 C2).
+
+    The delegatee's own use of the authority is an ordinary method call on the
+    borrowed parameter, so the IR keeps the call shape and adds `delegate: S`.
+    Emitters route that node through the delegation seam (check the grant,
+    attribute and spend it, then fire the provider) instead of calling the
+    handle object directly.
+
+    A method `S` does not declare is refused here, naming the delegated surface;
+    the call would otherwise fall through to plain name resolution with a
+    misleading diagnostic. An `async` operation is refused too: this slice emits
+    the delegated crossing synchronously, and silently dropping its coroutine
+    would be worse than not admitting it.
+    """
+    tenv = getattr(env, "type_env", None) or {}
+
+    def delegate_root(n):
+        """The name at the root of a field chain (`d`, in `d.provider.x`), or
+        None when the chain does not start at a plain name."""
+        target = n.get("target")
+        while isinstance(target, dict) and target.get("kind") == "field":
+            target = target.get("target")
+        return target if isinstance(target, dict) \
+            and target.get("kind") == "name" else None
+
+    def walk(n) -> None:
+        if isinstance(n, dict):
+            if n.get("kind") == "field":
+                # item 442 (issue #2693): a delegated reference exposes S's
+                # OPERATIONS and nothing else. Field reads on it would reach
+                # whatever the runtime value happens to carry (the field reader
+                # falls through to `getattr` for a non-record type), which is
+                # the escape that must not exist: the handle's backing state is
+                # the session's, not the delegatee's.
+                root = delegate_root(n)
+                if root is not None:
+                    head, _ = parse_type(tenv.get(root.get("id")) or "")
+                    if head == DELEGATE_HEAD:
+                        raise RevlError(
+                            filename, n.get("line") or line,
+                            f"`{root.get('id')}.{n.get('name')}` reads a field "
+                            f"of a delegated reference; a `{DELEGATE_HEAD}[S]` "
+                            f"exposes S's operations and nothing else",
+                            hint="call the delegated reference's own methods "
+                                 "(they are checked against the session's "
+                                 "ledger); it is a lookup key, not a record "
+                                 "(item 442, issue #2693)",
+                            code="G1", category="delegation")
+            if n.get("kind") == "call":
+                target = n.get("target")
+                method = n.get("method")
+                if isinstance(target, dict) and target.get("kind") == "name" \
+                        and isinstance(method, str):
+                    head, args = parse_type(tenv.get(target.get("id")) or "")
+                    svc = (env.services.get(args[0])
+                           if head == DELEGATE_HEAD and len(args) == 1 else None)
+                    if svc is not None:
+                        named = target.get("id")
+                        decl = svc.methods.get(method)
+                        if decl is None:
+                            raise RevlError(
+                                filename, line,
+                                f"`{named}.{method}` is not an operation of "
+                                f"service `{svc.name}`, the surface the "
+                                f"delegated reference exposes",
+                                hint=f"a `{DELEGATE_HEAD}[S]` value authorizes "
+                                     f"only S's own methods (item 442, "
+                                     f"issue #2693)",
+                                code="G1", category="delegation")
+                        if getattr(decl, "async_", False):
+                            raise RevlError(
+                                filename, line,
+                                f"`{named}.{method}` is an async operation of "
+                                f"`{svc.name}`; a delegated reference cannot "
+                                f"cross to an async operation yet",
+                                hint="delegated calls are emitted synchronously "
+                                     "in this slice, so an async operation "
+                                     "would be awaited nowhere (item 442, "
+                                     "issue #2693)",
+                                code="A1", category="delegation")
+                        n["delegate"] = svc.name
+            for v in n.values():
+                walk(v)
+        elif isinstance(n, list):
+            for v in n:
+                walk(v)
+
+    walk(node)
 
 
 def _ownership_check_expr(node, env: "Env", filename: str, line: int,
@@ -15694,6 +15814,14 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 env.local_arrows[ms.name] = ms.value
             if ms.type is not None:
                 check_type_wellformed(filename, ms.line, ms.type)
+                # issue #3212: the annotation is a declared type, so the value
+                # is checked against it exactly as a `fn` body's annotated
+                # `let` is (`_lower_pure_stmt`) and as this method's `return`
+                # is. Trusting it let an `Opt[Str]` or an `Int` reach a `Str`
+                # parameter with no refusal.
+                check_ir(value, ms.type, env.type_env, env.types, env.services,
+                         filename, ms.line,
+                         f"`let {ms.name}: {render_type(ms.type)}`")
                 env.type_env[safe] = ms.type
                 _pin_empty_literal(ms.type, value)
                 _pin_record_expected(ms.type, value, env.types)
@@ -16163,6 +16291,13 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         # borrow) is typed and detectable. An acquire bound in the method is
         # method-owned (its own `undo` is exempt).
         _ownership_walk_method(mbody, env, comp.source or filename, method.line)
+        # item 442 (issue #2693): a method called on a received `Delegate[S]`
+        # parameter is the delegatee's OWN crossing through the handed authority
+        # (design §4.3 C2). Mark it in the IR while the method's parameter types
+        # are still in scope, so the emitters route it through the delegation
+        # seam instead of treating the handle as a plain object, and refuse a
+        # method the delegated surface does not declare.
+        _mark_delegate_calls(mbody, env, comp.source or filename, method.line)
         # item 470: the declaration bounds the OPERATION, not the `emit` steps
         # written in it. Run after the body is fully lowered, while the
         # declaration is still the one in scope.
@@ -17613,7 +17748,11 @@ def _service_receiver_decl(node: dict, env: Env):
         return None
     ty = infer_ir(recv, getattr(env, "type_env", None) or {}, env.types,
                   env.services)
-    head, _ = parse_type(ty or "")
+    head, targs = parse_type(ty or "")
+    # item 442 (issue #2693): a received `Delegate[S]` exposes S's operations,
+    # so the receiver resolves to the delegated service, not to "Delegate".
+    if head == DELEGATE_HEAD and len(targs) == 1:
+        head = targs[0]
     svc = env.services.get(head)
     return svc.methods.get(method) if svc is not None else None
 
@@ -17908,7 +18047,12 @@ def _is_emission_call(node: dict, env: Env) -> bool:
         # demand is raised where the provision flows into the parameter (the
         # application, `_check_arrow_param_crossings`); this predicate only
         # decides emission-ness (GHSA-wg4v-r47x-52p2 residual).
-        head, _ = parse_type((getattr(env, "type_env", None) or {}).get(target.get("id")) or "")
+        head, targs = parse_type((getattr(env, "type_env", None) or {}).get(target.get("id")) or "")
+        # item 442 (issue #2693): a call on a `Delegate[S]` parameter reaches
+        # S's declared operations, so emission-ness is read from the delegated
+        # service rather than from a service literally named "Delegate".
+        if head == DELEGATE_HEAD and len(targs) == 1:
+            head = targs[0]
         svc = env.services.get(head)
         decl = svc.methods.get(node.get("method")) if svc is not None else None
         return decl is not None and decl.emission
@@ -17951,13 +18095,23 @@ def _lower_lease_step(stmt: "LetEffect", env: Env, filename: str) -> dict:
                  "revoke gate (item 379), which no source form reaches",
             code="G4", category="capability")
     safe = env.bind_local(stmt.bind, stmt.line)
+    # item 442 (issue #2693): a lease minted on a WIRING KEY is the delegation
+    # mint of the design's §5.1. When the capability's root names a `requires`
+    # key, record that key so the runtime acquisition can bind the handle to the
+    # provider the delegator actually holds; the handle then exposes that key's
+    # service to a delegatee. A lease over a bare capability (an extern's
+    # declared scope) has no key and stays an ordinary 294 lease, unchanged.
+    key = acq.capability.split("(", 1)[0].split(".", 1)[0]
+    binds_key = key if key in env.requires else None
     step = {
         "step": "let-effect",
         "bind": safe,
         "lease": {"capability": acq.capability,
-                  "ttlMs": acq.ttl_ms, "uses": acq.uses},
+                  "ttlMs": acq.ttl_ms, "uses": acq.uses,
+                  **({"key": binds_key} if binds_key else {})},
         "acquire": {"kind": "lease-acquire", "capability": acq.capability,
-                    "ttlMs": acq.ttl_ms, "uses": acq.uses, "line": acq.line},
+                    "ttlMs": acq.ttl_ms, "uses": acq.uses, "line": acq.line,
+                    **({"key": binds_key} if binds_key else {})},
         "undo": {"kind": "lease-revoke", "handle": safe, "line": acq.line},
     }
     return step
@@ -19479,6 +19633,133 @@ def _check_kernel_boundary(components: list[dict], services: dict,
             "component": comp["name"],
             "holds": _cap_sorted_strs(held),
             "kernel": [c.token for c in _kb.KERNEL_CAPS],
+            "disjoint": True,
+        })
+    return record
+
+
+def _check_evaluator_boundary(components: list[dict], services: dict,
+                              filename: str,
+                              manifest: dict | None = None) -> list[dict]:
+    """The EVALUATOR in the capability attenuation product (issue #2802, slice 3).
+
+    `kernel_boundary.EVALUATOR_PATHS` enumerates the judge of the evolution loop
+    (the reward conjunction, the progress counters, the lifecycle controller, the
+    held-out scorer and the protocol digest) and the controller and the scorer
+    refuse a diff that touches it. That is a changed-file check, answered after
+    the fact: a candidate composed for ANOTHER consumer that reaches the
+    evaluator without editing an enumerated file is not refused by it. This is
+    the other half, and it is `_check_kernel_boundary`'s own rule with a second
+    held set on the left:
+
+        held(evaluator)  n  effective(C)  =  {}   -> admit
+        held(evaluator)  n  effective(C) !=  {}   -> REFUSE, naming both sets
+
+    folded by `cap_order.disjoint`, the same predicate. There is no new algebra
+    and no second mechanism, which is why the evaluator's members live in
+    `kernel_boundary` beside the kernel's rather than in a module of their own.
+
+    WHICH WAY IT FAILS. Toward refusing, and only on a DECLARED reach, on both
+    sides of the trust boundary: an enumerated `evaluator.*` token is refused by
+    its member, and an `evaluator.*` token the enumeration has no member for (a
+    bare `evaluator`, `evaluator.something_new`) is refused under the same code
+    rather than read as an ordinary boundary. The undeclared reaches (the
+    unnameable `*` and a `svc:` element) are not folded here: under the
+    untrusted-author profile `_check_kernel_boundary` meets them against every
+    kernel member first and refuses the composition by name, and the first-party
+    tree is the subject of the loop and not a candidate passing through
+    admission. A second refusal for the same reach would only name the
+    evaluator where the kernel is already the stronger statement.
+
+    `manifest` is item 519's product record, consumed as `_check_kernel_boundary`
+    consumes it: `model_reach[].effective` is the per-edge ceiling, so a model
+    role that `reaches [evaluator.reward]` is refused with the component it
+    steers.
+
+    Returns the per-component disjointness record, which the call site does not
+    surface; raises on an intersection. Inert for a composition that declares no
+    `evaluator.*` token."""
+    from . import kernel_boundary as _kb  # noqa: PLC0415 - lazy, avoids a cycle
+    # A cheap gate first, for the reason `_check_kernel_boundary` has one: the
+    # ordinary compile pays a scan of the service declarations (and of the
+    # model-reach rows, when there are any) rather than a walk of every body.
+    declared = any(
+        _kb.is_evaluator_token(token.split("(", 1)[0])
+        for svc in services.values()
+        for method in getattr(svc, "methods", {}).values()
+        for token in (getattr(method, "capabilities", None) or ()))
+    if not declared:
+        declared = any(
+            _kb.is_evaluator_token(str(token).split("(", 1)[0])
+            for row in ((manifest or {}).get("model_reach") or [])
+            for token in (row.get("effective") or []))
+    if not declared:
+        return []
+    base = _spawn_reached_surface_pairs(components, services)
+    record: list[dict] = []
+    for comp in components:
+        own = base.get(comp["name"], set())
+        held = _strip_ceilings(_held_capabilities_pairs(comp, own, services))
+        effective = set(held) | set(
+            _strip_ceilings(set(_kb.effective_from_model_reach(
+                comp["name"], manifest))))
+        where = comp.get("source") or filename
+        line = comp.get("line", 1)
+
+        stray = _kb.unenumerated_evaluator(effective)
+        if stray:
+            names = ", ".join(f"`{_cap_render(c)}`" for c in stray)
+            known = ", ".join(f"`{c.token}`" for c in _kb.EVALUATOR_CAPS)
+            raise RevlError(
+                where, line,
+                f"`{comp['name']}` holds {names}, a capability in the reserved "
+                f"`{_kb.EVALUATOR_NAMESPACE}` namespace that the evaluator's own "
+                f"enumeration has no member for - a claim on the judge the "
+                f"compiler cannot check is refused, never admitted (G8)",
+                hint=f"the evaluator capability set is enumerated in "
+                     f"`src/revl/kernel_boundary.py` and holds {known}. The "
+                     f"`{_kb.EVALUATOR_NAMESPACE}` namespace names the code that "
+                     f"scores a candidate, so nothing outside the evaluator may "
+                     f"declare into it: rename the capability into the "
+                     f"boundary's own namespace, or drop it (issue #2802)",
+                code="G8", category="capability-attenuation",
+            )
+
+        hits = _kb.evaluator_offending(effective)
+        if hits:
+            first_member, first_element = hits[0]
+            members: list = []
+            seen_tokens: set = set()
+            for member, _element in hits:
+                if member.token in seen_tokens:
+                    continue
+                seen_tokens.add(member.token)
+                members.append(member)
+            named = ", ".join(f"`{m.token}`" for m in members)
+            paths = ", ".join(sorted({p for m in members for p in m.paths}))
+            held_str = (", ".join(f"`{s}`" for s in _cap_sorted_strs(held))
+                        or "no capabilities")
+            raise RevlError(
+                where, line,
+                f"`{comp['name']}` is inside the evaluator's authority: its "
+                f"effective ceiling meets {named}, which the evaluator holds and "
+                f"nothing else may. A candidate may evolve its behaviour, never "
+                f"the judge that scores it ({first_member.guarantee})",
+                hint=f"`{comp['name']}` holds `{_cap_render(first_element)}`, "
+                     f"which is the evaluator's own authority. "
+                     f"{first_member.why}. The evaluator capability set is "
+                     f"enumerated in `src/revl/kernel_boundary.py` and stands "
+                     f"for {paths}; `{comp['name']}` holds {held_str}. Drop the "
+                     f"capability; evaluator authority is not delegable and no "
+                     f"grant confers it, because a grant that could would be "
+                     f"the rule this refusal defends (attenuation, issue #2802 - "
+                     f"docs/capability-attenuation.md)",
+                code=first_member.guarantee, category="capability-attenuation",
+            )
+        record.append({
+            "component": comp["name"],
+            "holds": _cap_sorted_strs(held),
+            "evaluator": [c.token for c in _kb.EVALUATOR_CAPS],
             "disjoint": True,
         })
     return record

@@ -1971,6 +1971,13 @@ profile, with `may not call on <subject>` for the operators that must stay out
 ([operator-capabilities.md](operator-capabilities.md)); the grant itself does
 not do it.
 
+Under `--author-trust trusted` the ticket names the host code a yes lets run
+in `unreviewedHostCode` (and, for a ticket that replaces a running composition,
+`runningHostCode` and `newHostCode`; see docs/mcp-bridge.md). An extern backed
+by a host-module ref (`= @py ref <symbol> from "<path>"`) is listed like an
+inline body, with the ref's pinned sha256 as its digest and its `path` and
+`symbol` under `refs`, so a ref whose pin moved is new host code (issue #3347).
+
 The ticket carries `ceilings` (issue #1755): for each class-(c) capability it
 asks about, the crossing component's item-260 crossing ceiling, read from
 `revl audit`'s cardinality analysis

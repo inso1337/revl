@@ -857,7 +857,9 @@ def _need_covered(kind: str, path: str | None, mode: str | None, env: dict) -> b
 # A TDX quote is refused unless the table states what it demands of the quote
 # beyond MRTD (the runtime registers, TCB and quoting enclave); the keys below
 # spell that demand, and `accept_mrtd_only` is the explicit narrower choice.
-# `sev_min_tcb` is the SEV-SNP TCB floor, on the same terms:
+# A SEV-SNP report is refused unless the table states the TCB floor for the
+# report's processor generation (`sev_min_tcb` for Milan and Genoa,
+# `sev_turin_min_tcb` for Turin); `0` is the explicit "any TCB":
 #
 #     runtime_measurements = [["<rtmr0>", "<rtmr1>", "<rtmr2>", "<rtmr3>"]]
 #     accept_mrtd_only = true            # only when the registers are not compared
@@ -866,10 +868,15 @@ def _need_covered(kind: str, path: str | None, mode: str | None, env: dict) -> b
 #     min_pce_svn = 3                    # optional PCE SVN floor
 #     qe_mr_signers = ["<64 hex>"]       # optional permitted QE signers
 #     qe_mr_enclaves = ["<64 hex>"]      # optional permitted QE images
-#     sev_min_tcb = 0x7316000000000104   # optional SEV-SNP TCB floor: microcode
+#     sev_min_tcb = 0x7316000000000104   # SEV-SNP TCB floor for a Milan or Genoa
+#                                        # report: microcode 0x73, SNP 0x16, TEE
+#                                        # 0x01, bootloader 0x04 (bytes 7, 6, 1,
+#                                        # 0; 2 to 5 are reserved, must be zero)
+#     sev_turin_min_tcb = 0x7300000016010402
+#                                        # the same for a Turin report: microcode
 #                                        # 0x73, SNP 0x16, TEE 0x01, bootloader
-#                                        # 0x04 (bytes 7, 6, 1, 0; 2 to 5 are
-#                                        # reserved and must be zero)
+#                                        # 0x04, FMC 0x02 (bytes 7, 3, 2, 1, 0; 4
+#                                        # to 6 are reserved, must be zero)
 #
 # This surface PARSES into the `TeeRequirement` that `tee_attestation.py` already
 # defines and is checked by the `tee_admits` it already has: there is no second
@@ -890,7 +897,7 @@ ATTEST_KEYS = ("requires", "bundle", "measurements", "region", "regions",
                "outbound_network", "max_age_s", "nonce",
                "runtime_measurements", "accept_mrtd_only", "min_tee_tcb_svn",
                "min_qe_svn", "min_pce_svn", "qe_mr_signers", "qe_mr_enclaves",
-               "sev_min_tcb")
+               "sev_min_tcb", "sev_turin_min_tcb")
 #: The subset of keys that spells a :class:`~revl.tee_attestation.TdxPolicy`;
 #: a table carrying any of them states one.
 _ATTEST_TDX_KEYS = ("runtime_measurements", "accept_mrtd_only", "min_tee_tcb_svn",
@@ -1065,11 +1072,13 @@ def parse_tee_requirement(placement: dict, process: str, *,
         except TeeError as error:
             return None, f"process {process!r} [attest]: {error}"
 
-    sev_min_tcb: int | None = None
-    if "sev_min_tcb" in raw:
-        sev_min_tcb, problem = _attest_int(raw, process, "sev_min_tcb")
-        if problem:
-            return None, problem
+    sev_floors: dict[str, int | None] = {"sev_min_tcb": None,
+                                         "sev_turin_min_tcb": None}
+    for key in sev_floors:
+        if key in raw:
+            sev_floors[key], problem = _attest_int(raw, process, key)
+            if problem:
+                return None, problem
 
     challenge = raw.get("nonce")
     if challenge is None:
@@ -1081,7 +1090,7 @@ def parse_tee_requirement(placement: dict, process: str, *,
                                      measurements=frozenset(measurements),
                                      nonce=challenge,
                                      regions=frozenset(regions),
-                                     tdx=tdx, sev_min_tcb=sev_min_tcb,
+                                     tdx=tdx, **sev_floors,
                                      **optional)
     except TeeError as error:
         return None, f"process {process!r} [attest]: {error}"
@@ -1127,6 +1136,8 @@ def render_tee_requirement(requirement: TeeRequirement, *,
                     json.dumps(value) for value in sorted(values)) + "]")
     if requirement.sev_min_tcb is not None:
         lines.append(f"sev_min_tcb = {requirement.sev_min_tcb!r}")
+    if requirement.sev_turin_min_tcb is not None:
+        lines.append(f"sev_turin_min_tcb = {requirement.sev_turin_min_tcb!r}")
     lines.append(f"nonce = {json.dumps(requirement.nonce)}")
     return "\n".join(lines) + "\n"
 
@@ -3597,11 +3608,19 @@ def _emit_ts_module(ir: dict, tmp: Path) -> str:
     The IR is first narrowed to the tier-emittable slice (`ts_safe_ir`): a
     py-only provider (e.g. the `Gate` compiler service) is dropped here and
     reached as a bridge proxy instead, so the ts emitter never sees a `@py`
-    extern it cannot spell (roadmap item 144)."""
+    extern it cannot spell (roadmap item 144).
+
+    `test` blocks are left out of the module, as the py run path leaves them
+    inert: the emitter imports vitest for any test, and `it(...)` outside a
+    vitest worker throws before boot, so a file carrying in-file tests could
+    not be part of a running composition (issue #3626). `revl test --backend ts`
+    does not come through here and still emits them."""
     gen = _TS_DIR / "_gen"
     gen.mkdir(exist_ok=True)
     ir_json = tmp / "ir.json"
-    ir_json.write_text(json.dumps(ts_safe_ir(ir)), encoding="utf-8")
+    runnable = dict(ts_safe_ir(ir))
+    runnable.pop("tests", None)
+    ir_json.write_text(json.dumps(runnable), encoding="utf-8")
     result = _childproc.run([sys.executable, str(_TS_DIR / "emit.py"), str(ir_json)],
                             capture_output=True)
     if result.returncode != 0:
@@ -4354,11 +4373,28 @@ def run_placement(files, placement_path: str, once: bool = False,
     # never arms one runs byte-identically to the pre-443 conductor — no
     # watcher thread, no latch read, no change to any teardown path.
     estop_latch = latch_path(estop_latch)
+    # issue #3198: resolve the composition roots HERE, in the conductor. A
+    # container-sandboxed process re-compiles these exact paths inside its
+    # boundary, and the driver mounts the files themselves rather than the
+    # directories that hold them; absolute roots are what let that compile
+    # resolve with the conductor's working directory unmounted.
+    files = [os.path.abspath(str(f)) for f in files]
+    compile_report: dict = {}
     try:
-        ir = compile_files(files)
+        ir = compile_files(files, report=compile_report)
     except RevlError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+
+    # issue #3198: the exact FILES a container-sandboxed body may read to
+    # re-compile its own composition: the roots plus every file that compile
+    # read from disk (`use` dependencies, and every host file a ref, asset or
+    # body read). The driver mounts each one read-only on its own; no directory
+    # is mounted, so the body cannot read beside them (the envelope never
+    # granted that).
+    sandbox_files = sorted({os.path.abspath(str(f)) for f in files}
+                           | set(compile_report.get("disk_reads") or {})
+                           | set(compile_report.get("host_file_reads") or ()))
 
     placement = _load_placement(placement_path)
     # item 363: a `[tiers]` / `default_tier` manifest declares a backend tier
@@ -5411,8 +5447,7 @@ def run_placement(files, placement_path: str, once: bool = False,
             "seams": sandbox_seam_roles(pname, processes, requires, provides,
                                         owner, backends, remote_specs,
                                         default_deadline),
-            "files": [str(f) for f in files],
-            "cwd": os.getcwd(),
+            "files": sandbox_files,
             # item 411 T3: the per-process seam network and the seam-only canary
             # targets (empty for a seam-free sandbox — the ordinary net canary
             # runs then). Established above only when there is a cross-boundary
