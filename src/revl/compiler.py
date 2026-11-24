@@ -35,7 +35,7 @@ from .lower import IR_SCHEMA_REVISIONS, IR_TOPLEVEL_FIELDS, check_and_lower
 from .lower import _same_file_two_copies
 from .parser import ExternDecl, FnDecl, Parser, Program, ServiceDecl, TypeDecl, parse_text
 from .type_arity import check_declared_type_arity as _check_declared_type_arity
-from .typecheck import format_type, parse_type
+from .typecheck import _BUILTIN_TYPE_NAMES, format_type, parse_type
 
 
 # issue #2547: the rule for files under `.revl/export/`, an
@@ -874,6 +874,14 @@ class _ModuleLoader:
             raise RevlError(importer.path, line,
                             f"`{name}` is module-private in `{where}` and cannot be imported (G1)",
                             hint=f"mark `extern {name}` as `pub extern` in {where}")
+        if name in _BUILTIN_TYPE_NAMES:
+            # issue #3507: a builtin type (e.g. `Value`) is reserved, not a
+            # declaration in the named module — say so and say to drop it from
+            # the `use` list instead of "not a public declaration".
+            raise RevlError(importer.path, line,
+                            f"`{name}` is a builtin type: use it without importing it",
+                            hint=f"remove `{name}` from this `use` list — builtin type "
+                                 f"names are in scope everywhere")
         raise RevlError(importer.path, line,
                         f"`{name}` is not a public declaration in `{where}`")
 
