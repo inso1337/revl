@@ -741,7 +741,13 @@ class HttpTransport:
         if method in _NAMED_METHODS:
             header_name = _one_header(headers, "Mcp-Name")
             decoded = _decode_header_value(header_name) if header_name is not None else None
-            if decoded is None or decoded != params.get(_NAMED_METHODS[method]):
+            # issue #3537: a hatch call IS the verb it names (#2073), so the
+            # header binds to the RESOLVED verb, not the discovery tool —
+            # `revl_verbs` in the header must not authorize `revl_approve`.
+            resolved_name = (_disclosure.resolved_call(params)[0]
+                             if method == "tools/call"
+                             else params.get(_NAMED_METHODS[method]))
+            if decoded is None or decoded != resolved_name:
                 return 400, _rpc_error(request_id, HEADER_MISMATCH,
                                        "Mcp-Name header missing or does not match "
                                        "the body"), []
