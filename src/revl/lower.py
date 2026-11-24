@@ -9816,6 +9816,15 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     _collect(_check_kernel_boundary, live_components, services,
              program.filename, untrusted=untrusted, manifest=manifest)
 
+    # THE EVALUATOR as a capability (issue #2802, slice 3): the same fold with
+    # the evaluator's own held set on the left. A candidate composed for another
+    # consumer that DECLARES a reach into the judge of the evolution loop is
+    # refused by that declaration and not only by its diff. Inert for every
+    # composition that declares no `evaluator.*` token, which is every program on
+    # the tree (docs/design/545-kernel-boundary-capability.md, section 8).
+    _collect(_check_evaluator_boundary, live_components, services,
+             program.filename, manifest=manifest)
+
     # lifecycle tests are lowered last: they check against the component
     # declarations, so a broken component must report itself first
     tests = _collect(_lower_tests, program, program.filename, types, services)
@@ -19540,6 +19549,133 @@ def _check_kernel_boundary(components: list[dict], services: dict,
             "component": comp["name"],
             "holds": _cap_sorted_strs(held),
             "kernel": [c.token for c in _kb.KERNEL_CAPS],
+            "disjoint": True,
+        })
+    return record
+
+
+def _check_evaluator_boundary(components: list[dict], services: dict,
+                              filename: str,
+                              manifest: dict | None = None) -> list[dict]:
+    """The EVALUATOR in the capability attenuation product (issue #2802, slice 3).
+
+    `kernel_boundary.EVALUATOR_PATHS` enumerates the judge of the evolution loop
+    (the reward conjunction, the progress counters, the lifecycle controller, the
+    held-out scorer and the protocol digest) and the controller and the scorer
+    refuse a diff that touches it. That is a changed-file check, answered after
+    the fact: a candidate composed for ANOTHER consumer that reaches the
+    evaluator without editing an enumerated file is not refused by it. This is
+    the other half, and it is `_check_kernel_boundary`'s own rule with a second
+    held set on the left:
+
+        held(evaluator)  n  effective(C)  =  {}   -> admit
+        held(evaluator)  n  effective(C) !=  {}   -> REFUSE, naming both sets
+
+    folded by `cap_order.disjoint`, the same predicate. There is no new algebra
+    and no second mechanism, which is why the evaluator's members live in
+    `kernel_boundary` beside the kernel's rather than in a module of their own.
+
+    WHICH WAY IT FAILS. Toward refusing, and only on a DECLARED reach, on both
+    sides of the trust boundary: an enumerated `evaluator.*` token is refused by
+    its member, and an `evaluator.*` token the enumeration has no member for (a
+    bare `evaluator`, `evaluator.something_new`) is refused under the same code
+    rather than read as an ordinary boundary. The undeclared reaches (the
+    unnameable `*` and a `svc:` element) are not folded here: under the
+    untrusted-author profile `_check_kernel_boundary` meets them against every
+    kernel member first and refuses the composition by name, and the first-party
+    tree is the subject of the loop and not a candidate passing through
+    admission. A second refusal for the same reach would only name the
+    evaluator where the kernel is already the stronger statement.
+
+    `manifest` is item 519's product record, consumed as `_check_kernel_boundary`
+    consumes it: `model_reach[].effective` is the per-edge ceiling, so a model
+    role that `reaches [evaluator.reward]` is refused with the component it
+    steers.
+
+    Returns the per-component disjointness record, which the call site does not
+    surface; raises on an intersection. Inert for a composition that declares no
+    `evaluator.*` token."""
+    from . import kernel_boundary as _kb  # noqa: PLC0415 - lazy, avoids a cycle
+    # A cheap gate first, for the reason `_check_kernel_boundary` has one: the
+    # ordinary compile pays a scan of the service declarations (and of the
+    # model-reach rows, when there are any) rather than a walk of every body.
+    declared = any(
+        _kb.is_evaluator_token(token.split("(", 1)[0])
+        for svc in services.values()
+        for method in getattr(svc, "methods", {}).values()
+        for token in (getattr(method, "capabilities", None) or ()))
+    if not declared:
+        declared = any(
+            _kb.is_evaluator_token(str(token).split("(", 1)[0])
+            for row in ((manifest or {}).get("model_reach") or [])
+            for token in (row.get("effective") or []))
+    if not declared:
+        return []
+    base = _spawn_reached_surface_pairs(components, services)
+    record: list[dict] = []
+    for comp in components:
+        own = base.get(comp["name"], set())
+        held = _strip_ceilings(_held_capabilities_pairs(comp, own, services))
+        effective = set(held) | set(
+            _strip_ceilings(set(_kb.effective_from_model_reach(
+                comp["name"], manifest))))
+        where = comp.get("source") or filename
+        line = comp.get("line", 1)
+
+        stray = _kb.unenumerated_evaluator(effective)
+        if stray:
+            names = ", ".join(f"`{_cap_render(c)}`" for c in stray)
+            known = ", ".join(f"`{c.token}`" for c in _kb.EVALUATOR_CAPS)
+            raise RevlError(
+                where, line,
+                f"`{comp['name']}` holds {names}, a capability in the reserved "
+                f"`{_kb.EVALUATOR_NAMESPACE}` namespace that the evaluator's own "
+                f"enumeration has no member for - a claim on the judge the "
+                f"compiler cannot check is refused, never admitted (G8)",
+                hint=f"the evaluator capability set is enumerated in "
+                     f"`src/revl/kernel_boundary.py` and holds {known}. The "
+                     f"`{_kb.EVALUATOR_NAMESPACE}` namespace names the code that "
+                     f"scores a candidate, so nothing outside the evaluator may "
+                     f"declare into it: rename the capability into the "
+                     f"boundary's own namespace, or drop it (issue #2802)",
+                code="G8", category="capability-attenuation",
+            )
+
+        hits = _kb.evaluator_offending(effective)
+        if hits:
+            first_member, first_element = hits[0]
+            members: list = []
+            seen_tokens: set = set()
+            for member, _element in hits:
+                if member.token in seen_tokens:
+                    continue
+                seen_tokens.add(member.token)
+                members.append(member)
+            named = ", ".join(f"`{m.token}`" for m in members)
+            paths = ", ".join(sorted({p for m in members for p in m.paths}))
+            held_str = (", ".join(f"`{s}`" for s in _cap_sorted_strs(held))
+                        or "no capabilities")
+            raise RevlError(
+                where, line,
+                f"`{comp['name']}` is inside the evaluator's authority: its "
+                f"effective ceiling meets {named}, which the evaluator holds and "
+                f"nothing else may. A candidate may evolve its behaviour, never "
+                f"the judge that scores it ({first_member.guarantee})",
+                hint=f"`{comp['name']}` holds `{_cap_render(first_element)}`, "
+                     f"which is the evaluator's own authority. "
+                     f"{first_member.why}. The evaluator capability set is "
+                     f"enumerated in `src/revl/kernel_boundary.py` and stands "
+                     f"for {paths}; `{comp['name']}` holds {held_str}. Drop the "
+                     f"capability; evaluator authority is not delegable and no "
+                     f"grant confers it, because a grant that could would be "
+                     f"the rule this refusal defends (attenuation, issue #2802 - "
+                     f"docs/capability-attenuation.md)",
+                code=first_member.guarantee, category="capability-attenuation",
+            )
+        record.append({
+            "component": comp["name"],
+            "holds": _cap_sorted_strs(held),
+            "evaluator": [c.token for c in _kb.EVALUATOR_CAPS],
             "disjoint": True,
         })
     return record
