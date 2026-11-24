@@ -337,6 +337,25 @@ MCP tool `revl_resolve` and CLI `revl resolve`, same result object
   that running composition** (G2 provision disjointness, G3 acyclicity) —
   the answer upgrades from "compatible somewhere" to "admissible *here*".
 
+- `release` (Python `registry.resolve(..., release=...)`) selects among
+  releases. Left out, a resolve reads the **current** release of each entry,
+  exactly as above. A version string (`"1.2.0"`) considers only the entries,
+  current or frozen under `releases/<version>/` (§1.2), that are that release;
+  `"*"` considers every release of every entry; the version is matched as an
+  exact string. Python API only: `revl_resolve` and a CLI do not forward it yet.
+  The registry must be loaded
+  with its history (`Registry.from_dir(dir, releases=True)`, which a path
+  argument does for you); asking a registry loaded without it is refused, not
+  answered about the wrong set. Each candidate then carries `version` and
+  `frozen`, and the result a `releaseSelection` block, none of which appear
+  without `release`. At equal fit the current release ranks above an older one.
+  This is what lets a consumer pinned to `cache@1` ask which releases still fit
+  its need after `cache@2` became the current one. A frozen release is checked,
+  not believed: it is recompiled by the current compiler, and bytes that no
+  longer hash to what its own `release.json` recorded refuse it (listed in
+  `refused` with its `version`). It carries no evidence bundle, so its evidence
+  reads `unavailable`; it is never credited with the current release's.
+
 **Matching is admission, never text.** A candidate matches iff its
 provided service is §5 structurally compatible with the need — the same
 `service-compat` machinery the hot-swap gate runs, pointed at the index.
@@ -599,7 +618,8 @@ catches a name changing hands but proves nothing about who is behind it.
 **Deletion/yanking policy** (needs identity first). **Signatures** as a
 publish gate (the dossier is evidence — signing arrives with that identity, and
 unsigned-but-gate-verified beats signed-but-unverified). **Resolving by version
-range** — a resolve reads the current release; the frozen history is a record,
-not yet a selectable set (item 9 / multi-version coexistence). **Popularity
+range** — a resolve selects one release or all of them (§2, `release=`); there
+is no range grammar, no "newest that satisfies" and no per-consumer pin
+resolution, which is what a version range would add. **Popularity
 metrics** (see §2); **cross-registry federation** (there is one registry until
 that is a problem worth having).
