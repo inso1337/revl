@@ -3597,11 +3597,19 @@ def _emit_ts_module(ir: dict, tmp: Path) -> str:
     The IR is first narrowed to the tier-emittable slice (`ts_safe_ir`): a
     py-only provider (e.g. the `Gate` compiler service) is dropped here and
     reached as a bridge proxy instead, so the ts emitter never sees a `@py`
-    extern it cannot spell (roadmap item 144)."""
+    extern it cannot spell (roadmap item 144).
+
+    `test` blocks are left out of the module, as the py run path leaves them
+    inert: the emitter imports vitest for any test, and `it(...)` outside a
+    vitest worker throws before boot, so a file carrying in-file tests could
+    not be part of a running composition (issue #3626). `revl test --backend ts`
+    does not come through here and still emits them."""
     gen = _TS_DIR / "_gen"
     gen.mkdir(exist_ok=True)
     ir_json = tmp / "ir.json"
-    ir_json.write_text(json.dumps(ts_safe_ir(ir)), encoding="utf-8")
+    runnable = dict(ts_safe_ir(ir))
+    runnable.pop("tests", None)
+    ir_json.write_text(json.dumps(runnable), encoding="utf-8")
     result = _childproc.run([sys.executable, str(_TS_DIR / "emit.py"), str(ir_json)],
                             capture_output=True)
     if result.returncode != 0:
