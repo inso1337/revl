@@ -957,14 +957,27 @@ def _resolve_uses(decl: CompositionDecl, doc: str, base: str,
                   root: str) -> list[str]:
     uses = []
     for path, line in decl.uses:
-        target = os.path.join(base, path)
+        target = os.path.abspath(os.path.join(base, path))
+        shipped = False
+        if not os.path.isfile(target):
+            # issue #3530: a composition-level `use "stdlib/..."` resolves the
+            # way a row `from "stdlib/..."` does (#3529): the composition-
+            # relative file first, then the same search path the row falls
+            # back to (REVL_IMPORT_PATH entries, then the shipped stdlib).
+            found = _stdlib_row_source(path)
+            if found is not None:
+                target, shipped = found
         if not os.path.isfile(target):
             raise RevlError(
                 doc, line,
                 f"composition {decl.name} uses `{path}`, which does not exist",
                 hint=f"resolved against `{_relative(base, root)}`")
-        rel = _relative(target, root)
-        _refuse_shipped_look_alike(rel, path, doc, line, "`use`")
+        # a `use` that resolved to the shipped stdlib records the path as
+        # written behind `_SHIPPED`, exactly as a row source does, so the IR
+        # stays machine-independent and `_at` follows the record.
+        rel = _SHIPPED + path if shipped else _relative(target, root)
+        if not shipped:
+            _refuse_shipped_look_alike(rel, path, doc, line, "`use`")
         uses.append(rel)
     return uses
 
