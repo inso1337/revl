@@ -25879,6 +25879,21 @@ fn taint_source_qualifier(ty: Str) -> Str {
   return ""
 }
 
+// The IR's `"returns_qualifiers"` key for a declared return that holds BOTH
+// qualifiers (issue #3238), `, "returns_qualifiers": ["Untrusted", "Secret"]`,
+// else "": the reference's `taint.source_qualifiers`, stamped only when it finds
+// more than one. The primary stays in `returns_qualifier`; this is the full set,
+// so a unit compiled against the manifest mints both origins.
+fn taint_source_qualifiers_json(ty: Str) -> Str {
+  let top = taint_top_qualifier(ty)
+  if (top != "" && top != "Untrusted" && top != "Secret") { return "" }
+  if (ty == "" || ty_parse(ty).head == "Retained") { return "" }
+  if (taint_holds_qualifier(ty, "Untrusted") && taint_holds_qualifier(ty, "Secret")) {
+    return ", \"returns_qualifiers\": [\"Untrusted\", \"Secret\"]"
+  }
+  return ""
+}
+
 // A service operation's `params` list: `ir_params_json` plus the issue #1937
 // stamps `"trusted": true` / `"untrusted": true`, read off the DECLARED types
 // `raw` (before alias substitution, as the reference's `extract_and_normalize`
@@ -26073,12 +26088,14 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str
   var term = ""
   // issue #1937: the qualifier stripped off the return (`Untrusted`/`Secret`)
   var retQual = ""
+  var retQuals = ""
   // the declared return, for the validated response derivation below
   var rawRet = ""
   var nexti = ps.i
   if (atk(ts, ps.i, "arrow")) {
     let tr = type_at(ts, ps.i + 1)
     retQual = taint_source_qualifier(tr.ty)
+    retQuals = taint_source_qualifiers_json(tr.ty)
     rawRet = taint_strip(alias_subst(tr.ty, al))
     if (rawRet == "Criterion") {
       term = "criterion"
@@ -26097,6 +26114,7 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool, al: Map[Str
   if (retQual != "") {
     mj = mj.concat(", \"returns_qualifier\": ").concat(jstr(retQual))
   }
+  mj = mj.concat(retQuals)
   mj = mj.concat(ir_doc_key(st, dline, dstarts))
   if (term != "") {
     mj = mj.concat(", \"termination\": ").concat(jstr(term))

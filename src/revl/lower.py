@@ -9938,6 +9938,12 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
                         # Absent unless declared, so existing IR is unchanged.
                         **({"returns_qualifier": m.returns_qualifier}
                            if getattr(m, "returns_qualifier", None) else {}),
+                        # issue #3238: every qualifier of a return that holds
+                        # both, in the order `Untrusted`, `Secret`. Absent for
+                        # a single-qualifier return.
+                        **({"returns_qualifiers": list(m.returns_qualifiers)}
+                           if len(getattr(m, "returns_qualifiers", ()) or ()) > 1
+                           else {}),
                         # issue #1952: the comment block directly above the
                         # operation — contiguous `//` lines with the prefix
                         # stripped and line breaks kept. Documentation a host

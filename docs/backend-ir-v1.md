@@ -75,7 +75,9 @@ beside the type:
 - `"secret": true` on a `Secret[T]` parameter;
 - `"trusted": true` / `"untrusted": true` on a service operation's
   `Trusted[T]` / `Untrusted[T]` parameter;
-- `"returns_qualifier": "Untrusted"` or `"Secret"` on a service operation.
+- `"returns_qualifier": "Untrusted"` or `"Secret"` on a service operation;
+- `"returns_qualifiers": ["Untrusted", "Secret"]` on a service operation whose
+  return holds both qualifiers (issue #3238); absent for a single qualifier.
 
 The last two let a unit compiled against this IR as a manifest keep the
 operation's taint (issue #1937). Each key is absent unless declared, and an
