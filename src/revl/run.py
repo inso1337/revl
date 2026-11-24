@@ -195,6 +195,38 @@ def _components(ir: dict) -> list[dict]:
     return ir.get("components") or []
 
 
+def component_config(ir: dict, config: dict, name: str) -> dict:
+    """The config a component starts with: its composition row's `config`
+    values (issue #3484), then the host-supplied table for `name` over them.
+
+    A composition document's resolved rows reach the IR as `ir["rows"]`, each
+    already checked against the component's declared config at admission
+    (`composition._check_config`). The row is the composition's own statement
+    of what the component runs with, so it seeds the table and the component's
+    declared defaults fill only what neither the row nor the host names. A
+    field the host supplies (`--config`, `Session.load`'s map) wins over the
+    row's, field by field. An IR with no rows carries no row config, so a plain
+    module compile starts exactly as before."""
+    supplied = config.get(name) or {}
+    rows = [row for row in (ir.get("rows") or {}).get("rows") or []
+            if row.get("component") == name]
+    if len(rows) > 1:
+        # the runtime keys a component by name, so two rows placing one
+        # component cannot each start with their own values; never blend them
+        labels = ", ".join(f"`{row.get('qualified') or row.get('label')}`"
+                           for row in rows)
+        raise RevlError(
+            "<composition>", 0,
+            f"component `{name}` is placed by {len(rows)} rows ({labels}), so "
+            "it has no one row config to start with",
+            hint="place a component by one row; the runtime starts one "
+                 "instance per component name")
+    seeded = (rows[0].get("config") or {}) if rows else {}
+    if not seeded:
+        return supplied
+    return {**seeded, **supplied}
+
+
 # ── item 350: the environment contract (`boot component`) ───────────────────
 #
 # The host must know the port, the auth token, the data dir and the model
@@ -442,7 +474,7 @@ def _required_config_problem(ir: dict, config: dict) -> str | None:
     missing: list[str] = []
     for name in _load_order(ir):
         fields = (by_name.get(name) or {}).get("config") or []
-        supplied = config.get(name) or {}
+        supplied = component_config(ir, config, name)
         for field in fields:
             if field.get("default") is None and field["name"] not in supplied:
                 # item 350: a boot component's fields arrive through `--env`, the
@@ -675,7 +707,7 @@ def _print_plan(ir: dict, config: dict, backend: str) -> None:
         comp = by_name[name]
         requires = ", ".join(comp.get("requires") or {}) or "-"
         provides = ", ".join(comp.get("provides") or {}) or "-"
-        cfg = config.get(name)
+        cfg = component_config(ir, config, name)
         print(f"\ncomponent {name}")
         print(f"  requires: {requires}")
         print(f"  provides: {provides}")
@@ -2008,7 +2040,8 @@ class _Driver:
             # realms. For a component with no placements this is byte-identical to
             # a bare ctx.plugin.
             fiber = self.runtime.plug(
-                self.root, getattr(module, name), self.config.get(name, {}))
+                self.root, getattr(module, name),
+                component_config(ir, self.config, name))
             self.fibers[name] = fiber
             await self._flush()
             # roadmap item 372: DRIVE the deferred activation to completion and
@@ -3191,6 +3224,18 @@ def run_command(args, hold_once: bool = False) -> int:
     problem = _env_contract_problem(ir, env, config)
     if problem is not None:
         return _fail(problem, lifecycle.CONFIG)
+    # issue #3596: the host `--config` table is checked and folded the way a
+    # Session load does it (`configure_rows_from_host`): a row's table is typed
+    # and recorded in the rows IR, and a table for a component no row places
+    # is typed too, so a wrong type or an undeclared field refuses the boot
+    # here. Required fields stay with `_required_config_problem` below, which
+    # also knows the boot component's `--env` door.
+    from .composition import configure_rows_from_host  # noqa: PLC0415
+    try:
+        ir = configure_rows_from_host(ir, config, "<--config>",
+                                      required=False)
+    except RevlError as exc:
+        return _fail(str(exc), lifecycle.CONFIG)
     config = _merge_env(ir, env, config)
 
     # issue #1461: `--providers FILE` binds the composition's model crossings to
@@ -3350,7 +3395,11 @@ def run_command(args, hold_once: bool = False) -> int:
             return asyncio.run(driver.withdraw_once())
         if getattr(args, "watch", False):
             return asyncio.run(driver.watch(args.files))
-        return asyncio.run(driver.hold_repl(once=hold_once))
+        # #3435: the command line's `--once` reaches the py path like every
+        # other tier, so a script or a supervisor whose stdin stays open does
+        # not wait on the prompt. `revl dev` still passes `hold_once` itself.
+        return asyncio.run(driver.hold_repl(
+            once=hold_once or bool(getattr(args, "once", False))))
     except refusals(emit) as exc:
         # issue #1393: an emit-time refusal is an ANSWER, not a crash. The py
         # emitter refuses a document it cannot lower rather than silently
@@ -3375,3 +3424,9 @@ def run_command(args, hold_once: bool = False) -> int:
         return _fail(str(exc), lifecycle.BOOT)
     except KeyboardInterrupt:  # pragma: no cover — signal handler covers unix
         return 130
+    finally:
+        # issue #3380: the trace is context-local. The driver installed its
+        # `_on_host` on this thread when it was built, and the `set_trace(None)`
+        # of its teardown ran inside `asyncio.run`'s task, which this thread
+        # does not see; clear this thread's own.
+        runtime_mod.set_trace(None)

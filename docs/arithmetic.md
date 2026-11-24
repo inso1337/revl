@@ -25,8 +25,9 @@ rust. Rust was the tier out of step with the syntax, not the other two.
 Declaring the result `Int` is now a type error, with the diagnostic naming
 `Float`.
 
-The wasm tier refuses `Int / Int` by name until it can render a non-integer
-Float; use `div_trunc` / `div_floor` / `div_euclid` there.
+The wasm tier lowers `Int / Int` to true division now: both operands convert to
+f64 and the result is a native `Float` (docs/wasm-capabilities.md). Use
+`div_trunc` / `div_floor` / `div_euclid` where an integer quotient is meant.
 
 ## Integer division has names
 
@@ -393,7 +394,7 @@ on `ident(3)`, and not in the same direction:
 | java | `long` -> `double` is an implicit widening (JLS 5.1.2): absorbed it | `ident(((double) (3L)))` |
 | rust | `ident(3i64)` against `f64` is **E0308**, a compile error | `ident((3i64 as f64))` |
 | typescript | `ident(3n)` against `number`; `3n === 3` is false: a **wrong answer** | `ident(Number(3n))` |
-| wasm | refuses `Float` (the tier lowers `Int`/`Bool` only) | refuses, unchanged |
+| wasm | refuses `Float` (the tier lowers `Int`/`Bool` only) | `f64.convert_i64_s` / `f64.convert_i32_s` at the marked site; `Float` is a native f64 value |
 
 A refusal was survivable and the wrong answer was not, so the gap was pinned
 in `tests/test_cross_tier_execution.py` (`DIVERGENCES`) rather than left to
@@ -482,7 +483,37 @@ it. Both operands of a later `==` are then `Float`-typed, nothing is refused,
 and the tiers still disagree (python true, TypeScript false, and go false on
 the `List[Float]` let). The same test file pins those five shapes as strict
 expected failures. A `List[Int]` VALUE passed into a `List[Float]` parameter
-is the related issue #2937.
+is the related issue #2937, below.
+
+**A value that already carries its type is not converted** (issue #2937).
+`compatible` recurses into type arguments here too, so the checker used to
+accept a `List[Int]` variable where a `List[Float]` is declared: as a call
+argument, a `let` value, an assignment, a `return`, a record field, a list
+element or a constructor payload. The `"widen"` marker sits on one node and
+cannot reach an element, so nothing converted the elements. Python and
+TypeScript ran the program (TypeScript with `bigint` elements where `number` is
+declared), go failed to build (`[]int64` as `[]float64`) and java failed in
+javac (`List<Long>` as `List<Double>`). The same held for `Opt[Int]` as
+`Opt[Float]`, `Box[Int]` as `Box[Float]` (a record or a generic record) and
+`List[Int32]` as `List[Int]`. Converting each element would copy every value
+that crosses a call, so the checker refuses it (`T1`, "the `Int` inside is not
+widened to `Float` (only a bare value widens)"), in the reference and in the
+self-hosted checker, so no tier reaches the program. Build the value with the
+wide element type (`3.0`, not `3`), or convert each element where you mean to
+(a `Float` built from each `Int`). A bare scalar still widens (`f(n)` with `n: Int` for
+a `Float` parameter), and a constructor written at the site is judged part by
+part, not as a value: `[1, 2]`, `Some(3)`, `{ i: 3, f: 3 }` and `B([1, 2])`
+are unaffected, and so is `Some(xs)` with `xs: List[Float]`.
+A bare `Int` value or expression (`n`, `n + 1`) put into an `Opt[Float]` slot
+is refused the same way: the `Float` is inside the option, where no marker
+reaches. Known gaps, not covered by this rule: an argument to a builtin method
+(`rows.push(ys)` with `rows: List[List[Float]]`, `xs.concat(ys)`), the field
+read of a generic record (`b.v` with `b: Box[List[Int]]`), and an anonymous
+record value flowing into a nominal record.
+`tests/test_nested_widening_value_flow_2937.py` runs each refused shape on
+every tier (rust and java with `REVL_CROSS_TIER_SLOW=1`): on base it fails on
+every tier, because python and TypeScript run the program and go and java do
+not build it, and after the fix every tier refuses the shape at check time.
 
 ## Sized integers: `Int32`
 
@@ -652,14 +683,16 @@ issue #721 executed them (`tests/test_458_float_division_and_remainder.py`):
 This is why `/` by zero is *not* refused while `div_trunc(0)` and `mod(0)`
 are: integer division at zero has no value, and float division does.
 
-### The wasm tier refuses Float
+### Float on the wasm tier
 
-This tier lowers `Int` and `Bool` and nothing else numeric, so `Float` is a
-**deliberate limit** with a named refusal (`type 'Float' is not lowerable —
-this tier supports Int/Bool`), not a silent approximation. It is a limit of the
-emitter, not of WebAssembly, which has `f64`. That means `/` is unavailable
-there too, since it yields Float. `div_trunc`, `div_floor`, `div_euclid` and
-`mod` all work, at the full 64-bit range.
+`Float` is a native f64 value on this tier: a local, a record field, a list
+element, a tagged-cell payload, an arithmetic operand, a comparison operand and
+a service-boundary value. `%` has no wasm instruction, so the emitter calls
+`$f64_mod`, an exact binary long-division (C fmod semantics: a zero divisor is
+`NaN`, the sign is the dividend's, `-0.0` keeps its sign bit). The *rendering*
+fence is separate and unchanged: `$f64_to_str` renders NaN, ±Infinity and
+integer-valued finites exactly, and traps on a non-integer finite rather than
+emit a string that would diverge from the other tiers (docs/strings.md).
 
 ## Integer division by zero
 
@@ -704,52 +737,62 @@ IEEE defines ±infinity and `NaN` as *values*. See the Float section above.
   landed; `Int` is 64-bit on all six tiers (`backends/wasm/emit.py` lowers `Int`
   to `i64`). python and TypeScript are arbitrary-precision hosts and impose the
   bound; rust, java, go and wasm carry it natively.
-- ~~**A total, value-returning form.**~~ **Closed.** The `checked_div_*`
+- ~~**A total, value-returning form.**~~ **Closed.** The `checked_*`
   forms below return `Result[Int, Str]`, so a program handles a zero divisor
-  without faulting. `fail` could not serve here: it is a component construct
-  (A8) and is refused in a pure `fn`, so making division "fail" would have
-  meant either extending `fail` into the pure stratum (which costs totality,
-  the property `verified` rests on) or a `Result` form. The second is what
-  was built.
+  and an overflow without faulting. `fail` could not serve here: it is a
+  component construct (A8) and is refused in a pure `fn`, so making it "fail"
+  would have meant either extending `fail` into the pure stratum (which costs
+  totality, the property `verified` rests on) or a `Result` form. The second
+  is what was built.
 
-## The total division forms
+## The total arithmetic forms
 
-Each faulting operation has a value-returning counterpart, named by prefixing
-`checked_`:
+Each faulting binary operation has a value-returning counterpart, named by
+prefixing `checked_`:
 
-| operation | returns | rounding |
-|---|---|---|
-| `a.checked_div_trunc(b)` | `Result[Int, Str]` | toward zero (as `div_trunc`) |
-| `a.checked_div_floor(b)` | `Result[Int, Str]` | toward −∞ (as `div_floor`) |
-| `a.checked_div_euclid(b)` | `Result[Int, Str]` | Euclidean (as `div_euclid`) |
-| `a.checked_mod(b)` | `Result[Int, Str]` | Euclidean remainder (as `mod`) |
+| operation | returns | `Ok` value | fault replaced by `Err` |
+|---|---|---|---|
+| `a.checked_add(b)` | `Result[Int, Str]` | `a + b`, in range | `"revl: Int overflow"` |
+| `a.checked_sub(b)` | `Result[Int, Str]` | `a - b`, in range | `"revl: Int overflow"` |
+| `a.checked_mul(b)` | `Result[Int, Str]` | `a * b`, in range | `"revl: Int overflow"` |
+| `a.checked_div_trunc(b)` | `Result[Int, Str]` | toward zero (as `div_trunc`) | `"revl: division by zero"`, or `"revl: Int overflow"` at `Int.MIN / -1` |
+| `a.checked_div_floor(b)` | `Result[Int, Str]` | toward −∞ (as `div_floor`) | `"revl: division by zero"`, or `"revl: Int overflow"` at `Int.MIN / -1` |
+| `a.checked_div_euclid(b)` | `Result[Int, Str]` | Euclidean (as `div_euclid`) | `"revl: division by zero"`, or `"revl: Int overflow"` at `Int.MIN / -1` |
+| `a.checked_mod(b)` | `Result[Int, Str]` | Euclidean remainder (as `mod`) | `"revl: division by zero"` |
 
-`Ok(quotient)` carries exactly the quotient the faulting operation computes:
-the rounding convention is not a second choice to make. A zero divisor yields
-`Err("revl: division by zero")` instead of the fault:
+`Ok(value)` carries exactly the value the faulting operation computes where
+that value is representable (for the division forms, the quotient: the
+rounding convention is not a second choice to make); the error text is the one
+the faulting operation raises, so a caller can match the reason as data. A zero
+divisor yields `Err("revl: division by zero")` instead of the fault:
 
 ```revl
-fn ratio(a: Int, b: Int) -> Int {
-  return match a.checked_div_trunc(b) { Ok(v) => v, Err(e) => 0 }
+fn sum(a: Int, b: Int) -> Int {
+  return match a.checked_add(b) { Ok(v) => v, Err(e) => 0 }
 }
 ```
 
-Two consequences worth stating:
+Three consequences worth stating:
 
+- **The default operators are unchanged.** `+`, `-` and `*` still trap at the
+  64-bit edge (`INT_OVERFLOW` in `tests/test_cross_tier_execution.py`). The
+  total forms add a way to handle an overflow, never a way to turn checking
+  off.
 - **A literal zero divisor is accepted here** and refused for the faulting
   operations (`arith_zero_divisor.rvl`). The refusal exists because `x.mod(0)`
   is never a program anyone meant to write; passing zero to the *checked*
   form is precisely the program it is for.
-- **A zero divisor is not the only input with no answer.** `Int.MIN / -1` is
-  2^63, one past `Int.MAX`, and the three quotient forms answer it
-  `Err("revl: Int overflow")` on every tier. That is the second half of being
-  total, and it was not always there: rust and wasm reached the host division
-  and faulted, which is what the caller asked these forms not to do. A
-  `checked_*` that can still fault is not checked. `checked_mod` is the
-  exception in both directions, because its answer at that divisor is defined:
-  the Euclidean remainder against `|-1| = 1` is 0 for every dividend, so it
-  answers `Ok(0)` and carries no overflow arm at all. Asserted by execution on
-  all six tiers in `tests/test_int_min_edges_cross_tier.py`.
+- **A zero divisor and the one overflowing quotient are not the only inputs
+  with no answer.** `Int.MIN / -1` is 2^63, one past `Int.MAX`, and the three
+  quotient forms answer it `Err("revl: Int overflow")` on every tier. That is
+  the second half of being total, and it was not always there: rust and wasm
+  reached the host division and faulted, which is what the caller asked these
+  forms not to do. A `checked_*` that can still fault is not checked.
+  `checked_mod` is the exception in both directions, because its answer at
+  that divisor is defined: the Euclidean remainder against `|-1| = 1` is 0 for
+  every dividend, so it answers `Ok(0)` and carries no overflow arm at all.
+  Asserted by execution on all six tiers in
+  `tests/test_int_min_edges_cross_tier.py`.
 
 | tier | Result representation for the Err payload |
 |---|---|
@@ -760,7 +803,9 @@ Two consequences worth stating:
 | go | `RevlResult[int64, string]` (`RevlOk`/`RevlErr` structs) |
 | wasm | a tagged cell (`[u32 tag][i64 payload]`), Err pooling the reason string |
 
-All six tiers lower every form; there is no tier where `checked_div_*` is a
-compile error. Execution is asserted in `tests/test_cross_tier_execution.py`
-(`CHECKED_DIVISION`) on python, TypeScript, go and wasm; rust and java behind
-`REVL_CROSS_TIER_SLOW=1`.
+All six tiers lower every form; there is no tier where a checked operation is
+a compile error. Execution is asserted in
+`tests/test_cross_tier_execution.py` (`CHECKED_DIVISION` and `CHECKED_ARITH`)
+on python, TypeScript and go, with rust and java behind
+`REVL_CROSS_TIER_SLOW=1`; wasm's lowering is checked statically there, and its
+helpers run on real wasmtime in `backends/wasm/test_v3_emit.py`.

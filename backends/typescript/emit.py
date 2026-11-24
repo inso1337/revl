@@ -519,12 +519,16 @@ def _mangle(name: str, extra: frozenset = frozenset()) -> str:
 #                        a JS keyword (`static`) is already broken on ts for
 #                        exactly that reason; a scaffolding-named case would join
 #                        it. Fixing the construction site is a separate change.
-#   "type name", "service", "component", "extern name", "secret name",
+#   "type name", "service", "component", "secret name",
 #   "ref symbol"      -> a type/binding the emitter DERIVES from the name, or a
 #                        name it also emits as a string; a rename needs a
 #                        derivation-aware reservation (the still-open xfail in
 #                        tests/test_cluster_c_emitter_hijack_553.py), not this
 #                        ladder
+#
+# "extern name" left this list with issue #3127: an extern is bound inside the
+# emitted module and nothing on the host resolves it by name, so `_ident`
+# renames it through the module family (`_mangle_module`) instead.
 #
 # The injected type names (`RevlSecretShape`, `RevlResult`, `RevlActivation`,
 # `RevlFrame`, `RevlSpawnHandle`, java's `Pool`/`Map`) are NOT in
@@ -591,9 +595,10 @@ def _module_scope(module: frozenset, cases: frozenset = frozenset()) -> tuple:
     with, so an escaped local never lands on a module binding the same
     function may read. `rung` is 1 unless a module name ends in `_`, so a
     document whose module names do not is unaffected."""
-    # every spelling a module name can be emitted under: a read, and an ADT
-    # case's declaration (which also escapes `JS_GLOBAL_RESERVED`)
-    spelled = set(module) | {_mangle(n, EMITTER_RESERVED) for n in module} | {
+    # every spelling a module name can be emitted under: the module family's
+    # read/declaration spelling (issue #3127), and an ADT case's declaration
+    # (which also escapes `JS_GLOBAL_RESERVED`)
+    spelled = set(module) | {_mangle_module(n) for n in module} | {
         _mangle(n, EMITTER_RESERVED | JS_GLOBAL_RESERVED) for n in cases}
     tail = max((len(n) - len(n.rstrip("_")) for n in spelled), default=0)
     return (module, tail + 1)
@@ -607,6 +612,65 @@ def _reserved_for_locals(root: str) -> bool:
             or _TS_HELPER_PREFIX_RE.match(root) is not None)
 
 
+# Issue #3127: the same family, at MODULE scope. A top-level `fn`/extern/
+# component binds a module-scope name, so a user `fn undefined` or
+# `fn BigInt` replaced the JS global every other function in the emitted
+# module reads bare: a `match` on an `Opt` compared against the user fn
+# (`$revl_match_1 !== undefined` always true, so a `None` arm never fired),
+# and the `length()` helper's `BigInt` returned the user fn's value. The
+# module-scope names a user binding may take without changing host-visible
+# behaviour are renamed (a fn or an extern); a `pub fn` and a `component` are
+# resolved by the host under their source spelling (the placement spec names
+# the component), so a collision there is REFUSED instead (see
+# `_refuse_module_collision`).
+_MODULE_NAME_ROLES = frozenset({"function", "function name", "module name", "name"})
+
+
+def _module_reserved(root: str) -> bool:
+    """Whether a module-scope binding spelled *root* would shadow a JS global,
+    an emitted helper or a runtime import the emitted module reads bare
+    (issue #3127)."""
+    return (root in JS_GLOBAL_RESERVED or root in _TS_IMPORTED_NAMES
+            or root in TS_HELPER_NAMES
+            or _TS_HELPER_PREFIX_RE.match(root) is not None)
+
+
+def _mangle_module(name: str) -> str:
+    """`_mangle`'s injective ladder over the module family: JS keywords,
+    `EMITTER_RESERVED` and `_module_reserved`. Declaration and every read go
+    through here, so the two agree; a name outside the family is unchanged."""
+    root = name
+    while root:
+        if (root in JS_RESERVED or root in EMITTER_RESERVED
+                or _module_reserved(root)):
+            return name + "_"
+        if not root.endswith("_"):
+            break
+        root = root[:-1]
+    return name
+
+
+def _collides_with_module_name(name: str) -> bool:
+    """Whether *name* (or a trailing-underscore root of it) is in the module
+    family. A host-visible name that collides is refused, not renamed."""
+    root = name
+    while root:
+        if _module_reserved(root):
+            return True
+        if not root.endswith("_"):
+            break
+        root = root[:-1]
+    return False
+
+
+def _refuse_module_collision(name: object, role: str, why: str) -> None:
+    if isinstance(name, str) and _collides_with_module_name(name):
+        raise EmitError(
+            f"{role} {name!r} is spelled like {why}, which the emitted ts "
+            f"module reads bare at module scope, and a {role} is resolved by "
+            f"its source name: rename it (issue #3127)")
+
+
 def _mangle_local(name: str, extra: frozenset) -> str:
     """`_mangle`'s injective ladder over the local family: JS keywords,
     `extra`, `EMITTER_RESERVED` and `_reserved_for_locals`. A name that IS one
@@ -618,7 +682,7 @@ def _mangle_local(name: str, extra: frozenset) -> str:
     because both go through here."""
     module, rung = _MODULE_NAMES.get()
     if name in module:
-        return _mangle(name, extra | EMITTER_RESERVED)
+        return _mangle_module(name)
     root = name
     while root:
         if (root in JS_RESERVED or root in extra or root in EMITTER_RESERVED
@@ -633,8 +697,19 @@ def _mangle_local(name: str, extra: frozenset) -> str:
 def _ident(name: object, role: str, extra: frozenset = frozenset()) -> str:
     if not isinstance(name, str) or not IDENT_RE.match(name):
         raise EmitError(f"invalid {role} identifier: {name!r}")
+    if role in _MODULE_NAME_ROLES:
+        # A module-level fn/call read takes the module family (issue #3127).
+        # A `pub fn`'s host-visible spelling is refused separately, in
+        # `_emit_ts_functions`; every other module fn is internal and moves one
+        # rung clear of the global/helper it would shadow.
+        return _mangle_module(name)
     if role in _LOCAL_ROLES:
         return _mangle_local(name, extra)
+    if role == "extern name":
+        # An extern is bound inside this module (its config/secret/ref
+        # machinery keys on the declaration, not on the emitted spelling), so
+        # it takes the module family like a fn (issue #3127).
+        return _mangle_module(name)
     if role in _SCAFFOLDING_RENAMABLE_ROLES:
         # `EMITTER_RESERVED` joins the ladder as a position-INDEPENDENT family:
         # it is passed at the declaration AND at every use, so the two agree by
@@ -967,12 +1042,13 @@ def _fn_call(node: dict, ctx: "_Ctx") -> str:
     renderer now covers both dialects, so the kind is enough here; the args
     render through the same `_expr`.
     """
-    name = _ident(node.get("name"), "function")
-    if name not in ctx.function_names and name not in ctx.extern_names:
+    raw_name = node.get("name")
+    if raw_name not in ctx.function_names and raw_name not in ctx.extern_names:
         raise EmitError(
-            f"call to unknown function {name!r} — no `fn` or `extern` of "
+            f"call to unknown function {raw_name!r} — no `fn` or `extern` of "
             f"that name is declared in this document"
         )
+    name = _ident(raw_name, "function")
     args = ", ".join(_expr(arg, ctx) for arg in node.get("args") or [])
     call = f"{name}({args})"
     if node.get("name") in ctx.compensated:
@@ -2614,6 +2690,36 @@ def _await_statement(expr: dict, ctx: "_Ctx") -> str:
     return "await " + rendered
 
 
+#: Host acquisitions that create a resource a `handoff` state vector carries,
+#: the ts peers of py's `_Closable`: a `Map` (its entries ARE the state) and a
+#: `Pool` (state `null`, its type pinned). Emitted with `track()` only inside a
+#: component that declares a `handoff`, so every other program is unchanged.
+_HANDOFF_RESOURCE_FNS = {"Map.new", "Pool.open"}
+
+
+def _handoff_resource(component: dict, step: dict) -> Optional[str]:
+    """The IR bind name of a bound `let-effect` acquisition that belongs to the
+    component's declared `handoff` state vector (item 53), or None.
+
+    Py's `_Closable` resources register themselves on the activating frame;
+    this tier's resources are plain runtime objects, so the emitter tells the
+    frame explicitly (`$revl_frame.track(<bind>)`), keeping the captured vector
+    in acquisition order, the order the successor reproduces, which is what
+    makes the positional restore sound."""
+    if step.get("step") != "let-effect":
+        return None
+    handoff = component.get("handoff")
+    if not isinstance(handoff, dict) or not handoff.get("key"):
+        return None
+    acquire = step.get("acquire")
+    if not isinstance(acquire, dict) or acquire.get("kind") != "host":
+        return None
+    if acquire.get("fn") not in _HANDOFF_RESOURCE_FNS:
+        return None
+    bind = step.get("bind")
+    return bind if isinstance(bind, str) else None
+
+
 def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
                     indent: str, lines: list[str], frame_var: Optional[str]) -> None:
     """One step of the activation body, appended to `lines`.
@@ -2688,6 +2794,15 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
                     lines.append(f"{indent}const {bind_name} = {acquire}")
                 else:
                     lines.append(f"{indent}{_asi_safe(acquire)}")
+            # item 53: a component that declares a `handoff` carries its
+            # stateful resources on the activation frame, so a swap can capture
+            # them from the live provider before teardown and seat them in the
+            # successor (runtime.ts `swapProvider`). `tracked` is only non-None
+            # for a bound let-effect of a resource, whose emitted local
+            # `bind_name` the branches above just bound.
+            tracked = _handoff_resource(component, step)
+            if tracked is not None and frame_var is not None:
+                lines.append(f"{indent}{frame_var}.track({bind_name})")
             undo = _expr(step["undo"], ctx)
             acquire_node = step.get("acquire") or {}
             b_key = step.get("bind") or _acquire_method_name(acquire_node)
@@ -2996,6 +3111,13 @@ def _refuse_required_stream(component: dict, tier: str) -> None:
 
 def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
     name = _ident(component.get("name"), "component")
+    # The placement spec names the component to the runner, so its spelling is
+    # host-visible and cannot be renamed (issue #3127). This is the cordis
+    # module's own family; the temporal target reserves the names its workflow
+    # module reads in `emit_temporal.py` (#3375), so the check lives here and
+    # not in the `_ident` both targets share.
+    _refuse_module_collision(component.get("name"), "component",
+                             "a JS global or emitted helper")
     _refuse_required_stream(component, "cordis-ts")
     requires = component.get("requires") or {}
     provides = component.get("provides") or {}
@@ -3050,6 +3172,19 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
     if provides:
         keys = ", ".join(_string(_host_key(k)) for k in provides)
         lines.append(f"  provide: [{keys}],")
+    handoff = component.get("handoff")
+    if isinstance(handoff, dict) and handoff.get("key"):
+        # item 53: the declared state contract, carried onto the emitted
+        # component so a swap engine can correlate predecessor and successor
+        # by the key they provide and capture its live state before teardown
+        # (docs/state-handoff.md; runtime.ts `swapProvider`). Additive: a
+        # component with no `handoff` emits exactly as before. The key takes
+        # the same host spelling the `provide` row above uses.
+        decl = f"{{ key: {_string(_host_key(handoff['key']))}"
+        if handoff.get("type"):
+            decl += f", type: {_string(handoff['type'])}"
+        decl += " }"
+        lines.append(f"  handoff: {decl},")
 
     # item 131: a body containing an `await` step (or an async-flagged
     # `effect`/`let-effect`/`emit` — an awaited acquisition or emission) compiles
@@ -3121,8 +3256,16 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
     # WeakMap), so teardown behaviour is unchanged for those components except
     # that a raising inverse is now caught instead of starving every
     # earlier-registered entry.
+    # item 53: a component that declares a `handoff` always builds the Frame,
+    # it is where `track()` records the state vector a swap captures, even if
+    # an acquisition shape `_has_bracket` does not see (the emitted `track` is
+    # itself conditional on the acquisition, so this only guarantees the frame).
     needs_frame = _needs_frame(component, doc_ctx)
-    frame_var = "$revl_frame" if (needs_frame or _has_bracket(component)) else None
+    declares_handoff = (isinstance(component.get("handoff"), dict)
+                        and bool(component["handoff"].get("key")))
+    frame_var = ("$revl_frame"
+                 if (needs_frame or _has_bracket(component) or declares_handoff)
+                 else None)
     if frame_var is not None:
         lines.append(f"    const {frame_var} = new Frame(ctx, {_string(name)})")
 
@@ -3596,6 +3739,8 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx",
         return f"{_TS_INT_ARITH[method]}({target}, {args[0]})"
     if method in _TS_CHECKED_DIV:
         return f"{_TS_CHECKED_DIV[method]}({target}, {args[0]})"
+    if method in _TS_CHECKED_ARITH:
+        return f"{_TS_CHECKED_ARITH[method]}({target}, {args[0]})"
     # Int/Int32 width conversions (docs/arithmetic.md). Int is a bigint and
     # Int32 a number: widening is `BigInt(...)`, narrowing goes through
     # `revlI32(Number(...))`, which re-imposes the 32-bit bound and traps.
@@ -4347,6 +4492,15 @@ _TS_CHECKED_DIV = {
     "checked_mod": "revlCheckedMod",
 }
 
+# The total arithmetic forms (docs/arithmetic.md): BigInt is arbitrary
+# precision, so the value is exact and only the i64 bound check decides
+# between Ok and Err("revl: Int overflow").
+_TS_CHECKED_ARITH = {
+    "checked_add": "revlCheckedAdd",
+    "checked_sub": "revlCheckedSub",
+    "checked_mul": "revlCheckedMul",
+}
+
 # The receiver type a builtin reached through `?.` has: an `optcall` IR node
 # carries no `recv` tag (unlike a `builtin` node, which lowering annotates for
 # exactly this reason), so the one lowering that dispatches on it — `to_int`,
@@ -4494,17 +4648,47 @@ function revlCheckedMod(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | {
   return { kind: "Ok", value: ((a % m) + m) % m }
 }"""
 
+# The total arithmetic forms (docs/arithmetic.md): BigInt computes the exact
+# value, so an i64 bound check on the result is the whole overflow test.
+_REVL_CHECKED_ARITH_HELPER = """function revlCheckedAdd(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | { kind: "Err"; value: string } {
+  const r = a + b
+  if (r < REVL_I64_MIN || r > REVL_I64_MAX) return { kind: "Err", value: 'revl: Int overflow' }
+  return { kind: "Ok", value: r }
+}
+function revlCheckedSub(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | { kind: "Err"; value: string } {
+  const r = a - b
+  if (r < REVL_I64_MIN || r > REVL_I64_MAX) return { kind: "Err", value: 'revl: Int overflow' }
+  return { kind: "Ok", value: r }
+}
+function revlCheckedMul(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | { kind: "Err"; value: string } {
+  const r = a * b
+  if (r < REVL_I64_MIN || r > REVL_I64_MAX) return { kind: "Err", value: 'revl: Int overflow' }
+  return { kind: "Ok", value: r }
+}"""
+
 
 def _uses_int_arith(node) -> bool:
     """Does anything in this IR call a named integer division or modulo?
-    The total (`checked_*`) forms count too: they route through the same
-    helpers' tier (and need `revlI64` for the one overflowing quotient)."""
+    The total division (`checked_*`) forms count too: they route through the
+    same helpers' tier (and need `revlI64` for the one overflowing quotient)."""
     if isinstance(node, dict):
         if node.get("method") in _TS_INT_ARITH or node.get("method") in _TS_CHECKED_DIV:
             return True
         return any(_uses_int_arith(v) for v in node.values())
     if isinstance(node, (list, tuple)):
         return any(_uses_int_arith(v) for v in node)
+    return False
+
+
+def _uses_checked_arith(node) -> bool:
+    """Does this IR call one of the total `+`/`-`/`*` forms? They need only
+    the i64 bound constants (`_REVL_I64_HELPER`), not the division helpers."""
+    if isinstance(node, dict):
+        if node.get("method") in _TS_CHECKED_ARITH:
+            return True
+        return any(_uses_checked_arith(v) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_uses_checked_arith(v) for v in node)
     return False
 
 
@@ -4680,7 +4864,7 @@ def _revl_helpers(ir: dict) -> list[str]:
         out.extend([_REVL_EQ_HELPER, ""])
     if _uses_assert(ir):
         out.extend([_REVL_SHOW_HELPER, ""])
-    if _uses_bounded_int(ir) or _uses_int_arith(ir):
+    if _uses_bounded_int(ir) or _uses_int_arith(ir) or _uses_checked_arith(ir):
         out.extend([_REVL_I64_HELPER, ""])
     # issue #2147: the result-side coercion of a verbatim `@ts` body declared
     # `Int`. Gated by the same predicate the wrapper itself uses.
@@ -4690,6 +4874,8 @@ def _revl_helpers(ir: dict) -> list[str]:
         out.extend([_REVL_I32_HELPER, ""])
     if _uses_int_arith(ir):
         out.extend([_REVL_INT_ARITH_HELPER, ""])
+    if _uses_checked_arith(ir):
+        out.extend([_REVL_CHECKED_ARITH_HELPER, ""])
     if _uses_str_methods(ir):
         out.extend([_REVL_STR_HELPER, ""])
     if _uses_split(ir):
@@ -5263,7 +5449,15 @@ def _emit_ts_functions(functions: list, types: dict, externs: list) -> list[str]
     ctx = _Ctx(types, functions, externs)
     lines: list[str] = []
     for fn in functions:
-        name = _ident(fn.get("name"), "function name")
+        raw_name = fn.get("name")
+        if (fn.get("public") and isinstance(raw_name, str)
+                and _collides_with_module_name(raw_name)):
+            raise EmitError(
+                f"pub fn {raw_name!r} is spelled like a JS global or an emitted "
+                f"ts helper, which the module reads bare; a host calls a pub fn "
+                f"by its source name, so the emitter cannot rename it: give it "
+                f"another name (issue #3127)")
+        name = _ident(raw_name, "function name")
         params = ", ".join(
             f"{_ident(p.get('name'), 'parameter name')}: {_ts_v3_type(p.get('type'))}"
             for p in fn.get("params") or []

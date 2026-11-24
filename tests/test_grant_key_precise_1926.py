@@ -175,6 +175,7 @@ def test_truc_apply_refuses_the_sibling_naming_its_key(tmp_path):
         (kit / "component.rvl").read_text(encoding="utf-8") + _sibling("gate"))
     (kit / "layer.rvl").write_text((kit / "layer.rvl").read_text(encoding="utf-8").replace(
         "provides records", "provides records component RecordsKit"))
+    stack._pin(proj, "records_kit")     # the reviewed bytes, pinned as `truc add` would
     report = json.loads(stack._host.apply(str(proj), False))
     assert report["code"] == 1
     assert "`Sneak.gate`" in report["message"]
@@ -217,3 +218,92 @@ def test_a_key_precise_grant_still_refuses_an_ungranted_service():
         check_allowlist(_document({"name": "A", "requires": {"w": "SourceWriter"}}),
                         profile)
     assert "not in the granted set" in str(exc.value)
+
+
+# ------------------------------------ issue #3586: name the emission tokens
+
+_JOB_OPS = {"JobOps": {"methods": {
+    "start": {"params": [{"name": "x", "type": "Int"}], "returns": "Int",
+              "emission": True, "capabilities": ["jobs", "audit"]},
+    "stop": {"params": [], "returns": "Int",
+             "emission": True, "capabilities": ["jobs"]},
+    "peek": {"params": [], "returns": "Int"}}}}
+
+
+def _refusal(services: dict | None) -> str:
+    profile = AdmissionProfile.untrusted_author({"JobOps"},
+                                                requires={("A", "jops")})
+    document = _document({"name": "B", "requires": {"jops": "JobOps"}})
+    if services is not None:
+        document["services"] = services
+    with pytest.raises(RevlError) as exc:
+        check_allowlist(document, profile)
+    assert getattr(exc.value, "code", None) == "R2"
+    return exc.value.message
+
+
+def test_the_refusal_names_the_reached_services_emission_tokens():
+    assert _refusal(_JOB_OPS) == (
+        "admission refused: component `B` reaches service `JobOps` "
+        "(emission tokens: audit, jobs) via `requires jops`, and no grant "
+        "names `B.jops`")
+
+
+@pytest.mark.parametrize("services", [
+    None,
+    {"JobOps": {"methods": {"peek": {"params": [], "returns": "Int"}}}},
+    {"JobOps": {"methods": {"go": {"params": [], "returns": "Int",
+                                   "emission": True}}}},
+], ids=["no-services", "no-emission", "unbounded-emission"])
+def test_a_service_with_no_tokens_keeps_the_old_text(services):
+    assert _refusal(services) == (
+        "admission refused: component `B` reaches service `JobOps` "
+        "(via `requires jops`), and no grant names `B.jops`")
+
+
+def test_a_mixed_service_also_names_its_unbounded_emission():
+    services = {"JobOps": {"methods": {
+        **_JOB_OPS["JobOps"]["methods"],
+        "go": {"params": [], "returns": "Int", "emission": True}}}}
+    assert "(emission tokens: audit, jobs, and an unbounded emission) " \
+           "via `requires jops`" in _refusal(services)
+
+
+_JOB_SOURCE = """
+service JobOps {
+  emission[jobs] fn start(x: Int) -> Int
+  emission[audit] fn stop() -> Int
+  fn peek() -> Int
+}
+component B requires jops: JobOps {
+}
+"""
+
+
+@pytest.mark.parametrize("granted,tail", [
+    ({"JobOps"}, "and no grant names `B.jops`"),
+    ({"Other"}, "which is not in the granted set"),
+], ids=["key-precise", "ungranted-service"])
+def test_compiled_source_names_its_tokens_in_both_refusals(granted, tail):
+    """Built from real source, so an IR shape change is caught. Both R2
+    refusals name the tokens: a service granted to another key, and a
+    service not granted at all."""
+    from revl.compiler import compile_source
+    document = compile_source(_JOB_SOURCE, "c.rvl")
+    profile = AdmissionProfile.untrusted_author(granted,
+                                                requires={("A", "jops")})
+    with pytest.raises(RevlError) as exc:
+        check_allowlist(document, profile)
+    assert exc.value.message == (
+        "admission refused: component `B` reaches service `JobOps` "
+        "(emission tokens: audit, jobs) via `requires jops`, " + tail)
+
+
+def test_an_ungranted_service_with_no_tokens_keeps_the_old_text():
+    profile = AdmissionProfile.untrusted_author({"Other"})
+    with pytest.raises(RevlError) as exc:
+        check_allowlist(_document({"name": "B", "requires": {"jops": "JobOps"}}),
+                        profile)
+    assert exc.value.message == (
+        "admission refused: component `B` reaches service `JobOps` "
+        "(via `requires jops`), which is not in the granted set")

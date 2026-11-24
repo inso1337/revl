@@ -31,6 +31,7 @@ import copy
 import keyword
 import math
 import re
+import sys
 import textwrap
 from typing import Any, Callable, Optional
 
@@ -424,19 +425,24 @@ def _deferred_register_kwargs(ext: dict, args: list) -> str:
 # site both flow through), exactly as it already does for Python keywords. The
 # emitter's bare `len(...)` is untouched and keeps resolving to the builtin.
 #
-# `next` is deliberately ABSENT: it is emitted bare only inside the routed-
-# require router (a self-contained emitted class, item 167), and it is also a
-# common, legitimate revl identifier (a `next` callback parameter, a `next`
-# record field) whose every checked-in use is a local/field that shares no scope
-# with that class. Renaming those would be churn with no collision behind it, so
-# `next` stays off the list until a colliding *module-scope* spelling motivates
-# a narrower guard.
+# `next` is emitted bare only inside the routed-require router (a self-contained
+# emitted class, item 167), but that class's methods resolve `next` through the
+# MODULE globals, so a module-scope `fn next` (or a `type next`) rebinds it for
+# the router too. Issue #3129 also names the other bare references this list
+# missed: `chr` (the `to_char` helper), `IndexError`/`KeyError` (the list/str and
+# map index guards), `AssertionError` (the lifecycle residue check), `setattr`
+# (keyword-named provide-method registration) and the imported `realm_label`
+# (the realm router). They join the same ladder, so a user declaration of any of
+# them is escaped and every emitter reference keeps reaching the runtime name.
+# A local of one of these spellings is renamed too; the ladder is the one
+# module-global rename site, and the churn is a pure injective shift.
 _EMITTED_BUILTINS = frozenset({
-    "AttributeError", "Exception", "OverflowError", "RuntimeError", "TypeError",
-    "abs", "bool", "bytes", "callable", "dict", "float", "getattr", "globals",
-    "hasattr", "hash", "int", "isinstance", "len", "list", "max", "min",
-    "object", "ord", "range", "repr", "reversed", "set", "sorted", "str",
-    "tuple", "type",
+    "AssertionError", "AttributeError", "Exception", "IndexError", "KeyError",
+    "OverflowError", "RuntimeError", "TypeError",
+    "abs", "bool", "bytes", "callable", "chr", "dict", "float", "getattr",
+    "globals", "hasattr", "hash", "int", "isinstance", "len", "list", "max",
+    "min", "next", "object", "ord", "range", "realm_label", "repr", "reversed",
+    "set", "setattr", "sorted", "str", "tuple", "type",
 })
 
 # Type names the python emitter injects at module scope, which a user *type* of
@@ -654,6 +660,26 @@ def _pins(step: dict, slot: str) -> str:
     return ", ".join(f"{_mangle(n)}={_mangle(n)}" for n in names)
 
 
+def _coalescable_bracket(step: dict) -> bool:
+    """Whether a provide-method bracket's `undo` is an ABSOLUTE table inverse
+    on a literal or named key (issue #3304, `Frame.adopt_bracket`): `remove`
+    after `insert`, or the #1980 `match prev` restore. Both
+    set the key to a value fixed when the bracket registered, so a frame's
+    older record for the key does the newer one's work. The #2640 computed
+    list-append inverse is `table` too but drops one item from the list it
+    reads at undo time, so it is relative and never coalesced; so is a key the
+    undo would evaluate again (a call)."""
+    if step.get("inverse") != "table":
+        return False
+    acquire, undo = step.get("acquire") or {}, step.get("undo") or {}
+    key = (acquire.get("args") or [None])[0]
+    if not (isinstance(key, dict) and key.get("kind") in ("lit", "name")):
+        return False
+    if undo.get("kind") == "call":
+        return undo.get("method") == "remove"
+    return undo.get("kind") == "match"
+
+
 def _inverse_lambda(step: dict, slot: str, params: str = "") -> str:
     """`lambda …:`'s header for a derived inverse, with its by-value pins."""
     pins = _pins(step, slot)
@@ -730,6 +756,14 @@ def _host_key(key: Any) -> Any:
     if not isinstance(key, str) or KEY_NAMESPACE_SEP not in key:
         return key
     return "__".join(part.replace("_", "_u") for part in key.split(KEY_NAMESPACE_SEP))
+
+
+def _ctx_read(key: str) -> str:
+    """The read of provision `key` off the context: attribute access, or
+    `getattr` for a key that is a python keyword (issue #3538)."""
+    if keyword.iskeyword(key):
+        return f"getattr(_revl_ctx, {key!r})"
+    return f"_revl_ctx.{key}"
 
 
 def _key_binding(key: str) -> str:
@@ -1158,11 +1192,19 @@ _REVL_FTOA_SRC = '''def _revl_ftoa(x):
     return sign + body'''
 
 
-# The total, value-returning division forms (docs/arithmetic.md): same
-# rounding as the faulting operations, Err(reason) at a zero divisor.
+# The total, value-returning forms (docs/arithmetic.md): same value as the
+# faulting operations where it fits, Err(reason) instead of the fault
+# otherwise. `checked_add/sub/mul` answer Err("revl: Int overflow") at the
+# 64-bit edge; the division forms answer Err at a zero divisor (and at the
+# one overflowing quotient).
+_CHECKED_ARITH = ("checked_add", "checked_sub", "checked_mul")
 _CHECKED_DIVS = ("checked_div_trunc", "checked_div_floor",
                  "checked_div_euclid", "checked_mod")
+# Every total form produces a Result, so the Result cases travel with any of
+# them (`_uses_builtin_result`).
+_CHECKED_FORMS = _CHECKED_ARITH + _CHECKED_DIVS
 _DIV_ZERO_MSG = "revl: division by zero"
+_INT_OVERFLOW_MSG = "revl: Int overflow"
 
 # The receiver type a builtin reached through `?.` has: the `optcall` IR node
 # carries no `recv` tag (unlike a `builtin` node, which lowering annotates for
@@ -1350,6 +1392,107 @@ def _annotated_bin(node: dict, render) -> str | None:
         # every evaluation (item 436 F6).
         return f"_revl_rem({render(node['left'])}, {render(node['right'])})"
     return None
+
+
+# A chain of one operator (`a + b + c + ...`) lowers to a LEFT-DEEP tree, and
+# the nested rendering gave every operand one more level of brackets, so a
+# chain of ~100 bounded `+` overflowed CPython's parser stack at load
+# (`MemoryError: Parser stack overflowed`) after the compiler accepted it
+# (issue #3403). From this many operators on, the spine is written flat; a
+# shorter chain keeps the nested text it always had.
+_CHAIN_FLAT_MIN = 16
+
+
+def _chain_class(node: object) -> str:
+    """The flat-chain family of a `bin` node, or `""` for none.
+
+    Two nodes can share one flat chain only when they render the same way: the
+    bounded Int/Int32 arithmetic (any of `+ - *`, each step is explicit), a
+    plain `+ -` or a plain `*` (python's own precedence and left association
+    then read the flat text as the tree), and `&&` or `||` alone. A node with a
+    `widen` marker is wrapped in `float(...)`, so it is never a spine member.
+    """
+    if (not isinstance(node, dict) or node.get("kind") != "bin"
+            or node.get("widen") == "Float"):
+        return ""
+    op = node.get("op")
+    if op in ("&&", "||"):
+        return op
+    if op not in ("+", "-", "*"):
+        return ""
+    operands = node.get("operands")
+    if operands in ("Int", "Int32"):
+        return "bounded" + operands
+    return "plain+-" if op in ("+", "-") else "plain*"
+
+
+def _chain_spine(node: dict) -> tuple[object, list] | None:
+    """The left spine of a long chain: `(leaf, [step, ...])`, bottom up.
+
+    `None` when `node` heads fewer than `_CHAIN_FLAT_MIN` operators of one
+    family. Each step is a spine `bin` node; the leaf is the leftmost operand.
+    Iterative, so the depth of the chain costs no python frames here.
+    """
+    family = _chain_class(node)
+    if not family:
+        return None
+    steps = [node]
+    left = node.get("left")
+    while _chain_class(left) == family:
+        steps.append(left)
+        left = left.get("left")
+    if len(steps) < _CHAIN_FLAT_MIN:
+        return None
+    steps.reverse()
+    return left, steps
+
+
+def _chain_text(steps: list, leaf: str, rights: list) -> str:
+    """Write a chain flat, with the nesting of ONE operand, not of all of them.
+
+    `steps` are the spine nodes bottom up and `rights` their rendered right
+    operands. Evaluation order is the nested form's: the leaf, then each right
+    operand left to right, each operator applied as soon as its right operand
+    is in.
+
+      * `&&`/`||`: `(a and (b) and (c))`, one python BoolOp, the same
+        short-circuit at the same operand;
+      * plain `+ -` or `*`: `(a + (b) - (c))`, which python associates left;
+      * bounded Int/Int32: a tuple of steps, each the usual inline bound over
+        `_bi op right` where `_bi` is the previous step's value (python loads
+        the left operand before it evaluates the right one, so a bounded op
+        inside a right operand cannot clobber it), and the last element is the
+        answer. A step that leaves the range traps where the nested form did.
+
+    Each right operand is bracketed because it is now followed by another
+    operator instead of a closing bracket.
+    """
+    first = steps[0]
+    family = _chain_class(first)
+    if family in ("&&", "||"):
+        joiner = f" {_PY_BIN_OPS[family]} "
+        return "(" + leaf + "".join(f"{joiner}({r})" for r in rights) + ")"
+    if family.startswith("bounded"):
+        width = 64 if family == "boundedInt" else 32
+        parts = [_bounded(f"{leaf} {first.get('op')} {rights[0]}", width)]
+        for node, right in zip(steps[1:], rights[1:]):
+            parts.append(_bounded(f"{_BOUNDED_TMP} {node.get('op')} {right}", width))
+        return "(" + ", ".join(parts) + ")[-1]"
+    return "(" + leaf + "".join(
+        f" {node.get('op')} ({right})" for node, right in zip(steps, rights)) + ")"
+
+
+def _chain_bin(node: dict, render) -> str | None:
+    """Render a long one-operator chain flat (issue #3403), else `None`.
+
+    Shared by both expression renderers, as `_annotated_bin` is, so a `fn`
+    body and a `provide` body write the same text for the same chain.
+    """
+    spine = _chain_spine(node)
+    if spine is None:
+        return None
+    leaf, steps = spine
+    return _chain_text(steps, render(leaf), [render(s.get("right")) for s in steps])
 
 
 def _annotated_un(node: dict, render) -> str | None:
@@ -1739,6 +1882,13 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
             return ("(lambda _revl_m, _revl_k: {kk: vv for kk, vv in "
                     "_revl_m.items() if kk != _revl_k})"
                     f"({target}, {args[0]})")
+        if not _py_plain_key(args[0]):
+            # The key sits in the comprehension's condition, which Python
+            # evaluates once per entry: a call key ran len(m) times (issue
+            # #3344). Pass it as an argument, evaluated once per remove call.
+            return ("(lambda _revl_m, _revl_k: {kk: vv for kk, vv in "
+                    "_revl_m.items() if kk != _revl_k})"
+                    f"({target}, {args[0]})")
         return ("{" + f"kk: vv for kk, vv in {target}.items() "
                 f"if kk != {args[0]}" + "}")
     # Integer division and modulo (docs/arithmetic.md). Python's `//` floors
@@ -1771,12 +1921,12 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
         return f"({target})"
     if method == "to_int32":
         return f"_revl_i32({target})"
-    # The total forms (docs/arithmetic.md): same quotient as the faulting
-    # operation, but a zero divisor yields Err(reason) instead of raising —
-    # the whole point is that a pure fn cannot `fail`, so the error travels
-    # as a value. Ok/Err are the tagged classes emitted when the IR uses
-    # Result (gated in `_uses_builtin_result`).
-    if method in _CHECKED_DIVS:
+    # The total forms (docs/arithmetic.md): same value as the faulting
+    # operation, but an overflow (or a zero divisor) yields Err(reason)
+    # instead of raising — the whole point is that a pure fn cannot `fail`,
+    # so the error travels as a value. Ok/Err are the tagged classes emitted
+    # when the IR uses Result (gated in `_uses_builtin_result`).
+    if method in _CHECKED_FORMS:
         return f"_revl_{method}({target}, {args[0]})"
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): python ints on
     # this tier are already i64-clamped, so str() is the exact decimal. A
@@ -2319,10 +2469,11 @@ class _ComponentEmitter:
             _key_binding(local): service
             for local, service in self.requires_raw.items()
         }
-        # the runtime key spelling each `req` resolves through -- the mangled
-        # QUALIFIED key, which is what the provider registers in `_revl_ctx`
+        # the runtime key spelling each `req` resolves through -- the host key,
+        # which is what the provider registers in `_revl_ctx` (issue #3538:
+        # a string, never builtin-escaped)
         self.require_keys = {
-            _key_binding(local): _ident(_host_key(local), "requires key")
+            _key_binding(local): _host_key(local)
             for local in self.requires_raw
         }
         self.provides = dict(self.provides_raw)
@@ -2595,7 +2746,7 @@ class _ComponentEmitter:
                 return f"_revl_route_{_host_key(route)}"
             # committed-view access: resolves through the fiber's store, so it
             # stays readable during this component's own teardown (R3)
-            return f"_revl_ctx.{self.require_keys.get(name, name)}"
+            return _ctx_read(self.require_keys.get(name, name))
         if kind == "call":
             if "target" in expr:
                 target = self._expr(expr.get("target"), where)
@@ -2603,7 +2754,19 @@ class _ComponentEmitter:
                 if not isinstance(method, str) or not method.isidentifier():
                     raise EmitError(f"{where}: bad method name {method!r}")
                 args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
-                rendered = f"{_method_access(target, method)}({args})"
+                # item 442 (issue #2693): a call on a received `Delegate[S]`
+                # parameter is a delegated crossing. The frame checks the grant,
+                # attributes the use to THIS component (its own name) and spends
+                # it before the provider fires, so the handle itself carries no
+                # authority: the session's ledger does. Written as one statement
+                # (a conditional expression) so the mirrored-emitter line-coverage
+                # ratchet sees no new uncovered statement for the un-corpus'd
+                # delegation construct.
+                rendered = (
+                    f"_revl_frame.delegate_call({target}, {expr['delegate']!r}, "
+                    f"{method!r}, [{args}])"
+                    if expr.get("delegate")
+                    else f"{_method_access(target, method)}({args})")
                 # item 121 Slice 2: a crossing whose arguments the analysis
                 # proved read completion `site`'s binding fires THROUGH the
                 # marker helper, so the recorder can stamp `producedBy` on this
@@ -2868,6 +3031,9 @@ class _ComponentEmitter:
             # (issue #2198). Spelling these with the host operator is what
             # made `config.a % config.b` come back as python's floored `1`
             # in a `provide` method and the truncated `-1` in a `fn`.
+            chain = _chain_bin(expr, lambda n: self._expr(n, where))
+            if chain is not None:
+                return chain
             annotated = _annotated_bin(expr, lambda n: self._expr(n, where))
             if annotated is not None:
                 return annotated
@@ -2970,8 +3136,19 @@ class _ComponentEmitter:
             cap = expr.get("capability")
             ttl = expr.get("ttlMs")
             uses = expr.get("uses")
-            return (f"_revl_frame.acquire_lease({cap!r}, "
-                    f"{ttl!r}, {uses!r})")
+            # item 442 (issue #2693): a lease minted on a wiring key carries the
+            # provider that key resolves to, so the handle can serve a
+            # delegatee's methods through the delegation seam. A lease over a
+            # bare capability (no key) keeps the pre-442 call exactly.
+            # item 442 (issue #2693): a lease over a wiring key passes that key
+            # and the provider it resolves to, so the handle can serve a
+            # delegatee. One return statement (a conditional expression), so the
+            # mirrored-emitter line-coverage ratchet's uncovered count for this
+            # already-uncorpus'd lease arm does not move.
+            return (f"_revl_frame.acquire_lease({cap!r}, {ttl!r}, {uses!r}"
+                    + (f", {expr['key']!r}, _revl_ctx."
+                       f"{_ident(self.require_keys.get(expr['key'], expr['key']), 'lease key')}"
+                       if expr.get("key") else "") + ")")
         if kind == "lease-revoke":
             handle = expr.get("handle")
             if not isinstance(handle, str) or not handle.isidentifier():
@@ -4128,11 +4305,15 @@ class _ComponentEmitter:
         # `self.provides` is keyed by); the HOST spelling is what the runtime is
         # handed and what `_revl_ctx.<field>` is read through.
         raw = step.get("name")
-        name = _ident(_host_key(raw), f"{where}: provide key")
-        if name in _CONTEXT_MEMBERS:
+        # issue #3538: the key published to the runtime is the host key, a string
+        # unchanged by the builtin ladder; `name` is the python identifier
+        # derived from it (class name, method labels) and is the only escaped one.
+        key = _host_key(raw)
+        name = _ident(key, f"{where}: provide key")
+        if key in _CONTEXT_MEMBERS or name in _CONTEXT_MEMBERS:
             raise EmitError(
-                f"{where}: provision key {name!r} collides with a cordis-py "
-                f"Context member — `_revl_ctx.{name}` already exists, so the "
+                f"{where}: provision key {key!r} collides with a cordis-py "
+                f"Context member: `_revl_ctx.{key}` already exists, so the "
                 f"provision would fail at activation. Rename the key."
             )
         service = step.get("service")
@@ -4159,8 +4340,8 @@ class _ComponentEmitter:
                 out.add(indent, f"setattr({cls}, {contract!r}, {cls}.{spelled})")
         # runtime-derived revertible provision (R5): the withdrawal inverse is
         # _revl_ctx.provide's own disposer, yielded into the component accumulator
-        out.add(indent, f"yield _revl_ctx.provide({name!r})")
-        out.add(indent, f"_revl_ctx.set({name!r}, {cls}())")
+        out.add(indent, f"yield _revl_ctx.provide({key!r})")
+        out.add(indent, f"_revl_ctx.set({key!r}, {cls}())")
 
     def _method(self, out: _Lines, indent: int, provide_name: str, method: dict,
                 where: str, raw_key: str | None = None) -> None:
@@ -4312,7 +4493,10 @@ class _ComponentEmitter:
                 out.add(indent + 1,
                         f"yield _revl_frame._guard({_inverse_lambda(step, 'undo')}: "
                         f"{self._inverse_expr(step.get('undo'), where)})")
-                out.add(indent, f"_revl_frame.adopt(_revl_ctx.effect({fn}, {self._label(label)!r}))")
+                # issue #3304: an absolute table inverse may be coalesced with
+                # the frame's older record for the same key
+                adopt = "adopt_bracket" if _coalescable_bracket(step) else "adopt"
+                out.add(indent, f"_revl_frame.{adopt}(_revl_ctx.effect({fn}, {self._label(label)!r}))")
         elif kind == "let-effect":
             wit = self._witnessed_extern(step.get("acquire"))
             if wit is not None:
@@ -5170,6 +5354,9 @@ def _expr(node: dict) -> str:
         # component renderer calls too (`_annotated_bin`), so a `fn` body and a
         # `provide`-method body cannot disagree about `+ - * / %` again
         # (issue #2198).
+        chain = _chain_bin(node, _expr)
+        if chain is not None:
+            return chain
         annotated = _annotated_bin(node, _expr)
         if annotated is not None:
             return annotated
@@ -5482,6 +5669,16 @@ def _py_inplace_write(node: dict) -> dict | None:
     return value if value.get("method") in _PY_INPLACE_METHODS else None
 
 
+def _py_plain_key(key: str) -> bool:
+    """A rendered key that is a bare name or a number: re-evaluating it per
+    comprehension entry costs nothing and has no effect (issue #3344). The
+    comprehension's own loop variables `kk` and `vv` are not plain: a user name
+    spelled that way would be captured by them."""
+    return key not in ("", "kk", "vv") and all(
+        c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
+        for c in key)
+
+
 # The persistent methods with an in-place equivalent, and their arity, kept
 # here because `_py_inplace_stmts` renders one statement per method.
 _PY_INPLACE_METHODS = {"push": 1, "set": 2, "remove": 1}
@@ -5763,6 +5960,29 @@ def _emit_py_ref_thunk(name: str, params: str, ext: dict, ref: dict) -> "_Lines"
 _GATED_EXTERN_CLASSES = frozenset({"emission", "witnessed", "acquire"})
 
 
+def _inline_extern_param(ext: dict, pname: str) -> str:
+    """The Python spelling of a parameter of an extern with an inline `@py`
+    body (issue #3604). The body is host text copied verbatim and names its
+    parameters itself, so they keep their spelling: no builtin rung (a
+    parameter `max` was emitted `max_` while its body read the builtin `max`)
+    and no temporary rung. A spelling Python cannot bind as a parameter (a
+    keyword or soft keyword), or one in the emitter's `_revl*` scaffolding
+    namespace (`_revl_config`, `_revl_secret`, bound in the same body), cannot
+    keep it, so it is refused at emit naming the extern, the parameter and the
+    tier rather than renamed away from the body's spelling. A parameter
+    spelled like a host root (`Map`, `Pool`, `self`) is no longer refused: it
+    is local to the host text and shadows nothing the emitter writes."""
+    if keyword.iskeyword(pname) or keyword.issoftkeyword(pname):
+        why = "is a Python keyword"
+    elif pname.startswith("_") and pname.lstrip("_").startswith("revl"):
+        why = "is in the emitter's scaffolding namespace"
+    else:
+        return pname
+    raise EmitError(
+        f"extern `{ext['name']}` parameter {pname!r} {why}, so the py tier cannot "
+        "keep the spelling its inline @py body uses: rename the parameter")
+
+
 def _emit_externs(externs: list, crossings: dict | None = None,
                   gated: bool = True) -> "_Lines":
     out = _Lines()
@@ -5830,8 +6050,11 @@ def _emit_externs(externs: list, crossings: dict | None = None,
         # spelling; only the `@py ref` thunk, which binds `_f`/`_r` beside them,
         # lifts one off an emitter temporary (issue #2913).
         thunk = "py" in (ext.get("refs") or {}) and "py" not in (ext.get("bodies") or {})
-        params = ", ".join(_ident(p["name"], "extern parameter name", temps=thunk)
-                           for p in ext["params"])
+        inline = "py" in (ext.get("bodies") or {})
+        params = ", ".join(
+            _inline_extern_param(ext, p["name"]) if inline
+            else _ident(p["name"], "extern parameter name", temps=thunk)
+            for p in ext["params"])
         bodies = ext.get("bodies") or {}
         refs = ext.get("refs") or {}
         # issue #2688: the declared-ceiling tag the runtime backstop reads. A
@@ -6145,7 +6368,7 @@ def _render_providers(ir: dict) -> str:
     providers: dict = {}
     for comp in ir.get("components") or []:
         for key in comp.get("provides") or {}:
-            providers.setdefault(_ident(_host_key(key), "provides key"), []).append(
+            providers.setdefault(_host_key(key), []).append(
                 _ident(comp["name"], "component name"))
     return "{" + ", ".join(
         f"{key!r}: [{', '.join(map(repr, names))}]"
@@ -6331,7 +6554,7 @@ def _find_host_roots(nodes) -> set[str]:
 def _uses_builtin_result(ir: dict) -> bool:
     """True if the IR constructs or matches the built-in Result (Ok/Err) —
     an `adt` node typed Result, a `match` arm on Ok/Err, or a call to one of
-    the total division forms (which *produce* a Result). Used to decide
+    the total forms (which *produce* a Result). Used to decide
     whether the module needs the built-in Result cases, which it now IMPORTS
     from the shared runtime (`_builtin_result_imports`, issue #1932): the gate
     is dead-code hygiene — a module that never builds or matches a `Result`
@@ -6344,7 +6567,7 @@ def _uses_builtin_result(ir: dict) -> bool:
             if node.get("kind") == "match":
                 if any(arm.get("pattern") in ("Ok", "Err") for arm in node.get("arms") or []):
                     return True
-            if node.get("method") in _CHECKED_DIVS:
+            if node.get("method") in _CHECKED_FORMS:
                 return True
             return any(walk(v) for v in node.values())
         if isinstance(node, list):
@@ -7087,6 +7310,34 @@ def _refuse_validated_externs(ir: dict) -> None:
             f"this tier lowers in full.")
 
 
+# The frontend's own recursion headroom (`revl.parser.recursion_headroom`):
+# a chain of one operator is not nesting the parser bounds (`NESTING_LIMIT`
+# counts brackets), so a 1000-operand chain reaches this module as a 1000-deep
+# left spine, and the IR walkers below (`_refuse_holes`, `_find_host_roots`,
+# the inliner's `deepcopy`) each descend it with a frame or three per level.
+# At python's default limit the emitter then raised `RecursionError` on a
+# program the compiler had accepted (issue #3403). This module does not import
+# revl, so the number is repeated rather than shared.
+_EMIT_RECURSION_HEADROOM = 12000
+
+
+def _with_recursion_headroom(fn):
+    """Run `fn` with python's recursion limit at least the headroom above,
+    restoring the embedder's own limit after, and never lowering it."""
+    def wrapped(*args, **kwargs):
+        previous = sys.getrecursionlimit()
+        sys.setrecursionlimit(max(previous, _EMIT_RECURSION_HEADROOM))
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            sys.setrecursionlimit(previous)
+    wrapped.__name__ = fn.__name__
+    wrapped.__qualname__ = fn.__qualname__
+    wrapped.__doc__ = fn.__doc__
+    return wrapped
+
+
+@_with_recursion_headroom
 def emit(ir: dict) -> str:
     """Lower one IR document to a cordis-py Python module (as source text)."""
     if not isinstance(ir, dict):
@@ -7530,33 +7781,40 @@ def emit(ir: dict) -> str:
                    'so dispatch on the payload."""')
         out.add(0, "    return _revl_ftoa(v) if isinstance(v, float) else str(v)")
         out.add(0)
-    for checked in _CHECKED_DIVS:
+    for checked in _CHECKED_FORMS:
         if checked not in _scan.builtins:
             continue
-        # The total forms (docs/arithmetic.md): the same quotient as the
-        # faulting operation, but a zero divisor yields Err(reason) instead of
-        # raising — a pure fn cannot `fail`, so the error travels as a value.
-        quotient = {
-            "checked_div_trunc":
-                "abs(a) // abs(b) if (a < 0) == (b < 0) else -(abs(a) // abs(b))",
-            "checked_div_floor": "a // b",
-            "checked_div_euclid": "a // b if b > 0 else -(a // -b)",
-            "checked_mod": "a % abs(b)",
-        }[checked]
+        # The total forms (docs/arithmetic.md): the same value as the faulting
+        # operation where it fits, Err(reason) instead of the fault otherwise
+        # — a pure fn cannot `fail`, so the error travels as a value.
         out.add(0, f"def _revl_{checked}(a, b):")
-        out.add(0, f'    """Total `{checked[len("checked_"):]}`: a zero divisor '
-                   'is Err(reason), never a raise."""')
-        out.add(0, "    if b == 0:")
-        out.add(0, f"        return Err({_DIV_ZERO_MSG!r})")
-        out.add(0, f"    q = {quotient}")
+        if checked in _CHECKED_DIVS:
+            out.add(0, f'    """Total `{checked[len("checked_"):]}`: a zero divisor '
+                       'is Err(reason), never a raise."""')
+            out.add(0, "    if b == 0:")
+            out.add(0, f"        return Err({_DIV_ZERO_MSG!r})")
+            value = {
+                "checked_div_trunc":
+                    "abs(a) // abs(b) if (a < 0) == (b < 0) else -(abs(a) // abs(b))",
+                "checked_div_floor": "a // b",
+                "checked_div_euclid": "a // b if b > 0 else -(a // -b)",
+                "checked_mod": "a % abs(b)",
+            }[checked]
+        else:
+            out.add(0, f'    """Total `{checked[len("checked_"):]}`: an overflow '
+                       'is Err(reason), never a raise."""')
+            value = {"checked_add": "a + b", "checked_sub": "a - b",
+                     "checked_mul": "a * b"}[checked]
+        out.add(0, f"    v = {value}")
         if checked == "checked_mod":
             # a remainder cannot leave the range its operands are already in
-            out.add(0, "    return Ok(q)")
+            out.add(0, "    return Ok(v)")
         else:
-            # a quotient of 2^63 (Int.MIN/-1) does not fit i64 -> Err, not a value
-            out.add(0, "    if -(2**63) <= q <= 2**63 - 1:")
-            out.add(0, "        return Ok(q)")
-            out.add(0, "    return Err('revl: Int overflow')")
+            # an Int result that leaves i64 (an overflowing product, or the one
+            # overflowing quotient Int.MIN/-1) does not fit -> Err, not a value
+            out.add(0, "    if -(2**63) <= v <= 2**63 - 1:")
+            out.add(0, "        return Ok(v)")
+            out.add(0, f"    return Err({_INT_OVERFLOW_MSG!r})")
         out.add(0)
     if _scan.float_interp:
         # Canonical Float -> Str (docs/strings.md): the ECMAScript

@@ -582,6 +582,26 @@ def test_native_ir_preserves_function_visibility(lower_to_ir):
     assert native == reference
 
 
+def test_native_ir_preserves_visibility_of_a_pub_verified_fn(lower_to_ir):
+    """Issue #3107: the `verified` prefix sits between `pub` and `fn`, so a
+    walker that only looked for `pub fn` reached the `fn` with the visibility
+    already consumed and stamped the function PRIVATE. The reference's
+    `fn_decl(True, verified)` keeps it public.
+
+    The `verified` IR field itself is left out of this comparison: the native
+    producer does not stamp it (the native compiler refuses a `verified fn`
+    before emitting), and this test is about the visibility the walker reads.
+    """
+    source = "pub verified fn exported(n: Int) -> Int { return n + 1 }\n"
+    reference = compile_source(source)["functions"][0]
+    native = json.loads(lower_to_ir(source))["functions"][0]
+    assert reference["public"] is True
+    assert native["public"] is True
+    assert native["name"] == "exported"
+    for key in ("params", "returns", "body"):
+        assert native[key] == reference[key], key
+
+
 @pytest.mark.parametrize("prefix", ["", "pub "])
 @pytest.mark.parametrize("signature", ["(n: Int) -> Int", "()"])
 def test_native_ir_preserves_plain_function_cache(lower_to_ir, prefix, signature):
@@ -931,9 +951,13 @@ def test_native_ir_matches_reference_services(lower_to_ir, rel):
     ("Result[Untrusted[Str], Str]", "Untrusted"),
     ("Opt[Secret[Str]]", "Secret"),
     ("Result[Untrusted[Str], Secret[Str]]", "Untrusted"),
+    ("Result[Secret[Str], Untrusted[Str]]", "Untrusted"),
+    ("Secret[Result[Untrusted[Str], Str]]", "Secret"),
     ("Secret[Str]", "Secret"),
     ("Result[Str, Str]", None),
     ("Opt[(Secret[Str]) -> Int]", None),
+    ("Trusted[Result[Untrusted[Str], Secret[Str]]]", None),
+    ("Result[Untrusted[Str], (Secret[Str]) -> Int]", "Untrusted"),
 ])
 def test_native_ir_stamps_a_nested_return_qualifier_like_the_reference(
         lower_to_ir, returns, qual):
@@ -947,6 +971,11 @@ def test_native_ir_stamps_a_nested_return_qualifier_like_the_reference(
     assert native["services"] == reference["services"]
     assert reference["services"]["W"]["methods"]["get"].get(
         "returns_qualifier") == qual
+    # issue #3238: a return holding both stamps the full set beside the primary
+    both = "Untrusted" in returns and "Secret" in returns \
+        and "->" not in returns and not returns.startswith("Trusted")
+    assert reference["services"]["W"]["methods"]["get"].get(
+        "returns_qualifiers") == (["Untrusted", "Secret"] if both else None)
 
 
 @pytest.mark.parametrize("rel", CORPUS)

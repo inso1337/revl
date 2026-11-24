@@ -353,7 +353,14 @@ def _refuse_url_registries(registries: dict) -> None:
 def toml_manifest(project_dir: str) -> str:
     """`truc.toml` parsed (host owns TOML — there is no revl TOML parser) and
     flattened to the JSON shape the pure planner reads: the registry paths
-    resolved to absolute, the `[trucs]` table flattened to an ordered list."""
+    resolved to absolute, the `[trucs]` table flattened to an ordered list.
+
+    Each `[trucs]` entry carries a `grant`: the `requires` keys that row's
+    reach is bounded to (issue #2635). It is read here, not inferred, because
+    it is operator input; a malformed grant is refused by name rather than
+    handed to the pure planner, whose typed parse would fail without saying
+    which entry or how to spell it. An entry with no `grant` grants nothing
+    (fail-closed)."""
     import tomllib  # noqa: PLC0415 — stdlib, py3.11+
 
     p = pathlib.Path(project_dir, "truc.toml")
@@ -366,10 +373,24 @@ def toml_manifest(project_dir: str) -> str:
         path = (r or {}).get("path")
         resolved[rname] = (os.path.abspath(os.path.join(project_dir, path))
                            if path else "")
-    trucs = [
-        {"name": tname, "registry": (t or {}).get("registry", "local")}
-        for tname, t in (data.get("trucs") or {}).items()
-    ]
+    trucs = []
+    for tname, t in (data.get("trucs") or {}).items():
+        if not isinstance(t, dict):
+            raise TrucNameRefusal(
+                f"truc {tname!r} in truc.toml is not a table: write it as "
+                f'`{tname} = {{ registry = "local", grant = [...] }}` under '
+                "[trucs]")
+        grant = t.get("grant", [])
+        if grant is None:
+            grant = []
+        if (not isinstance(grant, list)
+                or not all(isinstance(s, str) for s in grant)):
+            raise TrucNameRefusal(
+                f"truc {tname!r} in truc.toml declares grant {grant!r}, and a "
+                'grant is a list of `requires` keys (grant = ["db"]); it '
+                "was not read")
+        trucs.append({"name": tname, "registry": t.get("registry", "local"),
+                      "grant": grant})
     default_reg = resolved.get("local") or next(iter(resolved.values()), "")
     return json.dumps({
         "name": assembly.get("name", ""),
@@ -394,8 +415,15 @@ def read_sources(project_dir: str, spec_json: str) -> str:
     loop is host-side because a provide method cannot iterate. The decision of
     *which* names to read was made by the pure planner and arrives in `spec`.
     Returns `{sources: {abspath: text}, vendored: [{name, path, source}]}`.
+
+    `skip_missing` is set by `add` and `rm`: an operator declares a row's
+    `[trucs]` entry (with its grant) before the first add, so a declared
+    sibling may have no vendored file yet and they gather only what is on
+    disk. `assemble` and `assemble --check` read every declared row and a
+    missing one is a refusal by name, not a traceback (issue #2635).
     """
     spec = json.loads(spec_json)
+    skip_missing = bool(spec.get("skip_missing"))
     entry = []
     for e in spec.get("entry") or []:
         ap = os.path.abspath(e)
@@ -405,6 +433,16 @@ def read_sources(project_dir: str, spec_json: str) -> str:
     for name in spec.get("trucs") or []:
         _check_name(name)
         ap = os.path.abspath(os.path.join(project_dir, "trucs", name, "component.rvl"))
+        if not os.path.exists(ap):
+            if skip_missing:
+                continue
+            # Reachable since issue #2635: the `[trucs]` entry carries the
+            # row's grant and is declared BEFORE the add vendors it, so a
+            # declared-but-unvendored truc is a normal intermediate state. It
+            # is a refusal, not a traceback, and the fix names `add`.
+            raise TrucNameRefusal(
+                f"truc {name!r} is declared in truc.toml but not vendored: "
+                f"trucs/{name}/component.rvl is missing (run `truc add {name}`)")
         src = pathlib.Path(ap).read_text(encoding="utf-8")
         vendored.append({"name": name, "path": ap, "source": src})
     return json.dumps({"entry": entry, "vendored": vendored})
@@ -432,7 +470,13 @@ def _vendored_profile():
     """The profile vendored text is admitted under: the untrusted-author
     profile the MCP server applies to an author by default, taken from the same
     constructor rather than spelled a second time. A truc is registry text,
-    not the project's own source, so its author is not the operator."""
+    not the project's own source, so its author is not the operator.
+
+    Its reach allowlist stays OFF here on purpose: the bound is applied after
+    lowering by `_enforce_grant`, because the operator's `[trucs]` grant uses
+    the row's own `requires` KEYS (the vocabulary `apply`'s grant uses), while
+    the allowlist compares SERVICE names. Resolving the one to the other needs
+    the lowered document."""
     from revl.mcp.server import AuthoringTrust  # noqa: PLC0415
 
     return AuthoringTrust().profile()
@@ -476,37 +520,107 @@ def _compile_row(item: dict, running: dict | None, profile=None) -> dict:
                          sources={path: item["source"]}, profile=profile)
 
 
+def _grant_of(item: dict) -> list[str]:
+    """The `requires` keys the ordered row's `[trucs]` entry grants, or [] when
+    the entry declares none (fail-closed)."""
+    grant = item.get("grant") or []
+    return [s for s in grant if isinstance(s, str)]
+
+
+def _enforce_grant(ir: dict, item: dict) -> None:
+    """Bound one admitted row's reach to the `requires` keys its `[trucs]`
+    entry grants (issue #2635).
+
+    The operator's grant is keyed the way `apply`'s grant is (the `requires`
+    key, e.g. `db`), while the untrusted-author allowlist compares SERVICE
+    names, and only the lowered document knows which key binds to which
+    service. So the profile is built here from the row's OWN components and
+    applied to the document the compile produced (`enforce_document`): every
+    requirement whose key is granted contributes its service, and the key-precise
+    half keeps one granted key from covering a sibling key of the same service.
+    An entry that grants nothing yields an empty allowlist, which is ON, so a
+    requiring row the operator did not grant is refused."""
+    from revl.admit_profile import AdmissionProfile, enforce_document  # noqa: PLC0415
+
+    granted = frozenset(_grant_of(item))
+    services: set[str] = set()
+    pairs: set[tuple[str, str]] = set()
+    for comp in ir.get("components") or []:
+        for key, service in (comp.get("requires") or {}).items():
+            if key in granted:
+                services.add(service)
+                pairs.add((comp.get("name"), key))
+    enforce_document(ir, AdmissionProfile.untrusted_author(services,
+                                                           requires=pairs))
+
+
 def _admit_row(item: dict, running: dict | None, flag: bool,
                lock_trusted: dict[str, str]) -> tuple[dict, str]:
     """Admit one row; return its IR and the basis its host code was trusted
     on ("" when the profile held). A row with no name is the project's own
     entry and keeps operator trust. A vendored row is compiled as an untrusted
-    author first; only a refusal there consults the flag or the lock record,
-    and a row that still refuses with the profile lifted raises that refusal."""
+    author first, bounded to the `requires` keys its `[trucs]` entry grants
+    (issue #2635); only a refusal there consults the flag or the lock record,
+    and a row that still refuses with the profile lifted raises that refusal.
+    The reach bound survives that lift: trusting a row's host code does not
+    widen what it may reach."""
     from revl.errors import RevlError  # noqa: PLC0415
 
     if not item.get("name"):
         return _compile_row(item, running), ""
     try:
-        return _compile_row(item, running, _vendored_profile()), ""
+        ir = _compile_row(item, running, _vendored_profile())
+        _enforce_grant(ir, item)
+        return ir, ""
     except RevlError:
         basis = _trust_basis(item, flag, lock_trusted)
         if not basis:
             raise
-    return _compile_row(item, running), basis
+    ir = _compile_row(item, running)
+    _enforce_grant(ir, item)
+    return ir, basis
+
+
+def _is_grant_refusal(error: Exception) -> bool:
+    """Whether a refusal is the reach bound.
+
+    `check_allowlist` stamps the ungranted-service refusal `R2`, and the
+    key-precise half (`_refuse_ungranted_key`, issue #1926) does too. The
+    message is a fallback for a multi-error carrier whose primary `code` is
+    another refusal."""
+    text = str(error)
+    return (getattr(error, "code", None) == "R2"
+            or "not in the granted set" in text
+            or "no grant names" in text)
+
+
+def _grant_hint() -> str:
+    """The operator's fix for a reach-bound refusal: the `[trucs]` grant."""
+    return ("this vendored row's reach is bounded to the `requires` keys its "
+            "`[trucs]` entry grants; add the key named above to that entry's "
+            "`grant` list in truc.toml and re-run")
 
 
 def _refusal_text(item: dict, running: dict | None, error: Exception) -> str:
     """The gate's diagnostic, plus the way out when the row refused only
-    because it is vendored: it admits with the profile lifted."""
+    because it is vendored: it admits with the profile lifted. A reach refusal
+    names its own fix (the `[trucs]` grant) and does not advertise
+    --trust-host-code, which cannot widen the grant."""
     from revl.errors import RevlError  # noqa: PLC0415
 
     text = str(error)
     if not item.get("name"):
         return text
+    if _is_grant_refusal(error):
+        return f"{text}\n{_grant_hint()}"
     try:
-        _compile_row(item, running)
-    except RevlError:
+        ir = _compile_row(item, running)
+        _enforce_grant(ir, item)
+    except RevlError as lifted:
+        # The host-code lift admits the body but the grant still refuses it:
+        # name both problems now, instead of after a --trust-host-code retry.
+        if _is_grant_refusal(lifted):
+            return f"{text}\n{_grant_hint()}"
         return text
     return (f"{text}\nvendored text is admitted as an untrusted author, and "
             f'"{item["name"]}" admits only with that profile lifted: it '
@@ -528,9 +642,9 @@ def _say_trusted(name: str, basis: str) -> None:
 
 def admit_all(ordered_json: str, lock_json: str = "",
               trust_host_code: bool = False) -> str:
-    """Admit an ordered list of `{path, source, name}` through revl's own gate,
-    *incrementally*, exactly as docs/design/truc-architecture.md §3.2 describes:
-    each candidate is linked against the running composition
+    """Admit an ordered list of `{path, source, name, grant}` through revl's
+    own gate, *incrementally*, exactly as docs/design/truc-architecture.md §3.2
+    describes: each candidate is linked against the running composition
     (`compile_files(files, manifest=running)`) so ambient services are in scope
     without redeclaration and G2/G3 span everything admitted so far. The first
     candidate that breaks the assembly stops the loop and its diagnostic (with
@@ -545,13 +659,17 @@ def admit_all(ordered_json: str, lock_json: str = "",
     Who wrote a row decides how it compiles (issue #2552). A row with no name
     is the project's own entry and compiles as the operator. A named row is
     vendored registry text and compiles under the untrusted-author profile
-    the MCP server applies to an author by default. That profile leaves the
-    reach allowlist off: reach is bounded later, when `truc apply` confines a
-    stack layer to its granted services, not here. Its host code is
-    admitted only when `trust_host_code` (the command's `--trust-host-code`) is
-    set, or when `lock_json` records that a flagged `add` admitted these exact
-    bytes. Each row admitted that way is named on stderr and listed in the
-    verdict's `trusted`, which is what `add` records in the row's lock entry.
+    the MCP server applies to an author by default, with one operator input:
+    the row's `grant` (issue #2635), the `requires` keys its `[trucs]` entry
+    allows, enforced against the row's own lowered components by
+    `_enforce_grant`. An entry that grants nothing grants nothing, so a
+    requiring row the operator did not grant is refused here, before it is
+    vendored. Its host code is admitted only when `trust_host_code` (the
+    command's `--trust-host-code`) is set, or when `lock_json` records that a
+    flagged `add` admitted these exact bytes; that lift does not widen the
+    reach the grant allowed. Each row admitted that way is named on stderr and
+    listed in the verdict's `trusted`, which is what `add` records in the row's
+    lock entry.
     """
     from revl.errors import RevlError  # noqa: PLC0415
 
@@ -590,6 +708,37 @@ def admit_all(ordered_json: str, lock_json: str = "",
     })
 
 
+def _sync_lock_grants(project_dir: str) -> None:
+    """Rewrite each lock row's `granted` from the `[trucs]` grant now in force.
+
+    `assemble` admits every vendored row under the grant `truc.toml` declares
+    today, not the one recorded when the row was added, so the lock must show
+    what this assembly was admitted under: a widened grant then appears in the
+    lock diff beside the capabilities and emissions it re-reports (issue
+    #2635). The grant is the operator's authority and stays in `truc.toml`; the
+    lock is provenance. Only rows `truc.toml` names are touched, and the lock
+    is rewritten only when a row actually changed."""
+    lock_path = pathlib.Path(project_dir, "truc.lock")
+    if not lock_path.exists() or not lock_path.read_text(encoding="utf-8").strip():
+        return
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    rows = lock.get("trucs") if isinstance(lock, dict) else None
+    if not isinstance(rows, list):
+        return
+    current = {t["name"]: sorted(t.get("grant") or [])
+               for t in json.loads(toml_manifest(project_dir)).get("trucs") or []}
+    changed = False
+    for row in rows:
+        if not isinstance(row, dict) or row.get("name") not in current:
+            continue
+        granted = current[row["name"]]
+        if row.get("granted") != granted:
+            row["granted"] = granted
+            changed = True
+    if changed:
+        _write_lock(project_dir, lock)
+
+
 def write_assembly(project_dir: str, manifest_json: str) -> str:
     """Write the admitted composition manifest to `build/assembly.json` — what
     a reviewer reads to see the wiring the gate accepted. An empty
@@ -605,6 +754,9 @@ def write_assembly(project_dir: str, manifest_json: str) -> str:
     out = pathlib.Path(project_dir, "build")
     if out.is_symlink():
         raise _symlink_refusal(out, "build")
+    # the gate admitted the assembly under the CURRENT grants, so the lock
+    # shows them (issue #2635); a dry run never reaches here
+    _sync_lock_grants(project_dir)
     out.mkdir(parents=True, exist_ok=True)
     data = json.loads(manifest_json)
     _write_no_follow(out / "assembly.json", json.dumps(data, indent=2),
@@ -1065,6 +1217,10 @@ def commit_add(project_dir: str, plan_json: str) -> str:
         "requires": row.get("requires") or {},
         "capabilities": row.get("capabilities") or [],
         "emissions": row.get("emissions", 0),
+        # the reach bound this add applied (issue #2635): the `requires` keys
+        # the `[trucs]` entry granted. Recorded here so the lock shows what was
+        # admitted, and `assemble` applies the same operator declaration.
+        "granted": sorted(_grant_of(add)),
         # how the gate admitted it (issue #2552): `profiled`, or
         # `trusted-host-code` when only the flag admitted its host code. The
         # record is bound to `sourceHash` above; `assemble` reads it.
@@ -1560,7 +1716,7 @@ def gauntlet_evidence(source: str, source_path: str = "") -> str:
     import contextvars  # noqa: PLC0415
 
     from revl.mcp import gauntlet  # noqa: PLC0415 — in-process, like the gate
-    from revl.mcp.session import Session  # noqa: PLC0415
+    from revl.mcp.session import Session, _lend_turn  # noqa: PLC0415
 
     # The gauntlet boots the candidate in a scratch Session, which drives its
     # own asyncio loop. ship runs this from *inside* truc's own running Session
@@ -1580,9 +1736,13 @@ def gauntlet_evidence(source: str, source_path: str = "") -> str:
     # this command) would silently become the process default there. Carry
     # the caller's context into the thread so the files form is judged by the
     # same rule as every other compile `truc` runs.
-    caller_context = contextvars.copy_context()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        dossier = pool.submit(caller_context.run, _grade).result()
+    # issue #3380: truc's own Session holds the process's session turn while
+    # this host body runs; lend it to the worker, which this thread joins, or
+    # the scratch boot would wait for a turn its own caller holds.
+    with _lend_turn():
+        caller_context = contextvars.copy_context()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            dossier = pool.submit(caller_context.run, _grade).result()
     lifecycle = ((dossier.get("tested") or {}).get("lifecycle")) or {}
     admission = ((dossier.get("proved") or {}).get("admission")) or {}
     return json.dumps({

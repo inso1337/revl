@@ -14,9 +14,9 @@ compile  explain  grammar  idiom  adapt  doctor  scaffold  composition
 layer  audit  goal  policy  simulate  diff  changelog  update  version
 migrate  contract  erase-report  retention-receipt  receipts  plan
 apply  undo  canary  promote  query  fmt  quarantine  analyze  test  mcp
-gen-types  import  export  sourcemap  serve  run  dev  recover  act
-estop  slo  branch  compare  replay  why  metrics  trace  profile  pool
-attest  dash  repair  bundle  emit  verify  deploy  deploy-admit
+gen-types  docs  import  export  sourcemap  serve  run  dev  recover
+act  estop  slo  branch  compare  replay  why  metrics  trace  profile
+pool  attest  dash  repair  bundle  emit  verify  deploy  deploy-admit
 federation-apply  truc
 ```
 <!-- docgen:cli-verbs end -->
@@ -567,6 +567,18 @@ to `quarantine` when the policy declares `quarantine required`, and otherwise to
 the gate's own `refuse`. When several soft clauses fail, the strictest outcome
 wins (`review` over `canary` over `observe`).
 
+The `strength` facet (issue #2804) grades what a recorded promotion verdict
+licenses: `strength exact` holds only for an exact verdict, `strength sampled` for
+a promoted sample or better. Nothing produces `exact` yet, so the rule below grades
+a sampled-only candidate `review` and never `admit`. The clause's `fact` is the
+sentence an approver reads: `sampled, 30 observations, failure rate below 0.1 at 95
+percent on the paths the window exercised`, or `bound not quotable`, or `1 diverged,
+no bound quoted`.
+
+```
+component vendored-* review on evidence [strength exact] self-attested
+```
+
 The `--json` report carries an `outcome` object per component and one overall
 (worst) outcome. Each names the clause that decided it, except `admit`, where
 no clause decided anything and `decidedBy` is `null`. The overall outcome is the
@@ -627,9 +639,9 @@ capability verdict is the gate's own: the diff calls the same
 predicate reads, the deny-lists and the closed allow-lists. The admission
 refuses a crossing on more legs than those two, and the diff reads none of the
 rest: the agent-sandbox allow-list, the taint-flow tier, the approval and
-declassify rules, the per-component pair rule, the declaration-strength floors,
-the evidence bundle and the recovery surface all decide by facts a WAL does not
-carry. Every leg is named in
+declassify rules, the per-component and composition pair rules, the
+declaration-strength floors, the evidence bundle and the recovery surface all
+decide by facts a WAL does not carry. Every leg is named in
 the report and in `--json`, and a recorded pair whose surface moves on one of
 them is reported undecided with the leg named, never as unchanged, so a widening
 on a leg this diff cannot read is not reported clean.
@@ -960,10 +972,11 @@ revl diff before.ir.json after.rvl
 ### `revl migrate`
 
 Plan one component version change against the real consumers in a composition
-(issue #2685, first slice). Read-only: it joins the semantic diff, the derived
-semver bump, the consumer compatibility predicate and the declared state
-hand-off, and reports what a migration would require. It compiles the three
-inputs, admits nothing, swaps nothing and writes no file.
+(issue #2685). Read-only: it joins the semantic diff, the derived semver bump,
+the consumer compatibility predicate, the declared state hand-off and, with
+`--policy`, the operator's boundary policy, and reports what a migration would
+require. It compiles its inputs, admits nothing, swaps nothing and writes no
+file.
 
 - `OLD` - the old version of the component: a compiled composition document
   (`revl compile -o`) or a `.rvl` source (required).
@@ -975,6 +988,10 @@ inputs, admits nothing, swaps nothing and writes no file.
   must also still run the OLD version: a composition already compiled against
   NEW is refused, because its consumers no longer pin the interface the plan
   is asking about.
+- `--policy POLICY_FILE` - a boundary policy
+  ([boundary-policy.md](boundary-policy.md)), evaluated over the composition as
+  it would stand after the migration: the old version's components replaced by
+  the new version's. See "The boundary policy" below.
 - `--json` - machine-readable plan. Exit status is 0 whenever a plan is
   produced; unreadable or insufficient inputs are nonzero. The classification
   travels in the plan, so a CI gate can decide on `classification` without this
@@ -986,8 +1003,8 @@ facts only:
 
 | classification | meaning |
 | --- | --- |
-| `refused` | a real consumer cannot move (its pinned shape broke) or the declared state hand-off cannot cross the swap |
-| `needs-approval` | the new version widens the measured authority surface (a new crossing or host backend, a weakened reach, a widened emission capability or emission ceiling, a dropped or weakened recovery), a consumer needs an authored adapter, or the successor drops the predecessor's state |
+| `refused` | a real consumer cannot move (its pinned shape broke), the declared state hand-off cannot cross the swap, or the boundary policy refuses the composition after the migration |
+| `needs-approval` | the new version widens the measured authority surface (a new crossing or host backend, a weakened reach, a widened emission capability or emission ceiling, a dropped or weakened recovery), the policy requires an approval for a capability the new version reaches, a consumer needs an authored adapter, or the successor drops the predecessor's state |
 | `needs-handoff` | the successor declares a compatible state hand-off; live state must cross the swap |
 | `needs-canary` | every real consumer can move, but the interface changed; exercise it on a canary slice first |
 | `safe` | no consumer work, no authority widening, no state crossing |
@@ -998,12 +1015,43 @@ exists. The adapter check uses the predicate's default opt-in map; an authored
 opt-in is supplied through `revl adapt --adapt`. The plan also reports whether
 the old version is removable (no consumer is still pinned to it) and whether a
 rollback is proven possible. `realm` is the empty string for the shared realm.
-A plan is not a gate: policy rules such as "refuse every widening" are a later
-slice.
+
+#### The boundary policy
+
+With `--policy`, the plan carries a `policy` block and the policy can refuse or
+gate the migration. The composition is evaluated before and after the
+migration, by the same `policy.evaluate` and approval admission the gate runs,
+and only what the migration changes counts:
+
+- `new` - a violation the migration introduces. Any kind but an approval
+  requirement refuses the plan (`refused`). A capability the policy marks
+  `requires approval` that the new version reaches makes it `needs-approval`:
+  the policy permits the reach once an approval is obtained and threaded, so the
+  plan names what to obtain. The gate still refuses the composition until that
+  approval edge is in the code.
+- `preexisting` - a violation the composition already has before the change.
+  It is reported, never blamed on the new version, so a composition that is
+  already out of policy does not read as refused by every plan.
+- `resolved` - a violation the migration removes.
+- `undecided` - the count of evidence rules, which read the candidate's
+  published evidence at the gate and cannot be decided from a compiled
+  document. They are reported, not failed for want of evidence. Register
+  floors read the audit alone and are decided like any other rule. The `mcp`
+  sandbox profile applies to components admitted through the MCP session, which
+  a plan has none of, so it never selects.
+
+No rule is added for migration. "Refuse any widening" is written the way it is
+for admission, as an allow-list: `component * may reach llm` refuses a version
+that starts reaching `mail`. A policy does not override the measured facts: a
+widening the policy allows is still `needs-approval`. A policy file that does
+not parse, or cannot be read, is an error (exit 1), never an empty policy.
+
+A plan is not a gate: `migrate` reports and never admits.
 
 ```bash
 revl migrate cache_v1.rvl cache_v2.rvl --against production.json
 revl migrate old.ir.json new.ir.json --against comp.json --json
+revl migrate cache_v1.rvl cache_v2.rvl --against production.json --policy boundary.policy
 ```
 
 ### `revl version`
@@ -2063,8 +2111,8 @@ for the key lifecycle and what the signature binds.
   private identity and the operator's PUBLIC one, so there is no secret here
   that could admit anybody, which is what makes running it on a machine the
   operator does not trust coherent. Every refusal names a link
-  (`task-signature`, `charter-identity`, `artifact-digest`, `replayed-task`,
-  ...) and is answered on the connection rather than dropped. It also answers
+  (`task-signature`, `charter-identity`, `artifact-digest`, `stale-task`,
+  `replayed-task`, ...) and is answered on the connection rather than dropped. It also answers
   `pool probe` with a signed heartbeat, after checking the probe against the
   same pinned operator key; a probe runs nothing.
   - `--charter PATH` - the charter this peer joined. A task must pin its
@@ -2089,7 +2137,14 @@ for the key lifecycle and what the signature binds.
     the pure-Python signer's timing leaks its key (issue #1460; see
     [tee-attestation-root.md](tee-attestation-root.md)).
   - `--workdir DIR` - where artifacts are written and run (default: a fresh
-    temporary directory removed on exit).
+    temporary directory removed on exit). The ids of the tasks this peer has run
+    are also kept here, in `seen@tasks.jsonl`, written before each run, so a
+    restarted peer refuses a task it already ran (`replayed-task`). Without it
+    nothing survives a restart; the freshness check below still applies. A task
+    whose signed `issued_at` is further from the peer's clock than the charter's
+    `join_window_s` (300 seconds by default), in either direction, is refused
+    on `stale-task` before it runs; a peer that cannot write the id down refuses
+    on `peer-state`.
   - `--timeout SECONDS` - how long one artifact may run (default 300).
   - `--once` - serve one task and exit.
 - `ledger` - the delivery ledger: every task dispatched, its state
@@ -2793,6 +2848,69 @@ refuses the generated file once the model no longer has that digest
   model relative to this file's directory, so the model must be there or below.
 - `--json-diagnostics` - on rejection, print a structured diagnostic instead of
   the human rendering.
+
+### `revl docs`
+
+Keep the derived part of a component's behavior comment honest. `revl docs
+gen FILES` writes or refreshes a managed comment block directly above each
+component and template declared in `FILES`, and `revl docs check FILES` refuses
+a block that no longer matches the IR (issue #2856). Both take the same file
+list `revl compile` takes, because a component file alone may not declare the
+services it requires; the composition is compiled once and each block is
+written back to the file that declares its component.
+
+The block carries the facts that can be derived from the lowered IR rather
+than reviewed by hand: the effect summary, the capability tokens its emission
+call sites and reached externs name, the realm placement (`isolate`/`routes`),
+the extern surface (declared externs reached transitively plus direct host
+calls) and the sha256 of the IR it was derived from.
+
+The digest covers the component's own lowered entry and the lowered entry of
+every module function and extern its body reaches, transitively (the same
+reference walk the emission analysis uses). A change to the component, to a
+function it calls or to the host body of an extern it reaches therefore stales
+the block. Source positions and the source path are excluded, so moving or
+reformatting the file does not. The digest does not cover another component,
+which carries its own block, or a service declaration, whose signature the
+`capabilities` line already spells.
+
+```revl sketch
+// the consumer: requires the `db` key, provides the `cache` key ...
+// revl:behavior begin
+// kind: component
+// effects: 2 reversible effects, 1 emission
+// capabilities: db
+// realms: shared
+// externs: Map.new
+// digest: sha256:5f0c...
+// revl:behavior end
+component UserCache requires db: Database provides cache: Cache { ... }
+```
+
+Prose outside the markers is never touched. Adoption is incremental: a
+component with no block is not an error, and it becomes managed the first time
+`revl docs gen` writes a block for it. A block above no component is refused,
+and so is a malformed marker pair or a marker with trailing text. A marker line
+inside a multi-line string, a template or a host body is data, not a comment,
+and is ignored. A stale block exits 1 naming the file, the line, the committed
+digest and the current one; regenerate it with `revl docs gen` instead of
+editing the derived lines by hand.
+
+`gen` rewrites only the block's own lines. A CRLF file stays CRLF (a new block
+takes the line ending of the declaration under it, or of the line above it when
+the declaration is the last line with no final newline), every other line is
+kept byte for byte, a block that is already current is not touched whatever its
+line endings, and a leading byte-order mark stays the first bytes of the file.
+The file is replaced through a temporary file in its own directory that is
+flushed to disk and then renamed over the source, so an interrupted run leaves
+the source as it was.
+
+`FILES` must be files: a directory is refused with one line and exit 2, because
+the `.rvl` files under a directory are not necessarily one composition. Name the
+files of the composition, as `revl compile` takes them.
+
+- `gen` - write or refresh the block above every component and template.
+- `check` - exit 1 on a stale, hand-edited, malformed or orphaned block.
 
 ### `revl import`
 

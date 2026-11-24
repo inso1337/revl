@@ -30,6 +30,27 @@ iteration lands (inertia is physical), a divert during the wait skips
 every later step, and a refusing job is L-Raise with paper-faithful
 withholding. See demo.py scenarios 6-8.
 
+## Browser host
+
+`host/` carries a dependency-free JavaScript host for the same import/export
+surface, so a component compiled here runs in a browser page: coeffect imports
+are bound to host operations or to another component's provisions, a component
+with an unresolved coeffect stays gated (compiled, not instantiated), and
+`activate_step`/`deactivate` drive the lifecycle. Scalars cross as native wasm
+values, so `Float` is an `f64` and arrives as a JavaScript `number`.
+
+```bash
+cd backends/wasm/host && python3 -m http.server 8080   # open localhost:8080
+node backends/wasm/host/test_host.mjs                  # gating + Float call
+python3 backends/wasm/host/build_demo.py --check       # demo artifacts current
+```
+
+The demo (`host/demo.rvl`) requires a `clock` service, reads `frame_dt` from
+the page as a coeffect and returns the cart's next `Float` position from its
+`provide:motion.step` export. The async inertia layer, routed realms, `spawn`
+and the instance accessors are outside the browser host and refused by name;
+`host/README.md` states the boundary.
+
 ## Tier restrictions (all hard EmitErrors, never silent)
 
 The full matrix — which values, which string builtins, and which service
@@ -41,8 +62,8 @@ boundary shapes the substrate carries, with the exact refusal each emits — is
 | `config` blocks | no instantiation-config channel yet | hosted backends |
 | host builtins (`Pool`, `Map`; `Job` outside `await`) | different host namespace | express state through coeffects |
 | method-time effects / compensation | the accumulator is fixed at activation | hosted backends |
-| `Float` / `Map` / function-typed values (any position) | no value representation in the canonical-ABI model (Float has only the interpolation subset) | hosted backends / WIT tier |
-| `repeat` builtin, `List.indexOf` | `repeat` and the List per-element search not lowered yet (`Str.split`/`join`/`indexOf` now DO lower — the reader trio, `$str_split`/`$str_join`/`$str_index_of`) | hosted backends |
+| `Map` / function-typed values (any position) | `Map` needs a keyed persistent value model the canonical ABI does not carry (a stated design decision, docs/wasm-capabilities.md); function values need closures/references, absent from wasm MVP | hosted backends / WIT tier |
+| `repeat` builtin, `List.indexOf` over records/lists/Floats | `repeat` and the List per-element search over an element with no comparison here are not lowered yet (List[Str]/Int/Int32/Bool lower: `$list_index_of_str`/`$list_index_of_slot`) (`Str.split`/`join`/`indexOf` now DO lower — the reader trio, `$str_split`/`$str_join`/`$str_index_of`) | hosted backends |
 | non-scalar instance-accessor payloads (`spawn`) | a pointer would cross into memory the spawner does not own | hosted backends |
 
 ## Now supported (v2 + typed v3)
@@ -51,6 +72,13 @@ boundary shapes the substrate carries, with the exact refusal each emits — is
   (`coeffect:tenant_a/kv` / `provide:tenant_a/kv.<op>`), and metadata is
   carried in `revl:isolate` / `revl:intercept` custom sections. Intercept
   enforcement remains host-side (advisory on this tier).
+- **`Float` as a native `f64`** (#3295): locals, record fields, list elements,
+  tagged-cell payloads, arithmetic (`+ - * / %`, with `$f64_mod` an exact C
+  fmod), comparison/equality (`NaN != NaN`, `-0.0 == 0.0`), `Int / Int` true
+  division, and the service boundary. An 8-byte slot stores the IEEE-754 bit
+  pattern (`i64.reinterpret_f64`), so a Float survives every value position.
+  `.to_str()`/`${…}` use `$f64_to_str`, the documented integer-valued/NaN/Inf
+  rendering fence (docs/strings.md).
 - **ir v3 Str/List/record/variant values**: emitted in a linear-memory
   canonical-ABI-shaped representation (`u32` length/count prefix, then one
   8-byte slot per field/element); the module exports `memory` so a host can
@@ -67,7 +95,7 @@ boundary shapes the substrate carries, with the exact refusal each emits — is
   provider's memory, which a host reads through the exported `memory`, and
   a required call to a host-provided key may pass one too. A required call to
   a key another component of the composition provides stays scalar
-  (Int/Bool): that provider is another instance with its own memory, so a
+  (Int/Bool/Float): that provider is another instance with its own memory, so a
   compound value would arrive as an address in the wrong one, and it is
   refused by name (issue #1601).
 - **`await Job.run(name)`** continues to lower to the runtime's async host op.
@@ -76,7 +104,9 @@ boundary shapes the substrate carries, with the exact refusal each emits — is
   keys, unloads LIFO, and proves no residue (`len(rt.fibers) == 0` R4 + the
   coeffect table empty R1) — the substrate sibling of the py/rust/ts/go lifecycle
   runners and the substrate mirror of the once-mode boot's no-residue proof. It
-  runs over the tier's **scalar** boundary (Int i64 / Bool i32); a test that
+  runs over the tier's **scalar** boundary as the lifecycle driver marshals it
+  (Int i64 / Bool i32; a Float service is lowerable but that step interpreter
+  does not parse f64 yet); a test that
   needs a `config` load, a non-scalar service boundary, or a timer skips *per
   test, with a reason* (never a false pass). Driver: `src/revl/test.py`
   (`run_wasm`) + `lifecycle.py` (classifier) + `lifecycle_harness.py` (the
@@ -164,6 +194,36 @@ boundary shapes the substrate carries, with the exact refusal each emits — is
   static section (a compile-time index of seq/kind/dispatch) always pointed at
   but deliberately did not itself carry: "a host wanting to build a real WAL on
   this tier" is exactly `run_wasm`'s drain.
+
+## Confinement on the run path (issue #3189)
+
+`revl run --backend wasm` applies the boundary policy's wasm component limits
+to every component it boots, not only to a quarantine candidate. `run_wasm`
+resolves the ceilings once (`wasm_confinement.limits_from_policy`: conservative
+defaults with no policy, and a `wasm components confined` policy that names no
+limits is refused) and passes them in the harness spec. The harness builds an
+`Engine` configured for fuel and epoch interruption, installs a store limiter,
+and gives every store the fuel budget, the linear-memory ceiling and a
+wall-clock epoch deadline before any module is plugged. A composition that hits
+a ceiling traps, reports `PARTIAL` with the runtime's reason on a `note raised`
+line, and exits nonzero. A harness that outlives the wall ceiling (plus a
+startup grace) is killed together with its whole process group, and the same
+kill runs if the driver is interrupted (Ctrl-C) or fails while the harness is
+alive.
+
+The `wall` ceiling is an epoch deadline fixed when each store is created, so it
+measures elapsed wall time since that component was plugged, not that
+component's own execution time. In a composition of several components the
+first component's deadline therefore spans every later boot and the whole
+teardown: a composition whose total round trip exceeds `wall` is stopped (a
+ceiling that traps during teardown fails the round trip) even though no single
+component ran that long. Size `wall` for the whole boot-to-teardown round trip.
+
+The emitted module's import section is also read back from the bytes the
+harness will compile and held to the same byte-level check the canonical and
+quarantine paths apply (`check_component_imports`). If the installed runtime or
+wasmtime cannot apply a ceiling, the harness refuses to run rather than run the
+composition unconfined.
 
 ## Widths: `Int` is i64, addresses are i32
 

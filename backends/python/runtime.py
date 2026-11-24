@@ -1993,7 +1993,11 @@ def plug(ctx, component: dict, config=None):
 #: fibers whose body is *currently* activating — a stack, innermost last. A host
 #: resource created inside a body (`Map.new()`) registers onto the top frame, so
 #: it is attributed to the activation (hence the instance) that acquired it.
-_ACTIVATING: list["Frame"] = []
+#: Context-local (issue #3380): a tuple in a context variable, so a session on
+#: another thread never sees this one's frames, and a task a body starts
+#: inherits the body's frame with its copied context.
+_ACTIVATING: "contextvars.ContextVar[tuple]" = contextvars.ContextVar(
+    "_revl_activating", default=())
 
 #: ctx -> the Frame of the activation on that context, for a context that
 #: cannot carry the frame itself (no instance `__dict__`). Every cordis context
@@ -2054,8 +2058,9 @@ def _register_resource(resource: Any) -> None:
     Called from `_Closable.__init__`; a no-op when nothing is activating (a
     resource made outside any component body — e.g. a bare test — is not
     instance state and is simply not tracked)."""
-    if _ACTIVATING:
-        _ACTIVATING[-1]._resources.append(resource)
+    activating = _ACTIVATING.get()
+    if activating:
+        activating[-1]._resources.append(resource)
 
 
 def _frame_for_ctx(ctx: Any) -> "Optional[Frame]":
@@ -2230,7 +2235,11 @@ def spawn(ctx, component: dict, config, realms):
 # tracing (test/demo observability for the stub stdlib)
 # ---------------------------------------------------------------------------
 
-_trace: Optional[Callable[[str], None]] = None
+#: the primary trace callback. Context-local (issue #3380): each session's
+#: driver installs its own before it drives its loop, and the tasks that loop
+#: runs copy it, so two sessions on two threads each trace to their own sink.
+_TRACE: "contextvars.ContextVar[Optional[Callable[[str], None]]]" = (
+    contextvars.ContextVar("_revl_trace", default=None))
 _observers: list = []
 
 
@@ -2242,9 +2251,12 @@ def set_trace(callback: Optional[Callable[[str], None]]) -> None:
     separate list and are **not** disturbed by this call, so a demo can hold
     its own subscription across a driver's install/teardown of the primary
     callback.
+
+    The callback is held in the calling context: a thread, or an asyncio task,
+    and the tasks started from it afterwards. One installed inside a task is
+    gone when that task ends.
     """
-    global _trace
-    _trace = callback
+    _TRACE.set(callback)
 
 
 def add_trace(callback: Callable[[str], None]) -> Callable[[], None]:
@@ -2279,7 +2291,7 @@ def remove_trace(callback: Callable[[str], None]) -> bool:
 
 def trace_observers() -> int:
     """How many callbacks are currently receiving events (primary included)."""
-    return len(_observers) + (1 if _trace is not None else 0)
+    return len(_observers) + (1 if _TRACE.get() is not None else 0)
 
 
 # item 259 slice 2 (docs/design/259-checked-parallel-emissions.md §4.1, HIGH-1):
@@ -2317,8 +2329,9 @@ def _record(event: str) -> None:
         # the parallel group's join rather than emitting to the real sink now.
         sinks[-1].append(event)
         return
-    if _trace is not None:
-        _trace(event)
+    trace = _TRACE.get()
+    if trace is not None:
+        trace(event)
     for observer in list(_observers):
         observer(event)
 
@@ -3098,7 +3111,7 @@ class _CallScope:
     def __enter__(self) -> "_CallScope":
         # an activation that starts INSIDE this call (a spawn) registers on its
         # own frame's cordis stack; `declared_crossing` compares depths
-        self._activating = len(_ACTIVATING)
+        self._activating = len(_ACTIVATING.get())
         self._token = _CALL_SCOPE.set(self)
         return self
 
@@ -3184,7 +3197,7 @@ def declared_crossing(label: str, compensate: Optional[Callable[[], Any]] = None
     def _wrap(fn):
         def _enter():
             scope = _CALL_SCOPE.get()
-            if scope is None or len(_ACTIVATING) > scope._activating:
+            if scope is None or len(_ACTIVATING.get()) > scope._activating:
                 return None   # no scope, or an activation body: it registers on cordis's stack
             scope.crossed.append(label)
             return scope
@@ -3256,12 +3269,15 @@ def declared_crossing(label: str, compensate: Optional[Callable[[], Any]] = None
 # from — the deferral queue, the discharge escrow, the live-frame registry —
 # never the runtime's per-call current frame (`_FRAME_BY_CTX`).
 #
-# The owner is process-global and single-slot, exactly like `_trace`: one driver
-# runs a session at a time. When NO owner is registered (`_SESSION_OWNER is
-# None`), every `Frame` behaves byte-identically to the pre-245 world — a clean
-# drain discharges at unload (implicit commit), the compatibility clause.
+# The owner is context-local (issue #3380), exactly like the trace: the driver
+# registers it on its own thread before it drives its loop, every task that
+# loop runs copies it, and a second session on another thread has its own.
+# When NO owner is registered (`session_owner()` is None), every `Frame`
+# behaves byte-identically to the pre-245 world: a clean drain discharges at
+# unload (implicit commit), the compatibility clause.
 
-_SESSION_OWNER: "Optional[SessionOwner]" = None
+_SESSION_OWNER: "contextvars.ContextVar[Optional[SessionOwner]]" = (
+    contextvars.ContextVar("_revl_session_owner", default=None))
 
 
 def set_session_owner(owner: "SessionOwner") -> None:
@@ -3270,20 +3286,20 @@ def set_session_owner(owner: "SessionOwner") -> None:
     The driver calls this once at session start, before loading the
     composition, so each activation `Frame.__init__` joins the owner's registry.
     Idempotent-ish: replacing an owner mid-session is a caller error, not
-    guarded here (one driver owns one session)."""
-    global _SESSION_OWNER
-    _SESSION_OWNER = owner
+    guarded here (one driver owns one session). Registered in the calling
+    context: a thread, or an asyncio task and the tasks started from it."""
+    _SESSION_OWNER.set(owner)
 
 
 def clear_session_owner() -> None:
     """Unregister the session owner (the driver calls this at commit/abort/unload
-    end). Frames built afterwards get the pre-245 implicit-commit semantics."""
-    global _SESSION_OWNER
-    _SESSION_OWNER = None
+    end). Frames built afterwards in this context get the pre-245
+    implicit-commit semantics; a task that copied the owner keeps it."""
+    _SESSION_OWNER.set(None)
 
 
 def session_owner() -> "Optional[SessionOwner]":
-    return _SESSION_OWNER
+    return _SESSION_OWNER.get()
 
 
 def _hold_for_session(entry: Any) -> bool:
@@ -3938,6 +3954,12 @@ class Frame:
         # before the frame's first write to it.
         self._open_journal: Any = None
         self._journal: dict = {}
+        # issue #3304: the (map, key) slots the open bracket's forward write
+        # journaled (None: no bracket opened since the last adopt), and the
+        # slots whose newest adopted record is an absolute table inverse with
+        # only such records adopted since (`adopt_bracket`)
+        self._bracket_slots: Optional[set] = None
+        self._coalesce: set = set()
         # Phase-2 residue (teardown-contract.md's `compensation-residue`):
         # one record per compensation that raised or was skipped past the
         # budget. Best-effort introspection for this activation; the merged
@@ -3980,7 +4002,7 @@ class Frame:
         # the session verdict instead of the activation's own clean unload. None
         # is the compatibility clause: drain discharges at unload, byte-identical
         # to the pre-245 world.
-        self._owner: "Optional[SessionOwner]" = _SESSION_OWNER
+        self._owner: "Optional[SessionOwner]" = _SESSION_OWNER.get()
         if self._owner is not None:
             self._owner.register_frame(self)
         # item 245: set by `drain`'s mid-session-withdrawal branch, so the
@@ -4303,6 +4325,7 @@ class Frame:
             self._take_journal()      # a forward that raised left it open
         prev = _JOURNAL.get()
         self._open_journal = prev
+        self._bracket_slots = set()
         _JOURNAL.set(prev + (self,))
 
     def _take_journal(self) -> bool:
@@ -4410,7 +4433,7 @@ class Frame:
             async def _async_tracked():
                 iterator = body().__aiter__()
                 while True:
-                    _ACTIVATING.append(frame)
+                    token = _ACTIVATING.set(_ACTIVATING.get() + (frame,))
                     try:
                         value = await iterator.__anext__()
                     except StopAsyncIteration:
@@ -4419,14 +4442,14 @@ class Frame:
                         frame._take_journal()   # a forward that raised (issue #1945)
                         raise
                     finally:
-                        _ACTIVATING.pop()
+                        _ACTIVATING.reset(token)
                     yield frame._guard(value)
             return _async_tracked
 
         def _tracked_gen():
             iterator = iter(body())
             while True:
-                _ACTIVATING.append(frame)
+                token = _ACTIVATING.set(_ACTIVATING.get() + (frame,))
                 try:
                     value = next(iterator)
                 except StopIteration:
@@ -4435,13 +4458,53 @@ class Frame:
                     frame._take_journal()   # a forward that raised (issue #1945)
                     raise
                 finally:
-                    _ACTIVATING.pop()
+                    _ACTIVATING.reset(token)
                 yield frame._guard(value)
         return _tracked_gen
 
     def adopt(self, effect: Any) -> Any:
         """Join an effect created while ACTIVE to this component's accumulator."""
+        # issue #3304: a record that is not an absolute table inverse may read
+        # or write any key when it replays, so no later record is coalesced
+        # across it, and no bracket's slots carry over to a later adopt
+        self._coalesce.clear()
+        self._bracket_slots = None
         self._adopted.append(effect)
+        return effect
+
+    def adopt_bracket(self, effect: Any) -> Any:
+        """`adopt` for a provide-method bracket whose `undo` the emitter proved
+        an ABSOLUTE table inverse on a literal or named key (issue #3304):
+        `insert -> remove`, or the #1980 restore `match prev { Some(v) =>
+        m.insert(k, v), None => m.remove(k) }`. (The `insert_if_absent` CAS
+        must be bound, `let ok = effect ...`, so it is a method `let-effect`
+        adopted through `acquire` and plain `adopt`, never coalesced.) Such
+        an inverse writes only its own `(map, key)`, reads nothing the frame
+        changes, and sets the key to one fixed value.
+
+        When the forward write journaled exactly one `(map, key)` and the frame
+        already holds such a record for it, with only such records adopted
+        since, the new record is released WITHOUT RUNNING. Inverses replay
+        LIFO: the new record would run first and the kept one after it, with
+        only records on other keys between them, so the key ends at the kept
+        record's value either way. The world, the `NotReversed` verdict (it
+        compares against the same value from before the frame's first write)
+        and every other key are the same, and the frame holds one record per
+        key instead of one per call.
+
+        Not coalesced: a recorded timeline (its `step_back` replays its own
+        per-step list, which may already have run the kept record), a forward
+        that journaled more or fewer keys, and anything `adopt` adopted since
+        the kept record."""
+        slots, self._bracket_slots = self._bracket_slots, None
+        if slots is None or len(slots) != 1 \
+                or getattr(self.ctx, "_revl_timeline", None) is not None:
+            return self.adopt(effect)
+        (slot,) = slots
+        if slot in self._coalesce and _release_unrun(effect):
+            return effect
+        self._adopted.append(effect)
+        self._coalesce.add(slot)
         return effect
 
     def acquire(self, label: str, get: Callable[[], Any], undo: Callable[[Any], Any]) -> Any:
@@ -4898,14 +4961,21 @@ class Frame:
         return {"capability": capability, "requestId": entry.get("requestId"),
                 "passthrough": False}
 
-    def acquire_lease(self, capability: str, ttl_ms: Any, uses: Any) -> Any:
+    def acquire_lease(self, capability: str, ttl_ms: Any, uses: Any,
+                      key: "str | None" = None, provider: Any = None) -> Any:
         """`let l = effect lease <cap> …` at runtime (item 294 Slice 2). The
         standing grant was already minted from the operator's approved ticket by
         the load-time lease gate; this resolves the live lease grant for THIS
         component and capability cone and returns the handle whose `.revoke()`
         retires it on teardown. Fails closed when no session owner backs the lease
         (an ungated raw run) — the load gate refuses that upstream, and this is the
-        defensive twin so no self-mint ever happens with no ticket behind it."""
+        defensive twin so no self-mint ever happens with no ticket behind it.
+
+        Item 442 (issue #2693): a lease over a wiring key registers the key and
+        the provider it resolves to with the SESSION, not on the handle. The
+        handle is a value a delegatee may read fields of, so it carries no
+        authority: `delegate_call` asks the session's ledger for the provider by
+        request id, after the grant has been checked and spent."""
         owner = self._owner
         acquire = getattr(owner, "lease_acquire", None) if owner is not None \
             else None
@@ -4916,14 +4986,82 @@ class Frame:
                 "lease is not a lease (item 294, honest sentence 2). A lease "
                 "must be acquired under an approval policy that raised and "
                 "approved its ticket")
-        request_id = acquire(self.name, capability, ttl_ms, uses)
+        request_id = acquire(self.name, capability, ttl_ms, uses, key, provider)
         if request_id is None:
             raise LeaseRefused(
                 capability,
                 "no live standing grant was minted for this lease — the "
                 "operator ticket for the lease was not approved (fail-closed: "
                 "a lease never self-mints)")
-        return LeaseHandle(capability, request_id, owner.lease_revoke)
+        return LeaseHandle(capability, request_id, owner.lease_revoke,
+                           key=key, holder=self.name)
+
+    def delegate_call(self, handle: Any, service: str, method: str,
+                      args: list) -> Any:
+        """The delegatee's crossing through a received delegated reference
+        (item 442, issue #2693): decide the crossing (which spends the grant and
+        any other authority the provider method's reach needs), attribute the use
+        to THIS component, then fire the provider.
+
+        The handle is a lookup key, never a bearer token. The provider object
+        lives in the session (`lease_provider`), so reading fields off the handle
+        yields no authority; the session checks that the handle's key really
+        exposes `service` before anything is spent, resolves the bound method
+        before anything is spent, then runs the ordinary class-(c) decision for
+        the provider operation. That decision is what keeps a provider method
+        reaching a SECOND class-(c) capability from firing it under the lease's
+        consent: it prompts for the uncovered capability instead.
+
+        The E-Stop is checked before the spend, exactly as `approval_crossing`
+        does, so a halted session leaves no consumed-but-unfired use."""
+        owner = self._owner
+        begin = getattr(owner, "delegate_begin", None) if owner is not None \
+            else None
+        lookup = getattr(owner, "lease_provider", None) if owner is not None \
+            else None
+        if begin is None or lookup is None:
+            raise LeaseRefused(
+                f"{service}.{method}",
+                "no session grant ledger backs this delegated reference: a "
+                "delegation is enforced by the receiver's own ledger and is "
+                "never a bearer token (item 442, issue #2693)")
+        request_id = getattr(handle, "request_id", None)
+        key = getattr(handle, "key", None)
+        if request_id is None or key is None:
+            raise LeaseRefused(
+                f"{service}.{method}",
+                "this value is not a delegatable lease: it names no grant or "
+                "wiring key, so there is nothing to look up and nothing to "
+                "fire (item 442, issue #2693)")
+        bound = lookup(request_id)
+        if bound is None:
+            raise LeaseRefused(
+                f"{key}.{method}",
+                "this lease registered no provider with the session, so it "
+                "cannot be delegated (a lease over a bare capability has no "
+                "provider; item 442, issue #2693)")
+        provider, provider_service = bound
+        if provider_service != service:
+            raise LeaseRefused(
+                f"{key}.{method}",
+                f"the delegated reference exposes `{provider_service}`, not "
+                f"the `{service}` the call was typed against: the handle and "
+                f"the parameter disagree (item 442, issue #2693)")
+        fn = getattr(provider, method, None)
+        if not callable(fn):
+            raise LeaseRefused(
+                f"{key}.{method}",
+                f"the provider behind this delegated reference has no "
+                f"`{method}` to fire (item 442, issue #2693)")
+        # item 443: before the spend, exactly as the approval crossing does.
+        _estop_check(f"{key}.{method}")
+        spends = begin(request_id, self.name, key, method, list(args),
+                       getattr(handle, "holder", None))
+        result = fn(*args)
+        fired = getattr(owner, "delegate_fired", None)
+        if spends and fired is not None:
+            fired(spends)
+        return result
 
     def approval_crossing(self, handle: Any, capability: str,
                           fire: Callable[[], Any]) -> Any:
@@ -5160,6 +5298,7 @@ class Frame:
 
     def _dispose_adopted(self) -> Any:
         adopted, self._adopted = self._adopted, []
+        self._coalesce.clear()
         if not adopted:
             return None
 
@@ -5553,15 +5692,26 @@ class LeaseHandle:
     the session minted from the approved ticket (by `requestId`) and carries the
     single scoped revoke exemption: `l.revoke()` retires THAT grant (its own,
     always-safe: revoking your own authority only narrows), riding the LIFO
-    teardown. It names no other grant."""
+    teardown. It names no other grant.
 
-    __slots__ = ("capability", "request_id", "_revoke_cb")
+    Item 442 (issue #2693): a lease minted on a WIRING KEY also carries that key
+    and the component that acquired it, so the same value is a delegated
+    reference when it is handed to another component. It deliberately carries NO
+    provider object: a delegatee may read fields off a value, so the thing that
+    can fire the host body lives in the session's ledger, looked up by request id
+    only AFTER the grant has been checked and spent. The handle is a lookup key,
+    never a bearer token."""
+
+    __slots__ = ("capability", "request_id", "_revoke_cb", "key", "holder")
 
     def __init__(self, capability: str, request_id: str,
-                 revoke_cb: "Callable[[str], Any]") -> None:
+                 revoke_cb: "Callable[[str], Any]", key: "str | None" = None,
+                 holder: "str | None" = None) -> None:
         self.capability = capability
         self.request_id = request_id
         self._revoke_cb = revoke_cb
+        self.key = key
+        self.holder = holder
 
     def revoke(self) -> Any:
         return self._revoke_cb(self.request_id)
@@ -5860,6 +6010,17 @@ class SessionOwner:
         # holds for every existing composition.
         self.lease_acquire: Optional[Callable[..., Any]] = None
         self.lease_revoke: Optional[Callable[[str], Any]] = None
+        # item 442 (issue #2693): the delegated-crossing seam. `lease_provider`
+        # resolves the provider a lease registered (by grant request id), never
+        # from the handle; `delegate_begin` validates and decides the crossing,
+        # spending the lease grant and any other authority the provider method's
+        # reach needs, and attributes the use to the subject; `delegate_fired`
+        # pairs the spends with their emission records after the provider
+        # returns. All three are None (and inert) unless the session installs
+        # them.
+        self.lease_provider: Optional[Callable[[str], Any]] = None
+        self.delegate_begin: Optional[Callable[..., Any]] = None
+        self.delegate_fired: Optional[Callable[[list], Any]] = None
 
     def _wal(self) -> Optional[Any]:
         return self._wal_getter() if self._wal_getter is not None else None
@@ -8125,10 +8286,29 @@ def _journal_note(store: Any, key: Any, verb: str) -> None:
     if not stack:
         return
     prior = store.data.get(key, _ABSENT)
+    slot = (id(store), key)
     for frame in stack:
-        frame._journal.setdefault((id(store), key), (store, key, prior, verb))
+        frame._journal.setdefault(slot, (store, key, prior, verb))
+        # issue #3304: the keys an open bracket's forward write touched (an
+        # `undo` replaying under the journal has no bracket open)
+        if frame._open_journal is not None and frame._bracket_slots is not None:
+            frame._bracket_slots.add(slot)
     if key not in store._journaled:
         store._journaled[key] = (prior, stack[0], verb)
+
+
+def _release_unrun(effect: Any) -> bool:
+    """Take a cordis effect off its fiber without running its disposers
+    (issue #3304, `Frame.adopt_bracket`); whether it was one. Anything else (a
+    simulated context's `None`) is left alone and adopted as before."""
+    fiber = getattr(getattr(effect, "_ctx", None), "fiber", None)
+    disposables = getattr(fiber, "_disposables", None)
+    runner = getattr(effect, "_runner", None)
+    if disposables is None or runner is None or not disposables.delete(effect):
+        return False
+    effect._remove = None
+    runner.epoch = False      # a stray call is a no-op, never the inverse
+    return True
 
 
 def _not_reversed(frame: Any, store: Any, key: Any, prior: Any, verb: str,
@@ -8184,7 +8364,8 @@ class Map(_Closable):
         self._reported: set = set()
         # the activation that acquired this map: a reversal failure found at
         # release is recorded on it, because its teardown releases the map
-        self._owner = _ACTIVATING[-1] if _ACTIVATING else None
+        activating = _ACTIVATING.get()
+        self._owner = activating[-1] if activating else None
 
     @classmethod
     def new(cls) -> "Map":

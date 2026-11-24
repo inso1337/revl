@@ -18,12 +18,16 @@ call — between tool calls the composition is simply idle.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import copy
 import dataclasses
+import functools
 import hashlib
 import io
 import pickle
 import sys
+import threading
 import weakref
 from fnmatch import fnmatchcase
 
@@ -43,6 +47,184 @@ from .approval import ApprovalRequired
 from .undo_record import undo_cold_start_note, undo_dropped_state_note
 from .approval import UnencodableTicketArgs
 from .approval import _args_digest
+
+
+# Issue #3380: one Session runs at a time per process. The Python runtime kept
+# the running session's owner (`runtime._SESSION_OWNER`), its host trace and
+# other module slots once for the whole process, so a verb of one session on one
+# thread and a verb of another on a second thread interleaved with the wrong
+# owner in the slot. The owner, the trace and the stack of activating frames
+# are context-local now (slice 2); the live-instance registry, the clock and
+# the frame table are still one per process, so every verb that sets the
+# owner, and every drive of a session's loop, takes this turn. Another thread
+# waits for it, up to
+# `_TURN_TIMEOUT` seconds, then gets a SessionError naming the holder. On the
+# thread that holds it, only the same session's own nested steps pass; any other
+# entry (a second session, or this session re-entered from inside its running
+# loop) is refused at once, because waiting there would never end. `estop`
+# takes no turn: it must reach a session whose call is stuck.
+_TURN_LOCK = threading.Lock()
+_TURN_TIMEOUT = 30.0
+_TURN_HOLDER: dict = {"session": None, "thread": None, "label": "",
+                      "lend": None, "lender": None, "borrowed": False,
+                      "orphaned": False}
+_TURN_BORROW = threading.Lock()   # guards a lend and its borrow
+_TURN_LENT: contextvars.ContextVar = contextvars.ContextVar(
+    "revl_session_turn_lent", default=None)
+
+
+def _turn_label(session) -> str:
+    return (f"session {id(session):#x} on thread "
+            f"{threading.current_thread().name!r}")
+
+
+def _busy(session, why: str) -> SessionError:
+    return SessionError(
+        f"{_turn_label(session)} cannot run: {why}. One session runs at a "
+        "time per process (issue #3380), and waiting here would never end",
+        code="SESSION_BUSY")
+
+
+class _SessionTurn:
+    """The process's session turn for one session (issue #3380)."""
+
+    __slots__ = ("session", "nested", "lent")
+
+    def __init__(self, session) -> None:
+        self.session = session
+        self.nested = False
+        self.lent = None
+
+    def __enter__(self):
+        held = _TURN_HOLDER
+        me = threading.get_ident()
+        if held["thread"] == me:
+            loop = self.session._loop
+            if held["session"] is self.session and not (
+                    loop is not None and loop.is_running()):
+                self.nested = True
+                return self
+            raise _busy(self.session, f"{held['label']} holds the process's "
+                        "session turn on this same thread")
+        token = _TURN_LENT.get()
+        with _TURN_BORROW:
+            if held["lender"] == me:
+                raise _busy(self.session, "this thread lent its session turn "
+                            f"to {held['label']}, which it is joining")
+            if token is not None and token is held["lend"]:
+                if held["borrowed"]:
+                    raise _busy(self.session, "the lent session turn is "
+                                f"already borrowed by {held['label']}")
+                # the holder lent its turn to this thread (`_lend_turn`)
+                self.lent = (held["session"], held["thread"], held["label"])
+                held.update(session=self.session, thread=me,
+                            label=_turn_label(self.session), borrowed=True)
+                return self
+        timeout = _TURN_TIMEOUT
+        if not _TURN_LOCK.acquire(timeout=timeout):
+            holder = held["label"] or "another session"
+            raise SessionError(
+                f"{_turn_label(self.session)} waited {timeout:g} s for the "
+                f"process's session turn, held by {holder}. One session runs "
+                "at a time per process (issue #3380)", code="SESSION_BUSY")
+        held.update(session=self.session, thread=me,
+                    label=_turn_label(self.session), lend=None, lender=None,
+                    borrowed=False, orphaned=False)
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        if self.nested:
+            return False
+        held = _TURN_HOLDER
+        with _TURN_BORROW:
+            if self.lent is not None:
+                if not held["orphaned"]:
+                    session, thread, label = self.lent
+                    held.update(session=session, thread=thread, label=label,
+                                borrowed=False)
+                    return False
+                # the lender's turn ended while this borrow ran: the lock
+                # passed to this borrower, which releases it now
+            elif held["borrowed"]:
+                # a borrower outlived the lend (`_lend_turn` raised for it):
+                # hand it the lock rather than release it under its feet
+                held["orphaned"] = True
+                return False
+            held.update(session=None, thread=None, label="", lend=None,
+                        lender=None, borrowed=False, orphaned=False)
+        _TURN_LOCK.release()
+        return False
+
+
+@contextlib.contextmanager
+def _lend_turn():
+    """Lend the session turn this thread holds to a worker it joins (#3380).
+
+    For a host body that must boot a scratch Session from inside a running
+    session's method (`truc ship` re-running the gauntlet): asyncio refuses a
+    second loop on this thread, so the scratch runs on a worker thread, and the
+    worker would wait for the turn this thread holds while this thread waits for
+    the worker. Inside the block, a session step on a thread whose context was
+    copied from this one (`contextvars.copy_context()` taken inside the block)
+    runs under the lent turn, one borrower at a time; a second borrower, and
+    this thread driving a session, are refused at once. Each lend has a token
+    of its own, retired when the block ends, so a copy that outlives the block
+    lends nothing. The runtime's session owner and host trace are context-local
+    (slice 2 of #3380): the borrower sets its own in its copied context and
+    the lender's are untouched; on exit they are set again all the same, so a
+    host body that changed them in this context gets the lender's back. A
+    borrower still running at exit is an error (join it inside the block). On
+    that orphan path the lock passes to the borrower, the lender's thread is
+    refused at once until the borrower's step ends, and the borrower's step
+    keeps its own owner and trace. The lender recovers on its next call.
+    Outside a held turn it lends nothing."""
+    held = _TURN_HOLDER
+    me = threading.get_ident()
+    with _TURN_BORROW:
+        lending = (held["thread"] == me and held["lend"] is None
+                   and not held["borrowed"])
+        if lending:
+            token = object()
+            held.update(lend=token, lender=me)
+    if not lending:
+        yield
+        return
+    lender = held["session"]
+    driver = lender._driver
+    runtime = driver.runtime if driver is not None else None
+    owner = runtime.session_owner() if runtime is not None else None
+    reset = _TURN_LENT.set(token)
+    try:
+        yield
+    finally:
+        _TURN_LENT.reset(reset)
+        with _TURN_BORROW:
+            outlived = held["borrowed"] or held["thread"] != me
+            # an orphan keeps `lender`, so this thread is refused at once
+            held.update(lend=None, lender=me if outlived else None)
+        if outlived:
+            raise SessionError(
+                f"{held['label']} still runs under the session turn "
+                f"{_turn_label(lender)} lent it: a borrower must be joined "
+                "inside the lend (issue #3380)", code="SESSION_BUSY")
+        if runtime is not None:
+            if owner is not None:
+                runtime.set_session_owner(owner)
+            else:
+                runtime.clear_session_owner()
+            lender._own_host_trace()
+
+
+def _one_turn(method):
+    """Hold the process's session turn for the whole of `method` (issue #3380):
+    the methods that set or clear the runtime's session owner, and the verbs
+    that change session state before their first drive, so a refusal leaves
+    that state as it was."""
+    @functools.wraps(method)
+    def held(self, *args, **kwargs):
+        with _SessionTurn(self):
+            return method(self, *args, **kwargs)
+    return held
 
 
 
@@ -87,6 +269,18 @@ def _raiser_name(token: str) -> str:
 
 def _raiser_list(tokens) -> str:
     return ", ".join(_raiser_name(t) for t in sorted(tokens))
+
+
+def _drain_driver_residue(driver) -> list:
+    """Take the driver's unreported compensation residue (`NotReversed`
+    records of disposed frames, `_Driver._compensation_residue`) and empty
+    it, so a long-lived session does not keep every record (issue #3381)."""
+    held = getattr(driver, "_compensation_residue", None)
+    if not held:
+        return []
+    taken = list(held)
+    held.clear()
+    return taken
 
 
 class SessionError(RuntimeError):
@@ -204,6 +398,49 @@ def _cap_covers(wide: str, narrow: str) -> bool:
                                 cap_order.parse_stored_cap(narrow))
     except cap_order.CapError:
         return False                    # unparseable -> only exact-string matches
+
+
+def _delegation_narrowed(capability: str) -> list:
+    """The parameters a delegation's grant spelling narrowed, for the chain link.
+
+    `fs.write(path="/tmp", size="1MB")` narrows on `path` and `size`; a bare
+    `fs.write` narrows on nothing. Reads the STORED canonical spelling (the one
+    relation, `cap_order.parse_stored_cap`), so the chain records exactly what the
+    ledger's grant declares and cannot drift from it. An unparseable spelling
+    yields an empty list rather than inventing a narrowing (fail closed on the
+    record, never on the use: the coverage check already refused or admitted)."""
+    try:
+        cap = cap_order.parse_stored_cap(capability)
+    except cap_order.CapError:
+        return []
+    return [name for name, _ in cap.params]
+
+
+def _delegation_covers(granted: str, use: str) -> bool:
+    """Does a delegation minted for `granted` authorize a use of `use`?
+
+    `use` is what a delegated method call reaches, spelled as the crossing's
+    semantic identity (`fs.write`); the parameter narrowing is the LEASE's own
+    and is not re-stated by a method call whose path is an ordinary argument.
+    So an IDENTICAL stored spelling and an equal TOKEN both authorize; a wider or
+    different token does not. A narrower use (the caller spelling parameters too)
+    still has to be covered by the ordinary partial order.
+
+    Reading the token rather than only `covers` is deliberate: `covers` refuses a
+    bare `fs.write` under a granted `fs.write(path="/tmp")` because a bare token
+    TOPS the cone, and that is the right answer for a MINT (`_grant_covers`).
+    It is the wrong answer for a delegated USE, which cannot widen a grant it
+    never re-states: a use names the granted token, and the value narrowing (a
+    `path=` bound) rides the lease's own declaration. That narrowing is
+    declared-and-audited, not mounted, until item 411's enforcement lands, and
+    this seam claims no more (design §8.3 item 1)."""
+    if _cap_covers(granted, use):
+        return True
+    try:
+        token = cap_order.parse_stored_cap(granted).token
+    except cap_order.CapError:
+        return False
+    return use == token
 
 
 # -- item 470 Slice 5: the class-(c) approval gate as an intent refinement ----
@@ -436,61 +673,90 @@ HISTORY_LIMIT = 64
 AUTHORED_HOST_BODIES_KEY = "_revl_authored_host_bodies"
 
 
+def has_host_code(extern: dict) -> bool:
+    """Whether `extern` carries host code: an inline or spliced body in
+    `bodies`, or a host-module ref in `refs` (issue #3347). A ref is listed
+    like a body: its pin says which bytes run, not that anyone reviewed them."""
+    return bool(extern.get("bodies") or extern.get("refs"))
+
+
+def host_code_of(extern: dict) -> tuple:
+    """The host code `extern` runs, for comparing two generations: its
+    verbatim bodies and its host-module refs (path, symbol, root kind and
+    pinned sha256), so a ref whose pin moved reads as changed code."""
+    return (extern.get("bodies") or {}, extern.get("refs") or {})
+
+
 def host_body_entry(extern: dict) -> dict:
-    """The disclosure record for one extern that carries a host body.
+    """The disclosure record for one extern that carries host code.
 
     The server's live-body reader and the applied-generation provenance below
     both produce this record, so the fields a ticket names have one
     definition rather than one per producer.
 
-    `digests` maps each backend to the lowercase hex sha256 of the verbatim
-    body string in `extern["bodies"][backend]`, encoded as UTF-8 with no
-    normalisation, so a one-byte change moves that backend's digest. Its keys
-    are in the same sorted order as `backends`. Comparing two records by
-    equality therefore sees a replaced host body as a changed record, which
-    is the point: without it a body whose text changed under the same extern
+    `backends` lists every backend the extern has host code on, inline or
+    by host-module ref. `digests` maps each backend to a lowercase hex
+    sha256: for a body in `extern["bodies"][backend]`, of the verbatim body
+    string encoded as UTF-8 with no normalisation, so a one-byte change moves
+    that backend's digest; for a ref in `extern["refs"][backend]`, the pinned
+    sha256 of the host file the ref names (issue #3347). Its keys are in the
+    same sorted order as `backends`. A record with any ref also carries
+    `refs`, each ref backend's `path` and `symbol` (and `root` for an
+    install-origin ref). Comparing two records by equality therefore sees a
+    replaced host body, or a ref whose pin moved, as a changed record, which
+    is the point: without it host code that changed under the same extern
     name, class and backends read as unchanged.
     """
     bodies = extern.get("bodies") or {}
-    backends = sorted(bodies)
-    return {"extern": extern.get("name"),
-            "classification": extern.get("class"),
-            "backends": backends,
-            "digests": {backend: hashlib.sha256(
-                bodies[backend].encode("utf-8")).hexdigest()
-                for backend in backends}}
+    refs = extern.get("refs") or {}
+    backends = sorted(set(bodies) | set(refs))
+    entry = {"extern": extern.get("name"),
+             "classification": extern.get("class"),
+             "backends": backends,
+             "digests": {backend: (hashlib.sha256(
+                 bodies[backend].encode("utf-8")).hexdigest()
+                 if backend in bodies else refs[backend].get("sha256"))
+                 for backend in backends}}
+    if refs:
+        entry["refs"] = {
+            backend: {"path": refs[backend].get("path"),
+                      "symbol": refs[backend].get("symbol"),
+                      **({"root": refs[backend]["root"]}
+                         if refs[backend].get("root") else {})}
+            for backend in sorted(refs)}
+    return entry
 
 
 def host_body_entries(ir: dict | None) -> list:
-    """Every extern in `ir` that carries a verbatim host body, as
-    `{extern, classification, backends, digests}`. This is the surface G8 does
-    not check inside (item 24) and the item-246 classifier never looks at."""
+    """Every extern in `ir` that carries host code (a verbatim body or a
+    host-module ref), as `{extern, classification, backends, digests}` plus
+    `refs` for a ref. This is the surface G8 does not check inside (item 24)
+    and the item-246 classifier never looks at."""
     out = []
     for extern in (ir or {}).get("externs") or []:
-        if extern.get("bodies"):
+        if has_host_code(extern):
             out.append(host_body_entry(extern))
     return sorted(out, key=lambda entry: str(entry.get("extern")))
 
 
 def _applied_host_bodies(running_ir: dict | None,
                          resulting_ir: dict | None) -> list:
-    """The host bodies an apply installed or changed.
+    """The host code an apply installed or changed.
 
     A plan artifact carries a compiled composition, not the compile report the
     authoring door uses, so attribution here is by comparison: an extern whose
-    body differs from the running generation's entry for the same name (or is
-    new) is a body this apply put in place. A body the apply left untouched is
-    not part of its disclosure.
+    bodies or refs differ from the running generation's entry for the same
+    name (or is new) is host code this apply put in place. Host code the
+    apply left untouched is not part of its disclosure.
     """
     before = {entry.get("name"): entry
               for entry in (running_ir or {}).get("externs") or []}
     applied = []
     for extern in (resulting_ir or {}).get("externs") or []:
-        bodies = extern.get("bodies") or {}
-        if not bodies:
+        if not has_host_code(extern):
             continue
         prior = before.get(extern.get("name")) or {}
-        if (prior.get("bodies") or {}) == bodies:
+        if host_code_of(prior) == host_code_of(extern):
             continue
         applied.append(host_body_entry(extern))
     return sorted(applied, key=lambda entry: str(entry.get("extern")))
@@ -518,8 +784,8 @@ def _applied_generation_origin(origin: dict | None, running_ir: dict | None,
     for entry in ((origin or {}).get(AUTHORED_HOST_BODIES_KEY) or []):
         current = live.get(entry.get("extern")) or {}
         previous = running.get(entry.get("extern")) or {}
-        if (not current.get("bodies")
-                or (previous.get("bodies") or {}) != current["bodies"]):
+        if (not has_host_code(current)
+                or host_code_of(previous) != host_code_of(current)):
             continue
         carried.append(host_body_entry(current))
     merged = {entry.get("extern"): entry for entry in carried}
@@ -527,7 +793,7 @@ def _applied_generation_origin(origin: dict | None, running_ir: dict | None,
                if authored_host_bodies is None else authored_host_bodies)
     for entry in applied:
         current = live.get(entry.get("extern")) or {}
-        if not current.get("bodies"):
+        if not has_host_code(current):
             continue
         entry = host_body_entry(current)
         merged[entry["extern"]] = entry
@@ -852,6 +1118,21 @@ def _activation_error():
     return ActivationError
 
 
+def _component_config(ir: dict, config: dict, name: str) -> dict:
+    """`run.component_config`: a component's composition row config under the
+    host-supplied table (issue #3484)."""
+    from ..run import component_config  # noqa: PLC0415 (lazy: run imports cordis)
+
+    return component_config(ir or {}, config, name)
+
+
+def _configure_rows_from_host(ir: dict, config: dict | None) -> dict:
+    """`composition.configure_rows_from_host` (issue #3484)."""
+    from ..composition import configure_rows_from_host  # noqa: PLC0415
+
+    return configure_rows_from_host(ir, config)
+
+
 def _capturing_driver_class():
     """`run._Driver`, with its trace captured instead of printed."""
     from ..run import _Driver  # noqa: PLC0415 — lazy: importing run pulls cordis
@@ -1056,7 +1337,19 @@ def _handoff_back_pairs(old_ir: dict, new_ir: dict) -> dict[str, str]:
 
 
 class Session:
-    """One live composition, driven step by step."""
+    """One live composition, driven step by step.
+
+    One session runs at a time per process (issue #3380). The Python runtime
+    keeps part of the running session's state in process-wide slots (the
+    live-instance registry, the clock, the frame table; the session owner,
+    host trace and activating stack are per session), so sessions on
+    different threads take turns: a `load`, `swap`, `call` or any
+    other step that drives the session's loop waits while another session's
+    step runs on another thread, and fails with a `SessionError` (code
+    ``SESSION_BUSY``) naming the holder after 30 s. A step of a second session
+    started on the thread that holds the turn (from inside a method body, say)
+    fails at once; a host body that boots one on a worker thread it joins
+    lends it the turn (`_lend_turn`). `estop` does not wait."""
 
     def __init__(self) -> None:
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -1309,6 +1602,12 @@ class Session:
         # (the candidateHash check invalidates a stale grant, exactly as
         # `_ledger` does); reset per session (invariant 5).
         self._grants: list = []
+        # item 442 (issue #2693): the lease providers, keyed by grant request id.
+        # A delegatable handle carries no provider object (it is a value a
+        # delegatee may read fields of), so the thing that can fire the host body
+        # lives here and is resolved only after the grant has been checked and
+        # spent. Per session, like the grant ledger.
+        self._lease_providers: dict = {}
         # roadmap item 251 Slice 2: distilled `AutoApproveRule`s loaded from the
         # bound policy (`self.sandbox.auto_approve_rules`) into a persistent
         # standing-grant analog, matched by a component glob + realm + resource
@@ -1499,14 +1798,30 @@ class Session:
     # -- plumbing ----------------------------------------------------------
 
     def _run(self, coro):
-        if self._loop is None:
-            self._loop = asyncio.new_event_loop()
-            # a session dropped while still loaded never reaches `_reset`;
-            # close its loop when it is collected rather than leave that to
-            # the loop's own finalizer and its ResourceWarning (issue #1720)
-            weakref.finalize(self, _close_abandoned_loop, self._loop)
-        self._own_host_trace()
-        return self._loop.run_until_complete(coro)
+        turn = _SessionTurn(self)
+        try:
+            turn.__enter__()
+        except SessionError:
+            close = getattr(coro, "close", None)
+            if close is not None:
+                close()        # refused before it ran: never awaited, by design
+            raise
+        try:
+            if self._loop is None:
+                # issue #3380: a new loop registers its self-pipe reader with a
+                # copy of the current context, which here holds this session's
+                # owner, and the owner reaches back to the session. Made under
+                # an empty context, the loop holds no such reference, so a
+                # session dropped while loaded can still be collected.
+                self._loop = contextvars.Context().run(asyncio.new_event_loop)
+                # a session dropped while still loaded never reaches `_reset`;
+                # close its loop when it is collected rather than leave that to
+                # the loop's own finalizer and its ResourceWarning (issue #1720)
+                weakref.finalize(self, _close_abandoned_loop, self._loop)
+            self._own_host_trace()
+            return self._loop.run_until_complete(coro)
+        finally:
+            turn.__exit__(None, None, None)
 
     def _own_host_trace(self) -> None:
         """Route the host stubs' trace to THIS session's driver while it runs
@@ -1543,16 +1858,19 @@ class Session:
                 self._loop = None
                 loop.close()
             return
-        self._loop = None
-        try:
-            for task in pending:
-                task.cancel()
-            if pending:
-                loop.run_until_complete(
-                    asyncio.gather(*pending, return_exceptions=True))
-            loop.run_until_complete(loop.shutdown_asyncgens())
-        finally:
-            loop.close()
+        # issue #3380: the drain runs the session's tasks, so it takes the turn
+        # like any other drive (a no-op inside `_reset` or `load`, which hold it)
+        with _SessionTurn(self):
+            self._loop = None
+            try:
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True))
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            finally:
+                loop.close()
 
     @property
     def loaded(self) -> bool:
@@ -1574,6 +1892,7 @@ class Session:
 
     # -- lifecycle ---------------------------------------------------------
 
+    @_one_turn
     def load(self, ir: dict, config: dict | None = None,
              record: bool = False, origin: dict | None = None, *,
              agent_authored: bool | None = None) -> dict:
@@ -1630,6 +1949,10 @@ class Session:
                 f"implementation, so it may never enter a running composition; "
                 f"`revl_check` lists them (docs/holes.md)")
         self._enforce_environment_contract(ir, config)
+        # issue #3484: a host table for a row's component is a value change to
+        # that row (426 §3.1 level 3), typed and recorded in the rows IR, so
+        # what the manifest and the audit report is what runs
+        ir = _configure_rows_from_host(ir, config)
         self._enforce_sandbox(ir)
         self._enforce_evidence(ir)
         # item 246, Slice 2: the policy-owned `requires approval` gate. A component
@@ -1906,6 +2229,15 @@ class Session:
         # gate already minted, and its disposer's own-requestId revoke rides here.
         self._owner.lease_acquire = self._runtime_lease_acquire
         self._owner.lease_revoke = self._runtime_lease_revoke
+        # item 442 (issue #2693): the delegated-crossing seam. The provider is
+        # resolved by request id from this session's registry; the crossing is
+        # decided and spent by the ordinary class-(c) machinery, attributed to
+        # the receiving component, and paired to its emission record after the
+        # provider fires. Inert unless a composition mints and hands out a
+        # delegation.
+        self._owner.delegate_begin = self.delegate_begin
+        self._owner.delegate_fired = self.delegate_fired
+        self._owner.lease_provider = self.lease_provider
         runtime_mod.set_session_owner(self._owner)
 
     def _configure_owner_approvals(self, ir: dict) -> None:
@@ -2250,16 +2582,24 @@ class Session:
         self._refuse_if_halted("swap")   # item 443
         checkpoint = _LoadCheckpoint(self)
         try:
+            ir = _configure_rows_from_host(ir, self.config)
             plan = self._plan_swap(driver, ir, migrate, agent_authored)
         except BaseException as exc:
             checkpoint.restore(self)
             _name_the_candidate(exc, ir)
             raise
         try:
-            return self._cut_over(driver, ir, origin, plan)
+            said = self._cut_over(driver, ir, origin, plan)
         except ApprovalRequired as exc:
             _name_the_candidate(exc, ir)
             raise
+        # Issue #3381: the frames disposed at this swap may have left
+        # `NotReversed` records (an `undo` that did not put a key back). The
+        # answer names them, in `unload`'s `compensationResidue` shape, and
+        # the driver's list is drained: a reported record is not kept, and one
+        # that no answer read is what `unload` reports.
+        said["compensationResidue"] = _drain_driver_residue(driver)
+        return said
 
     def _plan_swap(self, driver, ir: dict, migrate: str,
                    agent_authored: bool) -> "_SwapPlan":
@@ -2373,6 +2713,7 @@ class Session:
                          pre_pending=pre_pending, policy=migrate,
                          handoff_carry=handoff_carry)
 
+    @_one_turn
     def _cut_over(self, driver, ir: dict, origin: dict | None,
                   plan: "_SwapPlan") -> dict:
         """Tear the running generation down and boot the successor in its place.
@@ -2707,6 +3048,7 @@ class Session:
                 "resources": sum(len(cap) for _, cap in pairs)}
         return report
 
+    @_one_turn
     def _abort_swap(self, old_ir: dict, pre: dict,
                     saved_previous: dict | None,
                     saved_previous_origin: dict | None,
@@ -4014,7 +4356,7 @@ class Session:
             "componentStates": states,
         }
 
-    async def _plug(self, name: str, module) -> None:
+    async def _plug(self, name: str, module, ir: dict) -> None:
         """Bring one component up from `module`, awaiting an async body exactly
         as `run._Driver._load` does for the whole composition."""
         driver = self._driver
@@ -4023,7 +4365,8 @@ class Session:
             raise SessionError(
                 f"the composition has no component `{name}` to load — the plan "
                 "artifact is inconsistent with its resulting IR")
-        fiber = driver.root.plugin(body, driver.config.get(name, {}))
+        fiber = driver.root.plugin(body,
+                                   _component_config(ir, driver.config, name))
         driver.fibers[name] = fiber
         await driver._flush()
         if fiber.state == driver.FiberState.LOADING:
@@ -4045,7 +4388,7 @@ class Session:
             return {"name": name, "absent": name not in driver.fibers,
                     "state": None, "providedKeys": self._provided_keys()}
         if op["op"] == "load":
-            self._run(self._plug(name, module))
+            self._run(self._plug(name, module, driver.ir))
             fiber = driver.fibers.get(name)
             state = driver.FiberState(fiber.state).name if fiber is not None else None
             return {"name": name, "absent": fiber is None, "state": state,
@@ -4092,7 +4435,7 @@ class Session:
                 # reported through `_restore_entry` like a FAILED fiber.
                 state: str | None = None
                 try:
-                    self._run(self._plug(name, running_module))
+                    self._run(self._plug(name, running_module, running_ir))
                     fiber = driver.fibers.get(name)
                     state = (driver.FiberState(fiber.state).name
                              if fiber is not None else None)
@@ -4209,16 +4552,38 @@ class Session:
         return _snapshot(self)
 
     def restore(self, snap: dict, profile=None,
-                report: dict | None = None) -> dict:
+                report: dict | None = None, *,
+                gate_reads: dict[str, str] | None = None,
+                agent_supplied: bool = False,
+                compile_profile=None) -> dict:
         """Re-admit a snapshot into this (empty) session by replaying
         admission — compile through the gate, then boot. A component the
         current checker rejects fails loudly and loads nothing. `profile` is
         the authoring trust the snapshot's text compiles under (`None` for the
-        operator's own snapshot)."""
+        operator's own snapshot). `gate_reads` refuses a boot compile whose
+        disk reads differ from the operator gate's, and `agent_supplied`
+        makes the `meta.components` check unconditional
+        (`persist.restore`)."""
         from .persist import restore as _restore  # noqa: PLC0415 — lazy
 
-        return _restore(self, snap, profile=profile, report=report)
+        return _restore(self, snap, profile=profile, report=report,
+                        gate_reads=gate_reads, agent_supplied=agent_supplied,
+                        compile_profile=compile_profile)
 
+    def rehold_compensation_residue(self, *answers) -> None:
+        """Put back the `compensationResidue` of answers a caller does not
+        return to its client (issue #3381). A swap or rollback answer drains
+        the driver's records into itself; a caller that discards that answer
+        hands its records back here, so the next answer or the boundary report
+        names them and none is lost."""
+        held = getattr(self._driver, "_compensation_residue", None)
+        if held is None:
+            return
+        for answer in answers:
+            if isinstance(answer, dict):
+                held.extend(answer.get("compensationResidue") or ())
+
+    @_one_turn
     def unload(self) -> dict:
         """Tear down and report the residue checks — R4 from inside the
         protocol, so an agent can prove its component leaves nothing.
@@ -4535,8 +4900,12 @@ class Session:
         def _drive() -> None:
             driver._settlement_ledger = ledger
             try:
-                self._own_host_trace()             # issue #1859
-                self._loop.run_until_complete(driver._dispose_all(self.ir))
+                # issue #3380: the worker thread takes the process's session
+                # turn like any other drive; a refusal or a timeout is recorded
+                # as the attempt's failure below, never read as a release.
+                with _SessionTurn(self):
+                    self._own_host_trace()         # issue #1859
+                    self._loop.run_until_complete(driver._dispose_all(self.ir))
                 disposal["returned"] = True
             except asyncio.CancelledError:
                 disposal["cancelled"] = True
@@ -4545,7 +4914,10 @@ class Session:
             finally:
                 driver._settlement_ledger = None
 
-        await host_loop.run_in_executor(None, _drive)
+        # issue #3380: the runtime's session owner and trace are context-local,
+        # and an executor thread starts with none; carry this context over.
+        await host_loop.run_in_executor(
+            None, contextvars.copy_context().run, _drive)
         result = self._settlement(driver, owner, aborting, disposal, ledger,
                                   verdict=verdict, finalize=finalize)
         self._teardown_settlement = result
@@ -4750,6 +5122,7 @@ class Session:
             manifest["actions"] = [dict(a) for a in self._actions]
         return manifest
 
+    @_one_turn
     def commit_confirm(self, manifest_hash: str) -> dict:
         """Execute the approved commit — step 2 (Decision 3/4). The durable
         record order is exactly: `commit-approved`, then each `flushed`, then the
@@ -4781,6 +5154,7 @@ class Session:
                 "flushResidue": flush["flushResidue"], "discharged": discharged,
                 "prompts": prompts, "compensationResidue": residue, **report}
 
+    @_one_turn
     def abort(self) -> dict:
         """Abort the session (Decision 5): mark every live frame aborting BEFORE
         any teardown starts, drop the deferral queue (zero cost, zero crossings),
@@ -5648,10 +6022,16 @@ class Session:
 
         Called BEFORE the `prompts` snapshot and `_reset`, once the frames'
         Phase-2 drain and the owner's `finalize_abort` have run."""
-        if owner is None:
-            return []
-        residue = owner.collect_compensation_residue()
-        owner.prompts["residue"] += len(residue)
+        residue = ([] if owner is None
+                   else owner.collect_compensation_residue())
+        # Issue #3381: records left by frames disposed at an earlier swap are
+        # no longer in the owner's registry; the driver holds them until an
+        # answer reports them. Merged by identity, then drained.
+        seen = {id(rec) for rec in residue}
+        residue += [rec for rec in _drain_driver_residue(self._driver)
+                    if id(rec) not in seen]
+        if owner is not None:
+            owner.prompts["residue"] += len(residue)
         return residue
 
     def _teardown_report(self, driver, residue=()) -> dict:
@@ -5731,6 +6111,7 @@ class Session:
         if wal is not None and getattr(wal, "is_open", True):
             wal.close()
 
+    @_one_turn
     def _reset(self) -> None:
         if self._driver is not None:
             self._driver.runtime.clear_session_owner()
@@ -5805,6 +6186,7 @@ class Session:
         self._ledger = []
         self._grants = []
         self._grants_consumed = 0
+        self._lease_providers = {}
         # item 251 Slice 2: the MATERIALIZED rules die with the generation - the
         # next `load` rebuilds them from the bound policy. The H1 review bind and
         # the spent budget do NOT die with it: both are keyed by the rule's
@@ -5946,6 +6328,7 @@ class Session:
             self._wire_turn(turn_doc, bundle=turn_bundle)
         return AdmitVerdict(True, handle=AdmitHandle(self, keys), keys=keys)
 
+    @_one_turn
     def _wire_turn(self, turn_doc: dict, *,
                    bundle: dict | None = None) -> tuple[str, ...]:
         """Plug an admitted turn's components into the LIVE driver with the
@@ -6057,8 +6440,9 @@ class Session:
         async def _plug() -> None:
             for comp in turn_components:
                 name = comp["name"]
-                fiber = runtime_mod.plug(driver.root, getattr(module, name),
-                                         driver.config.get(name, {}))
+                fiber = runtime_mod.plug(
+                    driver.root, getattr(module, name),
+                    _component_config(driver.ir, driver.config, name))
                 driver.fibers[name] = fiber
                 await driver._flush()
                 if fiber.state == driver.FiberState.LOADING:
@@ -6312,6 +6696,7 @@ class Session:
 
     # -- interaction -------------------------------------------------------
 
+    @_one_turn
     def call(self, key: str, method: str, args: list | None = None,
              *, raw: bool = False) -> dict:
         """Invoke a provided service operation on the running composition —
@@ -7214,7 +7599,8 @@ class Session:
 
     def _approval_decide_call(self, key: str, method: str, args,
                               record: dict | None = None,
-                              spends: list | None = None) -> None:
+                              spends: list | None = None,
+                              prefer_grant: str | None = None) -> None:
         """The per-call decision (Decision 2). Off -> return immediately (byte-
         identical). class none/(a)/(b) -> proceed and count. class (c) -> consume
         a standing approval and proceed, else mint a ticket, count the prompt, and
@@ -7282,7 +7668,7 @@ class Session:
         # semantic identity covers ANY class-(c) call reaching it (differing
         # args included), so the shell-escape shape auto-approves against one
         # mint instead of prompting per call.
-        grants = self._find_standing_grant(ticket)
+        grants = self._find_standing_grant(ticket, prefer=prefer_grant)
         if grants is not None:
             for g in grants:                   # every class-(c) cap is covered
                 use = self._consume_grant(g)   # durable spend before the fire
@@ -7447,10 +7833,16 @@ class Session:
         from .approval import ApprovalRequired  # noqa: PLC0415
         for lz in leases:
             cap = lz["capability"]
-            component = lz["component"]
-            if self._live_lease_grant(component, cap) is not None:
-                continue  # already minted from an approved ticket (retry / pre-mint)
+            # The grant is bound to the CROSSING component the ticket names,
+            # which can differ from the acquiring activation body (`lz[
+            # "component"]`): a lease over a key another component provides is
+            # acquired by one component and consumed at another's crossing. The
+            # liveness check must use the identity the mint will use, or an
+            # approved lease re-raises its ticket forever in that topology
+            # (issue #2693).
             ticket = self._build_lease_ticket(lz)
+            if self._live_lease_grant(ticket["component"], cap) is not None:
+                continue  # already minted from an approved ticket (retry / pre-mint)
             # roadmap item 471: the lease's own votes are the answer. The mint
             # is taken from the LIVE satisfied decision for THIS ticket and from
             # nothing else (see the docstring). `in self._tickets` is the other
@@ -7589,7 +7981,8 @@ class Session:
         return self._satisfied_decision_for(ticket) is decision
 
     def _runtime_lease_acquire(self, component: str, capability: str,
-                               ttl_ms, uses) -> str | None:
+                               ttl_ms, uses, key: "str | None" = None,
+                               provider: object = None) -> str | None:
         """The runtime `_revl_frame.acquire_lease` bridge: resolve the standing
         grant the lease gate minted and return its `requestId` (the handle names
         it). None if no live lease grant backs it — the frame then fails closed
@@ -7599,7 +7992,15 @@ class Session:
         The grant's own component is the CROSSING component the ticket bound
         (`crossings_for_capability`), which may differ from the acquiring
         activation body's component; match on the crossing component so the handle
-        names the grant the body's crossings actually consume against."""
+        names the grant the body's crossings actually consume against.
+
+        Item 442 (issue #2693): a lease over a wiring key also registers the
+        provider the key resolves to with the SESSION (keyed by request id), and
+        records the ACQUIRING component as the lender together with that
+        component's activation-scope hash at this moment. The handle itself
+        carries no provider, so a delegatee reading fields off it gets no
+        authority; and liveness of the lender is decided against the scope it
+        lent from, not against the crossing scope the grant was minted for."""
         g = self._live_lease_grant(component, capability)
         if g is None:
             # the acquiring body's component is not the crossing component (the
@@ -7612,7 +8013,105 @@ class Session:
                         and _cap_covers(cand["capability"], capability):
                     g = cand
                     break
-        return g["requestId"] if g is not None else None
+        if g is None:
+            return None
+        if key is not None and provider is not None:
+            # First acquirer wins, as the lender and generation do: a second
+            # lease over the same crossing shares this grant (a documented
+            # limit), and it must not repoint the first lender's handle at the
+            # second one's provider. The lender and key are kept so a delegated
+            # crossing can check the handle against what was registered.
+            self._lease_providers.setdefault(g["requestId"], (
+                key, provider, self._require_service(component, key),
+                component))
+            g.setdefault("lender", component)
+            g.setdefault("lenderGeneration", self._scope_hash(component))
+        return g["requestId"]
+
+    def _require_service(self, component: str, key: str) -> str | None:
+        """The service type a component's `requires` key names, from the IR."""
+        for comp in (self.ir or {}).get("components") or []:
+            if comp.get("name") == component:
+                return (comp.get("requires") or {}).get(key)
+        return None
+
+    def _scope_hash(self, component: str) -> str | None:
+        """The candidate hash of one component's ACTIVATION scope in the current
+        generation, or None when no approval policy is bound (the generation
+        binding is inert then, as it is for a lease)."""
+        cm = self._class_map
+        if cm is None:
+            return None
+        reach = getattr(cm, "_reach", {}).get(f"{component}:activation")
+        closure = reach["closureComponents"] if reach is not None else {component}
+        return cm.candidate_hash(closure)
+
+    def lease_provider(self, request_id: str):
+        """`(provider, service)` for the lease grant `request_id`, or None. The
+        provider never lives on the handle; this is the only place a delegated
+        crossing resolves it, and only after the grant has been looked up by id
+        in this session's own ledger."""
+        bound = self._lease_providers.get(request_id)
+        if bound is None:
+            return None
+        key, provider, service, lender = bound
+        return provider, service
+
+    def delegate_begin(self, request_id: str, subject: str, key: str,
+                       method: str, args: list, lender: "str | None") -> list:
+        """Decide a delegated crossing and spend what it needs, returning the
+        spends for the emission pairing. The provider fires AFTER this returns.
+
+        The delegated grant is validated first (its checks do not spend), then
+        the ORDINARY class-(c) decision for the provider operation runs with the
+        lease grant PREFERRED: that is what spends the lease's grant for
+        `key.method` and also demands coverage for every OTHER class-(c)
+        capability the provider method reaches, so a provider method that reaches
+        a second irreversible capability prompts for it instead of firing it
+        under the lease's consent. Preferring the lease means an operator grant
+        that sits earlier in the ledger is not spent in its place; a single-use
+        approval the operator gave for this exact crossing still answers it, and
+        is then the authority for it (the lease is not spent, but the use is
+        still attributed to the delegation on the row).
+
+        The handle must match what the lease registered (its wiring key and its
+        lender), so a second lease sharing the grant cannot be used to fire the
+        first lender's provider."""
+        grant = self._delegation_grant(request_id, f"{key}.{method}")
+        self._delegation_subject(grant, subject, lender)
+        bound = self._lease_providers.get(request_id)
+        if bound is None or bound[0] != key or (
+                lender is not None and bound[3] != lender):
+            raise SessionError(
+                f"the delegated reference does not match what lease "
+                f"`{request_id}` registered (wiring key `{key}`, lender "
+                f"`{lender}`), so it cannot be used to cross: one grant is "
+                f"lent by the party that registered it (item 442, issue #2693)")
+        spends: list = []
+        self._approval_decide_call(key, method, list(args or []),
+                                   spends=spends, prefer_grant=request_id)
+        self._loop_axes.record_call(self._loop_call_class(key, method))
+        if not spends:
+            # a class none/(a)/(b) operation, or no approval policy bound: the
+            # lease still meters this crossing, and its spend is paired with an
+            # emission record like any other.
+            use = self._delegate_use(request_id, subject, f"{key}.{method}",
+                                     lender=lender)
+            return [{"requestId": grant["requestId"], "use": use,
+                     "capability": grant["capability"],
+                     "component": grant["component"]}]
+        # The crossing was made THROUGH the delegated reference, so the row
+        # records who lent it and who used it whichever authority answered the
+        # decision. When an operator's single-use approval answered instead of
+        # the lease, the lease is not spent, but the operator still reads that
+        # the delegatee used the lender's handle.
+        self._delegate_attribute(grant, subject, lender)
+        return spends
+
+    def delegate_fired(self, spends: list) -> None:
+        """After the provider returned, pair each spend with its emission record,
+        exactly as `Session.call` does for an ordinary crossing."""
+        self._record_spend_emissions(spends)
 
     def _runtime_lease_revoke(self, request_id: str) -> dict:
         """The lease disposer's own-requestId revoke (item 294, the scoped
@@ -9225,7 +9724,8 @@ class Session:
             f"{refusal}")
 
     def _live_grant_for(self, capability: str, ticket: dict, now: int,
-                        refusals_out: list | None = None):
+                        refusals_out: list | None = None,
+                        prefer: str | None = None):
         """The first LIVE standing grant covering `capability` under this ticket's
         live closure: `_grant_covers` on the minted key, the same component and
         reach-closure candidate hash (invariants 4/5), the same session, unexpired
@@ -9244,8 +9744,17 @@ class Session:
         the clauses are conjunctive, so the result is unchanged, but a refusal
         collected for a grant that is expired, spent, or minted for another
         deputy would name a declaration that is not standing any more, which is
-        a worse sentence than none."""
-        for g in self._grants:
+        a worse sentence than none.
+
+        `prefer` (item 442, issue #2693) names the grant a DELEGATED crossing is
+        made under: it is tried first, so an operator grant that happens to sit
+        earlier in the ledger cannot answer, and be spent, in place of the lease
+        the delegation was handed over under. Nothing else changes: a preferred
+        grant that is not live or does not cover is skipped like any other."""
+        ordered = self._grants if prefer is None else (
+            [g for g in self._grants if g.get("requestId") == prefer]
+            + [g for g in self._grants if g.get("requestId") != prefer])
+        for g in ordered:
             if g["consumed"]:
                 continue
             if g["component"] != ticket["component"]:
@@ -9269,7 +9778,7 @@ class Session:
             return g
         return None
 
-    def _find_standing_grant(self, ticket: dict):
+    def _find_standing_grant(self, ticket: dict, prefer: str | None = None):
         """Every LIVE standing grant needed to JOINTLY cover this class-(c)
         ticket, or None when even one class-(c) capability the ticket reaches has
         no live covering grant (fail-closed: the crossing then prompts single-use
@@ -9330,7 +9839,8 @@ class Session:
         missing = False
         for cap in class_c:
             refused: list = []
-            g = self._live_grant_for(cap, ticket, now, refusals_out=refused)
+            g = self._live_grant_for(cap, ticket, now, refusals_out=refused,
+                                     prefer=prefer)
             if g is None:
                 # a class-(c) capability with no live grant -> prompt. Keep
                 # walking the rest: the operator is about to be asked about the
@@ -9369,6 +9879,154 @@ class Session:
         if wal is not None:
             wal.record_approval_consumed(grant["requestId"], use=use)
         return use
+
+    # -- item 442 (issue #2693): delegated use, attribution and revocation ---
+
+    def _delegation_grant(self, request_id: str, capability: str) -> dict:
+        """Look up the delegation grant `request_id` and validate every axis of
+        its liveness WITHOUT spending it.
+
+        The delegation is a lookup key into this session's own ledger, never a
+        bearer token, so every decision is read from state the ledger holds: the
+        grant must exist here, be lease-tagged (a delegation is a lent lease, and
+        nothing else may be spent as one), belong to this session, be unrevoked,
+        unexpired at THIS crossing, and still belong to the generation its lender
+        lent it from. A lapsed grant is marked revoked (and consumed, so it can
+        no longer cover an ordinary crossing either) before the refusal: forward
+        only, never resurrected.
+        """
+        grant = next((g for g in self._grants
+                      if g.get("requestId") == request_id), None)
+        if grant is None:
+            raise SessionError(
+                f"no standing grant `{request_id}` in this session's ledger: a "
+                f"delegated reference is a lookup key into the receiver's own "
+                f"ledger and is never a bearer token (item 442, issue #2693)")
+        if not grant.get("lease"):
+            raise SessionError(
+                f"standing grant `{request_id}` is not a lease, so it cannot be "
+                f"delegated: a delegation is a bounded, revocable view of a "
+                f"held lease (item 442, issue #2693)")
+        if grant.get("session") != self._session_id:
+            raise SessionError(
+                f"standing grant `{request_id}` was minted in another session: "
+                f"a delegated use is never replayable across a session "
+                f"boundary (item 442, issue #2693)")
+        if grant.get("revoked"):
+            raise SessionError(
+                f"standing grant `{request_id}` was revoked, so the delegated "
+                f"reference it backed no longer authorizes any crossing "
+                f"(item 442, issue #2693)")
+        now = self._now_ms()
+        if self._expired(grant, now):
+            self._retire_delegation(grant)
+            raise SessionError(
+                f"the lease behind standing grant `{request_id}` lapsed at "
+                f"{grant.get('expiresAt')}, so the delegated reference it backed "
+                f"is revoked and this crossing is refused (item 442, issue #2693)")
+        if not self._lender_generation_live(grant):
+            self._retire_delegation(grant)
+            raise SessionError(
+                f"the lender of standing grant `{request_id}` was swapped or "
+                f"unloaded, so every delegation it handed out is revoked "
+                f"(item 442, issue #2693)")
+        remaining = grant.get("remainingUses")
+        if remaining is not None and remaining <= 0:
+            raise SessionError(
+                f"standing grant `{request_id}` has no uses left, so the delegated "
+                f"reference is exhausted and this crossing is refused "
+                f"(item 442, issue #2693)")
+        if not _delegation_covers(grant["capability"], capability):
+            raise SessionError(
+                f"standing grant `{request_id}` covers `{grant['capability']}`, "
+                f"not `{capability}`: a delegated reference authorizes only the "
+                f"surface it was minted for (item 442, issue #2693)")
+        return grant
+
+    @staticmethod
+    def _retire_delegation(grant: dict) -> None:
+        """Retire a delegation forward-only, so a row an operator reads as
+        revoked can never cover an ordinary crossing either (`_live_grant_for`
+        skips `consumed` even though it does not read `revoked`)."""
+        grant["revoked"] = True
+        grant["consumed"] = True
+
+    def _delegation_subject(self, grant: dict, subject: str,
+                            lender: "str | None") -> str | None:
+        """Validate who may lend a grant and who may use it, without writing the
+        attribution.
+
+        The LENDER is the component that acquired and handed out this lease (the
+        handle's holder), which can be distinct from the grant's own `component`:
+        the lease's grant is bound to the CROSSING component the ticket bound
+        (often the provider emitting the host op), while the delegating party is
+        the activation body that minted the handle. One grant is lent by one
+        party to one subject.
+        """
+        lender = lender or grant.get("lender") or grant.get("component")
+        known_lender = grant.get("lender")
+        if known_lender is not None and lender is not None \
+                and known_lender != lender:
+            raise SessionError(
+                f"standing grant `{grant['requestId']}` was already delegated "
+                f"by `{known_lender}`, so `{lender}` cannot lend it as well: "
+                f"one grant is lent by the party that holds it "
+                f"(item 442, issue #2693)")
+        held_by = grant.get("subject")
+        if held_by is not None and held_by != subject:
+            raise SessionError(
+                f"standing grant `{grant['requestId']}` is already lent to "
+                f"`{held_by}`, so `{subject}` cannot use it: one delegation "
+                f"names one subject (item 442, issue #2693)")
+        return lender
+
+    def _delegate_attribute(self, grant: dict, subject: str,
+                            lender: "str | None") -> None:
+        """Write the delegation record once: the lender, the subject, and the one
+        chain link this depth admits (`from` the lender, `to` the subject,
+        `narrowed` the granted parameters)."""
+        lender = self._delegation_subject(grant, subject, lender)
+        if grant.get("subject") is None:
+            grant["subject"] = subject
+            grant["lender"] = lender
+            grant.setdefault("chain", []).append({
+                "from": lender, "to": subject,
+                "narrowed": _delegation_narrowed(grant["capability"])})
+
+    def _delegate_use(self, request_id: str, subject: str,
+                      capability: str, *, lender: str | None = None) -> int:
+        """Spend one use of standing grant `request_id` FOR a second party.
+
+        This is the ledger primitive: validate the lease grant
+        (`_delegation_grant`), write the attribution once (`_delegate_attribute`)
+        and spend through `_consume_grant`, so consume-before-fire and the WAL
+        record are the lease's own. The runtime path is `delegate_begin`, which
+        lets the ordinary class-(c) decision perform the spend so a provider
+        method's OTHER class-(c) reach is decided too; this primitive is what
+        covers the no-policy case and what the ledger tests drive directly.
+        """
+        grant = self._delegation_grant(request_id, capability)
+        self._delegate_attribute(grant, subject, lender)
+        return self._consume_grant(grant)
+
+    def _lender_generation_live(self, grant: dict) -> bool:
+        """Whether the grant's LENDER still holds the generation it lent from.
+
+        The hash was taken over the ACQUIRING component's activation scope when
+        the handle was minted (`_runtime_lease_acquire`), not over the grant's
+        crossing scope: the grant's `component` is the crossing provider, and
+        re-deriving that scope here both checks the wrong party and changes when
+        the provider method's own reach changes. A swap that changes the lender's
+        activation closure recomputes a different hash, so the delegation
+        auto-revokes. A session with no class map (no policy bound) keeps the
+        binding inert.
+        """
+        expected = grant.get("lenderGeneration")
+        if expected is None:
+            return True
+        if self._class_map is None:
+            return True
+        return self._scope_hash(grant.get("lender")) == expected
 
     # -- item 251 Slice 2: distilled AutoApproveRule enforcement -------------
 
@@ -9983,6 +10641,18 @@ class Session:
             "consumed": False,
             "revoked": False,               # item 379: set by an early revoke
             "lease": is_lease,              # item 294: minted from an effect lease
+            # item 442 (issue #2693): the delegation record. `subject` is the
+            # party the authority was LENT to (None until a delegated use names
+            # one) and `chain` is who lent what to whom, shaped for depth from
+            # day one even though v1 writes exactly one link. `component` above
+            # stays the CROSSING component the ticket bound; the LENDER (the
+            # component that acquired the lease and handed it out) is written to
+            # `lender` at the first delegated use, because those can differ and
+            # the design's row names the delegator. A delegation SHARES
+            # authority, it never transfers it, so the delegatee holds nothing
+            # once the call returns.
+            "subject": None,
+            "chain": [],
             # item 470 stage 1: the ceilings the mint spelling STATED, kept after
             # the erasure above so the grant is still a declaration at the
             # crossing. `calls` is here for the audit and is not re-compared
@@ -10444,7 +11114,20 @@ class Session:
                  # item 379: True when an operator retired the grant EARLY (as
                  # opposed to it lapsing on uses/TTL). Both leave it out of the
                  # live set; this bit distinguishes them for the audit.
-                 "revoked": g.get("revoked", False)}
+                 # item 442: a delegation whose lender lapsed or was swapped is
+                 # also marked here at the delegated crossing that discovers it,
+                 # so the row an operator reads says the handle is retired.
+                 "revoked": g.get("revoked", False),
+                 # item 442 (issue #2693): the delegation record an operator
+                 # reads. `lender` is the component that acquired and handed out
+                 # the lease (which can differ from `component`, the crossing
+                 # component the grant is bound to), `subject` is the party the
+                 # authority was lent to, and `chain` is who lent what to whom.
+                 # They are None/[] until a delegated use names a subject, so an
+                 # ordinary lease's row is unchanged in meaning.
+                 "lender": g.get("lender"),
+                 "subject": g.get("subject"),
+                 "chain": [dict(link) for link in (g.get("chain") or [])]}
                 for g in self._grants],
             # item 251 Slice 3: the TIME AXIS. `promptsPerSessionSeries` is the
             # per-session prompt tally read from the WAL (deterministic, ordered by

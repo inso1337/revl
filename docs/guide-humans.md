@@ -223,6 +223,13 @@ compile error, never a host pass-through ([docs/stdlib-2.0.md](stdlib-2.0.md)):
 | `join(sep)` | List[Str] | elements joined by `sep` |
 | `repeat(n)` | Str | `n` copies concatenated |
 
+## What differs from Python and JavaScript
+
+- Timers (`every`, `after`) fire only when the host calls `Clock.advance(ms)`; time does not pass on its own: [time-coeffect.md](time-coeffect.md).
+- `%` is the truncated remainder (sign of the dividend, so `-3 % 4 == -3`); `a.mod(b)` is the Euclidean one, always in `[0, |b|)`: [arithmetic.md](arithmetic.md).
+- `Map.keys()` comes in ascending string order of the keys (`"1"`, `"10"`, `"100"`), not insertion order: [collections.md](collections.md).
+- A plain string has only the escapes `\"` and `\\`; `"a\nb"` is a backslash and an `n`, not a newline: [strings.md](strings.md).
+
 ## What won't compile
 
 This is the point of the language, each rejection names the guarantee and
@@ -273,7 +280,7 @@ below; the exhaustive per-command flag reference is
 | `revl goal audit FILES` | the termination-contract blind-spot report: the class-(c) capabilities the run reaches that no criterion in its contract observes (`--json`) | [441-goal-contracts.md](design/441-goal-contracts.md) |
 | `revl analyze FILES` | Petri-net reachability liveness: derive a net from the composition and report any reachable deadlock, naming the stranded activation (report-only; `--ir`, `--json`) | [analyze-liveness.md](analyze-liveness.md) |
 | `revl diff PREV CURR` | semantic composition diff: components added/removed/changed, emissions gained/lost, provide/require edges, the PR-review tool for agent-generated compositions | [revl-diff.md](revl-diff.md) |
-| `revl migrate OLD NEW --against COMP` | plan one component version change against the real consumers: movable/needs-adapter/blocked per consumer, authority widening, state hand-off, old-version removability (read-only) | [commands-reference.md](commands-reference.md#revl-migrate) |
+| `revl migrate OLD NEW --against COMP` | plan one component version change against the real consumers: movable/needs-adapter/blocked per consumer, authority widening, state hand-off, old-version removability, and with `--policy` the boundary policy's verdict on the composition after the change (read-only) | [commands-reference.md](commands-reference.md#revl-migrate) |
 | `revl version PREV CURR` | derive the required semver bump from the interface diff against a previous composition | [derived-versioning.md](derived-versioning.md) |
 | `revl changelog --from OLD --to NEW` | the release note derived from the interface, structural and authority delta, with the semver headline | [derived-versioning.md](derived-versioning.md) |
 | `revl update check` | compare the running toolchain with the newest release on a GitHub release feed, its manifest and compatibility statement (exit 10 when an update is available, `--json`) | [updates.md](updates.md) |
@@ -290,6 +297,7 @@ below; the exhaustive per-command flag reference is
 | `revl query emitted-between --timeline F --from X --to Y` | which emissions crossed between two steps of a recorded run | [queries.md](queries.md) |
 | `revl query touched COMPONENT` | everything a component touched (`--trace` lifecycle JSONL, `--timeline` replay recording) | [queries.md](queries.md) |
 | `revl fmt FILES` | canonical formatting (IR-equivalence gated); `--migrate` rewrites 1.x `$`, `--check` for CI | [fmt.md](fmt.md) |
+| `revl docs gen\|check FILES` | write or verify the behavior comment block derived from the IR above each component: effect summary, capability requirements, realm placement, extern surface and the IR digest; `check` refuses a stale block | [commands-reference.md](commands-reference.md#revl-docs) |
 | `revl test FILES` | run `test`/`prop test`/`fault test`/`lifecycle test` blocks; `--backend {py,ts,rust,java,wasm,go,all}`, `--sweep` fault sweep, `--list` to collect without running, `--filter PATTERN` to select by name | [prop-test.md](prop-test.md) · [fault-tests.md](fault-tests.md) |
 | `revl quarantine FILES [--service NAME] [--policy POLICY]` | grade a candidate with the gauntlet, then run its lifecycle + fault battery inside the wasm sandbox where an escape is a trap | [quarantine-tier.md](quarantine-tier.md) |
 | `revl canary FILES --candidate FILE --slice REALM` | run both generations at once, successor on one realm slice; promote (`--promote-to`) or revert on evidence | [verified-canary.md](verified-canary.md) |

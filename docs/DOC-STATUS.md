@@ -50,9 +50,9 @@ regenerated rather than edited.
 | doc | status | em-dashes | tier-limit notes |
 |---|---|---|---|
 | README.md | needs-work | 0 |  |
-| analyze-liveness.md | needs-work | 15 |  |
+| analyze-liveness.md | needs-work | 0 |  |
 | apply.md | needs-work | 19 |  |
-| arithmetic.md | needs-work | 6 |  |
+| arithmetic.md | needs-work | 5 |  |
 | attested-result-delivery.md | needs-work | 0 |  |
 | attested-tee-placement.md | needs-work | 0 |  |
 | audit-diff.md | needs-work | 12 |  |
@@ -62,10 +62,11 @@ regenerated rather than edited.
 | backend-ir-v1.md | needs-work | 16 |  |
 | backend-ir-v3.md | needs-work | 0 |  |
 | backend-ir.md | needs-work | 11 |  |
-| backends-roadmap.md | needs-work | 42 |  |
+| backends-roadmap.md | needs-work | 40 |  |
 | bench-selfhost.md | live-owned (not audited) | 49 |  |
 | boundary-policy.md | needs-work | 27 |  |
 | bundle.md | needs-work | 0 |  |
+| call-budget-proposal.md | current | 0 |  |
 | capabilities.md | needs-work | 46 |  |
 | capability-attenuation.md | needs-work | 25 |  |
 | capability-realm-placement.md | needs-work | 11 |  |
@@ -80,7 +81,7 @@ regenerated rather than edited.
 | conformance.md | needs-work | 0 |  |
 | contract-errata.md | needs-work | 56 | yes |
 | crash-recovery.md | needs-work | 51 |  |
-| dash.md | current | 9 |  |
+| dash.md | current | 0 |  |
 | delivery-semantics.md | needs-work | 0 |  |
 | deploy.md | needs-work | 12 |  |
 | derived-versioning.md | current | 9 |  |
@@ -95,7 +96,8 @@ regenerated rather than edited.
 | fault-tests.md | needs-work | 71 |  |
 | federation.md | current | 16 |  |
 | fix-code.md | needs-work | 10 |  |
-| fmt.md | needs-work | 12 |  |
+| float-math-proposal.md | current | 0 |  |
+| fmt.md | needs-work | 1 |  |
 | frontend-assets.md | needs-work | 13 |  |
 | function-specs.md | needs-work | 0 |  |
 | function-types.md | needs-work | 31 |  |
@@ -132,7 +134,7 @@ regenerated rather than edited.
 | network-path.md | needs-work | 24 |  |
 | network-placement.md | needs-work | 1 |  |
 | opentelemetry.md | stale-fixed | 0 |  |
-| operator-capabilities.md | needs-work | 41 |  |
+| operator-capabilities.md | needs-work | 40 |  |
 | parallel-activation.md | needs-work | 17 |  |
 | persistence.md | needs-work | 15 |  |
 | plan.md | needs-work | 35 |  |
@@ -165,7 +167,7 @@ regenerated rather than edited.
 | service-compat.md | needs-work | 17 |  |
 | signals-and-queries.md | needs-work | 44 |  |
 | stability.md | needs-work | 0 |  |
-| state-handoff.md | needs-work | 22 |  |
+| state-handoff.md | needs-work | 21 |  |
 | stdlib-2.0.md | current | 0 | yes |
 | stdlib-json.md | needs-work | 56 |  |
 | stdlib-list.md | current | 14 |  |
@@ -186,7 +188,7 @@ regenerated rather than edited.
 | verified-canary.md | needs-work | 24 |  |
 | verified-effect.md | needs-work | 18 |  |
 | vision.md | current | 0 |  |
-| wasm-capabilities.md | needs-work | 41 | yes |
+| wasm-capabilities.md | needs-work | 39 | yes |
 | webapp-competitiveness-report.md | needs-work | 33 |  |
 | why-runtime.md | needs-work | 29 |  |
 | why-traces.md | needs-work | 26 |  |

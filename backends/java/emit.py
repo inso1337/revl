@@ -546,6 +546,23 @@ _EMITTER_RESERVED = {
     "RevlFrame", "RevlSpawnHandle",
 }
 
+# Issue #3160 / #3171: the `Components` class declares its own helpers as
+# private static methods (`revlEq`, `revlConcat`, `revlHash`, `revlLength`,
+# `revlMarkSecret`, `revlSecretResult`, ...), and it emits every top-level user
+# `fn` and extern as a `public static` method of the SAME class under the source
+# name. java resolves an unqualified call among all overloads and picks the most
+# specific, so a user `revlEq(String, String)` beats the helper's
+# `revlEq(Object, Object)` for every Str `==`/`!=` in the module, and a user
+# `revlMarkSecret(String)` beats the varargs secret registration. The whole
+# helper namespace is therefore unspellable from a user name at every position
+# whose spelling is internal (a binding, a top-level fn/extern): names whose
+# root starts `revl` followed by an upper-case letter are escaped by one rung of
+# the same injective ladder. A `record field` / `config field` is a member or
+# wire name and keeps its spelling. This mirrors the ts tier's
+# `_TS_HELPER_PREFIX_RE` (issue #3179) and go's `_REVL_HELPER_PREFIX_RE`
+# (issue #3168).
+_REVL_NAMESPACE_RE = re.compile(r"^(?:revl[A-Z]|REVL_|_revl|_REVL)")
+
 # Host-runtime classes the emitter injects *and* names as bare tokens at host
 # call sites (`Map.new(..)`, `Pool.open(..)`, `Job.run(..)`), so they cannot go
 # into `_EMITTER_RESERVED`: refusing them would make a program that uses the
@@ -806,7 +823,8 @@ def _split_generic(inner: str) -> list[str]:
     return parts
 
 
-def _mangle(name: str, extra: "frozenset[str]" = frozenset()) -> str:
+def _mangle(name: str, extra: "frozenset[str]" = frozenset(), *,
+            helper_namespace: bool = False) -> str:
     """Rename a syntactically-valid identifier that collides with a *Java*
     reserved word (`class`, `new`, `int`, `default`, …) so a valid revl
     identifier that happens to be a Java keyword emits and RUNS instead of
@@ -852,10 +870,19 @@ def _mangle(name: str, extra: "frozenset[str]" = frozenset()) -> str:
     same injective ladder: a type name passes `_JAVA_TYPE_RESERVED` so the
     host-runtime `Map`/`Pool`/`Job` classes cannot be shadowed by a user type of
     the same simple name (`Map` -> `Map_`, `Map_` -> `Map__` stay distinct),
-    while every other position passes the empty set and is unchanged."""
+    while every other position passes the empty set and is unchanged.
+
+    `helper_namespace=True` adds the `revl*` helper namespace (issue #3160): the
+    `Components` class also declares `revlEq`, `revlConcat`, `revlMarkSecret`
+    and the rest, and java overload resolution prefers a user `revlEq(String,
+    String)` over the helper's `revlEq(Object, Object)`. It is opt-in so a
+    `record field` / `config field` (a member or wire name) keeps its spelling;
+    the binding and top-level-callable positions pass it."""
     root = name
     while root:
-        if root in _JAVA_RESERVED or root in extra:
+        if (root in _JAVA_RESERVED or root in extra
+                or (helper_namespace
+                    and _REVL_NAMESPACE_RE.match(root) is not None)):
             return name + "_"
         if not root.endswith("_"):
             break
@@ -977,7 +1004,7 @@ def _ident(name: object, role: str) -> str:
         raise EmitError(f"invalid {role} identifier: {name!r}")
     extra = _JAVA_TYPE_RESERVED if role == "type name" else frozenset()
     if role in _JAVA_SCAFFOLDING_RENAMABLE_ROLES:
-        return _mangle(name, extra | _EMITTER_RESERVED)
+        return _mangle(name, extra | _EMITTER_RESERVED, helper_namespace=True)
     if role in ("record field", "field"):
         # A record COMPONENT is a member name, not a module-scope binding, so
         # it is a different namespace from the `ctx`/`root`/`frame` tokens the
@@ -1044,7 +1071,8 @@ def _fn_name(name: object) -> str:
         raise EmitError(f"invalid function identifier: {name!r}")
     root = name
     while root:
-        if root in _JAVA_RESERVED or root in _EMITTER_RESERVED:
+        if (root in _JAVA_RESERVED or root in _EMITTER_RESERVED
+                or _REVL_NAMESPACE_RE.match(root) is not None):
             return name + "_"
         if not root.endswith("_"):
             break
@@ -1448,6 +1476,10 @@ class _V3Ctx:
         # (issue #2325). Empty in every other body, which keeps a match over
         # a generic variant raw there.
         self.param_types: dict[str, str] = {}
+        # `{id(record literal): declared record name}` for a literal whose
+        # field-set several records share, resolved from the type it flows
+        # into; see `_pin_record_targets`. Reset per body.
+        self.record_targets: dict[int, str] = {}
 
     def new_match_ignored(self) -> str:
         self._match_counter += 1
@@ -1458,7 +1490,8 @@ class _V3Ctx:
         self._gensym_counter += 1
         return self._gensym_counter
 
-    def record_type_for_fields(self, field_names: list[str]) -> str:
+    def record_type_for_fields(self, field_names: list[str],
+                               expected: str | None = None) -> str:
         wanted = set(field_names)
         matches = [
             name
@@ -1468,6 +1501,10 @@ class _V3Ctx:
         ]
         if len(matches) == 1:
             return matches[0]
+        # Several records share the field-set: the declared type the literal
+        # flows into names one of them (`_pin_record_targets`).
+        if isinstance(expected, str) and expected in matches:
+            return expected
         if not matches:
             raise EmitError(
                 f"record literal with fields {field_names!r} does not match any "
@@ -1506,6 +1543,18 @@ def _v3_len(target: str) -> str:
     return f"revlLength({target})"
 
 
+_JAVA_CHAR_CLASS = {
+    "is_digit": '"0".compareTo(_rc) <= 0 && _rc.compareTo("9") <= 0',
+    "is_alpha": ('("a".compareTo(_rc) <= 0 && _rc.compareTo("z") <= 0) '
+                 '|| ("A".compareTo(_rc) <= 0 && _rc.compareTo("Z") <= 0)'),
+    "is_alnum": ('("0".compareTo(_rc) <= 0 && _rc.compareTo("9") <= 0) '
+                 '|| ("a".compareTo(_rc) <= 0 && _rc.compareTo("z") <= 0) '
+                 '|| ("A".compareTo(_rc) <= 0 && _rc.compareTo("Z") <= 0)'),
+    "is_space": ('_rc.equals(" ") || _rc.equals("\\t") || _rc.equals("\\n") '
+                 '|| _rc.equals("\\r")'),
+}
+
+
 def _v3_builtin(method: object, target: str, args: list[str],
                 recv: str | None = None) -> str:
     """The stdlib surface (docs/stdlib-2.0.md), dispatched through the
@@ -1517,11 +1566,13 @@ def _v3_builtin(method: object, target: str, args: list[str],
     statically typed `String`. `recv` carries the receiver's static type only
     where the lowering must dispatch on it (`to_int`: the Int32 widen vs the
     Str parse)."""
-    # The total forms (docs/arithmetic.md): same quotient as the faulting
-    # operation, but a zero divisor yields Err(reason) instead of throwing —
+    # The total forms (docs/arithmetic.md): same value as the faulting
+    # operation where it fits, Err(reason) instead of the fault otherwise —
     # `fail` is refused in a pure fn, so the error travels as a value. The
-    # static helpers (emitted by `_emit_checked_div_helpers`) evaluate each
-    # operand exactly once and return a typed RevlResult.
+    # static helpers evaluate each operand exactly once and return a typed
+    # RevlResult.
+    if method in _CHECKED_ARITH:
+        return f"{_CHECKED_ARITH_HELPER[method]}({target}, {args[0]})"
     if method in _CHECKED_DIVS:
         return f"{_CHECKED_HELPER[method]}({target}, {args[0]})"
     if method == "length":
@@ -1643,6 +1694,16 @@ def _v3_builtin(method: object, target: str, args: list[str],
                 "(_cp < 0 || _cp > 0x10FFFF || (_cp >= 0xD800 && _cp <= 0xDFFF))"
                 " ? \"\" : new String(Character.toChars((int) _cp)))"
                 f".apply({target})")
+    # Single-character ASCII classification (item 233, docs/stdlib-2.0.md
+    # §Str.is_alnum), the contract the python tier lowers inline. `compareTo`
+    # is UTF-16 code-unit order, which IS code-point order for ASCII, so the
+    # chained comparison matches python's. It stays total as python's does: an
+    # empty receiver compares less than "0", so it is false rather than a
+    # fault, and multi-character input never throws. The lambda binds the
+    # receiver once.
+    if method in _JAVA_CHAR_CLASS:
+        return ("((java.util.function.Predicate<String>) (_rc) -> "
+                f"{_JAVA_CHAR_CLASS[method]}).test({target})")
     raise EmitError(f"unknown builtin method {method!r}")
 
 
@@ -2607,7 +2668,8 @@ def _expr(
 
     if kind == "record":
         fields = node.get("fields") or []
-        type_name = ctx.record_type_for_fields([k for k, _ in fields])
+        type_name = ctx.record_type_for_fields(
+            [k for k, _ in fields], ctx.record_targets.get(id(node)))
         spec = ctx.types[type_name]
         by_name = {k: _expr(v, ctx, rename, env) for k, v in fields}
         args = []
@@ -3491,8 +3553,8 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
 def _uses_builtin_result(ir: dict) -> bool:
     """True if the IR constructs or matches the built-in Result (Ok/Err) — an
     `adt` node typed Result, a match arm on Ok/Err, or a call to one of the
-    total division forms (which produce a Result). Emitted RevlResult is
-    gated on this so non-Result modules and v1 goldens are unaffected."""
+    total forms (which produce a Result). Emitted RevlResult is gated on this
+    so non-Result modules and v1 goldens are unaffected."""
     def walk(node) -> bool:
         if isinstance(node, dict):
             if node.get("kind") == "adt" and str(node.get("type", "")).startswith("Result"):
@@ -3501,7 +3563,7 @@ def _uses_builtin_result(ir: dict) -> bool:
                 a.get("pattern") in ("Ok", "Err") for a in node.get("arms") or []
             ):
                 return True
-            if node.get("method") in _CHECKED_DIVS:
+            if node.get("method") in _CHECKED_FORMS:
                 return True
             return any(walk(v) for v in node.values())
         if isinstance(node, list):
@@ -3574,7 +3636,19 @@ _CHECKED_HELPER = {
     "checked_div_euclid": "revlCheckedDivEuclid",
     "checked_mod": "revlCheckedMod",
 }
+# The total arithmetic forms (docs/arithmetic.md): same value as `+ - *`
+# where it fits, Err("revl: Int overflow") instead of the fault. The JDK's
+# `*Exact` family is the overflow test; the helper catches its exception and
+# replaces the JDK's own message, as the faulting helpers already do.
+_CHECKED_ARITH = ("checked_add", "checked_sub", "checked_mul")
+_CHECKED_ARITH_HELPER = {
+    "checked_add": "revlCheckedAdd",
+    "checked_sub": "revlCheckedSub",
+    "checked_mul": "revlCheckedMul",
+}
+_CHECKED_FORMS = _CHECKED_ARITH + _CHECKED_DIVS
 _DIV_ZERO_MSG = "revl: division by zero"
+_INT_OVERFLOW_MSG = "revl: Int overflow"
 # The reason a `Map` subscript miss faults (issue #957), spelled identically on
 # every tier so one guarantee does not read as five different bugs.
 _MAP_MISS_MSG = "revl: map index: no entry for key"
@@ -3586,6 +3660,21 @@ def _uses_checked_div(ir: dict) -> bool:
     def walk(node) -> bool:
         if isinstance(node, dict):
             if node.get("method") in _CHECKED_DIVS:
+                return True
+            return any(walk(v) for v in node.values())
+        if isinstance(node, list):
+            return any(walk(v) for v in node)
+        return False
+
+    return walk(ir.get("functions")) or walk(ir.get("tests")) or walk(ir.get("components"))
+
+
+def _uses_checked_arith(ir: dict) -> bool:
+    """True if the IR calls one of the total arithmetic forms — gates the
+    static helpers those calls lower to."""
+    def walk(node) -> bool:
+        if isinstance(node, dict):
+            if node.get("method") in _CHECKED_ARITH:
                 return True
             return any(walk(v) for v in node.values())
         if isinstance(node, list):
@@ -3696,6 +3785,30 @@ def _emit_map_index_helper() -> list[str]:
         f'        throw new java.util.NoSuchElementException("{_MAP_MISS_MSG}");',
         "    }",
         "    return m.get(k);",
+        "}",
+        "",
+    ]
+
+
+def _emit_checked_arith_helpers() -> list[str]:
+    """Static helpers backing the total arithmetic forms — emitted once per
+    file when any of their nodes is present. Each evaluates its operands
+    exactly once and returns a typed RevlResult; `Math.*Exact` throws the
+    overflow, which the helper carries out as `Err` with revl's own text."""
+    return [
+        "// total arithmetic forms (docs/arithmetic.md): an overflow yields",
+        "// Err(reason) instead of the fault the unchecked operations raise.",
+        "private static RevlResult<Long, String> revlCheckedAdd(long a, long b) {",
+        "    try { return new RevlResult.Ok<>(Math.addExact(a, b)); }",
+        f'    catch (ArithmeticException e) {{ return new RevlResult.Err<>("{_INT_OVERFLOW_MSG}"); }}',
+        "}",
+        "private static RevlResult<Long, String> revlCheckedSub(long a, long b) {",
+        "    try { return new RevlResult.Ok<>(Math.subtractExact(a, b)); }",
+        f'    catch (ArithmeticException e) {{ return new RevlResult.Err<>("{_INT_OVERFLOW_MSG}"); }}',
+        "}",
+        "private static RevlResult<Long, String> revlCheckedMul(long a, long b) {",
+        "    try { return new RevlResult.Ok<>(Math.multiplyExact(a, b)); }",
+        f'    catch (ArithmeticException e) {{ return new RevlResult.Err<>("{_INT_OVERFLOW_MSG}"); }}',
         "}",
         "",
     ]
@@ -4321,6 +4434,277 @@ def _emit_v3_externs(externs: list, journal: bool = False) -> list[str]:
     return lines
 
 
+def _pin_record_targets(body: object, params: object, ret_type: object,
+                        ctx: _V3Ctx) -> None:
+    """Name the record each ambiguous literal in a body builds.
+
+    A literal is anonymous: its field-set names the record only when one
+    record owns that field-set. When several share it (`{ i, e }` is `PR` and
+    `AtExpr`) the declared type the literal flows into names one, the same
+    target-type context the frontend checker reads: the declared return, a
+    parameter of a called fn, a field of a record already resolved, the
+    element type of a `push` receiver, an assignment to a typed local, the
+    payload of a variant case. A local handed on whole (`return p`, `xs.push(p)`,
+    `f(p)`, `{ k: p }`) carries the type of the slot to where it is bound, so
+    the body is walked until nothing new is learned (what each local is handed
+    on as, through `let a = b` too), then once more to type each local from the
+    settled facts.
+
+    The answer goes into `ctx.record_targets`, keyed by node, and the literal
+    renderer reads it. The walk types locals forward from the parameters, an
+    annotated empty list's pin and `_map_value_expr_type`; what it cannot type
+    stays out, and the renderer then refuses an ambiguous literal as before.
+    """
+    ctx.record_targets = targets = {}
+    # `{binding: declared type}` it was handed on as, and `{binding: binding}`
+    # for `let a = b`, across both walks. A binding is the number its `let`
+    # (or loop, arm or arrow parameter) was given in walk order, so two
+    # sibling blocks that reuse a name stay two bindings; `bound` maps the
+    # names in scope to those numbers and is restored at each block's end.
+    handed_as: dict[int, str] = {}
+    # bindings handed on to two different declared types: no one type names
+    # them, so a literal bound to one is refused, as the go tier does
+    conflicted: set[int] = set()
+    alias: dict[int, int] = {}
+    scope: dict[str, str | None] = {}
+    bound: dict[str, int] = {}
+    counter = [0]
+
+    def bind(name: object) -> int:
+        counter[0] += 1
+        bound[name] = counter[0]
+        return counter[0]
+
+    def infer(node: object) -> str | None:
+        # a call of a top-level fn answers its declared return
+        if isinstance(node, dict) and node.get("kind") == "call":
+            callee = node.get("callee") or {}
+            if callee.get("kind") == "var":
+                for fn in ctx.functions:
+                    if fn.get("name") == callee.get("name"):
+                        return fn.get("returns")
+        return _map_value_expr_type(node, scope, None, ctx.functions, ctx)
+
+    def head(declared: object) -> str | None:
+        return declared.split("[", 1)[0] if isinstance(declared, str) else None
+
+    def resolve(fields: list, declared: object) -> str | None:
+        wanted = set(fields)
+        names = [n for n, spec in ctx.types.items()
+                 if spec.get("kind") == "record"
+                 and set((spec.get("fields") or {}).keys()) == wanted]
+        if head(declared) in names:
+            return head(declared)
+        return names[0] if len(names) == 1 else None
+
+    def elem_of(declared: object) -> str | None:
+        if (isinstance(declared, str) and declared.startswith("List[")
+                and declared.endswith("]")):
+            return declared[5:-1]
+        return None
+
+    def handed(node: object, declared: object) -> None:
+        """`node` flows into a slot declared `declared`."""
+        if not isinstance(node, dict):
+            return
+        if not isinstance(declared, str):
+            expr(node)  # still walked: its binders are numbered in order
+            return
+        if node.get("kind") == "var":
+            ident = bound.get(node.get("name"))
+            seen: set[int] = set()
+            while ident is not None and ident not in seen:
+                seen.add(ident)
+                if handed_as.setdefault(ident, declared) != declared:
+                    conflicted.add(ident)
+                ident = alias.get(ident)
+            return
+        expr(node, declared)
+
+    def expr(node: object, declared: object = None) -> None:
+        if isinstance(node, list):
+            for item in node:
+                expr(item)
+            return
+        if not isinstance(node, dict):
+            return
+        kind = node.get("kind")
+        if kind == "record":
+            fields = node.get("fields") or []
+            found = resolve([k for k, _ in fields], declared)
+            if found is not None:
+                targets[id(node)] = found
+            slots = (ctx.types.get(found) or {}).get("fields") or {}
+            for key, value in fields:
+                handed(value, slots.get(key))
+            return
+        if kind == "call" and "callee" in node:
+            callee = node.get("callee") or {}
+            fn = next((f for f in ctx.functions if callee.get("kind") == "var"
+                       and f.get("name") == callee.get("name")), None)
+            if fn is not None:
+                sig = [p.get("type") for p in fn.get("params") or []]
+                for index, arg in enumerate(node.get("args") or []):
+                    handed(arg, sig[index] if index < len(sig) else None)
+                expr(callee)
+                return
+        if kind == "builtin" and node.get("method") == "push" \
+                and len(node.get("args") or []) == 1:
+            handed(node["args"][0], elem_of(infer(node.get("target"))))
+            expr(node.get("target"))
+            return
+        if kind == "adt":
+            owner = ctx.case_owners.get(node.get("case"))
+            case = next((c for c in (ctx.types.get(owner) or {}).get("cases") or []
+                         if c.get("name") == node.get("case")), None)
+            args = node.get("args") or []
+            if case is not None and len(args) == 1:
+                handed(args[0], case.get("payload"))
+                return
+        if kind == "if":
+            expr(node.get("cond"))
+            expr(node.get("then"), declared)
+            expr(node.get("else"), declared)
+            return
+        if kind == "match":
+            expr(node.get("scrutinee"))
+            for arm in node.get("arms") or []:
+                saved, saved_bound = dict(scope), dict(bound)
+                if isinstance(arm, dict) and arm.get("bind"):
+                    scope[arm["bind"]] = None
+                    bind(arm["bind"])
+                expr(arm.get("body") if isinstance(arm, dict) else arm, declared)
+                scope.clear()
+                scope.update(saved)
+                bound.clear()
+                bound.update(saved_bound)
+            return
+        if kind == "arrow":
+            saved, saved_bound = dict(scope), dict(bound)
+            for param in node.get("params") or []:
+                scope[param] = None
+                bind(param)
+            expr(node.get("body"))
+            scope.clear()
+            scope.update(saved)
+            bound.clear()
+            bound.update(saved_bound)
+            return
+        if kind == "list":
+            for item in node.get("items") or []:
+                handed(item, elem_of(declared))
+            return
+        for value in node.values():
+            expr(value)
+
+    def stmts(steps: object) -> None:
+        saved, saved_bound = dict(scope), dict(bound)
+        for step in steps if isinstance(steps, list) else []:
+            stmt(step)
+        # a block's locals end with it
+        scope.clear()
+        scope.update(saved)
+        bound.clear()
+        bound.update(saved_bound)
+
+    def stmt(step: dict) -> None:
+        kind = step.get("step")
+        if kind == "let":
+            name, value = step.get("name"), step.get("value")
+            source = (bound.get(value.get("name"))
+                      if isinstance(value, dict) and value.get("kind") == "var"
+                      else None)
+            # the new binding is numbered now but comes into scope after its
+            # value is read (`let x = f(x)` reads the outer `x`)
+            counter[0] += 1
+            ident = counter[0]
+            if source is not None:
+                alias[ident] = source
+            # the type the local is handed on as stands for a literal or an
+            # empty list nothing else types
+            declared = None if ident in conflicted else handed_as.get(ident)
+            expr(value, declared)
+            bound[name] = ident
+            found = infer(value)
+            if found is None and isinstance(value, dict):
+                if value.get("kind") == "list" and not value.get("items"):
+                    found = value.get("expected") or declared
+                elif value.get("kind") == "record":
+                    found = targets.get(id(value))
+            scope[name] = found
+        elif kind == "assign":
+            handed(step.get("value"), scope.get(step.get("name"))
+                   or (None if bound.get(step.get("name")) in conflicted
+                       else handed_as.get(bound.get(step.get("name")))))
+        elif kind == "return":
+            handed(step.get("expr"), ret_type)
+        elif kind == "if":
+            expr(step.get("cond"))
+            stmts(step.get("then"))
+            stmts(step.get("else"))
+        elif kind == "while":
+            expr(step.get("cond"))
+            stmts(step.get("body"))
+        elif kind == "for":
+            expr(step.get("iterable"))
+            saved, saved_bound = dict(scope), dict(bound)
+            scope[step.get("bind")] = elem_of(infer(step.get("iterable")))
+            bind(step.get("bind"))
+            stmts(step.get("body"))
+            scope.clear()
+            scope.update(saved)
+            bound.clear()
+            bound.update(saved_bound)
+        elif kind == "let_pattern":
+            expr(step.get("value"))
+            for name in [*(step.get("names") or []), step.get("rest")]:
+                if isinstance(name, str):
+                    scope[name] = None
+                    bind(name)
+        else:
+            for value in step.values():
+                expr(value)
+
+    def walk() -> None:
+        counter[0] = 0
+        bound.clear()
+        for p in params or []:
+            if p.get("name"):
+                bind(p["name"])
+        scope.clear()
+        scope.update({p.get("name"): p.get("type")
+                      for p in params or [] if p.get("name")})
+        stmts(body)
+
+    # A hand-on can appear only once an outer literal is named, and that
+    # naming rests on an earlier hand-on, so walk until nothing new is learned
+    # (at least twice: the first walk learns what each local is handed on as).
+    # Then name every literal again from the settled facts, so a local that
+    # ends up handed to two records is refused rather than keeping the first.
+    # The facts only grow and are bounded (locals times declared types), and
+    # each walk settles at least one more level of nesting, so the loop ends
+    # after at most one walk per node of the body; a body that runs past that
+    # is refused rather than named from unsettled facts.
+    def count(node: object) -> int:
+        if isinstance(node, dict):
+            return 1 + sum(count(v) for v in node.values())
+        if isinstance(node, list):
+            return sum(count(v) for v in node)
+        return 0
+
+    for _walk in range(count(body) + 3):
+        before = (len(handed_as), len(conflicted))
+        walk()
+        if _walk and (len(handed_as), len(conflicted)) == before:
+            break
+    else:
+        raise EmitError(
+            "the record hand-ons of this function do not settle; name the "
+            "record each literal builds")
+    targets.clear()
+    walk()
+
+
 def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]:
     ctx = _V3Ctx(types, functions, externs)
     lines: list[str] = []
@@ -4337,6 +4721,7 @@ def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]
         ctx.param_types = {p.get("name"): p.get("type") for p in fn.get("params") or []
                            if p.get("name") in ctx.param_names}
         _pin_value_map_locals(fn.get("body"), fn.get("params"), ctx)
+        _pin_record_targets(fn.get("body"), fn.get("params"), fn.get("returns"), ctx)
         lines.append(f"public static {ret} {name}({params}) {{")
         if not fn.get("body"):
             lines.append("    // (empty body)")
@@ -4366,6 +4751,7 @@ def _emit_v3_tests(tests: list, types: dict, functions: list, externs: list,
         test_names.append(mname)
         ctx.arrows = {}  # arrow bindings are local to one body
         _pin_value_map_locals(test.get("body"), None, ctx)
+        _pin_record_targets(test.get("body"), None, None, ctx)
         lines.append(f"public static void {mname}() {{")
         for stmt in test.get("body") or []:
             _v3_stmt(stmt, ctx, lines, 1, test_mode=True)
@@ -6817,7 +7203,8 @@ def _map_value_expr_type(node: object, var_types: dict, env: _Env,
             return None
         try:
             return v3_ctx.record_type_for_fields(
-                [k for k, _ in node.get("fields") or []])
+                [k for k, _ in node.get("fields") or []],
+                v3_ctx.record_targets.get(id(node)))
         except EmitError:
             return None
     if kind == "adt":
@@ -10037,6 +10424,8 @@ def _emit_v3(ir: dict, package_name: str) -> str:
     # document that reaches only for a `checked_*` form still needs them.
     if _uses_int_arith(ir) or _uses_checked_div(ir):
         out.extend(["    " + line if line else line for line in _emit_int_arith_helpers()])
+    if _uses_checked_arith(ir):
+        out.extend(["    " + line if line else line for line in _emit_checked_arith_helpers()])
     if _uses_checked_div(ir):
         out.extend(["    " + line if line else line for line in _emit_checked_div_helpers()])
     if _uses_map_index(ir):

@@ -86,7 +86,7 @@ def _candidate_host_bodies(ir: dict, report: dict, candidate_sources: set[str],
     tree is attributed while a shipped `stdlib` module is not. The explicit
     operator-source opt-out wins over both.
     """
-    from .mcp.session import host_body_entry  # noqa: PLC0415
+    from .mcp.session import has_host_code, host_body_entry  # noqa: PLC0415
 
     excluded = {os.path.abspath(path) for path in operator_sources}
     names = {
@@ -98,7 +98,7 @@ def _candidate_host_bodies(ir: dict, report: dict, candidate_sources: set[str],
     }
     return sorted((host_body_entry(extern)
                    for extern in (ir.get("externs") or [])
-                   if extern.get("name") in names and extern.get("bodies")),
+                   if extern.get("name") in names and has_host_code(extern)),
         key=lambda entry: str(entry.get("extern")))
 
 
@@ -194,6 +194,11 @@ def _merge_resulting_ir(running_ir: dict | None, candidate_ir: dict,
         "functions": list(functions.values()),
         "externs": list(externs.values()),
         "manifest": candidate_ir.get("manifest") or running_ir.get("manifest") or {},
+        # issue #3484: the composition rows the components start from. A
+        # candidate admitted from a composition document carries its own;
+        # a module candidate leaves the running rows in force.
+        **({"rows": rows} if (rows := candidate_ir.get("rows")
+                              or running_ir.get("rows")) else {}),
     }
 
 

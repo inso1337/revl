@@ -118,7 +118,11 @@ def _run_migrate(args) -> int:
     from ..composition_diff import load_composition  # noqa: PLC0415
     from ..migrate import plan as build_plan, render as render_plan  # noqa: PLC0415
 
+    policy = None
     try:
+        if getattr(args, "policy", None):
+            from ..policy import load_policy  # noqa: PLC0415
+            policy = load_policy(args.policy)
         old = load_composition(args.old)
         new = load_composition(args.new)
         against = load_composition(args.against)
@@ -128,7 +132,8 @@ def _run_migrate(args) -> int:
 
     try:
         result = build_plan(old, new, against, old_label=args.old,
-                            new_label=args.new, against_label=args.against)
+                            new_label=args.new, against_label=args.against,
+                            policy=policy)
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
@@ -278,8 +283,12 @@ def _run_undo(args) -> int:
             if i == 0:
                 session.load(ir, config, origin=origin)
             else:
-                session.swap(ir, origin=origin, agent_authored=False)
+                # replay answers are not printed: their residue stays held
+                # for the unload below (issue #3381)
+                session.rehold_compensation_residue(
+                    session.swap(ir, origin=origin, agent_authored=False))
         result = session.undo(to_session)
+        session.rehold_compensation_residue(result)
     except (SessionError, RevlError) as error:
         print(f"refused: {error}", file=sys.stderr)
         if session.loaded:
@@ -1042,10 +1051,17 @@ def _run_repair(args) -> int:
     if args.predicate:
         arguments["predicate"] = args.predicate
     if args.candidate:
+        # The candidate files ride as FILES, never joined into one inline
+        # source: a joined text compiles under a label that names no file, so
+        # the export rule (`export_area.CliRule`) could not see that one of
+        # them lies under `.revl/export/` and the agent's text would compile
+        # with the operator's trust (issue #2563). Read each one first so an
+        # unreadable path is still reported here.
         try:
+            for p in args.candidate:
+                Path(p).read_text(encoding="utf-8")
             arguments["candidate"] = {
-                "source": "\n".join(Path(p).read_text(encoding="utf-8")
-                                    for p in args.candidate)}
+                "files": [os.path.abspath(p) for p in args.candidate]}
         except OSError as error:
             print(f"error: cannot read candidate: {error}", file=sys.stderr)
             return 1

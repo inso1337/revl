@@ -20,23 +20,23 @@ Lowering — the paper's §6.7 state machine, literally:
   the linker binding itself, alive through this component's whole teardown.
 
 Widths: `Int` is **i64** — 64-bit two's complement with trapping overflow, as
-docs/arithmetic.md specifies for every tier. Linear-memory *addresses* stay
-i32 (wasm32 addressing is 32-bit), as do Bool and the internal counters, so
-this emitter deliberately uses both widths and `_wasm_ty` is the single place
-that decides which. `Float` remains refused by name.
+docs/arithmetic.md specifies for every tier, and `Float` is the native **f64**.
+Linear-memory *addresses* stay i32 (wasm32 addressing is 32-bit), as do Bool,
+Int32 and the internal counters, so this emitter deliberately uses several
+widths and `_wasm_ty` is the single place that decides which.
 
 Tier restrictions (cordis-wasm status: core Wasm, sync base calculus).
 Violations are EmitError, never silent degradation. The service boundary
 (coeffect imports, `provide:<key>.<op>` exports) carries the SAME canonical-ABI
-representation the v3 functions tier uses: an `Int` is an i64 value, a `Bool`
-an i32 value, and every Str/List/record/variant/Opt/Result an i32 *pointer*
-into the module's linear memory (`_boundary_wty`). A value whose wasm width
-disagrees with its declared service type (a `List` from an `Int`-declared
-op) stays refused — a real mismatch, not a silent narrowing. `@wasm`-bodied
-externs lower to internal `(func $name …)`. Config blocks (no instantiation
-channel), host builtins outside `await Job.run` (e.g. `Map.new` — the tier has
-no Map representation), method-time effects, and `Float`/`Map` at the boundary
-are still rejected with a precise reason.
+representation the v3 functions tier uses: an `Int` is an i64 value, a `Float`
+an f64 value, a `Bool` an i32 value, and every Str/List/record/variant/Opt/Result
+an i32 *pointer* into the module's linear memory (`_boundary_wty`). A value
+whose wasm width disagrees with its declared service type (a `List` from an
+`Int`-declared op) stays refused — a real mismatch, not a silent narrowing.
+`@wasm`-bodied externs lower to internal `(func $name …)`. Config blocks (no
+instantiation channel), host builtins outside `await Job.run` (e.g. `Map.new` —
+the tier has no Map representation), method-time effects, and `Map` at the
+boundary are still rejected with a precise reason.
 
 `emit(ir) -> dict[name, wat]` — one WAT module per component, plus a
 `functions` module for IR v3 type/function documents.
@@ -66,6 +66,10 @@ IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 #: a slot always holds the same 8 bytes whichever way it is read.
 _SLOT = 8
 
+# The List element types `indexOf` can compare on this tier: a Str by its bytes,
+# an Int/Int32/Bool by the i64 pattern its slot holds.
+_INDEX_OF_ELEMS = ("Str", "Int", "Int32", "Bool")
+
 # The placeholder a confidential witness is framed as instead of the value, when
 # the author declared the witness position `Secret[T]`. Must equal
 # `revl.taint.REDACTED_SECRET` / `confidential.REDACTED`: it is part of the WAL's
@@ -74,14 +78,19 @@ _SLOT = 8
 # addressing the wrong referent and reporting the miss as a clean rollback.
 _REDACTED_SECRET = "<redacted:secret>"
 
-# The total, value-returning division forms (docs/arithmetic.md): same
-# rounding as the faulting operations, Err(reason) at a zero divisor.
+# The total, value-returning forms (docs/arithmetic.md): same value as the
+# faulting operations where it fits, Err(reason) instead of the fault
+# otherwise. `checked_add/sub/mul` answer the overflow; the division forms
+# answer a zero divisor too (and the one overflowing quotient).
+_CHECKED_ARITH = ("checked_add", "checked_sub", "checked_mul")
 _CHECKED_DIVS = ("checked_div_trunc", "checked_div_floor",
                  "checked_div_euclid", "checked_mod")
+_CHECKED_FORMS = _CHECKED_ARITH + _CHECKED_DIVS
 _DIV_ZERO_MSG = "revl: division by zero"
-#: The reason a `checked_*` quotient does not fit (`Int.MIN / -1` is 2^63, one
-#: past Int.MAX). Spelled exactly as the other five tiers spell it: the total
-#: forms answer it as a VALUE, where the faulting operations trap.
+#: The reason an `Int` result does not fit (an overflowing `+`/`-`/`*`, or
+#: `Int.MIN / -1` = 2^63, one past Int.MAX). Spelled exactly as the other
+#: five tiers spell it: the total forms answer it as a VALUE, where the
+#: faulting operations trap.
 _INT_OVERFLOW_MSG = "revl: Int overflow"
 
 
@@ -96,12 +105,17 @@ def _align8(value: int) -> int:
 def _wasm_ty(ty: str | None) -> str:
     """The wasm value type that carries a revl type on this tier.
 
-    `Int` is the only revl type here that is 64-bit. Everything else is a Bool
-    (0/1) or a *linear-memory address*, and wasm32 addressing is 32-bit, so
-    those stay i32. This one function is what stops "value" and "pointer" from
-    being confused now that they are no longer the same wasm type.
+    `Int` is i64 and `Float` is the native f64 (docs/arithmetic.md: binary64 on
+    every tier). Everything else is a Bool (0/1), an Int32, or a
+    *linear-memory address*, and wasm32 addressing is 32-bit, so those stay
+    i32. This one function is what stops "value" and "pointer" from being
+    confused now that they are no longer the same wasm type.
     """
-    return "i64" if ty == "Int" else "i32"
+    if ty == "Int":
+        return "i64"
+    if ty == "Float":
+        return "f64"
+    return "i32"
 
 
 def _wat_string(value: str) -> str:
@@ -712,17 +726,18 @@ class _ComponentEmitter:
         This is the whole port: the v3 functions tier already lowers
         Str/List/record/variant/Opt/Result through a canonical-ABI linear-memory
         representation, so the service boundary carries the SAME representation —
-        `Int` is an i64 value, `Bool` an i32 value, and every compound type an
-        i32 *pointer* into the module's memory. Anything the v3 value model has
-        no representation for (`Float`, `Map`, function types) is refused here by
-        `_check_type` — a genuine boundary, not a silent narrowing. `None`/`Unit`
-        means the slot is absent (a void operation, no param/result).
+        `Int` is an i64 value, `Float` an f64 value, `Bool` an i32 value, and
+        every compound type an i32 *pointer* into the module's memory. Anything
+        the v3 value model has no representation for (`Map`, function types) is
+        refused here by `_check_type` — a genuine boundary, not a silent
+        narrowing. `None`/`Unit` means the slot is absent (a void operation, no
+        param/result).
         """
         if _is_unit_type(ty):
             return None
         # `_check_type` is the v3 tier's single lowerability gate: it accepts
-        # Int/Bool/Str/Bytes/List/record/variant/Opt/Result and refuses Float,
-        # Map, and function types with a named reason.
+        # Int/Int32/Float/Bool/Str/Bytes/List/record/variant/Opt/Result and
+        # refuses Map and function types with a named reason.
         self.v3._check_type(ty, where)
         if not _is_scalar_type(ty):
             self.boundary_uses_memory = True
@@ -763,7 +778,7 @@ class _ComponentEmitter:
 
         A routed require carries no single-realm provider, so its op resolves
         strictly per named realm through the substrate's `route:<key>` primitive.
-        Only SCALAR (Int/Bool) params/returns cross this tier's routed boundary:
+        Only SCALAR (Int/Bool/Float) params/returns cross this tier's routed boundary:
         a Str/List/record pointer is an offset into the CALLER's linear memory,
         which the provider in another realm (another instance, another memory)
         cannot read — the same physical boundary the scalar coeffect boundary
@@ -782,13 +797,13 @@ class _ComponentEmitter:
             if not _is_scalar_type(pty):
                 raise EmitError(
                     f"{where}: routed op {key}.{op} param {i} is {pty!r} — only "
-                    f"scalar (Int/Bool) values cross a routed require on this "
+                    f"scalar (Int/Bool/Float) values cross a routed require on this "
                     f"tier; a pointer would name the caller's memory, not the "
                     f"cross-realm provider's (use a hosted backend)")
         if return_type is not None and not _is_scalar_type(return_type):
             raise EmitError(
                 f"{where}: routed op {key}.{op} returns {return_type!r} — only "
-                f"scalar (Int/Bool) values cross a routed require on this tier "
+                f"scalar (Int/Bool/Float) values cross a routed require on this tier "
                 f"(use a hosted backend for a compound routed result)")
         param_wtys = [_wasm_ty(pty) for pty in param_types]
         result_wty = _wasm_ty(return_type) if return_type is not None else None
@@ -1063,7 +1078,7 @@ class _ComponentEmitter:
             if not _is_scalar_type(fty):
                 raise EmitError(
                     f"{where}: config field {field!r} is {fty!r} — only scalar "
-                    f"config (Int/Bool) crosses the spawn boundary on this tier; "
+                    f"config (Int/Bool/Float) crosses the spawn boundary on this tier; "
                     f"a Str/record/List config value would cross as a pointer into "
                     f"memory the instance does not own (use a hosted backend)")
             self.config_imports[field] = _wasm_ty(fty)
@@ -1144,7 +1159,7 @@ class _ComponentEmitter:
             if not _is_scalar_type(ftype):
                 raise EmitError(
                     f"{where}: spawn {target}.{fname} is {ftype!r} — only scalar "
-                    f"config (Int/Bool) crosses the spawn boundary on this tier")
+                    f"config (Int/Bool/Float) crosses the spawn boundary on this tier")
             wty = _wasm_ty(ftype)
             value = self._lower(supplied[fname], scope, types, where)
             if _wasm_ty(value.ty) != wty:
@@ -1207,11 +1222,11 @@ class _ComponentEmitter:
             # The provision lives in a *different* instance's linear memory, so a
             # rich (pointer) param would cross as a pointer into memory the
             # spawner does not own — the same genuine boundary spawn/config draw.
-            # Scalars (Int/Bool) cross by value and resolve cleanly.
+            # Scalars (Int/Bool/Float) cross by value and resolve cleanly.
             if not _is_scalar_type(ptype):
                 raise EmitError(
                     f"{where}: {key}.{op} param {i} is {ptype!r} — only scalar "
-                    f"(Int/Bool) values cross the instance-accessor boundary on "
+                    f"(Int/Bool/Float) values cross the instance-accessor boundary on "
                     f"this tier; a Str/record/List would cross as a pointer into "
                     f"the instance's own memory (use a hosted backend)")
             value = self._lower(arg, scope, types, where)
@@ -1225,7 +1240,7 @@ class _ComponentEmitter:
         if not _is_scalar_type(return_type) and not _is_unit_type(return_type):
             raise EmitError(
                 f"{where}: {key}.{op} returns {return_type!r} — only scalar "
-                f"(Int/Bool) provisions cross the instance-accessor boundary on "
+                f"(Int/Bool/Float) provisions cross the instance-accessor boundary on "
                 f"this tier; a rich return is a pointer into the instance's own "
                 f"memory (use a hosted backend)")
         result_wty = _wasm_ty(return_type) if not _is_unit_type(return_type) else None
@@ -1245,6 +1260,8 @@ class _ComponentEmitter:
             if not _is_scalar_type(operand.ty):
                 return self._delegate(node, scope, types, where)
             if op == "-":
+                if operand.ty == "Float":
+                    return _E(f"(f64.neg {operand.wat})", "Float")
                 # `0 - Int.MIN` overflows, so negation traps like any other
                 # subtraction rather than being the one wrapping operator.
                 return _E(f"(call $int_sub (i64.const 0) {operand.wat})", "Int")
@@ -1257,7 +1274,6 @@ class _ComponentEmitter:
         right = self._lower(node.get("right"), scope, types, where)
         if _is_unit_type(left.ty) or _is_unit_type(right.ty):
             raise EmitError(f"{where}: `{op}` on a void expression")
-        _refuse_float_operands(node, where)
         operand_ty = left.ty if left.ty == right.ty else None
         instruction = _bin_instr(op, operand_ty) if _is_scalar_type(operand_ty) else None
         if instruction is None:
@@ -1321,6 +1337,7 @@ class _ComponentEmitter:
         self.v3._reset_tmp_pool()
         self.v3._arrows = {}
         self.v3._arrow_counter = 0
+        self.v3._flowed_lists = {}
         self.v3._match_counter = 0
         self.v3._cdiv_counter = 0
         self.v3._loop_counter = 0
@@ -2979,6 +2996,12 @@ class _ComponentEmitter:
             # splits/joins/searches keeps a byte-identical helper preamble.
             if "$str_index_of" in rendered:
                 lines.append(self.v3._helper_str_index_of())
+            # Str ordering and List.indexOf (issue #3145), same demand rule.
+            for token, helper in (("$str_cmp", self.v3._helper_str_cmp),
+                                  ("$list_index_of_str", self.v3._helper_list_index_of_str),
+                                  ("$list_index_of_slot", self.v3._helper_list_index_of_slot)):
+                if token in rendered:
+                    lines.append(helper())
             if "$str_split" in rendered:
                 lines.append(self.v3._helper_str_split())
             if "$str_join" in rendered:
@@ -2991,6 +3014,11 @@ class _ComponentEmitter:
                 lines.append(self.v3._helper_str_concat_n(k))
         elif needs_arith:
             lines.extend(self.v3._arith_helper_funcs())
+        # `%` on Float has no wasm instruction, so it calls `$f64_mod`; the
+        # helper needs no linear memory, so it is pulled in independently of
+        # the two branches above, and only when the body actually calls it.
+        if "$f64_mod" in rendered:
+            lines.append(self.v3._helper_f64_mod())
         lines.extend(fn_defs)
         lines.append(")")
         return "\n".join(lines) + "\n"
@@ -3114,12 +3142,10 @@ _TRAPPING_INT_OPS = {"+": "call $int_add", "-": "call $int_sub", "*": "call $int
 _TRAPPING_INT32_OPS = {"+": "call $int32_add", "-": "call $int32_sub",
                        "*": "call $int32_mul"}
 #: `/` is deliberately ABSENT: it is true division, so `Int / Int` is `Float`
-#: (docs/arithmetic.md) and this tier refuses Float by name: see
-#: `_refuse_true_division`. `i64.div_s` here was a silent wrong value (7 / 2
-#: answered 3), and `f64.div` is no better: `$f64_to_str` traps on a
-#: non-integer-valued finite float (docs/strings.md §"Remaining wasm WAT work"),
-#: where the language documents `/` as total. Integer division is spelled
-#: `div_trunc` / `div_floor` / `div_euclid`.
+#: (docs/arithmetic.md) and is lowered to `f64.div` over converted operands, not
+#: to `i64.div_s` (which would answer a silent 3 for `7 / 2`). Integer division
+#: is spelled `div_trunc` / `div_floor` / `div_euclid`. `%` over Int is
+#: `i64.rem_s`, which traps at a zero divisor: the fault every tier gives.
 _RAW_INT_OPS = {"%": "i64.rem_s"}
 #: Int32 bitwise operators (item 366). wasm is the reference substrate: every
 #: one is a single native i32 instruction, and both shifts mask the count to 5
@@ -3196,49 +3222,11 @@ def _bin_instr(op: str, operand_ty: str | None) -> str | None:
         return _BITWISE_INT32_OPS[op] if operand_ty == "Int32" else None
     if operand_ty == "Int32":
         # Only `+ - *` reach here for Int32 (docs/arithmetic.md): `/` yields
-        # Float (refused on this tier) and `%` is Int-only.
+        # Float (lowered through f64) and `%` is Int-only.
         return _TRAPPING_INT32_OPS.get(op)
     if operand_ty != "Int":
         return None
     return _TRAPPING_INT_OPS.get(op) or _RAW_INT_OPS.get(op)
-
-
-def _refuse_float_operands(node: Any, where: str) -> None:
-    """`Float` stays refused on this tier, by name (docs/arithmetic.md).
-
-    The IR annotates `/ % + - *` with the *operand* type, which is the only
-    thing that distinguishes `Int / Int` from `Float / Float` in the node. It
-    is also what tells this tier that a site is Float-valued before it tries to
-    infer a type for it, so the refusal names Float rather than surfacing as a
-    confusing failure further down.
-    """
-    if isinstance(node, dict) and node.get("operands") == "Float":
-        raise EmitError(
-            f"{where}: type 'Float' is not lowerable — this tier supports "
-            f"Int/Bool, and the operands of `{node.get('op')}` are Float")
-
-
-def _refuse_true_division(operand_ty: str, where: str) -> None:
-    """`/` over two `Int`s is refused BY NAME, because it is Float division.
-
-    `Int / Int` is `Float` (docs/arithmetic.md): `7 / 2` is `3.5`, not `3`. This
-    tier lowers `Int`/`Bool` and refuses `Float` by name, and the one position
-    where it does lower a Float (a `${…}` part feeding `$f64_to_str`) cannot
-    absorb the result either, because that renderer traps on a finite float that
-    is not integer-valued (docs/strings.md §"Remaining wasm WAT work") while the
-    language documents `/` as total. So both lowerings are wrong: `i64.div_s`
-    answers a silent `3`, and `f64.div` moves the wrong answer to a runtime trap.
-    The refusal is the tier's documented contract, and it is stated here rather
-    than left to surface as a generic "only lowerable for Int/Int32".
-
-    `%` is unaffected: it is Int-only and keeps `i64.rem_s`, which traps at a
-    zero divisor: the fault every other tier gives.
-    """
-    raise EmitError(
-        f"{where}: `/` yields 'Float' even over two {operand_ty}s, and 'Float' "
-        f"is not lowerable: the wasm tier does not lower Float, so `{operand_ty} / "
-        f"{operand_ty}` is refused by name (docs/arithmetic.md); use "
-        f"div_trunc / div_floor / div_euclid for integer division")
 
 
 def _extern_wasm_body(ext: dict) -> str | None:
@@ -3257,10 +3245,11 @@ def _emit_extern_func(ext: dict, check_type) -> str:
     """Render a `@wasm`-bodied extern as an internal `(func $name …)`.
 
     Widths follow the same rule as every other value on this tier (`_wasm_ty`):
-    an `Int` param/return is an i64 value, a Str/List/record/variant/Opt/Result
-    is an i32 pointer. `check_type` is the caller's lowerability gate so a
-    Float/Map/function-typed extern is refused the same way an ordinary value of
-    that type is, rather than emitting an unvalidated body.
+    an `Int` param/return is an i64 value, a `Float` an f64 value, and a
+    Str/List/record/variant/Opt/Result an i32 pointer. `check_type` is the
+    caller's lowerability gate so a Map/function-typed extern is refused the
+    same way an ordinary value of that type is, rather than emitting an
+    unvalidated body.
     """
     name = _ident(ext.get("name"), "extern name")
     body = (_extern_wasm_body(ext) or "").strip()
@@ -3309,12 +3298,19 @@ def _refuse_cross_module_compound(key: str, op: str, param_types: list,
                  else [])
     if compound:
         raise EmitError(
-            f"{where}: {key}.{op}: {compound[0]}, and only scalar (Int/Bool) "
+            f"{where}: {key}.{op}: {compound[0]}, and only scalar (Int/Bool/Float) "
             f"values cross a service another component provides on this tier. "
             f"The provider is another module with its own linear memory and the runtime passes "
             f"a compound value as an address, so the other side would read its "
             f"own memory at that address (issue #1601). Pass scalars, keep the "
             f"compound value inside one component, or use a hosted backend")
+
+
+def _is_untyped_empty_list(node: Any) -> bool:
+    """An itemless list literal no annotation pinned (`let xs = []`)."""
+    return (isinstance(node, dict) and node.get("kind") == "list"
+            and not (node.get("items") or [])
+            and not _is_list_type(node.get("expected")))
 
 
 def _is_unit_type(ty: str | None) -> bool:
@@ -3324,11 +3320,11 @@ def _is_unit_type(ty: str | None) -> bool:
 def _is_scalar_type(ty: str | None) -> bool:
     """A value that lives in a wasm register rather than in linear memory.
 
-    (Was `_is_i32_type` while every value was an i32; an `Int` is an i64 now,
-    so the question the callers actually ask — "does this cross a service
-    boundary without a pointer?" — needed its own name.)
+    (Was `_is_i32_type` while every value was an i32; an `Int` is an i64 and a
+    `Float` an f64 now, so the question the callers actually ask — "does this
+    cross a service boundary without a pointer?" — needed its own name.)
     """
-    return ty in ("Int", "Bool")
+    return ty in ("Int", "Bool", "Float")
 
 
 def _is_list_type(ty: str | None) -> bool:
@@ -3560,21 +3556,6 @@ class _V3Emitter:
 
     def _declare_local(self, name: str, ty: str | None, where: str) -> None:
         """Record the wasm width of a local. Idempotent; conflicts are fatal."""
-        if ty == "Float":
-            # `_wasm_ty` carries every non-Int revl type as i32 (a pointer or a
-            # 0/1), and a Float VALUE is an f64: `(local.set $l_x (f64.const
-            # 0.5))` into an i32 local is a module that does not validate
-            # ("type mismatch: expected i32, found f64"), which wasmtime
-            # refuses at load. A Float parameter, return, comparison, equality
-            # and `.to_str()` are each refused BY NAME on this tier; the
-            # binding was the one position that emitted instead, so a program
-            # that merely wrote `let x: Float = 0.5` — even without reading it
-            # — got a broken artifact where every sibling position got a
-            # diagnostic. Same refusal, same wording, at the same boundary.
-            raise EmitError(
-                f"{where}: type 'Float' is not lowerable — this tier supports "
-                f"Int/Bool/Str/Bytes/List/record/variant/Opt/Result values"
-            )
         wasm = _wasm_ty(ty)
         previous = self._local_types.get(name)
         if previous is not None and previous != wasm:
@@ -3663,7 +3644,7 @@ class _V3Emitter:
     # -- type/layout helpers --------------------------------------------------
 
     def _check_type(self, ty: str | None, where: str) -> None:
-        if ty in (None, "Unit", "Int", "Int32", "Bool", "Str", "Bytes"):
+        if ty in (None, "Unit", "Int", "Int32", "Bool", "Str", "Bytes", "Float"):
             return
         if _is_fn_type(ty):
             raise EmitError(
@@ -3697,7 +3678,7 @@ class _V3Emitter:
             return
         raise EmitError(
             f"{where}: type {ty!r} is not lowerable — this tier supports "
-            f"Int/Bool/Str/Bytes/List/record/variant/Opt/Result values"
+            f"Int/Int32/Float/Bool/Str/Bytes/List/record/variant/Opt/Result values"
         )
 
     def _record_fields(self, ty: str | None) -> dict[str, str] | None:
@@ -3764,14 +3745,15 @@ class _V3Emitter:
             if isinstance(node, dict):
                 if node.get("kind") == "lit" and isinstance(node.get("value"), str):
                     seen.setdefault(node["value"], None)
-                if node.get("method") in _CHECKED_DIVS:
-                    # the total division forms carry their Err reasons from
-                    # the emitter, not from a literal in the source — pool them
+                if node.get("method") in _CHECKED_FORMS:
+                    # the total forms carry their Err reasons from the
+                    # emitter, not from a literal in the source — pool them
                     # here so `_str_ptr` can name them at lowering time. The
-                    # three quotient forms carry a second one: `Int.MIN / -1`
-                    # has no representable quotient, and they answer that as a
-                    # value rather than trapping the way `/` does.
-                    seen.setdefault(_DIV_ZERO_MSG, None)
+                    # division forms carry a second one for `Int.MIN / -1`,
+                    # which has no representable quotient; the arithmetic
+                    # forms carry only the overflow reason.
+                    if node.get("method") in _CHECKED_DIVS:
+                        seen.setdefault(_DIV_ZERO_MSG, None)
                     if node.get("method") != "checked_mod":
                         seen.setdefault(_INT_OVERFLOW_MSG, None)
                 if node.get("kind") == "interp":
@@ -3828,15 +3810,29 @@ class _V3Emitter:
     # allocator last left there.
 
     @staticmethod
-    def _slot_load(address: str, ty: str | None) -> str:
-        load = f"(i64.load {address})"
-        return load if ty == "Int" else f"(i32.wrap_i64 {load})"
+    def _slot_value(value: str, ty: str | None) -> str:
+        """The i64 bit pattern a slot holds for a value of revl type `ty`.
+
+        Slots are uniformly 8 bytes. `Int` already is that width; `Float` is
+        stored as its IEEE-754 bit pattern (`i64.reinterpret_f64`), which is
+        lossless and round-trips through `_slot_load`; a Bool, Int32, or
+        pointer is zero-extended.
+        """
+        if ty == "Int":
+            return value
+        if ty == "Float":
+            return f"(i64.reinterpret_f64 {value})"
+        return f"(i64.extend_i32_u {value})"
 
     @staticmethod
-    def _slot_store(address: str, value: str, ty: str | None) -> str:
-        if ty != "Int":
-            value = f"(i64.extend_i32_u {value})"
-        return f"(i64.store {address} {value})"
+    def _slot_load(address: str, ty: str | None) -> str:
+        load = f"(i64.load {address})"
+        if ty == "Float":
+            return f"(f64.reinterpret_i64 {load})"
+        return load if ty == "Int" else f"(i32.wrap_i64 {load})"
+
+    def _slot_store(self, address: str, value: str, ty: str | None) -> str:
+        return f"(i64.store {address} {self._slot_value(value, ty)})"
 
 
     # -- linear-memory runtime helpers ---------------------------------------
@@ -4110,6 +4106,48 @@ class _V3Emitter:
           (f64.lt (f64.abs (local.get $x)) (f64.const 0x1p+63)))
       (then (return (call $int_to_str (i64.trunc_f64_s (local.get $x))))))
     (unreachable))"""
+
+    def _helper_f64_mod(self) -> str:
+        # C fmod semantics, for `%` on Float (docs/arithmetic.md: `%` is the
+        # truncated remainder, C fmod including a zero divisor, where it is NaN
+        # rather than a fault). wasm has no f64 remainder instruction, and the
+        # naive `a - trunc(a/b)*b` is not exact (it loses the low bits of a when
+        # the quotient is large), so this is the binary long-division form:
+        # scale |b| up to the largest power of two not exceeding |a|, then halve
+        # it back down, subtracting whenever it fits. Every subtraction is
+        # exact by Sterbenz's lemma (|a| stays below twice the current divisor),
+        # so the result is the exact remainder, and `copysign` restores the
+        # dividend's sign (including -0.0).
+        return """  (func $f64_mod (param $a f64) (param $b f64) (result f64)
+    (local $x f64) (local $y f64) (local $d f64)
+    (if (f64.ne (local.get $a) (local.get $a))
+      (then (return (f64.const nan))))
+    (if (f64.eq (f64.abs (local.get $a)) (f64.const inf))
+      (then (return (f64.const nan))))
+    (if (f64.ne (local.get $b) (local.get $b))
+      (then (return (f64.const nan))))
+    (if (f64.eq (local.get $b) (f64.const 0))
+      (then (return (f64.const nan))))
+    (local.set $x (f64.abs (local.get $a)))
+    (local.set $y (f64.abs (local.get $b)))
+    (if (f64.lt (local.get $x) (local.get $y))
+      (then (return (local.get $a))))
+    (local.set $d (local.get $y))
+    (block $scaled
+      (loop $scale
+        (br_if $scaled (f64.gt
+          (f64.mul (local.get $d) (f64.const 2))
+          (local.get $x)))
+        (local.set $d (f64.mul (local.get $d) (f64.const 2)))
+        (br $scale)))
+    (block $done
+      (loop $outer
+        (br_if $done (f64.lt (local.get $x) (local.get $y)))
+        (if (f64.ge (local.get $x) (local.get $d))
+          (then (local.set $x (f64.sub (local.get $x) (local.get $d)))))
+        (local.set $d (f64.mul (local.get $d) (f64.const 0.5)))
+        (br $outer)))
+    (f64.copysign (local.get $x) (local.get $a)))"""
 
     def _helper_str_concat(self) -> str:
         return """  (func $str_concat (param $a i32) (param $b i32) (result i32)
@@ -4780,6 +4818,80 @@ class _V3Emitter:
     # (py/ts): index/count in *code points*, JS-shape split (trailing empties
     # kept, `""` → per-code-point pieces), and `List[Str].join(sep)`.
 
+    def _helper_str_cmp(self) -> str:
+        # Str ordering: -1/0/1 over the two byte strings. UTF-8 is built so that
+        # comparing bytes as unsigned values orders strings by code point, which
+        # is the order every other tier gives (docs/stdlib-2.0.md, #458 Str
+        # ordering); a shorter string that is a prefix of the other sorts first.
+        return """  (func $str_cmp (param $a i32) (param $b i32) (result i32)
+    (local $na i32) (local $nb i32) (local $n i32) (local $i i32)
+    (local $ca i32) (local $cb i32)
+    (local.set $na (i32.load (local.get $a)))
+    (local.set $nb (i32.load (local.get $b)))
+    (local.set $n
+      (select (local.get $na) (local.get $nb) (i32.lt_u (local.get $na) (local.get $nb))))
+    (local.set $i (i32.const 0))
+    (block $done
+      (loop $loop
+        (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+        (local.set $ca
+          (i32.load8_u (i32.add (i32.add (local.get $a) (i32.const 4)) (local.get $i))))
+        (local.set $cb
+          (i32.load8_u (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $i))))
+        (if (i32.ne (local.get $ca) (local.get $cb))
+          (then
+            (return
+              (select (i32.const -1) (i32.const 1)
+                      (i32.lt_u (local.get $ca) (local.get $cb))))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $loop)))
+    (if (i32.lt_u (local.get $na) (local.get $nb)) (then (return (i32.const -1))))
+    (if (i32.gt_u (local.get $na) (local.get $nb)) (then (return (i32.const 1))))
+    (i32.const 0))"""
+
+    def _helper_list_index_of_str(self) -> str:
+        # List[Str].indexOf(needle): the index of the first slot whose Str equals
+        # the needle (`$str_eq`, byte equality), else -1. The i32 result is
+        # sign-extended at the call site so -1 crosses to the tier's Int as -1.
+        return """  (func $list_index_of_str (param $l i32) (param $x i32) (result i32)
+    (local $n i32) (local $i i32)
+    (local.set $n (i32.load (local.get $l)))
+    (local.set $i (i32.const 0))
+    (block $done
+      (loop $loop
+        (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+        (if (call $str_eq
+              (i32.wrap_i64
+                (i64.load
+                  (i32.add (local.get $l)
+                    (i32.add (i32.const 8) (i32.mul (local.get $i) (i32.const 8))))))
+              (local.get $x))
+          (then (return (local.get $i))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $loop)))
+    (i32.const -1))"""
+
+    def _helper_list_index_of_slot(self) -> str:
+        # List[Int|Int32|Bool].indexOf(needle): the slot holds the value's i64
+        # pattern (Int as is, Int32/Bool zero-extended), so equality of the
+        # element is equality of the slot and the needle in the same encoding.
+        return """  (func $list_index_of_slot (param $l i32) (param $x i64) (result i32)
+    (local $n i32) (local $i i32)
+    (local.set $n (i32.load (local.get $l)))
+    (local.set $i (i32.const 0))
+    (block $done
+      (loop $loop
+        (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+        (if (i64.eq
+              (i64.load
+                (i32.add (local.get $l)
+                  (i32.add (i32.const 8) (i32.mul (local.get $i) (i32.const 8)))))
+              (local.get $x))
+          (then (return (local.get $i))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $loop)))
+    (i32.const -1))"""
+
     def _helper_str_index_of(self) -> str:
         # Str.indexOf(needle): a byte substring scan; on a hit, the byte offset
         # is converted to the *code-point* index (the reference tiers return a
@@ -4955,6 +5067,8 @@ class _V3Emitter:
             raise EmitError("malformed v3 expression")
         if node.get("widen") == "Int":
             return "Int"  # Int32 widened to Int (docs/arithmetic.md)
+        if node.get("widen") == "Float":
+            return "Float"  # Int/Int32 widened to binary64 (docs/arithmetic.md)
         kind = node["kind"]
         if kind == "lit":
             value = node.get("value")
@@ -4993,10 +5107,13 @@ class _V3Emitter:
                 return "Str"
             if op == "+" and _is_list_type(left) and left == right:
                 return left
-            if node.get("operands") == "Float" and op in ("+", "-", "*", "/"):
-                # Float arithmetic on this tier lowers to f64 ops only so the
-                # result can be rendered (docs/strings.md); the value never
-                # enters the storage ABI.
+            if op == "/":
+                # `/` is TRUE division and yields Float even over two Ints
+                # (docs/arithmetic.md).
+                return "Float"
+            if op in ("+", "-", "*", "%") and (
+                    node.get("operands") == "Float"
+                    or left == "Float" or right == "Float"):
                 return "Float"
             if op in ("&", "|", "^", "<<", ">>"):
                 return "Int32"  # bitwise ops are Int32-only (docs/arithmetic.md)
@@ -5010,6 +5127,9 @@ class _V3Emitter:
             if op == "~":
                 return "Int32"  # bitwise complement is Int32-only (docs/arithmetic.md)
             if op == "-":
+                operand_ty = self._infer_type(node.get("operand"), scope)
+                if operand_ty == "Float" or node.get("operands") == "Float":
+                    return "Float"
                 return "Int32" if node.get("operands") == "Int32" else "Int"
             raise EmitError(f"unsupported unary operator {op!r}")
         if kind == "call":
@@ -5164,8 +5284,8 @@ class _V3Emitter:
                 raise EmitError("codepoint_at is only lowerable on Str/Bytes values")
             return "Int"
         if method == "to_str":
-            if target_ty != "Int":
-                raise EmitError("to_str is only lowerable on Int values")
+            if target_ty not in ("Int", "Float"):
+                raise EmitError("to_str is only lowerable on Int/Float values")
             return "Str"
         # The reverse of `codepoint_at` (issue #2285, docs/stdlib-2.0.md
         # §Int.to_char).
@@ -5190,9 +5310,13 @@ class _V3Emitter:
             # named refusal.
             if target_ty in ("Str", "Bytes"):
                 return "Int"
+            if _is_list_type(target_ty) and _list_elem(target_ty) in _INDEX_OF_ELEMS:
+                return "Int"
             raise EmitError(
                 "indexOf is not lowerable on this tier yet for List — the "
-                "element comparison has no representation here; use a hosted backend")
+                "element comparison has no representation here for "
+                f"{target_ty!r} (only List[Str]/List[Int]/List[Int32]/"
+                "List[Bool] have one); use a hosted backend")
         if method == "split":
             # Str.split(sep) → List[Str] (docs/stdlib-2.0.md §split).
             if target_ty not in ("Str", "Bytes"):
@@ -5211,9 +5335,15 @@ class _V3Emitter:
 
     def _record_type(self, node: dict, scope: _Scope, expected: str | None) -> str:
         fields: list[tuple[str, str]] = []
+        # Where the literal flows into a record type (a return, a typed local,
+        # a field of an outer record), that type's own field types are the
+        # `expected` of each value, so `{ ok: false, params: [] }` pins its
+        # empty list to the declared `List[Str]` exactly as `_record_expr` does
+        # when it lowers the field.
+        declared = self._record_fields(expected) if expected is not None else None
         for raw_name, raw_value in node.get("fields") or []:
             name = _ident(raw_name, "record field")
-            ftype = self._infer_type(raw_value, scope)
+            ftype = self._infer_type(raw_value, scope, (declared or {}).get(name))
             if ftype is None or ftype == "Unit":
                 raise EmitError(f"record field {name!r} has void type")
             fields.append((name, ftype))
@@ -5236,6 +5366,11 @@ class _V3Emitter:
             pinned = node.get("expected")
             if _is_list_type(pinned):
                 return pinned
+            # An unannotated `let xs = []` typed from how its block uses it
+            # (`_flow_empty_list`), kept off the shared IR node.
+            flowed = self._flowed_lists.get(id(node))
+            if flowed is not None:
+                return flowed
         items = node.get("items") or []
         if not items:
             raise EmitError("an untyped empty list literal needs an expected List type")
@@ -5252,14 +5387,25 @@ class _V3Emitter:
     def _expr(self, node: Any, scope: _Scope, where: str, expected: str | None = None) -> _E:
         if not isinstance(node, dict) or "kind" not in node:
             raise EmitError(f"{where}: malformed v3 expression {node!r}")
-        # An Int32 -> Int widening site (docs/arithmetic.md): Int32 is an i32
-        # and Int is an i64, so the lossless widening is a sign-extend, emitted
-        # where the frontend marked it. (`widen: "Float"` never reaches this
-        # tier — Float is refused by name.)
+        # Widening sites (docs/arithmetic.md): the frontend marks every
+        # implicit numeric conversion so each backend emits it at the same
+        # place. Int32 -> Int is a sign-extend; Int/Int32 -> Float is the
+        # binary64 conversion every tier performs (Int / Int is Float).
         if node.get("widen") == "Int":
             inner = {k: v for k, v in node.items() if k != "widen"}
             operand = self._expr(inner, scope, where, "Int32")
             return _E(f"(i64.extend_i32_s {operand.wat})", "Int")
+        if node.get("widen") == "Float":
+            inner = {k: v for k, v in node.items() if k != "widen"}
+            value = self._expr(inner, scope, where)
+            if value.ty == "Float":
+                return value
+            if value.ty == "Int":
+                return _E(f"(f64.convert_i64_s {value.wat})", "Float")
+            if value.ty == "Int32":
+                return _E(f"(f64.convert_i32_s {value.wat})", "Float")
+            raise EmitError(
+                f"{where}: only Int/Int32 values widen to Float, got {value.ty!r}")
         kind = node["kind"]
         if kind == "__wat":
             return _E(node.get("wat"), node.get("ty"))
@@ -5274,11 +5420,9 @@ class _V3Emitter:
             if isinstance(value, str):
                 return _E(self._str_ptr(value), "Str")
             if isinstance(value, float):
-                # A Float value on this tier exists only to be rendered: it is
-                # an f64 on the wasm stack, produced here and consumed by
-                # `$f64_to_str` in interpolation. It is never stored in an
-                # i32/8-byte slot, so no Float ever reaches the value ABI —
-                # storing/returning a Float still refuses by name below.
+                # Float is a native f64 value (locals, fields, list elements,
+                # return values and the boundary all use it); a slot stores its
+                # bit pattern, see `_slot_value`.
                 return _E(f"(f64.const {_f64_literal(value)})", "Float")
             raise EmitError(f"{where}: literal {value!r} is not lowerable on this tier")
         if kind == "var":
@@ -5389,6 +5533,26 @@ class _V3Emitter:
     def _trap_free(self, node: Any, scope: _Scope) -> bool:
         return _trap_free_operand(node, lambda n: self._infer_type(n, scope))
 
+    def _float_operand(self, node: Any, scope: _Scope, where: str) -> str:
+        """Lower `node` as a native f64, converting an Int/Int32 operand.
+
+        The checker widens implicitly at a Float site (docs/arithmetic.md:
+        Int32 -> Int -> Float), and the IR marks a *standalone* conversion with
+        `widen`, but a binary node leaves the Int side unmarked (`1 < x` with
+        `x: Float`). So the conversion happens here, at the operation, which is
+        where every tier's host would do it.
+        """
+        value = self._expr(node, scope, where)
+        if value.ty == "Float":
+            return value.wat
+        if value.ty == "Int":
+            return f"(f64.convert_i64_s {value.wat})"
+        if value.ty == "Int32":
+            return f"(f64.convert_i32_s {value.wat})"
+        raise EmitError(
+            f"{where}: cannot use a {value.ty!r} value in Float arithmetic or "
+            f"comparison on this tier")
+
     def _bin_expr(self, node: dict, scope: _Scope, where: str) -> _E:
         op = node.get("op")
         if op == "??":
@@ -5412,9 +5576,33 @@ class _V3Emitter:
             left = self._expr(left_node, scope, where, left_ty)
             right = self._expr(right_node, scope, where, right_ty)
             return _E(f"{left.wat}\n      {right.wat}\n      (call $list_concat)", left_ty)
+        # Float comparison and equality are native f64 instructions. Either
+        # operand being Float makes the site a Float site (the checker widens
+        # the Int side implicitly, docs/arithmetic.md), and IEEE semantics are
+        # exactly what the host instructions implement (NaN != NaN, -0.0 == 0.0).
+        if op in _CMP_SUFFIX and (left_ty == "Float" or right_ty == "Float"):
+            numeric = ("Int", "Int32", "Float")
+            if left_ty not in numeric or right_ty not in numeric:
+                raise EmitError(
+                    f"{where}: cannot compare {left_ty!r} with {right_ty!r} on this tier")
+            left = self._float_operand(left_node, scope, where)
+            right = self._float_operand(right_node, scope, where)
+            suffix = {"==": "eq", "===": "eq", "!=": "ne", "!==": "ne",
+                      "<": "lt", ">": "gt", "<=": "le", ">=": "ge"}[op]
+            return _E(f"{left}\n      {right}\n      (f64.{suffix})", "Bool")
+        if op in ("<", ">", "<=", ">=") and left_ty == "Str" and right_ty == "Str":
+            # Str ordering is code-point order on every tier; byte order over
+            # UTF-8 is the same order, so `$str_cmp` (-1/0/1) is compared to 0.
+            left = self._expr(left_node, scope, where, "Str")
+            right = self._expr(right_node, scope, where, "Str")
+            suffix = {"<": "lt_s", ">": "gt_s", "<=": "le_s", ">=": "ge_s"}[op]
+            return _E(f"{left.wat}\n      {right.wat}\n      (call $str_cmp)\n"
+                      f"      (i32.const 0)\n      (i32.{suffix})", "Bool")
         if op in ("<", ">", "<=", ">=") and not (
                 left_ty == right_ty and left_ty in ("Int", "Int32")):
-            raise EmitError(f"{where}: relational operator {op!r} is only lowerable for Int/Int32")
+            raise EmitError(
+                f"{where}: relational operator {op!r} is only lowerable for "
+                f"Int/Int32/Float/Str")
         if op in ("&&", "||") and (left_ty != "Bool" or right_ty != "Bool"):
             raise EmitError(f"{where}: logical operator {op!r} is only lowerable for Bool")
         if op in ("&&", "||") and not self._trap_free(right_node, scope):
@@ -5441,7 +5629,9 @@ class _V3Emitter:
                     f"(then (i32.const 1))\n        (else {right.wat})")
             return _E(f"{left.wat}\n      (if (result i32)\n        {arms})", "Bool")
         if op in ("==", "===", "!=", "!==") and (left_ty not in ("Int", "Int32", "Bool") or right_ty not in ("Int", "Int32", "Bool")):
-            raise EmitError(f"{where}: equality on this tier is lowerable for Int, Int32, Bool, and Str")
+            raise EmitError(
+                f"{where}: equality on this tier is lowerable for Int, Int32, "
+                f"Bool, Float, and Str")
         if op in ("==", "===", "!=", "!==") and left_ty != right_ty:
             # Int (i64), Int32 (i32) and Bool (i32) are distinct wasm types, and
             # no comparison instruction spans two widths — say so rather than
@@ -5450,36 +5640,30 @@ class _V3Emitter:
             raise EmitError(
                 f"{where}: cannot compare {left_ty!r} with {right_ty!r} on this "
                 f"tier — Int is 64-bit and Int32/Bool are 32-bit")
-        if op in ("+", "-", "*", "/") and node.get("operands") == "Float":
-            # Float arithmetic is lowerable *only* to feed the renderer: it
-            # produces a bare f64 on the stack (IEEE-754 semantics, matching
-            # every other tier's host), consumed by `$f64_to_str` in an
-            # interpolation. No Float ever reaches an i32 slot, a local, a
-            # return or the boundary — those positions still refuse by name
-            # (docs/strings.md §"Remaining wasm WAT work").
-            left = self._expr(left_node, scope, where, "Float")
-            right = self._expr(right_node, scope, where, "Float")
-            if left.ty != "Float" or right.ty != "Float":
+        # Float arithmetic. `/` is true division, so it is Float even over two
+        # Ints (docs/arithmetic.md), and any Float operand makes the site a
+        # Float site. The values are native f64s here; `%` is C fmod semantics,
+        # for which wasm has no instruction, so it calls `$f64_mod`.
+        if op in ("+", "-", "*", "/", "%") and (
+                op == "/" or node.get("operands") == "Float"
+                or left_ty == "Float" or right_ty == "Float"):
+            numeric = ("Int", "Int32", "Float")
+            if left_ty not in numeric or right_ty not in numeric:
                 raise EmitError(
-                    f"{where}: `{op}` marked Float but an operand is "
-                    f"{left.ty!r}/{right.ty!r} on this tier")
+                    f"{where}: arithmetic operator {op!r} is not lowerable over "
+                    f"{left_ty!r}/{right_ty!r} on this tier")
+            left = self._float_operand(left_node, scope, where)
+            right = self._float_operand(right_node, scope, where)
+            if op == "%":
+                return _E(f"{left}\n      {right}\n      (call $f64_mod)", "Float")
             instr = {"+": "f64.add", "-": "f64.sub",
                      "*": "f64.mul", "/": "f64.div"}[op]
-            return _E(f"{left.wat}\n      {right.wat}\n      ({instr})", "Float")
+            return _E(f"{left}\n      {right}\n      ({instr})", "Float")
         if op in ("+", "-", "*", "/", "%") and not (
                 left_ty == right_ty and left_ty in ("Int", "Int32")):
-            _refuse_float_operands(node, where)
             raise EmitError(f"{where}: arithmetic operator {op!r} is only lowerable for Int/Int32")
-        if op == "/":
-            # Past the guard above, `/` is over two Ints (or two Int32s), and
-            # that is TRUE division, i.e. Float, which this tier refuses by name
-            # rather than lowering to `i64.div_s` (issue #2201). The Float-operand
-            # branch above already returned, so `Float / Float` in the renderer
-            # position is untouched.
-            _refuse_true_division(left_ty, where)
         if op not in _BINARY_OPS:
             raise EmitError(f"{where}: unsupported binary operator {op!r}")
-        _refuse_float_operands(node, where)
         # `expected` is the *operand* type, which is also what picks the
         # instruction: `i64.eq` and `i32.eq` are the same comparison at two
         # widths, and only the operands say which.
@@ -5516,6 +5700,10 @@ class _V3Emitter:
             # never traps; the operand is Int32 (the checker guarantees it).
             return _E(f"{operand.wat}\n      (i32.const -1)\n      (i32.xor)", "Int32")
         if op == "-":
+            if operand.ty == "Float":
+                # Float negation is total, including at -0.0 (f64.neg flips
+                # the sign bit) and NaN (sign is irrelevant to the value).
+                return _E(f"(f64.neg {operand.wat})", "Float")
             # negation is a subtraction from zero, and `0 - MIN` overflows: it
             # goes through the checked helper like any other subtraction, at the
             # operand's width (docs/arithmetic.md).
@@ -5592,12 +5780,12 @@ class _V3Emitter:
         target_node = node.get("target")
         target_ty = self._infer_type(target_node, scope)
         args = node.get("args") or []
-        # The total forms (docs/arithmetic.md): same quotient as the faulting
-        # operation, but a zero divisor yields Err(reason) instead of the
-        # `i64.div_s` trap — `fail` is refused in a pure fn, so the error
-        # travels as a value. Both operands are evaluated once into scratch
-        # slots; each branch allocates its own tagged cell.
-        if method in _CHECKED_DIVS:
+        # The total forms (docs/arithmetic.md): same value as the faulting
+        # operation where it fits, Err(reason) instead of the trap otherwise
+        # — `fail` is refused in a pure fn, so the error travels as a value.
+        # Both operands are evaluated once into scratch slots; each branch
+        # allocates its own tagged cell.
+        if method in _CHECKED_FORMS:
             ty = expected if self._tagged_layout(expected) is not None else "Result[Int, Str]"
             if self._tagged_layout(ty) is None:
                 raise EmitError(f"{where}: {ty!r} is not a tagged union")
@@ -5608,10 +5796,60 @@ class _V3Emitter:
             tmp_b = f"cdiv_{node['_cdiv']}_b"
             self._declare_local(tmp_a, "Int", where)
             self._declare_local(tmp_b, "Int", where)
-            dividend = self._expr(target_node, scope, where, "Int")
-            divisor = self._expr(args[0], scope, where, "Int")
+            left = self._expr(target_node, scope, where, "Int")
+            right = self._expr(args[0], scope, where, "Int")
             read_a = f"(local.get ${tmp_a})"
             read_b = f"(local.get ${tmp_b})"
+            if method in _CHECKED_ARITH:
+                # The value is computed first, then the same overflow test the
+                # trapping `$int_add/$int_sub/$int_mul` helpers run decides
+                # between the Ok and Err cells. For multiply the test must not
+                # divide when the left operand is zero (that traps), so the
+                # zero case is branched out before the readback; `Int.MIN * -1`
+                # is named before it for the same reason `$int_mul` names it.
+                tmp_r = f"cdiv_{node['_cdiv']}_r"
+                self._declare_local(tmp_r, "Int", where)
+                read_r = f"(local.get ${tmp_r})"
+                value = {
+                    "checked_add": f"(i64.add {read_a} {read_b})",
+                    "checked_sub": f"(i64.sub {read_a} {read_b})",
+                    "checked_mul": f"(i64.mul {read_a} {read_b})",
+                }[method]
+                ok_cell = self._make_tagged(
+                    ty, "Ok", {"kind": "__wat", "wat": read_r, "ty": "Int"},
+                    scope, where)
+                err_cell = self._make_tagged(
+                    ty, "Err",
+                    {"kind": "lit", "value": _INT_OVERFLOW_MSG},
+                    scope, where)
+                if method == "checked_add":
+                    overflow = (f"(i64.lt_s (i64.and (i64.xor {read_a} {read_r}) "
+                                f"(i64.xor {read_b} {read_r})) (i64.const 0))")
+                elif method == "checked_sub":
+                    overflow = (f"(i64.lt_s (i64.and (i64.xor {read_a} {read_b}) "
+                                f"(i64.xor {read_a} {read_r})) (i64.const 0))")
+                else:
+                    overflow = (f"(if (result i32)\n"
+                                f"          (i32.or (i64.eqz {read_a}) (i64.eqz {read_b}))\n"
+                                f"          (then (i32.const 0))\n"
+                                f"          (else (if (result i32)\n"
+                                f"            (i32.or\n"
+                                f"              (i32.and (i64.eq {read_a} "
+                                f"(i64.const -9223372036854775808)) "
+                                f"(i64.eq {read_b} (i64.const -1)))\n"
+                                f"              (i32.and (i64.eq {read_a} (i64.const -1)) "
+                                f"(i64.eq {read_b} (i64.const -9223372036854775808))))\n"
+                                f"            (then (i32.const 1))\n"
+                                f"            (else (i64.ne (i64.div_s {read_r} {read_b}) "
+                                f"{read_a})))))")
+                wat = (f"{left.wat}\n      (local.set ${tmp_a})\n"
+                       f"      {right.wat}\n      (local.set ${tmp_b})\n"
+                       f"      {value}\n      (local.set ${tmp_r})\n"
+                       f"      (if (result i32)\n"
+                       f"        {overflow}\n"
+                       f"        (then {err_cell.wat})\n"
+                       f"        (else {ok_cell.wat}))")
+                return _E(wat, ty)
             quotient = {
                 "checked_div_trunc": f"(i64.div_s {read_a} {read_b})",
                 "checked_div_floor": f"(call $int_div_floor {read_a} {read_b})",
@@ -5646,8 +5884,8 @@ class _V3Emitter:
                          f"          (i64.eq {read_b} (i64.const -1)))\n"
                          f"        (then {overflow_cell.wat})\n"
                          f"        (else {ok_cell.wat}))")
-            wat = (f"{dividend.wat}\n      (local.set ${tmp_a})\n"
-                   f"      {divisor.wat}\n      (local.set ${tmp_b})\n"
+            wat = (f"{left.wat}\n      (local.set ${tmp_a})\n"
+                   f"      {right.wat}\n      (local.set ${tmp_b})\n"
                    f"      (if (result i32)\n"
                    f"        (i64.eqz {read_b})\n"
                    f"        (then {err_cell.wat})\n"
@@ -5680,8 +5918,9 @@ class _V3Emitter:
             elem_ty = _list_elem(target_ty)
             arg = self._expr(args[0], scope, where, elem_ty)
             # $list_push writes one 8-byte slot and never learns the element
-            # type, so a non-Int element is widened into the slot here
-            elem = arg.wat if elem_ty == "Int" else f"(i64.extend_i32_u {arg.wat})"
+            # type, so a Float is stored as its bit pattern and a non-Int
+            # scalar/pointer is zero-extended, exactly as `_slot_store` does.
+            elem = self._slot_value(arg.wat, elem_ty)
             return _E(f"{target.wat}\n      {elem}\n      (call $list_push)", target_ty)
         if method == "concat":
             if target_ty not in ("Str", "Bytes") and not _is_list_type(target_ty):
@@ -5746,11 +5985,16 @@ class _V3Emitter:
                     "mod": "$int_mod"}[method]
             return _E(f"(call {call} {target.wat} {arg.wat})", "Int")
         if method == "to_str":
-            # The rendering builtin (docs/stdlib-2.0.md §Int.to_str). The runtime
-            # helper already exists for templates; it renders Int.MIN exactly
-            # by dividing the negated bit pattern as unsigned.
+            # The rendering builtin (docs/stdlib-2.0.md §Int.to_str). The Int
+            # helper renders Int.MIN exactly by dividing the negated bit pattern
+            # as unsigned; the Float form is the same canonical renderer an
+            # interpolation of a Float uses (`$f64_to_str`), so the two
+            # spellings agree byte for byte.
+            if target_ty == "Float":
+                target = self._expr(target_node, scope, where, "Float")
+                return _E(f"(call $f64_to_str {target.wat})", "Str")
             if target_ty != "Int":
-                raise EmitError(f"{where}: to_str is only lowerable on Int")
+                raise EmitError(f"{where}: to_str is only lowerable on Int/Float")
             target = self._expr(target_node, scope, where, "Int")
             return _E(f"(call $int_to_str {target.wat})", "Str")
         if method == "to_char":
@@ -5782,10 +6026,30 @@ class _V3Emitter:
             # Byte-scan the haystack for the needle; `$str_index_of` returns a
             # code-point index (or -1), matching py/ts. The i32 result is
             # sign-extended so -1 crosses to the tier's Int as -1.
+            if _is_list_type(target_ty) and _list_elem(target_ty) in _INDEX_OF_ELEMS:
+                # List.indexOf: the first slot equal to the needle, by the
+                # element's own equality (Str bytes, or the slot's i64 pattern
+                # for Int/Int32/Bool); -1 when absent.
+                elem = _list_elem(target_ty)
+                target = self._expr(target_node, scope, where, target_ty)
+                arg = self._expr(args[0], scope, where, elem)
+                if arg.ty != elem:
+                    raise EmitError(
+                        f"{where}: indexOf needle is {arg.ty!r} but the List "
+                        f"carries {elem!r}")
+                if elem == "Str":
+                    return _E(f"{target.wat}\n      {arg.wat}\n      "
+                              f"(call $list_index_of_str)\n      (i64.extend_i32_s)",
+                              "Int")
+                return _E(f"{target.wat}\n      {self._slot_value(arg.wat, elem)}\n      "
+                          f"(call $list_index_of_slot)\n      (i64.extend_i32_s)",
+                          "Int")
             if target_ty not in ("Str", "Bytes"):
                 raise EmitError(
                     f"{where}: indexOf is not lowerable on this tier yet for List — "
-                    f"the element comparison has no representation here; use a hosted backend")
+                    f"the element comparison has no representation here for "
+                    f"{target_ty!r} (only List[Str]/List[Int]/List[Int32]/"
+                    f"List[Bool] have one); use a hosted backend")
             target = self._expr(target_node, scope, where, target_ty)
             arg = self._expr(args[0], scope, where, "Str")
             return _E(f"{target.wat}\n      {arg.wat}\n      (call $str_index_of)\n      (i64.extend_i32_s)", "Int")
@@ -6073,15 +6337,19 @@ class _V3Emitter:
                 self._collect_match_locals(value, binds, scruts)
 
     def _collect_cdiv_locals(self, node: Any, names: list) -> None:
-        """Mint the i64 operand locals each total-division form needs, in the
-        order the bodies are lowered — the same pre-pass `_collect_match_locals`
-        does for match scratch, since both live in expression position."""
+        """Mint the i64 locals each total form needs, in the order the bodies
+        are lowered — the same pre-pass `_collect_match_locals` does for match
+        scratch, since both live in expression position. The arithmetic forms
+        need a third local for the computed value, whose sign is part of the
+        overflow test."""
         if isinstance(node, dict):
-            if node.get("method") in _CHECKED_DIVS and "_cdiv" not in node:
+            if node.get("method") in _CHECKED_FORMS and "_cdiv" not in node:
                 self._cdiv_counter += 1
                 node["_cdiv"] = self._cdiv_counter
                 names.extend([f"cdiv_{self._cdiv_counter}_a",
                               f"cdiv_{self._cdiv_counter}_b"])
+                if node.get("method") in _CHECKED_ARITH:
+                    names.append(f"cdiv_{self._cdiv_counter}_r")
             for value in node.values():
                 self._collect_cdiv_locals(value, names)
         elif isinstance(node, list):
@@ -6237,9 +6505,86 @@ class _V3Emitter:
                     "step inside a while/for body "
                     "(docs/design/379-break-continue.md)")
 
+    def _flow_empty_list(self, name: str, rest: list, scope: _Scope,
+                         expected_return: str | None) -> str | None:
+        """The `List[T]` an unannotated `let xs = []` is used as, read off what
+        the rest of its block does with it (the evidence the checker's
+        unification used, and what the Go tier reads too): the first
+        `xs = xs.push(e)` / `xs = xs.concat(l)` fixes `T` from `e` / `l`; a
+        `return xs` takes the declared return type. A wasm list slot is
+        uniform, so the element type never changes the code, only which
+        helpers and field reads the later uses lower to. Returns None when the
+        block gives no evidence, or conflicting evidence (the caller then keeps
+        the named refusal).
+
+        Inference runs over a scratch scope that follows the block's own
+        bindings and nested blocks, so a pushed value that mentions a loop
+        variable or a `let` declared after `xs` types as it will at emit time.
+        """
+        def infer(node: Any, sc: _Scope) -> str | None:
+            try:
+                return self._infer_type(node, sc)
+            except EmitError:
+                return None
+
+        def is_name(node: Any) -> bool:
+            return (isinstance(node, dict) and node.get("kind") == "var"
+                    and node.get("name") == name)
+
+        found: list[str] = []
+
+        def walk(stmts: list, sc: _Scope) -> None:
+            for st in stmts or []:
+                step = st.get("step")
+                value = st.get("value")
+                if step == "assign" and st.get("name") == name \
+                        and isinstance(value, dict) \
+                        and value.get("kind") == "builtin" \
+                        and is_name(value.get("target")):
+                    method, vargs = value.get("method"), value.get("args") or []
+                    if method == "push" and vargs:
+                        elem = infer(vargs[0], sc)
+                        if elem is not None and not _is_unit_type(elem):
+                            found.append(f"List[{elem}]")
+                    elif method == "concat" and vargs:
+                        other = infer(vargs[0], sc)
+                        if _is_list_type(other):
+                            found.append(other)
+                elif step == "assign" and st.get("name") == name and is_name(value):
+                    continue
+                elif step == "return" and is_name(st.get("expr")):
+                    if _is_list_type(expected_return):
+                        found.append(expected_return)
+                elif step in ("let", "assign") and isinstance(st.get("name"), str):
+                    if step == "let" and isinstance(value, dict) \
+                            and value.get("kind") == "arrow":
+                        continue
+                    if st["name"] != name:
+                        ty = infer(value, sc)
+                        if ty is not None and not _is_unit_type(ty):
+                            sc.types[st["name"]] = ty
+                            sc.slots[st["name"]] = f"(local.get $l_{st['name']})"
+                elif step in ("if", "while"):
+                    for key in ("then", "else", "body"):
+                        walk(st.get(key) or [], _Scope(dict(sc.slots), dict(sc.types)))
+                elif step == "for":
+                    iter_ty = infer(st.get("iterable"), sc)
+                    inner = _Scope(dict(sc.slots), dict(sc.types))
+                    if _is_list_type(iter_ty) and isinstance(st.get("bind"), str):
+                        inner.types[st["bind"]] = _list_elem(iter_ty)
+                        inner.slots[st["bind"]] = f"(local.get $l_{st['bind']})"
+                    walk(st.get("body") or [], inner)
+
+        walk(rest, _Scope(dict(scope.slots), dict(scope.types)))
+        # Every use must agree: a program whose pushes disagree (the checker is
+        # lax about it) keeps the named refusal rather than emitting a list the
+        # wasm validator rejects.
+        return found[0] if found and all(t == found[0] for t in found) else None
+
     def _emit_stmts(self, stmts: list, scope: _Scope, where: str, expected_return: str | None) -> list[str]:
         out: list[str] = []
-        for stmt in stmts or []:
+        stmts = stmts or []
+        for position, stmt in enumerate(stmts):
             step = stmt.get("step")
             if step in ("let", "assign"):
                 name = _ident(stmt.get("name"), f"{where}: binding")
@@ -6257,6 +6602,11 @@ class _V3Emitter:
                         out.append(f"(local.set $cap_{c}_{aid})")
                     continue
                 if step == "let":
+                    if _is_untyped_empty_list(value_node):
+                        flowed = self._flow_empty_list(
+                            name, stmts[position + 1:], scope, expected_return)
+                        if flowed is not None:
+                            self._flowed_lists[id(value_node)] = flowed
                     value_ty = self._infer_type(stmt.get("value"), scope)
                 else:
                     if name not in scope.types:
@@ -6527,6 +6877,9 @@ class _V3Emitter:
         self._for_temps: list[str] = []
         self._arrows: dict = {}
         self._arrow_counter = 0
+        # `{id(list literal node): List[T]}` for an unannotated empty list typed
+        # from its block's later uses (`_flow_empty_list`).
+        self._flowed_lists: dict[int, str] = {}
         self._local_types = {}
         self._collect_locals(fn.get("body") or [], local_names)
         for lname in sorted(local_names):
@@ -6634,11 +6987,17 @@ class _V3Emitter:
                 test_mode=True))
         all_blocks = fn_blocks + extern_blocks + test_blocks
         uses_f64 = any("$f64_to_str" in block for block in all_blocks)
+        uses_f64_mod = any("$f64_mod" in block for block in all_blocks)
         # The reader builtins ($str_split/$str_join/$str_index_of) follow the
         # same demand-driven rule as $f64_to_str: pulled in only when a body
         # actually calls one, so every split/join/indexOf-free module stays
         # byte-identical to before.
         uses_index_of = any("$str_index_of" in block for block in all_blocks)
+        uses_str_cmp = any("$str_cmp" in block for block in all_blocks)
+        uses_list_index_of_str = any("$list_index_of_str" in block
+                                     for block in all_blocks)
+        uses_list_index_of_slot = any("$list_index_of_slot" in block
+                                      for block in all_blocks)
         uses_split = any("$str_split" in block for block in all_blocks)
         uses_join = any("$str_join" in block for block in all_blocks)
         uses_code_point = any("$str_of_code_point" in block
@@ -6650,8 +7009,16 @@ class _V3Emitter:
             lines.extend(self._helper_funcs())
             if uses_f64:
                 lines.append(self._helper_f64_to_str())
+            if uses_f64_mod:
+                lines.append(self._helper_f64_mod())
             if uses_index_of:
                 lines.append(self._helper_str_index_of())
+            if uses_str_cmp:
+                lines.append(self._helper_str_cmp())
+            if uses_list_index_of_str:
+                lines.append(self._helper_list_index_of_str())
+            if uses_list_index_of_slot:
+                lines.append(self._helper_list_index_of_slot())
             if uses_split:
                 lines.append(self._helper_str_split())
             if uses_join:

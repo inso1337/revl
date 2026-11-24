@@ -498,8 +498,8 @@ def _env_narrowed(prev: dict, new: dict, delta: dict) -> set:
     one removed `env:N:B`. Read alone the added token is a widening, and
     canary has no accept path, so hardening a bound could never promote. Each
     added token is paired with the field's row on both sides (the structured
-    bound, not a re-parse of the token, whose `in=` join cannot carry a value
-    holding `|`), and dropped from the added set only when exactly one row
+    bound, not a re-parse of the token, whose `in=` join escapes `|` and `\`),
+    and dropped from the added set only when exactly one row
     names the field on each side, the two rows agree on everything but the
     bound (type, secrecy, requiredness), the old token is among the removed
     ones, and `_env_bound_narrower` proves the new bound narrower. Anything else

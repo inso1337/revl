@@ -451,6 +451,18 @@ jobs:
       # rather than a note nobody reads.
       - run: python3 tools/check_workflow_permissions.py --self-test
       - run: python3 tools/check_workflow_permissions.py --strict
+      # issue #3117: `tests/test_workflow_action_pins.py` proves every action is
+      # pinned to a 40-hex sha; this proves the sha is the commit of the release
+      # its comment names, which needs the API (a read-only GITHUB_TOKEN is
+      # enough). A substituted pin, such as a commit from a fork of the action,
+      # is a real commit and answers every other check. `--check` makes about one
+      # API call per distinct tag (no staleness listing), well inside the job
+      # token's hourly budget. An unreachable API (rate limit, network) is retried,
+      # then exits 2 with a plain message: a pin that could not be verified must
+      # not pass. Never add `|| true`.
+      - run: python3 tools/pin_workflow_actions.py --check
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       # issue #292: the static half of the merge-queue answer. Three defects
       # reached main in one day from clean merges; the merge_group trigger at
       # the top of this file closes that class by construction, and this gate
@@ -480,6 +492,16 @@ jobs:
       # themselves. Never add `|| true`.
       - run: python3 tools/check_vocabulary_mirrors.py --self-test
       - run: python3 tools/check_vocabulary_mirrors.py --check
+      # issue #2844: hand-written `path:line` references in docs and comments.
+      # ADVISORY: `continue-on-error` keeps a new unrecorded finding from
+      # reddening the job while the ledger is being worked down; the step still
+      # shows red in the log so the author sees it. Repair the reference, or
+      # record it with `python3 tools/check_doc_refs.py --write-ledger`. Make it
+      # fatal by deleting the `continue-on-error` line once the ledger is small.
+      # Stdlib only, no revl install; it reads git history, which this job's
+      # full clone provides.
+      - run: python3 tools/check_doc_refs.py --check
+        continue-on-error: true
       # The roadmap's in-progress markers, checked against git: a marker naming
       # a branch that already landed, a branch gone from origin, or a sha not
       # reachable from main is a lie the next reader pays for. Needs no
@@ -624,6 +646,19 @@ jobs:
       # make a red line pass: fix the document, or soften the claim.
       - run: python3 tools/check_vision_claims.py --self-test
       - run: python3 tools/check_vision_claims.py --check
+      # issue #2846: a behaviour claim in a `.rvl` comment or a Markdown doc is
+      # tied to a witness in `claims.toml` (a test, a generated docgen block or
+      # another claim). An unknown id, a deleted or renamed witness and a
+      # `.rvl` claim whose test witness the affected selection would not run
+      # are named failures. The selection half imports `tools/affected_tests.py`
+      # but no `revl` install: this job has neither a compiler nor a toolchain,
+      # and the parser it reads is loaded from `src/revl/claims.py` by path.
+      #
+      # The self-test runs FIRST and plants each named failure in a synthetic
+      # tree, so a check that stopped firing is a red here rather than a green
+      # line that judged nothing. Never add `|| true`.
+      - run: python3 tools/check_claims.py --self-test
+      - run: python3 tools/check_claims.py --check
 
   # issue #2333: the guards below need no `revl` install, toolchain or
   # network: they read tracked repository text (the workflow, tests/ and
@@ -673,12 +708,25 @@ jobs:
     # Heavy job: never on a pull request (issue #1678). It runs on the merge queue
     # (merge_group), on push to main, nightly, on dispatch and from the tag
     # build (workflow_call). On a PR the root suite is still collected, by the
-    # ungated `root-suite-affected` job. `conformance` and `formal` need this
-    # job and carry the same `if:` of their own.
+    # ungated `root-suite-affected` job. `conformance` and `formal` no longer
+    # wait on this job (issue #3353); each carries the same `if:` of its own.
     if: ${{ github.event_name != 'pull_request' }}
+    # Issue #3353: the root suite ran whole, once per Python version, about 100
+    # minutes, and main's full run was bounded by it. It is now split four ways
+    # per version with the mechanism `root-suite-affected` already uses
+    # (`REVL_TEST_SHARD=k/4`, tests/_shard.py, issue #1774), so each leg runs
+    # about a quarter of it. The legs of one Python version together run every
+    # test of `tests/` exactly once, and every version runs all four: three
+    # versions times four shards is 12 jobs where there were 3
+    # (tests/test_root_suite_shards_1774.py pins this for `frontend` and
+    # `frontend-cordis`). The six gate steps are not per shard: they run once
+    # per Python version, in shard 1. `fail-fast` is off so a red shard does not
+    # hide what the others find.
     strategy:
+      fail-fast: false
       matrix:
         python: ["3.11", "3.12", "3.13"]
+        shard: [1, 2, 3, 4]
     # Issue #2264: this job installs go (setup-go below), so a go test that
     # finds no go toolchain HERE is a broken setup step, not an environment
     # fact. REVL_REQUIRE_TIERS naming go turns that skip into a failure, for
@@ -778,6 +826,10 @@ jobs:
       # first only moves the silence, and would have moved it onto these five
       # gates, since the root suite is the step that is currently red.
       #
+      # Issue #3353 split the root suite over four shard legs per Python version,
+      # and the six gates below run in shard 1 only (`matrix.shard == 1`), so
+      # each is still run once per Python version, not once per shard.
+      #
       # The job still FAILS when any step fails -- nothing here is softened,
       # branch protection is unaffected. What changes is that each step now
       # reports its own verdict instead of the first failure speaking for six.
@@ -797,14 +849,14 @@ jobs:
       # arrives with no row on some tier — the case a hand-written support
       # table renders blank and nobody notices.
       - run: python3 tools/conformance.py --check-readme
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && matrix.shard == 1 }}
       - run: python3 tools/selfhost_coverage.py --check
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && matrix.shard == 1 }}
       # Issue #301: differential oracles only prove the constructs their corpus
       # spells. Keep a named reach report for every oracle, including lower_ir and
       # compile, so a new reference construct cannot hide behind a green oracle.
       - run: python3 tools/oracle_construct_reach.py --check
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && matrix.shard == 1 }}
       # Roadmap item 542 / issue #1221: the census corpus and the emit corpora
       # are globbed, so a generated document enters them with no list to edit
       # and reads as evidence indistinguishable from a hand-written one. This
@@ -813,7 +865,7 @@ jobs:
       # hand-written), on a manifest line that outlived its document, and on a
       # scoring corpus below its declared independence floor.
       - run: python3 tools/corpus_provenance.py --check
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && matrix.shard == 1 }}
       # issue #255: five docs carried source-derived content (the MCP verb
       # table, the CLI subcommand list, the guarantee tables, the DOC-STATUS
       # inventory, a test count) with nothing to keep them honest, and the one
@@ -825,7 +877,14 @@ jobs:
       # the check. Pure Python over the installed package, so it belongs beside
       # the matrix gate rather than in a new job.
       - run: python3 tools/docgen.py --check
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && matrix.shard == 1 }}
+      # issue #2856: a behavior comment block is derived from the IR and
+      # carries that IR's digest, so the block adopted in the corpus is a
+      # generated artifact like any docgen block. A change to
+      # examples/user_cache.rvl's components that leaves the block behind reds
+      # this line; regenerate it with `revl docs gen examples/user_cache.rvl`.
+      - run: revl docs check examples/user_cache.rvl
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && matrix.shard == 1 }}
       # roadmap 110c: the playground/site wheel freshness is NOT checked here,
       # and must not be. The wheel vendors the whole of src/revl, so a per-push
       # gate reddened CI on every source change to a bundled module (an outage
@@ -845,7 +904,13 @@ jobs:
       # backends (emitter goldens, IR contract, manifest/admission, audit);
       # runtime-integration tests skip cleanly when their host runtime is
       # absent (cordis-py fork, node/cordis, wasmtime, cordisc)
+      # Issue #3353: this leg's share of the whole suite. Every leg collects the
+      # same `tests/` and so computes the same assignment; together the four
+      # run each test once. There is no `-k`, no file list and no skip switch:
+      # a leg that collects nothing exits 5 and fails the job.
       - run: pytest tests/ -q
+        env:
+          REVL_TEST_SHARD: ${{ matrix.shard }}/4
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
 
   backend-python:
@@ -968,6 +1033,13 @@ jobs:
     # Heavy job, same rule as `frontend`: never on a pull request, always on
     # merge_group, push, schedule, dispatch and workflow_call (issue #1678).
     if: ${{ github.event_name != 'pull_request' }}
+    # Issue #3353: one pytest step of about 100 minutes, split four ways like
+    # the `frontend` matrix (`REVL_TEST_SHARD=k/4`, tests/_shard.py). The four
+    # legs run every test of `tests/` exactly once.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     # Issue #2264: this job installs go, so go is required on every pytest
     # step (see the `frontend` job for why).
     env:
@@ -1018,6 +1090,8 @@ jobs:
       # future failure needs excluding, enumerate it here with a reason and add
       # it to 430 rather than narrowing the path above.
       - run: backends/python/.venv/bin/python -m pytest tests/ -q
+        env:
+          REVL_TEST_SHARD: ${{ matrix.shard }}/4
 
   # Issue #854. The root `tests/` suite ran in exactly two jobs, `frontend` and
   # `frontend-cordis`, and BOTH gated on `changes.outputs.frontend`, which was
@@ -2105,8 +2179,9 @@ jobs:
       # browser target's headless Chrome run below adds about 30s.
       # issue #3294: the browser target's gate loads an emitted module in
       # headless Chrome. `ubuntu-latest` carries `google-chrome`, and this
-      # variable makes a missing engine a failure that names the command to
-      # install one, rather than a silent skip in the one job that can run it.
+      # variable makes a missing engine a failure that says what to install
+      # (Google Chrome or Chromium) or set (REVL_CHROME), rather than a silent
+      # skip in the one job that can run it.
       - run: pytest backends/typescript/ -q
         env:
           REVL_BROWSER_REQUIRED: "1"
@@ -2188,6 +2263,13 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
           python-version: "3.12"
+      # the browser host's node test (`backends/wasm/test_browser_host.py`)
+      # would otherwise skip here, and this job's no-skip guard reds a skip.
+      # Node runs the same CordisHost module the page imports, on a real
+      # WebAssembly engine.
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5.0.0
+        with:
+          node-version: "22"
       - run: pip install -e ".[test]"
       # the wasmtime-gated tests (WAT validation, emitted-component execution)
       # used to skip silently here: the runtime was never installed. Pin a
@@ -2263,11 +2345,17 @@ jobs:
       # collecting it here is what makes those tests real in CI instead of
       # skips. Its other tests build the component framing by hand and run
       # everywhere.
+      # issue #3189: `tests/test_run_wasm_enforcement_3189.py` drives the same
+      # ceilings through the `revl run --backend wasm` path, so it must run in
+      # the job that provisions the cordis-wasm runtime; the static refusal
+      # and the import-check unit half need nothing.
       - name: wasm tests, including durable crash recovery
         run: >-
           pytest backends/wasm/ tests/test_wasm_backend.py
           tests/test_wasm_confined_default_2729.py
-          tests/test_wasm_crash_recovery.py -q --junitxml=/tmp/wasm-junit.xml
+          tests/test_wasm_crash_recovery.py
+          tests/test_run_wasm_enforcement_3189.py
+          -q --junitxml=/tmp/wasm-junit.xml
         env:
           # turns "wasmtime not installed" from a silent skip into a failure;
           # unset locally, so offline dev still skips cleanly
@@ -2618,13 +2706,15 @@ jobs:
   conformance:
     runs-on: ubuntu-latest
     timeout-minutes: 180
-    # Fail fast: this job provisions six toolchains and runs for minutes, so
-    # skip it entirely when `lint` or `frontend` is red (see backend-python for
-    # the rationale; required context unchanged). Heavy job: never on a pull
-    # request, always on merge_group, push, schedule, dispatch and
-    # workflow_call (issue #1678). `frontend` is skipped on a PR too, so this
-    # `if:` states what the `needs:` would already imply.
-    needs: [lint, frontend]
+    # Fail fast on `lint` only: this job provisions six toolchains, so skip it
+    # when the cheap gate is red (see backend-python for the rationale; required
+    # context unchanged). It no longer waits for `frontend` (issue #3353): that
+    # ordering put this whole job after the whole of `frontend` on main, which
+    # was the critical path of a full run. The cost, stated: it now runs when
+    # `frontend` is red, spending its runner minutes on a commit already known
+    # to be broken. Heavy job: never on a pull request, always on merge_group,
+    # push, schedule, dispatch and workflow_call (issue #1678).
+    needs: [lint]
     if: ${{ github.event_name != 'pull_request' }}
     # Issue #2264: this job installs go, so go is required on every pytest
     # step (see the `frontend` job for why).
@@ -2785,6 +2875,7 @@ jobs:
           tests/test_1850_show_cross_tier.py
           tests/test_2285_str_char_control_cross_tier.py
           tests/test_mixed_numeric_equality_tiers.py
+          tests/test_nested_widening_value_flow_2937.py
           -q
         env:
           # LIVE as of item 445. This turns on the rust and java probes, the
@@ -2851,6 +2942,7 @@ jobs:
           tests/test_go_component_int32_trap_2262.py
           tests/test_go_lifecycle_residue_2505.py
           tests/test_host_map_journal_2009.py
+          tests/test_char_class_record_target_go_java_3144.py
           tests/test_insert_if_absent.py
           tests/test_json_cross_tier_bytes.py
           tests/test_kdf_stdlib.py
@@ -3018,6 +3110,8 @@ jobs:
       # go back to failing on the toolchain rather than on revl. Prove it first.
       - run: temporal --version
       - run: cd tests/temporal_exit && npm ci
+      # the seeded-defect saga corpus scores its Temporal ports on the same server
+      - run: cd bench/saga_defects/temporal && npm ci
       - name: Boot a Temporal dev server and wait for it
         run: |
           temporal server start-dev --headless --ip 127.0.0.1 --port 7233 \
@@ -3029,7 +3123,7 @@ jobs:
             sleep 2
           done
           echo "the Temporal dev server never became healthy"; cat /tmp/temporal-dev.log; exit 1
-      - run: pytest tests/test_temporal_exit_saga.py backends/typescript/test_temporal_target.py -q
+      - run: pytest tests/test_temporal_exit_saga.py tests/test_saga_defect_temporal_2736.py backends/typescript/test_temporal_target.py -q
         env:
           # The item-253 exit gate. Past it NOTHING skips: the test asserts on
           # node and the SDK install rather than skipping over them, so a
@@ -3046,11 +3140,13 @@ jobs:
   formal:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    # Fail fast: the Lean `lake build` is heavy, so skip it when `lint` or
-    # `frontend` is red (see backend-python for the rationale; required context
-    # unchanged). Heavy job: never on a pull request, always on merge_group,
-    # push, schedule, dispatch and workflow_call (issue #1678).
-    needs: [lint, frontend]
+    # Fail fast on `lint` only: the Lean `lake build` is heavy, so skip it when
+    # the cheap gate is red (see backend-python for the rationale; required
+    # context unchanged). It no longer waits for `frontend` (issue #3353), and
+    # the cost, stated: it now runs when `frontend` is red. Heavy job: never on
+    # a pull request, always on merge_group, push, schedule, dispatch and
+    # workflow_call (issue #1678).
+    needs: [lint]
     if: ${{ github.event_name != 'pull_request' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0

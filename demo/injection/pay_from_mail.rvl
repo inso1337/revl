@@ -1,0 +1,33 @@
+// REJECTED (G9): the payee of a payment is read out of a mailbox.
+//
+// The task is "pay this week's supplier invoices". One mail in the inbox says
+// the supplier's bank details changed and names another account. This is the
+// step an author writes after obeying that mail: read the inbox, take the
+// account the mail names, pay it.
+//
+// Nothing here names the mail or its wording. `read_inbox` returns
+// `Untrusted[Str]`, `pay` takes its payee as `Trusted[Str]`, and `account_in`
+// is a plain helper, so the origin rides through it. The refusal is on the
+// shape of the step, before any mail is read.
+//
+// expected error:
+//   untrusted value (mail) flows into the trusted sink `pay` at argument 1 of `pay`
+
+extern emission[mail] fn read_inbox() -> Untrusted[Str] = @py { return "" }
+extern emission[bank] fn pay(iban: Trusted[Str], cents: Int, memo: Str) = @py { return }
+
+fn account_in(mail: Str) -> Str {
+  return mail.split("IBAN ").slice(1, 2).join("")
+}
+
+service Payables { emission fn settle(supplier: Str, cents: Int) }
+
+component PayInvoices provides payables: Payables {
+  provide payables {
+    fn settle(supplier, cents) {
+      let mail = emit read_inbox()
+      emit pay(account_in(mail), cents, supplier)
+      return
+    }
+  }
+}

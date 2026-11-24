@@ -738,8 +738,8 @@ def _forbidden_decider_grant(ir: dict, granted: list) -> str | None:
 
 # The process-global single live gate (v1). A second live `Gate` in one process
 # is refused loudly at construction, the honest spelling of today's
-# process-global admit-bridge/session-owner binds (`admit_bridge._SESSION`,
-# `runtime._SESSION_OWNER`). Lifting this is owner-scoping work the arc does not
+# process-global admit-bridge bind (`admit_bridge._SESSION`; the runtime's
+# session owner is per context since #3380). Lifting this is owner-scoping work the arc does not
 # need here (337's mesh runs one gate per tier process).
 #
 # The slot is a WEAK reference, not a strong one: a Gate dropped without

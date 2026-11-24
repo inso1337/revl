@@ -816,6 +816,12 @@ def build_parser() -> argparse.ArgumentParser:
              "must carry each consumer's required service, not just key lists, "
              "and must still run the old version")
     migrate_cmd.add_argument(
+        "--policy", metavar="POLICY_FILE", default=None,
+        help="a boundary policy file (docs/boundary-policy.md): evaluated over "
+             "the composition as it would stand after the migration; a "
+             "violation the migration introduces refuses it, an approval-"
+             "required capability it reaches needs approval")
+    migrate_cmd.add_argument(
         "--json", action="store_true",
         help="machine-readable plan an agent or a CI gate can consume")
 
@@ -1595,6 +1601,25 @@ def build_parser() -> argparse.ArgumentParser:
     gen.add_argument("--json-diagnostics", action="store_true",
                      help="on rejection, print a structured diagnostic instead "
                           "of the human rendering")
+
+    docs = sub.add_parser(
+        "docs",
+        help="write and check the behavior comment block derived from the IR "
+             "above each component (issue #2856)")
+    docs_sub = docs.add_subparsers(dest="docs_command", required=True)
+    docs_gen = docs_sub.add_parser(
+        "gen",
+        help="write or refresh the behavior block above every component in FILES")
+    docs_gen.add_argument("files", nargs="+", metavar="FILE",
+                          help="the composition's .rvl sources, as `revl compile` "
+                               "takes them; blocks are written back to the roots "
+                               "that declare components")
+    docs_check = docs_sub.add_parser(
+        "check",
+        help="refuse a behavior block whose digest no longer matches the IR")
+    docs_check.add_argument("files", nargs="+", metavar="FILE",
+                            help="the composition's .rvl sources, as `revl compile` "
+                                 "takes them")
 
     imp = sub.add_parser("import",
                          help="import an external interface definition as revl source")
@@ -2740,9 +2765,11 @@ def build_parser() -> argparse.ArgumentParser:
              "forged undetected, and nothing on it is secret — the artifact "
              "source crosses in the clear")
     pool_serve.add_argument("--workdir", default=None, metavar="DIR",
-                            help="where artifacts are written and run "
-                                 "(default: a fresh temporary directory that "
-                                 "is removed on exit)")
+                            help="where artifacts are written and run, and "
+                                 "where the ids of the tasks this peer has "
+                                 "run are kept, so a restart does not run one "
+                                 "again (default: a fresh temporary directory "
+                                 "that is removed on exit, which forgets them)")
     pool_serve.add_argument("--timeout", type=float, default=300.0,
                             metavar="SECONDS",
                             help="how long one artifact may run (default: 300)")

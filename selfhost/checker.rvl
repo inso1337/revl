@@ -1035,9 +1035,23 @@ fn infer_call_t(c: CallN, env: List[Bind], tt: Tt, ct: Ct) -> Infer {
   return match c.target {
     // a named ADT case constructor; anything else (plain fns — no signature
     // table in this slice — and non-name callees) stays unchecked
-    Var(n) => case_call_ty(n, unwrap_case(ct, n), args, ct.has(n), tt),
+    Var(n) => case_call_flow(c, n, args, env, tt, ct),
     _      => ok_ty(""),
   }
+}
+
+// `case_call_ty`, then the issue #2937 nested-widening check on the payload.
+fn case_call_flow(c: CallN, n: Str, args: List[Str], env: List[Bind], tt: Tt,
+                  ct: Ct) -> Infer {
+  let r = case_call_ty(n, unwrap_case(ct, n), args, ct.has(n), tt)
+  if (!r.ok || !ct.has(n) || args.length() == 0) { return r }
+  let ci = unwrap_case(ct, n)
+  if (ci.payload != "") {
+    let f = nested_flow(c.args[0], ci.payload, args[0], env, tt, ct,
+                        "`".concat(n).concat("(...)` payload"))
+    if (!f.ok) { return f }
+  }
+  return r
 }
 
 fn pick_arg0(args: List[Str]) -> Str {
@@ -1096,6 +1110,130 @@ pub fn check_t(e: Expr, expected: Str, env: List[Bind], tt: Tt, ct: Ct,
   }
 }
 
+// typecheck.nested_widening_flow_error, message for message (issue #2937).
+fn nested_flow_refusal(where_: Str, expected: Str, actual: Str, w: Widen) -> Infer {
+  let a = render_type(w.l)
+  let b = render_type(w.r)
+  let narrow = widen_rank(a) < widen_rank(b) ? a : b
+  let wide = widen_rank(a) < widen_rank(b) ? b : a
+  return refuse("T1", where_.concat(" expects `").concat(render_type(expected))
+                  .concat("`, got `").concat(render_type(actual))
+                  .concat("`; the `").concat(narrow)
+                  .concat("` inside is not widened to `").concat(wide)
+                  .concat("` (only a bare value widens), so the tiers ")
+                  .concat("would not agree on the program"))
+}
+
+// typecheck._site_children: the parts of a constructor written at the site,
+// each with the type it is held to. `ctor` is false for a value that already
+// carries its type (a variable, a field read, a call result).
+type FlowParts = { ctor: Bool, exprs: List[Expr], tys: List[Str] }
+
+fn flow_value() -> FlowParts { return { ctor: false, exprs: [], tys: [] } }
+
+fn flow_leaf() -> FlowParts { return { ctor: true, exprs: [], tys: [] } }
+
+fn flow_one(e: Expr, t: Str) -> FlowParts {
+  return { ctor: true, exprs: [e], tys: [t] }
+}
+
+fn flow_parts(e: Expr, expected: Str, tt: Tt, ct: Ct) -> FlowParts {
+  let ep = parse_type(expected)
+  return match e {
+    IntLit(_)   => flow_leaf(),
+    FloatLit(_) => flow_leaf(),
+    StrLit(_)   => flow_leaf(),
+    BoolLit(_)  => flow_leaf(),
+    NullLit     => flow_leaf(),
+    Lst(l)      => flow_list_parts(l.items, ep),
+    Rec(r)      => flow_rec_parts(r.fields, expected, tt),
+    If(f)       => { ctor: true, exprs: [f.then_, f.els],
+                     tys: [expected, expected] },
+    Call(c)     => flow_call_parts(c, ep, ct),
+    _           => flow_value(),
+  }
+}
+
+fn flow_list_parts(items: List[Expr], ep: Parsed) -> FlowParts {
+  if (ep.head != "List" || ep.args.length() != 1) { return flow_leaf() }
+  var exprs: List[Expr] = []
+  var tys: List[Str] = []
+  var i = 0
+  while (i < items.length()) {
+    exprs = exprs.push(items[i])
+    tys = tys.push(ep.args[0])
+    i += 1
+  }
+  return { ctor: true, exprs: exprs, tys: tys }
+}
+
+fn flow_rec_parts(fields: List[InitN], expected: Str, tt: Tt) -> FlowParts {
+  let rf = rec_fields_of(expected, tt)
+  var exprs: List[Expr] = []
+  var tys: List[Str] = []
+  if (!rf.is_rec) { return flow_leaf() }
+  var i = 0
+  while (i < fields.length()) {
+    if (rec_has(rf.fields, fields[i].name)) {
+      exprs = exprs.push(fields[i].value)
+      tys = tys.push(struct_field_ty(rf.fields, fields[i].name))
+    }
+    i += 1
+  }
+  return { ctor: true, exprs: exprs, tys: tys }
+}
+
+fn flow_call_parts(c: CallN, ep: Parsed, ct: Ct) -> FlowParts {
+  if (c.args.length() != 1) { return flow_value() }
+  return match c.target {
+    Var(n) => flow_case_parts(n, c.args[0], ep, ct),
+    _      => flow_value(),
+  }
+}
+
+fn flow_case_parts(n: Str, arg: Expr, ep: Parsed, ct: Ct) -> FlowParts {
+  if (n == "Some" && ep.head == "Opt" && ep.args.length() == 1) {
+    return flow_one(arg, ep.args[0])
+  }
+  if ((n == "Ok" || n == "Err") && ep.head == "Result"
+      && ep.args.length() == 2) {
+    return flow_one(arg, n == "Ok" ? ep.args[0] : ep.args[1])
+  }
+  if (ct.has(n)) {
+    let ci = unwrap_case(ct, n)
+    if (ci.payload != "") { return flow_one(arg, ci.payload) }
+    return flow_leaf()
+  }
+  return flow_value()
+}
+
+// typecheck.refuse_nested_widening (issue #2937): a value whose declared type
+// nests a widening the position needs. `compat_tt` admits `List[Int]` where
+// `List[Float]` is declared, but no marker reaches an element, so the tiers
+// disagreed on the program. A constructor written at the site is entered and
+// each part judged on its own.
+fn nested_flow(e: Expr, expected: Str, actual: Str, env: List[Bind], tt: Tt,
+               ct: Ct, where_: Str) -> Infer {
+  if (expected == "" || actual == "") { return ok_ty("") }
+  let p = flow_parts(e, expected, tt, ct)
+  if (p.ctor) {
+    var i = 0
+    while (i < p.exprs.length()) {
+      if (p.tys[i] != "") {
+        let c = infer_t(p.exprs[i], env, tt, ct)
+        if (!c.ok) { return c }
+        let r = nested_flow(p.exprs[i], p.tys[i], c.ty, env, tt, ct, where_)
+        if (!r.ok) { return r }
+      }
+      i += 1
+    }
+    return ok_ty("")
+  }
+  let w = nested_widening(expected, actual, tt, 0)
+  if (w.hit) { return nested_flow_refusal(where_, expected, actual, w) }
+  return ok_ty("")
+}
+
 fn check_default_t(e: Expr, expected: Str, env: List[Bind], tt: Tt, ct: Ct,
                    where_: Str) -> Infer {
   let a = infer_t(e, env, tt, ct)
@@ -1115,7 +1253,7 @@ fn check_default_t(e: Expr, expected: Str, env: List[Bind], tt: Tt, ct: Ct,
   if (!compat_tt(expected, a.ty, tt)) {
     return mismatch(where_, expected, a.ty)
   }
-  return ok_ty("")
+  return nested_flow(e, expected, a.ty, env, tt, ct, where_)
 }
 
 fn check_struct_against(struct: List[RecField], expected: Str, spec: TySpec,
@@ -1916,7 +2054,9 @@ fn mk_comp(nm: Str, rq: List[Bind], pv: List[Provide],
   return { name: nm, reqs: rq, provs: pv, setup: su }
 }
 
-fn mk_ev2(l: List[Str], c: List[Str]) -> Ev { return { labels: l, caps: c } }
+fn mk_ev2(l: List[Str], c: List[Str], u: List[Str]) -> Ev {
+  return { labels: l, caps: c, unnamed: u }
+}
 
 fn tbl_or_empty(built: TblR) -> Tt {
   if (built.err != "") { return Map.empty() }
@@ -2993,7 +3133,7 @@ fn reached_caps(called: List[Str], caps: CapsT, i: Int,
 // reason instead of decided for the wrong one.
 type Ctx = { compName: Str, reqMap: Map[Str, Str], svcs: Map[Str, SvcD],
              fns: Map[Str, FnD], caps: CapsT, tt: Tt }
-type Ev  = { labels: List[Str], caps: List[Str] }
+type Ev  = { labels: List[Str], caps: List[Str], unnamed: List[Str] }
 type Ck  = { ctx: Ctx, env: List[Bind], ev: Ev, msg: Str }
 
 type MethR = { m: MethSig, ok: Bool }
@@ -3101,7 +3241,7 @@ fn refuse_ck(ck: Ck, msg: Str) -> Ck {
   return { ctx: ck.ctx, env: ck.env, ev: ck.ev, msg: msg }
 }
 
-fn empty_ev() -> Ev { return { labels: [], caps: [] } }
+fn empty_ev() -> Ev { return { labels: [], caps: [], unnamed: [] } }
 
 fn bind_map(env: List[Bind]) -> Map[Str, Str] {
   var m: Map[Str, Str] = Map.empty()
@@ -3155,7 +3295,7 @@ fn note_host_emission(s: Stmt, ck: Ck) -> Ck {
   // carry the label once
   return { ctx: ck.ctx, env: ck.env,
            ev: mk_ev2(union_into(ck.ev.labels, ["a host emission"]),
-                      ck.ev.caps),
+                      ck.ev.caps, ck.ev.unnamed),
            msg: ck.msg }
 }
 
@@ -3217,7 +3357,7 @@ fn order_ev_labels(before: List[Str], grown: List[Str],
 fn ck_ordered(before: Ev, ck: Ck, step: Bool) -> Ck {
   return { ctx: ck.ctx, env: ck.env,
            ev: mk_ev2(order_ev_labels(before.labels, ck.ev.labels, step),
-                      ck.ev.caps),
+                      ck.ev.caps, ck.ev.unnamed),
            msg: ck.msg }
 }
 
@@ -3631,7 +3771,7 @@ fn req_call(root: Str, meth: Str, args: List[Expr], mode: Int,
   var ev = ck.ev
   if (decl.isEm && mode == mode_head()) {
     let lab = ev.labels.push(root.concat(".").concat(meth))
-    ev = mk_ev2(lab, union_into(ev.caps, [root]))
+    ev = mk_ev2(lab, union_into(ev.caps, [root]), ev.unnamed)
   }
   return walk_args(args, 0, arg_mode(mode), mk_ck2(ck.ctx, ck.env, ev, ""))
 }
@@ -3660,7 +3800,7 @@ fn fn_call(name: Str, args: List[Expr], mode: Int, ck: Ck) -> Ck {
   if (ck.ctx.caps.has(name)) {
     let cc = caps_of(ck.ctx.caps, name)
     let lab = ev.labels.push(name.concat("()"))
-    ev = mk_ev2(lab, union_into(ev.caps, cc))
+    ev = mk_ev2(lab, union_into(ev.caps, cc), union_into(ev.unnamed, cc))
   }
   let wck = walk_args(args, 0, arg_mode(mode),
                       mk_ck2(ck.ctx, ck.env, ev, ""))
@@ -3712,6 +3852,39 @@ fn fn_sig_check(name: Str, args: List[Expr], ck: Ck) -> Ck {
   return ck
 }
 
+// issue #3485: a crossing `emit k.m(...)` through required key `k` is covered
+// by `k` or by `k.m`, the key followed by the verb it calls, and by nothing
+// else. A key is covered one verb at a time when every one of its crossing
+// labels (`k.m`) is declared; `*`, a key with no crossing label, and a key
+// reached any other way (`unnamed`: a reached fn's declared scope) stay.
+// Mirrors emission_analysis.py's `_admit_required_scopes` and its `unname`.
+fn verb_covered(cap: Str, labels: List[Str], caps: List[Str],
+                unnamed: List[Str]) -> Bool {
+  if (cap == "*" || list_contains(unnamed, cap)) { return false }
+  let pre = cap.concat(".")
+  var seen = false
+  var i = 0
+  while (i < labels.length()) {
+    if (starts_with(labels[i], pre)) {
+      if (!list_contains(caps, labels[i])) { return false }
+      seen = true
+    }
+    i += 1
+  }
+  return seen
+}
+
+fn drop_verb_covered(extra: List[Str], labels: List[Str], caps: List[Str],
+                     unnamed: List[Str]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < extra.length()) {
+    if (!verb_covered(extra[i], labels, caps, unnamed)) { out = out.push(extra[i]) }
+    i += 1
+  }
+  return out
+}
+
 // The upper-bound verdict for one provision method, ported from lower.py's
 // provider check: plain declarations must reach no emission at all;
 // `emission[caps]` declarations bound *which* boundary.
@@ -3722,7 +3895,8 @@ fn g4_verdict(svcName: Str, mname: Str, decl: MethSig, ev: Ev) -> Str {
       .concat(quote_join(ev.labels))
   }
   if (decl.isEm && decl.caps.length() > 0) {
-    let extra = sort_strs(minus_list(ev.caps, decl.caps))
+    let extra = sort_strs(drop_verb_covered(minus_list(ev.caps, decl.caps),
+                                            ev.labels, decl.caps, ev.unnamed))
     if (extra.length() > 0) {
       var msg = "`".concat(svcName).concat(".").concat(mname)
         .concat("` is declared `emission[").concat(decl.caps.join(", "))

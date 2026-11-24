@@ -102,6 +102,7 @@ from . import gauntlet as _gauntlet
 from . import quarantine as _quarantine
 from . import quorum as _quorum
 from . import repair as _repair
+from . import refusal_repair as _refusal_repair
 from . import runtime_gate as _runtime_gate
 from . import ship as _ship
 from . import stdlib as _stdlib
@@ -124,7 +125,8 @@ from . import disclosure as _disclosure
 from . import remedy as _remedy
 from . import repeat as _repeat
 from .session import (AUTHORED_HOST_BODIES_KEY, ApprovalRefused,
-                      NothingLoaded, Session, SessionError, host_body_entries)
+                      NothingLoaded, Session, SessionError, has_host_code,
+                      host_body_entries, host_code_of)
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"name": "revl", "version": "2.0"}
@@ -1118,6 +1120,17 @@ def _bound_only(profile: AdmissionProfile | None) -> AdmissionProfile | None:
     if profile is None:
         return AdmissionProfile(realm_bindings=AUTHORING.realm_bindings)
     return replace(profile, realm_bindings=AUTHORING.realm_bindings)
+
+
+def _restore_gate_profile() -> AdmissionProfile | None:
+    """The profile the operator gate's `restore` target derivation compiles
+    under (issue #3197): the realm bindings the boot compile
+    (`AUTHORING.profile()`) carries, and nothing else, so a `realm(?NAME)`
+    binds the same way in the gate and in the boot. None when the boot binds
+    nothing."""
+    if not AUTHORING.realm_bindings:
+        return None
+    return _bound_only(None)
 
 
 def _candidate_of(arguments: dict) -> tuple:
@@ -3512,10 +3525,12 @@ def _add_replacement_host_code(fields: dict, candidate: dict,
 
 
 def _host_body_texts(ir: dict) -> dict:
-    """Each host-bodied extern in `ir` by name, as its classification and its
-    verbatim bodies, so two compositions' host code compares by content."""
-    return {extern.get("name"): (extern.get("class"), extern.get("bodies"))
-            for extern in ir.get("externs") or [] if extern.get("bodies")}
+    """Each extern in `ir` that carries host code by name, as its
+    classification, its verbatim bodies and its host-module refs, so two
+    compositions' host code compares by content and a ref whose pinned
+    sha256 moved is new host code (issue #3347)."""
+    return {extern.get("name"): (extern.get("class"), host_code_of(extern))
+            for extern in ir.get("externs") or [] if has_host_code(extern)}
 
 
 def _host_code_fields(bodies: list) -> dict:
@@ -4196,6 +4211,11 @@ def _restore_authoring_refusal(error: RevlError, snap: dict | None = None) -> di
     return payload
 
 
+#: issue #3197: the operator gate's restore disk reads for the call in flight
+#: (path -> sha256), set by `handle` around the handler; None outside one.
+_RESTORE_GATE_READS: dict | None = None
+
+
 def _tool_restore(arguments: dict) -> dict:
     """Re-admit a snapshot into an empty session by replaying admission.
 
@@ -4219,7 +4239,10 @@ def _tool_restore(arguments: dict) -> dict:
     # a restore is a cold load from a document, so it answers to the same
     # enforced lease rule `revl_load` does (`leases.FENCED`)
     if not SESSION.loaded:
-        leased = _leases.check(SESSION, "restore", arguments)
+        # issue #3509: the lease derivation compiles under the boot's realm
+        # bindings, as the operator gate's does
+        leased = _leases.check(SESSION, "restore", arguments,
+                               restore_profile=_restore_gate_profile())
         if leased is not None:
             return _refused_by_lease(leased)
     profile = AUTHORING.profile()
@@ -4227,7 +4250,17 @@ def _tool_restore(arguments: dict) -> dict:
     sources = sources or {}
     compile_report: dict = {"authored": True}
     try:
-        result = SESSION.restore(snap, profile=profile, report=compile_report)
+        # issue #3197: with an operator bound, the boot compile reads from
+        # disk exactly what the gate's compile read (none when no gate ran
+        # for this call). Ungated, the call is unchanged.
+        gated = ({"gate_reads": _RESTORE_GATE_READS or {}}
+                 if getattr(SESSION, "operator", None) is not None else {})
+        # issue #3510: a trusted author has no profile, but the boot compile
+        # still binds `realm(?NAME)` as `revl_load` does (`_bound_only`)
+        result = SESSION.restore(snap, profile=profile,
+                                 report=compile_report, agent_supplied=True,
+                                 compile_profile=_bound_only(profile),
+                                 **gated)
     except ApprovalRequired as error:
         from .persist import admitted_name  # noqa: PLC0415
 
@@ -4514,6 +4547,54 @@ def _tool_check(arguments: dict) -> dict:
                                    ir if _gate_can_reuse(arguments) else None)
     return _note_held_file_differs(
         arguments, _canonical.attach(checked, canon))
+
+
+def _tool_apply_repair(arguments: dict) -> dict:
+    """Apply the repair one refusal minted and return the repaired candidate
+    with its re-check (issue #2855).
+
+    Opt-in and read-only. The call names the `repairId` a refusing
+    `revl_check` returned; the verified edit that refusal carried (the fixgen
+    engine, issue #2684) is applied to the very text the check compiled, and
+    the patched candidate is re-checked by `revl_check`'s own handler, so the
+    re-check is that verb's answer to the repaired candidate: the same
+    authoring door, the same `DRAFT_HELD` guard and the same canonical report.
+    The answer names what changed and what still fails: the repaired candidate
+    in the shape it was sent, the applied edit, and the new check outcome,
+    whose own refusal carries a `repairId` when that class is mechanical too.
+    While a draft is held the answer IS the check's `DRAFT_HELD` refusal: the
+    repaired candidate is not the composition the loop is filling.
+    Nothing is installed; `revl_swap`/`revl_load` still decide whether the
+    candidate enters the composition.
+
+    The stored candidate is the text the check COMPILED, so a terse candidate
+    comes back with the punctuation `revl_check` completed (its
+    `canonicalSource.completed`) as well as the repair: the edits are ranges
+    into that text, not into the text as sent."""
+    repair_id = arguments.get(_refusal_repair.REPAIR_KEY)
+    if repair_id is None:
+        return _session_error(
+            f"`{_refusal_repair.REPAIR_KEY}` is required: it is the id a "
+            "refusing `revl_check` returned beside the repair, and only that "
+            "id names the candidate and edit the session already holds",
+            category="usage",
+            fix=f"pass the `{_refusal_repair.REPAIR_KEY}` a refusal returned")
+    try:
+        entry = _refusal_repair.resolve(SESSION, repair_id)
+    except _refusal_repair.RepairError as error:
+        return _session_error(
+            str(error), category="usage", refusal_code=error.code,
+            location=_refusal_repair.REPAIR_KEY,
+            fix="re-run the check that refused to mint a repair for the "
+                "current unit of work")
+    candidate = _refusal_repair.patched_candidate(entry)
+    check = _tool_check(candidate)
+    if check.get("code") == "DRAFT_HELD":
+        return check
+    return {"ok": True,
+            "applied": _refusal_repair.applied(entry),
+            "repaired": candidate,
+            "check": check}
 
 
 def _gate_can_reuse(arguments: dict) -> bool:
@@ -4813,14 +4894,27 @@ def _check_as_sent(arguments: dict, held: dict | None = None) -> tuple:
         # rather than only the prose. It is never read from `error.filename`:
         # an edited buffer rides as a `modules` overlay over a real path, and
         # the disk copy there is pre-edit text that did not compile.
+        sources = _compiled_sources(source, modules, held)
         refused = report(
             error,
-            sources=_compiled_sources(source, modules, held),
+            sources=sources,
             verifier=lambda patched, one: _verify_repair(
                 patched, one, source, _files, modules))
         # issue #1704: every guarantee in the same answer, not only the one
         # that refused, so the self-check is one call
         refused["selfCheck"] = _authoring_loop.self_check(refused["diagnostics"])
+        # issue #2855: mint the verified repair this refusal carries, so one
+        # opt-in verb applies it to the same candidate the check compiled
+        # without the caller reconstructing the edit or re-sending the text.
+        # The refusal names that call: the apply verb is not in the core tier,
+        # and the caller that needs it is the one this refusal answers.
+        repair_id = _refusal_repair.mint(
+            SESSION, refused, sources=sources, source=source, files=_files,
+            modules=modules)
+        if repair_id is not None and "next" not in refused:
+            refused["next"] = _remedy.call(
+                "revl_apply_repair",
+                {_refusal_repair.REPAIR_KEY: repair_id})
         return _with_candidate_knowledge(refused, arguments, refused, held), None
     # `holes` is the agent's own remaining work on this draft: every
     # placeholder it wrote that still has a type and no implementation
@@ -5709,6 +5803,39 @@ TOOLS = [
             **_RETURN_CANONICAL}},
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_check,
+    },
+    {
+        "name": "revl_apply_repair",
+        "description": "Apply the verified repair a refusal carries and return "
+                       "the repaired candidate with its re-check (issue #2855). "
+                       "A refusing `revl_check` answers with `repairId` when the "
+                       "refusal's class has a mechanical repair the fixgen "
+                       "engine verified (a T2 `null`, an A9 provide key, a G4 "
+                       "missing undo, a REVL sized receiver). Pass that id and "
+                       "nothing else: the session still holds the candidate and "
+                       "the edit, so the text is not re-sent and the edit is "
+                       "not re-derived. The answer carries `repaired` (the "
+                       "candidate in the shape it was sent: `source`, or `files` "
+                       "with the patched file as a `modules` overlay), "
+                       "`applied` (the code, title, target and verified edits), "
+                       "and `check` (the new outcome: a pass, or the next "
+                       "refusal, which mints its own `repairId` when that class "
+                       "is mechanical too). It is explicit and read-only: "
+                       "nothing is loaded, drafted or written. A repair id this "
+                       "session never minted is refused as `UNKNOWN_REPAIR`; "
+                       "one minted before the unit of work moved (a load, swap, "
+                       "rollback or undo) is `STALE_REPAIR`. The candidate is "
+                       "applied with `revl_swap`/`revl_load` as usual. See "
+                       "docs/fix-code.md and docs/mcp-reference.md.",
+        "inputSchema": {"type": "object", "properties": {
+            "repairId": {"type": "string",
+                         "description": "the id a refusing `revl_check` returned "
+                                        "beside the repair; a refusal with no "
+                                        "mechanically applyable repair mints "
+                                        "none"}},
+            "required": ["repairId"]},
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_apply_repair,
     },
     {
         "name": "revl_admit",
@@ -8253,7 +8380,11 @@ def _call_tool_in_scope(name: str, arguments: dict, record: bool) -> dict:
     # profile bound -> ungated, today's behaviour unchanged. Skipped when the
     # call is already refused, so a refused path is never even resolved
     # against an operator's grants.
-    decision = _operator.decide(SESSION, name, arguments)
+    # issue #3197: a restore's target derivation binds realm placeholders
+    # the way its boot compile will; every other verb's call is unchanged
+    gate_kwargs = ({"restore_profile": _restore_gate_profile()}
+                   if name == "revl_restore" else {})
+    decision = _operator.decide(SESSION, name, arguments, **gate_kwargs)
     if decision.gated and not decision.allowed:
         return _canonicalised(_refused_by_operator(decision),
                               canonicalised)
@@ -8266,7 +8397,14 @@ def _call_tool_in_scope(name: str, arguments: dict, record: bool) -> dict:
         return _canonicalised(_runtime_gate.refusal(name), canonicalised)
     pre = _capture_undo_state(name, arguments)
     ir_before = getattr(SESSION, "ir", None)
-    payload = _run_handler(name, arguments)
+    global _RESTORE_GATE_READS
+    # issue #3197: what the operator gate's restore compile read from disk,
+    # for `_tool_restore` to hold the boot compile to
+    _RESTORE_GATE_READS = decision.disk_reads
+    try:
+        payload = _run_handler(name, arguments)
+    finally:
+        _RESTORE_GATE_READS = None
     if decision.gated and decision.allowed:
         _stamp_authority(payload, decision)
     if payload.get("ok"):

@@ -38,6 +38,19 @@ Pipeline (formal/STATUS.md, "differential oracle"):
    recomputing it. See `teardown_scenarios` / `teardown_observation`, and
    `teardown_coverage` for the non-vacuity ratchet that keeps the row
    from agreeing over shapes the corpus never reaches.
+2c. the IR rows (issue #2739) read a document rather than a program. `JR`
+   facts are the `provides` and sparse `isolate` columns of the IR a file
+   LOWERS to (`revl.compiler.compile_files`, the door `checker_code` uses),
+   the fields the backends consume, and whether the document's own
+   `manifest.templates` names each component. The model decides
+   `RevL.G2.IRDisjoint` over the document's static composition, G2 stated on
+   the document rather than on the AST the `V` row reads, and the `IRS` row
+   decides that the document's slots are a permutation of the composition's,
+   the hypothesis `RevL.G2.source_linkOK_ir_disjoint` takes beside `LinkOK`.
+   A lowering that drops or moves a realm is then a gate failure
+   (`ir_alignment`), not something a backend discovers at run time, and a
+   file the checker accepts that produces no `JR` row is one too.
+
 3. compute reference verdicts here AND run the Lean oracle
    (`formal/harness/Oracle.lean`) over the same TSV, then diff them. This
    is the HARD gate, and since item 418 step 6 the two sides are no longer
@@ -110,6 +123,7 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "backends" / "python"))
 
 from revl import cap_order
+from revl import lower  # the lowering walk, observed (issue #2744)
 from revl import recovery
 from revl import taint  # the shipped walk, observed (issue #2108)
 from revl import ui_family  # the shipped computer-use reversibility registry
@@ -1091,14 +1105,28 @@ def collect_arrow_param_aliases(body, handles: dict, aliases: dict,
 def _reach_call(node: ExprCall, out: "set[tuple[str, str]]", region: str,
                 requires: dict, handles: dict, psvc: dict, bounds: dict,
                 em_set: set, emitting: set, aliases: dict | None,
-                host_tokens: "dict[str, set[str]] | None") -> None:
+                host_tokens: "dict[str, set[str]] | None",
+                via_out: "dict[tuple[str, str], set[str]] | None" = None
+                ) -> None:
     """The crossing ONE call head contributes (see `walk_reach`). The
     arguments are the caller's to walk, under whatever region encloses them:
-    a call evaluated to produce an argument is not the marked crossing."""
+    a call evaluated to produce an argument is not the marked crossing.
+
+    `via_out`, when given, records HOW each pair was reached, the third
+    spelling the provide-method bound reads (issue #3485): the `k.m` of a
+    crossing through a required key (`emission_analysis.record_scope`), or
+    `*` for a crossing that names no verb of the key: a resolved receiver, a
+    host emission, a `fn` reaching one (`emission_analysis.unname`)."""
     rt = _route_values(node.callee)
     if not rt:
         return
     root, chain = rt
+
+    def note(cap: str, bound: str, via: str) -> None:
+        out.add((cap, bound))
+        if via_out is not None:
+            via_out.setdefault((cap, bound), set()).add(via)
+
     res = _resolve_emission(root, chain, requires, handles, psvc, aliases)
     if res is not None and region == "all":
         svc, meth = res
@@ -1110,23 +1138,24 @@ def _reach_call(node: ExprCall, out: "set[tuple[str, str]]", region: str,
             # declared scope, `*` when bare, which is what the checker's
             # provider bound reads (`_resolved_crossings`); the attenuation
             # column stays `*`, as `_emit_step_caps_pairs` reads a non-`req`
-            # head.
+            # head. No verb of a required key is crossed, so the VIA is `*`.
             mode, entries = bounds[(svc, meth)]
             if mode == "any":
-                out.add(("*", "*"))
+                note("*", "*", "*")
             else:
                 for e in entries:
-                    out.add(("*", e))
+                    note("*", e, "*")
         elif (svc, meth) in em_set:
             mode, entries = bounds[(svc, meth)]
+            via = f"{root}.{meth}"
             if mode == "any":
                 # No declared token: the SERVICE names the boundary
                 # for the fold, in its own namespace; the BOUND
                 # column still reads the wiring key (item 561).
-                out.add((_undeclared_cap(svc), root))
+                note(_undeclared_cap(svc), root, via)
             else:
                 for e in entries:
-                    out.add((_declared_cap(e), _canon_cap(root, e)))
+                    note(_declared_cap(e), _canon_cap(root, e), via)
     elif res is None and region == "all" and root in emitting:
         # A host emission. The two namespaces part company here (#1169 F3):
         # the attenuation fold gives it the unnameable `*` whatever the
@@ -1143,13 +1172,15 @@ def _reach_call(node: ExprCall, out: "set[tuple[str, str]]", region: str,
         # first-class reference, as the checker's fold adds it.
         reached = (host_tokens or {}).get(root) or {"*"}
         for token in sorted(reached):
-            out.add(("*", token))
+            note("*", token, "*")
 
 
 def walk_reach(node, out: "set[tuple[str, str]]", region: str, requires: dict,
                handles: dict, psvc: dict, bounds: dict, em_set: set,
                emitting: set, aliases: dict | None = None,
-               host_tokens: "dict[str, set[str]] | None" = None) -> None:
+               host_tokens: "dict[str, set[str]] | None" = None,
+               via_out: "dict[tuple[str, str], set[str]] | None" = None
+               ) -> None:
     """Collect the emission caps `node` crosses, each as the PAIR
     `(attenuation spelling, bound spelling)` — the two namespaces a crossing
     has (see `_canon_cap` / `_declared_cap`). The caller keeps whichever half
@@ -1162,7 +1193,8 @@ def walk_reach(node, out: "set[tuple[str, str]]", region: str, requires: dict,
     `*` in both namespaces; a host emission (an emission extern, or a fn
     reaching one) is `*` for the fold and the capability tokens it reaches
     for the bound (`_reach_call`). `host_tokens` is the file's
-    `_emitting_tokens` table.
+    `_emitting_tokens` table. `via_out`, when given, collects per pair how
+    it was reached (`_reach_call`): the F row's third column.
 
     An `emit` marks its HEAD call only: `_emit_step_caps_pairs` reads the
     step's `expr.target` and nothing beneath it, so the arguments (and a
@@ -1173,7 +1205,7 @@ def walk_reach(node, out: "set[tuple[str, str]]", region: str, requires: dict,
     if node is None or isinstance(node, (str, int, float, bool)):
         return
     args = (requires, handles, psvc, bounds, em_set, emitting, aliases,
-            host_tokens)
+            host_tokens, via_out)
     if isinstance(node, (EmitStmt, EmitExpr)) and not isinstance(node, type):
         expr = getattr(node, "expr", None)
         if isinstance(expr, ExprCall):
@@ -3556,6 +3588,543 @@ def access_rows(rel: str, comp, roots: set[str], resolved: set[str],
     return ["\t".join(["GA", rel, comp.name, root]) for root in sorted(access)]
 
 
+# ----------------------------- declared-access COVERAGE (issue #2744)
+#
+# THE VISITING HALF OF G1, which the `GA`/`G1` row above cannot state. G1 is
+# enforced by name resolution DURING lowering (`lower.py`'s own guarantee map:
+# "G1 undeclared access -> `_lower_postfix` name resolution"), so the walk that
+# resolves roots is the lowering walk itself. `RevL.G1Coverage.coversAccessBodyB`
+# states the obligation over `RevL.Syntax.Body`: every scope a body induces is
+# opened, as many statements of it visited as the scope declares, and every
+# declared parameter seeded
+# into the scope's own environment. This section is the corpus half.
+#
+# THE TWO SIDES ARE INDEPENDENT OBSERVATIONS.
+#
+#   G1B <file> <comp> <stmts>
+#       The component body's ACTIVATION, as the PARSE sees it: how many
+#       statements the activation declares. `0` means the body has no
+#       activation scope at all, which `Body.scopes` reads as no scope. Unlike
+#       the G9 `GB` row, every non-provide statement counts: the lowering
+#       walk dispatches `handoff`/`route` statements too, so it visits them
+#       and has to be compared against a body that includes them.
+#
+#   G1P <file> <comp> <key> <method> <stmts> <params>
+#       One provide method: the number of statements its body declares and
+#       its declared parameter NAMES, comma-joined (empty string for none).
+#       Names only, no qualifiers: for G1 every declared parameter is a local
+#       of ITS OWN scope whatever origin it carries, which is exactly the
+#       per-scope fact a component-wide classification cannot express.
+#
+#   G1W <file> <comp> <scope> <stmts> <params>
+#       One scope the shipped checker's lowering ACTUALLY visited, recorded
+#       while `compile_files` ran: the scope's label (`activation` or
+#       `<provide key>.<method>`), how many of the scope's TOP-LEVEL
+#       statements the lowering loop REACHED (recorded at the loop head,
+#       before dispatch, so a dispatch that skips a reached statement is not
+#       seen), and the parameter names it seeded into the scope's own
+#       environment when it opened it. The rows are in `Body.scopes` order:
+#       the activation scope first when it was visited, then the provide
+#       scopes in the order the walk opened them. The checker accepts an
+#       `emit` or an `if` after a `provide` block and then opens the provide
+#       scope first, so the activation scope is moved to the front; nothing
+#       else is reordered.
+#
+#       Statements inside an `if`/`while`/`for` body are lowered by the
+#       scope's own recursion and are NOT counted a second time: the count is
+#       per scope, at the granularity of the flat `Stmt` list `Body.scopes`
+#       carries. That is the same subject the G9 row counts, and the
+#       limitation is stated in `RevL.G1Coverage`'s docstring.
+#
+#   G1C <file> <comp> <scope> coverage=ok|fail
+#       The oracle's OUTPUT, not an export row: `RevLOracle.g1covVerdicts`
+#       prints `Walked.matches` per scope over `G1B`/`G1P`/`G1W`, out to the
+#       longer of the two lists, so a walk that opened FEWER scopes than the
+#       body still produces a NAMED `fail` for the missing one. That is the
+#       per-scope projection of `coversAccessBodyB`, not the whole-walk Bool.
+#
+#   G1M <kind> <file> <comp> <walk>
+#       The recorded walk (`as-walked`) and its four shortenings (`drop`,
+#       `bump`, `strip`, `extra`, `_g1_shortenings`), one row each, the walk
+#       as `label|count|params` joined by `;`. The oracle answers each with
+#       `G1CM <kind> <file> <comp> covers=ok|fail`, the whole-walk
+#       `RevLOracle.accessCoverageRowB` the bridge theorem is about, and the
+#       ratchet requires `ok` on a recorded walk and `fail` under each
+#       shortening from the LEAN side, not only from the Python one.
+#
+# THE PRIVATE SEAM THIS PINS. The checker has no separate access-walk function
+# to wrap the way the G9 row wraps `taint._walk_component_methods`: the walk
+# IS `_lower_component`'s `_dispatch_action` and `_lower_provide`'s statement
+# loop, which call `lower._note_access_visit` / `lower._note_access_scope`
+# while a log is installed. The recorder below installs that log for ONE
+# `compile_files` call and reads it back, so a moved or renamed call site
+# leaves the log short; that is the harness's OWN blind spot, filed under
+# `missed-G1-coverage-observation` and never as a coverage disagreement.
+#
+# WHAT THIS ROW IS NOT. It is not the rule (`RevL.G1Access`, the `G1` verdict)
+# and not yet the per-scope ROOT classification: the exporter still classifies
+# a root as local, callable, import, host family or constructor component-wide
+# (the issue's second slice). The parameter conjunct is that slice's observable
+# precondition, not the slice itself. It is also not a proof about Python: no
+# Lean theorem can be, and the theorem's docstring says so.
+
+#: One component's coverage obligation as the export carries it:
+#: `rel -> [(component, body scopes, walk scopes)]`, each scope a
+#: `(label, statement count, [param name, ...])` triple. Read by
+#: `g1coverage_coverage`.
+_G1_COVERAGE_ROWS: dict = {}
+
+#: How the observation pass classified the corpus. Read by
+#: `g1coverage_coverage` so a corpus that stopped being OBSERVED fails the
+#: ratchet instead of passing it vacuously.
+_G1_COVERAGE_CENSUS: dict = {}
+
+#: Files where the parse says a component has scopes and the recorder captured
+#: NONE of them: the harness's own blind spot, bucketed as
+#: `missed-G1-coverage-observation` and never as `missed-G1-coverage`.
+_G1_UNOBSERVED: dict = {}
+
+#: Files whose walk covers their bodies, filled by `checker_alignment` and
+#: printed as a second axis (a coverage agreement is not a bucket: the chain
+#: above already gives every file one).
+_G1_COVERED: list = []
+
+
+def g1_body_scopes(rel: str, prog) -> tuple[dict, list[str]]:
+    """The scopes of every component body in `prog`, as the PARSE sees them:
+    `{component: [(label, stmts, [param name, ...])]}` in
+    `RevL.Syntax.Body.scopes` order, the activation first and only when it
+    has a statement, then one scope per provide method, in declaration order.
+
+    Independent of the walk: nothing here reads the checker's output, so the
+    two sides of the comparison can only agree by the checker actually
+    lowering the body."""
+    out: dict = {}
+    problems: list[str] = []
+    for c in prog.components:
+        if not isinstance(c, ComponentDecl):
+            continue
+        scopes: list = []
+        act = [s for s in c.body if not isinstance(s, ProvideStmt)]
+        if act:
+            scopes.append(("activation", len(act), []))
+        for stmt in c.body:
+            if not isinstance(stmt, ProvideStmt):
+                continue
+            for m in stmt.methods:
+                scopes.append((f"{stmt.key}.{m.name}", len(m.body or []),
+                               list(m.params or [])))
+        labels = [s[0] for s in scopes]
+        if len(set(labels)) != len(labels):
+            problems.append(
+                f"{rel}/{c.name}: scopes {labels} are not distinct, so a "
+                "per-scope verdict could not name one")
+            continue
+        out[c.name] = scopes
+    return out, problems
+
+
+@contextlib.contextmanager
+def _access_observation():
+    """Install the checker's access-walk log for one compile.
+
+    Both the log and the module attribute are restored on the way out,
+    including when the compile refuses. `_ACCESS_WALK` is None in production,
+    so the only thing this context manager changes is the duration of ONE
+    `compile_files` call."""
+    saved = lower._ACCESS_WALK
+    log: list = []
+    lower._ACCESS_WALK = log
+    try:
+        yield log
+    finally:
+        lower._ACCESS_WALK = saved
+
+
+def _access_walk_scopes(observed: dict) -> list:
+    """The walk's scopes for one component as `(label, statement count,
+    parameter names)` triples, in the order `Body.scopes` defines: the
+    activation scope first when the walk visited an activation statement,
+    then the provide scopes in the order the checker opened them.
+
+    The checker's own opening order is NOT the model's order on every
+    admitted body. It refuses an `effect`, a `let`-effect or a `timer` after a
+    `provide` block, but it accepts an `emit` or an `if` there, and the
+    lowering loop then opens the provide scope before it visits that
+    activation statement. Comparing that raw order would print `fail` on both
+    scopes of a correct walk. Moving the activation scope to the front is the
+    one reordering applied: it is the order the model defines, and the
+    provide scopes keep the order the checker opened them in, so the label
+    conjunct still reads them as walked."""
+    act = [("activation", v["stmts"], list(v["params"]))
+           for label, v in observed.items() if label == "activation"]
+    rest = [(label, v["stmts"], list(v["params"]))
+            for label, v in observed.items() if label != "activation"]
+    return act + rest
+
+
+def g1coverage_rows(rel: str, prog) -> list[str]:
+    """The `G1B`/`G1P`/`G1W` rows of one modeled file (issue #2744).
+
+    `G1B`/`G1P` come from the parse; `G1W` from a real `compile_files` run
+    with the lowering walk's log installed. Also fills `_G1_COVERAGE_ROWS`
+    (the per-component comparison the ratchet re-runs under shortening) and
+    `_G1_COVERAGE_CENSUS`/`_G1_UNOBSERVED`.
+
+    A file the checker REFUSES emits no row: the walk that would have been
+    observed did not complete, so the row has no subject. That is counted,
+    not dropped, and it is NOT a coverage failure."""
+    body, problems = g1_body_scopes(rel, prog)
+    problems = [f"{rel}: {p}" for p in problems]
+    if not body:
+        return []
+    with _access_observation() as log:
+        try:
+            compile_files([str(REPO / rel)])
+        except RevlError:
+            _G1_COVERAGE_CENSUS["refused"] = (
+                _G1_COVERAGE_CENSUS.get("refused", 0) + 1)
+            return []
+    _G1_COVERAGE_CENSUS["checked"] = (
+        _G1_COVERAGE_CENSUS.get("checked", 0) + 1)
+    walk: dict = {}
+    for kind, comp, scope, params in log:
+        if comp not in body:
+            # a component the parse does not carry (a `use`d module's or a
+            # name this file never declared): not this row's subject
+            continue
+        if kind == "scope":
+            _G1_COVERAGE_CENSUS["scope_opens"] = (
+                _G1_COVERAGE_CENSUS.get("scope_opens", 0) + 1)
+        elif scope == "activation":
+            _G1_COVERAGE_CENSUS["activation_visits"] = (
+                _G1_COVERAGE_CENSUS.get("activation_visits", 0) + 1)
+        entry = walk.setdefault(comp, {})
+        if kind == "scope":
+            entry.setdefault(scope, {"stmts": 0, "params": list(params)})
+        else:
+            cur = entry.setdefault(scope, {"stmts": 0, "params": []})
+            cur["stmts"] += 1
+    if not any(walk.get(comp) for comp in body):
+        # The checker accepted the file and the lowering walk left no scope
+        # at all: the instrument did not fire, not the checker skipping.
+        _G1_COVERAGE_CENSUS["no_walk"] = (
+            _G1_COVERAGE_CENSUS.get("no_walk", 0) + 1)
+        if any(scopes for scopes in body.values()):
+            _G1_UNOBSERVED[rel] = (
+                "the parse gives the file's components scopes and the "
+                "lowering recorder captured none")
+        return []
+    _G1_COVERAGE_CENSUS["active"] = (
+        _G1_COVERAGE_CENSUS.get("active", 0) + 1)
+    _G1_COVERAGE_CENSUS["scopes"] = _G1_COVERAGE_CENSUS.get("scopes", 0) + sum(
+        len(v) for v in walk.values())
+
+    rows: list[str] = []
+    per_file: list = []
+    for comp in body:
+        scopes = body[comp]
+        observed = walk.get(comp, {})
+        if scopes and not observed:
+            _G1_UNOBSERVED[rel] = (
+                f"the parse gives {comp} {len(scopes)} scope(s) and the "
+                "lowering recorder captured none")
+        act = next((n for lb, n, _p in scopes if lb == "activation"), 0)
+        rows.append("\t".join(["G1B", rel, comp, str(act)]))
+        for label, n, params in scopes:
+            if label == "activation":
+                continue
+            key, _, method = label.partition(".")
+            rows.append("\t".join(["G1P", rel, comp, key, method, str(n),
+                                   ",".join(params)]))
+        ordered = _access_walk_scopes(observed)
+        for label, n, params in ordered:
+            rows.append("\t".join(["G1W", rel, comp, label, str(n),
+                                   ",".join(params)]))
+        if ordered:
+            # the same walk, as recorded and under each shortening, for the
+            # Lean oracle to decide with `accessCoverageRowB` (the ratchet
+            # requires the Lean verdict to flip, not only the Python one)
+            for kind, mutated in _g1_shortenings(ordered):
+                rows.append("\t".join(["G1M", kind, rel, comp,
+                                       _g1_walk_field(mutated)]))
+        per_file.append((comp, scopes, ordered))
+    _G1_COVERAGE_ROWS[rel] = per_file
+    _G1_COVERAGE_CENSUS["components"] = (
+        _G1_COVERAGE_CENSUS.get("components", 0) + len(per_file))
+    _G1_COVERAGE_CENSUS.setdefault("findings", []).extend(problems)
+    return rows
+
+
+def _g1_covers(body: list, walk: list) -> list[tuple[str, str]]:
+    """`RevL.G1Coverage.coversAccessB` at the carried columns, respelled in
+    Python so the reference's verdict is an INDEPENDENT recomputation of the
+    three conjuncts the theorem names, label, statement count and declared
+    parameters, out to the longer of the two lists, so a walk that opened
+    FEWER scopes still yields a named `fail` for the missing one."""
+    out: list[tuple[str, str]] = []
+    for i in range(max(len(body), len(walk))):
+        s = body[i] if i < len(body) else None
+        w = walk[i] if i < len(walk) else None
+        label = (s[0] if s is not None else (w[0] if w is not None else ""))
+        ok = (s is not None and w is not None and w[0] == s[0]
+              and w[1] == s[1] and w[2] == s[2])
+        out.append((label, "ok" if ok else "fail"))
+    return out
+
+
+#: The kinds of `G1M` row, in export order: the walk as recorded (the
+#: positive control, the Lean oracle must print `ok` on it) and its four
+#: shortenings (each must make the Lean oracle print `fail` somewhere).
+G1_SHORTENINGS = ("as-walked", "drop", "bump", "strip", "extra")
+
+
+def _g1_shortenings(walk: list) -> list[tuple[str, list]]:
+    """The recorded walk and its four shortenings, `(kind, walk)` in
+    `G1_SHORTENINGS` order: drop the first scope, bump every visited count,
+    strip every scope's last parameter, add a scope the body does not have.
+    ONE definition, so the Python ratchet and the `G1M` rows the Lean oracle
+    decides mutate the same walk the same way."""
+    return [
+        ("as-walked", list(walk)),
+        ("drop", walk[1:]),
+        ("bump", [(lb, n + 1, p) for lb, n, p in walk]),
+        ("strip", [(lb, n, p[:-1]) for lb, n, p in walk]),
+        ("extra", walk + [("activation", 1, [])]),
+    ]
+
+
+def _g1_walk_field(walk: list) -> str:
+    """One walk as a single `G1M` column: `label|count|params` per scope,
+    `;`-joined, parameters `,`-joined, the empty walk the empty column. A
+    label is `key.method` and a key may be namespaced (`acme::greeter`), so
+    `:` is NOT a safe separator; `|` and `;` are checked rather than assumed
+    absent, and a label or parameter carrying one stops the run."""
+    for lb, _n, ps in walk:
+        for part in (lb, *ps):
+            if "|" in part or ";" in part or (part != lb and "," in part):
+                raise SystemExit(
+                    f"differential oracle: G1 walk label or parameter {part!r} "
+                    "carries a G1M separator")
+    return ";".join(f"{lb}|{n}|{','.join(p)}" for lb, n, p in walk)
+
+
+def _g1_lean_mutant_verdicts(formal_text: str) -> dict:
+    """The Lean oracle's `G1CM <kind> <file> <comp> covers=ok|fail` rows:
+    `RevLOracle.accessCoverageRowB`, the whole-walk Bool the bridge theorem
+    is about, over each `G1M` row."""
+    out: dict = {}
+    for line in formal_text.splitlines():
+        parts = line.split("\t")
+        if parts[0] == "G1CM" and len(parts) == 5:
+            out[(parts[1], parts[2], parts[3])] = parts[4].split("=", 1)[1]
+    return out
+
+
+def _g1_lean_findings(formal_text: str) -> list[str]:
+    """The Lean half of the ratchet: every `G1M` row the export carried got
+    a `G1CM` verdict, that verdict is the Python whole-walk verdict, the
+    as-recorded walk prints `ok` somewhere and each shortening prints `fail`
+    somewhere. An oracle that printed a constant fails here."""
+    got = _g1_lean_mutant_verdicts(formal_text)
+    findings: list[str] = []
+    missing: list = []
+    differ: list = []
+    oks = {k: 0 for k in G1_SHORTENINGS}
+    fails = {k: 0 for k in G1_SHORTENINGS}
+    for rel, per_file in sorted(_G1_COVERAGE_ROWS.items()):
+        for comp, body, walk in per_file:
+            if not walk:
+                continue
+            for kind, mutated in _g1_shortenings(walk):
+                want = ("ok" if all(v == "ok" for _lb, v
+                                    in _g1_covers(body, mutated)) else "fail")
+                lean = got.get((kind, rel, comp))
+                if lean is None:
+                    missing.append((kind, rel, comp))
+                    continue
+                if lean != want:
+                    differ.append((kind, rel, comp, want, lean))
+                (oks if lean == "ok" else fails)[kind] += 1
+    if missing:
+        findings.append(
+            f"g1 coverage (Lean): {len(missing)} G1M row(s) got no G1CM "
+            f"verdict from the oracle, e.g. {missing[:3]}")
+    if differ:
+        findings.append(
+            f"g1 coverage (Lean): {len(differ)} G1CM verdict(s) differ from "
+            f"the Python whole-walk verdict (kind, file, comp, python, lean), "
+            f"e.g. {differ[:3]}")
+    if not oks["as-walked"]:
+        findings.append(
+            "g1 coverage (Lean): the oracle printed `ok` on no recorded walk, "
+            "so its `fail` under the shortenings proves nothing")
+    for kind in G1_SHORTENINGS[1:]:
+        if not fails[kind]:
+            findings.append(
+                f"g1 coverage (Lean): the {kind!r} shortening makes the Lean "
+                f"oracle print `fail` on no walk, so the printed verdict does "
+                f"not read what that shortening changes")
+    if not findings:
+        print(f"g1 coverage (Lean): {sum(oks.values()) + sum(fails.values())} "
+              f"G1M walks decided by `accessCoverageRowB`, "
+              f"{oks['as-walked']} recorded walks ok, fail under "
+              + ", ".join(f"{k} {fails[k]}" for k in G1_SHORTENINGS[1:]))
+    return findings
+
+
+def _g1_params(field: str) -> list[str]:
+    """One carried comma-joined parameter-NUMBER column as a list. The empty
+    string is the empty list; an empty member stops the run rather than being
+    dropped, so a malformed row cannot silently compare as fewer parameters."""
+    if not field:
+        return []
+    out: list[str] = []
+    for member in field.split(","):
+        if not member:
+            raise SystemExit(
+                f"differential oracle: malformed G1 coverage parameter "
+                f"{field!r}")
+        out.append(member)
+    return out
+
+
+def g1coverage_coverage(formal_text: str | None = None) -> list[str]:
+    """The non-vacuity ratchet for the `G1B`/`G1P`/`G1W`/`G1C` rows
+    (issue #2744).
+
+    COVERAGE OF THE ACCESS WALK, which is the half the `G1` verdict cannot
+    state. The ratchet has to fail in each of these ways:
+
+      * the corpus must EXERCISE the row, at least one component with a
+        non-empty activation scope, at least one provide scope, and at least
+        one provide scope declaring a parameter, and the observation must
+        have RUN, so a corpus that stopped reaching the walk fails here
+        instead of passing vacuously;
+      * the observation must have SUCCEEDED for every component the parse
+        says has scopes: a component with scopes and no recorded visit is
+        `missed-G1-coverage-observation`, this harness's own blind spot; and
+      * the verdict must FLIP under each of four SHORTENINGS of the recorded
+        walk, drop a scope, bump a count, strip a parameter, and add a scope
+        the body does not have. `RevL.G1Coverage` proves each shortening is a
+        distinct way to fail; this is the corpus half, and a row that
+        returned a constant fails all four. Given the oracle's output
+        (`formal_text`), the same four shortenings, exported as `G1M` rows,
+        must also make the LEAN oracle's `accessCoverageRowB` print `fail`,
+        and the walk as recorded must make it print `ok`, so an oracle that
+        printed a constant fails too (`_g1_lean_findings`).
+
+    A verdict that comes out `fail` on the corpus, the walk genuinely having
+    skipped a scope, is NOT reported here: it is `checker_alignment`'s
+    `missed-G1-coverage` bucket. This ratchet is evidence the row BITES; the
+    bucket is the row's verdict.
+
+    Returns findings, treated as gate failures."""
+    findings = [f"g1 coverage observation: {rel}: {why}"
+                for rel, why in sorted(_G1_UNOBSERVED.items())]
+    findings.extend(f"g1 coverage: {p}"
+                    for p in _G1_COVERAGE_CENSUS.get("findings", []))
+    if not _G1_COVERAGE_ROWS:
+        findings.append("g1 coverage: no G1B/G1P/G1W rows at all, the row "
+                        "would decide nothing and agree vacuously")
+        return findings
+    if not _G1_COVERAGE_CENSUS.get("active"):
+        findings.append(
+            "g1 coverage: the observation ran over no ACTIVE file, the "
+            "lowering recorder captured nothing, so the row is its own blind "
+            "spot")
+        return findings
+    if not _G1_COVERAGE_CENSUS.get("scopes"):
+        findings.append(
+            "g1 coverage: the observation recorded no SCOPE at all, the "
+            "`lower._note_access_visit` seam this pins did not fire, so a "
+            "`fail` row would be reporting a coverage failure that is really "
+            "an instrument failure")
+        return findings
+    any_activation = any(
+        any(lb == "activation" for lb, _n, _p in body)
+        for per_file in _G1_COVERAGE_ROWS.values()
+        for _c, body, _w in per_file)
+    any_provide = any(
+        any(lb != "activation" for lb, _n, _p in body)
+        for per_file in _G1_COVERAGE_ROWS.values()
+        for _c, body, _w in per_file)
+    if any_activation and not _G1_COVERAGE_CENSUS.get("activation_visits"):
+        findings.append(
+            "g1 coverage: components declare activation statements but the "
+            "`lower._note_access_visit` activation call site recorded none, "
+            "an instrument failure, not a walk that skipped them")
+    if any_provide and not _G1_COVERAGE_CENSUS.get("scope_opens"):
+        findings.append(
+            "g1 coverage: components declare provide scopes but the "
+            "`lower._note_access_scope` call site recorded none, an "
+            "instrument failure, not a walk that skipped them")
+    acts = provs = params = 0
+    drop_scope = bump = strip = extra = 0
+    for rel, per_file in sorted(_G1_COVERAGE_ROWS.items()):
+        for comp, body, walk in per_file:
+            if any(lb == "activation" for lb, _n, _p in body):
+                acts += 1
+            if any(lb != "activation" for lb, _n, _p in body):
+                provs += 1
+            if any(p for _lb, _n, ps in body for p in ps):
+                params += 1
+            if not walk:
+                continue
+            short = dict(_g1_shortenings(walk))
+            if _g1_covers(body, short["drop"]) != _g1_covers(body, walk):
+                drop_scope += 1
+            if _g1_covers(body, short["bump"]) != _g1_covers(body, walk):
+                bump += 1
+            if _g1_covers(body, short["strip"]) != _g1_covers(body, walk):
+                strip += 1
+            if _g1_covers(body, short["extra"]) != _g1_covers(body, walk):
+                extra += 1
+    if not acts:
+        findings.append(
+            "g1 coverage: no component in the corpus has a non-empty "
+            "activation scope, so the row never decides an activation walk")
+    if not provs:
+        findings.append(
+            "g1 coverage: no component in the corpus has a provide scope, so "
+            "the row never decides a receiver body")
+    if not params:
+        findings.append(
+            "g1 coverage: no provide scope in the corpus declares a "
+            "parameter, so the row never decides the per-scope parameter "
+            "observation")
+    if not drop_scope:
+        findings.append(
+            "g1 coverage: dropping a scope from every recorded walk changes "
+            "no verdict, the row does not read the scope list")
+    if not bump:
+        findings.append(
+            "g1 coverage: bumping a visited-statement count changes no "
+            "verdict, the row does not read the count")
+    if not strip:
+        findings.append(
+            "g1 coverage: stripping a parameter changes no verdict, the row "
+            "does not read the parameters")
+    if not extra:
+        findings.append(
+            "g1 coverage: adding a scope the body does not have changes no "
+            "verdict, the row does not read the label list")
+    if formal_text is not None:
+        findings.extend(_g1_lean_findings(formal_text))
+    if not findings:
+        print(f"g1 coverage: {len(_G1_COVERAGE_ROWS)} files over "
+              f"{_G1_COVERAGE_CENSUS['components']} components "
+              f"({acts} with an activation scope, {provs} with a provide "
+              f"scope, {params} declaring a parameter), observation "
+              f"active={_G1_COVERAGE_CENSUS['active']} "
+              f"refused={_G1_COVERAGE_CENSUS.get('refused', 0)} "
+              f"no-walk={_G1_COVERAGE_CENSUS.get('no_walk', 0)}, each verdict "
+              "flipping under dropping a scope, bumping a count, stripping a "
+              "parameter and adding a scope, coverage of the checker's "
+              "lowering walk ON THE CORPUS")
+    return findings
+
+
 # ------------------------------------ binding uniqueness (issue #1812)
 #
 # The checker's G6 `binding` refusal (`Env.bind_local` in the activation body,
@@ -4273,8 +4842,67 @@ def _a2_step(stmt: object) -> str:
 
 
 
+#: Files the checker ACCEPTED whose lowered document produced no `JR` row, and
+#: the components of used modules each lowered document carried that are not
+#: the file's own. Both are reset by `export` and read by `ir_coverage`.
+_IR_UNLOWERED: list[str] = []
+_IR_FOREIGN: dict[str, int] = {}
+
+
+def _declared_in(source: object, rel: str) -> bool:
+    """Whether a lowered component's `source` is the file `rel`. The IR names
+    the declaring file relative to the invocation (issue #2072), so both sides
+    are resolved against the working directory the way the checker's own
+    output is."""
+    if not isinstance(source, str) or not source:
+        return False
+    return (os.path.realpath(os.path.abspath(source))
+            == os.path.realpath(str(REPO / rel)))
+
+
+def ir_fact_rows(rel: str, lowered: dict) -> tuple[list[str], int]:
+    """The `JR` facts: one row per component of a LOWERED IR document (issue
+    #2739), carrying `provides`, the sparse `isolate` map and a role. These
+    are the fields the backends consume and the model's V row never read,
+    because it reads the parsed AST. A lowering that drops or moves a realm
+    therefore shows up as a slot mismatch in the oracle instead of only in a
+    backend at run time.
+
+    The role is the DOCUMENT's own: a component is a `template` exactly when
+    the lowered `manifest.templates` names it, which is the list `lower._link`
+    uses to keep a spawn target out of the static composition. Lowering still
+    lists the template in `components`, because the backends instantiate it,
+    so it is the role column and not the row that carries the exclusion.
+
+    The rows are the file's own components, selected by each entry's
+    `source`. A component declared by a `use`d module is another file's
+    composition, as the model's V row treats it, and is returned as the second
+    value so the census can say how many the rows do not cover. `-` is the
+    export's empty column (the same spelling the `EX` rows use), so `parseJR`
+    can tell `no keys` from a key named the empty string."""
+    templates = set((lowered.get("manifest") or {}).get("templates") or ())
+    rows: list[str] = []
+    foreign = 0
+    for entry in lowered.get("components") or ():
+        name = entry.get("name")
+        if name is None:
+            continue
+        if not _declared_in(entry.get("source"), rel):
+            foreign += 1
+            continue
+        provides = ",".join((entry.get("provides") or {}).keys()) or "-"
+        isolate = ",".join(
+            f"{k}={v}" for k, v in
+            sorted((entry.get("isolate") or {}).items())) or "-"
+        role = "template" if name in templates else "member"
+        rows.append("\t".join(["JR", rel, name, provides, isolate, role]))
+    return rows, foreign
+
+
 def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
     """Parse the corpus; return (tsv rows, per-file facts, census)."""
+    _IR_UNLOWERED.clear()
+    _IR_FOREIGN.clear()
     tsv: list[str] = []
     file_facts: dict[str, dict] = {}
     caps_seen: set[str] = set()
@@ -4354,6 +4982,7 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
         tsv.extend(council_rows(rel, prog))
         tsv.extend(g9_rows(rel))
         tsv.extend(g9coverage_rows(rel, prog))
+        tsv.extend(g1coverage_rows(rel, prog))
         tsv.extend(retain_rows(rel))
         tsv.extend(g4inverse_rows(rel, prog))
         tsv.extend(a5_rows(rel, prog))
@@ -4530,7 +5159,12 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             # surfaces read, so it carries BOTH spellings: `cap` is the
             # attenuation element (the declared boundary) and `bound` is the
             # bound element (the wiring key the crossing went through). They
-            # differ, and collapsing them is the laundering hole.
+            # differ, and collapsing them is the laundering hole. The ninth
+            # column, `via`, is the `k.m` a crossing through a required key
+            # names, or `*` when the crossing names no verb of the key; the
+            # bound admits a declared `k.m` only for a key every crossing of
+            # which is such a verb (issue #3485). One row per (pair, via):
+            # a key reached both ways carries both rows.
             for stmt in c.body:
                 if isinstance(stmt, ProvideStmt):
                     svc = psvc.get(c.name, {}).get(stmt.key)
@@ -4538,17 +5172,19 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                         continue
                     for pm in stmt.methods:
                         reach: "set[tuple[str, str]]" = set()
+                        vias: "dict[tuple[str, str], set[str]]" = {}
                         for inner in pm.body:
                             walk_reach(inner, reach, "all", require_map, handles,
                                        psvc, bounds, em_set, emitting, aliases,
-                                       host_tokens)
+                                       host_tokens, vias)
                         for cap, bound in sorted(reach):
                             caps_seen.add(cap)
                             caps_seen.add(bound)
                             held_strs.add(cap)
-                            tsv.append("\t".join(
-                                ["F", rel, c.name, stmt.key, svc, pm.name,
-                                 cap, bound]))
+                            for via in sorted(vias.get((cap, bound), {"*"})):
+                                tsv.append("\t".join(
+                                    ["F", rel, c.name, stmt.key, svc, pm.name,
+                                     cap, bound, via]))
 
             # approval-floor facts (AX/AE): each marked crossing's tokens and
             # its `with` edge, in a file that declares an approval-required
@@ -4733,6 +5369,25 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
         for name, caps in sorted(op_boundaries.items()):
             tsv.append("\t".join(["EX", rel, name, "emission", "-", "-",
                                    ",".join(caps)]))
+        # IR facts (JR, issue #2739): the provision slots the LOWERED IR
+        # document carries. Lowered the way `checker_code` does, through
+        # `compile_files`, so a file with a `use` resolves and the document is
+        # the one every CLI verb gets; `check_and_lower` on the bare parse
+        # refused four such files and the rows silently skipped them. A file
+        # the checker refuses has no document and so no row; a file it
+        # ACCEPTS that yields none is a gate failure (`ir_coverage`), not an
+        # absence.
+        try:
+            lowered = compile_files([str(REPO / rel)])
+        except RevlError:
+            lowered = None
+        if lowered is not None:
+            jr, foreign = ir_fact_rows(rel, lowered)
+            if not jr:
+                _IR_UNLOWERED.append(rel)
+            if foreign:
+                _IR_FOREIGN[rel] = foreign
+            tsv.extend(jr)
         file_facts[rel] = ff
     # Z/Y decomposition rows go FIRST so the oracle can build its table in
     # one pass; the harness refuses a capability the checker cannot re-read.
@@ -6201,7 +6856,11 @@ class Verdicts(NamedTuple):
     REPORTS under `G4`/`reversibility`, issue #2114), and `gc` GC rows (G9
     coverage: the walk the checker PERFORMED visits every statement of the
     body the parse enumerates and seeds every origin-carrying parameter — the
-    obligation `RevL.G9Coverage.coversBodyB` states, issue #2108), and `ev`
+    obligation `RevL.G9Coverage.coversBodyB` states, issue #2108), and `g1cov`
+    G1C rows (G1 declared-access coverage: the lowering walk the checker
+    PERFORMED visits as many statements of each scope as the body the parse
+    enumerates declares, and seeds every declared parameter of each scope, the obligation
+    `RevL.G1Coverage.coversAccessBodyB` states, issue #2744), and `ev`
     EV rows (G4 emission value: an emission is reached only by a call, never
     as a function value, issues #2842 and #2834)."""
     files: dict[str, tuple[str, str, str]]
@@ -6236,7 +6895,10 @@ class Verdicts(NamedTuple):
     sw: dict[tuple[str, str, str], str]
     a5: dict[tuple[str, str, str], str]
     gc: dict[tuple[str, str, str], str]
+    g1cov: dict[tuple[str, str, str], str]
     ev: dict[str, str]
+    ir_disjoint: dict[str, str]
+    ir_kept: dict[str, str]
 
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
@@ -6254,7 +6916,8 @@ class Verdicts(NamedTuple):
                 + len(self.councils) + len(self.g9) + len(self.retain)
                 + len(self.inv)
                 + len(self.sw) + len(self.a5) + len(self.gc)
-                + len(self.ev))
+                + len(self.g1cov)
+                + len(self.ev) + len(self.ir_disjoint) + len(self.ir_kept))
 
 
 
@@ -6298,7 +6961,10 @@ def parse_verdicts(text: str) -> Verdicts:
     sw: dict[tuple[str, str, str], str] = {}
     a5: dict[tuple[str, str, str], str] = {}
     gc: dict[tuple[str, str, str], str] = {}
+    g1cov: dict[tuple[str, str, str], str] = {}
     ev: dict[str, str] = {}
+    ir_disjoint: dict[str, str] = {}
+    ir_kept: dict[str, str] = {}
 
     for line in text.splitlines():
         parts = line.split("\t")
@@ -6373,6 +7039,12 @@ def parse_verdicts(text: str) -> Verdicts:
         elif parts[0] == "EV" and len(parts) == 3:
             # G4 emission value (issues #2842, #2834): file -> ok|fail.
             ev[parts[1]] = parts[2].split("=", 1)[1]
+        elif parts[0] == "IRD" and len(parts) == 3:
+            # G2 over the IR image (issue #2739): file -> ok|fail.
+            ir_disjoint[parts[1]] = parts[2].split("=", 1)[1]
+        elif parts[0] == "IRS" and len(parts) == 3:
+            # G2 over the IR image: the IR keeps the composition's slots.
+            ir_kept[parts[1]] = parts[2].split("=", 1)[1]
         elif parts[0] == "AP" and len(parts) == 5:
             # The approval floor: (file, comp, crossing ord) -> ok|fail.
             approvals[(parts[1], parts[2], parts[3])] = \
@@ -6460,13 +7132,26 @@ def parse_verdicts(text: str) -> Verdicts:
             # did not visit a statement the body declares), which is what
             # explains the two historical walk bugs; `ok` is coverage HELD.
             gc[(parts[1], parts[2], parts[3])] = parts[4].split("=", 1)[1]
+        elif parts[0] == "G1C" and len(parts) == 5:
+            # G1 coverage (issue #2744): (file, component, scope) -> ok|fail,
+            # the projection of `coversAccessBodyB` per scope, as `GC` is for
+            # G9. `fail` is coverage VIOLATED: the lowering walk did not visit
+            # as many statements as a scope the body declares, or seeded a
+            # different parameter set than that scope declares.
+            g1cov[(parts[1], parts[2], parts[3])] = parts[4].split("=", 1)[1]
+        elif parts[0] == "G1CM" and len(parts) == 5:
+            # G1 coverage under a shortening (issue #2744): not a corpus
+            # verdict, the Lean half of `g1coverage_coverage`'s ratchet, which
+            # reads these rows from the oracle's output itself.
+            continue
         else:
             raise SystemExit(f"differential oracle: malformed verdict row {line!r}")
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
                     recoveries, confinements, g8surface, g5reg, a9, configs,
                     a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
-            places, model_reach, councils, g9, retain, inv, sw, a5, gc, ev)
+            places, model_reach, councils, g9, retain, inv, sw, a5, gc, g1cov,
+            ev, ir_disjoint, ir_kept)
 
 
 
@@ -6474,6 +7159,81 @@ def _slots(provides: list[str], realms: dict[str, str]) -> list[tuple[str, str]]
     """`RevL.Manifest.slots` — the `(key, realm)` pairs a component fills.
     An unisolated key sits in the shared realm (the empty string)."""
     return [(k, realms.get(k, "")) for k in provides]
+
+
+def _ir_reference(mrows: list[list[str]],
+                  jrrows: list[list[str]]) -> tuple[dict, dict]:
+    """The REFERENCE verdicts for the IRD/IRS rows (issue #2739).
+
+    Recomputed from the same two fact sets the oracle decides: the lowered
+    document's `JR` rows (`provides`, `isolate`, and a role read from the
+    document's own `manifest.templates`) and the model's own component facts
+    (`M`). The document's static composition is its `member` rows.
+    `disjoint` is Nodup over those slots, G2 read off the document instead of
+    the AST. `kept` is multiset equality between those slots and the model's
+    own composition's, the hypothesis `source_linkOK_ir_disjoint` takes: the
+    half that fails when a lowering drops, adds, duplicates or moves a realm.
+    The model's composition is the `M` rows its own role column calls a
+    `member`, the same set the oracle's `comps` is.
+
+    Also fills `_IR_ROWS` for `ir_coverage`: what the corpus exercised, kept
+    beside the compared verdict the way `_CONFIG_FIELDS` is."""
+    def csv(s: str) -> list[str]:
+        return [] if s == "-" else [x for x in s.split(",") if x]
+
+    def realms(s: str) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for pair in csv(s):
+            k, v = pair.split("=", 1)
+            out[k] = v
+        return out
+
+    src: dict[str, list[tuple[str, str]]] = {}
+    for r in mrows:
+        if r[6] == "template":
+            # The model's composition excludes a spawn target, as the linker
+            # does (`lower._link`); the document side excludes it by its own
+            # `templates` list, so the two exclusions are compared, not shared.
+            continue
+        rel, provs, rl = r[1], csv(r[4]), realms(r[5])
+        src.setdefault(rel, []).extend((k, rl.get(k, "")) for k in provs)
+    members: dict[str, list[tuple[str, str]]] = {}
+    every: dict[str, list[tuple[str, str]]] = {}
+    templates: dict[str, int] = {}
+    for r in jrrows:
+        rel, provs, rl, role = r[1], csv(r[3]), realms(r[4]), r[5]
+        mine = [(k, rl.get(k, "")) for k in provs]
+        every.setdefault(rel, []).extend(mine)
+        if role == "template":
+            templates[rel] = templates.get(rel, 0) + 1
+        else:
+            members.setdefault(rel, []).extend(mine)
+
+    disjoint: dict[str, str] = {}
+    kept: dict[str, str] = {}
+    _IR_ROWS.clear()
+    for rel in every:
+        slots = members.get(rel, [])
+        disjoint[rel] = "ok" if len(slots) == len(set(slots)) else "fail"
+        kept[rel] = ("ok" if sorted(slots) == sorted(src.get(rel, []))
+                     else "fail")
+        # a spawn template whose slots would collide if it were composed: the
+        # case the document's `templates` list exists to keep out
+        collides = len(every[rel]) != len(set(every[rel]))
+        _IR_ROWS[rel] = {
+            "components": sum(1 for r in jrrows if r[1] == rel),
+            "templates": templates.get(rel, 0),
+            "slots": slots,
+            "realms": sum(1 for _k, rl in slots if rl != ""),
+            "template_collision": collides and disjoint[rel] == "ok",
+        }
+    return disjoint, kept
+
+
+#: What the REFERENCE read out of the lowered IR documents, for `ir_coverage`:
+#: file -> {"components", "templates", "slots", "realms",
+#: "template_collision"}. Filled by `_ir_reference`.
+_IR_ROWS: dict[str, dict] = {}
 
 
 def _link_ok(comps: list[tuple[list[str], list[str], dict[str, str]]]) -> bool:
@@ -6526,12 +7286,13 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     X rows carry a parse refusal through."""
     rows = [r.split("\t") for r in tsv]
     mrows = [r for r in rows if r and r[0] == "M" and len(r) == 7]
+    jrrows = [r for r in rows if r and r[0] == "JR" and len(r) == 6]
     xrows = [r for r in rows if r and r[0] == "X" and len(r) == 3]
     urows = [r for r in rows if r and r[0] == "U" and len(r) == 7]
     brows = [r for r in rows if r and r[0] == "B" and len(r) == 5]
     qrows = [r for r in rows if r and r[0] == "Q" and len(r) == 5]
     arows = [r for r in rows if r and r[0] == "A" and len(r) == 4]
-    frows = [r for r in rows if r and r[0] == "F" and len(r) == 8]
+    frows = [r for r in rows if r and r[0] == "F" and len(r) == 9]
     krows = [r for r in rows if r and r[0] == "K" and len(r) == 5]
     srows = [r for r in rows if r and r[0] == "S" and len(r) == 4]
     harows = [r for r in rows if r and r[0] == "HA" and len(r) == 5]
@@ -6620,10 +7381,15 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     providers: dict[tuple[str, str, str, str, str], str] = {}
     # The BOUND surface reads the F row's bound spelling (column 8): the
     # reference names a crossing by the wiring key it went through when it
-    # measures a provide method against its own service's declaration.
-    fmethods: dict[tuple[str, str, str, str, str], set[str]] = {}
+    # measures a provide method against its own service's declaration. Column
+    # 9 is how the key was reached: a key is covered by its token, or by the
+    # `k.m` of every crossing when each one names a verb of the key (`*` is
+    # a crossing that does not: `emission_analysis._admit_required_scopes`,
+    # issue #3485).
+    fmethods: dict[tuple[str, str, str, str, str], dict[str, set[str]]] = {}
     for r in frows:
-        fmethods.setdefault((r[1], r[2], r[3], r[4], r[5]), set()).add(r[7])
+        fmethods.setdefault((r[1], r[2], r[3], r[4], r[5]), {}) \
+            .setdefault(r[7], set()).add(r[8])
     for k, caps in fmethods.items():
         mode, ents = bounds_by_file.get((k[0], k[3], k[4]), ("plain", set()))
         if mode == "any":
@@ -6631,7 +7397,9 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
         elif mode == "plain":
             ok = not caps
         else:
-            ok = {parse_cap(c).token for c in caps} <= ents
+            ok = all(parse_cap(c).token in ents
+                     or all(v != "*" and v in ents for v in vias)
+                     for c, vias in caps.items())
         providers[k] = "ok" if ok else "fail"
 
     # ... and the ATTENUATION surface reads the same row's column 7, the
@@ -6882,6 +7650,44 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
         for label, verdict in _gc_covers(gc_bodies.get(key, []),
                                          gc_walks.get(key, [])):
             gc[(rel, comp, label)] = verdict
+
+    # G1C rows: declared-access coverage (issue #2744), the reference's own
+    # verdict, recomputed independently from the three export rows in Python.
+    # `G1B`/`G1P` are the body as the PARSE sees it; `G1W` is the lowering walk
+    # the checker PERFORMED. Same projection as GC: per scope, out to the
+    # longer of the two lists, so a walk that opened FEWER scopes still yields
+    # a named `fail` for the missing one.
+    g1cov: dict[tuple[str, str, str], str] = {}
+    g1_bodies: dict[tuple[str, str], list] = {}
+    g1_walks: dict[tuple[str, str], list] = {}
+    g1_order: list[tuple[str, str]] = []
+    for r in rows:
+        if not r:
+            continue
+        if r[0] == "G1B" and len(r) == 4:
+            key = (r[1], r[2])
+            if key not in g1_order:
+                g1_order.append(key)
+            scopes = g1_bodies.setdefault(key, [])
+            if int(r[3]):
+                scopes.append(("activation", int(r[3]), []))
+        elif r[0] == "G1P" and len(r) == 7:
+            key = (r[1], r[2])
+            if key not in g1_order:
+                g1_order.append(key)
+            g1_bodies.setdefault(key, []).append(
+                (f"{r[3]}.{r[4]}", int(r[5]), _g1_params(r[6])))
+        elif r[0] == "G1W" and len(r) == 6:
+            key = (r[1], r[2])
+            if key not in g1_order:
+                g1_order.append(key)
+            g1_walks.setdefault(key, []).append(
+                (r[3], int(r[4]), _g1_params(r[5])))
+    for key in g1_order:
+        rel, comp = key
+        for label, verdict in _g1_covers(g1_bodies.get(key, []),
+                                         g1_walks.get(key, [])):
+            g1cov[(rel, comp, label)] = verdict
 
     spawns: dict[tuple[str, str, str], str] = {}
     _ATTENUATION_HALVES.clear()
@@ -7228,12 +8034,13 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
         _PRELUDE_ROWS[key] = (steps, targets_by.get(key, set()), provides,
                               calls_by.get(key, set()))
 
+    ir_disjoint, ir_kept = _ir_reference(mrows, jrrows)
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
                     recoveries, confinements, g8surface, g5reg, a9,
                     configs, a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
                     places, model_reach, councils, g9, retain, inv, sw, a5,
-                    gc, ev)
+                    gc, g1cov, ev, ir_disjoint, ir_kept)
 
 
 #: What the REFERENCE decided for each config field, for the CD row's
@@ -7371,6 +8178,7 @@ FATAL_BUCKETS = ("missed-G1", "missed-G4", "missed-G2", "missed-G5",
                  "missed-G-MODEL-PLACE", "missed-G-COUNCIL-SPLIT", "missed-G9",
                  "missed-G-RETAIN", "missed-G9-coverage",
                  "missed-G9-coverage-observation",
+                 "missed-G1-coverage", "missed-G1-coverage-observation",
                  "formal-strict", "formal-found-other")
 
 
@@ -7480,6 +8288,7 @@ def checker_alignment(file_facts: dict, componentless: list[str],
     _ALIGN_SAMPLES.clear()
     _G5_WITNESS.clear()
     _GC_COVERED.clear()
+    _G1_COVERED.clear()
     g5_resolved = g5_files_the_prog_resolves(tsv)
 
     def record(key: str, rel: str) -> None:
@@ -7833,6 +8642,29 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         elif any(k[0] == rel for k in v.gc):
             _GC_COVERED.append(rel)
 
+        # G1 DECLARED-ACCESS COVERAGE (issue #2744), on the same axis and with
+        # the same split. A `fail` here is the lowering walk having SKIPPED a
+        # scope or a statement the body has (or seeded a scope a different
+        # parameter set than it declares): G1's name resolution never visited
+        # it, so its undeclared reads were never refused. That is fatal on its
+        # own bucket. An UNOBSERVED walk takes the other bucket and never this
+        # one: when the parse gives a component scopes and the recorder
+        # captured none of it, the harness is blind for that whole component,
+        # and folding that into a coverage disagreement would let a fully
+        # broken seam read as a checker regression. The split is only
+        # component-level: a seam that stops firing for ONE call site while the
+        # other still records cannot be told apart from a checker that skipped
+        # that call site, so it lands here as a coverage disagreement; the
+        # ratchet's per-seam census names a wholly dead call site as an
+        # instrument failure. The AGREEMENT is again a second axis, not a
+        # bucket.
+        if rel in _G1_UNOBSERVED:
+            record("missed-G1-coverage-observation", rel)
+        elif any(x == "fail" for k, x in v.g1cov.items() if k[0] == rel):
+            record("missed-G1-coverage", rel)
+        elif any(k[0] == rel for k in v.g1cov):
+            _G1_COVERED.append(rel)
+
     # Files with no composition to model, and files revl refused at parse:
     # named, not omitted. Neither carries a computed verdict, so neither can
     # agree or disagree with the model — but the code the checker gives them
@@ -7916,6 +8748,19 @@ def checker_alignment(file_facts: dict, componentless: list[str],
           f"every scope the bodies have is one the model's walk visits, with "
           f"the statement count and the parameter qualifiers it seeds. The "
           f"two `missed-G9-coverage*` buckets above are the disagreements.")
+
+    # G1 DECLARED-ACCESS COVERAGE (issue #2744), its own line for the same
+    # reason: the two disagreements are buckets above, the agreement is a
+    # count on a second reading and is outside the "files bucketed" total.
+    g1_covered = set(_G1_COVERED)
+    g1_covered_scopes = sum(1 for k in v.g1cov if k[0] in g1_covered)
+    print(f"G1 coverage of the access walk (issue #2744; a second axis over "
+          f"the files above, not a bucket and outside the total): "
+          f"{len(_G1_COVERED)} file(s) over {g1_covered_scopes} scope(s) "
+          f"agree. Every scope the bodies have is one the checker's lowering "
+          f"walk visits, with the statement count and the declared parameters "
+          f"it seeds. The two `missed-G1-coverage*` buckets above are the "
+          f"disagreements.")
 
     print(f"no-manifest ({len(componentless)} files parsed with no component, "
           f"outside the model's fragment):")
@@ -8419,7 +9264,10 @@ ROW_KINDS = (
     ("sw", "SW witnessed site (G4)"),
     ("a5", "A5 compensation"),
     ("gc", "GC walk coverage (G9)"),
+    ("g1cov", "G1C access coverage (G1)"),
     ("ev", "EV emission value (G4)"),
+    ("ir_disjoint", "IRD provision disjointness over the IR (G2)"),
+    ("ir_kept", "IRS IR keeps the composition's slots (G2)"),
 )
 
 #: Row kinds whose corpus is one-sided today, as field -> (the side that has no
@@ -8437,6 +9285,17 @@ ONE_SIDED: dict[str, tuple[str, str]] = {
     "gc": ("refused", "a document the checker refuses completes no walk, so "
            "it has no row; the refusing side is the Lean "
            "coversB_refuses_* theorems"),
+    "g1cov": ("refused", "a document the checker refuses completes no "
+              "lowering walk, so it has no row; the refusing side is the "
+              "Lean coversAccessB_refuses_* theorems"),
+    "ir_disjoint": ("refused", "a row is exported only for a document that "
+                    "LOWERED, so every document is one the checker admitted; "
+                    "the refusing side is the Lean isolate_entry_is_load_"
+                    "bearing mutation witness"),
+    "ir_kept": ("refused", "a row is exported only for a document that "
+                "lowered, and a kept=ok row is the admitted side by "
+                "construction; the failing side is the Lean "
+                "isolate_entry_is_load_bearing mutation witness"),
 }
 
 
@@ -8507,6 +9366,165 @@ def print_row_census(census: dict[str, dict]) -> None:
               f"{c['accepted']} accepted and {c['refused']} refused documents")
 
 
+#: The bucket every document lands in when BOTH sides admit it: the checker
+#: accepts and every model row is `ok`, so neither side refused it.
+_REFUSED_BY_NEITHER = "agree-accept"
+
+
+def agreed_subset(align: dict[str, int], parse_refused: int,
+                  componentless: int) -> dict:
+    """The agreed subset as numbers (issue #2739).
+
+    `checker_alignment` files every MODELED corpus document in exactly one
+    bucket, so the buckets partition those documents. The subset on which the
+    model and the shipped checker are claimed to agree is the `agree-*` half:
+    the model DECIDES each of those documents and the checker's verdict is the
+    same, whether the agreement is an admission (`agree-accept`, where neither
+    side refuses) or a refusal (`agree-G4` and the rest). The complement is
+    named beside it rather than left to be inferred from the bucket table:
+
+    - each `out-of-fragment*` bucket is a checker refusal under a rule the
+      model states no row about, so the model has no fact to agree or
+      disagree with;
+    - `out-of-scope` is a refusal outside the guarantee backbone by explicit
+      rule, not a hole;
+    - a `missed-*` / `formal-*` document is a DISAGREEMENT, and every one of
+      them fails the gate;
+    - the parse refusals and the componentless documents are outside the
+      model entirely.
+
+    Returned as counts rather than a string so the printed line and the
+    tests read the same partition.
+    """
+    decided = {k: n for k, n in align.items() if k.startswith("agree-")}
+    no_fact = {k: n for k, n in align.items()
+               if k.startswith("out-of-fragment")}
+    disagree = {k: n for k, n in align.items()
+                if k.startswith(("missed-", "formal-"))}
+    out_of_scope = {k: n for k, n in align.items() if k == "out-of-scope"}
+    return {
+        "decided": decided,
+        "refused_by_neither": align.get(_REFUSED_BY_NEITHER, 0),
+        "no_fact": no_fact,
+        "disagree": disagree,
+        "out_of_scope": out_of_scope,
+        "parse_refused": parse_refused,
+        "componentless": componentless,
+    }
+
+
+def format_agreed_subset(a: dict) -> str:
+    """One printed line stating the agreed subset (issue #2739)."""
+    decided = sum(a["decided"].values())
+    refused = decided - a["refused_by_neither"]
+    parts = [
+        f"agreed subset: {decided} corpus documents the model decides and the "
+        f"checker agrees with ({refused} refused by the checker, "
+        f"{a['refused_by_neither']} refused by neither side)"
+    ]
+    if a["no_fact"]:
+        parts.append("the model has no fact about " + ", ".join(
+            f"{k} {n}" for k, n in sorted(a["no_fact"].items())))
+    if a["out_of_scope"]:
+        parts.append("outside the guarantee backbone by explicit rule: "
+                     + ", ".join(f"{k} {n}" for k, n in sorted(
+                         a["out_of_scope"].items())))
+    if a["disagree"]:
+        parts.append("DISAGREEING (the gate fails): " + ", ".join(
+            f"{k} {n}" for k, n in sorted(a["disagree"].items())))
+    parts.append(f"outside the model entirely: {a['parse_refused']} parse "
+                 f"refusals and {a['componentless']} componentless documents")
+    return "; ".join(parts)
+
+
+def ir_alignment(ref: "Verdicts") -> list[str]:
+    """The IR rows against the composition they were lowered from (issue
+    #2739). Returns gate failures.
+
+    The `IRS` row is where a lowering defect lands: the document the backends
+    consume must carry the same `(key, realm)` provision slots as the source
+    composition the model checked, which is the `hk` hypothesis
+    `RevL.G2.source_linkOK_ir_disjoint` takes beside `LinkOK`. Where it holds,
+    `ir_disjoint_iff_source_disjoint` makes the `IRD` row the model's own
+    V-row disjointness for the same file, so the two must agree there; where
+    it does not, the file is already a finding and a second one would only
+    restate it. A file the checker refuses has no IR row; its refusal is the
+    `V`/`X` row's business, not this one's. A file the checker ACCEPTS that
+    has none is a finding here, because absence is how a lowering that stops
+    emitting a file's components would otherwise pass."""
+    findings: list[str] = []
+    for rel in _IR_UNLOWERED:
+        findings.append(
+            f"IR rows missing ({rel}): the checker accepted the file and its "
+            "lowered document carries none of the file's components, so the "
+            "IRD/IRS rows read nothing")
+    for rel, kept in sorted(ref.ir_kept.items()):
+        if kept != "ok":
+            findings.append(
+                f"IR drift ({rel}): the lowered document's provision slots are "
+                "not the composition's, so the IR the backends consume is not "
+                "the one the model proved")
+            continue
+        source = ref.files.get(rel)
+        disjoint = ref.ir_disjoint.get(rel)
+        if source is not None and disjoint != source[0]:
+            findings.append(
+                f"IR G2 drift ({rel}): the IR says disjoint={disjoint} but the "
+                f"model's V row says disjoint={source[0]}")
+    return findings
+
+
+def ir_coverage() -> list[str]:
+    """The non-vacuity ratchet for the IR rows (issue #2739).
+
+    A pair of rows that only ever said `ok` over an empty or realm-free
+    document would certify nothing about the IR image, so the corpus must
+    carry a realm-pinned slot, a composition that provides one key in two
+    realms (the case the slot distinction exists for), and a document whose
+    spawn templates would collide if the document's own `templates` list did
+    not keep them out of the static composition. Also names the components of
+    used modules the rows do not cover, so the claim is not wider than the
+    rows."""
+    findings: list[str] = []
+    if not _IR_ROWS:
+        return ["ir coverage: no IRD/IRS rows at all. The IR rows are vacuous"]
+    components = sum(v["components"] for v in _IR_ROWS.values())
+    slots = sum(len(v["slots"]) for v in _IR_ROWS.values())
+    realms = sum(v["realms"] for v in _IR_ROWS.values())
+    templates = sum(v["templates"] for v in _IR_ROWS.values())
+    collisions = sum(1 for v in _IR_ROWS.values() if v["template_collision"])
+    spread = 0
+    for v in _IR_ROWS.values():
+        by_key: dict[str, set] = {}
+        for k, r in v["slots"]:
+            by_key.setdefault(k, set()).add(r)
+        spread += sum(1 for rs in by_key.values() if len(rs) > 1)
+    if components == 0:
+        findings.append("ir coverage: no IR components. The IR rows are "
+                        "vacuous")
+    if realms == 0:
+        findings.append("ir coverage: NO realm-pinned slot in any lowered "
+                        "document. The isolate column is never exercised")
+    if spread == 0:
+        findings.append("ir coverage: NO composition provides one key in two "
+                        "realms, so the slot distinction is never exercised")
+    if collisions == 0:
+        findings.append("ir coverage: NO document whose spawn templates would "
+                        "collide if composed, so the document's own "
+                        "`templates` list is never load-bearing")
+    if not findings:
+        foreign = sum(_IR_FOREIGN.values())
+        print(f"ir coverage: {len(_IR_ROWS)} lowered documents, "
+              f"{components} components ({templates} spawn templates), "
+              f"{slots} static slots, {realms} realm-pinned, "
+              f"{spread} keys provided in two realms, "
+              f"{collisions} documents kept disjoint only by their templates "
+              f"list; {foreign} components of used modules in "
+              f"{len(_IR_FOREIGN)} documents are another file's composition "
+              "and carry no row")
+    return findings
+
+
 def main() -> int:
     tsv, file_facts, census = export()
     refusals: dict[str, str] = census["refusals"]
@@ -8571,10 +9589,13 @@ def main() -> int:
             ("g9", ref.g9, formal.g9),
             ("retain", ref.retain, formal.retain),
             ("g9_coverage", ref.gc, formal.gc),
+            ("g1_coverage", ref.g1cov, formal.g1cov),
             ("inv", ref.inv, formal.inv),
             ("sw", ref.sw, formal.sw),
             ("a5", ref.a5, formal.a5),
-            ("emission_value", ref.ev, formal.ev)):
+            ("emission_value", ref.ev, formal.ev),
+            ("ir_disjoint", ref.ir_disjoint, formal.ir_disjoint),
+            ("ir_kept", ref.ir_kept, formal.ir_kept)):
 
         for key, want in refmap.items():
             got = gotmap.get(key)
@@ -8609,9 +9630,11 @@ def main() -> int:
         f"{len(ref.councils)} council tie policies + "
         f"{len(ref.g9)} taint walks + "
         f"{len(ref.gc)} coverage scopes + "
+        f"{len(ref.g1cov)} access-coverage scopes + "
         f"{len(ref.retain)} retention refusals + "
         f"{len(ref.inv)} inverse refusals + "
-        f"{len(ref.sw)} witnessed-site refusals) — "
+        f"{len(ref.sw)} witnessed-site refusals + "
+        f"{len(ref.ir_disjoint)} IR documents (G2)): "
 
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
@@ -8635,10 +9658,13 @@ def main() -> int:
     mismatches.extend(council_coverage())
     mismatches.extend(g9_coverage())
     mismatches.extend(g9coverage_coverage())
+    mismatches.extend(g1coverage_coverage(formal_text))
     mismatches.extend(retain_coverage())
     mismatches.extend(g4inverse_coverage())
     mismatches.extend(sw_coverage())
     mismatches.extend(a5_coverage())
+    mismatches.extend(ir_alignment(ref))
+    mismatches.extend(ir_coverage())
     mismatches.extend(polarity_coverage(polarity))
 
     for m in mismatches[:10]:
@@ -8647,6 +9673,11 @@ def main() -> int:
         print(f"  ... and {len(mismatches) - 10} more")
 
     fatal = checker_alignment(file_facts, componentless, formal, tsv, refusals)
+    # The agreed subset, printed rather than left for a reader to reconstruct
+    # from the bucket table (issue #2739). It reads `_ALIGN`, which
+    # `checker_alignment` has just filled, so it must follow that call.
+    print(format_agreed_subset(
+        agreed_subset(_ALIGN, len(refusals), len(componentless))))
     # The two buckets that record an absence rather than a disagreement, held
     # to their committed membership so they can fail at all.
     fatal.extend(out_of_fragment_ratchet(_ALIGN_SAMPLES))

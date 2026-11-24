@@ -567,10 +567,13 @@ def test_two_runs_reusing_one_wal_recover_only_with_their_own_compositions(tmp_p
 # before it spends no fence.
 
 FAMILIES = COMPOSITION + f"""
-extern emission fn post(k: Str) -> Unit = @py {{
+extern emission deferred fn post(k: Str) -> Unit = @py {{
 {_host("post", "'post:' + k")}}}
 extern pure fn release_host(h: Str) -> Unit = @py {{
 {_host("release_host", "'release:' + h")}}}
+extern emission fn grab() -> Unit compensate release_host("h1") = @py {{
+    return None
+}}
 """
 
 

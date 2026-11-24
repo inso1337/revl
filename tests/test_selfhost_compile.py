@@ -1561,6 +1561,36 @@ _IMPORT_REFUSED = {
             "event Placed(key: id) { id: Str }\n\n"
             "pub service Store { fn put(x: Int) -> Str }\n"),
     }),
+    # Issue #3364: a fn or extern a `use` list imports may not also be declared
+    # by the importer, refused at the local declaration (line 11 of `doc.rvl`).
+    "a_fn_declared_locally": (
+        "`dice` is imported from ./lib.rvl on line 1 and declared on line 11; "
+        "rename one of them", {
+            "sub/doc.rvl": ('use "./lib.rvl" { Store, dice }\n\n' + _STORE_COMPONENT % "1"
+                            + "\nfn dice(a: Int) -> Int { return a }\n"),
+            "sub/lib.rvl": (
+                "pub fn dice(x: Int, z: Int) -> Int { return x + z }\n\n"
+                "pub service Store { fn put(x: Int) -> Str }\n"),
+        }),
+    "an_extern_declared_locally": (
+        "`raw` is imported from ./lib.rvl on line 1 and declared on line 11; "
+        "rename one of them", {
+            "sub/doc.rvl": ('use "./lib.rvl" { Store, raw }\n\n' + _STORE_COMPONENT % "1"
+                            + "\nextern pure fn raw(x: Int) -> Int = @py { return x }\n"),
+            "sub/lib.rvl": (
+                "pub extern pure fn raw(x: Int) -> Int = @py { return x }\n\n"
+                "pub service Store { fn put(x: Int) -> Str }\n"),
+        }),
+    "a_pub_fn_declared_locally_in_a_used_module": (
+        "`dice` is imported from ./inner.rvl on line 1 and declared on line 3; "
+        "rename one of them", {
+            "sub/doc.rvl": _STORE_DOC % "1",
+            "sub/lib.rvl": (
+                'use "./inner.rvl" { dice }\n\n'
+                "pub fn dice(a: Int) -> Int { return a }\n\n"
+                "pub service Store { fn put(x: Int) -> Str }\n"),
+            "sub/inner.rvl": "pub fn dice(x: Int, z: Int) -> Int { return x + z }\n",
+        }),
     # One `use` further down: the reference checks the names `lib.rvl` imports
     # too, though nothing of `inner.rvl` is carried.
     "a_private_fn_two_uses_away": ("`hidden` is module-private in", {
@@ -2583,43 +2613,6 @@ def test_generic_variant_difference_is_a_known_silent_admit(compile_to, name):
         f"{name}: the native chain now refuses ({got[:160]!r}); if that is "
         f"the reference's message, DELETE the entry from "
         f"GENERIC_VARIANT_SILENT_ADMITS.")
-
-
-# Issue #3107: two fn spellings the reference parser admits and the gate's
-# parser refuses before any later stage runs, so a gate test cannot be written
-# in either form (the #2981 regression cases above use the long `{ ... }` body
-# for that reason). These are fail-closed differences: the gate refuses a
-# program the reference admits. Each is pinned to the exact refusal so the day
-# the gate parser admits the spelling, the pin fails and is DELETED, and the
-# #2981 cases can be added in that spelling too.
-GATE_PARSER_REFUSALS_ISSUE_3107: dict[str, tuple[str, str]] = {
-    "shorthand_fn_body": ("fn inc(x: Int) -> Int = x + 1\n",
-                          "BAD|expected { after fn signature"),
-    "verified_fn": ("verified fn inc(x: Int) -> Int {\n  return x + 1\n}\n",
-                    "BAD|unexpected declaration"),
-}
-
-
-def _assert_gate_parser_refusal_issue_3107(admit, name):
-    source, expected = GATE_PARSER_REFUSALS_ISSUE_3107[name]
-    compile_source(source)  # the reference admits it
-    got = admit(source)
-    assert got == expected, (
-        f"{name}: pinned as the gate parser's refusal {expected!r} (issue "
-        f"#3107), now {got!r}. If the gate admits this spelling, DELETE the "
-        f"pin and add the #2981 cases in this spelling.")
-
-
-def test_shorthand_fn_body_is_a_known_gate_parser_refusal(admit):
-    """Issue #3107: the reference admits `fn f(...) -> T = expr` and the gate's
-    parser refuses it fail-closed. Fails the day #3107 lands."""
-    _assert_gate_parser_refusal_issue_3107(admit, "shorthand_fn_body")
-
-
-def test_verified_fn_is_a_known_gate_parser_refusal(admit):
-    """Issue #3107: the reference admits a `verified fn` declaration and the
-    gate's parser refuses it fail-closed. Fails the day #3107 lands."""
-    _assert_gate_parser_refusal_issue_3107(admit, "verified_fn")
 
 
 # The four checking positions a transparent type alias has to be erased at, plus
@@ -3722,9 +3715,6 @@ _ISSUE_2403_COMPILED = {
     "return": _BOX + _box_fn("s: Box[Int]", "  return s", "Box[Int]"),
     "nested_argument": _BOX + _G2 + _box_fn("s: Box[Box[Int]]", "  return g2(s)"),
     "nested_field": _BOX + _box_fn("s: Box[Box[Int]]", "  return s.v.v"),
-    "widening_argument": _BOX + (
-        "fn h(b: Box[Float]) -> Int {\n  return 1\n}\n"
-        + _box_fn("s: Box[Int]", "  return h(s)")),
     "list_argument": _BOX + (
         "fn h(xs: List[Box[Int]]) -> Int {\n  return xs.length()\n}\n"
         + _box_fn("s: List[Box[Int]]", "  return h(s)")),
@@ -3773,6 +3763,30 @@ def test_two_applied_generic_records_are_compared_by_type_argument(compile_rvl, 
     got = compile_rvl["compile_to_at"](text, tier, "x.rvl")
     assert got.startswith("REFUSED|"), got[:120]
     assert got.split("|", 2)[2] == want
+
+
+# Issue #2937: the reference refuses a `Box[Int]` where a `Box[Float]` is
+# declared (no marker converts the field, so the tiers disagreed on the
+# program), as it refuses the same nested mix in `==` (#2715). The native
+# lowering has no mirror of either refusal yet, so it still compiles the
+# program: a silent admit recorded here so it cannot read as agreement. Fails
+# the day the native chain refuses too, so the entry is removed.
+_ISSUE_2937_SILENT_ADMITS = {
+    "widening_argument": _BOX + (
+        "fn h(b: Box[Float]) -> Int {\n  return 1\n}\n"
+        + _box_fn("s: Box[Int]", "  return h(s)")),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_ISSUE_2937_SILENT_ADMITS))
+def test_nested_widening_argument_is_a_known_silent_admit(compile_rvl, name):
+    text = _ISSUE_2937_SILENT_ADMITS[name]
+    assert "only a bare value widens" in _reference_refusal(text)
+    got = compile_rvl["compile_to_at"](text, "py", "x.rvl")
+    assert not got.startswith("REFUSED|"), (
+        f"{name}: the native chain now refuses ({got[:160]!r}); if that is "
+        f"the reference's message, DELETE the entry from "
+        f"_ISSUE_2937_SILENT_ADMITS and compare bytes instead.")
 
 
 @pytest.mark.parametrize("name", sorted(_ISSUE_2403_COMPILED))

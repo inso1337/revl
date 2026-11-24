@@ -1,4 +1,5 @@
 // REJECTED - G4: a declared read-only capability, a body that writes.
+// revl:claim g4-emission-widens-refused
 // `Store.load` is declared `emission[fs.read]`, so the provider promises to
 // cross only the read boundary. The body also emits `fs.write`, widening what
 // the declaration bounds. The fix is to widen the declaration, not the

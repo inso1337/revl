@@ -78,7 +78,7 @@ python3 tools/check_vocabulary_mirrors.py --check || fail=1
 # silently when the cited file moves or shortens; nothing else checks them.
 # Advisory for now: tools/doc_refs_ledger.json records the findings the tree
 # already has, so this is green on adoption and reports only a finding that is
-# not recorded. It does not set fail=1 and CI does not run it yet. Repair an
+# not recorded. It does not set fail=1, and CI runs it advisory too. Repair an
 # anchor, then rerun `--write-ledger` and the ledger shrinks.
 echo "== doc refs (advisory) =="
 if ! python3 tools/check_doc_refs.py --check; then
@@ -116,6 +116,14 @@ python3 tools/build_gate_wasm.py --check || fail=1
 # A stale block: `make docs-gen`. A coverage failure: write the missing section.
 echo "== docs drift =="
 python3 tools/docgen.py --check || fail=1
+
+# issue #2846: a behaviour claim in a comment or doc is tied to a witness in
+# `claims.toml`. The self-test plants each named failure first, then the real
+# tree is judged, including the `.rvl` claims whose test witness the affected
+# selection must run.
+echo "== claims =="
+python3 tools/check_claims.py --self-test || fail=1
+python3 tools/check_claims.py --check || fail=1
 
 # issue #2645: the two generated-artifact drifts that dominated failed PR runs
 # were only ever reported by CI. Both checks already exist, and the helper

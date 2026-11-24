@@ -1,4 +1,8 @@
 import RevL.Manifest
+-- The G2 theorem file carries the IR image (issue #2739): the
+-- `IRD`/`IRS` rows decide `RevL.G2.IRDisjoint` over a lowered document and
+-- whether its slots are a permutation of the model's own.
+import RevL.Theorems.G2_ProvisionDisjoint
 import RevL.Lemmas.CapLemmas
 import RevL.Theorems.CapCeilings
 import RevL.Theorems.G5_ClassifiedTeardownPure
@@ -23,6 +27,7 @@ import RevL.Theorems.G4Inverse
 import RevL.Theorems.G4_WitnessedSiteUndo
 import RevL.Theorems.A5_CompensationAccompaniesEmission
 import RevL.Theorems.G9Coverage
+import RevL.Theorems.G1Coverage
 
 /-!
 Formal oracle — the differential harness's Lean side (formal/STATUS.md,
@@ -159,7 +164,7 @@ Fact rows in (tab-separated, one fact per line):
                                              by the DECLARED boundary
   A <file> <comp> <cap>                      activation emit-step surface,
                                              named by the DECLARED boundary
-  F <file> <comp> <key> <svc> <meth> <cap> <bound>
+  F <file> <comp> <key> <svc> <meth> <cap> <bound> <via>
                                              provide-method emission reach.
                                              TWO spellings of the same
                                              crossing: `cap` is the declared
@@ -173,9 +178,19 @@ Fact rows in (tab-separated, one fact per line):
                                              emission it is the capability
                                              TOKEN the call reaches, a scoped
                                              extern's scope (issue #1455).
-                                             `A` and `K` feed the fold alone
-                                             and carry the boundary spelling
-                                             only
+                                             `via` is HOW the key was
+                                             reached: the `k.m` of a call on
+                                             a required key's verb, or `*`
+                                             when the crossing names no verb
+                                             of the key (a resolved receiver,
+                                             a host emission, a fn reaching
+                                             one). A declared `k.m` covers
+                                             the key only when every crossing
+                                             of it is such a verb (issue
+                                             #3485). One row per (crossing,
+                                             via). `A` and `K` feed the fold
+                                             alone and carry the boundary
+                                             spelling only
   S <file> <comp> <child>                    activation spawn edge
   H <file> <comp> <var> <child>              spawn handle var
   U <file> <comp> <ctx> <root> <svc> <meth>  call fact + marker context:
@@ -310,6 +325,15 @@ Capabilities arrive DECOMPOSED (Z/Y), from `src/revl/cap_order.parse_cap`
 
 Verdict rows out:
   V <file> <disjoint=ok|fail> <closed=ok|fail> <link=ok|fail>
+  IRD <file> <disjoint=ok|fail>                    G2 over the LOWERED IR
+                                                   document (issue #2739):
+                                                   `RevL.G2.IRDisjoint` over
+                                                   the `JR` facts, templates
+                                                   read from the document
+  IRS <file> <kept=ok|fail>                        the document's slots are a
+                                                   permutation of the
+                                                   composition's, the `hk` of
+                                                   `source_linkOK_ir_disjoint`
   G <file> <comp> <g4=ok|fail>                     marker rule (incl. handle)
                                                    AND host-acquisition rule
   P <file> <comp> <key> <svc> <meth> <bound=ok|fail>
@@ -344,6 +368,15 @@ Verdict rows out:
   G1 <file> <comp> <access=ok|fail>                G1 declared access:
                                                    `RevL.G1Access.accessB`
                                                    over the `GA` roots
+  G1C <file> <comp> <scope> <coverage=ok|fail>     G1 declared-access
+                                                   coverage over one scope:
+                                                   `RevL.G1Coverage.coversAccessBodyB`
+                                                   over the `G1B`/`G1P` body
+                                                   and the `G1W` walk
+  G1CM <kind> <file> <comp> <covers=ok|fail>       the same coverage over a
+                                                   whole `G1M` walk:
+                                                   `accessCoverageRowB`,
+                                                   for the harness ratchet
   A1 <file> <comp> <ord> <async=ok|fail>           A1 async colour over one
                                                    site: `RevL.A1Async.siteB`
   A1S <file> <comp> <key.method> <sig=ok|fail>     A1, a provide method's
@@ -433,6 +466,39 @@ theorem linkOKB_iff : ∀ l : List LComponent, linkOKB l = true ↔ LinkOK l := 
       | cons _ _ h1 h2 h3 h4 =>
         simp only [linkOKB, Bool.and_eq_true, decide_eq_true_eq]
         exact ⟨⟨⟨h1, h2⟩, h3⟩, ih.mpr h4⟩
+
+/-! ## Deciding G2 over the IR image (issue #2739)
+
+The `IRD` row decides `RevL.G2.IRDisjoint` over a LOWERED IR document (`JR`
+facts: each component's `provides` and sparse `isolate` map, and whether the
+document's own `manifest.templates` names it), so the verdict is the L2 model
+applied to the document the backends consume. The `IRS` row decides the
+hypothesis `source_linkOK_ir_disjoint` takes beside `LinkOK`: that the
+document's static slots are a permutation of the source composition's slots.
+Where it says `ok`, `RevL.G2.ir_disjoint_iff_source_disjoint` makes the `IRD`
+verdict the `V` row's `disjoint` column, and `source_linkOK_ir_disjoint`
+derives it from `LinkOK`. -/
+
+/-- G2 over one lowered IR document, as a decision procedure. -/
+def irdisjointB (d : RevL.G2.IRDoc) : Bool :=
+  decide (RevL.G2.IRDisjoint d)
+
+/-- **The IR verdict is the model's judgment.** -/
+theorem irdisjointB_iff (d : RevL.G2.IRDoc) :
+    irdisjointB d = true ↔ RevL.G2.IRDisjoint d := by
+  simp [irdisjointB]
+
+/-- Does the lowered document carry exactly the composition's slots, as a
+multiset? Order is not a claim the row makes, multiplicity is: a lowering that
+drops, adds, duplicates or moves a slot is a `fail` rather than a silent
+agreement. -/
+def irKeptB (d : RevL.G2.IRDoc) (src : List LComponent) : Bool :=
+  decide (d.slots.Perm (src.flatMap slots))
+
+/-- **The kept verdict is the theorem's hypothesis.** -/
+theorem irKeptB_iff (d : RevL.G2.IRDoc) (src : List LComponent) :
+    irKeptB d src = true ↔ d.slots.Perm (src.flatMap slots) := by
+  simp [irKeptB]
 
 /-- Pick a component whose consumed slots are all already provided — the
 linker's Kahn step. Returns it with the rest of the queue. -/
@@ -1052,6 +1118,13 @@ structure MRow where
   realms : List (String × String)
   isTemplate : Bool
 
+structure JRRow where
+  path : String
+  comp : String
+  provides : List String
+  realms : List (String × String)
+  isTemplate : Bool
+
 structure URow where
   path : String
   comp : String
@@ -1100,6 +1173,7 @@ structure FRow where
   meth : String
   cap : String
   bound : String
+  via : String
 
 structure KRow where
   path : String
@@ -1391,6 +1465,13 @@ def parseM (f : List String) : Option MRow :=
             role == "template"⟩
   | _ => none
 
+def parseJR (f : List String) : Option JRRow :=
+  match f with
+  | ["JR", path, comp, provs, realms, role] =>
+      some ⟨path, comp, (if provs == "-" then [] else splitKeys provs),
+            parseRealms realms, role == "template"⟩
+  | _ => none
+
 def parseU (f : List String) : Option URow :=
   match f with
   | ["U", path, comp, ctx, root, svc, meth] => some ⟨path, comp, ctx, root, svc, meth⟩
@@ -1413,8 +1494,8 @@ def parseA (f : List String) : Option ARow :=
 
 def parseF (f : List String) : Option FRow :=
   match f with
-  | ["F", path, comp, key, svc, meth, cap, bound] =>
-      some ⟨path, comp, key, svc, meth, cap, bound⟩
+  | ["F", path, comp, key, svc, meth, cap, bound, via] =>
+      some ⟨path, comp, key, svc, meth, cap, bound, via⟩
   | _ => none
 
 def parseK (f : List String) : Option KRow :=
@@ -1624,18 +1705,28 @@ def configDataOK (ns : List CNRow) : Bool :=
 declared bound (plain => none; any => free; scoped => the declared
 entries).
 
+`reach` is the F row's `(bound, via)` pairs. A reached key is covered when
+the declared entries hold its token, or when every crossing of it names a
+verb of the key (`via` is a `k.m`, never `*`) and the entries hold each of
+those `k.m` (issue #3485; `emission_analysis._admit_required_scopes`). A
+key reached by any path that names no verb is covered by its token alone.
+
 PRIVATE RESTATEMENT (see the header): the model states no
 declaration-versus-reach bound. -/
 def methodBoundOK (t : CapTable)
                    (bounds : List (String × String × String × List String))
-                   (svc meth : String) (caps : List String) : Bool :=
+                   (svc meth : String) (reach : List (String × String)) : Bool :=
   let b := bounds.find? (fun x => x.1 == svc && x.2.1 == meth)
   let mode := match b with | some x => x.2.2.1 | none => "plain"
   let entries := match b with | some x => x.2.2.2 | none => []
+  let keys := (reach.map (·.1)).eraseDups
   if mode == "any" then true
   else if mode == "scoped" then
-    (caps.map (capToken t)).all fun tk => entries.contains tk
-  else caps.isEmpty
+    keys.all fun k =>
+      entries.contains (capToken t k)
+        || ((reach.filter (fun r => r.1 == k)).map (·.2)).all
+             (fun via => via != "*" && entries.contains via)
+  else keys.isEmpty
 
 /-- Component -> capability set, as an association list. -/
 abbrev CapMap := List (String × List String)
@@ -2967,6 +3058,228 @@ def gcVerdicts (p : String) (rs : G9CoverageRows) : String := Id.run do
 
 end G9Coverage
 
+/-! ### The `G1C` row: G1 declared-access coverage (issue #2744)
+
+`STATUS.md` carried G1 as `partial` because `RevL.G1.declared_only_access`
+proves the RULE, an undeclared access cannot be written, and the `G1` row
+below decides that rule over each component's access roots, but neither says
+the checker's name resolution VISITS the statements of a real body. G1 is
+enforced by name resolution during lowering, so the walk that resolves roots
+is the lowering walk itself; `RevL.G1Coverage` states the coverage
+obligation over `RevL.Syntax.Body`, and this section is the oracle bridge
+that makes the differential row bite.
+
+Three kinds of row, deliberately **not** folded into one, because the two
+sides are independent observations:
+
+* `G1B`, a component body's ACTIVATION, as the **parse** sees it: how many
+  statements the activation declares. `0` means the body has no activation
+  scope at all, which `Body.scopes` reads as no scope.
+* `G1P`, one provide METHOD of that body, as the **parse** sees it: its
+  block key, its method name, how many statements its body declares and its
+  declared parameter NAMES. Names only: for G1 every declared parameter is a
+  local of its own scope whatever origin it carries.
+* `G1W`, one scope the **checker's lowering walk actually visited**,
+  observed by running the checker: its label, how many statements of it the
+  walk dispatched, and the parameter names it seeded into the scope's own
+  environment.
+
+`G1B`/`G1P` come from the parse; `G1W` comes from `compile_files` driving the
+lowering walk with `revl.lower._ACCESS_WALK` installed. That is what makes
+the row a comparison rather than a tautology.
+
+**What this row is not.** It is not `RevL.G1Access` (the `G1` verdict): this
+decides only whether the walk that resolves roots covered the body. It is
+also not the issue's second slice, the per-scope ROOT classification: the
+export still classifies a root component-wide, and the parameter conjunct is
+that slice's observable precondition rather than the slice itself. A walk the
+harness failed to observe at all is the separate fatal bucket
+`missed-G1-coverage-observation`, never `missed-G1-coverage`. -/
+
+section G1Coverage
+
+/-- A comma-joined parameter-NAME list. The empty string is the empty list,
+and an empty member yields `none` rather than being dropped, so a malformed
+row never compares as fewer parameters. -/
+def parseNames (s : String) : Option (List String) :=
+  if s == "" then some []
+  else (s.splitOn ",").mapM fun x => if x.isEmpty then none else some x
+
+/-- One `G1B` row: a component body's activation, as the parse sees it. -/
+structure G1BRow where
+  path : String
+  comp : String
+  stmts : Nat
+
+def parseG1B (f : List String) : Option G1BRow :=
+  match f with
+  | ["G1B", path, comp, stmts] => stmts.toNat?.map fun n => ⟨path, comp, n⟩
+  | _ => none
+
+/-- One `G1P` row: one provide method of a component body, as the parse sees
+it. -/
+structure G1PRow where
+  path : String
+  comp : String
+  key : String
+  method : String
+  stmts : Nat
+  params : List String
+
+def parseG1P (f : List String) : Option G1PRow :=
+  match f with
+  | ["G1P", path, comp, key, method, stmts, params] =>
+      (stmts.toNat?).bind fun n => (parseNames params).map fun ps =>
+        ⟨path, comp, key, method, n, ps⟩
+  | _ => none
+
+/-- One `G1W` row: one scope the checker's lowering walk actually visited. -/
+structure G1WRow where
+  path : String
+  comp : String
+  label : String
+  stmts : Nat
+  params : List String
+
+def parseG1W (f : List String) : Option G1WRow :=
+  match f with
+  | ["G1W", path, comp, label, stmts, params] =>
+      (stmts.toNat?).bind fun n => (parseNames params).map fun ps =>
+        ⟨path, comp, label, n, ps⟩
+  | _ => none
+
+/-- The body a `G1B` row and its `G1P` rows describe, as `RevL.Syntax.Body`.
+The statements are placeholders and the parameter QUALIFIERS are `plain`:
+what the row observes is the scope SHAPE, which scopes, how many statements,
+which declared parameter names, and both projections read exactly those
+columns. A `G1B` row carrying `0` produces a body with no activation scope,
+so `Body.scopes`'s "the activation first, and only when it has a statement"
+is exercised rather than assumed. -/
+def bodyOfAccess (r : G1BRow) (ps : List G1PRow) : RevL.Syntax.Body where
+  items := List.replicate r.stmts (RevL.Syntax.Item.step (.pure (.lit "")))
+    ++ ps.map (fun p =>
+        RevL.Syntax.Item.provide
+          { key := p.key
+            methods :=
+              [{ name := p.method
+                 params := p.params.map
+                   fun n => (⟨n, .plain⟩ : RevL.Syntax.Param)
+                 body := List.replicate p.stmts (.pure (.lit "")) }] })
+
+/-- The walk a `G1W` row's columns describe, as `RevL.G1Coverage.Walked`. -/
+def walkOfAccessRows (ws : List G1WRow) : List RevL.G1Coverage.Walked :=
+  ws.map fun w => { scope := w.label, stmts := w.stmts, params := w.params }
+
+/-- The row's verdict: does the walk the `G1W` rows record cover the body the
+`G1B`/`G1P` rows describe? -/
+def accessCoverageRowB (r : G1BRow) (ps : List G1PRow)
+    (ws : List G1WRow) : Bool :=
+  RevL.G1Coverage.coversAccessBodyB (walkOfAccessRows ws) (bodyOfAccess r ps)
+
+/-- `accessCoverageRowB` is exactly the theorem's three conjuncts at the
+carried columns, so the procedure the oracle runs and the judgment
+`RevL.G1Coverage` proves are the same statement. -/
+theorem accessCoverageRowB_iff (r : G1BRow) (ps : List G1PRow)
+    (ws : List G1WRow) :
+    accessCoverageRowB r ps ws = true ↔
+      RevL.G1Coverage.walkLabels (walkOfAccessRows ws)
+          = (bodyOfAccess r ps).scopeLabels
+        ∧ RevL.G1Coverage.walkCounts (walkOfAccessRows ws)
+            = (bodyOfAccess r ps).scopes.map (fun s => s.stmts.length)
+        ∧ RevL.G1Coverage.walkParams (walkOfAccessRows ws)
+            = (bodyOfAccess r ps).scopeParamNames := by
+  unfold accessCoverageRowB
+  exact RevL.G1Coverage.coversAccessBodyB_iff _ _
+
+/-- The three kinds of coverage row of one export. -/
+structure G1CoverageRows where
+  g1b : List G1BRow
+  g1p : List G1PRow
+  g1w : List G1WRow
+
+def parseG1CoverageRows (fields : List (List String)) : G1CoverageRows :=
+  { g1b := fields.filterMap parseG1B
+    g1p := fields.filterMap parseG1P
+    g1w := fields.filterMap parseG1W }
+
+/-- One `G1C` row per scope of each component the export carries, in the
+body's order and out to the longer of the body's scope list and the walk's, 
+so a walk that opened FEWER scopes than the body still produces a row for the
+missing one, with `fail`, and the missing scope is *named* rather than
+silently absent. The per-scope verdict is `Walked.matches`, the same
+conjunction `accessCoverageRowB` makes over the whole list. -/
+def g1covVerdicts (p : String) (rs : G1CoverageRows) : String := Id.run do
+  let mut out := ""
+  for b in rs.g1b.filter (fun r => r.path == p) do
+    let ps := rs.g1p.filter (fun r => r.path == p && r.comp == b.comp)
+    let ws := rs.g1w.filter (fun r => r.path == p && r.comp == b.comp)
+    let bd := bodyOfAccess b ps
+    let wl := walkOfAccessRows ws
+    for i in List.range (Nat.max bd.scopes.length wl.length) do
+      let sc := bd.scopes[i]?
+      let w := wl[i]?
+      let label := match sc with
+        | some s => s.label
+        | none => match w with
+          | some x => x.scope
+          | none => ""
+      let v := match sc, w with
+        | some s, some x => if x.matches s then "ok" else "fail"
+        | _, _ => "fail"
+      out := out ++ s!"G1C\t{p}\t{b.comp}\t{label}\tcoverage={v}\n"
+  return out
+
+/-- One `G1M` row: a component's recorded walk, as recorded (`as-walked`) or
+under one of the harness ratchet's shortenings (`drop`, `bump`, `strip`,
+`extra`), the whole walk in one `label|count|params;...` column so an empty
+walk is still a row. -/
+structure G1MRow where
+  kind : String
+  path : String
+  comp : String
+  walk : List G1WRow
+
+/-- One `label|count|params` scope of a `G1M` walk column (a label may be
+namespaced, `acme::greeter.hello`, so `:` is not the separator), as the
+`G1WRow` it stands for. -/
+def parseWalkScope (path comp : String) (s : String) : Option G1WRow :=
+  match s.splitOn "|" with
+  | [label, n, ps] =>
+      n.toNat?.bind fun k => (parseNames ps).map fun names =>
+        ⟨path, comp, label, k, names⟩
+  | _ => none
+
+def parseG1M (f : List String) : Option G1MRow :=
+  match f with
+  | ["G1M", kind, path, comp, walk] =>
+      let ws := if walk == "" then some []
+        else (walk.splitOn ";").mapM (parseWalkScope path comp)
+      ws.map fun w => ⟨kind, path, comp, w⟩
+  | _ => none
+
+/-- One `G1CM <kind> <file> <comp> covers=ok|fail` row per `G1M` row: the
+whole-walk `accessCoverageRowB`, the Bool `accessCoverageRowB_iff` is about,
+over the body the `G1B`/`G1P` rows describe and the walk the `G1M` row
+carries. The per-scope `G1C` rows never print this Bool; these rows are what
+lets the harness ratchet require the LEAN verdict to flip under each
+shortening, so an oracle that printed a constant fails the gate. A row whose
+component has no `G1B` row prints `fail`. -/
+def g1covMutantVerdicts (rs : G1CoverageRows) (ms : List G1MRow) :
+    String := Id.run do
+  let mut out := ""
+  for m in ms do
+    let v := match rs.g1b.find?
+        (fun (r : G1BRow) => r.path == m.path && r.comp == m.comp) with
+      | some b =>
+          let ps := rs.g1p.filter
+            (fun (r : G1PRow) => r.path == m.path && r.comp == m.comp)
+          if accessCoverageRowB b ps m.walk then "ok" else "fail"
+      | none => "fail"
+    out := out ++ s!"G1CM\t{m.kind}\t{m.path}\t{m.comp}\tcovers={v}\n"
+  return out
+
+end G1Coverage
+
 def main (args : List String) : IO UInt32 := do
   match args with
   | [inPath, outPath] =>
@@ -2974,6 +3287,7 @@ def main (args : List String) : IO UInt32 := do
     let fields := (text.splitOn "\n").filter (fun l => l != "")
       |>.map (·.splitOn "\t")
     let mrows := fields.filterMap parseM
+    let jrrows := fields.filterMap parseJR
     let urows := fields.filterMap parseU
     let brows := fields.filterMap parseB
     let qrows := fields.filterMap parseQ
@@ -3011,6 +3325,8 @@ def main (args : List String) : IO UInt32 := do
     let crows := parseCouncilRows fields
     let g9rows := parseG9Rows fields
     let gcrow := parseG9CoverageRows fields
+    let g1covrows := parseG1CoverageRows fields
+    let g1mrows := fields.filterMap parseG1M
     let retainrows := parseGRetainRows fields
     let invrows := parseG4InvRows fields
     let swrows := parseSWRows fields
@@ -3106,6 +3422,9 @@ def main (args : List String) : IO UInt32 := do
     if !unknownEVR.isEmpty then
       IO.eprintln s!"oracle: EVR rows of unknown scope or position: {unknownEVR}"
       return 1
+    -- G1CM verdicts (the G1 coverage ratchet's walks, issue #2744): the
+    -- whole-walk `accessCoverageRowB` over each `G1M` row
+    out := out ++ g1covMutantVerdicts g1covrows g1mrows
     for p in paths do
       let fm := mrows.filter (fun r => r.path == p)
       let ub := brows.filter (fun r => r.path == p)
@@ -3135,6 +3454,25 @@ def main (args : List String) : IO UInt32 := do
       let cv := if decide (RequiresClosed comps) then "ok" else "fail"
       let lv := if linkVerdict comps then "ok" else "fail"
       out := out ++ s!"V\t{p}\tdisjoint={dv}\tclosed={cv}\tlink={lv}\n"
+      -- G2 over the IR image (issue #2739): the same disjointness judgment,
+      -- decided over the LOWERED document's static composition, plus the
+      -- claim that that document carries the slots of the composition the V
+      -- row just decided. The templates are the document's OWN
+      -- (`manifest.templates`, the `JR` role column), not the parse's.
+      -- Only files that lowered have rows: a document the checker refused
+      -- produces no IR, and its refusal is the V/X rows' business. The
+      -- exporter fails the gate for a document the checker ACCEPTED that
+      -- produced no `JR` row, so this guard cannot hide one.
+      let jc := jrrows.filter (fun r => r.path == p)
+      if !jc.isEmpty then
+        let irDoc : RevL.G2.IRDoc :=
+          { components := jc.map fun r => { name := r.comp, provides := r.provides,
+                                            isolate := r.realms },
+            templates := (jc.filter (·.isTemplate)).map (·.comp) }
+        let ird := if irdisjointB irDoc then "ok" else "fail"
+        let irk := if irKeptB irDoc comps then "ok" else "fail"
+        out := out ++ s!"IRD\t{p}\tdisjoint={ird}\n"
+        out := out ++ s!"IRS\t{p}\tkept={irk}\n"
       let aPairs := ua.map (fun r => (r.comp, r.cap))
       let fPairs := uf.map (fun r => (r.comp, r.cap))
       let owns := groupCaps (aPairs ++ fPairs)
@@ -3185,10 +3523,10 @@ def main (args : List String) : IO UInt32 := do
       -- P verdicts (provide-method bound) per method reach group
       let fkeys := (uf.map (fun r => (r.comp, r.key, r.svc, r.meth))).eraseDups
       for k in fkeys do
-        let caps := (uf.filter (fun r => r.comp == k.1 && r.key == k.2.1
-                                && r.svc == k.2.2.1 && r.meth == k.2.2.2))
-                    |>.map (·.bound) |>.eraseDups
-        let ok := methodBoundOK capTable bounds k.2.2.1 k.2.2.2 caps
+        let reach := (uf.filter (fun r => r.comp == k.1 && r.key == k.2.1
+                                 && r.svc == k.2.2.1 && r.meth == k.2.2.2))
+                     |>.map (fun r => (r.bound, r.via)) |>.eraseDups
+        let ok := methodBoundOK capTable bounds k.2.2.1 k.2.2.2 reach
         let pv := if ok then "ok" else "fail"
         out := out ++ s!"P\t{p}\t{k.1}\t{k.2.1}\t{k.2.2.1}\t{k.2.2.2}\tbound={pv}\n"
       -- MPV / MAV verdicts (G-MODEL-PLACE, issue #1811)
@@ -3199,6 +3537,8 @@ def main (args : List String) : IO UInt32 := do
       out := out ++ g9Verdicts p g9rows
       -- GC verdicts (G9 path coverage of a component body, issue #2108)
       out := out ++ gcVerdicts p gcrow
+      -- G1C verdicts (G1 declared-access coverage, issue #2744)
+      out := out ++ g1covVerdicts p g1covrows
       -- RETAIN verdicts (G-RETAIN on the corpus, issue #1811 group 3)
       out := out ++ gretainVerdicts p retainrows
       -- INV verdicts (the G4 inverse rule on the corpus, issue #2097)
@@ -3339,6 +3679,8 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.stmtSurfaceB_iff
 #print axioms RevLOracle.registrationsB_iff
 #print axioms RevLOracle.linkOKB_iff
+#print axioms RevLOracle.irdisjointB_iff
+#print axioms RevLOracle.irKeptB_iff
 #print axioms RevLOracle.pathPrefixB_iff
 #print axioms RevLOracle.pleqB_iff
 #print axioms RevLOracle.mem_keys_of_lookupV
@@ -3388,3 +3730,4 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.a5RowB_iff
 #print axioms RevLOracle.a5RowBAll_iff
 #print axioms RevLOracle.gcRowB_iff
+#print axioms RevLOracle.accessCoverageRowB_iff

@@ -584,14 +584,24 @@ def test_surface_h_refuses_the_star_widening():
 
 
 def test_surface_h_refuses_an_acquire_in_the_closure():
-    problem = _surface_h(
+    """No source reaches an `acquire` extern from a provide-method body any
+    more (issue #2985 refuses the call), so the fold's defensive arm is driven
+    over an IR whose extern is re-classed: the fold reads the class from the IR
+    alone, exactly as `Session.load` hands it over."""
+    from revl.mcp.approval import ClassMap, cache_applicability_refusal
+    from revl.mcp.session import Session
+    ir = compile_source(
         "type Sock = { fd: Int }\n"
-        "extern pure fn shut(s: Sock) -> Unit = @py { pass }\n"
-        "extern acquire fn open() -> Sock undo shut(result) = @py { pass }\n"
+        "extern pure fn open() -> Sock = @py { pass }\n"
         "extern emission fn ping(s: Sock) -> Str = @py { return 'ok' }\n"
         "service S { emission fn get() -> Str cache capability }\n"
         "component C provides s: S { provide s { fn get() { "
-        "let s = open() return emit ping(s) } } }\n")
+        "let s = open() return emit ping(s) } } }\n", "h.rvl")
+    for ext in ir["externs"]:
+        if ext["name"] == "open":
+            ext["class"] = "acquire"
+    index = Session._build_cache_index(Session.__new__(Session), ir)
+    problem = cache_applicability_refusal(ClassMap(ir), index)
     assert problem is not None
     assert "`acquire` extern `open`" in problem and "teardown would leak" in problem
 

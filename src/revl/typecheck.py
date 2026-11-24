@@ -66,6 +66,8 @@ Two expression dialects are covered:
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import dataclasses
 import math
 
@@ -1501,6 +1503,108 @@ def nested_widening_error(filename: str, line: int, op: str,
         expected=left, actual=right)
 
 
+def nested_widening_flow_error(filename: str, line: int, where: str,
+                               expected: str | None, actual: str | None,
+                               inner: tuple[str, str]) -> RevlError:
+    """A value whose declared type nests a widening the position needs
+    (issue #2937): `List[Int]` into a `List[Float]` slot."""
+    want, got = render_type(expected), render_type(actual)
+    a, b = render_type(inner[0]), render_type(inner[1])
+    narrow, wide = (a, b) if _rank(a) < _rank(b) else (b, a)
+    if wide == "Float":
+        example = ("build it with `Float` elements (`3.0`, not `3`), or "
+                   "convert each element where you mean to")
+    else:
+        example = (f"build it with `{wide}` elements, or convert each "
+                   "element where you mean to (`.to_int()`)")
+    return RevlError(
+        filename, line,
+        f"{where} expects `{want}`, got `{got}`; the `{narrow}` inside is not "
+        f"widened to `{wide}` (only a bare value widens), so the tiers would "
+        "not agree on the program",
+        hint=example, code="T1", category="type-mismatch",
+        expected=want, actual=got)
+
+
+def _site_children(expr, expected: str | None, tenv: dict, types: dict):
+    """The parts of a constructor written at a value-flow site, each with the
+    type it is held to, or None when `expr` is a value rather than a
+    constructor.
+
+    A literal list, record or option is checked against the expected type
+    part by part, where each part is its own coercion site (issue #2938);
+    only a value that already carries its type (a variable, a field read, a
+    call result) has nothing to convert it elementwise. `Opt`'s payload,
+    `Result`'s two slots and a plain variant case are entered, so
+    `Some(ns)` is judged on `ns`."""
+    from .parser import ExprAsset, ExprCall, ExprIf, ExprList, ExprLit, \
+        ExprRecord, ExprVar
+
+    if isinstance(expr, ExprLit):
+        return []
+    ehead, eargs = parse_type(expected)
+    if isinstance(expr, ExprList):
+        if ehead == "List" and len(eargs) == 1:
+            return [(item, eargs[0]) for item in expr.items]
+        return []
+    if isinstance(expr, ExprRecord) and not isinstance(expr, ExprAsset):
+        slots = structural_fields(expected)
+        if slots is None:
+            slots = nominal_record_fields(expected, types)
+        return [(value, slots[name]) for name, value in expr.fields
+                if slots and name in slots]
+    if isinstance(expr, ExprIf):
+        return [(expr.then, expected), (expr.otherwise, expected)]
+    if isinstance(expr, ExprCall) and isinstance(expr.callee, ExprVar) \
+            and len(expr.args) == 1 and expr.callee.name not in tenv:
+        name = expr.callee.name
+        if name == "Some" and ehead == "Opt" and len(eargs) == 1:
+            return [(expr.args[0], eargs[0])]
+        if name in ("Ok", "Err") and ehead == "Result" and len(eargs) == 2:
+            return [(expr.args[0], eargs[0] if name == "Ok" else eargs[1])]
+        case = (types.get(CASES_KEY) or {}).get(name)
+        if case is not None:
+            payload = case.get("payload")
+            if generic_variant_params(case["adt"], types):
+                return None  # its payload type is bound by this very call
+            if payload:
+                return [(expr.args[0], payload)]
+            return []
+    return None
+
+
+def refuse_nested_widening(expr, expected: str | None, actual: str | None,
+                           tenv: dict, types: dict, filename: str | None,
+                           where: str) -> None:
+    """Refuse a value that would need its elements converted (issue #2937).
+
+    `compatible` recurses into type arguments, so a `List[Int]` value is
+    admitted where a `List[Float]` is declared (and `Opt[Int]` for
+    `Opt[Float]`, a record or a generic record the same way). The widening
+    marker sits on one node and cannot reach an element, so nothing converts
+    it: python and TypeScript ran the program (TypeScript with `bigint`
+    elements where `number` is declared), while go and java did not build.
+    Converting would copy every value that crosses a call, `let` or `return`,
+    so the checker refuses it, as it does inside `==` (`nested_widening`).
+    A constructor written at the site is entered and its parts judged on
+    their own."""
+    if not filename or not expected or not actual:
+        return
+    children = _site_children(expr, expected, tenv, types)
+    if children is not None:
+        for child, child_expected in children:
+            if child_expected is None:
+                continue
+            child_actual = infer_ast(child, tenv, types, None)
+            refuse_nested_widening(child, child_expected, child_actual, tenv,
+                                   types, filename, where)
+        return
+    inner = nested_widening(expected, actual, types)
+    if inner:
+        raise nested_widening_flow_error(
+            filename, getattr(expr, "line", 0), where, expected, actual, inner)
+
+
 def opt_escape_error(filename: str, line: int, what: str, target: str,
                      inner: str | None, alt: str | None = None) -> RevlError:
     """`Opt[T]` reached through as if it were `T`.
@@ -1756,12 +1860,16 @@ _BUILTIN_SIG = {
     # source reader folds a CR byte to LF and `"..."` carries no escapes, so a
     # carriage return or a NUL has no other spelling in pure revl.
     "to_char": ("Int", [], "Str"),
-    # The total, value-returning forms (docs/arithmetic.md, "Still open"):
-    # same rounding convention as their faulting counterparts, but a zero
-    # divisor yields `Err(reason)` instead of faulting — `fail` cannot serve
-    # here (it is a component construct, refused in a pure fn), so the error
-    # travels as a value. The Err payload is `Str` because it is the one
-    # type every tier can hold in a Result without new representation.
+    # The total, value-returning forms (docs/arithmetic.md, "The total
+    # arithmetic forms"): same value as their faulting counterparts where
+    # that value fits, `Err(reason)` instead of the fault otherwise — `fail`
+    # cannot serve here (it is a component construct, refused in a pure fn),
+    # so the error travels as a value. The Err payload is `Str` because it is
+    # the one type every tier can hold in a Result without new
+    # representation.
+    "checked_add": ("Int", ["Int"], "Result[Int, Str]"),
+    "checked_sub": ("Int", ["Int"], "Result[Int, Str]"),
+    "checked_mul": ("Int", ["Int"], "Result[Int, Str]"),
     "checked_div_trunc": ("Int", ["Int"], "Result[Int, Str]"),
     "checked_div_floor": ("Int", ["Int"], "Result[Int, Str]"),
     "checked_div_euclid": ("Int", ["Int"], "Result[Int, Str]"),
@@ -2287,9 +2395,58 @@ def _extend_arm_tenv(stmt, tenv: dict, types: dict, filename: str | None) -> Non
                    else infer_ast(stmt.value, tenv, types, filename))
 
 
+# issue #3400: lowering asks for the type of each operand of an operator
+# (`_lower_pure_expr`), and `infer_ast` answers by walking the operand's whole
+# subtree, so a chain of n operators cost n*n/2 inferences: 3000 `+` took over
+# a minute and a half. Inside `infer_memo()` a non-raising inference is kept
+# for the pass, keyed on the node, the type environment and the type table
+# (by identity, all three held by the entry so no id is reused while it
+# lives), so each node of an expression is inferred once. A raising
+# inference (`filename` given) is never memoised: its diagnostics stay exactly
+# where they were.
+_INFER_MEMO: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "revl_infer_memo", default=None)
+
+
+@contextlib.contextmanager
+def infer_memo():
+    """Keep non-raising `infer_ast` answers for the duration of the block.
+
+    Re-entrant: a nested scope shares the outermost one's memo. The caller
+    owns the soundness condition: no type environment handed to `infer_ast`
+    inside the block is mutated in a way that changes the type of an
+    expression already inferred under it.
+    """
+    if _INFER_MEMO.get() is not None:
+        yield
+        return
+    token = _INFER_MEMO.set({})
+    try:
+        yield
+    finally:
+        _INFER_MEMO.reset(token)
+
+
+def infer_memo_active() -> bool:
+    return _INFER_MEMO.get() is not None
+
+
 def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str | None:
     """Best-effort type of a parser-AST expression. With `filename`, definite
     operator/branch/argument mismatches raise; without it, never raises."""
+    memo = _INFER_MEMO.get()
+    if memo is None or filename is not None:
+        return _infer_ast(expr, tenv, types, filename)
+    key = (id(expr), id(tenv), id(types))
+    hit = memo.get(key)
+    if hit is not None and hit[0] is expr and hit[1] is tenv and hit[2] is types:
+        return hit[3]
+    result = _infer_ast(expr, tenv, types, None)
+    memo[key] = (expr, tenv, types, result)
+    return result
+
+
+def _infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str | None:
     from .parser import (
         ExprArrow, ExprBin, ExprBlockArm, ExprCall, ExprField, ExprHole,
         ExprIf, ExprIndex, ExprList, ExprLit, ExprMatch, ExprOptCall,
@@ -2680,6 +2837,10 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
                                    case["payload"], arg_types[0],
                                    why=unresolved_nominal_reason(
                                        case["payload"], arg_types[0], types))
+                if case["payload"] and arg_types and expr.args:
+                    refuse_nested_widening(
+                        expr.args[0], case["payload"], arg_types[0], tenv,
+                        types, filename, f"`{name}(...)` payload")
                 # A case call with NO argument. With a filename,
                 # `check_case_call_arity` above refuses it at a payload case
                 # (issue #2447). Without one (an inference-only probe) it still
@@ -2743,6 +2904,11 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
                                 raise mismatch(filename, line,
                                                f"argument {i + 1} of `{name}(...)`", p, a,
                                                why=unresolved_nominal_reason(p, a, types))
+                        for i, (p, a, arg) in enumerate(
+                                zip(params, arg_types, expr.args)):
+                            refuse_nested_widening(
+                                arg, p, a, tenv, types, filename,
+                                f"argument {i + 1} of `{name}(...)`")
                     return sig["returns"]
                 # generic: instantiate the signature against this call's
                 # arguments rather than letting every `T` position pass
@@ -2756,8 +2922,12 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
                     raise mismatch(filename, line,
                                    f"argument {i + 1} of `{name}(...)`", bound, a,
                                    why=unresolved_nominal_reason(bound, a, types))
-                _check_arrow_args(expr.args, [substitute(p, subst) for p in params],
-                                  tenv, types, filename, f"`{name}(...)`")
+                inst = [substitute(p, subst) for p in params]
+                _check_arrow_args(expr.args, inst, tenv, types, filename,
+                                  f"`{name}(...)`")
+                for i, (p, a, arg) in enumerate(zip(inst, arg_types, expr.args)):
+                    refuse_nested_widening(arg, p, a, tenv, types, filename,
+                                           f"argument {i + 1} of `{name}(...)`")
                 return substitute(sig["returns"], subst)
         if isinstance(expr.callee, ExprField):
             # a constructor form (`Map.new()`, `Pool.open(..)`) infers the
@@ -3253,8 +3423,12 @@ def call_function_value(expr, fn_type: str, what: str, arg_types: list,
     check_function_value_arity(what, fn_type, params, len(expr.args),
                                filename, line)
     _check_arrow_args(expr.args, params, tenv, types, filename, what)
-    return function_value_result(what, params, returns, arg_types, types,
-                                 filename, line)
+    result = function_value_result(what, params, returns, arg_types, types,
+                                   filename, line)
+    for i, (p, a, arg) in enumerate(zip(params, arg_types, expr.args)):
+        refuse_nested_widening(arg, p, a, tenv, types, filename,
+                               f"argument {i + 1} of {what}")
+    return result
 
 
 def local_function_call_type(node: dict, tenv: dict, types: dict,
@@ -3616,12 +3790,73 @@ def check_ast(expr, expected: str | None, tenv: dict, types: dict,
     if actual and not compatible(expected, actual, types):
         raise mismatch(filename, line, where, expected, actual,
                        why=unresolved_nominal_reason(expected, actual, types))
+    refuse_nested_widening(expr, expected, actual, tenv, types, filename, where)
 
 
 # ------------------------------------------------------- IR inference (components)
 
+# Issue #3457: the component-stratum operator arms of
+# `lower._lower_component_pure_expr` ask `infer_ir` for each operand's type
+# after lowering it, and each answer walked the operand's subtree, so a chain
+# of n operators in a provide method cost about n*n/2 inferences. Inside
+# `infer_ir_memo()` a non-raising inference is kept for the pass. Unlike
+# `infer_ast`'s memo the type environment is keyed by CONTENT, not identity:
+# the component lowering binds and unbinds names in `env.type_env` in place
+# (match-arm payloads, arrow parameters, setup `let`s), and a content key
+# cannot return an answer computed under different bindings. The node, the
+# type table and the service table are keyed by identity (held by the entry so
+# no id is reused while it lives); `infer_ir` reads none of the keys the
+# lowering adds to a node after inferring it (`operands`, `widen`). A raising
+# inference (`filename` given) is never memoised, and neither is one whose
+# environment holds an unhashable value.
+_INFER_IR_MEMO: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "revl_infer_ir_memo", default=None)
+
+
+@contextlib.contextmanager
+def infer_ir_memo():
+    """Keep non-raising `infer_ir` answers for the duration of the block.
+
+    Re-entrant: a nested scope shares the outermost one's memo. The caller
+    owns the soundness condition: neither the type table nor the service table
+    is mutated inside the block, and no IR node is changed in a key `infer_ir`
+    reads after it was inferred."""
+    if _INFER_IR_MEMO.get() is not None:
+        yield
+        return
+    token = _INFER_IR_MEMO.set({})
+    try:
+        yield
+    finally:
+        _INFER_IR_MEMO.reset(token)
+
+
+def infer_ir_memo_active() -> bool:
+    return _INFER_IR_MEMO.get() is not None
+
+
 def infer_ir(node, tenv: dict, types: dict, services: dict,
              filename: str | None = None, line: int = 0) -> str | None:
+    """Best-effort type of a lowered component-body IR node; see
+    `_infer_ir`. Memoised inside `infer_ir_memo()` (issue #3457)."""
+    memo = _INFER_IR_MEMO.get()
+    if memo is None or filename is not None or not isinstance(node, dict):
+        return _infer_ir(node, tenv, types, services, filename, line)
+    try:
+        key = (id(node), id(types), id(services), tuple(tenv.items()))
+        hit = memo.get(key)
+    except TypeError:  # an unhashable value in the environment
+        return _infer_ir(node, tenv, types, services, filename, line)
+    if hit is not None and hit[0] is node and hit[1] is types \
+            and hit[2] is services:
+        return hit[3]
+    result = _infer_ir(node, tenv, types, services, filename, line)
+    memo[key] = (node, types, services, result)
+    return result
+
+
+def _infer_ir(node, tenv: dict, types: dict, services: dict,
+              filename: str | None = None, line: int = 0) -> str | None:
     """Best-effort type of a lowered component-body IR node. `services` maps
     service name -> ServiceDecl; `tenv` maps *safe* names -> types.
 
