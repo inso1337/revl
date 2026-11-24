@@ -29,9 +29,10 @@ Usage:
     python3 bench/saga_defects/run.py --list       # show the rows, measure nothing
     python3 bench/saga_defects/run.py --only ID    # one row, for debugging
 
-The Temporal port and sagas written by people outside the checker's authors
-are the second slice of issue #2736; they are not scored here, and the results
-file says so.
+The Temporal TypeScript port of each row is scored by `run_temporal.py` against
+a real Temporal server, into bench/results/saga-defect-corpus-temporal.md. Sagas
+written by people outside the checker's authors are not in the corpus yet, and
+the results file says so.
 """
 
 from __future__ import annotations
@@ -463,8 +464,9 @@ def render_results(rows: list[dict], outcomes: dict[str, dict], data: dict) -> s
         "- The defects are seeded, not found in real code. The table measures",
         "  which seeded defect each mechanism catches, not how often real code",
         "  contains one.",
-        "- The Temporal TypeScript port and its score are the second slice of",
-        "  issue #2736. The `temporal` column is absent rather than guessed.",
+        "- The Temporal TypeScript ports are scored by `run_temporal.py`, not here:",
+        "  see `saga-defect-corpus-temporal.md` for the same rows on a real Temporal",
+        "  server. This table has no Temporal column.",
         "- The fault sweep is sequential, single-fault and top-level only",
         "  (`docs/fault-tests.md` sections 9.3 and 9.5). A missed row here does",
         "  not say whether a deeper or concurrent failure would expose it.",

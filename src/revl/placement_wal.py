@@ -9,7 +9,9 @@ run uses. FILE itself is the run's INDEX, the one path the operator names to
   wal, components, backend}]}``. ``wal`` is the process WAL's file name,
   relative to the index's own directory, so the set moves as one.
 * ``opened`` per run that armed this index: ``{run}``.
-* ``committed`` once every process of that run was UP: ``{run}``. It is
+* ``committed`` once every process of that run was UP: ``{run}``. Each process
+  records ``process-up`` in its own WAL as it comes up, before it prints `UP`;
+  recover trusts this line for a process only when that record is there. It is
   written BEFORE the conductor tells each process to stamp its own
   `activation-complete`, so it is the placement's commit decision. A crash
   between the two leaves processes whose WALs lack the marker under a run
@@ -72,7 +74,9 @@ def process_wal_path(index_path: str, entry: dict) -> str:
     process WAL (:func:`entry_problem`), and for a process WAL that is a
     symbolic link or does not resolve to a file in the index's own directory:
     the run never writes one, and following it would read and stamp a file
-    outside that directory (issue #3193)."""
+    outside that directory (issue #3193). A process WAL with more than one hard
+    link is refused too: a link to a file elsewhere would be stamped through
+    the index's name (issue #3234)."""
     problem = entry_problem(index_path, entry)
     if problem is not None:
         raise PlacementIndexError(f"{index_path}: {problem}")
@@ -85,6 +89,16 @@ def process_wal_path(index_path: str, entry: dict) -> str:
             f"symbolic link, or resolves outside the index's directory; a "
             f"placement run writes each process WAL as a plain file next to "
             f"the index. Refusing to read or stamp it.")
+    try:
+        links = os.lstat(path).st_nlink
+    except OSError:
+        links = 1   # missing is reported by the caller as a missing WAL
+    if links > 1:
+        raise PlacementIndexError(
+            f"{index_path}: process {entry['name']!r}: its WAL {path} has "
+            f"{links} hard links, so it may be a file outside the index's "
+            f"directory; a placement run writes each process WAL as a file "
+            f"with one link. Refusing to read or stamp it (issue #3234).")
     return path
 
 
@@ -157,8 +171,28 @@ def arm(index_path: str, processes: dict, backends: dict, specs: dict) -> int:
         path = process_wal_path(index_path, entry)
         open(path, "a", encoding="utf-8").close()
         specs[entry["name"]]["wal"] = path
+        # issue #3234: the run each process-up record names
+        specs[entry["name"]]["walRun"] = run
     _fsync_append(index_path, {"record": "opened", "run": run})
     return run
+
+
+def process_up(records: list, process: str, run: int) -> bool:
+    """Whether a process WAL's ``records`` carry the ``process-up`` record the
+    process wrote for ``run`` when it came up (issue #3234). The index's
+    `committed` line is the run's commit decision only for a process whose WAL
+    holds it: without it the line cannot be told from a forged one, or from one
+    written before the record existed.
+
+    Only the WAL's latest opening is searched: a run that reused the file
+    writes its own `generation` record, and an earlier opening's record must
+    not vouch for it (an index re-created or edited to name an earlier run
+    would otherwise borrow it)."""
+    from .wal import opening_intervals  # noqa: PLC0415
+
+    return any(r.get("record") == "process-up" and r.get("process") == process
+               and type(r.get("run")) is int and r.get("run") == run
+               for r in opening_intervals(records)[-1])
 
 
 def mark_committed(index_path: str, run: int) -> None:

@@ -3,14 +3,16 @@
 #
 # 1. the L0/L1/L2 import layering (formal/scripts/layering_gate.py);
 # 2. the non-vacuity registry (formal/scripts/nonvacuity_gate.py);
-# 3. lake build over the Lean package;
-# 4. CheckAxioms.lean's `#print axioms` output through the axioms gate
+# 3. the oracle summary against the table it restates
+#    (formal/scripts/oracle_summary.py, issue #2739);
+# 4. lake build over the Lean package;
+# 5. CheckAxioms.lean's `#print axioms` output through the axioms gate
 #    (no sorryAx, no project-defined axioms, no missing theorem);
-# 5. the same axioms gate over harness/Oracle.lean's own `#print axioms`
+# 6. the same axioms gate over harness/Oracle.lean's own `#print axioms`
 #    block — that file is outside the RevL library root, so it is outside
 #    CheckAxioms.lean and outside the layering gate, and its bridge
 #    theorems are what make the differential oracle bite;
-# 6. the harness census (formal/harness/diff_corpus.py), which also fails a
+# 7. the harness census (formal/harness/diff_corpus.py), which also fails a
 #    row kind whose corpus has no accepted or no refused document.
 #
 # When $GITHUB_STEP_SUMMARY is set, a proof-status table (theorems per
@@ -47,6 +49,7 @@ trap summarize EXIT
 # machine without lake still gets the layering and non-vacuity verdicts.
 python3 scripts/layering_gate.py
 python3 scripts/nonvacuity_gate.py
+python3 scripts/oracle_summary.py --check
 
 # elan installs lake in ~/.elan/bin and adds that to PATH only from a shell
 # profile, so a shell that never sourced it has elan installed and no lake on
@@ -73,6 +76,13 @@ python3 scripts/axioms_gate.py \
   RevL.G2.linkOK_requires_closed \
   RevL.G2.realm_separation_admitted \
   RevL.G2.same_realm_conflict_refused \
+  RevL.G2.source_linkOK_ir_disjoint \
+  RevL.G2.ir_disjoint_iff_source_disjoint \
+  RevL.G2.tenants_ir_kept \
+  RevL.G2.tenants_ir_disjoint \
+  RevL.G2.isolate_entry_is_load_bearing \
+  RevL.G2.lost_realm_is_caught_by_kept \
+  RevL.G2.template_exclusion_is_load_bearing \
   RevL.G3.depPath_rank_lt \
   RevL.G3.no_dependency_cycles \
   RevL.G3.linkOK_layeredBy_rankOf \
@@ -205,6 +215,13 @@ python3 scripts/axioms_gate.py \
   RevL.G9.authority_refusal_is_not_universal \
   RevL.G9.sink_rules_are_distinct \
   RevL.G9.secret_refusal_is_load_bearing \
+  RevL.G9.secret_noninterference \
+  RevL.G9.leak_needs_declassifier \
+  RevL.G9.execution_labels_match_the_flow \
+  RevL.G9.endorse_gate_preserves_foreign_origins \
+  RevL.G9.noninterference_witness \
+  RevL.G9.declassify_breaks_noninterference \
+  RevL.G9.unadmitted_secret_endorse_breaks_noninterference \
   RevL.Lemmas.reach_mono_fuel \
   RevL.Lemmas.reaches_le \
   RevL.Lemmas.reach_exact \
@@ -446,6 +463,12 @@ python3 scripts/axioms_gate.py \
   RevL.A5.outside_the_family_is_out_of_the_row \
   RevL.A5.fixtures_decided \
   RevL.A5.a5_not_vacuous \
+  RevL.Fanout.par_run_is_a_sequential_run \
+  RevL.Fanout.group_abort_leaves_exactly_the_emissions \
+  RevL.Fanout.group_abort_reverts_when_nothing_crossed \
+  RevL.Fanout.both_interleavings_are_taken \
+  RevL.Fanout.over_fired_witnessed_member_is_undone \
+  RevL.Fanout.over_fired_emission_is_residue \
   RevL.A5.witness_bites < .axioms.out
 
 # The oracle's bridge theorems (harness/Oracle.lean) are outside the RevL
@@ -464,6 +487,8 @@ python3 scripts/axioms_gate.py \
   RevLOracle.stmtSurfaceB_iff \
   RevLOracle.registrationsB_iff \
   RevLOracle.linkOKB_iff \
+  RevLOracle.irdisjointB_iff \
+  RevLOracle.irKeptB_iff \
   RevLOracle.pathPrefixB_iff \
   RevLOracle.pleqB_iff \
   RevLOracle.mem_keys_of_lookupV \

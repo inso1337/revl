@@ -1,0 +1,2216 @@
+// The cordis-go EMITTER, part 3 of 4: the component tier and the document
+// routing. Split out of selfhost/emit_go.rvl (issue #3098); see the header of
+// that file for the layout.
+//
+// It holds the predicates that decide which path a document takes (pure
+// typed-core, combined, live, or declined), the component-body typing and
+// rendering (`comp_*`, `emit_comp_*`), the live module, `host_runtime` and
+// `teardown_preamble`. It uses selfhost/emit_go_core.rvl and
+// selfhost/emit_go_module.rvl.
+use "../stdlib/value.rvl" {
+  value_kind, value_is_null, value_field, value_list, value_at, value_str,
+  value_int, value_bool, value_keys
+}
+use "../stdlib/str.rvl" { split_top, rstrip, trim }
+use "../stdlib/list.rvl" { list_contains }
+use "./emit_go_core.rvl" {
+  HintAcc, HintScan, applied_variant, builtin_ret_type, camel, empty_acc,
+  empty_list_pin, erase_async, finish_scan, flag, flagged, go_bin_op,
+  go_string, gv_of, has_any_word, is_empty_list_lit, line, list_elem,
+  local_ref_of, map_get, marked, newline, node_kind, node_op, node_operands,
+  node_step, num_str, pair_map, sorted_key, split_fn_type, stdlib_mark,
+  strip_marks, unbound_refusal, untyped_empty_list, v3_ident, v3_subst,
+  v3_unify, variant_type_args, walk_nodes
+}
+use "./emit_go_module.rvl" {
+  go_literal, overflow_preamble, stdlib_preamble, upper_first
+}
+
+// ----------------------------------------------- the uncarried component tier
+// A `component` belongs to the go LIVE tier (the v1/v2 stc-go path in the
+// reference's `emit`), which this slice does not mirror — see WHAT IT DEFERS
+// above. What follows is about SAYING SO, not about carrying it.
+//
+// The rule is: NAME every `components` entry this file does not carry, except
+// where naming it would break a byte agreement the REFERENCE itself produces.
+//
+// That exception is real on this tier and on no other. The reference has two
+// document-level answers. Its PURE typed-core path — the one this slice mirrors
+// — routes PAST the components of a document that also carries top-level
+// declarations and emits ordinary Go for those declarations alone; both sides
+// then drop the same thing, and the documents that reach it are byte-identical
+// on this tier for exactly that reason. A marker there would name a gap that is
+// not there and cost every one of those agreements.
+//
+// Issue #1321 narrowed which documents reach it. The reference carries an
+// OBSERVABLE component, one with an activation body or a provide method, on
+// its combined renderer now, declarations AND components in one package, and
+// routes past only an INCIDENTAL one. So the exception narrows with it: where
+// the reference carries, there is no agreement left for a marker to cost, and
+// staying silent would mean answering a 6-kilobyte reference module with a
+// component-free one and no sign that anything was missing. That is the exact
+// failure the marker convention exists to prevent, so `component_is_observable`
+// below mirrors the reference predicate the routing now branches on.
+//
+// Everywhere else the marker is free, and it was badly needed. A document whose
+// components are ALL it declares never reaches the pure path: the reference
+// answers it with a whole stc-go module, and this slice used to answer with its
+// three-line banner and nothing else — 144 bytes against the reference's 40502
+// on backends/go/testdata/stream_130.rvl, with no marker anywhere in the output.
+// A refusal that is silent is indistinguishable from a lowering that is missing,
+// which is the one direction the byte-agreement oracle exists to rule out.
+//
+// A component beside an in-file `test` section is named too. Plain `test`
+// blocks are emitted now (`emit_tests`), but a `lifecycle test` is a script over
+// a live composition and keeps its document on the live path, and telling the
+// two apart would mean reading the per-test lifecycle flag, which this file
+// does not (see `deferred_test_markers`). For a plain-test document whose
+// component is incidental that is a refusal where the reference agrees: it
+// costs an agreement, never a silent divergence.
+//
+// So the suppression is narrow and checkable without reading a component STEP:
+// pure declarations present, no test section, and no observable component. `component_is_observable` reads the LENGTH of a component's `body`
+// (not the discriminant of any step inside it), so it states the reference's
+// routing without claiming a port of a lowering this slice does not have. That
+// matters because tools/selfhost_coverage.py takes a port's construct table
+// straight off the `value_str(value_field(n, "kind"))` spellings: reading a
+// `subscribe` or `stream-iter` discriminant here would move them out of the
+// blind-spot ledger's `unported` baseline and claim a stream port. A marker is
+// a refusal, not an implementation.
+//
+// The observable arm also subsumes item 130's STREAM DIVERSION, which the
+// suppression used to leave silent: a document that holds a stream is sent to
+// the reference's live path even when it carries top-level declarations, which
+// a typed-event program always does (the event's record declaration is what
+// puts a `types` entry in the document). Its components have bodies, so they
+// are observable, so they are named now, without this file reading a single
+// stream spelling.
+//
+// Markers are one per entry, in document order — the same total-dispatch
+// convention every expression- and step-level arm in this file already uses.
+fn carries_pure_declarations(ir: Any) -> Bool {
+  if (value_list(value_field(ir, "functions")).length() > 0) { return true }
+  if (value_keys(value_field(ir, "types")).length() > 0) { return true }
+  return value_list(value_field(ir, "externs")).length() > 0
+}
+
+// The reference's `_component_is_observable`: does routing past this component
+// lose something the author wrote? An activation step or a provide method puts
+// something in the component's `body`; an empty `component C { }` renders to
+// nothing anyone can call. The reference's own helper also walks a `provides`
+// entry for `methods`, which is unreachable on a frontend-produced document:
+// a `provides` clause with no `provide` block is refused at compile time (A9)
+// and a provide method IS a `body` step, so the length of `body` is the whole
+// predicate here.
+fn component_is_observable(c: Any) -> Bool {
+  return value_list(value_field(c, "body")).length() > 0
+}
+
+fn any_component_is_observable(comps: List[Any]) -> Bool {
+  for (c of comps) {
+    if (component_is_observable(c)) { return true }
+  }
+  return false
+}
+
+pub fn uncarried_components(ir: Any) -> List[Str] {
+  let comps = value_list(value_field(ir, "components"))
+  if (comps.length() == 0) { return [] }
+  let has_tests = value_list(value_field(ir, "tests")).length() > 0
+  if (carries_pure_declarations(ir) && !has_tests
+      && !any_component_is_observable(comps)) { return [] }
+  var out = []
+  for (c of comps) {
+    out = out.push(`<<UNSUPPORTED-COMPONENT:${value_str(value_field(c, "name"))}>>`)
+  }
+  return out
+}
+
+// ------------------------------------------ the deferred fault-test section
+// Plain in-file `test` blocks are emitted (`emit_tests`). A `fault test` is
+// not: the reference refuses the document, and this port names each entry
+// instead of dropping the section in silence (issue #1123, which measured all
+// six self-host emitters doing exactly that).
+//
+// Nothing here reads the per-test lifecycle discriminant that tells a
+// `lifecycle test` from a plain one. `tools/selfhost_coverage.py` reads "this tier ports construct X"
+// straight off the boolean-flag read spelling in the self-host source, so
+// branching on that flag here would claim a port of the lifecycle-driver arm
+// this slice does not have, and would move that tier/construct pair out of the
+// ledger's `unported` baseline on the strength of a marker. A marker is a
+// refusal, not an implementation; it says only what it knows. (That scan is
+// over the raw file text, comments included, so naming the spelling in prose
+// registers it too, which is why this note does not.)
+pub fn deferred_test_markers(ir: Any) -> List[Str] {
+  var out = []
+  for (t of value_list(value_field(ir, "fault_tests"))) {
+    out = out.push(`<<UNSUPPORTED-FAULT-TEST:${value_str(value_field(t, "name"))}>>`)
+  }
+  return out
+}
+
+// `_refuse_deferred_emissions`: a CALL to a `deferred` emission extern, in any
+// position inside a component, needs a session owner runtime this tier does
+// not have, so the reference refuses the document. The port names each
+// reached call, component first, on every path (issue #2316). A declared but
+// never-called deferred extern is not named, as on the reference.
+pub fn deferred_emission_markers(ir: Any) -> List[Str] {
+  // Read through `list_contains` and `flag_of`, like the other declines:
+  // tools/selfhost_coverage.py reads an inline comparison as a port.
+  var deferred = []
+  for (e of value_list(value_field(ir, "externs"))) {
+    if (list_contains(["emission"], value_str(value_field(e, "class"))) && flag_of(e, "deferred")) {
+      deferred = deferred.push(value_str(value_field(e, "name")))
+    }
+  }
+  var out = []
+  if (deferred.length() == 0) { return out }
+  for (c of value_list(value_field(ir, "components"))) {
+    let cname = value_str(value_field(c, "name"))
+    for (n of walk_nodes(c)) {
+      let name = value_str(value_field(n, "name"))
+      let mark = `<<UNSUPPORTED-DEFERRED-EMISSION:${cname}.${name}>>`
+      if (node_kind(n) == "fn" && list_contains(deferred, name) && !list_contains(out, mark)) {
+        out = out.push(mark)
+      }
+    }
+  }
+  return out
+}
+
+// ------------------------------------------------------- the IR text probes
+// The reference gates the Opt / Result / Map preambles on substrings of
+// `json.dumps({types, functions, externs, tests})`. A probe that only names
+// ASCII and no quote is a substring of that text exactly when it is a
+// substring of one of its keys or string values, so these walk those.
+pub fn ir_text_has(node: Any, needles: List[Str]) -> Bool {
+  let shape = value_kind(node)
+  if (shape == "str") { return text_has_any(value_str(node), needles) }
+  if (shape == "record") {
+    for (key of value_keys(node)) {
+      if (text_has_any(key, needles)) { return true }
+      if (ir_text_has(value_field(node, key), needles)) { return true }
+    }
+    return false
+  }
+  for (child of value_children(node)) { if (ir_text_has(child, needles)) { return true } }
+  return false
+}
+
+pub fn text_has_any(text: Str, needles: List[Str]) -> Bool {
+  for (n of needles) { if (text.indexOf(n) >= 0) { return true } }
+  return false
+}
+
+// `'"maplit"' in blob`: a key or a string value that IS one of `words`.
+pub fn ir_text_is(node: Any, words: List[Str]) -> Bool {
+  let shape = value_kind(node)
+  if (shape == "str") { return list_contains(words, value_str(node)) }
+  if (shape == "record") {
+    for (key of value_keys(node)) {
+      if (list_contains(words, key)) { return true }
+      if (ir_text_is(value_field(node, key), words)) { return true }
+    }
+    return false
+  }
+  for (child of value_children(node)) { if (ir_text_is(child, words)) { return true } }
+  return false
+}
+
+// `'"method": "set"' in blob`: a record whose `method` is one of `methods`.
+pub fn ir_has_method(node: Any, methods: List[Str]) -> Bool {
+  if (value_kind(node) == "record") {
+    let m = value_field(node, "method")
+    if (value_kind(m) == "str" && list_contains(methods, value_str(m))) { return true }
+  }
+  for (child of value_children(node)) { if (ir_has_method(child, methods)) { return true } }
+  return false
+}
+
+// The live stc-go tier: an ir_version 1/2 document never reaches the pure
+// typed-core path this file mirrors (the reference renders a whole stc-go
+// module for it), so the port names the routing instead of answering with a
+// bare banner.
+pub fn live_tier_markers(ir: Any) -> List[Str] {
+  let ver = value_int(value_field(ir, "ir_version"))
+  if (ver == 3) { return [] }
+  var out = [`<<UNSUPPORTED-LIVE-TIER:ir_version ${ver}>>`]
+  for (c of value_list(value_field(ir, "components"))) {
+    out = out.push(`<<UNSUPPORTED-COMPONENT:${value_str(value_field(c, "name"))}>>`)
+  }
+  return out
+}
+
+// item 388 stage 6: the reference collapses a caller-decided-colour extern's
+// sync clone (`X_revl_sync`, same bodies as its twin `X`) into `X` and rewrites
+// its call sites. This port does not rewrite the IR, so it names the clone.
+pub fn colour_clone_markers(externs: List[Any]) -> List[Str] {
+  var out = []
+  for (e of externs) {
+    let name = value_str(value_field(e, "name"))
+    if (name.endsWith("_revl_sync")) {
+      let origin = name.slice(0, name.length() - 10)
+      for (twin of externs) {
+        if (value_str(value_field(twin, "name")) == origin) {
+          out = out.push(`<<UNSUPPORTED-EXTERN-COLOUR-CLONE:${name}>>`)
+        }
+      }
+    }
+  }
+  return out
+}
+
+pub fn has_text(lines: List[Str], needle: Str) -> Bool {
+  for (l of lines) { if (l.indexOf(needle) >= 0) { return true } }
+  return false
+}
+
+// ======================================== the v3 COMBINED path (issue #106)
+// `_emit_v3_combined`: a v3 document whose top-level declarations sit beside
+// an OBSERVABLE component renders both tiers in one package, the pure
+// typed-core tier above and the live stc-go components below. This slice
+// ports the documents whose components only `provide` methods of `emit`
+// steps (a site `compensate` clause parked on the activation frame included)
+// and at most one closing `return`, over the component expression renderer
+// (declared records and variants, field reads, a variant `match`, the stdlib
+// builtins and `${..}` interpolation, `config.<f>` included), with or without
+// `requires`, a `config` block, `isolate` and `intercept`. Anything past it keeps the
+// `<<UNSUPPORTED-COMPONENT:..>>` markers (`combined_ok` decides).
+
+// `_GO_KEYWORDS` / `_safe_local`: the component tier's own rename, smaller than
+// `v3_ident`'s reserved set, and injective the same way (the `kw`/`kw_` ladder
+// shifts up one rung).
+fn is_go_keyword(name: Str) -> Bool {
+  return list_contains(["type", "range", "func", "map", "chan", "select", "go",
+                        "defer", "return", "var", "const", "package", "import"], name)
+}
+
+// issue #3053: the lifecycle driver's own names; go renames the USER binding.
+// issue #3095 adds the component activation/provide-impl scaffolding a
+// `let-effect` bind shares scope with. Mirrors backends/go/emit.py.
+fn is_emitter_reserved(name: Str) -> Bool {
+  return list_contains(["revlT", "root", "_fibers", "_revlLoadOrder", "_revlAt",
+                        "_svc", "_err", "_r", "_ok",
+                        "ctx", "cfg", "err", "revlFrame", "revlJournal", "revlSelf",
+                        "_revlUi", "_revlApplyInv", "_revlApplyErr"], name)
+}
+
+fn safe_local(name: Str) -> Str {
+  var root = name
+  var go = true
+  while (go && root != "") {
+    if (is_go_keyword(root) || is_emitter_reserved(root)) { return name.concat("_") }
+    if (!root.endsWith("_")) { go = false } else { root = root.slice(0, root.length() - 1) }
+  }
+  return name
+}
+
+// `_lower_camel`: `camel` (the `_camel` extern above) with the first char lowered.
+fn lower_first(s: Str) -> Str {
+  let c = s == "" ? 0 : s.charCodeAt(0)
+  let upper = c >= 65 && c <= 90
+  return upper ? "abcdefghijklmnopqrstuvwxyz".charAt(c - 65).concat(s.slice(1, s.length())) : s
+}
+
+fn lower_camel(name: Str) -> Str { return lower_first(camel(name)) }
+fn key_var(name: Str) -> Str { return "_key".concat(camel(name)) }
+
+// `_go_type` in v3 mode: the component tier's VALUE-position spelling. Unlike
+// the pure tier's `go_type`, an Opt is a `*T` pointer and an undeclared name
+// is camel-cased rather than kept.
+fn comp_go_type(tv: Any, types: Any) -> Str {
+  let t = trim(value_str(tv))
+  if (t == "" || t == "Unit") { return "" }
+  if (t == "Str") { return "string" }
+  if (t == "Int") { return "int64" }
+  if (t == "Int32") { return "int32" }
+  if (t == "Float") { return "float64" }
+  if (t == "Bool") { return "bool" }
+  // issue #1892: `Any` erases to Go's `any`, and a Result parameter is the
+  // package's `RevlResult[T, E]` (return position spreads in `comp_go_return`)
+  if (t == "Any") { return "any" }
+  // issue #1923: `Value` is the stdlib erased-dynamic type, a reserved builtin
+  // that is never DECLARED, so it used to fall through to `camel` and print the
+  // surface spelling (`Value Value`) into a record that `go build` then rejected
+  // with `undefined: Value`. `any` is this tier's spelling of it, as for `Any`.
+  if (t == "Value") { return "any" }
+  if (t.startsWith("Result[") && t.endsWith("]")) {
+    let oe = split_top(t.slice(7, t.length() - 1), ",")
+    return `RevlResult[${comp_go_type(oe[0], types)}, ${comp_go_type(oe[1], types)}]`
+  }
+  if (t.startsWith("List[") && t.endsWith("]")) { return "[]".concat(comp_go_type(t.slice(5, t.length() - 1), types)) }
+  if (t.startsWith("Opt[") && t.endsWith("]")) { return "*".concat(comp_go_type(t.slice(4, t.length() - 1), types)) }
+  if (t.startsWith("Map[") && t.endsWith("]")) {
+    let kv = split_top(t.slice(4, t.length() - 1), ",")
+    return `map[${comp_go_type(kv[0], types)}]${comp_go_type(kv[1], types)}`
+  }
+  if (t == "Row") { return "Row" }
+  let ft = split_fn_type(t)
+  if (ft.length() > 0) {
+    let np = ft.length()
+    var ps = []
+    var i = 0
+    while (i < np - 1) { ps = ps.push(comp_go_type(ft[i], types)); i = i + 1 }
+    return rstrip(`func(${ps.join(", ")}) ${comp_go_return(erase_async(ft[np - 1]), types)}`)
+  }
+  // issue #2471: an applied generic variant is its Go instantiation
+  let av = applied_variant(t, gv_of(types))
+  if (av.generic) {
+    var rendered: List[Str] = []
+    for (a of av.args) {
+      let got = comp_go_type(a, types)
+      rendered = rendered.push(got == "" ? "struct{}" : got)
+    }
+    return `${v3_ident(av.head)}[${rendered.join(", ")}]`
+  }
+  return value_is_null(value_field(types, t)) ? camel(t) : v3_ident(t)
+}
+
+// `_go_return`: the RETURN-position spelling. Opt[T] -> `(T, bool)` and
+// Result[T, E] -> `(T, E, bool)`, the tuple convention of the live tier.
+fn comp_go_return(tv: Any, types: Any) -> Str {
+  let raw = value_str(tv)
+  if (raw == "") { return "" }
+  let t = trim(raw)
+  if (t.startsWith("Opt[") && t.endsWith("]")) { return `(${comp_go_type(t.slice(4, t.length() - 1), types)}, bool)` }
+  if (t.startsWith("Result[") && t.endsWith("]")) {
+    let oe = split_top(t.slice(7, t.length() - 1), ",")
+    return `(${comp_go_type(oe[0], types)}, ${comp_go_type(oe[1], types)}, bool)`
+  }
+  return comp_go_type(t, types)
+}
+
+fn is_tuple_surface(tv: Any) -> Bool {
+  let t = trim(value_str(tv))
+  return t.startsWith("Opt[") || t.startsWith("Result[")
+}
+
+// `_Env` inside a provide method: params are bare locals, a required key is a
+// field on the method receiver.
+type CEnv = { params: List[Str], reqs: List[Str], types: Any, vt: Map[Str, Str], fr: Map[Str, Str], rq: Any, services: Any, cfg: Map[Str, Str], et: Map[Str, Str] }
+
+fn comp_name_ref(env: CEnv, ident: Str) -> Str {
+  if (list_contains(env.params, ident)) { return safe_local(ident) }
+  if (list_contains(env.reqs, ident)) { return "revlSelf.".concat(lower_camel(ident)) }
+  return safe_local(ident)
+}
+
+fn ref_ident(n: Any) -> Str {
+  let a = value_str(value_field(n, "name"))
+  return a != "" ? a : value_str(value_field(n, "id"))
+}
+
+fn with_vt(env: CEnv, name: Str, t: Str) -> CEnv {
+  return { params: env.params, reqs: env.reqs, types: env.types, vt: env.vt.set(name, t),
+           fr: env.fr, rq: env.rq, services: env.services, cfg: env.cfg, et: env.et }
+}
+
+// `env.var_types` replaced wholesale, for the untyped-empty-list forward pass.
+fn with_comp_vt(env: CEnv, vt: Map[Str, Str]) -> CEnv {
+  return { params: env.params, reqs: env.reqs, types: env.types, vt: vt,
+           fr: env.fr, rq: env.rq, services: env.services, cfg: env.cfg, et: env.et }
+}
+
+// `_go_v3_is_interface` over a component env's declared types.
+fn comp_is_interface(t: Str, types: Any) -> Bool {
+  // A generic applied variant (`Mb[Int]`, issue #2471) is outside this
+  // component slice, so the declared-name check is the whole variant arm.
+  let s = trim(t)
+  return s == "any" || (s.startsWith("Opt[") && s.endsWith("]"))
+    || (s.startsWith("Result[") && s.endsWith("]"))
+    || decl_kind(types, s) == "variant"
+}
+
+// ------------------------------------------- declared records and variants
+fn decl_kind(types: Any, name: Str) -> Str {
+  return value_str(value_field(value_field(types, name), "kind"))
+}
+
+// `_v3_record_type_for_fields`: the ONE declared record whose field set is
+// exactly `fields`, else "" (none, or more than one: the reference refuses
+// both by name).
+fn comp_record_for_fields(types: Any, fields: List[Str]) -> Str {
+  let want = sorted_key(fields)
+  var found = ""
+  var count = 0
+  for (name of value_keys(types)) {
+    if (decl_kind(types, name) == "record") {
+      if (sorted_key(value_keys(value_field(value_field(types, name), "fields"))) == want) {
+        found = name
+        count = count + 1
+      }
+    }
+  }
+  return count == 1 ? found : ""
+}
+
+fn record_field_names(n: Any) -> List[Str] {
+  var names = []
+  for (pair of value_list(value_field(n, "fields"))) { names = names.push(value_str(value_at(pair, 0))) }
+  return names
+}
+
+// `_v3_case_layout` and `_v3_case_payload` in one walk: the variant that
+// declares `case_name` and that case's payload surface, as [variant, payload],
+// or [] when no declared variant has it. With `adt` given only that variant is
+// searched; with "" the first declaring variant wins, as in the layout.
+fn case_entry(types: Any, adt: Str, case_name: Str) -> List[Str] {
+  for (name of value_keys(types)) {
+    if ((adt == "" || adt == name) && decl_kind(types, name) == "variant") {
+      for (c of value_list(value_field(value_field(types, name), "cases"))) {
+        if (value_str(value_field(c, "name")) == case_name) { return [name, value_str(value_field(c, "payload"))] }
+      }
+    }
+  }
+  return []
+}
+
+// The variant a case resolves against: `hint` when it is a declared variant
+// (the frozen node type, or the scrutinee's), else the case's own layout
+// entry. "" when neither declares it.
+fn case_variant_of(types: Any, hint: Str, case_name: Str) -> Str {
+  let e = case_entry(types, decl_kind(types, hint) == "variant" ? hint : "", case_name)
+  return e.length() > 0 ? e[0] : ""
+}
+
+fn case_payload(types: Any, adt: Str, case_name: Str) -> Str {
+  let e = case_entry(types, adt, case_name)
+  return e.length() > 0 ? e[1] : ""
+}
+
+// `_v3_comp_applied` (issue #2471): the instantiation (`Mb[Int]`) a
+// component-body construction of `case` builds when its variant is generic,
+// else "". The type arguments come from the flow target when it names the same
+// variant, else from the payload argument.
+fn comp_applied(env: CEnv, adt: Str, case: Str, expected: Str, arg_nodes: List[Any]) -> Str {
+  let gv = gv_of(env.types)
+  let av = applied_variant(adt, gv)
+  if (!av.generic) { return "" }
+  var bound: Map[Str, Str] = Map.empty()
+  let want = applied_variant(expected, gv)
+  if (want.generic && want.head == av.head) {
+    var i = 0
+    while (i < av.params.length() && i < want.args.length()) {
+      if (want.args[i] != "any") { bound = bound.set(av.params[i], want.args[i]) }
+      i = i + 1
+    }
+  }
+  let payload = case_payload(env.types, av.head, case)
+  if (arg_nodes.length() > 0 && payload != "") {
+    bound = v3_unify(payload, comp_infer(arg_nodes[0], env), av.params, bound)
+  }
+  var args: List[Str] = []
+  for (p of av.params) { args = args.push(bound.lookup(p) ?? "any") }
+  return `${av.head}[${args.join(", ")}]`
+}
+
+// `_v3_comp_case_type`: the Go case struct of `case` under `instance`:
+// `MbJj[int64]` for `Mb[Int]`, `StepFinal` for a monomorphic `Step`.
+fn comp_case_type(instance: Str, case: Str, types: Any) -> Str {
+  let gv = gv_of(types)
+  let av = applied_variant(instance, gv)
+  let head = av.generic ? av.head : instance
+  var struct = `${v3_ident(head)}${case}`
+  if (!av.generic) { return struct }
+  return struct.concat(variant_type_args(instance, gv))
+}
+
+// The variant an `adt` node constructs: the type the checker froze onto it,
+// else the layout's. "" when that is not a declared variant.
+fn adt_variant(n: Any, types: Any) -> Str {
+  return case_variant_of(types, value_str(value_field(n, "type")), value_str(value_field(n, "case")))
+}
+
+// A literal's surface type by its JSON shape ("" for a null). A table rather
+// than comparisons: tools/selfhost_coverage.py would read `.. == "bool"` as
+// the legacy `bool` node kind.
+fn lit_surface(shape: Str) -> Str {
+  let shapes = ["bool", "int", "float", "str"]
+  let surfaces = ["Bool", "Int", "Float", "Str", ""]
+  var i = 0
+  while (i < shapes.length() && shapes[i] != shape) { i = i + 1 }
+  return surfaces[i]
+}
+
+// ------------------------------------------------------ `_comp_infer`
+// The surface type of a component-body expression, "" when unknown. Mirrors
+// the arms of `_comp_infer` the slice can reach.
+fn comp_infer(n: Any, env: CEnv) -> Str {
+  let k = node_kind(n)
+  if (k == "lit") { return lit_surface(value_kind(value_field(n, "value"))) }
+  if (k == "name" || k == "var") { return map_get(env.vt, ref_ident(n)) }
+  if (k == "list") {
+    let items = value_list(value_field(n, "items"))
+    var item_types: List[Str] = []
+    for (it of items) { item_types = item_types.push(comp_infer(it, env)) }
+    // issue #2471: the first item whose generic variant arguments are all
+    // bound (`[Nn, Jj(4)]` is a `List[Mb[Int]]`)
+    let el = list_elem(item_types, gv_of(env.types))
+    return el == "" ? "List[Int]" : `List[${el}]`
+  }
+  if (k == "bin") {
+    if (list_contains(["==", "===", "!=", "!==", "<", ">", "<=", ">=", "&&", "||"], node_op(n))) { return "Bool" }
+    // `/` is true division and Float arithmetic answers a Float
+    // (docs/arithmetic.md), whatever the left operand's own type is.
+    let opnd = node_operands(n)
+    if (node_op(n) == "/" && list_contains(["Int", "Int32", "Float"], opnd)) { return "Float" }
+    if (list_contains(["+", "-", "*", "%"], node_op(n)) && opnd == "Float") { return "Float" }
+    let l = comp_infer(value_field(n, "left"), env)
+    return l != "" ? l : comp_infer(value_field(n, "right"), env)
+  }
+  if (k == "un") { return node_op(n) == "!" ? "Bool" : comp_infer(value_field(n, "operand"), env) }
+  if (k == "record") { return comp_record_for_fields(env.types, record_field_names(n)) }
+  if (k == "adt") {
+    let case = value_str(value_field(n, "case"))
+    let t = value_str(value_field(n, "type"))
+    let declared = t != "" ? t : case_variant_of(env.types, "", case)
+    // issue #2471: a construction of a generic variant answers its
+    // instantiation (from the frozen node type or the payload argument)
+    let inst = comp_applied(env, declared, case, "", value_list(value_field(n, "args")))
+    return inst != "" ? inst : declared
+  }
+  if (k == "fn") { return map_get(env.fr, value_str(value_field(n, "name"))) }
+  if (k == "builtin") { return builtin_ret_type(value_str(value_field(n, "method")), comp_infer(value_field(n, "target"), env)) }
+  if (k == "format") { return "Str" }
+  if (k == "config") { return map_get(env.cfg, value_str(value_field(n, "field"))) }
+  if (k == "call") {
+    let target = value_field(n, "target")
+    let svc = value_str(value_field(env.rq, value_str(value_field(target, "name"))))
+    let m = value_field(service_methods(env.services, svc), value_str(value_field(n, "method")))
+    return node_kind(target) == "req" ? value_str(value_field(m, "returns")) : ""
+  }
+  // a match's value is one of its arms', never its scrutinee's (issue #1834)
+  if (k == "match") { return comp_infer_match(n, env) }
+  if (k == "field") {
+    let tt = comp_infer(value_field(n, "target"), env)
+    let ft = value_str(value_field(value_field(value_field(env.types, tt), "fields"), value_str(value_field(n, "name"))))
+    return decl_kind(env.types, tt) == "record" ? ft : ""
+  }
+  return ""
+}
+
+// Does `_expr` in a provide method render this node in the ported subset? The
+// rest of the component expression surface (builtins, `??`, interpolation, an
+// Opt/Result `match`, an Opt/Result construction as a value) is outside it. A
+// literal renders through `go_literal`, the `_go_literal` port the extern
+// config defaults already use. Each arm is one boolean, so a declined document
+// costs no branch of its own.
+fn comp_expr_ok(n: Any, env: CEnv) -> Bool {
+  let k = node_kind(n)
+  if (k == "name" || k == "req" || k == "config") { return true }
+  if (k == "var") { return ref_ident(n) != "None" }
+  if (k == "lit") { return list_contains(["str", "int", "bool", "float"], value_kind(value_field(n, "value"))) }
+  if (k == "call") { return call_head_ok(n, env) && all_ok(value_list(value_field(n, "args")), env) }
+  if (k == "fn") { return all_ok(value_list(value_field(n, "args")), env) }
+  if (k == "bin") {
+    let op = node_op(n)
+    return op != "??" && go_bin_op(op) != "" && all_ok([value_field(n, "left"), value_field(n, "right")], env)
+  }
+  if (k == "un") { return list_contains(["!", "~", "-"], node_op(n)) && comp_expr_ok(value_field(n, "operand"), env) }
+  if (k == "if") { return all_ok([value_field(n, "cond"), value_field(n, "then"), value_field(n, "else")], env) }
+  if (k == "list") { return all_ok(value_list(value_field(n, "items")), env) }
+  if (k == "record") {
+    var values = []
+    for (pair of value_list(value_field(n, "fields"))) { values = values.push(value_at(pair, 1)) }
+    return comp_record_for_fields(env.types, record_field_names(n)) != "" && all_ok(values, env)
+  }
+  if (k == "adt") {
+    let adt = adt_variant(n, env.types)
+    let want = case_payload(env.types, adt, value_str(value_field(n, "case"))) == "" ? 0 : 1
+    let args = value_list(value_field(n, "args"))
+    return adt != "" && args.length() == want && all_ok(args, env)
+  }
+  if (k == "field") {
+    let target = value_field(n, "target")
+    let shape_ok = value_str(value_field(n, "name")) == "length"
+      || decl_kind(env.types, comp_infer(target, env)) == "record"
+    return shape_ok && comp_expr_ok(target, env)
+  }
+  if (k == "builtin") {
+    let recv = comp_infer(value_field(n, "target"), env)
+    return comp_builtin_ok(value_str(value_field(n, "method")), recv)
+      && comp_expr_ok(value_field(n, "target"), env) && all_ok(value_list(value_field(n, "args")), env)
+  }
+  if (k == "format") { return all_ok(value_list(value_field(n, "args")), env) }
+  return k == "match" && comp_match_ok(n, env)
+}
+
+// `_comp_builtin` for the methods this slice ports. A Map method, `Str.to_int`
+// (the Opt-returning parse) and the division forms are outside it.
+fn comp_builtin_ok(method: Str, recv: Str) -> Bool {
+  let ported = ["length", "push", "concat", "slice", "indexOf", "split", "join", "repeat", "charAt",
+                "charCodeAt", "codepoint_at", "startsWith", "endsWith", "to_int", "to_int32", "to_str",
+                "to_char"]
+  return list_contains(ported, method) && !(method == "to_int" && recv == "Str")
+}
+
+// `_comp_builtin(method, recv, target, args)`: the revl* helper, `strings`
+// probe or `strconv` rendering for one stdlib call. A Str receiver picks the
+// Str helper where the List one shares the method name. Every builtin pulls
+// the stdlib preamble in (`_COMP_NEEDS_STDLIB`), so the text carries the mark
+// `emit_module` reads.
+fn comp_builtin(method: Str, recv: Str, target: Str, args: List[Str]) -> Str {
+  let kind = recv == "Str" ? "Str" : "List"
+  let a0 = args.length() > 0 ? args[0] : ""
+  let a1 = args.length() > 1 ? args[1] : ""
+  let one = ["concat", "indexOf"]
+  var text = ""
+  if (method == "length") { text = `revl${kind}Len(${target})` }
+  if (list_contains(one, method)) { text = `revl${kind}${upper_first(method)}(${target}, ${a0})` }
+  if (method == "slice") { text = `revl${kind}Slice(${target}, ${a0}, ${a1})` }
+  if (method == "push") { text = `revlListPush(${target}, ${a0})` }
+  if (method == "join") { text = `revlJoin(${target}, ${a0})` }
+  let str_helpers = ["split", "repeat", "charAt", "charCodeAt", "codepoint_at"]
+  let str_names = ["revlStrSplit", "revlStrRepeat", "revlStrCharAt", "revlStrCharCodeAt", "revlStrCharCodeAt"]
+  var i = 0
+  while (i < str_helpers.length()) {
+    if (str_helpers[i] == method) { text = `${str_names[i]}(${target}, ${a0})` }
+    i = i + 1
+  }
+  if (method == "startsWith") { text = `strings.HasPrefix(${target}, ${a0})` }
+  if (method == "endsWith") { text = `strings.HasSuffix(${target}, ${a0})` }
+  if (method == "to_int") { text = `int64(${target})` }
+  if (method == "to_int32") { text = flagged("n", `revlToI32(${target})`) }
+  if (method == "to_char") { text = `func(n int64) string { if n < 0 || n > 0x10FFFF || (n >= 0xD800 && n <= 0xDFFF) { return "" }; return string(rune(n)) }(${target})` }
+  // an Int32 receiver is the reference's own guard; the checker admits
+  // `to_str` on Int and Float only
+  if (method == "to_str") {
+    text = flagged("s", recv == "Float" ? `strconv.FormatFloat(${target}, 'g', -1, 64)`
+      : (recv == "Int32" ? `strconv.FormatInt(int64(${target}), 10)` : `strconv.FormatInt(${target}, 10)`))
+  }
+  return marked(text)
+}
+
+fn is_ascii_digit(ch: Str) -> Bool {
+  let c = ch == "" ? 0 : ch.charCodeAt(0)
+  return c >= 48 && c <= 57
+}
+
+// `_format(template, args, arg_types)`: a `$N` template as a Go string. With
+// every operand's surface type known it is a `+` chain of string pieces (a Str
+// as is, an Int or Int32 through `strconv.FormatInt`, a Bool through
+// `strconv.FormatBool`); otherwise `fmt.Sprintf` with `%v`. The k-th
+// placeholder takes the k-th argument, whatever its digits say.
+fn comp_format(n: Any, env: CEnv) -> Str {
+  let template = value_str(value_field(n, "template"))
+  var args = []
+  var types = []
+  for (a of value_list(value_field(n, "args"))) {
+    args = args.push(comp_expr(a, env, ""))
+    types = types.push(comp_infer(a, env))
+  }
+  var out = ""
+  var pieces = []
+  var text = ""
+  var used = 0
+  var typed = true
+  var i = 0
+  let len = template.length()
+  while (i < len) {
+    let c = template.charAt(i)
+    if (c == "$" && i + 1 < len && is_ascii_digit(template.charAt(i + 1))) {
+      var j = i + 1
+      while (j < len && is_ascii_digit(template.charAt(j))) { j = j + 1 }
+      out = out.concat("%v")
+      i = j
+      let at = used < types.length() ? types[used] : ""
+      let arg = used < args.length() ? args[used] : ""
+      typed = typed && used < args.length() && list_contains(["Str", "Int", "Int32", "Bool"], at)
+      if (used < args.length() && text != "") {
+        pieces = pieces.push(go_string(text))
+        text = ""
+      }
+      if (at == "Str") { pieces = pieces.push(arg) }
+      if (at == "Int") { pieces = pieces.push(flagged("s", `strconv.FormatInt(${arg}, 10)`)) }
+      if (at == "Int32") { pieces = pieces.push(flagged("s", `strconv.FormatInt(int64(${arg}), 10)`)) }
+      if (at == "Bool") { pieces = pieces.push(flagged("s", `strconv.FormatBool(${arg})`)) }
+      used = used + 1
+    } else {
+      out = out.concat(c == "%" ? "%%" : c)
+      text = text.concat(c)
+      i = i + 1
+    }
+  }
+  if (text != "") { pieces = pieces.push(go_string(text)) }
+  let fmt_str = go_string(out)
+  if (args.length() == 0) { return `fmt.Sprintf(${fmt_str})` }
+  if (typed && used == args.length()) { return pieces.length() == 1 ? pieces[0] : `(${pieces.join(" + ")})` }
+  return `fmt.Sprintf(${fmt_str}, ${args.join(", ")})`
+}
+
+// The callee or receiver of a call. A built-in Opt/Result constructor as a
+// bare value is refused; it is matched by list rather than by the comparison
+// the blind-spot gate (tools/selfhost_coverage.py) reads as a ported arm.
+fn call_head_ok(n: Any, env: CEnv) -> Bool {
+  let callee = value_field(n, "callee")
+  if (value_is_null(callee)) { return comp_expr_ok(value_field(n, "target"), env) }
+  if (node_kind(callee) == "field") { return comp_expr_ok(value_field(callee, "target"), env) }
+  return !list_contains(["Some", "None", "Ok", "Err"], ref_ident(callee)) && comp_expr_ok(callee, env)
+}
+
+fn all_ok(nodes: List[Any], env: CEnv) -> Bool {
+  var ok = true
+  for (x of nodes) { ok = ok && comp_expr_ok(x, env) }
+  return ok
+}
+
+// A `match` over a declared variant (the type switch). An Opt/Result scrutinee
+// takes the tuple form, which is outside the slice. A bound payload's type
+// stays visible to the later arms, as it does when the match renders.
+fn comp_match_ok(n: Any, env: CEnv) -> Bool {
+  let scrut = value_field(n, "scrutinee")
+  let st = comp_infer(scrut, env)
+  var ok = comp_expr_ok(scrut, env) && !st.startsWith("Opt[") && !st.startsWith("Result[")
+  var e = env
+  let gav = applied_variant(st, gv_of(env.types))
+  for (arm of value_list(value_field(n, "arms"))) {
+    let pattern = value_str(value_field(arm, "pattern"))
+    let bind = value_str(value_field(arm, "bind"))
+    var adt = case_variant_of(env.types, st, pattern)
+    var payload = case_payload(env.types, adt, pattern)
+    // issue #2471: an arm over an applied generic variant binds the
+    // substituted payload type
+    if (gav.generic && pattern != "_") {
+      adt = gav.head
+      payload = v3_subst(payload, pair_map(gav.params, gav.args))
+    }
+    let binds = bind != "" && bind != "_" && pattern != "_"
+    ok = ok && (pattern == "_" || adt != "") && (!binds || payload != "")
+    if (binds) { e = with_vt(e, bind, payload) }
+    ok = ok && comp_expr_ok(value_field(arm, "body"), e)
+  }
+  return ok
+}
+
+// `_expr(node, env, expected)` over that subset. A `widen` marker is the
+// explicit Int -> Float conversion, rendered around the node it marks.
+fn comp_expr(n: Any, env: CEnv, expected: Str) -> Str {
+  if (value_str(value_field(n, "widen")) == "Float") {
+    return `float64(${comp_expr_bare(n, env, expected)})`
+  }
+  return comp_expr_bare(n, env, expected)
+}
+
+fn comp_args(n: Any, env: CEnv) -> Str {
+  var parts = []
+  for (a of value_list(value_field(n, "args"))) { parts = parts.push(comp_expr(a, env, "")) }
+  return parts.join(", ")
+}
+
+// The `if`/`match` result type: the expected surface's Go spelling when there
+// is one, else the first of `candidates` that has one, else `any`.
+fn result_go_type(expected: Str, candidates: List[Any], env: CEnv) -> Str {
+  var gt = ""
+  for (c of candidates) { if (gt == "") { gt = comp_go_type(comp_infer(c, env), env.types) } }
+  if (expected != "") { gt = comp_go_type(expected, env.types) }
+  return gt == "" && expected == "" ? "any" : gt
+}
+
+// `_comp_typed_arith`: an arithmetic node keys on its `operands` as a `fn`
+// body's does (docs/arithmetic.md). Int `+ - *` trap through the checked
+// helpers (issue #2259), `/` is true division through `revlDiv`, a Float `%`
+// is `math.Mod`, and an Int operand of Float arithmetic widens (issue #2198).
+fn comp_typed_arith(n: Any, left: Str, right: Str, env: CEnv) -> Str {
+  let op = node_op(n)
+  let opnd = node_operands(n)
+  var l = left
+  var r = right
+  if (opnd == "Float") {
+    if (list_contains(["Int", "Int32"], comp_infer(value_field(n, "left"), env))) { l = `float64(${l})` }
+    if (list_contains(["Int", "Int32"], comp_infer(value_field(n, "right"), env))) { r = `float64(${r})` }
+  }
+  if (opnd == "Int" && list_contains(["+", "-", "*"], op)) {
+    var h = "revlMul"
+    if (op == "+") { h = "revlAdd" }
+    if (op == "-") { h = "revlSub" }
+    return flagged("a", `${h}(${l}, ${r})`)
+  }
+  if (opnd == "Int32" && list_contains(["+", "-", "*"], op)) {
+    var h = "revlMulI32"
+    if (op == "+") { h = "revlAddI32" }
+    if (op == "-") { h = "revlSubI32" }
+    return flagged("i", `${h}(${l}, ${r})`)
+  }
+  if (op == "/" && list_contains(["Int", "Int32", "Float"], opnd)) {
+    return flagged("d", opnd == "Float" ? `revlDiv(${l}, ${r})` : `revlDiv(float64(${l}), float64(${r}))`)
+  }
+  if (op == "%" && opnd == "Float") { return flagged("m", `math.Mod(${l}, ${r})`) }
+  return `(${l} ${go_bin_op(op)} ${r})`
+}
+
+fn comp_expr_bare(n: Any, env: CEnv, expected: Str) -> Str {
+  let k = node_kind(n)
+  if (k == "name") { return comp_name_ref(env, value_str(value_field(n, "id"))) }
+  if (k == "var") { return comp_name_ref(env, ref_ident(n)) }
+  if (k == "req") { return "revlSelf.".concat(lower_camel(value_str(value_field(n, "name")))) }
+  if (k == "config") { return "revlSelf.cfg.".concat(camel(value_str(value_field(n, "field")))) }
+  if (k == "lit") { return go_literal(value_field(n, "value")) }
+  if (k == "call") {
+    let callee = value_field(n, "callee")
+    if (!value_is_null(callee)) {
+      if (node_kind(callee) == "field") {
+        return `${comp_expr(value_field(callee, "target"), env, "")}.${camel(value_str(value_field(callee, "name")))}(${comp_args(n, env)})`
+      }
+      return `${comp_expr(callee, env, "")}(${comp_args(n, env)})`
+    }
+    let target = comp_expr(value_field(n, "target"), env, "")
+    return `${target}.${camel(value_str(value_field(n, "method")))}(${comp_args(n, env)})`
+  }
+  if (k == "fn") { return `${v3_ident(value_str(value_field(n, "name")))}(${comp_args(n, env)})` }
+  if (k == "bin") {
+    let op = node_op(n)
+    let l = comp_expr(value_field(n, "left"), env, "")
+    let r = comp_expr(value_field(n, "right"), env, "")
+    if (op == "<<" || op == ">>") { return `(${l} ${op} (uint32(${r}) & 31))` }
+    return comp_typed_arith(n, l, r, env)
+  }
+  if (k == "un") {
+    let operand = comp_expr(value_field(n, "operand"), env, "")
+    let op = node_op(n)
+    if (op == "!") { return `(!${operand})` }
+    if (op == "~") { return `(^${operand})` }
+    if (node_operands(n) == "Int") { return flagged("a", `revlSub(0, ${operand})`) }
+    if (node_operands(n) == "Int32") { return flagged("i", `revlSubI32(0, ${operand})`) }
+    return `(-${operand})`
+  }
+  if (k == "if") {
+    let gt = result_go_type(expected, [value_field(n, "then"), value_field(n, "else")], env)
+    let c = comp_expr(value_field(n, "cond"), env, "")
+    let th = comp_expr(value_field(n, "then"), env, expected)
+    let el = comp_expr(value_field(n, "else"), env, expected)
+    return `func() ${gt} { if ${c} { return ${th} }; return ${el} }()`
+  }
+  if (k == "list") {
+    var elem = ""
+    let items = value_list(value_field(n, "items"))
+    if (expected.startsWith("List[") && expected.endsWith("]")) { elem = expected.slice(5, expected.length() - 1) }
+    if (elem == "" && items.length() > 0) {
+      var item_types: List[Str] = []
+      for (it of items) { item_types = item_types.push(comp_infer(it, env)) }
+      // issue #2471: the first item whose generic variant arguments are all
+      // bound (`[Nn, Jj(4)]` is a `List[Mb[Int]]`)
+      elem = list_elem(item_types, gv_of(env.types))
+    }
+    var go_elem = "any"
+    if (elem != "") { go_elem = comp_go_type(elem, env.types) }
+    var parts = []
+    // the element type is each item's flow target, so a nullary `Nn` in
+    // `[Jj(n), Nn]` builds an `MbNn[int64]` (issue #2471)
+    for (it of items) { parts = parts.push(comp_expr(it, env, elem)) }
+    return `[]${go_elem}{${parts.join(", ")}}`
+  }
+  if (k == "record") {
+    let tname = v3_ident(comp_record_for_fields(env.types, record_field_names(n)))
+    var parts = []
+    for (pair of value_list(value_field(n, "fields"))) {
+      parts = parts.push(`${camel(value_str(value_at(pair, 0)))}: ${comp_expr(value_at(pair, 1), env, "")}`)
+    }
+    return `${tname}{${parts.join(", ")}}`
+  }
+  if (k == "adt") {
+    let adt = adt_variant(n, env.types)
+    let case = value_str(value_field(n, "case"))
+    let arg_nodes = value_list(value_field(n, "args"))
+    // issue #2471: a generic variant construction names its instantiation
+    // (`MbJj[int64]{..}`), and one whose type argument nothing pins is refused
+    // by name rather than emitted as a package that does not build
+    let inst = comp_applied(env, adt, case, expected, arg_nodes)
+    let refusal = unbound_refusal(inst, case, gv_of(env.types))
+    if (refusal != "") { return refusal }
+    var struct_name = `${v3_ident(adt)}${case}`
+    if (inst != "") { struct_name = comp_case_type(inst, case, env.types) }
+    var payload = case_payload(env.types, adt, case)
+    if (inst != "") {
+      let av = applied_variant(inst, gv_of(env.types))
+      payload = v3_subst(payload, pair_map(av.params, av.args))
+    }
+    if (payload == "") { return `${struct_name}{}` }
+    var parts: List[Str] = []
+    for (a of arg_nodes) { parts = parts.push(comp_expr(a, env, payload)) }
+    return `${struct_name}{Value: ${parts.join(", ")}}`
+  }
+  if (k == "builtin") {
+    let target_node = value_field(n, "target")
+    var args = []
+    for (a of value_list(value_field(n, "args"))) { args = args.push(comp_expr(a, env, "")) }
+    return comp_builtin(value_str(value_field(n, "method")), comp_infer(target_node, env),
+                        comp_expr(target_node, env, ""), args)
+  }
+  if (k == "format") { return comp_format(n, env) }
+  if (k == "field") {
+    let target_node = value_field(n, "target")
+    var target = comp_expr(target_node, env, "")
+    if (value_str(value_field(n, "name")) == "length") {
+      if (comp_infer(target_node, env) == "Str") { return marked(`revlStrLen(${target})`) }
+      return marked(`revlListLen(${target})`)
+    }
+    if (!list_contains(["name", "var", "call", "host", "instance-get", "index", "field"], node_kind(target_node))) {
+      target = `(${target})`
+    }
+    return `${target}.${camel(value_str(value_field(n, "name")))}`
+  }
+  // the match arm (`comp_expr_ok` admits no other kind)
+  return comp_match(n, env, expected)
+}
+
+// `_go_comp_match` over a declared variant: an immediately applied func whose
+// type switch returns each arm's body. A bound payload's type is visible to
+// every later arm too, as on the reference (its `var_types` is restored only
+// after the whole match).
+// `_comp_infer_match`: the first arm whose body infers a type, with the arm's
+// binding in scope (issue #1834). The slice declines an Opt or Result
+// scrutinee, so a binding is a declared variant's payload or, for `_`, the
+// scrutinee itself (`_comp_arm_binding`).
+fn comp_infer_match(n: Any, env: CEnv) -> Str {
+  let st = comp_infer(value_field(n, "scrutinee"), env)
+  var found = ""
+  for (arm of value_list(value_field(n, "arms"))) {
+    let pattern = value_str(value_field(arm, "pattern"))
+    let bind = value_str(value_field(arm, "bind"))
+    var adt = decl_kind(env.types, st) != "" ? st : case_variant_of(env.types, "", pattern)
+    var bound = pattern == "_" ? st : case_payload(env.types, adt, pattern)
+    // issue #2471: an arm over an applied generic variant binds the
+    // substituted payload type
+    let gav = applied_variant(st, gv_of(env.types))
+    if (gav.generic && pattern != "_") {
+      adt = gav.head
+      bound = v3_subst(case_payload(env.types, adt, pattern), pair_map(gav.params, gav.args))
+    }
+    let e = bind != "" && bind != "_" && bound != "" ? with_vt(env, bind, bound) : env
+    found = found != "" ? found : comp_infer(value_field(arm, "body"), e)
+  }
+  return found
+}
+
+fn comp_match(n: Any, env: CEnv, expected: Str) -> Str {
+  let scrut_node = value_field(n, "scrutinee")
+  let st = comp_infer(scrut_node, env)
+  let arms = value_list(value_field(n, "arms"))
+  var bodies = []
+  for (arm of arms) { bodies = bodies.push(value_field(arm, "body")) }
+  var exp_t = expected != "" ? comp_go_type(expected, env.types) : ""
+  for (b of bodies) { if (exp_t == "") { exp_t = comp_go_type(comp_infer(b, env), env.types) } }
+  exp_t = exp_t == "" ? "any" : exp_t
+  let scrutinee = comp_expr(scrut_node, env, st)
+  // issue #1834: a scrutinee that is not a bare name (a case built in place)
+  // is bound to an interface-typed temp first, as the pure tier does (item 313)
+  let bare = list_contains(["var", "name"], node_kind(scrut_node))
+  var first_case = ""
+  for (arm of arms) {
+    let pc = case_variant_of(env.types, "", value_str(value_field(arm, "pattern")))
+    first_case = first_case != "" ? first_case : pc
+  }
+  let gav = applied_variant(st, gv_of(env.types))
+  // issue #2471: an applied generic variant is its own interface
+  // instantiation (`Mb[int64]`), not the bare declaration
+  let iface = gav.generic ? st : (decl_kind(env.types, st) != "" ? st : first_case)
+  let iface_t = comp_go_type(iface, env.types)
+  var lines = bare ? [`func() ${exp_t} {`] : [`func() ${exp_t} {`, line(1, `var _s ${iface_t == "" ? "any" : iface_t} = ${scrutinee}`)]
+  lines = lines.push(line(1, `switch _m := ${bare ? scrutinee : "_s"}.(type) {`))
+  var has_wild = false
+  var e = env
+  for (arm of arms) {
+    let pattern = value_str(value_field(arm, "pattern"))
+    if (pattern == "_") {
+      has_wild = true
+      lines = lines.push(line(1, "default:")).push(line(2, "_ = _m"))
+      lines = lines.push(line(2, `return ${comp_expr(value_field(arm, "body"), e, expected)}`))
+    } else {
+      let adt = case_variant_of(env.types, st, pattern)
+      // issue #2471: the case struct of an applied generic variant is
+      // instantiated like the scrutinee (`MbJj[int64]` under `Mb[Int]`), and
+      // the bound payload takes the substituted type
+      var case_type = `${v3_ident(adt)}${pattern}`
+      var payload = case_payload(env.types, adt, pattern)
+      if (gav.generic) {
+        let inst = `${gav.head}[${gav.args.join(", ")}]`
+        case_type = `${v3_ident(gav.head)}${pattern}${variant_type_args(inst, gv_of(env.types))}`
+        payload = v3_subst(payload, pair_map(gav.params, gav.args))
+      }
+      lines = lines.push(line(1, `case ${case_type}:`))
+      let bind = value_str(value_field(arm, "bind"))
+      if (bind != "" && bind != "_") {
+        e = with_vt(e, bind, payload)
+        lines = lines.push(line(2, `${safe_local(bind)} := _m.Value`)).push(line(2, `_ = ${safe_local(bind)}`))
+      } else {
+        lines = lines.push(line(2, "_ = _m"))
+      }
+      lines = lines.push(line(2, `return ${comp_expr(value_field(arm, "body"), e, expected)}`))
+    }
+  }
+  if (!has_wild) {
+    lines = lines.push(line(1, "default:")).push(line(2, "_ = _m")).push(line(2, `panic("unreachable: non-exhaustive match")`))
+  }
+  lines = lines.push(line(1, "}")).push("}()")
+  return lines.join(newline())
+}
+
+// The service a provide block implements, and its declared method table.
+fn service_methods(services: Any, svc: Str) -> Any {
+  return value_field(value_field(services, svc), "methods")
+}
+
+// ---------------------------------- untyped empty lists in a provide body
+// `_method_flow_hints` + `_empty_list_type`: the same evidence analysis over
+// `_comp_infer`, keyed by name (the component tier's hints carry no binding
+// keys, as in the reference) and with `appends` false: a method body's `push`
+// is a call, not the pure tier's `append`, so nothing may be sized only.
+fn method_add_read(acc: HintAcc, key: Str, kind: Str, other: Str) -> HintAcc {
+  return { acc | reads = acc.reads.push([key, kind, other]) }
+}
+
+fn method_reads(node: Any, acc: HintAcc, pos: Str, other: Str, env: CEnv) -> HintAcc {
+  if (value_kind(node) == "list") {
+    var la = acc
+    for (child of value_list(node)) { la = method_reads(child, la, "other", "", env) }
+    return la
+  }
+  if (value_kind(node) != "record") { return acc }
+  let ref = local_ref_of(node)
+  if (ref != "") { return method_add_read(acc, ref, pos, other) }
+  var a = acc
+  let k = node_kind(node)
+  if (k == "builtin" && value_str(value_field(node, "method")) == "length") {
+    a = method_reads(value_field(node, "target"), a, "length", "", env)
+    return method_reads(value_field(node, "args"), a, "other", "", env)
+  }
+  for (child of value_children(node)) { a = method_reads(child, a, "other", "", env) }
+  return a
+}
+
+// The body is the slice's flat one (`emit` steps and a final `return` beside
+// `let`/`var` bindings), so the forward typing and the push/reassign evidence
+// are collected in one pass over the top-level steps, in document order.
+fn method_scan(body: List[Any], ret_surface: Str, env: CEnv) -> HintScan {
+  var a = empty_acc(Map.empty())
+  for (st of body) {
+    let step = node_step(st)
+    if (step == "let" || step == "var") {
+      let nm = value_str(value_field(st, "name"))
+      let v = value_field(st, "value")
+      a = method_reads(v, a, "other", "", env)
+      let pin = empty_list_pin(v)
+      if (untyped_empty_list(v)) { a = { a | empties = a.empties.push(nm) } }
+      if (pin != "") {
+        if (!a.scratch.has(nm)) { a = { a | scratch = a.scratch.set(nm, pin) } }
+      } else if (!is_empty_list_lit(v)) {
+        let t = comp_infer(v, with_comp_vt(env, a.scratch))
+        if (t != "" && !has_any_word(t) && !a.scratch.has(nm)) {
+          a = { a | scratch = a.scratch.set(nm, t) }
+        }
+      }
+    } else if (step == "return") {
+      let e = value_field(st, "expr")
+      let r = local_ref_of(e)
+      if (ret_surface != "" && r != "") { a = { a | primary = a.primary.push([r, ret_surface]) } }
+      a = method_reads(e, a, "other", "", env)
+    } else {
+      a = method_reads(value_field(st, "expr"), a, "other", "", env)
+    }
+  }
+  return finish_scan(a, "List[Int]", false)
+}
+
+// Is this provide method an empty body or a single `return` the slice renders?
+fn provide_method_ok(m: Any, decl: Any, env: CEnv) -> Bool {
+  let steps = value_list(value_field(m, "body"))
+  var secret = false
+  for (p of value_list(value_field(decl, "params"))) { secret = secret || flag_of(p, "secret") }
+  // `emit` steps the slice renders, then at most one `return` (of nothing or of
+  // an expression the slice renders) as the last step
+  var body_ok = true
+  var i = 0
+  for (st of steps) {
+    let e = value_field(st, "expr")
+    let last = i == steps.length() - 1
+    body_ok = body_ok && (method_emit_ok(st, env) || method_let_ok(st, env)
+                          || (last && node_step(st) == "return" && (value_is_null(e) || comp_expr_ok(e, env))))
+    i = i + 1
+  }
+  return !is_tuple_surface(value_field(decl, "returns")) && !secret && body_ok
+}
+
+// A method-body `let`/`var` the slice renders: its value is an expression the
+// slice renders (an untyped `[]` included), so `_emit_method_body`'s let arm is
+// the only statement form this widens.
+fn method_let_ok(st: Any, env: CEnv) -> Bool {
+  let kind = node_step(st)
+  if (kind != "let" && kind != "var") { return false }
+  let v = value_field(st, "value")
+  // A binding whose value carries one of the sum surfaces is outside this
+  // slice. The reference's let arm pins it with `_go_v3_type` and only when
+  // the document declares a type (`_V3_TYPED_COMPONENTS and _V3_TYPES`), so
+  // the same document spells `r := ...` with no types and `RevlOpt[int64]`
+  // with one; the port's component spelling is `comp_go_type` (`*int64` for
+  // Opt, `RevlResult[...]` for Result) and its pin does not depend on the type
+  // table, so it would write a different literal either way. Declining the
+  // let names the component instead of emitting Go the reference does not.
+  let surface = comp_infer(v, env)
+  let sum = surface == "any" || (surface.startsWith("Opt[") && surface.endsWith("]"))
+    || (surface.startsWith("Result[") && surface.endsWith("]"))
+  return comp_expr_ok(v, env) && !sum
+}
+
+// A method-body `emit`: its expression, and a site-spelled `compensate` clause
+// if it has one. A clause that pins a mutable local by value
+// (`compensate_captures`) is past the slice; a provide method here binds none.
+fn method_emit_ok(st: Any, env: CEnv) -> Bool {
+  let comp = value_field(st, "compensate")
+  return node_step(st) == "emit" && comp_expr_ok(value_field(st, "expr"), env)
+    && (value_is_null(comp) || comp_expr_ok(comp, env))
+    && value_list(value_field(st, "compensate_captures")).length() == 0
+}
+
+// `_method_body_has_compensate` / `_provide_has_method_frame`: a provide block
+// one of whose methods parks an `emit .. compensate ..` offset on the
+// component's activation frame. Its impl takes the frame, and the component's
+// Apply opens and commits it (`_body_needs_frame`).
+fn provide_has_frame(s: Any) -> Bool {
+  var hit = false
+  for (m of value_list(value_field(s, "methods"))) {
+    for (st of value_list(value_field(m, "body"))) {
+      hit = hit || (node_step(st) == "emit" && !value_is_null(value_field(st, "compensate")))
+    }
+  }
+  return hit
+}
+fn component_needs_frame(c: Any) -> Bool {
+  var hit = false
+  for (s of value_list(value_field(c, "body"))) { hit = hit || provide_has_frame(s) }
+  return hit
+}
+
+// `_call_descriptor`: the static (key, method) a residue record names for a
+// compensation call, a service call's receiver and method or a free function's
+// name twice.
+fn call_descriptor(n: Any) -> List[Str] {
+  let k = node_kind(n)
+  let target = value_field(n, "target")
+  let tname = value_str(value_field(target, "name"))
+  let key = tname != "" ? tname : "call"
+  let fname = value_str(value_field(n, "name"))
+  let callee = fname != "" ? fname : "call"
+  return k == "call" && !value_is_null(value_field(n, "method")) ? [key, value_str(value_field(n, "method"))]
+    : (k == "fn" ? [callee, callee] : ["call", "call"])
+}
+
+// The document-wide tables a provide method's renderer reads: the declared
+// types, the services, and every module fn's and extern's declared return
+// (`_FN_RET`).
+type CDoc = { types: Any, services: Any, fr: Map[Str, Str] }
+
+fn comp_doc(ir: Any) -> CDoc {
+  var fr: Map[Str, Str] = Map.empty()
+  for (d of value_list(value_field(ir, "functions")).concat(value_list(value_field(ir, "externs")))) {
+    let name = value_str(value_field(d, "name"))
+    if (name != "") { fr = fr.set(name, value_str(value_field(d, "returns"))) }
+  }
+  return { types: value_field(ir, "types"), services: value_field(ir, "services"), fr: fr }
+}
+
+// The `_Env` of one provide method: its params typed from the service
+// declaration (`env.var_types[pn] = ptypes.get(pn)`), and the component's
+// required keys as receiver fields.
+fn method_env(m: Any, decl: Any, c: Any, doc: CDoc) -> CEnv {
+  let rq = value_field(c, "requires")
+  // `_CONFIG_TYPES`: the declared surface type of each config field
+  var cfg: Map[Str, Str] = Map.empty()
+  for (f of value_list(value_field(c, "config"))) {
+    cfg = cfg.set(value_str(value_field(f, "name")), value_str(value_field(f, "type")))
+  }
+  var ptypes: Map[Str, Str] = Map.empty()
+  for (p of value_list(value_field(decl, "params"))) {
+    ptypes = ptypes.set(value_str(value_field(p, "name")), value_str(value_field(p, "type")))
+  }
+  var params = []
+  var vt: Map[Str, Str] = Map.empty()
+  for (pn of value_list(value_field(m, "params"))) {
+    let name = value_str(pn)
+    params = params.push(name)
+    vt = vt.set(name, map_get(ptypes, name))
+  }
+  return { params: params, reqs: value_keys(rq), types: doc.types, vt: vt, fr: doc.fr,
+           rq: rq, services: doc.services, cfg: cfg, et: Map.empty() }
+}
+
+fn component_ok(c: Any, doc: CDoc) -> Bool {
+  let rq = value_field(c, "requires")
+  var ok = value_keys(value_field(c, "routes")).length() == 0
+  for (r of value_keys(rq)) { ok = ok && !value_str(value_field(rq, r)).startsWith("Stream") }
+  for (s of value_list(value_field(c, "body"))) {
+    ok = ok && node_step(s) == "provide"
+    let table = service_methods(doc.services, value_str(value_field(s, "service")))
+    for (m of value_list(value_field(s, "methods"))) {
+      let decl = value_field(table, value_str(value_field(m, "name")))
+      ok = ok && provide_method_ok(m, decl, method_env(m, decl, c, doc))
+    }
+  }
+  return ok
+}
+
+// `_collect_host_calls`: a `host` node whose family has no fixed runtime here
+// (anything but Pool / Map / Stream) needs a generated stub, outside the slice.
+fn has_stub_host(node: Any) -> Bool {
+  let fam = value_str(value_field(node, "fn")).split(".")[0]
+  var hit = list_contains(["host"], node_kind(node)) && fam != "" && !list_contains(["Pool", "Map", "Stream"], fam)
+  for (child of value_children(node)) { hit = hit || has_stub_host(child) }
+  return hit
+}
+
+// A boolean IR flag, read through a helper. Used where the combined slice
+// DECLINES a document over a flag (a `Secret[T]` marking, a lifecycle test):
+// tools/selfhost_coverage.py reads the inline `value_bool(value_field(.., "f"))`
+// spelling as "this tier ports construct f", and a decline is not a port.
+fn flag_of(node: Any, field: Str) -> Bool { return value_bool(value_field(node, field)) }
+
+// `_declares_secret`: a surviving `Secret[T]` marking turns on the
+// confidentiality funnel, which this slice does not carry.
+fn declares_secret(ir: Any) -> Bool {
+  let services = value_field(ir, "services")
+  var marked = []
+  for (sname of value_keys(services)) {
+    let ms = service_methods(services, sname)
+    for (mname of value_keys(ms)) { marked = marked.concat(value_list(value_field(value_field(ms, mname), "params"))) }
+  }
+  var hit = false
+  for (e of value_list(value_field(ir, "externs"))) {
+    hit = hit || flag_of(e, "secret_return")
+    marked = marked.concat(value_list(value_field(e, "params")))
+  }
+  for (c of value_list(value_field(ir, "components"))) { marked = marked.concat(value_list(value_field(c, "config"))) }
+  for (x of marked) { hit = hit || flag_of(x, "secret") }
+  return hit
+}
+
+fn has_lifecycle_test(ir: Any) -> Bool {
+  var hit = false
+  for (t of value_list(value_field(ir, "tests"))) { hit = hit || flag_of(t, "lifecycle") }
+  return hit
+}
+
+// The reference routes a v3 document to `_emit_v3_combined` when a top-level
+// declaration (a fn, type, extern or test) sits beside an observable component
+// and no lifecycle test keeps it on the live path. The rest of `combined_ok`
+// is this slice's own reach.
+fn takes_combined_path(ir: Any) -> Bool {
+  let comps = value_list(value_field(ir, "components"))
+  let top = carries_pure_declarations(ir) || value_list(value_field(ir, "tests")).length() > 0
+  return value_int(value_field(ir, "ir_version")) == 3 && comps.length() > 0 && !has_lifecycle_test(ir)
+    && top && any_component_is_observable(comps)
+}
+
+pub fn combined_ok(ir: Any) -> Bool {
+  return takes_combined_path(ir) && components_in_slice(ir)
+}
+
+// The reach of this file's component renderer, shared by the combined path
+// and the live one: what each component's body may hold, and the document
+// features (a fault test, a `Secret[T]` marking, a stub host family, a
+// renamed host type, an extern `compensate`) it does not carry.
+pub fn components_in_slice(ir: Any) -> Bool {
+  // A declared `Map` or `Pool` renames the host runtime's own type; a
+  // declared `Row` only drops its alias (`host_runtime_for`).
+  let types = value_field(ir, "types")
+  var ok = value_list(value_field(ir, "fault_tests")).length() == 0
+    && !declares_secret(ir) && !has_stub_host(ir)
+    && value_is_null(value_field(types, "Map")) && value_is_null(value_field(types, "Pool"))
+  // An extern's own declared `compensate` (issue #1592) registers through
+  // `revlDeclared`, past this slice.
+  for (ext of value_list(value_field(ir, "externs"))) { ok = ok && value_is_null(value_field(ext, "compensate")) }
+  // A called `deferred` emission is a reference refusal (issue #2316).
+  ok = ok && deferred_emission_markers(ir).length() == 0
+  let doc = comp_doc(ir)
+  for (c of value_list(value_field(ir, "components"))) { ok = ok && component_ok(c, doc) }
+  return ok && keys_in_slice(ir)
+}
+
+// `_key_ident` / `_check_host_keys`: a namespaced key (`acme::greeter`) is
+// mangled on the reference, and two keys that land on one Go identifier are
+// refused there. This file ports neither, so it declines both.
+fn keys_in_slice(ir: Any) -> Bool {
+  var seen: Map[Str, Str] = Map.empty()
+  var ok = true
+  for (c of value_list(value_field(ir, "components"))) {
+    for (table of ["provides", "requires", "isolate", "intercept"]) {
+      for (k of value_keys(value_field(c, table))) {
+        let first = map_get(seen, camel(k))
+        ok = ok && k.indexOf("::") < 0 && (first == "" || first == k)
+        seen = seen.set(camel(k), k)
+      }
+    }
+  }
+  return ok
+}
+
+// `_emit_services`: one interface per declared service, in declaration order.
+fn emit_comp_services(services: Any, types: Any) -> List[Str] {
+  var out = []
+  for (sname of value_keys(services)) {
+    out = out.push(`// service ${sname}`).push(`type ${camel(sname)} interface {`)
+    let ms = service_methods(services, sname)
+    for (mname of value_keys(ms)) {
+      let m = value_field(ms, mname)
+      var ps = []
+      for (p of value_list(value_field(m, "params"))) {
+        ps = ps.push(`${safe_local(value_str(value_field(p, "name")))} ${comp_go_type(value_field(p, "type"), types)}`)
+      }
+      let ret = comp_go_return(value_field(m, "returns"), types)
+      if (value_bool(value_field(m, "idempotent"))) {
+        out = out.push(line(1, "// idempotent: the runtime may auto-retry a transient failure"))
+      }
+      var sig = line(1, `${camel(mname)}(${ps.join(", ")})`)
+      if (ret != "") { sig = sig.concat(" ").concat(ret) }
+      out = out.push(sig)
+    }
+    out = out.push("}").push("")
+  }
+  return out
+}
+
+// `_emit_keys`: one typed key per provided or required name, first seen wins.
+fn emit_comp_keys(comps: List[Any]) -> List[Str] {
+  var names = []
+  var svc_of: Map[Str, Str] = Map.empty()
+  for (c of comps) {
+    let pv = value_field(c, "provides")
+    for (k of value_keys(pv)) {
+      if (!list_contains(names, k)) { names = names.push(k) }
+      svc_of = svc_of.set(k, value_str(value_field(pv, k)))
+    }
+    let rq = value_field(c, "requires")
+    for (k of value_keys(rq)) {
+      if (!list_contains(names, k)) {
+        names = names.push(k)
+        svc_of = svc_of.set(k, value_str(value_field(rq, k)))
+      }
+    }
+  }
+  var out = []
+  for (k of names) {
+    out = out.push(`var ${key_var(k)} = stc.NewKey[${camel(map_get(svc_of, k))}](${go_string(k)})`)
+  }
+  if (names.length() > 0) { out = out.push("") }
+  return out
+}
+
+// `_emit_component` for the slice: the constructor (required services
+// resolved, each provide block wired), then one impl struct per block.
+fn emit_comp_component(c: Any, doc: CDoc) -> List[Str] {
+  let cname = camel(value_str(value_field(c, "name")))
+  let rq = value_field(c, "requires")
+  let reqs = value_keys(rq)
+  let pv = value_keys(value_field(c, "provides"))
+  let steps = value_list(value_field(c, "body"))
+  let has_config = value_list(value_field(c, "config")).length() > 0
+  var out = emit_comp_config_struct(c, cname, doc.types)
+  out = out.push(has_config ? `func ${cname}(cfg ${cname}Config) stc.Component {` : `func ${cname}() stc.Component {`)
+  out = out.push(line(1, "return stc.Component{")).push(line(2, `Name: ${go_string(value_field(c, "name"))},`))
+  if (reqs.length() > 0) {
+    var ks = []
+    for (r of reqs) { ks = ks.push(key_var(r)) }
+    out = out.push(line(2, `Inject: []stc.Key{${ks.join(", ")}},`))
+  }
+  if (pv.length() > 0) {
+    var ks = []
+    for (p of pv) { ks = ks.push(key_var(p)) }
+    out = out.push(line(2, `Provide: []stc.Key{${ks.join(", ")}},`))
+  }
+  out = out.push(line(2, "Apply: func(ctx *stc.Context) (stc.Inverse, error) {"))
+  let needs_frame = component_needs_frame(c)
+  if (needs_frame) {
+    out = out.push(line(3, flagged("t", "_revlFrame := newRevlFrame()"))).push(line(3, "if err := ctx.Effect(func() stc.Inverse {"))
+    out = out.push(line(4, "return func() error { _revlFrame.runCompensationPhase(); return nil }"))
+    out = out.push(line(3, "}); err != nil {")).push(line(4, "return nil, err")).push(line(3, "}"))
+  }
+  for (r of reqs) {
+    out = out.push(line(3, `${lower_camel(r)}, err := stc.Service[${camel(value_str(value_field(rq, r)))}](ctx, ${key_var(r)})`))
+    out = out.push(line(3, "if err != nil {")).push(line(4, "return nil, err")).push(line(3, "}"))
+  }
+  for (s of steps) {
+    let pname = value_str(value_field(s, "name"))
+    var fields = provide_has_frame(s) ? ["ctx: ctx", "revlFrame: _revlFrame"] : ["ctx: ctx"]
+    if (has_config) { fields = fields.push("cfg: cfg") }
+    for (r of reqs) { fields = fields.push(`${lower_camel(r)}: ${lower_camel(r)}`) }
+    out = out.push(line(3, `_impl${camel(pname)} := &${cname}_${pname}{${fields.join(", ")}}`))
+    out = out.push(line(3, `if _, err := ctx.Provide(${key_var(pname)}, ${camel(value_str(value_field(s, "service")))}(_impl${camel(pname)})); err != nil {`))
+    out = out.push(line(4, "return nil, err")).push(line(3, "}"))
+  }
+  for (r of reqs) { out = out.push(line(3, `_ = ${lower_camel(r)}`)) }
+  if (has_config) { out = out.push(line(3, "_ = cfg")) }
+  out = out.push(line(3, needs_frame ? "return func() error { _revlFrame.commit(); return nil }, nil" : "return nil, nil"))
+  out = out.push(line(2, "},")).push(line(1, "}")).push("}").push("")
+  for (s of steps) { out = out.concat(emit_comp_provide_impl(cname, s, c, doc)) }
+  return out
+}
+
+// `_emit_config_struct`: the component's config struct and its defaults
+// constructor (a field with no default is left to its zero value).
+fn emit_comp_config_struct(c: Any, cname: Str, types: Any) -> List[Str] {
+  let fields = value_list(value_field(c, "config"))
+  if (fields.length() == 0) { return [] }
+  var out = [`type ${cname}Config struct {`]
+  for (f of fields) { out = out.push(line(1, `${camel(value_str(value_field(f, "name")))} ${comp_go_type(value_field(f, "type"), types)}`)) }
+  out = out.push("}").push("").push(`func Default${cname}Config() ${cname}Config {`).push(line(1, `return ${cname}Config{`))
+  for (f of fields) {
+    let dv = value_field(f, "default")
+    if (!value_is_null(dv)) {
+      out = out.push(line(2, `${camel(value_str(value_field(f, "name")))}: ${default_lit(dv, comp_go_type(value_field(f, "type"), types))},`))
+    }
+  }
+  return out.push(line(1, "}")).push("}").push("")
+}
+
+// `_default_lit`: a config default as its Go literal for the field's type.
+fn default_lit(v: Any, gt: Str) -> Str {
+  return gt == "string" ? go_string(v) : (gt == "bool" ? (value_bool(v) ? "true" : "false") : num_str(v))
+}
+
+// `_emit_provide_impl`: the impl struct (ctx plus every required handle) and
+// one method per provided operation, typed from the service declaration.
+fn emit_comp_provide_impl(cname: Str, s: Any, c: Any, doc: CDoc) -> List[Str] {
+  let rq = value_field(c, "requires")
+  let services = doc.services
+  let types = doc.types
+  let struct_name = `${cname}_${value_str(value_field(s, "name"))}`
+  let reqs = value_keys(rq)
+  var out = [`type ${struct_name} struct {`, line(1, "ctx *stc.Context")]
+  if (provide_has_frame(s)) { out = out.push(line(1, "revlFrame *RevlFrame")) }
+  if (value_list(value_field(c, "config")).length() > 0) { out = out.push(line(1, `cfg ${cname}Config`)) }
+  for (r of reqs) { out = out.push(line(1, `${lower_camel(r)} ${camel(value_str(value_field(rq, r)))}`)) }
+  out = out.push("}").push("")
+  let table = service_methods(services, value_str(value_field(s, "service")))
+  for (m of value_list(value_field(s, "methods"))) {
+    let mname = value_str(value_field(m, "name"))
+    let decl = value_field(table, mname)
+    var ptypes: Map[Str, Str] = Map.empty()
+    for (p of value_list(value_field(decl, "params"))) {
+      ptypes = ptypes.set(value_str(value_field(p, "name")), value_str(value_field(p, "type")))
+    }
+    var gp = []
+    for (pn of value_list(value_field(m, "params"))) {
+      let name = value_str(pn)
+      let pt = map_get(ptypes, name)
+      gp = gp.push(`${safe_local(name)} ${comp_go_type(pt == "" ? "any" : pt, types)}`)
+    }
+    let ret = comp_go_return(value_field(decl, "returns"), types)
+    var sig = `func (revlSelf *${struct_name}) ${camel(mname)}(${gp.join(", ")})`
+    if (ret != "") { sig = sig.concat(" ").concat(ret) }
+    out = out.push(sig.concat(" {"))
+    let env = method_env(m, decl, c, doc)
+    let body = value_list(value_field(m, "body"))
+    var cur = with_comp_scan(env, method_scan(body, value_str(value_field(decl, "returns")), env))
+    for (st of body) {
+      let r = emit_method_step(st, cur, decl)
+      out = out.concat(r.lines)
+      cur = r.env
+    }
+    out = out.push("}").push("")
+  }
+  return out
+}
+
+// `_emit_method_body` over the slice's steps. An `emit` fires inline, then
+// parks its site-spelled offset on the activation frame through
+// `registerMethodCompensation` (item 247): discharged on a clean commit,
+// enqueued for Phase 2 on an abort. A `let`/`var` is `_emit_method_body`'s let
+// arm: an untyped `[]` takes its type from the method's flow hints or is named
+// as a refusal, an integer/float binding is pinned to the tier's type, and a
+// user-variant binding holds its interface (issue #2898 / item 280).
+type MethodStep = { lines: List[Str], env: CEnv }
+
+fn with_comp_scan(env: CEnv, scan: HintScan) -> CEnv {
+  return { env | et = scan.et }
+}
+
+fn emit_method_step(st: Any, env: CEnv, decl: Any) -> MethodStep {
+  let e = value_field(st, "expr")
+  let step = node_step(st)
+  if (step == "emit") {
+    var out = [line(1, comp_expr(e, env, ""))]
+    let comp = value_field(st, "compensate")
+    if (!value_is_null(comp)) {
+      let d = call_descriptor(comp)
+      out = out.push(line(1, `revlSelf.revlFrame.registerMethodCompensation(${go_string(d[0])}, ${go_string(d[1])}, func() error { ${comp_expr(comp, env, "")}; return nil })`))
+    }
+    return { lines: out, env: env }
+  }
+  if (step == "let" || step == "var") {
+    let raw = value_str(value_field(st, "name"))
+    let nm = safe_local(raw)
+    let v = value_field(st, "value")
+    var surface = comp_infer(v, env)
+    if (is_empty_list_lit(v)) {
+      let pin = empty_list_pin(v)
+      surface = pin != "" ? pin : map_get(env.et, raw)
+    }
+    if (surface == "" && is_empty_list_lit(v)) {
+      return { lines: [line(1, "<<UNSUPPORTED-EMPTY-LIST-TYPE>>")], env: env }
+    }
+    var nenv = env
+    if (surface != "") { nenv = with_vt(env, raw, surface) }
+    let value = comp_expr(v, nenv, surface)
+    let go_t = surface != "" ? comp_go_type(surface, env.types) : ""
+    let pinned = surface == "Int" ? "int64" : (surface == "Float" ? "float64" : "")
+    var out = []
+    if (go_t != "" && comp_is_interface(surface, env.types)) {
+      out = out.push(line(1, `var ${nm} ${go_t} = ${value}`))
+    } else if (pinned != "") {
+      out = out.push(line(1, `var ${nm} ${pinned} = ${value}`))
+    } else {
+      out = out.push(line(1, `${nm} := ${value}`))
+    }
+    out = out.push(line(1, `_ = ${nm}`))
+    return { lines: out, env: nenv }
+  }
+  return { lines: [line(1, value_is_null(e) ? "return" : `return ${comp_expr(e, env, value_str(value_field(decl, "returns")))}`)], env: env }
+}
+
+// `_emit_load_helpers`: a component that isolates a key into a
+// realm or intercepts one loads into a child context that carries both.
+fn emit_comp_load_helpers(comps: List[Any]) -> List[Str] {
+  var out = []
+  for (c of comps) {
+    let cname = camel(value_str(value_field(c, "name")))
+    let placed = value_field(c, "isolate")
+    let watched = value_field(c, "intercept")
+    let has_config = value_list(value_field(c, "config")).length() > 0
+    if (has_config) {
+      out = out.push(`// Load${cname} isolates the load-target per the component's realm placement, then loads it.`)
+    }
+    out = out.push(has_config ? `func Load${cname}(target *stc.Context, cfg ${cname}Config) *stc.Fiber {` : `func Load${cname}(target *stc.Context) *stc.Fiber {`)
+    var target = "target"
+    if (value_keys(placed).length() > 0 || value_keys(watched).length() > 0) {
+      out = out.push(line(1, "ctx := target.Child()"))
+      for (k of value_keys(placed)) {
+        out = out.push(line(1, `ctx.Isolate(${key_var(k)}, _revlRealm(${go_string(value_field(placed, k))}))`))
+      }
+      for (k of value_keys(watched)) {
+        out = out.push(line(1, `ctx.Intercept(${key_var(k)}, ${meta_literal(value_field(watched, k))})`))
+      }
+      target = "ctx"
+    }
+    let arg = has_config ? "cfg" : ""
+    out = out.push(line(1, `return ${target}.Load(${cname}(${arg}))`)).push("}").push("")
+  }
+  return out
+}
+
+// `_go_literal` over an intercept's metadata: scalars as `go_literal` spells
+// them, a list as `[]any{..}` and a record as `map[string]any{..}` in its
+// declared key order.
+fn meta_literal(v: Any) -> Str {
+  let shape = value_kind(v)
+  if (shape == "list") {
+    var parts = []
+    for (x of value_list(v)) { parts = parts.push(meta_literal(x)) }
+    return `[]any{${parts.join(", ")}}`
+  }
+  if (shape == "record") {
+    var parts = []
+    for (k of value_keys(v)) { parts = parts.push(`${go_string(k)}: ${meta_literal(value_field(v, k))}`) }
+    return `map[string]any{${parts.join(", ")}}`
+  }
+  if (shape == "null") { return "nil" }
+  return go_literal(v)
+}
+
+// `_emit_realm_helper`: the realm interner, emitted when any component
+// isolates a key (a routed key would reach it too, but routes are past the
+// slice).
+fn emit_comp_realm_helper(comps: List[Any]) -> List[Str] {
+  var any_isolate = false
+  for (c of comps) { if (value_keys(value_field(c, "isolate")).length() > 0) { any_isolate = true } }
+  if (!any_isolate) { return [] }
+  return [
+    "var (", line(1, "_revlRealmMu sync.Mutex"), line(1, "_revlRealmBy = map[string]*stc.Realm{}"), ")", "",
+    "// _revlRealm interns a realm by name under the root realm so every load",
+    "// site naming the same realm shares the same *stc.Realm (provKey is",
+    "// keyed by pointer, not name).",
+    "func _revlRealm(name string) *stc.Realm {",
+    line(1, "_revlRealmMu.Lock()"), line(1, "defer _revlRealmMu.Unlock()"),
+    line(1, "if r, ok := _revlRealmBy[name]; ok {"), line(2, "return r"), line(1, "}"),
+    line(1, "r := stc.NewRealm(stc.RootRealm(), name)"), line(1, "_revlRealmBy[name] = r"),
+    line(1, "return r"), "}", ""
+  ]
+}
+
+// The component half of the combined body, after the pure tier.
+pub fn emit_comp_section(ir: Any) -> List[Str] {
+  return ["", "// ---- live stc-go components (placement) -------------------"].concat(emit_comp_body(ir))
+}
+
+// The services, keys, realm interner, components and load helpers, in the
+// order both the combined path and the live one render them.
+fn emit_comp_body(ir: Any) -> List[Str] {
+  let services = value_field(ir, "services")
+  let types = value_field(ir, "types")
+  let comps = value_list(value_field(ir, "components"))
+  var out = emit_comp_services(services, types)
+  out = out.concat(emit_comp_keys(comps))
+  out = out.concat(emit_comp_realm_helper(comps))
+  let doc = comp_doc(ir)
+  for (c of comps) { out = out.concat(emit_comp_component(c, doc)) }
+  out = out.concat(emit_comp_load_helpers(comps))
+  return out
+}
+// ============================================ the v3 LIVE path (issue #2260)
+// `_emit`'s own stc-go module: a v3 document of services and components and
+// nothing top-level (no fn, type, extern or test) is not routed to the pure
+// typed-core path or the combined one, but rendered as a live stc-go module.
+// With no declared type the component renderer is the combined one's, so this
+// path differs from it only in the assembly: the banner, an import block in
+// the reference's fixed (unsorted) order, the preambles in `_emit`'s order
+// and no trailing strip. A body that names a Result takes `_emit`'s sealed
+// Result preamble, which this file does not carry, so it is declined with a
+// `<<UNSUPPORTED-COMPONENT:..>>` marker per component. A body that names an
+// Opt is declined too, which is stricter than the reference needs.
+pub fn takes_live_path(ir: Any) -> Bool {
+  return value_int(value_field(ir, "ir_version")) == 3
+    && value_list(value_field(ir, "components")).length() > 0
+    && !carries_pure_declarations(ir) && value_list(value_field(ir, "tests")).length() == 0
+}
+
+// The module, when every component is in the slice (`in_slice`) and the body
+// it renders is too. Otherwise the live tier's banner, so the answer still
+// says which module the reference renders, then one marker per component and
+// per deferred fault test, never the pure tier's module.
+pub fn emit_live_module(ir: Any, in_slice: Bool) -> Str {
+  let banner = ["// Code generated by backends/go/emit.py — DO NOT EDIT.",
+                "// revl -> cordis-go, targeting github.com/0xdenny218/stc-go.",
+                "package emitted", ""]
+  let marked = in_slice ? emit_comp_body(ir) : []
+  let stdlib = has_text(marked, stdlib_mark())
+  var body = []
+  for (l of marked) { body = body.push(strip_marks(l)) }
+  if (!in_slice || text_has_any(body.join(newline()), ["RevlOpt[", "RevlSome[", "RevlNone[", "RevlResult[", "RevlOk[", "RevlErr["])) {
+    let named = banner.concat(uncarried_components(ir)).concat(deferred_test_markers(ir)).concat(deferred_emission_markers(ir))
+    return rstrip(named.join(newline())).concat(newline())
+  }
+  let uses_strconv = has_text(marked, flag("s"))
+  let ovf = has_text(marked, flag("a"))
+  let teardown = has_text(marked, flag("t"))
+  var imports = [line(1, `"fmt"`), line(1, `"sync"`)]
+  if (stdlib) { imports = imports.push(line(1, `"strings"`)).push(line(1, `"unicode/utf8"`)) }
+  if (teardown) { imports = imports.push(line(1, `"time"`)).push(line(1, `"os"`)).push(line(1, `"strconv"`)) }
+  if (has_text(marked, flag("m"))) { imports = imports.push(line(1, `"math"`)) }
+  if (uses_strconv && !teardown) { imports = imports.push(line(1, `"strconv"`)) }
+  imports = imports.push(line(1, `"slices"`)).push("").push(line(1, `stc "github.com/0xdenny218/stc-go"`))
+  var out = banner.push("import (").concat(imports).push(")").push("").push("var _ = fmt.Sprintf").push("").concat(host_runtime())
+  if (stdlib) { out = out.concat(stdlib_preamble("strings")) }
+  // `_V3_OVERFLOW32_HELPER`, after `_V3_ARITH32_HELPER` when a method body's
+  // Int32 `+ - *` or unary minus set `_COMP_NEEDS_ARITH32` (issue #2262)
+  let arith32 = has_text(marked, flag("i"))
+  if (arith32 || has_text(marked, flag("n"))) {
+    if (arith32) {
+      out = out.push("func revlAddI32(a, b int32) int32 { return revlToI32(int64(a) + int64(b)) }")
+      out = out.push("func revlSubI32(a, b int32) int32 { return revlToI32(int64(a) - int64(b)) }")
+      out = out.push("func revlMulI32(a, b int32) int32 { return revlToI32(int64(a) * int64(b)) }")
+    }
+    out = out.concat(["func revlToI32(v int64) int32 {", line(1, "if v < -2147483648 || v > 2147483647 {"),
+                      line(2, `panic("revl: Int32 overflow")`), line(1, "}"), line(1, "return int32(v)"), "}", ""])
+  }
+  if (ovf) { out = out.concat(overflow_preamble()) }
+  if (has_text(marked, flag("d"))) { out = out.push("func revlDiv(a, b float64) float64 { return a / b }").push("") }
+  if (teardown) { out = out.concat(teardown_preamble()) }
+  return out.concat(body).join(newline()).concat(newline())
+}
+
+// `_host_runtime()` for this document: a declared `Row` drops the runtime's own
+// alias, so `Query` answers the declared record (issue #1356 on the reference).
+pub fn host_runtime_for(types: Any) -> List[Str] {
+  let rt = host_runtime()
+  if (value_is_null(value_field(types, "Row"))) { return rt }
+  var out = []
+  var i = 0
+  while (i < rt.length()) {
+    if (rt[i] == "// Row is a query result row." && i + 1 < rt.length() && rt[i + 1] == "type Row = map[string]string") {
+      i = i + 2
+    } else {
+      out = out.push(rt[i])
+      i = i + 1
+    }
+  }
+  return out
+}
+
+// `_host_runtime()` in v3 mode (`@INT@` = int64), with no `Secret[T]` declared
+// and no declared record renaming a host type: the fixed, recording Pool/Map
+// runtime the combined module always carries. One entry per line of the
+// reference's single string, so the trailing newline is the final "".
+fn host_runtime() -> List[Str] {
+  return [
+    "// ---- host runtime (minimal, recording) --------------------------------",
+    "",
+    "// R1 live-resource accounting (docs/backend-ir.md §Required semantics, the",
+    "// same pairing the py reference tier's `assert no_residue` checks): every host",
+    "// object acquired must be released by its `undo`, or the lifecycle",
+    "// `assert no_residue` fails. The counter is package-wide, so it is per-test",
+    "// and cross-test safe: a clean test returns to zero.",
+    "var _revlLiveMu sync.Mutex",
+    "var _revlLiveHostResources int",
+    "",
+    "func revlHostAcquire() { _revlLiveMu.Lock(); _revlLiveHostResources++; _revlLiveMu.Unlock() }",
+    "func revlHostRelease() { _revlLiveMu.Lock(); _revlLiveHostResources--; _revlLiveMu.Unlock() }",
+    "func revlHostLive() int {",
+    line(1, "_revlLiveMu.Lock()"),
+    line(1, "defer _revlLiveMu.Unlock()"),
+    line(1, "return _revlLiveHostResources"),
+    "}",
+    "// A deterministic in-memory stand-in for revl host objects, instrumented so",
+    "// scenarios can assert the exact effect/undo order of emitted code.",
+    "",
+    "var _hostMu sync.Mutex",
+    "var _hostLog []string",
+    "",
+    "func hostRecord(op string) {",
+    line(1, "_hostMu.Lock()"),
+    line(1, "_hostLog = append(_hostLog, op)"),
+    line(1, "_hostMu.Unlock()"),
+    "}",
+    "",
+    "// HostMarks returns an ordered snapshot of host operations.",
+    "func HostMarks() []string {",
+    line(1, "_hostMu.Lock()"),
+    line(1, "defer _hostMu.Unlock()"),
+    line(1, "out := make([]string, len(_hostLog))"),
+    line(1, "copy(out, _hostLog)"),
+    line(1, "return out"),
+    "}",
+    "",
+    "// HostReset clears the host op log (call between scenarios).",
+    "func HostReset() {",
+    line(1, "_hostMu.Lock()"),
+    line(1, "_hostLog = nil"),
+    line(1, "_hostMu.Unlock()"),
+    "}",
+    "",
+    "// Row is a query result row.",
+    "type Row = map[string]string",
+    "",
+    "// Pool is a deterministic in-memory connection pool.",
+    "type Pool struct {",
+    line(1, "url  string"),
+    line(1, "size int64"),
+    "}",
+    "",
+    "func PoolOpen(url string, size int64) *Pool {",
+    line(1, "hostRecord(\"pool.open\")"),
+    line(1, "revlHostAcquire()"),
+    line(1, "return &Pool{url: url, size: size}"),
+    "}",
+    "func (p *Pool) Close()               { hostRecord(\"pool.close\"); revlHostRelease() }",
+    "func (p *Pool) Query(sql string) []Row {",
+    line(1, "hostRecord(\"pool.query:\" + sql)"),
+    line(1, "return nil"),
+    "}",
+    "func (p *Pool) Execute(sql string) int64 {",
+    line(1, "hostRecord(\"pool.execute:\" + sql)"),
+    line(1, "return 0"),
+    "}",
+    "",
+    "// Map is a thread-safe map with Str keys. The value type is generic — each",
+    "// site's `Map.new()` pins `V` from how the map is used (FR-4: a revl",
+    "// `Map[Str, Int]` counter or `Map[Str, List[Msg]]` ledger, not only String),",
+    "// mirroring backends/rust/emit.py's `struct Map<V>`. Emit instantiates it at",
+    "// the acquisition (`MapNew[int64]()`), so the boundary carries the declared",
+    "// value type and Insert/Get type-check against the component's real values.",
+    "type Map[V any] struct {",
+    line(1, "mu sync.Mutex"),
+    line(1, "m  map[string]V"),
+    "}",
+    "",
+    "func MapNew[V any]() *Map[V] {",
+    line(1, "hostRecord(\"map.new\")"),
+    line(1, "revlHostAcquire()"),
+    line(1, "return &Map[V]{m: map[string]V{}}"),
+    "}",
+    "func (m *Map[V]) Drop() { hostRecord(\"map.drop\"); revlHostRelease() }",
+    "func (m *Map[V]) Insert(k string, v V) {",
+    line(1, "m.mu.Lock()"),
+    line(1, "m.m[k] = v"),
+    line(1, "m.mu.Unlock()"),
+    "}",
+    "",
+    "// InsertIfAbsent is the atomic compare-and-set (item 397). The per-op mutex is",
+    "// held across BOTH the membership test AND the insert, so the whole CAS is one",
+    "// critical section: no concurrent caller can witness the probe and the write as",
+    "// separable steps. Returns whether it inserted; a false (key already present)",
+    "// leaves the existing value untouched. Under N concurrent callers on one map,",
+    "// exactly one receives true.",
+    "func (m *Map[V]) InsertIfAbsent(k string, v V) bool {",
+    line(1, "m.mu.Lock()"),
+    line(1, "defer m.mu.Unlock()"),
+    line(1, "if _, ok := m.m[k]; ok {"),
+    line(2, "return false"),
+    line(1, "}"),
+    line(1, "m.m[k] = v"),
+    line(1, "return true"),
+    "}",
+    "func (m *Map[V]) Remove(k string) {",
+    line(1, "m.mu.Lock()"),
+    line(1, "delete(m.m, k)"),
+    line(1, "m.mu.Unlock()"),
+    "}",
+    "func (m *Map[V]) Get(k string) (V, bool) {",
+    line(1, "m.mu.Lock()"),
+    line(1, "defer m.mu.Unlock()"),
+    line(1, "v, ok := m.m[k]"),
+    line(1, "return v, ok"),
+    "}",
+    "",
+    "// Iteration surface (docs/stdlib-2.0.md §Map): the checker promises",
+    "// `size()`/`keys()` on a host `Map.new()` receiver too, and emit lowers both",
+    "// as method calls on this object. `Size` is the entry count as the tier's",
+    "// revl Int (int64, matching the service-method return type); `Keys`",
+    "// yields the keys in ascending canonical Str order (UTF-8 byte lexicographic —",
+    "// go string < is exactly code-point order, and slices.Sort on []string orders",
+    "// by <, so the order is identical to the insertion sort this replaced, as it",
+    "// is in revlMapKeys). keys() IS the Map iteration surface, so this sits on",
+    "// every map traversal: O(n log n), not O(n^2) (item 434 (h)). Both are",
+    "// read-only queries, no host trace — like Get.",
+    "func (m *Map[V]) Size() int64 {",
+    line(1, "m.mu.Lock()"),
+    line(1, "defer m.mu.Unlock()"),
+    line(1, "return int64(len(m.m))"),
+    "}",
+    "func (m *Map[V]) Keys() []string {",
+    line(1, "m.mu.Lock()"),
+    line(1, "ks := make([]string, 0, len(m.m))"),
+    line(1, "for k := range m.m {"),
+    line(2, "ks = append(ks, k)"),
+    line(1, "}"),
+    line(1, "m.mu.Unlock()"),
+    line(1, "slices.Sort(ks)"),
+    line(1, "return ks"),
+    "}",
+    ""
+  ]
+}
+
+// `_teardown_preamble(True)`: the frame teardown accumulator with the item 318
+// method-registered extension, line for line. A provide method's
+// `emit .. compensate ..` parks its offset through `registerMethodCompensation`,
+// which sets `_COMP_NEEDS_METHOD_WITNESSED` on the reference, so this slice only
+// ever emits the extended form.
+pub fn teardown_preamble() -> List[Str] {
+  return [
+    "// ---- witnessed/compensation teardown accumulator (items 243/247, docs/design/teardown-contract.md) ----",
+    "",
+    "// RevlTeardownRecord is one entry of the merged residue schema (docs/design/",
+    "// teardown-contract.md, \"the merged residue schema\"): a Phase-1 inverse that",
+    "// failed (`bracket-fault` / `restore-residue`) or a Phase-2 compensation that",
+    "// failed, timed out, or was never attempted (`compensation-residue`).",
+    "type RevlTeardownRecord struct {",
+    line(1, "Kind           string // \"restore-residue\" | \"bracket-fault\" | \"compensation-residue\""),
+    line(1, "CrossingKey    string"),
+    line(1, "CrossingMethod string"),
+    line(1, "AttemptedCall  string"),
+    line(1, "AttemptedPhase int    // 1 or 2"),
+    line(1, "ErrorType      string // e.g. \"panic\" | \"deadline-expired\" | \"per-call-timeout\""),
+    line(1, "ErrorMessage   string"),
+    line(1, "Outcome        string // \"failed\" | \"unknown\" | \"not-attempted\""),
+    line(1, "Referent       string // what is still out in the world"),
+    line(1, "Hint           string // recovery hint for the operator"),
+    "}",
+    "",
+    "// revlCompEntry is one queued Phase-2 compensation: the offsetting call,",
+    "// captured at registration (`emit X compensate Y`), never re-read at",
+    "// teardown (docs/design/teardown-contract.md, \"no data hazard\").",
+    "type revlCompEntry struct {",
+    line(1, "key    string"),
+    line(1, "method string"),
+    line(1, "run    func() error"),
+    "}",
+    "",
+    "// RevlFrame is one component activation's teardown accumulator: the",
+    "// commit-vs-abort bit, the Phase-2 compensation queue, and the surfaced",
+    "// residue. Bracket inverses need none of this — they stay plain `ctx.Effect`",
+    "// disposers, unchanged.",
+    "type RevlFrame struct {",
+    line(1, "committed bool // see the package-level note above: single-writer, no lock"),
+    line(1, "aborting  bool // item 318: session-level abort seam — see (*RevlFrame).Abort"),
+    line(1, "mu        sync.Mutex"),
+    line(1, "pending   []revlCompEntry"),
+    line(1, "residue   []RevlTeardownRecord"),
+    line(1, "deferred  []func() error // item 318: parked provide-method witnessed inverses"),
+    "}",
+    "",
+    "// item 318: a package-level registry of every activation frame created, the go",
+    "// mirror of the py reference tier's `_frame_for_ctx` — the seam a session/test",
+    "// reaches a live frame through to Abort() it before unload (item 245's reject",
+    "// UX will drive this in production; the H1 exec test drives it directly).",
+    "var (",
+    line(1, "_revlFrameRegMu sync.Mutex"),
+    line(1, "_revlFrameReg   []*RevlFrame"),
+    ")",
+    "",
+    "func newRevlFrame() *RevlFrame {",
+    line(1, "f := &RevlFrame{}"),
+    line(1, "_revlFrameRegMu.Lock()"),
+    line(1, "_revlFrameReg = append(_revlFrameReg, f)"),
+    line(1, "_revlFrameRegMu.Unlock()"),
+    line(1, "return f"),
+    "}",
+    "",
+    "// RevlFrames returns a snapshot of every activation frame created since the",
+    "// last RevlResetFrames — the seam for reaching a live frame to Abort it.",
+    "func RevlFrames() []*RevlFrame {",
+    line(1, "_revlFrameRegMu.Lock()"),
+    line(1, "defer _revlFrameRegMu.Unlock()"),
+    line(1, "out := make([]*RevlFrame, len(_revlFrameReg))"),
+    line(1, "copy(out, _revlFrameReg)"),
+    line(1, "return out"),
+    "}",
+    "",
+    "// RevlResetFrames clears the frame registry (call between scenarios, like",
+    "// HostReset), so a test can find its own activation's sole frame.",
+    "func RevlResetFrames() {",
+    line(1, "_revlFrameRegMu.Lock()"),
+    line(1, "_revlFrameReg = nil"),
+    line(1, "_revlFrameRegMu.Unlock()"),
+    "}",
+    "",
+    "// Abort marks this activation as ABORTING (item 318, the go mirror of",
+    "// Frame.abort): its next teardown replays every parked per-tool-call witnessed",
+    "// inverse instead of committing it. Idempotent; a plain unload never calls it,",
+    "// so a commit stays a commit.",
+    "func (f *RevlFrame) Abort() {",
+    line(1, "f.aborting = true"),
+    "}",
+    "",
+    "// registerMethodWitnessed parks one provide-method witnessed inverse (item",
+    "// 318): a per-tool-call mutation whose rollback must outlive the method call",
+    "// and survive until the component/session commits or aborts. It is NOT a",
+    "// stc-go disposer (see commit() for why); commit() disposes it once the",
+    "// commit-vs-abort bit is settled.",
+    "func (f *RevlFrame) registerMethodWitnessed(run func() error) {",
+    line(1, "f.mu.Lock()"),
+    line(1, "f.deferred = append(f.deferred, run)"),
+    line(1, "f.mu.Unlock()"),
+    "}",
+    "",
+    "// registerMethodCompensation parks one provide-method `emit ... compensate ...`",
+    "// offset (the item-247 method-body remainder): the compensation analog of",
+    "// registerMethodWitnessed, and the method-body analog of the activation-body",
+    "// `emit ... compensate ...` (item 247). A method body runs AFTER activation, so",
+    "// the offset must outlive the method call and is owed ONLY on an abort, never on",
+    "// a clean commit (the emission it offsets was the deliverable). It is NOT a",
+    "// stc-go disposer (see commit() for the disposal-ordering hazard); commit()",
+    "// disposes the parked closure once the commit-vs-abort bit is settled. On a",
+    "// COMMIT the closure discharges (never runs). On an ABORT it hands the offset to",
+    "// `enqueue`, so runCompensationPhase (registered first, hence run LAST on the",
+    "// unwind) fires it in Phase 2 — after every bracket/transactional/method-",
+    "// witnessed inverse in this activation has completed, guarded and residue-",
+    "// collected. `key`/`method` are the offsetting call's descriptor for the WAL and",
+    "// residue, captured here at registration (the \"no data hazard\" rule).",
+    "func (f *RevlFrame) registerMethodCompensation(key, method string, run func() error) {",
+    line(1, "f.mu.Lock()"),
+    line(1, "f.deferred = append(f.deferred, func() error {"),
+    line(2, "if f.committed {"),
+    line(3, "return nil // discharge — the emission was the deliverable"),
+    line(2, "}"),
+    line(2, "f.enqueue(key, method, run) // abort: defer to Phase 2"),
+    line(2, "return nil"),
+    line(1, "})"),
+    line(1, "f.mu.Unlock()"),
+    "}",
+    "",
+    "// commit flips the discriminator a clean unload reads (item 243 decision 1,",
+    "// the go mirror of `Frame._committed`/`Frame.drain`): every transactional",
+    "// entry and every compensation observes `committed == true` from here on,",
+    "// meaning discharge instead of replay/run.",
+    "func (f *RevlFrame) commit() {",
+    line(1, "// item 318: an Abort() may have requested revert of already-applied"),
+    line(1, "// per-tool-call work; honour it before flipping the bit every parked and"),
+    line(1, "// activation-body inverse reads."),
+    line(1, "if !f.aborting {"),
+    line(2, "f.committed = true"),
+    line(1, "}"),
+    line(1, "// Dispose the parked provide-method witnessed inverses HERE, now that the"),
+    line(1, "// commit-vs-abort bit is settled (the go mirror of Frame.drain disposing"),
+    line(1, "// `_deferred_transactional`): on a commit each discharges (mutation"),
+    line(1, "// persists, witness GC'd), on an abort each replays (reverts). They are not"),
+    line(1, "// stc-go disposers, so this is their sole disposal — no double-free with the"),
+    line(1, "// fiber's own unwind. commit() is the LAST-registered inverse, hence stc-go"),
+    line(1, "// runs it FIRST on unwind, so this is ordered before any body inverse runs."),
+    line(1, "//"),
+    line(1, "// item 369: replay in reverse INVOCATION order (LIFO), NOT registration"),
+    line(1, "// order. `deferred` is appended newest-last as each provide-method fires"),
+    line(1, "// (registerMethodWitnessed), so it must be drained newest-FIRST — exactly"),
+    line(1, "// like the activation-body path, where stc-go unwinds its disposer stack"),
+    line(1, "// LIFO. On a COMMIT order is immaterial (every entry no-op discharges); on"),
+    line(1, "// an ABORT two inverses whose paths OVERLAP must undo newest-first or a FIFO"),
+    line(1, "// replay leaves residue or DESTROYS pre-session data (every stdlib/fs.rvl"),
+    line(1, "// inverse is idempotent-and-total, so the oldest inverse runs first, no-ops,"),
+    line(1, "// and the newer one undoes into the hole — G7, 243 §2). Mirrors the py/ts"),
+    line(1, "// runtimes."),
+    line(1, "f.mu.Lock()"),
+    line(1, "deferred := f.deferred"),
+    line(1, "f.deferred = nil"),
+    line(1, "f.mu.Unlock()"),
+    line(1, "for i := len(deferred) - 1; i >= 0; i-- {"),
+    line(2, "_ = deferred[i]()"),
+    line(1, "}"),
+    "}",
+    "",
+    "// enqueue defers one compensation to Phase 2 (item 247): called from a",
+    "// compensation's inverse when the activation is aborting, never on a commit",
+    "// (the commit branch returns before reaching this). Entries queue in the",
+    "// order stc-go's unwind visits them, which is already reverse-registration",
+    "// (LIFO) order — \"LIFO within itself\" (docs/design/teardown-contract.md)",
+    "// falls out for free from the enqueue order, no re-sorting needed.",
+    "func (f *RevlFrame) enqueue(key, method string, run func() error) {",
+    line(1, "f.mu.Lock()"),
+    line(1, "f.pending = append(f.pending, revlCompEntry{key: key, method: method, run: run})"),
+    line(1, "f.mu.Unlock()"),
+    "}",
+    "",
+    "func (f *RevlFrame) recordResidue(rec RevlTeardownRecord) {",
+    line(1, "f.mu.Lock()"),
+    line(1, "f.residue = append(f.residue, rec)"),
+    line(1, "f.mu.Unlock()"),
+    "}",
+    "",
+    "// Residue is a snapshot of the merged residue records this activation's",
+    "// abort teardown surfaced (docs/design/teardown-contract.md, \"surface",
+    "// (residue)\"). Empty on a clean commit or when nothing failed.",
+    "func (f *RevlFrame) Residue() []RevlTeardownRecord {",
+    line(1, "f.mu.Lock()"),
+    line(1, "defer f.mu.Unlock()"),
+    line(1, "out := make([]RevlTeardownRecord, len(f.residue))"),
+    line(1, "copy(out, f.residue)"),
+    line(1, "return out"),
+    "}",
+    "",
+    "// revlNoCompensationBound is the \"0 means no bound\" sentinel: a Duration long",
+    "// enough that a timer armed with it never meaningfully fires (~292 years),",
+    "// so `runOneCompensation`'s select always resolves via the real call instead.",
+    "const revlNoCompensationBound = time.Duration(1<<63 - 1)",
+    "",
+    "// revlEnvDurationMS reads a `REVL_*_MS` env var once per call (docs/design/",
+    "// teardown-contract.md, \"Budget values… read once at activation\"; reading it",
+    "// per Phase-2 run is equivalent for a value that a process never mutates",
+    "// mid-run, and keeps the accumulator free of package-level init ordering).",
+    "// Unset or unparsable falls back to `defaultMS`; `\"0\"` returns 0, the",
+    "// caller's \"no bound\" signal.",
+    "func revlEnvDurationMS(name string, defaultMS int64) time.Duration {",
+    line(1, "v, ok := os.LookupEnv(name)"),
+    line(1, "if !ok || v == \"\" {"),
+    line(2, "return time.Duration(defaultMS) * time.Millisecond"),
+    line(1, "}"),
+    line(1, "n, err := strconv.ParseInt(v, 10, 64)"),
+    line(1, "if err != nil || n < 0 {"),
+    line(2, "return time.Duration(defaultMS) * time.Millisecond"),
+    line(1, "}"),
+    line(1, "return time.Duration(n) * time.Millisecond"),
+    "}",
+    "",
+    "// runCompensationPhase is Phase 2 of the two-phase abort (docs/design/",
+    "// teardown-contract.md): best-effort, bounded, and it never runs on a clean",
+    "// commit (a5a — discharge, the queue is simply never drained). Every queued",
+    "// compensation not yet started when the budget expires is recorded",
+    "// `compensation-residue` with `error: deadline-expired`, `attempted: false` —",
+    "// every skip is recorded, nothing silently dropped.",
+    "func (f *RevlFrame) runCompensationPhase() {",
+    line(1, "if f.committed {"),
+    line(2, "return"),
+    line(1, "}"),
+    line(1, "f.mu.Lock()"),
+    line(1, "pending := f.pending"),
+    line(1, "f.pending = nil"),
+    line(1, "f.mu.Unlock()"),
+    line(1, "if len(pending) == 0 {"),
+    line(2, "return"),
+    line(1, "}"),
+    "",
+    line(1, "budgetMS := revlEnvDurationMS(\"REVL_COMPENSATION_BUDGET_MS\", 5000)"),
+    line(1, "perCallMS := revlEnvDurationMS(\"REVL_COMPENSATION_PER_CALL_MS\", 1000)"),
+    line(1, "hasDeadline := budgetMS != 0"),
+    line(1, "var deadline time.Time"),
+    line(1, "if hasDeadline {"),
+    line(2, "deadline = time.Now().Add(budgetMS)"),
+    line(1, "}"),
+    "",
+    line(1, "for _, entry := range pending {"),
+    line(2, "if hasDeadline && !time.Now().Before(deadline) {"),
+    line(3, "f.recordResidue(RevlTeardownRecord{"),
+    line(4, "Kind: \"compensation-residue\", CrossingKey: entry.key, CrossingMethod: entry.method,"),
+    line(4, "ErrorType: \"deadline-expired\","),
+    line(4, "ErrorMessage: \"the phase-2 compensation budget (REVL_COMPENSATION_BUDGET_MS) expired \" +"),
+    line(5, "\"before this compensation started\","),
+    line(4, "Outcome: \"not-attempted\", AttemptedPhase: 2, Referent: entry.key,"),
+    line(4, "Hint: \"the phase-2 budget expired before \" + entry.key + \".\" + entry.method +"),
+    line(5, "\" ran; verify and finish by hand\","),
+    line(3, "})"),
+    line(3, "continue"),
+    line(2, "}"),
+    line(2, "bound := revlNoCompensationBound"),
+    line(2, "if perCallMS != 0 {"),
+    line(3, "bound = perCallMS"),
+    line(2, "}"),
+    line(2, "if hasDeadline {"),
+    line(3, "if remaining := time.Until(deadline); remaining < bound {"),
+    line(4, "bound = remaining"),
+    line(3, "}"),
+    line(2, "}"),
+    line(2, "f.runOneCompensation(entry, bound)"),
+    line(1, "}"),
+    "}",
+    "",
+    "// runOneCompensation runs one Phase-2 compensation with go's normative",
+    "// in-call preemption: abandon-the-wait (docs/design/teardown-contract.md,",
+    "// per-tier table). The call runs in its own goroutine; the runtime waits up",
+    "// to `bound` and, on timeout, stops waiting and moves on to the next",
+    "// compensation — the call keeps running DETACHED, recorded `outcome:",
+    "// unknown` (the emission may still land after this abort completed).",
+    "//",
+    "// The goroutine MUST recover its own panic and route it over the channel",
+    "// (go's per-tier obligation, docs/design/teardown-contract.md, \"Per-tier",
+    "// loop obligations\"): an unrecovered panic in a detached goroutine kills the",
+    "// whole process, turning a best-effort phase into a crash. And abandonment",
+    "// relaxes seriality — once one compensation is abandoned and the next one",
+    "// starts, both may be running concurrently; \"LIFO within itself\" pins the",
+    "// START order of Phase-2 compensations only, never mutual exclusion.",
+    "func (f *RevlFrame) runOneCompensation(entry revlCompEntry, bound time.Duration) {",
+    line(1, "done := make(chan error, 1) // buffered: an abandoned goroutine's send never blocks"),
+    line(1, "go func() {"),
+    line(2, "defer func() {"),
+    line(3, "if r := recover(); r != nil {"),
+    line(4, "done <- fmt.Errorf(\"panic: %v\", r)"),
+    line(3, "}"),
+    line(2, "}()"),
+    line(2, "done <- entry.run()"),
+    line(1, "}()"),
+    "",
+    line(1, "if bound < 0 {"),
+    line(2, "bound = 0"),
+    line(1, "}"),
+    line(1, "timer := time.NewTimer(bound)"),
+    line(1, "defer timer.Stop()"),
+    line(1, "select {"),
+    line(1, "case err := <-done:"),
+    line(2, "if err != nil {"),
+    line(3, "f.recordResidue(RevlTeardownRecord{"),
+    line(4, "Kind: \"compensation-residue\", CrossingKey: entry.key, CrossingMethod: entry.method,"),
+    line(4, "ErrorType: \"compensation-failed\", ErrorMessage: err.Error(),"),
+    line(4, "Outcome: \"failed\", AttemptedCall: entry.method, AttemptedPhase: 2, Referent: entry.key,"),
+    line(4, "Hint: \"the compensation \" + entry.key + \".\" + entry.method +"),
+    line(5, "\" failed; verify and finish by hand\","),
+    line(3, "})"),
+    line(2, "}"),
+    line(1, "case <-timer.C:"),
+    line(2, "// abandon-the-wait: the call keeps running detached (its own"),
+    line(2, "// panic-guard already contains whatever it does)."),
+    line(2, "f.recordResidue(RevlTeardownRecord{"),
+    line(3, "Kind: \"compensation-residue\", CrossingKey: entry.key, CrossingMethod: entry.method,"),
+    line(3, "ErrorType:    \"per-call-timeout\","),
+    line(3, "ErrorMessage: \"compensation exceeded its per-call bound (REVL_COMPENSATION_PER_CALL_MS); abandoned in flight\","),
+    line(3, "Outcome:      \"unknown\", AttemptedCall: entry.method, AttemptedPhase: 2, Referent: entry.key,"),
+    line(3, "Hint: \"the compensation \" + entry.key + \".\" + entry.method +"),
+    line(4, "\" was abandoned in flight; it may still land — verify by hand\","),
+    line(2, "})"),
+    line(1, "}"),
+    "}",
+    ""
+  ]
+}

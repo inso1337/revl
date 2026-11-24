@@ -125,7 +125,8 @@ from . import disclosure as _disclosure
 from . import remedy as _remedy
 from . import repeat as _repeat
 from .session import (AUTHORED_HOST_BODIES_KEY, ApprovalRefused,
-                      NothingLoaded, Session, SessionError, host_body_entries)
+                      NothingLoaded, Session, SessionError, has_host_code,
+                      host_body_entries, host_code_of)
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"name": "revl", "version": "2.0"}
@@ -3524,10 +3525,12 @@ def _add_replacement_host_code(fields: dict, candidate: dict,
 
 
 def _host_body_texts(ir: dict) -> dict:
-    """Each host-bodied extern in `ir` by name, as its classification and its
-    verbatim bodies, so two compositions' host code compares by content."""
-    return {extern.get("name"): (extern.get("class"), extern.get("bodies"))
-            for extern in ir.get("externs") or [] if extern.get("bodies")}
+    """Each extern in `ir` that carries host code by name, as its
+    classification, its verbatim bodies and its host-module refs, so two
+    compositions' host code compares by content and a ref whose pinned
+    sha256 moved is new host code (issue #3347)."""
+    return {extern.get("name"): (extern.get("class"), host_code_of(extern))
+            for extern in ir.get("externs") or [] if has_host_code(extern)}
 
 
 def _host_code_fields(bodies: list) -> dict:
@@ -4236,7 +4239,10 @@ def _tool_restore(arguments: dict) -> dict:
     # a restore is a cold load from a document, so it answers to the same
     # enforced lease rule `revl_load` does (`leases.FENCED`)
     if not SESSION.loaded:
-        leased = _leases.check(SESSION, "restore", arguments)
+        # issue #3509: the lease derivation compiles under the boot's realm
+        # bindings, as the operator gate's does
+        leased = _leases.check(SESSION, "restore", arguments,
+                               restore_profile=_restore_gate_profile())
         if leased is not None:
             return _refused_by_lease(leased)
     profile = AUTHORING.profile()

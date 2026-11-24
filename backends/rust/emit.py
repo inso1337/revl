@@ -11723,9 +11723,16 @@ def _emit_bridge(ir: dict) -> list[str]:
         out.append(f"impl {_svc(sname)} for {sname}Proxy {{")
         for mname, method in methods.items():
             params = method.get("params") or []
-            plist = ", ".join(f"{p['name']}: {_rust_type(p.get('type'), types)}" for p in params)
+            proxy_params = [
+                (_ident(p.get("name"), "parameter"),
+                 _rust_type(p.get("type"), types))
+                for p in params
+            ]
+            plist = ", ".join(f"{name}: {ptype}" for name, ptype in proxy_params)
             ret = _rust_type(method.get("returns"), types) if method.get("returns") else "()"
-            argvec = ", ".join(_bridge_arg_ser(p["name"], _rust_type(p.get("type"), types)) for p in params)
+            argvec = ", ".join(
+                _bridge_arg_ser(name, ptype) for name, ptype in proxy_params
+            )
             deser = _bridge_ret_deser("_v", ret)
             out.append(f"    fn {_method_ident(mname)}(&self, {plist}) -> {ret} {{")
             if deser is None:
