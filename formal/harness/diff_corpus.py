@@ -7207,8 +7207,7 @@ class Verdicts(NamedTuple):
                 + len(self.inv)
                 + len(self.sw) + len(self.a5) + len(self.gc)
                 + len(self.g1cov)
-                + len(self.ev) + len(self.ir_disjoint) + len(self.ir_kept))
-                + len(self.ev) + len(self.splits))
+                + len(self.ev) + len(self.ir_disjoint) + len(self.ir_kept) + len(self.splits))
 
 
 
@@ -7463,8 +7462,7 @@ def parse_verdicts(text: str) -> Verdicts:
                     a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
             places, model_reach, councils, g9, retain, inv, sw, a5, gc, g1cov,
-            ev, ir_disjoint, ir_kept)
-            ev, splits)
+            ev, ir_disjoint, ir_kept, splits)
 
 
 
@@ -8362,8 +8360,7 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
                     configs, a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
                     places, model_reach, councils, g9, retain, inv, sw, a5,
-                    gc, g1cov, ev, ir_disjoint, ir_kept)
-                    gc, g1cov, ev, splits)
+                    gc, g1cov, ev, ir_disjoint, ir_kept, splits)
 
 
 #: What the REFERENCE decided for each config field, for the CD row's
@@ -9918,7 +9915,7 @@ def main() -> int:
             ("a5", ref.a5, formal.a5),
             ("emission_value", ref.ev, formal.ev),
             ("ir_disjoint", ref.ir_disjoint, formal.ir_disjoint),
-            ("ir_kept", ref.ir_kept, formal.ir_kept)):
+            ("ir_kept", ref.ir_kept, formal.ir_kept),
             ("split", ref.splits, formal.splits)):
 
         for key, want in refmap.items():
