@@ -99,6 +99,10 @@ tenants never reach each other
 # component may hold both. One glob on each side of `together with`
 component Agent*   may not reach fs.read together with network.call
 
+# the same pair over the WHOLE composition (issue #2686): no combination of
+# components, in any realms, may hold both. Takes no component selector
+composition may not reach fs.read together with network.call
+
 # the MCP / agent sandbox — the profile for agent-generated code admitted
 # through the MCP session: "agent output may reach [llm, kv*] and nothing else"
 mcp may reach llm, kv*
@@ -131,6 +135,7 @@ The JSON form parses to the same policy:
   "tenants": {"neverReachEachOther": true},
   "pairs": [{"component": "Agent*",
              "together": ["fs.read", "network.call"]}],
+  "compositionPairs": [{"together": ["fs.read", "network.call"]}],
   "mcp": {"allow": ["llm", "kv*"]},
   "approvalCeilings": {"refuseUnbounded": true},
   "neverStanding": ["mail.send", "shell.*"],
@@ -164,12 +169,29 @@ The JSON form parses to the same policy:
   same set the allow/deny legs read, and must be two **distinct** reached
   tokens: one token matching both patterns is one capability, not the pair.
   `together with` names exactly two patterns, one on each side; a comma list,
-  an allow form and a `realm` subject are refused at parse time. A
-  composition-wide form (a pair split across components or realms) is a later
-  slice and is not this rule: two realms holding X and Y separately must not
-  trip the per-component pair. Like a deny-list, the pair rule does not match
-  an unbounded `*` reach, so a component reaching `fs.read` plus an unnameable
-  dispatch is admitted unless an allow-list catches it.
+  an allow form and a `realm` subject are refused at parse time. Two
+  components (or two realms) holding X and Y separately never trip the
+  per-component pair; that is the composition rule's question. Like a
+  deny-list, the pair rule does not match an unbounded `*` reach, so a
+  component reaching `fs.read` plus an unnameable dispatch is admitted unless
+  an allow-list catches it.
+* **`composition may not reach X together with Y` (composition pair rule,
+  issue #2686).** The same pair over the whole emission set: the union of
+  every component's reach, in the audit's component order. The composition is
+  refused when that set holds two **distinct** reached tokens, one matching
+  each pattern, in any components: the pair may be split across components or
+  held by one. **Realms do not count.** The composition is one boundary, and a
+  realm says who shares state, not what the composition as a whole can cross,
+  so a component isolated into realm `a` reaching X and a component in realm
+  `b` (or in none) reaching Y make the composition hold the pair. The rule
+  takes no selector and has no `realm` form, which is refused at parse time:
+  the per-component rule is how to refuse a pair inside one component, and
+  `tenants never reach each other` is how to keep realms apart. The refusal
+  names the component that reaches each capability; in the machine-readable
+  report the violation's `component` is the holder of the first capability. It is independent of the
+  per-component rule: a single component holding both trips both when both are
+  written, each reporting its own refusal. The `*` reach is excluded exactly
+  as for the per-component rule.
 * **`mcp` / `agent` (the sandbox).** An allow-list that applies only to
   components admitted through the MCP session (see below). Everywhere else it
   is inert.
@@ -234,6 +256,19 @@ The JSON form parses to the same policy:
   filled in silently. With no policy the conservative defaults still apply, so
   a generated component is confined by default.
 
+  The same ceilings apply to the **run path** (issue #3189):
+  `revl run --backend wasm` resolves them once and the harness gives every
+  component's store the fuel budget, the linear-memory ceiling and a wall-clock
+  epoch deadline before any module is plugged. A composition that hits a
+  ceiling traps and the run exits nonzero (`note raised` names the reason); a
+  harness that outlives the wall ceiling plus a startup grace is killed with
+  its whole process group. The wall ceiling runs from the moment each
+  component is plugged, so it bounds the whole boot-to-teardown round trip of
+  a composition, not each component's own execution. The emitted modules' import sections are read back
+  from the bytes the harness compiles and held to the same byte-level check. A
+  runtime or wasmtime that cannot apply a ceiling makes the harness refuse
+  rather than run unconfined.
+
 ### The pair rule: admitted and refused
 
 With `component Agent* may not reach fs.read together with network.call` in
@@ -244,6 +279,15 @@ force:
   the pair, and the rule accepts both components.
 * **Refused.** `AgentExfiltrate` reaches both capabilities, so admission is
   refused with the two reach chains named (see [The refusal](#the-refusal)).
+
+With `composition may not reach fs.read together with network.call` instead:
+
+* **Admitted.** A composition whose components reach `fs.read` (any number of
+  them) and nothing that matches `network.call`.
+* **Refused.** `ReaderJob` (realm `tenantA`) reaches `fs.read` and `CallerJob`
+  (realm `tenantB`) reaches `network.call`. Neither holds both, so the
+  per-component rule admits them, and the composition rule refuses the pair
+  with each component and chain named.
 
 ### What a capability token may be
 
@@ -268,7 +312,9 @@ particular:
   no-op nobody was told about.
 * `component Agent* may not reach fs.read together with network.call shell.run`
   is refused: a pair rule names exactly two patterns, one on each side of
-  `together with`.
+  `together with`. The same holds for `composition may not reach ...`, and
+  `realm billing may not reach ... together with ...` is refused as a realm
+  subject the pair rules do not take.
 * `except` is **not** part of the reach grammar, and `component * may not reach
   mail.send except the send kit` is refused with a diagnostic saying so. A
   reach rule carries no carve-out slot: the supported way to say "this crossing
@@ -283,10 +329,11 @@ boundary is `mail.send`). Nothing at parse time can tell those apart, so
 `evaluate` warns (`InertDenyPolicyWarning`) when a `may not reach` rule selected
 a component in the audit and no reach of that component matched any of its
 patterns. Such a rule is not protecting anything, and without the warning
-enforcing it reads exactly like a clean pass. The pair rule gets the same
-enforce-time warning (`InertPairPolicyWarning`) when its two patterns each match
-a reach somewhere but never both in one component, because a per-component pair
-rule protects only when the component holds the pair.
+enforcing it reads exactly like a clean pass. The pair rules get the same
+enforce-time warning (`InertPairPolicyWarning`): the per-component rule when no
+component it selects holds both patterns, the composition rule when no pair of
+distinct reaches across the composition matches them. Either refuses nothing in
+that audit, which is indistinguishable from a clean pass.
 
 ## The refusal
 
@@ -332,6 +379,21 @@ together with `network.call`, but `AgentExfiltrate` reaches both `fs.read` and
     network.call                 boundary crossed [network.call]
 ```
 
+For a composition pair rule each chain starts from the component that holds
+that capability (the same component twice when one holds both):
+
+```
+policy violation: the composition may not reach `fs.read` together with
+`network.call`, but it reaches `fs.read` through `ReaderJob` and `network.call`
+through `CallerJob`: the composition holds the forbidden pair; admission
+refused (boundary policy, issue #2686)
+  why `ReaderJob` was rejected:
+    ReaderJob     split.rvl  reaches `fs.read` via emission `files.read`
+    fs.read                  boundary crossed [fs.read]
+    CallerJob     split.rvl  reaches `network.call` via emission `net.call`
+    network.call             boundary crossed [network.call]
+```
+
 ## The CLI
 
 ```
@@ -355,7 +417,10 @@ policy refuses is rejected and the running generation is kept. With
 `--backend wasm` the item-289 least-authority chain over the emitted host
 imports runs as well, and it reads the policy's deny rules as well as its
 allow-lists (issue #3185); it does not run for wasm components placed by
-`--placement`, where only the gate above applies.
+`--placement`, where only the gate above applies. The wasm run path also
+applies the policy's component limits and the byte-level import check (issue
+#3189); a `wasm components confined` policy that names no limits refuses the
+run before the runtime gate.
 
 A policy with evidence rules always refuses `revl run`: run takes no
 `--evidence` or `--key`, so every evidence clause is evaluated against absent

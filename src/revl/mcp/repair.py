@@ -126,6 +126,20 @@ class SelfRepairPolicy:
                 return rule
         return None
 
+    def unselected_realms(self, name: str, running: frozenset[str],
+                          candidate: frozenset[str]) -> list[str]:
+        """The realms a candidate newly places `name` in that no rule selects.
+
+        A component-scoped rule names the component whatever its realm, so it
+        authorizes the move; otherwise a realm the component did not run in
+        must itself be selected by a realm rule (issue #3223)."""
+        if any(rule.scope == "component" and rule.selects(name, candidate)
+               for rule in self.eligibility):
+            return []
+        return sorted(realm for realm in candidate - running
+                      if not any(rule.selects(name, frozenset({realm}))
+                                 for rule in self.eligibility))
+
     def out_of_bounds(self, capabilities: list[str]) -> list[str]:
         """Capabilities the candidate reaches that the policy's `may_touch`
         bound does not permit. Empty when `may_touch` is None (inherit) — a new
@@ -472,10 +486,24 @@ def run_repair(session, arguments: dict,
     # 4/5/6/7. GAUNTLET (31) -> POLICY (33) -> WIDENING (21).
     verdicts, gate = _run_gates(session, candidate_arg, running_ir, policy,
                                 set(arguments.get("accept") or []),
-                                over_the_transport=over_the_transport)
+                                over_the_transport=over_the_transport,
+                                component=component)
     host_bodies = gate.pop("_approval_host_bodies", [])
+    by_running = eligibility["by"]
+    if "eligibility" in verdicts:
+        eligibility["candidate"] = verdicts["eligibility"]
+        if not verdicts["eligibility"]["eligible"]:
+            eligibility["eligible"] = False
+            eligibility["by"] = None
+            eligibility["byRunning"] = by_running
+            rule = None
+            eligibility["note"] = (
+                "the self-repair policy authorizes this component in its "
+                "running realms, but not in the realms the candidate places "
+                "it in, so the loop halts and hands off to a human")
     if gate["blocked"]:
         status = (STATUS_AWAITING_ACK if gate["reason"] == "widening"
+                  else STATUS_INELIGIBLE if gate["reason"] == "eligibility"
                   else STATUS_REJECTED)
         return _assemble(status, component, fault, sliced, eligibility,
                          candidate=candidate, verdicts=verdicts,
@@ -539,12 +567,20 @@ def run_repair(session, arguments: dict,
 
 def _run_gates(session, candidate_arg: dict, running_ir: dict | None,
                policy: SelfRepairPolicy, accepted: set,
-               over_the_transport: bool = True) -> tuple[dict, dict]:
+               over_the_transport: bool = True, *,
+               component: str) -> tuple[dict, dict]:
     """Run gauntlet (31) -> boundary policy (33) -> widening/may-touch (21) in
     order, short-circuiting at the first block. Returns `(verdicts, gate)` where
     `gate` carries `blocked`, `reason`, and — when everything passed — the
     compiled candidate IR to swap, with `authored` (what that compile reported
-    about the candidate's origins)."""
+    about the candidate's origins).
+
+    The self-repair policy's eligibility is read again against the realms the
+    candidate places `component` in (issue #3223): the first read in
+    `run_repair` saw only the running side, so a candidate that moved the
+    component to another realm would otherwise swap in outside the realm that
+    made it eligible. The candidate must itself be selected, and may not add a
+    realm that no rule selects."""
     from . import gauntlet as _gauntlet  # noqa: PLC0415 — sibling, avoid a cycle
 
     verdicts: dict = {}
@@ -583,6 +619,29 @@ def _run_gates(session, candidate_arg: dict, running_ir: dict | None,
                              "diagnostics": refusal}
         return verdicts, {"blocked": True, "reason": "realm",
                           "diagnostics": refusal}
+
+    # -- eligibility again (issue #3223): the candidate's own realms ----------
+    running_realms = (component_realms(running_ir.get("manifest") or {},
+                                       component)
+                      if running_ir is not None else frozenset())
+    candidate_realms = component_realms(candidate_ir.get("manifest") or {},
+                                        component)
+    candidate_rule = policy.eligible(component, candidate_realms)
+    unselected = policy.unselected_realms(component, running_realms,
+                                          candidate_realms)
+    eligible = candidate_rule is not None and not unselected
+    verdicts["eligibility"] = {
+        "eligible": eligible,
+        "realms": sorted(candidate_realms),
+        "unselectedRealms": unselected,
+        # a refusal names no rule: the one that selected a realm does not
+        # authorize the realm the candidate added
+        "by": ({"scope": candidate_rule.scope,
+                "selector": candidate_rule.selector}
+               if eligible else None),
+    }
+    if not eligible:
+        return verdicts, {"blocked": True, "reason": "eligibility"}
 
     candidate_audit = audit_diff.audit_report(candidate_ir)
 

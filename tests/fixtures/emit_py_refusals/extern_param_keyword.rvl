@@ -1,0 +1,3 @@
+// A parameter Python cannot bind (a keyword) cannot keep the spelling an inline
+// `@py` body uses, so the python emitter refuses it by name (issue #3604).
+extern pure fn f(from: Int) -> Int = @py { return 1 }

@@ -48,6 +48,7 @@
 //
 // ── CANONICAL FORM: json_stringify is byte-identical across tiers (item 385) ──
 //
+// revl:claim json-canonical-bytes
 // json_stringify is a `pure` fn, so revl's cross-tier determinism guarantee
 // (docs/syntax-2.0.md §3.4: "no backend can diverge") requires the SAME BYTES
 // on every tier for the same value. It once did not: py emitted
@@ -176,13 +177,37 @@ pub extern pure fn json_parse(s: Str) -> Any
     function digits(): void {
       while (i < n) { const c = s.charCodeAt(i); if (c >= 48 && c <= 57) i++; else break; }
     }
+    // RFC 8259 section 6: -? (0 | [1-9][0-9]*) (. [0-9]+)? ([eE] [+-]? [0-9]+)?.
+    // A leading zero, a bare minus, and an empty digit run after the point or
+    // the exponent mark are refused, as the py tier refuses them; without the
+    // check the token 1e reached Number("1e") = NaN, which no bound comparison
+    // catches.
+    function isDigit(c: string | undefined): boolean {
+      return c !== undefined && c >= "0" && c <= "9";
+    }
     function num(): number | bigint {
       const start = i;
       if (s[i] === "-") i++;
-      digits();
+      if (s[i] === "0") {
+        i++;
+        if (isDigit(s[i])) fail("a number has no leading zero");
+      } else if (isDigit(s[i])) {
+        digits();
+      } else {
+        fail("invalid number");
+      }
       let float = false;
-      if (s[i] === ".") { float = true; i++; digits(); }
-      if (s[i] === "e" || s[i] === "E") { float = true; i++; if (s[i] === "+" || s[i] === "-") i++; digits(); }
+      if (s[i] === ".") {
+        float = true; i++;
+        if (!isDigit(s[i])) fail("a number needs digits after the point");
+        digits();
+      }
+      if (s[i] === "e" || s[i] === "E") {
+        float = true; i++;
+        if (s[i] === "+" || s[i] === "-") i++;
+        if (!isDigit(s[i])) fail("a number needs digits in the exponent");
+        digits();
+      }
       const tok = s.slice(start, i);
       return float ? Number(tok) : BigInt(tok);
     }
@@ -200,8 +225,15 @@ pub extern pure fn json_parse(s: Str) -> Any
           else if (e === "n") out += "\n";
           else if (e === "r") out += "\r";
           else if (e === "t") out += "\t";
-          else if (e === "u") { out += String.fromCharCode(parseInt(s.slice(i, i + 4), 16)); i += 4; }
+          else if (e === "u") {
+            const hex = s.slice(i, i + 4);
+            if (!/^[0-9a-fA-F]{4}$/.test(hex)) fail("invalid unicode escape");
+            out += String.fromCharCode(parseInt(hex, 16)); i += 4;
+          }
           else fail("invalid escape");
+        } else if (c < " ") {
+          // RFC 8259 section 7: a raw character below U+0020 must be escaped.
+          i--; fail("unescaped control character in a string");
         } else out += c;
       }
       return fail("unterminated string");

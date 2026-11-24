@@ -29,7 +29,7 @@ than recorded: a record cannot claim one format and carry the other's bytes.
 | `sign_alg` | format | signing curve | measurement reported |
 | --- | --- | --- | --- |
 | `tdx-quote-v4-ecdsa-p256` | Intel TDX Quote v4, ECDSA-256-with-P-256 | NIST P-256, SHA-256 | `MRTD`, the TD's initial measurement, plus the runtime registers, TCB and quoting enclave a `TdxPolicy` names |
-| `sev-snp-report-v2-ecdsa-p384` | AMD SEV-SNP `ATTESTATION_REPORT` v2/v3 | NIST P-384, SHA-384 | `MEASUREMENT`, the guest's launch measurement |
+| `sev-snp-report-v2-ecdsa-p384` | AMD SEV-SNP `ATTESTATION_REPORT` v2/v3/v5 | NIST P-384, SHA-384 | `MEASUREMENT`, the guest's launch measurement |
 | `hmac-sha256` | the development verifier, NOT a root | none | whatever the record says |
 
 **TDX** is parsed at the real offsets: a 48-byte quote header (version, attestation
@@ -91,17 +91,32 @@ requirement's `TdxPolicy` names the permitted register quadruples, the TCB floor
 when the operator wants them. A TDX quote presented to a requirement that states
 no `TdxPolicy` is REFUSED rather than admitted on MRTD alone;
 `TdxPolicy(accept_mrtd_only=True)` is the explicit acknowledgement that the
-runtime registers are not compared. For SEV-SNP, `sev_min_tcb` is the TCB floor,
-compared on the report's SVN components, each on its own: the TCB version is read
-little-endian, and on Milan and Genoa the bootloader SVN is byte 0, TEE byte 1,
-SNP byte 6 and microcode byte 7, with bytes 2 to 5 reserved. A report below the
-floor in any one component is refused, and a floor that sets a reserved byte is
-refused when the requirement is built. Turin lays the TCB version out
-differently and the report's processor family is not read, so a Turin-layout
-report is not covered by this floor. The TDX policy is required where the
-SEV-SNP floor is optional because a SEV-SNP report's launch measurement covers
-the guest image it was launched with and has no runtime-register analogue, while
-MRTD covers only a TD's initial build. `docs/attested-tee-placement.md` is the
+runtime registers are not compared.
+
+For SEV-SNP, the TCB floor is stated per processor generation, because AMD lays
+the 8-byte TCB version out differently. It is read little-endian, so byte 0 is the
+least significant:
+
+| layout | field on `TeeRequirement` | components (report byte) | reserved |
+| --- | --- | --- | --- |
+| Milan and Genoa | `sev_min_tcb` | bootloader 0, TEE 1, SNP 6, microcode 7 | 2 to 5 |
+| Turin | `sev_turin_min_tcb` | FMC 0, bootloader 1, TEE 2, SNP 3, microcode 7 | 4 to 6 |
+
+The layout is decided from what the firmware stamped into the report, not from
+what the peer says: a version 2 report predates the CPUID fields and is Milan or
+Genoa, a later report names its CPUID family and model (family `0x19` is Milan or
+Genoa, family `0x1A` models `0x00` to `0x1F` is Turin), and Venice or a report
+whose CPUID is unstamped has no layout this root reads and is refused. Each
+component is compared on its own byte, so a high SVN in one cannot offset a low one
+in another, and a floor that sets a reserved byte of its layout is refused when
+the requirement is built. A SEV-SNP report is refused unless the requirement states
+the floor for ITS layout: `0` is the explicit statement that the operator demands no
+minimum, so silence cannot be mistaken for "any TCB", the same way a TDX quote is
+refused without a `TdxPolicy`. The version 5 report Turin firmware emits is read at
+the offsets version 3 uses; it adds mitigation vectors in space version 3 leaves
+reserved, which this root does not read.
+
+`docs/attested-tee-placement.md` is the
 placement-file spelling of the same demand.
 
 ```python
@@ -122,8 +137,10 @@ requirement = TeeRequirement(
         qe_mr_signers=frozenset({qe_mr_signer_hex}),
         qe_mr_enclaves=frozenset({qe_mr_enclave_hex}),
     ),
-    # microcode 0x73, SNP 0x16, TEE 0x01, bootloader 0x04
+    # Milan and Genoa: microcode 0x73, SNP 0x16, TEE 0x01, bootloader 0x04
     sev_min_tcb=0x7316000000000104,
+    # Turin: microcode 0x73, SNP 0x16, TEE 0x01, bootloader 0x04, FMC 0x02
+    sev_turin_min_tcb=0x7300000016010402,
 )
 ```
 
@@ -159,6 +176,17 @@ Two ways a platform key can reach the root, and neither is the peer's to choose:
   chain to the SGX Root CA, AMD's VCEK certificate under the ASK and ARK).
   Consuming the vendor DER directly is the remaining hop: it changes which bytes
   carry the endorsement, not where the trust terminates.
+
+**Revoking a platform key.** `HardwareRoot(revoked_platform_keys=[...])` names the
+fingerprints (`PinnedKey.key_id`, or a `PinnedKey`) of platform keys the operator no
+longer trusts, for instance a platform whose firmware is known to be vulnerable. A
+revoked key is refused however it arrives, pinned directly or certified by a pinned
+endorsement root, and revocation wins over a pin: a key left in `platform_keys`
+while it is also revoked is still refused. This is the operator's own list. The
+root does not fetch a vendor revocation list or read a TCB Info document, and a
+minimum TCB floor cannot tell that a platform claims an SVN above what it runs;
+both need the vendor's signed collateral, which the one-hop `PlatformEndorsement`
+does not carry.
 
 There is deliberately **no placement-file key for a root**. A root is operator
 configuration, it is the thing that makes the demand mean anything, and a file a

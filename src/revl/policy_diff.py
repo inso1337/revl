@@ -142,6 +142,10 @@ LEGS = (
         "the component's WHOLE reach set: a per-component pair rule refuses "
         "only when one component holds both capabilities, which one recorded "
         "crossing does not carry"),
+    Leg("composition-pair", "unmodelled",
+        "the union of every component's reach: a composition pair rule refuses "
+        "when the whole emission set holds both capabilities, in any "
+        "components, which one recorded crossing does not carry"),
 )
 
 
@@ -457,6 +461,11 @@ def leg_surfaces(policy, name: str, token: str, realms) -> dict:
         "pair": _rows((rule.selector, rule.first, rule.second)
                       for rule in policy.pair_rules
                       if rule.selects(name)),
+        # the composition form selects every component, so every such rule is
+        # part of every pair's surface: it reads the whole emission set, which
+        # no single recorded crossing carries.
+        "composition-pair": _rows((rule.first, rule.second)
+                                  for rule in policy.composition_pair_rules),
     }
 
 

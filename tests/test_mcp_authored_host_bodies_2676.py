@@ -308,7 +308,10 @@ def test_repair_gate_carries_the_candidate_bodies(monkeypatch):
 
     _verdicts, gate = repair._run_gates(
         SimpleNamespace(ir=ir), {"source": _CANDIDATE, "modules": modules},
-        ir, repair.SelfRepairPolicy(ack_on_widen=False), set())
+        ir, repair.SelfRepairPolicy(
+            eligibility=(repair.Eligibility("component", "*"),),
+            ack_on_widen=False),
+        set(), component="candidate_root")
     assert _body_names(gate["_approval_host_bodies"]) == {
         "candidate_helper", "candidate_root",
     }
@@ -374,7 +377,7 @@ def test_restore_stores_provenance_on_the_live_generation_and_history(
         return {"restored": True}
 
     monkeypatch.setattr(server.SESSION, "restore", restore)
-    monkeypatch.setattr(server._leases, "check", lambda *_args: None)
+    monkeypatch.setattr(server._leases, "check", lambda *_args, **_kwargs: None)
     result = server._tool_restore({"snapshot": {"sources": origin}})
 
     assert result["restored"] is True

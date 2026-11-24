@@ -103,6 +103,19 @@ rule produced it. The digest is taken from the SCORER's own checkout, so two
 rounds can show they were scored by the same protocol. It proves identity, not
 correctness: who holds the expected value and how it rotates is the custody
 question in issue #2762, and a digest is not a solution to it.
+
+THE EVALUATOR AS A CAPABILITY (slice 3)
+---------------------------------------
+Both halves above are answered against a changed-file set. `EVALUATOR_NAMESPACE`
+is the reserved capability namespace that closes the other half, as `kernel` does
+for the admission kernel: a component that is composed for another consumer and
+DECLARES a reach into the evaluator is refused by that declaration, and not only
+by its diff. `EVALUATOR_CAPS` is its held set, `lower._check_evaluator_boundary`
+is the fold (the same `cap_order.disjoint`), and the members live in this file
+rather than in a module of their own because there is no new algebra and
+`kernel_boundary` is already the ruleset module `lower` reads. A path has ONE
+capability: the evaluator members stand for the evaluator paths that are not
+kernel paths. The undeclared reaches (`*` and `svc:`) stay the kernel arm's.
 """
 
 from __future__ import annotations
@@ -471,6 +484,150 @@ def unenumerated(effective) -> list:
     enumeration named so the reader can see what the tree does know about."""
     return sorted((c for c in effective
                    if is_kernel_token(c.token) and c.token not in BY_TOKEN),
+                  key=lambda c: c.to_str())
+
+
+# ------------------------------------------ the evaluator as a capability (#2802)
+
+#: The reserved capability namespace for the evaluator, as `kernel` is for the
+#: admission kernel. A token whose head is `evaluator` names a boundary that
+#: reaches the judge of the evolution loop: the reward conjunction, the progress
+#: counters, the lifecycle controller, the held-out scorer or the protocol
+#: digest. No service in the tree declares one, which is the point: a candidate
+#: that was composed for another consumer and reaches the evaluator has to say
+#: so in the one vocabulary the attenuation product already folds, and saying so
+#: is refused by its declared reach and not only by its diff (issue #2802,
+#: slice 3). The diff check (`EVALUATOR_PATHS`, the controller and the held-out
+#: scorer) and this capability answer two different questions and neither
+#: replaces the other.
+EVALUATOR_NAMESPACE = "evaluator"
+
+
+@dataclass(frozen=True)
+class EvaluatorCap:
+    """One member of the evaluator capability set.
+
+    Same four fields as `KernelCap`, with the same meaning. `paths` are the
+    `EVALUATOR_PATHS` entries the member stands for, so a refusal can say which
+    part of the tree the authority is the authority over. A path that is already
+    a kernel member (`kernel.census` stands for the census tool and its
+    baseline, `kernel.admission` for this file) is NOT repeated here: one path
+    has one capability, so a reader never has to decide which of two refusals
+    names it."""
+
+    token: str
+    guarantee: str
+    paths: tuple[str, ...]
+    why: str
+
+
+#: The evaluator's own held set. The LEFT side of every refusal below, exactly as
+#: `KERNEL_CAPS` is for the kernel. Every member cites `G8`, the guarantee the
+#: kernel namespace's own unenumerated-token refusal cites, because no new code
+#: is registered for this item: a registered code with no reproducer under
+#: `examples/rejections/` fails matrix generation.
+EVALUATOR_CAPS: tuple[EvaluatorCap, ...] = (
+    EvaluatorCap(
+        "evaluator.reward", "G8",
+        ("tools/evolution_reward.py", "tests/test_evolution_reward.py"),
+        "the reward conjunction and its retention rule; a component that "
+        "reaches it chooses which components a trajectory must satisfy to be "
+        "kept",
+    ),
+    EvaluatorCap(
+        "evaluator.progress", "G8",
+        ("tools/evolution_progress.py", "tests/test_evolution_progress.py"),
+        "the progress counters; a component that reaches them decides what "
+        "counts as an improvement",
+    ),
+    EvaluatorCap(
+        "evaluator.controller", "G8",
+        ("tools/evolution_controller.py", "tests/test_evolution_controller.py"),
+        "the lifecycle that reduces stage records to one verdict; a component "
+        "that reaches it is judged by the rule it just wrote",
+    ),
+    EvaluatorCap(
+        "evaluator.heldout", "G8",
+        ("tools/heldout_scoring.py", "tests/test_heldout_scoring.py",
+         "tools/build_gate_crate.py", "tests/test_selfhost_lower.py"),
+        "the held-out scorer and the programs it is scored against; a "
+        "component that reaches it chooses the draw it is judged on",
+    ),
+    EvaluatorCap(
+        "evaluator.protocol", "G8",
+        ("tools/evaluator_protocol.py", "tests/test_evaluator_protocol.py"),
+        "the loader that puts the evaluator enumeration in front of the tools "
+        "and the digest that names the protocol a verdict was produced under; a "
+        "component that reaches it rewrites the identity of its own judge",
+    ),
+)
+
+#: token -> EvaluatorCap, for the refusal's lookup.
+EVALUATOR_BY_TOKEN: dict[str, EvaluatorCap] = {c.token: c for c in EVALUATOR_CAPS}
+
+
+def evaluator_held() -> list:
+    """The evaluator's held set as `cap_order.Cap`s - the left side of the fold.
+
+    Built rather than stored for the reason `kernel_held` is: one spelling of a
+    token, and the order's own parser reads it."""
+    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+    return [cap_order.parse_cap(c.token) for c in EVALUATOR_CAPS]
+
+
+def is_evaluator_token(token: str) -> bool:
+    """Whether a capability token names the evaluator namespace.
+
+    Matched on the NAMESPACE, not on membership of `EVALUATOR_CAPS`, for the
+    reason `is_kernel_token` gives: a token spelled `evaluator.something_new` is
+    still a claim on the judge, and reading it as an ordinary boundary because
+    the enumeration has not caught up is the fail-open shape."""
+    return (token == EVALUATOR_NAMESPACE
+            or token.startswith(EVALUATOR_NAMESPACE + "."))
+
+
+def evaluator_offending(effective) -> list:
+    """The evaluator capabilities `effective` DECLARES a claim on.
+
+    `effective` is a component's effective ceiling as `cap_order.Cap`s, the same
+    input `offending` takes. Returns a list of `(EvaluatorCap, Cap)` in
+    `EVALUATOR_CAPS` order: the member, and the element of `effective` that
+    reaches it. Empty means no declared claim on an enumerated member.
+
+    DECLARED reaches only, on both sides. The unnameable `*` and the `svc:`
+    undeclared reaches are not read here: under the untrusted-author profile
+    `offending` already meets them against EVERY kernel member and refuses the
+    candidate before this fold runs, and the first-party tree is the subject of
+    the loop and not a candidate passing through admission. Repeating that arm
+    would only produce a second refusal for the same reach, naming the evaluator
+    where the kernel's is already the stronger statement. An unenumerated
+    `evaluator.*` token has no member to compare against and is caught by
+    `unenumerated_evaluator`."""
+    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+    hits: list = []
+    for held in evaluator_held():
+        member = EVALUATOR_BY_TOKEN[held.token]
+        for element in sorted(effective, key=lambda c: c.to_str()):
+            if is_evaluator_token(element.token) \
+                    and not cap_order.disjoint(element, held):
+                hits.append((member, element))
+                break
+    return hits
+
+
+def unenumerated_evaluator(effective) -> list:
+    """Declared evaluator-namespace elements that `EVALUATOR_CAPS` does not
+    enumerate, in canonical order.
+
+    A candidate that writes `emission [evaluator.something_new]` has made a claim
+    on the judge that this file has no member for. It is refused under `G8`
+    rather than read as an ordinary boundary, with the enumeration named so the
+    reader can see what the tree does know about. A bare `evaluator` is in this
+    set too, because `cap_order.disjoint` treats two distinct tokens as disjoint
+    and the bare namespace would otherwise slip through the fold."""
+    return sorted((c for c in effective
+                   if is_evaluator_token(c.token)
+                   and c.token not in EVALUATOR_BY_TOKEN),
                   key=lambda c: c.to_str())
 
 

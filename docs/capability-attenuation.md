@@ -275,6 +275,19 @@ do is mint the policy that bounds its own data.
 `docs/design/545-kernel-boundary-capability.md` carries the design, the
 non-vacuity measurement and the residuals.
 
+**The evaluator is the second reserved namespace (issue #2802).** The code that
+scores a candidate (the reward conjunction, the progress counters, the lifecycle
+controller, the held-out scorer and the protocol digest) is enumerated beside
+the kernel as `evaluator.reward`, `evaluator.progress`, `evaluator.controller`,
+`evaluator.heldout` and `evaluator.protocol`, and a component that declares a
+reach into any of them is refused by that declaration with the same fold and the
+same code (G8), on both sides of the trust boundary. A token the enumeration has
+no member for, including the bare `evaluator`, is refused rather than read as an
+ordinary boundary. The undeclared reaches stay the kernel arm's. The diff check
+that refuses a candidate editing these files stays too: it answers a different
+question, and the capability is what refuses a reach no diff shows. Section 8 of
+the design note carries the table and the residuals.
+
 ## Soundness
 
 The check is a compile-time refusal, not codegen — an admitted program emits
