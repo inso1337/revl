@@ -33,7 +33,7 @@ from pathlib import Path
 import pytest
 
 from revl.truc import _host
-from test_truc_add_assemble import CORDIS_PY, REGISTRY, _new_project, _truc
+from test_truc_add_assemble import CORDIS_PY, REGISTRY, _grant, _new_project, _truc
 
 ENTRY = "user_cache"
 #: the composition manifest a clean gate verdict hands `write_assembly`
@@ -337,6 +337,7 @@ _cli = pytest.mark.skipif(
 @_cli
 def test_cli_assemble_names_a_drifted_vendored_manifest(tmp_path):
     proj = _new_project(tmp_path)
+    _grant(proj, "user_cache", ["db"])
     assert _truc(proj, "add", "user_cache").returncode == 0
     assert _truc(proj, "add", "pg_database").returncode == 0
     vendored = proj / "trucs" / "user_cache" / "manifest.json"
@@ -353,6 +354,7 @@ def test_cli_assemble_check_names_a_drifted_vendored_manifest(tmp_path):
     """The remaining gap: `assemble --check` wrote nothing and so never reached
     the host's drift check, reporting a drifted vendored manifest as valid."""
     proj = _new_project(tmp_path)
+    _grant(proj, "user_cache", ["db"])
     assert _truc(proj, "add", "user_cache").returncode == 0
     assert _truc(proj, "add", "pg_database").returncode == 0
     vendored = proj / "trucs" / "user_cache" / "manifest.json"
@@ -375,6 +377,7 @@ def test_cli_add_of_a_dossier_shipping_entry_pins_the_dossier(tmp_path):
     toml = proj / "truc.toml"
     toml.write_text(toml.read_text(encoding="utf-8").replace(str(REGISTRY), str(reg)))
 
+    _grant(proj, ENTRY, ["db"])
     r = _truc(proj, "add", ENTRY)
     assert r.returncode == 0, r.stdout + r.stderr
     vendored = proj / "trucs" / ENTRY / "dossier.json"
@@ -395,6 +398,7 @@ def test_cli_add_of_a_dossier_shipping_entry_pins_the_dossier(tmp_path):
 @_cli
 def test_cli_assemble_check_is_still_quiet_on_a_clean_assembly(tmp_path):
     proj = _new_project(tmp_path)
+    _grant(proj, "user_cache", ["db"])
     assert _truc(proj, "add", "user_cache").returncode == 0
 
     r = _truc(proj, "assemble", "--check")

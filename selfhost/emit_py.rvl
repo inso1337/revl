@@ -226,9 +226,18 @@ extern pure fn ctx_read(key: Str) -> Str = @py {
 fn mangle(name: Str) -> Str { return mangle_with(name, true, false, true) }
 fn mangle_kw(name: Str) -> Str { return mangle_with(name, false, false, false) }
 fn mangle_type(name: Str) -> Str { return mangle_with(name, true, true, true) }
-// an inline extern body's parameter: host code names it, no temporary shares
-// its scope, so only the builtin rung (`_ident(..., temps=False)`)
-fn mangle_host_param(name: Str) -> Str { return mangle_with(name, true, false, false) }
+// an inline extern body's parameter (issue #3604): host code names it, so it
+// keeps its spelling. `host_param_refusal` is "" for such a name, else why the
+// reference (`_inline_extern_param`) refuses it: a Python keyword or soft
+// keyword, or the emitter's `_revl*` scaffolding namespace.
+extern pure fn host_param_refusal(name: Str) -> Str = @py {
+    import keyword
+    if keyword.iskeyword(name) or keyword.issoftkeyword(name):
+        return "keyword"
+    if name.startswith("_") and name.lstrip("_").startswith("revl"):
+        return "scaffolding"
+    return ""
+}
 // `_snake` / `_pascal` verbatim (backends/python/emit.py): the component's apply
 // fn name is `_<snake>_apply`, a provision class is `_<Pascal>`.
 extern pure fn snake(name: Str) -> Str = @py {
@@ -2240,7 +2249,13 @@ fn emit_externs(externs: List[Any], gated: Bool) -> List[Str] {
   for (ext of externs) {
     let name = mangle(value_str(value_field(ext, "name")))
     var ps = []
-    for (p of value_list(value_field(ext, "params"))) { ps = ps.push(mangle_host_param(value_str(value_field(p, "name")))) }
+    var refused = ""
+    for (p of value_list(value_field(ext, "params"))) {
+      let pn = value_str(value_field(p, "name"))
+      ps = ps.push(pn)
+      let why = host_param_refusal(pn)
+      if (refused == "" && why != "" && !value_is_null(value_field(value_field(ext, "bodies"), "py"))) { refused = `${pn} ${why}` }
+    }
     var kw = "def"
     if (value_bool(value_field(ext, "async"))) { kw = "async def" }
     // item 421 F6 (ported per item 429(d)): the extern's declared return carried
@@ -2283,6 +2298,9 @@ fn emit_externs(externs: List[Any], gated: Bool) -> List[Str] {
     // by name.
     if (value_is_null(py_body) && !value_is_null(value_field(value_field(ext, "refs"), "py"))) {
       out = out.concat([`<<UNSUPPORTED-EXTERN:py-ref ${name}>>`, ""])
+    } else if (refused != "") {
+      // issue #3604: the reference refuses this parameter by name at emit
+      out = out.concat([`<<UNSUPPORTED-EXTERN:param ${name} ${refused}>>`, ""])
     } else {
       out = out.push(`${kw} ${name}(${ps.join(", ")}):`)
       // item 256 Slice 1: a bound secret is the FIRST body local of the

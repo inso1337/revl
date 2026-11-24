@@ -520,6 +520,27 @@ SWEEP_EXEMPT = {
         "test_the_promote_branch_holds_no_threshold_and_no_rung_name`, which "
         "reads the `pool promote` block and refuses any threshold literal or "
         "rung name in it",
+    "src/revl/registry.py":
+        "it READS a recorded promotion verdict as one facet of an evidence "
+        "bundle and renders none: the token the sweep matches is the "
+        "decision word `PROMOTE` that `_strength_status` compares a "
+        "verdict's `decision` against, which is the guard that only a "
+        "PROMOTE verdict licenses a `strength` and that a REFUSE or REVERT "
+        "one grades `not-promoted`. It decides no promotion and confers no "
+        "authority: the verdict is made by `shadow_promotion.decide`, the "
+        "path registered above, with the authority precondition ahead of "
+        "every measured stage, and the `strength` grade can only NARROW what "
+        "a policy admits (a hard clause refuses, a soft one grades `review` "
+        "or `canary`), never widen it. That is pinned by `tests/"
+        "test_evidence_strength_2804.py::"
+        "test_a_sampled_only_candidate_grades_review_and_never_admit` and "
+        "`::test_the_tag_widens_no_authority`, and `::test_nothing_may_claim_"
+        "exact_today` holds the set of producers allowed to state `exact` "
+        "empty. What would make this module a promotion path is a decision "
+        "of its own, a threshold or a default that lets a document without "
+        "a PROMOTE verdict grade `sampled`; "
+        "`::test_a_refusal_or_revert_does_not_license_a_strength` refuses "
+        "the last",
 }
 
 
@@ -530,12 +551,12 @@ def renders_promotion(source: str) -> bool:
     renders a promotion when it contains a string constant whose value is
     exactly ``promote``, in any case. That is what a module that decides
     promotions has and what one that merely discusses them does not. Measured
-    over this tree, it selects eight modules: the four in :data:`REGISTRY`
+    over this tree, it selects nine modules: the four in :data:`REGISTRY`
     (`src/revl/mcp/canary.py`, `tools/evolution_controller.py`,
-    `src/revl/peer_pool.py`, `src/revl/shadow_promotion.py`) and the four in
+    `src/revl/peer_pool.py`, `src/revl/shadow_promotion.py`) and the five in
     :data:`SWEEP_EXEMPT` (`src/revl/promotion_barrier.py`,
     `tools/evolution_progress.py`, `src/revl/__main__.py`,
-    `src/revl/cli/parser.py`).
+    `src/revl/cli/parser.py`, `src/revl/registry.py`).
 
     It errs WIDE, and that is the direction to err in. A module that renders a
     verdict conferring no authority is selected and has to be argued out by

@@ -291,7 +291,7 @@ is live, which makes scoped approval authority unusable in exactly the
 multi-component sessions that need it. The branch resolves the presented
 hash against the outstanding-ticket table to the ticket's component and
 its realm labels, the same resolve-before-running pattern the `restore`
-branch uses (`_snapshot_targets`), and refuses
+branch uses (`_restore_targets`), and refuses
 an unknown hash before the authority check runs.
 
 **Back-compatibility, the item-55 clause.** With no approval policy

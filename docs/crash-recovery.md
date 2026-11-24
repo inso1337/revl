@@ -650,7 +650,11 @@ run`, and `--config` the config it ran with. Recover then:
    So is a descriptor whose `entry` is not the one its call is declared as
    (a compensation recorded as a transactional inverse, or the reverse). A
    legacy boundary inverse is checked by name only: it is a transactional
-   entry by construction.
+   entry by construction. The other families get the same check (issue
+   #3234): an owed deferred emission is re-fired only if it names a
+   `deferred` extern the composition declares, and a `shared` grant is
+   reclaimed only through a declared inverse; anything else is `undeclared`
+   residue, and a call that names neither boots no provider.
 5. **Replays the open discharge descriptors through the runtime's own abort
    path** (`runtime.replay_descriptors`): witnessed inverses newest first with
    their fences, then compensations newest first under the Phase-2 budget.
@@ -739,11 +743,21 @@ back, as it would the same composition run in one process. A crash between the
 index's `committed` and a process's marker is completed by recover: it stamps
 that process's `activation-complete` from the index (`commitStamped` in the
 verdict), so the process rolls forward with the others instead of back alone.
-That stamp is taken on the index's word: a process WAL records nothing when
-its process comes UP (the conductor reads `[name] UP` off the process's
-output), so recover cannot yet confirm the commit from the process WALs
-themselves (issue #3193). Keep the index and its process WALs where only the
-operator can write.
+That stamp is taken only for a process whose WAL carries the `process-up`
+record it appended when it came up, just before it prints `UP` (the record names
+the process and the run). A committed run whose process WAL has none, in its
+latest opening, is refused with an error naming the process, and no process WAL
+of the run is stamped: the line is forged, or the run was written before the
+record existed (issue #3234). The error names both remedies, and each is the
+operator's decision: remove the index's `committed` line when the process never
+came up (its activation then rolls back), or append the `process-up` line it
+prints when the process did come up and the run committed. The record is
+additive: the WAL version is unchanged. It is not authenticated, so it defeats a
+forged `committed` line over a WAL the process never wrote, not a writer who can
+append to both files: keep the index and its process WALs where only the
+operator can write. A process WAL with more than one hard link is refused too
+(a link to a file elsewhere would be stamped through the index's name); this
+includes a hard-link backup of the directory such as `cp -al`.
 
 `revl recover --wal FILE` on an index recovers the whole run:
 
@@ -754,7 +768,8 @@ operator can write.
    any WAL is read or stamped, and so is a process WAL that is a symbolic
    link or resolves outside the index's directory, by `revl recover` and
    `revl estop` alike; the stamp itself does not follow a link (issue
-   #3193). A hard link is not detected. A missing one is residue named
+   #3193). A process WAL with more than one hard link is refused too (issue
+   #3234). A missing one is residue named
    by its process (`missing-wal`): recover cannot tell what it crossed. An
    empty one was created by the conductor and never opened by its process,
    which crossed nothing.

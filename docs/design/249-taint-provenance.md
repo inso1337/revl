@@ -324,7 +324,11 @@ running composition's IR, and the IR's types are stripped. So the IR carries
 what the strip removed, beside the bare type:
 - `"trusted": true` on a `Trusted[T]` parameter of a service operation;
 - `"untrusted": true` on an `Untrusted[T]` parameter;
-- `"returns_qualifier": "Untrusted"` (or `"Secret"`) on the operation.
+- `"returns_qualifier": "Untrusted"` (or `"Secret"`) on the operation;
+- `"returns_qualifiers": ["Untrusted", "Secret"]` on an operation whose return
+  holds both (`Result[Untrusted[T], Secret[E]]`, issue #3238). The primary
+  stays in `returns_qualifier`; the reading side mints every origin the set
+  names, so the `Secret` is not lost across the manifest.
 
 Each key is absent unless declared, so a program with no qualifier keeps its
 IR byte for byte. `taint.fold_ambient_composition` reads them back for every

@@ -74,10 +74,20 @@ verifies and cannot count as evidence for a promotion that requires the
 binding. See
 [566-pool-execution-receipts.md](566-pool-execution-receipts.md#the-grant-the-policy-the-outcome-and-the-budget-claim-issue-2720).
 
-Nine checks on the peer side, each naming one lowercase link, each failing
+Ten checks on the peer side (and an eleventh, `peer-state`, below), each naming one lowercase link, each failing
 closed: `task-shape`, `task-signature`, `pool-identity`, `charter-identity`,
-`policy-identity`, `peer-identity`, `artifact-digest`, `unknown-runner`,
-`replayed-task`. A
+`policy-identity`, `peer-identity`, `stale-task`, `artifact-digest`,
+`unknown-runner`, `replayed-task`. A task's signed `issued_at` must be within
+the charter's `join_window_s` of the peer's clock, read when the task arrives
+(issue #3154); the join check is the model, and the one window serves both. The
+ids the peer has run are appended to `seen@tasks.jsonl` in its `--workdir`
+before each run and read at start, so a restart does not forget them; a peer
+that cannot write the id down refuses on `peer-state` and runs nothing. The
+id is burned before the run, so a task lost mid-run is re-issued under a new id
+and never re-run under the old one. One peer per `--workdir`: the file is read
+at start, so a second `pool serve` on the same directory is not covered. Both
+clocks matter now: an operator and a peer more than `join_window_s` apart see
+every task refused on `stale-task`. A
 multi-file task adds four, each naming the file it is about: `bundle-path`,
 `bundle-missing-file`, `bundle-extra-file` and `bundle-file-digest` (see
 "Multi-file artifacts" below). Four more on the way back: `peer-unreachable`, `result-digest`, `receipt-refused`,

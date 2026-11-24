@@ -7,10 +7,11 @@
 use "../externs.rvl" { host_admit_all }
 
 pub service Gate {
-  // Admit an ordered list of {path, source, name} incrementally through the
-  // gate; the verdict names the first candidate that would not join. Vendored
-  // rows are admitted as an untrusted author: `lockJson` and `trustHostCode`
-  // are the only two things that may lift that for a host body.
+  // Admit an ordered list of {path, source, name, grant} incrementally through
+  // the gate; the verdict names the first candidate that would not join.
+  // Vendored rows are admitted as an untrusted author bounded to the `requires`
+  // keys their `grant` carries; `lockJson` and `trustHostCode` are the two
+  // things that may lift the untrusted profile for a host body.
   emission[host_admit_all] fn admit_all(orderedJson: Str, lockJson: Str, trustHostCode: Bool) -> Str
 }
 

@@ -329,16 +329,20 @@ def _book(session) -> LeaseBook:
 # ------------------------------------------------------ swap-target derivation
 
 
-def _swap_targets(session, arguments: dict, verb: str = "swap") \
-        -> list[str] | None:
+def _swap_targets(session, arguments: dict, verb: str = "swap",
+                  restore_profile=None) -> list[str] | None:
     """The component names a `verb` with these arguments would *replace*,
     boot or take down, reusing item 55's target derivation (read-only).
     ``None`` means undecidable — the candidate will not compile, or nothing is
     loaded. Enforcement fails CLOSED on it (see :func:`check`); only the
-    advisory path, which never blocks anything, is allowed to shrug."""
+    advisory path, which never blocks anything, is allowed to shrug.
+
+    `restore_profile` is the profile a `restore`'s derivation compiles under
+    (the boot's realm bindings, issue #3509); other verbs ignore it."""
     from . import operator as _operator  # noqa: PLC0415 — read-only reuse of item 55
 
-    targets = _operator._targets(verb, session, arguments)
+    targets = _operator._targets(verb, session, arguments,
+                                 restore_profile=restore_profile)
     if targets is None:
         return None
     return [name for name, _labels in targets]
@@ -526,7 +530,7 @@ def check_swap(session, arguments: dict,
 
 
 def check(session, verb: str, arguments: dict,
-          now: float | None = None) -> LeaseRefusal | None:
+          now: float | None = None, restore_profile=None) -> LeaseRefusal | None:
     """The enforcement decision for a `verb` in :data:`FENCED`. Returns a
     :class:`LeaseRefusal` when the policy enforces leases and the verb would
     replace, boot or take down a component held by *another* operator;
@@ -544,7 +548,13 @@ def check(session, verb: str, arguments: dict,
 
     The self-holder exemption is granted only to a *verified* lease (see
     :func:`_exempt`), so a lease re-seated from a restored snapshot refuses
-    even the operator its document names as holder."""
+    even the operator its document names as holder.
+
+    `restore_profile` carries the boot compile's realm bindings into a
+    `restore`'s target derivation, as the operator gate's does (issue #3509),
+    so a bound `realm(?NAME)` placeholder is decidable and the restore is
+    refused only when it touches a leased component. An unbound one stays
+    undecidable and refuses against every active lease."""
     if verb not in FENCED:
         raise ValueError(f"no lease rule for verb {verb!r}")
     if not enforced(session):
@@ -552,7 +562,7 @@ def check(session, verb: str, arguments: dict,
     now = time.time() if now is None else now
     undecidable = False
     try:
-        targets = _swap_targets(session, arguments, verb)
+        targets = _swap_targets(session, arguments, verb, restore_profile)
     except Exception:  # noqa: BLE001 — a derivation that raised is undecidable
         targets = None
     if targets is None:

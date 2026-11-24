@@ -164,7 +164,8 @@ def test_a_tdx_quote_chained_to_a_pinned_root_is_admitted():
 
 def test_a_sev_snp_report_chained_to_a_pinned_root_is_admitted():
     ok, reason = admits(
-        sev_proof(), requirement(measurements=frozenset({SEV_MEASUREMENT})))
+        sev_proof(),
+        requirement(measurements=frozenset({SEV_MEASUREMENT}), sev_min_tcb=0))
     assert ok, reason
     assert q.DEV_ROOT_NOTE not in reason
 

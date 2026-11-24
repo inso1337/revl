@@ -22,6 +22,7 @@ from .registry import (
     EVIDENCE_COMPENSATION,
     EVIDENCE_FAULT_SWEEP,
     EVIDENCE_INVERSE_ROUNDTRIP,
+    EVIDENCE_PROMOTION,
     EVIDENCE_PROVENANCE,
     EVIDENCE_SECRET_SINKS,
     _BOUND_FACETS,
@@ -31,6 +32,7 @@ from .registry import (
     _normalize_ir_for_attest,
     _provenance_document,
     _read,
+    _read_json,
     _reached_capability_tokens,
     _write_evidence_file,
     load_knowledge,
@@ -47,6 +49,8 @@ def build_evidence(registry_dir: str | os.PathLike, *, key: bytes | None = None,
     writes their verbatim output under ``<component>/evidence/``. `capabilities`
     (the G8 boundary), `ceilings`, `secret-sinks`, `compensation` and
     `provenance` are always reproducible from source and are always written;
+    `promotion.json` is the one file a publisher supplies (a recorded
+    decision) and is bound, not produced;
     `attestation` is written when a signing `key` is given; `fault-sweep` and
     `inverse-roundtrip` are the runtime-tested facets - written when the
     cordis-py runtime is present, and honestly skipped (left `unavailable`) when
@@ -139,6 +143,15 @@ def build_evidence(registry_dir: str | os.PathLike, *, key: bytes | None = None,
         if knowledge is not None:
             bindings["knowledge"] = _facet_hash(knowledge)
             facets.append("knowledge")
+        # issue #2804: the promotion verdict is a DECISION the publisher
+        # recorded, not a projection of the source, so it is never produced
+        # here. When the entry ships one it is bound like the knowledge
+        # records, so a signed entry vouches for it and an edited one breaks
+        # the attestation.
+        promotion = _read_json(entry_dir / "evidence" / EVIDENCE_PROMOTION)
+        if promotion is not None:
+            bindings["strength"] = _facet_hash(promotion)
+            facets.append("strength")
 
         # provenance - reproducible source/build facts (not itself bound: it
         # carries the source/manifest hashes the composition hash already roots).
