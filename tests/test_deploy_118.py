@@ -1716,11 +1716,13 @@ component C provides s: S {
 # --- a stranded participant settles by the durable record, never a guess ----
 
 
-def _stranded_wal(path, *, complete=False):
+def _stranded_wal(path, *, complete=False, generation=0):
     """A participant WAL in `recovery.py`'s own schema, stranded mid-update: one
-    transactional inverse and one held (class-(b)) deferred emission."""
+    transactional inverse and one held (class-(b)) deferred emission. The
+    header carries `generation` so a settle run (#3571) constrains its decision
+    records to the same generation."""
     records = [
-        {"record": "header", "walVersion": 1, "generation": 0,
+        {"record": "header", "walVersion": 1, "generation": generation,
          "guarantee": "test"},
         {"record": "discharge-descriptor", "seq": 1, "entry": "transactional",
          "call": {"receiver": "db", "method": "removeRow", "args": ["r1"]},
@@ -1738,7 +1740,7 @@ def _stranded_wal(path, *, complete=False):
 def test_a_stranded_participant_rolls_forward_when_the_record_is_present(tmp_path):
     wal = str(tmp_path / "p.wal")
     decision = str(tmp_path / "decision.jsonl")
-    _stranded_wal(wal)
+    _stranded_wal(wal, generation=1)
     deploy.write_commit_approval(decision, federation_id="fed", generation=1,
                                  participants=["billing"])
     verdict = deploy.settle_stranded(wal, decision)
@@ -1762,7 +1764,7 @@ def test_a_stranded_participant_rolls_back_when_the_record_is_absent(tmp_path):
 def test_a_stranded_participant_rolls_back_on_an_explicit_abort_record(tmp_path):
     wal = str(tmp_path / "p.wal")
     decision = str(tmp_path / "decision.jsonl")
-    _stranded_wal(wal)
+    _stranded_wal(wal, generation=1)
     deploy.write_abort_decision(decision, federation_id="fed", generation=1,
                                 reason="peer failed", failed="edge")
     verdict = deploy.settle_stranded(wal, decision)
@@ -1776,7 +1778,7 @@ def _settle_complete(tmp_path, write_record):
     `writer=FEDERATION_APPLY_WRITER` makes it a `revl federation-apply` file."""
     wal = str(tmp_path / "p.wal")
     decision = str(tmp_path / "decision.jsonl")
-    _stranded_wal(wal, complete=True)
+    _stranded_wal(wal, complete=True, generation=1)
     write_record(decision)
     return deploy.settle_stranded(wal, decision)
 
@@ -1876,7 +1878,7 @@ def test_an_unreadable_decision_record_fails_closed(tmp_path):
 
 
 def _stranded_participant_wal(tmp_path, identity="db",
-                              effects=("row1", "row2")):
+                              effects=("row1", "row2"), generation=0):
     """Drive a real `_deploy_participant._Participant` to apply its effects and
     then STOP before `activation-complete` — the on-disk shape a crash mid
     activation leaves. Returns its WAL path."""
@@ -1887,6 +1889,7 @@ def _stranded_participant_wal(tmp_path, identity="db",
         "identity": identity,
         "world": str(tmp_path / f"{identity}.world.json"),
         "wal": str(wal),
+        "generation": generation,
         "effects": [{"name": name, "reversible": True} for name in effects],
     })
     for effect in part.effects:
@@ -1928,7 +1931,7 @@ def test_a_real_participant_wal_rolls_forward_when_committed(tmp_path):
     """A durable `commit-approved` decision -> roll forward. settle_stranded
     hands recover the marker and recover rolls the missing discharge forward,
     replaying NO inverse — over the real participant WAL."""
-    wal = _stranded_participant_wal(tmp_path)
+    wal = _stranded_participant_wal(tmp_path, generation=1)
     decision = str(tmp_path / "decision.jsonl")
     deploy.write_commit_approval(decision, federation_id="fed", generation=1,
                                  participants=["db"])
