@@ -41,7 +41,7 @@ class RevlError(Exception):
                  why: WhyTrace | None = None, navigate: dict | None = None,
                  fix: str | None = None, repair: dict | None = None,
                  acquire: dict | None = None, declared_class: dict | None = None,
-                 repairs: list[dict] | None = None):
+                 repairs: list[dict] | None = None, plain: str | None = None):
         message = source_spelling(message)
         hint = source_spelling(hint)
         expected = source_spelling(expected)
@@ -52,7 +52,6 @@ class RevlError(Exception):
         acquire = _source_spelling_deep(acquire)
         declared_class = _source_spelling_deep(declared_class)
         repairs = _source_spelling_deep(repairs)
-                 repairs: list[dict] | None = None, plain: str | None = None):
         self.filename = filename
         self.line = line
         self.message = message
