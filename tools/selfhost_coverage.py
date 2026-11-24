@@ -251,7 +251,20 @@ _VAR_CMP = re.compile(r'\b(\w+)\s*[!=]=\s*"([^"]*)"')
 _BOOL_FLAG = re.compile(r'value_bool\(value_field\([^,]+,\s*"(\w+)"\)\)')
 
 
-def selfhost_constructs(path: Path) -> set[str]:
+def port_sources(port: str) -> list[Path]:
+    """`selfhost/<port>.rvl` plus the sibling files it was split into.
+
+    A port that outgrew the gate crate's source bound (issue #3098) keeps its
+    entry file and moves declarations into `selfhost/<port>_<part>.rvl`, one
+    logical emitter in several files. Each file is scanned on its own, since a
+    `let` binding never reaches across a file boundary, but the accessor helpers
+    are read from the whole port.
+    """
+    base = ROOT / "selfhost"
+    return [base / f"{port}.rvl"] + sorted(base.glob(f"{port}_*.rvl"))
+
+
+def selfhost_constructs(path: Path, helper_src: str | None = None) -> set[str]:
     """Every discriminant `selfhost/emit_<tier>.rvl` branches on.
 
     The ported emitters read the IR through one fixed spelling set (item 185's
@@ -261,7 +274,10 @@ def selfhost_constructs(path: Path) -> set[str]:
     side a bound name resolves to the NEAREST binding above the comparison.
     """
     src = path.read_text(encoding="utf-8")
-    helpers = {m.group(1): m.group(2) for m in _HELPER.finditer(src)}
+    # The accessor helpers (`node_kind`, ...) are declared once, in one file of a
+    # split port, and called from its siblings: read them from the whole port.
+    helpers = {m.group(1): m.group(2)
+               for m in _HELPER.finditer(src if helper_src is None else helper_src)}
     binds: dict[str, list[tuple[int, str]]] = {}
 
     def line_of(offset: int) -> int:
@@ -345,7 +361,11 @@ def survey() -> dict[str, dict[str, object]]:
     result: dict[str, dict[str, object]] = {}
     for tier, (package, port, _) in TIERS.items():
         reference = reference_constructs(ROOT / "backends" / package / "emit.py")
-        ported = selfhost_constructs(ROOT / "selfhost" / f"{port}.rvl")
+        sources = port_sources(port)
+        whole = "\n".join(p.read_text(encoding="utf-8") for p in sources)
+        ported = set()
+        for source in sources:
+            ported |= selfhost_constructs(source, whole)
         covered = corpus_constructs(tier)
         mirrored = set(reference) & ported
         result[tier] = {

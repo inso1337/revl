@@ -2911,8 +2911,9 @@ class Parser:
         loose heuristic, and a single-line `` `// …` `` template, which is what
         every emitter in `selfhost/` writes to emit a host comment, trips it.
         The two together replaced an exact "`acquire` is a reserved keyword" at
-        `selfhost/emit_go.rvl:1711` with a template complaint at line 1341:
-        the wrong kind of error, 370 lines from the statement that caused it.
+        line 1711 of `selfhost/emit_go.rvl` (as it was before the file was split)
+        with a template complaint at line 1341: the wrong kind of error, 370
+        lines from the statement that caused it.
         Keeping the reword inside the tail costs the item-365 case nothing,
         since its failures land on the very next token after the stray close,
         and it leaves every failure outside the tail with the diagnostic the

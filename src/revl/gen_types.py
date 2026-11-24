@@ -399,7 +399,8 @@ def generated_header(text: str) -> tuple[str, str] | None:
 
 
 def check_generated_header(text: str, abs_path: str, sources: dict,
-                           is_virtual: bool) -> dict | None:
+                           is_virtual: bool,
+                           reads: set[str] | None = None) -> dict | None:
     """Refuse a generated file whose model no longer has the header's digest,
     and return its `generated_from` row otherwise (None for a file that is not
     generated).
@@ -408,7 +409,10 @@ def check_generated_header(text: str, abs_path: str, sources: dict,
     disk reads it from disk, inside the generated file's own directory tree; an
     in-memory module only through the sources map, so a compile of foreign
     source reads nothing it was not given. The refusal names the header's
-    digest and not the file's current one, so it is no digest oracle."""
+    digest and not the file's current one, so it is no digest oracle.
+
+    `reads` (issue #3198) collects the model document's disk paths, so the
+    sandbox driver can mount it for the in-boundary recompile."""
     header = generated_header(text)
     if header is None:
         return None
@@ -448,6 +452,9 @@ def check_generated_header(text: str, abs_path: str, sources: dict,
                             f"`{name}` names a model document outside its own "
                             f"directory: `{model}`",
                             hint=regenerate, category="admission")
+        if reads is not None:
+            reads.add(os.path.abspath(key))
+            reads.add(real)
         try:
             with open(real, "rb") as handle:
                 data = handle.read()

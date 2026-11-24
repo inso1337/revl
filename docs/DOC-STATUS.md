@@ -66,6 +66,7 @@ regenerated rather than edited.
 | bench-selfhost.md | live-owned (not audited) | 49 |  |
 | boundary-policy.md | needs-work | 27 |  |
 | bundle.md | needs-work | 0 |  |
+| call-budget-proposal.md | current | 0 |  |
 | capabilities.md | needs-work | 46 |  |
 | capability-attenuation.md | needs-work | 25 |  |
 | capability-realm-placement.md | needs-work | 11 |  |
@@ -95,6 +96,7 @@ regenerated rather than edited.
 | fault-tests.md | needs-work | 71 |  |
 | federation.md | current | 16 |  |
 | fix-code.md | needs-work | 10 |  |
+| float-math-proposal.md | current | 0 |  |
 | fmt.md | needs-work | 1 |  |
 | frontend-assets.md | needs-work | 13 |  |
 | function-specs.md | needs-work | 0 |  |

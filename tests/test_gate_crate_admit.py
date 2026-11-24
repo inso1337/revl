@@ -90,8 +90,18 @@ _CROSS_CHECK_EXCLUSIONS = {
     "selfhost/parser.rvl":
         "31 KB. 90.1 s release, >150 s debug, both measured (#333).",
     "selfhost/emit_go.rvl":
-        "66 KB. >20 s debug measured; release not timed, and it is larger "
-        "than parser.rvl which costs 90 s release (#333).",
+        "28 KB entry of the split Go emitter (#3098). The whole emitter was "
+        "excluded at 66 KB (>20 s debug measured); the entry is the size of "
+        "parser.rvl, which costs 90 s release (#333).",
+    "selfhost/emit_go_core.rvl":
+        "137 KB, moved out of emit_go.rvl (#3098), which was excluded for "
+        "the same reason. Larger than parser.rvl, 90 s release (#333).",
+    "selfhost/emit_go_module.rvl":
+        "49 KB, moved out of emit_go.rvl (#3098), which was excluded for "
+        "the same reason. Larger than parser.rvl, 90 s release (#333).",
+    "selfhost/emit_go_comp.rvl":
+        "106 KB, moved out of emit_go.rvl (#3098), which was excluded for "
+        "the same reason. Larger than parser.rvl, 90 s release (#333).",
     "selfhost/checker.rvl":
         "72 KB. >20 s debug measured; larger than parser.rvl (#333).",
     "selfhost/emit_wasm.rvl":

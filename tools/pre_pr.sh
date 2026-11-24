@@ -117,6 +117,14 @@ python3 tools/build_gate_wasm.py --check || fail=1
 echo "== docs drift =="
 python3 tools/docgen.py --check || fail=1
 
+# issue #2846: a behaviour claim in a comment or doc is tied to a witness in
+# `claims.toml`. The self-test plants each named failure first, then the real
+# tree is judged, including the `.rvl` claims whose test witness the affected
+# selection must run.
+echo "== claims =="
+python3 tools/check_claims.py --self-test || fail=1
+python3 tools/check_claims.py --check || fail=1
+
 # issue #2645: the two generated-artifact drifts that dominated failed PR runs
 # were only ever reported by CI. Both checks already exist, and the helper
 # prints the exact fix command on failure:

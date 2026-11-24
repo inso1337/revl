@@ -14,6 +14,7 @@ tools/pre_merge.sh and runs it under sh.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -54,14 +55,41 @@ def _run(body: str, env: dict | None = None, cwd: Path | None = None):
                           timeout=120, check=False, env=env, cwd=cwd)
 
 
+#: A python gate `run_gate.sh` invokes directly, as `python3 scripts/<name>`.
+#: The stubs below are read off the script itself rather than listed here: a
+#: new gate added to `run_gate.sh` used to turn these tests red with "can't
+#: open file ...", before the gate reached its lake-skip path (PR #3119 added
+#: `oracle_summary.py` that way).
+_GATE_SCRIPT = re.compile(r"^python3 scripts/([A-Za-z0-9_]+\.py)",
+                          re.MULTILINE)
+
+
 def _formal_copy(tmp: Path) -> Path:
-    """run_gate.sh in a throwaway formal/ whose two toolchain-free gates pass."""
+    """`run_gate.sh` in a throwaway formal/ with a passing stub for every
+    python gate the script runs, so it reaches its elan/lake guard."""
     scripts = tmp / "formal" / "scripts"
     scripts.mkdir(parents=True)
     shutil.copy2(RUN_GATE, scripts / "run_gate.sh")
-    for name in ("layering_gate.py", "nonvacuity_gate.py"):
+    names = sorted(_GATE_SCRIPT.findall(RUN_GATE.read_text(encoding="utf-8")))
+    assert names, "run_gate.sh names no python gate script"
+    for name in names:
         (scripts / name).write_text("print('ok')\n", encoding="utf-8")
     return scripts / "run_gate.sh"
+
+
+def test_the_formal_copy_stubs_every_gate_run_gate_runs(tmp_path):
+    """The stubbed set is the script's own, not a list that can fall behind.
+
+    Deliberately not gated on lake's absence like the two skip tests below:
+    on a machine WITH lake those two are skipped, which is how a missing stub
+    would go unnoticed until CI.
+    """
+    gate = _formal_copy(tmp_path)
+    wanted = set(_GATE_SCRIPT.findall(RUN_GATE.read_text(encoding="utf-8")))
+    assert {"layering_gate.py", "nonvacuity_gate.py",
+            "oracle_summary.py"} <= wanted
+    assert wanted == {p.name for p in gate.parent.iterdir()} - {
+        "run_gate.sh"}
 
 
 @pytest.mark.skipif(shutil.which("lake", path="/usr/bin:/bin") is not None,

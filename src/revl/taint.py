@@ -1248,6 +1248,12 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
             # mints from `Result[Untrusted[T], E]` / `Opt[Secret[T]]` exactly
             # as a unit holding the declaration does.
             method.returns_qualifier = source_qualifier(method.returns)
+            # Issue #3238: the primary alone loses the other qualifier of a
+            # return that holds both (`Result[Untrusted[T], Secret[E]]`), so
+            # the full set rides beside it. Only a return that holds more than
+            # one stamps it; a single-qualifier return is unchanged.
+            _quals = source_qualifiers(method.returns)
+            method.returns_qualifiers = _quals if len(_quals) > 1 else ()
             # Slice D (D1/D3): a shell/exec/terminal-scoped service operation is a
             # derived sink under strict mode, exactly as an extern is — a granted
             # tool surface annotates nothing yet still refuses untrusted input.
@@ -1438,6 +1444,17 @@ def _fold_declared_qualifiers(model: TaintModel, ambient_services) -> None:
                 model.sources.setdefault(name, _origin_of(caps))
             elif qual == "Secret":
                 model.sources.setdefault(name, CONFIDENTIAL_ORIGIN)
+            # Issue #3238: every further qualifier the return holds mints its
+            # origin beside the primary one, as `_also_origins` does for a unit
+            # holding the declaration. A stamp that names only the primary
+            # (an older IR) reads exactly as before.
+            _also = frozenset(
+                _origin_of(caps) if q == "Untrusted" else CONFIDENTIAL_ORIGIN
+                for q in (getattr(method, "returns_qualifiers", ()) or ())
+                if q in ("Untrusted", "Secret") and q != qual)
+            if _also and name in model.sources:
+                model.source_also[name] = (
+                    model.source_also.get(name, frozenset()) | _also)
             params = list(getattr(method, "params", ()) or ())
             for i in sorted(getattr(method, "trusted_params", ()) or ()):
                 ptype = params[i][1] if i < len(params) else None

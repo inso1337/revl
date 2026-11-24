@@ -259,6 +259,10 @@ def test_wasm_run_never_starts_the_harness_on_a_failed_header_fsync(
     monkeypatch.setattr("revl.least_authority.enforce_wasm_least_authority",
                         lambda ir, policy, modules: None)
     monkeypatch.setattr(run_wasm, "wasm_runtime_reason", lambda: None)
+    # the byte-level import check needs a real interpreter and real modules
+    # (issue #3189); this test is about the WAL header, so it is out of scope
+    monkeypatch.setattr(run_wasm, "_check_emitted_imports",
+                        lambda ir, modules: None)
     monkeypatch.setattr(run_wasm.os, "fsync", _fail_fsync)
     started = []
     monkeypatch.setattr(run_wasm.subprocess, "Popen",
@@ -304,8 +308,11 @@ class _FakeHarness:
     def kill(self):
         self.killed = True
 
-    def wait(self):
+    def wait(self, timeout=None):
         self.waited = True
+        return 0
+
+    def poll(self):
         return 0
 
 
@@ -322,6 +329,12 @@ def _wasm_run_fixture(tmp_path, monkeypatch, fail_after: int):
     monkeypatch.setattr("revl.least_authority.enforce_wasm_least_authority",
                         lambda ir, policy, modules: None)
     monkeypatch.setattr(run_wasm, "wasm_runtime_reason", lambda: None)
+    # out of scope here (issue #3189): the import check needs a real
+    # interpreter, and the fake harness has no process group to kill
+    monkeypatch.setattr(run_wasm, "_check_emitted_imports",
+                        lambda ir, modules: None)
+    monkeypatch.setattr(run_wasm, "_kill_process_group",
+                        lambda proc: proc.kill())
     calls = []
     real_fsync = os.fsync
 

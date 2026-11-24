@@ -40,6 +40,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from revl import placement_wal  # noqa: E402
 from revl.recover_placement import _consumers_first, _reach, recover_index  # noqa: E402
+from revl.recovery import RecoveryError  # noqa: E402
 from revl.wal import PlacementIndexNotAWAL, read_wal  # noqa: E402
 
 needs_cordis = pytest.mark.skipif(
@@ -290,6 +291,12 @@ def test_an_orderly_placement_commits_every_process_wal(tmp_path):
         [marker] = [r for r in records if r["record"] == "activation-complete"]
         assert sorted(marker["components"]) == sorted(components)
         assert records[-1]["record"] == "run-complete"
+        # issue #3234: each process recorded that it came up, before the
+        # conductor's commit stamped the marker
+        [up] = [r for r in records if r["record"] == "process-up"]
+        assert (up["process"], up["run"]) == (name, 1)
+        assert sorted(up["components"]) == sorted(components)
+        assert records.index(up) < records.index(marker)
 
     proc = _revl(["recover", "--wal", "ok.wal", "--composition", "app.rvl",
                   "--json"], tmp_path, log)
@@ -324,6 +331,11 @@ def _index(tmp_path: Path, *tail: dict) -> Path:
 def _process_wal(path: Path, *tail: dict) -> None:
     _write(path, [{"record": "header", "walVersion": 1, "generation": 1,
                    "guarantee": "g"}, *tail])
+
+
+def _up(process: str, components: list, run: int = 1) -> dict:
+    return {"record": "process-up", "generation": 1, "process": process,
+            "run": run, "components": components}
 
 
 def test_an_index_is_refused_as_a_wal_rather_than_read_as_an_empty_one(tmp_path):
@@ -366,7 +378,7 @@ def test_a_recorded_commit_is_completed_for_a_process_that_died_before_its_marke
     _process_wal(tmp_path / "run.wal.desk",
                  {"record": "activation-complete", "generation": 1,
                   "components": ["Desk"]})
-    _process_wal(tmp_path / "run.wal.agent")
+    _process_wal(tmp_path / "run.wal.agent", _up("agent", ["Agent"]))
 
     report = recover_index(str(index), placement_wal.read_index(str(index)))
 
@@ -378,6 +390,118 @@ def test_a_recorded_commit_is_completed_for_a_process_that_died_before_its_marke
     marker = _records(tmp_path / "run.wal.agent")[-1]
     assert marker["record"] == "activation-complete"
     assert marker["components"] == ["Agent"]
+
+
+def _refused(tmp_path: Path, match: str = "never recorded that it came up") -> None:
+    index = _index(tmp_path, {"record": "committed", "run": 1})
+    with pytest.raises(RecoveryError, match=match):
+        recover_index(str(index), placement_wal.read_index(str(index)))
+
+
+def test_a_committed_line_over_a_wal_with_no_process_up_record_is_refused(tmp_path):
+    """The index's `committed` line alone is not proof the process came up: a
+    forged line over a WAL the process never wrote `process-up` to is refused,
+    and no process WAL is stamped (issue #3234)."""
+    _process_wal(tmp_path / "run.wal.desk", _up("desk", ["Desk"]))
+    _process_wal(tmp_path / "run.wal.agent")
+    before = {n: (tmp_path / f"run.wal.{n}").read_bytes() for n in ("desk", "agent")}
+
+    _refused(tmp_path, "process 'agent' never recorded that it came up")
+
+    assert {n: (tmp_path / f"run.wal.{n}").read_bytes()
+            for n in ("desk", "agent")} == before
+
+
+def test_an_old_format_wal_under_a_committed_run_is_refused(tmp_path):
+    """A WAL written before the record existed reads the same as a forged line:
+    both processes carry no `process-up`, so recover refuses the stamp rather
+    than guess (issue #3234)."""
+    _process_wal(tmp_path / "run.wal.desk")
+    _process_wal(tmp_path / "run.wal.agent")
+
+    _refused(tmp_path, "remove the index's `committed` line for run 1")
+
+    # the operator who knows the run committed appends the line the error names
+    for name, comp in (("desk", "Desk"), ("agent", "Agent")):
+        with open(tmp_path / f"run.wal.{name}", "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(_up(name, [comp])) + "\n")
+    index = tmp_path / "run.wal"
+    report = recover_index(str(index), placement_wal.read_index(str(index)))
+    assert all(r["commitStamped"] is True for r in report["processes"])
+
+
+def test_a_process_up_record_of_another_run_does_not_vouch_for_this_one(tmp_path):
+    index = _index(tmp_path, {"record": "opened", "run": 2},
+                   {"record": "committed", "run": 2})
+    _process_wal(tmp_path / "run.wal.desk", _up("desk", ["Desk"], run=1))
+    _process_wal(tmp_path / "run.wal.agent", _up("agent", ["Agent"], run=1))
+
+    with pytest.raises(RecoveryError, match="run 2 as committed"):
+        recover_index(str(index), placement_wal.read_index(str(index)))
+
+
+def test_an_earlier_openings_process_up_does_not_vouch_for_a_later_opening(tmp_path):
+    """A run that reused the WAL opens it with its own `generation` record. An
+    index edited (or re-created) to call run 1 committed must not borrow the
+    first opening's record for a crashed second one."""
+    index = tmp_path / "run.wal"
+    _write(index, [{"record": "placement-index", "placementVersion": 1,
+                    "processes": [
+                        {"name": "desk", "wal": "run.wal.desk",
+                         "components": ["Desk"], "backend": "py"},
+                        {"name": "agent", "wal": "run.wal.agent",
+                         "components": ["Agent"], "backend": "py"}]},
+                   {"record": "opened", "run": 1}, {"record": "committed", "run": 1}])
+    for name, comp in (("desk", "Desk"), ("agent", "Agent")):
+        _process_wal(tmp_path / f"run.wal.{name}", _up(name, [comp]),
+                     {"record": "generation", "generation": 1, "fromSeq": 0,
+                      "composition": "d"})
+
+    with pytest.raises(RecoveryError, match="never recorded that it came up"):
+        recover_index(str(index), placement_wal.read_index(str(index)))
+
+
+def test_a_process_up_run_must_be_the_integer_not_a_boolean(tmp_path):
+    _process_wal(tmp_path / "run.wal.desk", _up("desk", ["Desk"], run=True))
+    _process_wal(tmp_path / "run.wal.agent", _up("agent", ["Agent"]))
+
+    _refused(tmp_path, "process 'desk' never recorded")
+
+
+def test_a_process_up_record_of_another_process_does_not_vouch_for_this_one(tmp_path):
+    _process_wal(tmp_path / "run.wal.desk", _up("desk", ["Desk"]))
+    _process_wal(tmp_path / "run.wal.agent", _up("desk", ["Desk"]))
+
+    _refused(tmp_path, "process 'agent' never recorded")
+
+
+def test_a_wal_that_already_carries_its_marker_needs_no_process_up_record(tmp_path):
+    """Nothing is stamped for it, so no trust is placed in the index's line."""
+    index = _index(tmp_path, {"record": "committed", "run": 1})
+    for name, comp in (("desk", "Desk"), ("agent", "Agent")):
+        _process_wal(tmp_path / f"run.wal.{name}",
+                     {"record": "activation-complete", "generation": 1,
+                      "components": [comp]})
+
+    report = recover_index(str(index), placement_wal.read_index(str(index)))
+
+    assert all(r["commitStamped"] is False for r in report["processes"])
+
+
+def test_a_process_wal_with_a_second_hard_link_is_refused(tmp_path):
+    """A link to a file elsewhere would be stamped through the index's name."""
+    index = _index(tmp_path, {"record": "committed", "run": 1})
+    outside = tmp_path / "outside" / "victim"
+    outside.parent.mkdir()
+    _process_wal(outside, _up("desk", ["Desk"]))
+    os.link(outside, tmp_path / "run.wal.desk")
+    _process_wal(tmp_path / "run.wal.agent", _up("agent", ["Agent"]))
+    before = outside.read_bytes()
+
+    with pytest.raises(placement_wal.PlacementIndexError, match="hard links"):
+        recover_index(str(index), placement_wal.read_index(str(index)))
+
+    assert outside.read_bytes() == before
 
 
 def test_an_uncommitted_run_does_not_stamp_any_process(tmp_path):

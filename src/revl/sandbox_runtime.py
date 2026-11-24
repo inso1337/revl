@@ -340,16 +340,17 @@ def accepted_uname(platform: str) -> tuple[str, ...] | None:
 # --------------------------------------------------------------------------
 
 def container_flags(env: dict, *, name: str, mounts: list[tuple[str, str]],
-                    interactive: bool = True, workdir: str | None = None,
+                    interactive: bool = True,
                     network: str | None = None) -> list[str]:
     """The confinement flags one envelope derives, as a list, deterministically.
 
     Pure: no runtime is consulted, so this is the half of the driver that is
     testable everywhere and reviewable as a whole. `mounts` is the ALREADY
-    resolved mount list (path, mode) — the declared `fs` grants plus the
-    placement directory and, when the image does not carry it, the host
-    runtime; every one of them is reported in the achieved record, so nothing
-    the driver adds on the author's behalf is invisible.
+    resolved mount list (path, mode): the declared `fs` grants, this process's
+    own spec and seam identity, the composition's compile-input FILES and, when
+    the image does not carry it, the host runtime; every one of them is reported
+    in the achieved record, so nothing the driver adds on the author's behalf is
+    invisible.
 
     `network` is the per-process seam-only network a seam-carrying sandbox joins
     (item 411 T3): an `--internal` user-defined network the conductor created,
@@ -401,10 +402,6 @@ def container_flags(env: dict, *, name: str, mounts: list[tuple[str, str]],
         # so a path the conductor wrote into the spec resolves to the same file
         # on the other side of it.
         flags += ["-v", f"{path}:{path}:{'rw' if mode == 'rw' else 'ro'}"]
-    if workdir:
-        # the same working directory as the conductor, so a relative source path
-        # the placement was invoked with resolves to the same file inside.
-        flags += ["--workdir", workdir]
     if interactive:
         # the runner's control channel (`repoint`) is newline-delimited JSON on
         # stdin, so stdin must stay open across the boundary.
@@ -491,21 +488,77 @@ def seam_dir_mounts(ctx: dict) -> list[tuple[str, str]]:
     return mounts
 
 
-def source_mounts(files, cwd: str) -> list[tuple[str, str]]:
-    """The composition's own `.rvl` sources, read-only.
+def source_mounts(files) -> list[tuple[str, str]]:
+    """The composition's own compile inputs, read-only, one FILE mount each.
 
     A py process re-COMPILES the composition it was handed (item 337 boot
     re-admission: the running manifest it judges its seams against is one it
-    builds itself, not one the conductor asserts), so its own program text has
-    to be readable inside the boundary. The conductor's working directory comes
-    with them because the file list it was invoked with may be relative to it,
-    and the container runs with the same working directory so those paths
-    resolve to the same files.
+    builds itself, not one the conductor asserts), so its own program text and
+    every host file that compile reads have to be readable inside the boundary.
+    The mounts are the FILES, never the directories that hold them: a directory
+    mount would hand the confined body everything beside the composition (the
+    operator's home, a project root with `.env`, SSH keys, other projects),
+    which the declared `fs` grants did not grant and which design 411 does not
+    let the driver add on the author's behalf. Relative spellings resolve here,
+    in the conductor, so the working directory itself never has to be mounted
+    for them to resolve inside.
+
+    `placement.run_placement` resolves its roots before launch and passes this
+    function the compile's exact input set (its roots, every `use` dependency,
+    and every host file a ref, asset or body read).
     """
-    dirs = {cwd}
-    for f in files:
-        dirs.add(str(Path(f).resolve().parent))
-    return [(d, "ro") for d in sorted(dirs)]
+    # abspath, not resolve: the compile collects BOTH the symlink spelling it
+    # opens and the real path, and the in-boundary compile opens the spelling it
+    # was handed, so the spelling has to be a mount too.
+    return [(path, "ro") for path in sorted({os.path.abspath(str(f)) for f in files})]
+
+
+def _within(parent: Path, child: Path) -> bool:
+    """Whether `child` is `parent` or sits under it, lexically."""
+    return child == parent or child.is_relative_to(parent)
+
+
+def _overbroad_host_mount(pname: str, mounts: list[tuple[str, str]], env: dict, *,
+                          home: Path | None = None) -> str | None:
+    """The first driver-added DIRECTORY mount that reaches past the declared
+    envelope, or None.
+
+    A single-file mount is one file the composition itself reads; it cannot
+    widen the envelope. A directory mount can: if it is the operator's home or
+    an ancestor of it, or an ancestor of a declared `fs` grant, the confined
+    body can read outside what the manifest granted. The envelope, not the gate,
+    is the boundary (design 411), so the placement refuses rather than mounting
+    one. `home` is injected by the tests; the conductor passes none.
+    """
+    operator_home = (Path.home() if home is None else home).resolve()
+    # A conductor whose home IS the filesystem root (some CI containers) has no
+    # "beyond home" to guard; mounting the root itself is still refused.
+    home_is_root = operator_home == Path("/")
+    grants = [Path(path).resolve() for path, _mode in envelope_mounts(env)]
+    for path, _mode in mounts:
+        mount = Path(path).resolve()
+        if not mount.is_dir():
+            continue
+        if (mount == operator_home
+                or (not home_is_root and operator_home.is_relative_to(mount))):
+            return (
+                f"process {pname!r}: the container driver would mount the "
+                f"directory {path!r}, which is the operator's home or an "
+                f"ancestor of it. A directory mount that wide would give the "
+                f"confined body more than the envelope declared, so the "
+                f"placement refuses rather than widening the boundary (the "
+                f"envelope, not the gate, is the security boundary). Run the "
+                f"conductor and its composition from a tree outside that "
+                f"directory.")
+        for grant in grants:
+            if grant != mount and _within(mount, grant):
+                return (
+                    f"process {pname!r}: the container driver would mount the "
+                    f"directory {path!r}, which contains the declared fs grant "
+                    f"{str(grant)!r}. The body could read the grant's siblings "
+                    f"through the wider mount, so the placement refuses rather "
+                    f"than widening the boundary the envelope declared.")
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -926,12 +979,11 @@ class ContainerDriver:
         if image_err:
             return None, image_err
 
-        # PHASE 1 — the declared envelope alone: the placement directory (the
-        # process reads its own spec there) plus the granted `fs` mounts. This
-        # is the set the manifest is a claim ABOUT, so it is the set the canary
-        # confirms first, and its RUNTIME line says whether the image can be the
-        # runner on its own.
-        cwd = ctx.get("cwd") or os.getcwd()
+        # PHASE 1 — the declared envelope alone: this process's own spec and
+        # seam identity plus the granted `fs` mounts. This is the set the
+        # manifest is a claim ABOUT, so it is the set the canary confirms first,
+        # and its RUNTIME line says whether the image can be the runner on its
+        # own.
         # item 411 T3: a seam-carrying sandbox runs on its per-process seam-only
         # network with the relay up, and the canary discriminates a seam (open)
         # from egress (a dropped isolation target) instead of the net=none probe.
@@ -948,10 +1000,11 @@ class ContainerDriver:
         if err:
             return None, err
 
-        # the host paths the driver adds on the author's behalf: the sources the
-        # process re-compiles, and (when the image is not a revl runner itself)
-        # the conductor's own runtime. All read-only, all reported.
-        host_mounts = source_mounts(ctx.get("files") or [], cwd)
+        # the host FILES the driver adds on the author's behalf: the composition's
+        # compile inputs (one read-only FILE mount each, never their directories)
+        # and (when the image is not a revl runner itself) the conductor's own
+        # runtime. All read-only, all reported.
+        host_mounts = source_mounts(ctx.get("files") or [])
         pythonpath: str | None = None
         if probe.get("RUNTIME") != "image":
             runtime, rt_err = _runtime_mounts()
@@ -964,6 +1017,23 @@ class ContainerDriver:
                     f"(sh backends/python/setup.sh).")
             host_mounts += runtime
             pythonpath = os.pathsep.join(p for p, _ in runtime)
+
+        # issue #3198: a driver-added DIRECTORY mount that covers the operator's
+        # home or a declared grant is a widening the envelope never asked for, so
+        # it is refused here rather than handed to the body.
+        widening = _overbroad_host_mount(pname, host_mounts, env)
+        if widening:
+            return None, widening
+
+        # `-v` creates a missing host path as a DIRECTORY, so a compile input
+        # that vanished since the compile would be mounted as an empty one.
+        for path, _mode in host_mounts:
+            if not os.path.exists(path):
+                return None, (
+                    f"process {pname!r}: the compile input {path!r} no longer "
+                    f"exists, so the container driver cannot mount it (a bind "
+                    f"mount of a missing path would create an empty directory "
+                    f"there). Re-run the placement.")
 
         # PHASE 2 — the FINAL configuration. The process does not run under the
         # set phase 1 confirmed, it runs under that set plus the host mounts, so
@@ -997,7 +1067,6 @@ class ContainerDriver:
             "enforced": True,
             "image": image,
             "platform": env.get("platform"),
-            "workdir": cwd,
             "mounts": final,
             "host_mounts": host_mounts,
             "pythonpath": pythonpath,
@@ -1245,7 +1314,6 @@ class ContainerDriver:
         argv = ([docker, "run"]
                 + container_flags(achieved["_env"], name=name,
                                   mounts=achieved["mounts"],
-                                  workdir=achieved.get("workdir"),
                                   network=achieved.get("seam_network"))
                 + env_flags + [str(achieved["image"])] + inner)
         # the child's environment is the CONDUCTOR's process environment for

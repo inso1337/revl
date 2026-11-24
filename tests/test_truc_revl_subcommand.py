@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from test_truc_add_assemble import _grant
+
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY = ROOT / "registry"
 CORDIS_PY = ROOT / "backends" / "python" / ".venv" / "bin" / "python"
@@ -75,6 +77,7 @@ def test_revl_truc_add_then_assemble_is_admitted_and_composed(tmp_path):
     """`revl truc add`/`assemble` vendors, locks and composes exactly as the
     standalone `truc` does — the dispatch reaches truc's real engine."""
     proj = _new_project(tmp_path)
+    _grant(proj, "user_cache", ["db"])
 
     r = _revl_truc(proj, "add", "user_cache")
     assert r.returncode == 0, r.stderr
@@ -102,6 +105,8 @@ def test_revl_truc_add_matches_standalone_truc_add(tmp_path):
     and lock/vendor state."""
     proj_a = _new_project(tmp_path, "via_revl")
     proj_b = _new_project(tmp_path, "via_truc")
+    _grant(proj_a, "user_cache", ["db"])
+    _grant(proj_b, "user_cache", ["db"])
 
     a = _revl_truc(proj_a, "add", "user_cache")
     b = _truc(proj_b, "add", "user_cache")
@@ -120,6 +125,7 @@ def test_revl_truc_add_refusal_is_forwarded_g2(tmp_path):
     through the passthrough unchanged — same nonzero exit, same why-trace,
     nothing written — proving the tail is truc's, not a reimplementation."""
     proj = _new_project(tmp_path)
+    _grant(proj, "user_cache", ["db"])
     assert _revl_truc(proj, "add", "user_cache").returncode == 0
     assert _revl_truc(proj, "add", "pg_database").returncode == 0
 

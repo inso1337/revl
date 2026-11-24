@@ -23,7 +23,9 @@ index:
 * if the index recorded the run's commit (every process was UP) but a process
   died before stamping its own `activation-complete`, recover stamps it from
   the index first, so that process rolls forward with the others instead of
-  rolling back alone.
+  rolling back alone. The index's line is trusted only for a process whose WAL
+  carries the `process-up` record it wrote when it came up (issue #3234); a
+  process WAL with none under a committed run is refused, not stamped.
 
 The verdict is one report: per process, its own verdict, and one residue proof
 that names each process's residue. It is clean only when every process is.
@@ -35,7 +37,7 @@ import json
 import os
 from typing import Optional
 
-from .placement_wal import process_wal_path
+from .placement_wal import process_up, process_wal_path
 from .recovery import WORLD_MODEL, WORLD_REAL, RecoveryError, recover, render
 
 
@@ -83,13 +85,31 @@ def _stamp_commit(path: str, entry: dict) -> None:
     except OSError as error:
         raise RecoveryError(f"{path}: cannot stamp the recorded commit: {error}") from None
     with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+        # a hard link made since `process_wal_path` checked is not stamped
+        # through either (issue #3234)
+        if os.fstat(handle.fileno()).st_nlink > 1:
+            raise RecoveryError(f"{path}: has more than one hard link; "
+                                f"refusing to stamp it")
         handle.write(json.dumps(record, sort_keys=True) + "\n")
         handle.flush()
         os.fsync(handle.fileno())
 
 
-def _process_state(path: str, entry: dict, committed: bool) -> dict:
-    """What is on disk for one process, completing a recorded commit."""
+def _up_line(entry: dict, run: int) -> dict:
+    return {"record": "process-up", "process": entry["name"], "run": run,
+            "components": entry["components"]}
+
+
+def _process_state(path: str, entry: dict, committed: bool, run: int) -> dict:
+    """What is on disk for one process, and whether the index's recorded commit
+    is to be completed on it. Reads only: :func:`_stamp_commit` writes, after
+    every process has been checked.
+
+    The index's `committed` line is trusted for a process only when its WAL
+    carries the ``process-up`` record the process wrote for this run when it
+    came up (issue #3234). A WAL under a committed run with none is refused,
+    not rolled back or forward: it is a forged line or a WAL written before the
+    record existed, and recover cannot tell which."""
     from .wal import read_wal  # noqa: PLC0415
 
     if not os.path.exists(path):
@@ -98,8 +118,19 @@ def _process_state(path: str, entry: dict, committed: bool) -> dict:
     if not wal["header"]:
         return {"state": "never-opened"}
     stamped = committed and not wal["complete"]
-    if stamped:
-        _stamp_commit(path, entry)
+    if stamped and not process_up(wal["records"], entry["name"], run):
+        raise RecoveryError(
+            f"{path}: the placement index records run {run} as committed, but "
+            f"process {entry['name']!r} never recorded that it came up in this "
+            f"run (no `process-up` record for run {run} in its latest "
+            f"opening), so the line is not trusted and recover will not stamp "
+            f"this WAL, nor any other of this run's. The line is forged, or "
+            f"this run was written before revl recorded the process coming "
+            f"up. If you know the process never came up, remove the index's "
+            f"`committed` line for run {run}: its activation then rolls back. "
+            f"If you know it came up and the run committed, append "
+            f"{json.dumps(_up_line(entry, run), sort_keys=True)} to this WAL "
+            f"and recover again.")
     return {"state": "recorded", "commitStamped": stamped}
 
 
@@ -120,7 +151,8 @@ class _PlacementBinding:
 
     def bind(self, recorded: list) -> dict:
         """``{process: CompositionWorld}`` for each ``(entry, path)``."""
-        from .recover_binding import (boot_providers, emit_unactivated,  # noqa: PLC0415
+        from .recover_binding import (boot_providers, declared_deferred,  # noqa: PLC0415
+                                      declared_inverses, emit_unactivated,
                                       open_keys, plan_wal, reactivation_refusals)
         plans = {}
         for entry, path in recorded:
@@ -128,7 +160,9 @@ class _PlacementBinding:
                 plans[entry["name"]] = plan_wal(path, self.digest, self.files)
             except RecoveryError as error:
                 raise type(error)(f"process {entry['name']} ({path}): {error}") from None
-        self.keys = {name: open_keys(*plan) for name, plan in plans.items()}
+        declared, deferred = declared_inverses(self.ir), declared_deferred(self.ir)
+        self.keys = {name: open_keys(*plan, declared=declared, deferred=deferred)
+                     for name, plan in plans.items()}
         wanted = set().union(set(), *self.keys.values())
         self.refused = reactivation_refusals(self.ir, wanted)
         self.module, self.runtime = emit_unactivated(self.ir, self.config, self.cleanup)
@@ -140,7 +174,7 @@ class _PlacementBinding:
 
     def _world(self, path: str, plan: tuple, keys: set):
         from .recover_binding import (CompositionWorld, _provider_closure,  # noqa: PLC0415
-                                      declared_inverses)
+                                      declared_deferred, declared_inverses)
         _wal, foreign, _grants, foreign_handles = plan
         refused = {k: v for k, v in self.refused.items() if k in keys}
         return CompositionWorld(
@@ -150,7 +184,8 @@ class _PlacementBinding:
             booted=_provider_closure(self.ir, keys - set(refused)),
             provider_session=None, cleanup=[], foreign=foreign,
             foreign_handles=foreign_handles, refused=refused,
-            declared=declared_inverses(self.ir))
+            declared=declared_inverses(self.ir),
+            deferred=declared_deferred(self.ir))
 
     def close(self) -> None:
         session, self.session = self.session, None
@@ -279,7 +314,12 @@ def recover_index(index_path: str, index: dict, *,
     for entry, path in zip(order, paths):
         results.append({"process": entry["name"],
                         "components": entry["components"], "wal": path,
-                        **_process_state(path, entry, index["committed"])})
+                        **_process_state(path, entry, index["committed"],
+                                         index["run"])})
+    # every process is checked before any WAL is stamped (issue #3234)
+    for entry, result in zip(order, results):
+        if result.get("commitStamped"):
+            _stamp_commit(result["wal"], entry)
     recorded = [(e, r["wal"]) for e, r in zip(order, results)
                 if r["state"] == "recorded"]
     binding = (_PlacementBinding(list(composition), ir, digest, dict(config or {}))

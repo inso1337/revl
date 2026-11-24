@@ -951,9 +951,13 @@ def test_native_ir_matches_reference_services(lower_to_ir, rel):
     ("Result[Untrusted[Str], Str]", "Untrusted"),
     ("Opt[Secret[Str]]", "Secret"),
     ("Result[Untrusted[Str], Secret[Str]]", "Untrusted"),
+    ("Result[Secret[Str], Untrusted[Str]]", "Untrusted"),
+    ("Secret[Result[Untrusted[Str], Str]]", "Secret"),
     ("Secret[Str]", "Secret"),
     ("Result[Str, Str]", None),
     ("Opt[(Secret[Str]) -> Int]", None),
+    ("Trusted[Result[Untrusted[Str], Secret[Str]]]", None),
+    ("Result[Untrusted[Str], (Secret[Str]) -> Int]", "Untrusted"),
 ])
 def test_native_ir_stamps_a_nested_return_qualifier_like_the_reference(
         lower_to_ir, returns, qual):
@@ -967,6 +971,11 @@ def test_native_ir_stamps_a_nested_return_qualifier_like_the_reference(
     assert native["services"] == reference["services"]
     assert reference["services"]["W"]["methods"]["get"].get(
         "returns_qualifier") == qual
+    # issue #3238: a return holding both stamps the full set beside the primary
+    both = "Untrusted" in returns and "Secret" in returns \
+        and "->" not in returns and not returns.startswith("Trusted")
+    assert reference["services"]["W"]["methods"]["get"].get(
+        "returns_qualifiers") == (["Untrusted", "Secret"] if both else None)
 
 
 @pytest.mark.parametrize("rel", CORPUS)
