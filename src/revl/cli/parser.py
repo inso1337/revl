@@ -201,6 +201,16 @@ class _Parser(argparse.ArgumentParser):
         return [found for found in super()._get_option_tuples(option_string)
                 if TRUST_EXPORTED not in found[0].option_strings]
 
+    def error(self, message):
+        """Issue #3505: `check` is the verb an author reaches for, and the
+        refusal listed all 57 verbs without naming a form that checks a file
+        without running it. Keep the verb list, but point at the two existing
+        forms when the unknown verb is exactly `check`."""
+        if ("argument command: invalid choice: 'check'" in message):
+            message += ("\n  to check a file without running it, use "
+                        "'revl compile <file>' or 'revl test <file> --list'")
+        super().error(message)
+
 
 def build_parser() -> argparse.ArgumentParser:
     """Assemble the full `revl` subcommand parser."""
