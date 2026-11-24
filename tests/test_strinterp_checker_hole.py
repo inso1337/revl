@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl import RevlError, compile_source  # noqa: E402
+from revl.lexer import lex  # noqa: E402
 
 
 def _err(source: str) -> str:
@@ -77,10 +78,13 @@ def test_passing_a_correctly_typed_fn_by_name_still_compiles():
 # -- (B) the interpolation diagnostic ---------------------------------------
 
 def test_dollar_brace_in_a_plain_string_is_redirected_to_a_template():
-    # `"hi ${name}"` compiled clean and emitted the LITERAL `${name}`. It is
-    # now a diagnostic that redirects to a backtick template.
+    # `"hi ${name}"` used to compile clean and emit the LITERAL `${name}`. It is
+    # now a refusal that says so and names both working forms (#3502): a
+    # triple-quoted string for literal text, a backtick template to interpolate.
     err = _err('fn greet(name: Str) -> Str { return "hi ${name}" }\n')
     assert "does not interpolate" in err
+    assert "refused, not emitted as literal text" in err
+    assert "triple-quoted string" in err and '"""..."""' in err
     assert "backtick template" in err and "`hi ${name}`" in err
 
 
@@ -121,3 +125,26 @@ def test_literal_braces_in_a_plain_string_are_not_flagged():
     # `{}` / `{value}` as literal text (JSON, emit placeholders) must survive.
     compile_source('fn t() -> Str { return "{value}L" }\n', "t.rvl")
     compile_source('fn t() -> Str { return "{}" }\n', "t.rvl")
+
+
+def test_literal_dollar_brace_is_written_as_a_triple_quoted_string():
+    # the refusal's hint names the literal spelling, and it works: the shell
+    # fragment from #3502 keeps its `${HOME}` characters verbatim.
+    ir = compile_source('fn env() -> Str { return """echo ${HOME}""" }\n', "t.rvl")
+    assert ir is not None
+
+
+def test_a_template_has_no_escape_processing_so_two_backslashes_are_two():
+    # #3503's rule: a template body is verbatim except for `${...}`, so `\\`
+    # (two source backslashes) is two characters, where a plain string's `\\`
+    # is one.
+    toks = lex("fn f() -> Str { return `a\\\\b` }\n", "t.rvl")
+    tmpl = next(t for t in toks if t.kind == "template")
+    assert tmpl.value == [("text", "a\\\\b")]
+
+
+def test_a_single_template_backslash_is_one_character():
+    # to build a regex `\(x`, the template takes ONE backslash, not two.
+    toks = lex("fn f() -> Str { return `\\(` }\n", "t.rvl")
+    tmpl = next(t for t in toks if t.kind == "template")
+    assert tmpl.value == [("text", "\\(")]
