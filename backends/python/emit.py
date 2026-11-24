@@ -687,11 +687,16 @@ def _inverse_lambda(step: dict, slot: str, params: str = "") -> str:
     return f"lambda {bound}" if bound else "lambda"
 
 
-def _ident(name: Any, what: str, *, attr: bool = False, temps: bool = True) -> str:
+def _ident(name: Any, what: str, *, attr: bool = False, temps: bool = True,
+           builtins: bool = True) -> str:
     """Validate and rename one user identifier. `attr=True` marks a name emitted
     as an attribute the runtime dispatches by its contract spelling (a provide-
     method name) — it takes the keyword-only rung, since it cannot shadow a
-    bare-emitted builtin and renaming it would break that dispatch."""
+    bare-emitted builtin and renaming it would break that dispatch.
+    `builtins=False` takes the same keyword-only rung for a name HOST text
+    spells itself (an inline `@py` extern body's parameter, issue #3604): the
+    body is copied verbatim, so renaming the parameter left the body reading
+    the Python builtin instead of the argument."""
     if not isinstance(name, str) or not name.isidentifier():
         raise EmitError(f"{what} {name!r} is not a usable Python identifier")
     # The emitter's scaffolding lives in the `_revl*` namespace (`_revl_ctx`,
@@ -712,8 +717,13 @@ def _ident(name: Any, what: str, *, attr: bool = False, temps: bool = True) -> s
     extra = _TYPE_RESERVED if what == "type name" else frozenset()
     # `temps=False`: a name host code spells itself (an inline extern body's
     # parameter) shares no scope with an emitter temporary, so it takes only
-    # the builtin rung (issue #2913).
-    return (_mangle_kw(name) if attr else _mangle(name, extra) if temps
+    # the builtin rung (issue #2913). `builtins=False` takes the keyword-only
+    # rung outright: nothing the emitter writes bare sits inside an inline
+    # extern body's def, so the parameter may keep the spelling the host body
+    # reads (issue #3604).
+    if attr or not builtins:
+        return _mangle_kw(name)
+    return (_mangle(name, extra) if temps
             else _mangle_escaping(name, _EMITTED_BUILTINS | extra))
 
 
@@ -6057,6 +6067,17 @@ def _emit_externs(externs: list, crossings: dict | None = None,
             for p in ext["params"])
         bodies = ext.get("bodies") or {}
         refs = ext.get("refs") or {}
+        thunk = "py" in refs and "py" not in bodies
+        # An inline host body names its parameters itself, so they keep their
+        # spelling; only the `@py ref` thunk, which binds `_f`/`_r` beside them,
+        # lifts one off an emitter temporary (issue #2913). Issue #3604: the
+        # inline body is verbatim host text, so a parameter named like a bare
+        # builtin (`max`, `len`) takes the keyword-only rung too — renaming it
+        # in the `def` left the body reading the Python builtin. Nothing the
+        # emitter writes bare sits inside this def, so the spelling is safe.
+        params = ", ".join(_ident(p["name"], "extern parameter name", temps=thunk,
+                                  builtins=thunk or "py" not in bodies)
+                           for p in ext["params"])
         # issue #2688: the declared-ceiling tag the runtime backstop reads. A
         # budgeted extern reached with empty caps must NOT be treated as
         # unbounded, so the function object carries the declaration the emitter
