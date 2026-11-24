@@ -26,6 +26,7 @@ import functools
 import hashlib
 import io
 import pickle
+import re
 import sys
 import threading
 import weakref
@@ -847,6 +848,16 @@ def _name_the_candidate(exc: BaseException, ir: dict) -> None:
 #: the table never grows with the session.
 RENDER_CACHE_SIZE = 4
 
+#: The pre-check `_slo_discover` runs before parsing an origin file (issue
+#: #3597): `slo` as a word, not as three letters — so `slow`, `slot` and the
+#: like no longer reach the parser. A clause-head `slo` is an ident token
+#: (`parser` reads it with `at("ident", "slo")`), and an ident is always
+#: bounded by non-identifier characters, so every file the parser COULD bind a
+#: contract in still passes this check; only files that cannot bind are
+#: skipped. Identifier characters here are letters and underscore, the lexer's
+#: own set.
+_SLO_WORD = re.compile(r"(?<![A-Za-z_])slo(?![A-Za-z_])")
+
 
 class _PlainPickler(pickle.Pickler):
     """Pickles plain data and refuses everything else. `reducer_override` is
@@ -928,7 +939,10 @@ class _RenderCache:
         return None
 
     def put(self, key: tuple | None, source: str, code) -> None:
-        if key is None or code is None:
+        # `code` may be None: an offered render whose host kept no compiled
+        # code (issue #3597) still skips the emit; the generation that runs it
+        # compiles the text and re-puts the entry with its own code object.
+        if key is None:
             return
         self._entries = [entry for entry in self._entries
                          if not _same_key(entry[0], key)]
@@ -1797,6 +1811,31 @@ class Session:
     @property
     def loaded(self) -> bool:
         return self._driver is not None
+
+    def offer_render(self, ir: dict, source: str, code: object = None, *,
+                     emitter=None) -> bool:
+        """Hand the session a render a host already made for `ir` (issue #3597).
+
+        The next `load`/`swap` of the same document then hits the render cache
+        (issue #3383) instead of re-emitting, and reuses `code` when given to
+        skip the compile too. The pair is keyed on the document and on this
+        session's OWN emitter — `emitter` when given, else the driver's, else
+        the module `run` loads its emitter as (`python_backend_emitter`) — so
+        a pair offered for another document or another emitter is never used,
+        and every admission gate still runs on the load itself. Returns whether
+        the document hashes to a cache key at all; False means the load emits
+        as before. This is the public door for the private
+        `session._renders.put(_RenderCache.key(emitter, ir), source, code)`
+        reach a host used before.
+        """
+        if emitter is None:
+            driver = self._driver
+            emitter = driver.emit if driver is not None else python_backend_emitter()
+        key = _RenderCache.key(emitter, ir)
+        if key is None:
+            return False
+        self._renders.put(key, source, code)
+        return True
 
     def _require(self):
         if self._frozen:
@@ -3573,14 +3612,17 @@ class Session:
         point: a file that is not a composition, a composition with no `slo`
         block, a parse that raises — each leaves the session with no contract,
         which is exactly the state it was in before item 473. A contract can
-        never be INVENTED here; it can only be found or not found. The `slo`
-        substring pre-check keeps a load that has no contract to find from
-        re-parsing its own sources.
+        never be INVENTED here; it can only be found or not found. The
+        `_SLO_WORD` pre-check keeps a load that has no contract to find from
+        re-parsing its own sources: only a file containing `slo` as a word
+        reaches the parser, so `slow`/`slot` and the like (issue #3597) no
+        longer cost a parse each, and a file that can declare an `slo` block
+        always passes it.
         """
         for path in (origin or {}).get("files") or []:
             try:
                 with open(path, encoding="utf-8") as handle:
-                    if "slo" not in handle.read():
+                    if _SLO_WORD.search(handle.read()) is None:
                         continue
                 if self._slo_bind(path):
                     return
