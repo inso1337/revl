@@ -214,7 +214,8 @@ SETUP = ("component C {{ config {{ p: Int = 1 }}\n"
 
 def test_setup_operator_mismatch_rejected():
     err = _err(SETUP.format(body="let bad = 1 + true"))
-    assert "operand of `+` expects `Int`, got `Bool`" in err
+    # issue #3491: the refusal names what `+` accepts, not `Int` alone
+    assert "operand of `+` expects `Str, Int or Float`, got `Bool`" in err
 
 
 def test_str_plus_int_rejected():

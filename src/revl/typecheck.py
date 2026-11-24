@@ -1633,6 +1633,18 @@ def _binop_type(op: str, lt: str | None, rt: str | None,
     if op in ("+", "-", "*", "/", "%"):
         for t in (lt, rt):
             if filename and t and t not in _NUMERIC:
+                if op == "+":
+                    # issue #3491: `+` is not arithmetic-only — `Str + Str`
+                    # concatenates (handled above) — so the refusal names what
+                    # `+` actually accepts, and a List operand gets the forms
+                    # that do the job.
+                    err = mismatch(filename, line, f"operand of `{op}`",
+                                   "Str, Int or Float", t)
+                    if parse_type(t)[0] == "List":
+                        err.hint = ("`+` does not join lists — use `xs.concat(ys)` "
+                                    "to join two lists, or `xs = xs.push(x)` to add "
+                                    "one element (docs/stdlib-2.0.md)")
+                    raise err
                 raise mismatch(filename, line, f"operand of `{op}`", "Int", t)
         if op == "/":
             # `/` is TRUE division and yields Float even on two Ints, because
