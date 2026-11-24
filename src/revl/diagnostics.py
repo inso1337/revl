@@ -273,8 +273,7 @@ OTHER_CODES = {
         "fix": "admit the turn again against the live generation to get a "
                "handle onto it",
     },
-    "SESSION_BUSY": {
-    "ARGS": {
+    "ARGSESSION_BUSY": {
         "category": "session",
         "guarantee": "one session runs at a time per process",
         "meaning": "another session's step held the process's session turn: "
