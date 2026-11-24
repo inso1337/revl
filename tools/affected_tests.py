@@ -256,6 +256,10 @@ SELFHOST_ORACLE_TESTS = {
     "checker": ("tests/test_selfhost_checker.py",),
     "compile": ("tests/test_selfhost_compile.py",),
     "emit_go": ("tests/test_selfhost_emit_go.py",),
+    # The Go emitter is split across files (issue #3098); one oracle covers all.
+    "emit_go_comp": ("tests/test_selfhost_emit_go.py",),
+    "emit_go_core": ("tests/test_selfhost_emit_go.py",),
+    "emit_go_module": ("tests/test_selfhost_emit_go.py",),
     "emit_java": ("tests/test_selfhost_emit_java.py",),
     "emit_py": ("tests/test_selfhost_emit_py.py",),
     "emit_rust": ("tests/test_selfhost_emit_rust.py",),
