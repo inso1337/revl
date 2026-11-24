@@ -4362,11 +4362,28 @@ def run_placement(files, placement_path: str, once: bool = False,
     # never arms one runs byte-identically to the pre-443 conductor — no
     # watcher thread, no latch read, no change to any teardown path.
     estop_latch = latch_path(estop_latch)
+    # issue #3198: resolve the composition roots HERE, in the conductor. A
+    # container-sandboxed process re-compiles these exact paths inside its
+    # boundary, and the driver mounts the files themselves rather than the
+    # directories that hold them; absolute roots are what let that compile
+    # resolve with the conductor's working directory unmounted.
+    files = [os.path.abspath(str(f)) for f in files]
+    compile_report: dict = {}
     try:
-        ir = compile_files(files)
+        ir = compile_files(files, report=compile_report)
     except RevlError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+
+    # issue #3198: the exact FILES a container-sandboxed body may read to
+    # re-compile its own composition: the roots plus every file that compile
+    # read from disk (`use` dependencies, and every host file a ref, asset or
+    # body read). The driver mounts each one read-only on its own; no directory
+    # is mounted, so the body cannot read beside them (the envelope never
+    # granted that).
+    sandbox_files = sorted({os.path.abspath(str(f)) for f in files}
+                           | set(compile_report.get("disk_reads") or {})
+                           | set(compile_report.get("host_file_reads") or ()))
 
     placement = _load_placement(placement_path)
     # item 363: a `[tiers]` / `default_tier` manifest declares a backend tier
@@ -5419,8 +5436,7 @@ def run_placement(files, placement_path: str, once: bool = False,
             "seams": sandbox_seam_roles(pname, processes, requires, provides,
                                         owner, backends, remote_specs,
                                         default_deadline),
-            "files": [str(f) for f in files],
-            "cwd": os.getcwd(),
+            "files": sandbox_files,
             # item 411 T3: the per-process seam network and the seam-only canary
             # targets (empty for a seam-free sandbox — the ordinary net canary
             # runs then). Established above only when there is a cross-boundary
