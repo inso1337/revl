@@ -502,6 +502,10 @@ NOT_A_RULE = {
               "are outside the digest too, which is the deliberate bound: this "
               "digest identifies the checker, not the library it checks.",
     "attest": "this module: the consumer of the digest, not a checker.",
+    "unit_cache": "the on-disk parse cache (issue #3429). It stores and "
+                  "returns compiler verdicts; it decides none, and a cache "
+                  "miss recomputes the verdict from the ruleset modules "
+                  "themselves.",
     "intent": "declared-intent reporting on an already-admitted document.",
     "policy": "the runtime policy evaluator; it runs after admission.",
     "erasure_receipt": "an after-the-fact receipt over a completed erasure.",

@@ -78,7 +78,7 @@ def compiler_digest() -> str:
     digest.update(f"format={FORMAT}\0revl={_revl_version()}\0"
                   f"python={sys.version}\0".encode())
     for path in _package_sources():
-        digest.update(os.path.relpath(path, _PACKAGE_DIR).encode() + b"\0")
+        digest.update(relpath_or_abs(path, _PACKAGE_DIR).encode() + b"\0")
         with open(path, "rb") as handle:
             digest.update(handle.read())
         digest.update(b"\0")
