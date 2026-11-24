@@ -9222,3 +9222,32 @@ def test_a_known_3107_loud_refusal_is_still_open(admit, name):
         f"{name}: recorded as {pinned!r}, now {got!r}. If the gate now admits "
         f"it, DELETE the entry; if the refusal merely changed shape, read it "
         f"before rewriting it.")
+
+
+_3212_LET_PROGRAMS = [
+    ("an Opt value under a Str annotation", "Str", "maybe(u)"),
+    ("an Int under a Str annotation", "Str", "5"),
+    ("a correct annotation", "Str", "u"),
+]
+
+
+@pytest.mark.parametrize("case", _3212_LET_PROGRAMS,
+                         ids=[n for n, _, _ in _3212_LET_PROGRAMS])
+def test_an_annotated_provide_method_let_is_checked_as_the_reference_checks_it(
+        admit, case):
+    """Issue #3212: the reference checks the value of an annotated `let` in a
+    provide method against its annotation, so the gate does too, with the
+    reference's sentence."""
+    _, ann, value = case
+    src = (
+        "extern pure fn maybe(a: Str) -> Opt[Str] = @py { return None }\n"
+        "service Ops { fn go(u: Str) -> Int }\n"
+        "component Agent provides ops: Ops {\n"
+        "  provide ops {\n"
+        "    fn go(u: Str) {\n"
+        f"      let s: {ann} = {value}\n"
+        "      return 0\n"
+        "    }\n"
+        "  }\n"
+        "}\n")
+    _agree(admit, src)

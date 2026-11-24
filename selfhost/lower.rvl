@@ -9200,6 +9200,15 @@ fn mth_type_verdict(body: List[Stmt], i: Int, env: List[Bind], cx: Ctx,
   if (r.v != "") { return mk_verd(r.v, ln) }
   let rq = s.edge == "subscribe" ? ct_sub_head(s.e, cx, env) : ct_scan(s.e, cx, env)
   if (rq != "") { return mk_verd(rq, ln) }
+  // issue #3212: an ANNOTATED binding is a checking position against what it
+  // writes (`_do_let`'s `check_ir`), after the sweep above and before the name
+  // is bound. A crossing binding is not one: its type is the boundary's.
+  if (s.bind != "" && s.bindTy != "" && !ct_crossing(s) && !is_bad(s.e)
+      && tk_solid(s.bindTy, env) != "") {
+    let lc = tk_check(s.e, s.bindTy, env, "`let ".concat(s.bind).concat(": ")
+      .concat(tk_render(s.bindTy)).concat("`"))
+    if (lc.v != "") { return mk_verd(lc.v, ln) }
+  }
   var next = env
   if (s.bind != "") {
     // the type a binding takes: its own annotation first, then the declared
