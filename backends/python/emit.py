@@ -5759,6 +5759,14 @@ def _emit_assert(expr: dict, out: "_Lines", indent: int) -> None:
     reports both values alongside the expression as emitted. Anything else
     keeps the plain form.
     """
+    if expr.get("kind") == "bin" and expr.get("op") == "&&":
+        # issue #3513: split the top-level `&&` chain into one assert per
+        # operand, so a failure names the first false operand (a comparison
+        # operand gets the left/right report below). Short-circuit semantics
+        # are unchanged: the first false operand's assert raises first.
+        _emit_assert(expr["left"], out, indent)
+        _emit_assert(expr["right"], out, indent)
+        return
     if expr.get("kind") == "bin" and expr.get("op") in _ASSERT_COMPARISONS:
         op = _PY_BIN_OPS[expr["op"]]
         left = _expr(expr["left"])
