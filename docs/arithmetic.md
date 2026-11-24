@@ -483,7 +483,37 @@ it. Both operands of a later `==` are then `Float`-typed, nothing is refused,
 and the tiers still disagree (python true, TypeScript false, and go false on
 the `List[Float]` let). The same test file pins those five shapes as strict
 expected failures. A `List[Int]` VALUE passed into a `List[Float]` parameter
-is the related issue #2937.
+is the related issue #2937, below.
+
+**A value that already carries its type is not converted** (issue #2937).
+`compatible` recurses into type arguments here too, so the checker used to
+accept a `List[Int]` variable where a `List[Float]` is declared: as a call
+argument, a `let` value, an assignment, a `return`, a record field, a list
+element or a constructor payload. The `"widen"` marker sits on one node and
+cannot reach an element, so nothing converted the elements. Python and
+TypeScript ran the program (TypeScript with `bigint` elements where `number` is
+declared), go failed to build (`[]int64` as `[]float64`) and java failed in
+javac (`List<Long>` as `List<Double>`). The same held for `Opt[Int]` as
+`Opt[Float]`, `Box[Int]` as `Box[Float]` (a record or a generic record) and
+`List[Int32]` as `List[Int]`. Converting each element would copy every value
+that crosses a call, so the checker refuses it (`T1`, "the `Int` inside is not
+widened to `Float` (only a bare value widens)"), in the reference and in the
+self-hosted checker, so no tier reaches the program. Build the value with the
+wide element type (`3.0`, not `3`), or convert each element where you mean to
+(a `Float` built from each `Int`). A bare scalar still widens (`f(n)` with `n: Int` for
+a `Float` parameter), and a constructor written at the site is judged part by
+part, not as a value: `[1, 2]`, `Some(3)`, `{ i: 3, f: 3 }` and `B([1, 2])`
+are unaffected, and so is `Some(xs)` with `xs: List[Float]`.
+A bare `Int` value or expression (`n`, `n + 1`) put into an `Opt[Float]` slot
+is refused the same way: the `Float` is inside the option, where no marker
+reaches. Known gaps, not covered by this rule: an argument to a builtin method
+(`rows.push(ys)` with `rows: List[List[Float]]`, `xs.concat(ys)`), the field
+read of a generic record (`b.v` with `b: Box[List[Int]]`), and an anonymous
+record value flowing into a nominal record.
+`tests/test_nested_widening_value_flow_2937.py` runs each refused shape on
+every tier (rust and java with `REVL_CROSS_TIER_SLOW=1`): on base it fails on
+every tier, because python and TypeScript run the program and go and java do
+not build it, and after the fix every tier refuses the shape at check time.
 
 ## Sized integers: `Int32`
 

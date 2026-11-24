@@ -73,6 +73,7 @@ from .typecheck import (
     null_error,
     parse_type,
     POISON,
+    refuse_nested_widening,
     structural_fields,
     substitute,
     unify,
@@ -7148,6 +7149,12 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
                                declared, inferred)
             type_env[stmt.name] = widened
             declared = widened
+        elif declared and inferred:
+            # issue #2937: `compatible` admits a `List[Int]` value into a
+            # `List[Float]` variable; no marker converts the elements
+            refuse_nested_widening(
+                value, declared, inferred, type_env, types, filename,
+                f"assignment to `{stmt.name}` (a `{render_type(declared)}` variable)")
         if inferred is not None and declared is None:
             type_env[stmt.name] = inferred
         lowered_value = _lower_pure_expr(value, scope, callables, alias_fns, filename, type_env, types)
