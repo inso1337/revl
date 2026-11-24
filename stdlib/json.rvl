@@ -110,9 +110,29 @@ pub extern pure fn json_parse(s: Str) -> Any
     # fn must not diverge per tier (docs/syntax-2.0.md §3.4), so refuse the
     # constants here rather than accept a document three tiers reject.
     import json
+    import math
     def _revl_reject_constant(name):
         raise ValueError("json_parse: " + name +
                          " is not valid JSON (RFC 8259 section 6)")
+    # Issue #3465: a number past the Float range (1e400, or an integer literal
+    # whose float conversion overflows) is refused, as serde_json refuses it
+    # on the rust tier — the tiers must not disagree on what the document is.
+    def _revl_parse_float(tok):
+        f = float(tok)
+        if not math.isfinite(f):
+            raise ValueError("json_parse: " + tok +
+                             " is outside the Float range")
+        return f
+    def _revl_parse_int(tok):
+        v = int(tok)
+        try:
+            f = float(v)
+        except OverflowError:
+            f = math.inf
+        if not math.isfinite(f):
+            raise ValueError("json_parse: " + tok +
+                             " is outside the Float range")
+        return v
     def _revl_refuse_lone_surrogate(root):
         stack = [root]
         while stack:
@@ -132,7 +152,8 @@ pub extern pure fn json_parse(s: Str) -> Any
                     stack.append(item)
         return root
     return _revl_refuse_lone_surrogate(
-        json.loads(s, parse_constant=_revl_reject_constant))
+        json.loads(s, parse_constant=_revl_reject_constant,
+                   parse_float=_revl_parse_float, parse_int=_revl_parse_int))
   }
   = @ts {
     // The builtin JSON.parse decodes every JSON number to a JS number (f64),
@@ -184,7 +205,22 @@ pub extern pure fn json_parse(s: Str) -> Any
       if (s[i] === ".") { float = true; i++; digits(); }
       if (s[i] === "e" || s[i] === "E") { float = true; i++; if (s[i] === "+" || s[i] === "-") i++; digits(); }
       const tok = s.slice(start, i);
-      return float ? Number(tok) : BigInt(tok);
+      if (float) {
+        // issue #3465: a float literal past the Float range (1e400) decodes to
+        // Infinity here; every other tier refuses the document (serde_json
+        // errors, the py tier's parse_float hook raises), so fail the parse.
+        const f = Number(tok);
+        if (!Number.isFinite(f)) fail("number outside the Float range");
+        return f;
+      }
+      const b = BigInt(tok);
+      // issue #3465: an integer literal past the Float range is refused too
+      // (the py tier's parse_int hook refuses it, serde_json errors on it).
+      // Number.MAX_VALUE is exactly representable, so BigInt(..) of it is the
+      // exact largest finite f64 as an integer.
+      const maxf = BigInt(Number.MAX_VALUE);
+      if (b > maxf || b < -maxf) fail("number outside the Float range");
+      return b;
     }
     function str(): string {
       i++;

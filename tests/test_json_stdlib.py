@@ -244,7 +244,13 @@ def test_ts_tier_emits_bigint_aware_json(consumer_ir):
     # decodes a JSON integer literal to a JS `bigint` (revl `Int`) and a float
     # to a JS `number` (revl `Float`), matching the py tier past 2^53.
     assert "function json_parse(s: string): any {" in out
-    assert "return float ? Number(tok) : BigInt(tok);" in out
+    # issue #3465: a number past the Float range fails the parse on every tier
+    # (serde_json errors on it on rust) — the float branch refuses a
+    # non-finite Number and the integer branch refuses a bigint past
+    # Number.MAX_VALUE; in-range literals still decode as before.
+    assert "Number.isFinite(f)" in out
+    assert "BigInt(Number.MAX_VALUE)" in out
+    assert "outside the Float range" in out
     assert "JSON.parse(s)" not in out  # the lossy builtin is gone from parse
     # item 281: json_stringify wraps JSON.stringify in a bigint replacer (an
     # `Int` field is JS `bigint`, which the builtin throws on) rather than
