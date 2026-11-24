@@ -296,3 +296,99 @@ def test_a_step_that_cannot_execute_also_rolls_back():
         assert session.call("api", "lookup", ["k"])["result"] == "v1:miss"
     finally:
         session.unload()
+
+
+# ============================================== issue #3534: apply re-checks row config
+
+ROW_SERVICES = """
+service Database { fn query(sql: Str) -> Str }
+"""
+
+ROW_SQLITE = """
+use "services.rvl" { }
+component SqliteDatabase provides db: Database {
+  config { url: Str, pool: Int = 4 }
+  provide db { fn query(sql) = sql }
+}
+"""
+
+ROW_BASE = """
+composition Demo {
+  use "services.rvl"
+  row @db from "sqlite.rvl" provides db
+    config { url: "sqlite://local" }
+    open   { url, pool }
+}
+"""
+
+
+def _row_project(tmp_path) -> Path:
+    (tmp_path / "services.rvl").write_text(ROW_SERVICES, encoding="utf-8")
+    (tmp_path / "sqlite.rvl").write_text(ROW_SQLITE, encoding="utf-8")
+    (tmp_path / "base.rvl").write_text(ROW_BASE, encoding="utf-8")
+    return tmp_path / "base.rvl"
+
+
+def test_check_resulting_rows_refuses_a_value_the_replacement_schema_drops(tmp_path):
+    """Pure half of #3534: a resulting IR that carries the old row value
+    beside a replacement component whose schema retyped the field is refused
+    by `check_resulting_rows`, naming the row, the field and the declared
+    type."""
+    from revl.composition import admit_composition, check_resulting_rows
+    from revl.errors import RevlError
+
+    base = _row_project(tmp_path)
+    running = admit_composition(str(base), str(tmp_path), full=True)
+    resulting = copy.deepcopy(running)
+    # the replacement component retypes `url` as Int; the row still carries
+    # the old Str value — exactly what the planner carries forward
+    for comp in resulting["components"]:
+        if comp["name"] == "SqliteDatabase":
+            for field in comp["config"]:
+                if field["name"] == "url":
+                    field["type"] = "Int"
+    with pytest.raises(RevlError) as caught:
+        check_resulting_rows(resulting)
+    message = str(caught.value)
+    assert "@db" in message and "url" in message and "Int" in message
+    # and the untouched document passes
+    check_resulting_rows(running)
+
+
+@needs_runtime
+def test_apply_refuses_a_row_value_the_replacement_no_longer_admits(tmp_path):
+    """Live half of #3534: an apply whose resulting rows carry a value the
+    replacement's declared config no longer admits is refused BEFORE anything
+    is torn down, naming the row and the field; the running component keeps
+    serving."""
+    from revl.composition import admit_composition
+
+    base = _row_project(tmp_path)
+    running = admit_composition(str(base), str(tmp_path), full=True)
+    # a no-change plan against the running composition (the same sqlite
+    # source re-admitted): admissible, and its resultingIR carries the rows
+    # forward (plan.py keeps `rows` in force)
+    artifact = build_artifact(
+        plan(files=[str(tmp_path / "sqlite.rvl")], manifest=running,
+             include_ir=True),
+        running)
+    # simulate the replacement landing with a retyped schema: the row value
+    # (Str) no longer fits the declared field (Int)
+    for comp in artifact["resultingIR"]["components"]:
+        if comp["name"] == "SqliteDatabase":
+            for field in comp["config"]:
+                if field["name"] == "url":
+                    field["type"] = "Int"
+
+    session = _fresh()
+    try:
+        session.load(running)
+        assert session.call("db", "query", ["x"])["result"] == "x"
+        report = session.apply(artifact)
+        assert report["applied"] is False
+        assert report["noResidue"] is True
+        assert "@db" in report["reason"] and "url" in report["reason"]
+        # nothing was torn down: the row's component still serves
+        assert session.call("db", "query", ["y"])["result"] == "y"
+    finally:
+        session.unload()

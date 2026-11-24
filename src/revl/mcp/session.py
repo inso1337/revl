@@ -4380,6 +4380,29 @@ class Session:
         resulting_ir = artifact["resultingIR"]
         operations = artifact["operations"]
 
+        # issue #3534: at apply, the rows of the RESULTING composition are
+        # re-checked against the REPLACEMENT's declared config (and the
+        # session's host table folded in), before anything is torn down. A
+        # row or host value the new schema no longer admits refuses here,
+        # naming the row, the field and the declared type.
+        from ..composition import check_resulting_rows  # noqa: PLC0415
+        from ..errors import RevlError  # noqa: PLC0415
+        try:
+            _configure_rows_from_host(resulting_ir, self.config)
+            check_resulting_rows(resulting_ir, "<apply>")
+        except RevlError as error:
+            return {
+                "applied": False,
+                "failedAt": None,
+                "reason": f"config check at apply: {error}",
+                "steps": [],
+                "rolledBack": False,
+                "noResidue": True,  # nothing was applied, so nothing to roll back
+                "registry": {"baseline": driver.root.registry.size,
+                             "afterRollback": driver.root.registry.size},
+                "state": self.state(drain=True),
+            }
+
         registry_baseline = driver.root.registry.size
         result_module = self._emit_or_refuse(driver, resulting_ir)
         running_module = (self._emit_or_refuse(driver, running_ir)
