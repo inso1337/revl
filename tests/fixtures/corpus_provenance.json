@@ -1375,6 +1375,7 @@
    "oracle-reject:issue 2842: an emission extern passed to a function parameter is refused",
    "oracle-reject:issue 2842: an emission extern stored in a list is refused",
    "oracle-reject:issue 2842: an emission extern stored in a record field is refused",
+   "stdlib/channel.rvl",
    "stdlib/net.rvl",
    "stdlib/socket.rvl",
    "stdlib/wire.rvl",
