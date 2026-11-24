@@ -630,61 +630,90 @@ HISTORY_LIMIT = 64
 AUTHORED_HOST_BODIES_KEY = "_revl_authored_host_bodies"
 
 
+def has_host_code(extern: dict) -> bool:
+    """Whether `extern` carries host code: an inline or spliced body in
+    `bodies`, or a host-module ref in `refs` (issue #3347). A ref is listed
+    like a body: its pin says which bytes run, not that anyone reviewed them."""
+    return bool(extern.get("bodies") or extern.get("refs"))
+
+
+def host_code_of(extern: dict) -> tuple:
+    """The host code `extern` runs, for comparing two generations: its
+    verbatim bodies and its host-module refs (path, symbol, root kind and
+    pinned sha256), so a ref whose pin moved reads as changed code."""
+    return (extern.get("bodies") or {}, extern.get("refs") or {})
+
+
 def host_body_entry(extern: dict) -> dict:
-    """The disclosure record for one extern that carries a host body.
+    """The disclosure record for one extern that carries host code.
 
     The server's live-body reader and the applied-generation provenance below
     both produce this record, so the fields a ticket names have one
     definition rather than one per producer.
 
-    `digests` maps each backend to the lowercase hex sha256 of the verbatim
-    body string in `extern["bodies"][backend]`, encoded as UTF-8 with no
-    normalisation, so a one-byte change moves that backend's digest. Its keys
-    are in the same sorted order as `backends`. Comparing two records by
-    equality therefore sees a replaced host body as a changed record, which
-    is the point: without it a body whose text changed under the same extern
+    `backends` lists every backend the extern has host code on, inline or
+    by host-module ref. `digests` maps each backend to a lowercase hex
+    sha256: for a body in `extern["bodies"][backend]`, of the verbatim body
+    string encoded as UTF-8 with no normalisation, so a one-byte change moves
+    that backend's digest; for a ref in `extern["refs"][backend]`, the pinned
+    sha256 of the host file the ref names (issue #3347). Its keys are in the
+    same sorted order as `backends`. A record with any ref also carries
+    `refs`, each ref backend's `path` and `symbol` (and `root` for an
+    install-origin ref). Comparing two records by equality therefore sees a
+    replaced host body, or a ref whose pin moved, as a changed record, which
+    is the point: without it host code that changed under the same extern
     name, class and backends read as unchanged.
     """
     bodies = extern.get("bodies") or {}
-    backends = sorted(bodies)
-    return {"extern": extern.get("name"),
-            "classification": extern.get("class"),
-            "backends": backends,
-            "digests": {backend: hashlib.sha256(
-                bodies[backend].encode("utf-8")).hexdigest()
-                for backend in backends}}
+    refs = extern.get("refs") or {}
+    backends = sorted(set(bodies) | set(refs))
+    entry = {"extern": extern.get("name"),
+             "classification": extern.get("class"),
+             "backends": backends,
+             "digests": {backend: (hashlib.sha256(
+                 bodies[backend].encode("utf-8")).hexdigest()
+                 if backend in bodies else refs[backend].get("sha256"))
+                 for backend in backends}}
+    if refs:
+        entry["refs"] = {
+            backend: {"path": refs[backend].get("path"),
+                      "symbol": refs[backend].get("symbol"),
+                      **({"root": refs[backend]["root"]}
+                         if refs[backend].get("root") else {})}
+            for backend in sorted(refs)}
+    return entry
 
 
 def host_body_entries(ir: dict | None) -> list:
-    """Every extern in `ir` that carries a verbatim host body, as
-    `{extern, classification, backends, digests}`. This is the surface G8 does
-    not check inside (item 24) and the item-246 classifier never looks at."""
+    """Every extern in `ir` that carries host code (a verbatim body or a
+    host-module ref), as `{extern, classification, backends, digests}` plus
+    `refs` for a ref. This is the surface G8 does not check inside (item 24)
+    and the item-246 classifier never looks at."""
     out = []
     for extern in (ir or {}).get("externs") or []:
-        if extern.get("bodies"):
+        if has_host_code(extern):
             out.append(host_body_entry(extern))
     return sorted(out, key=lambda entry: str(entry.get("extern")))
 
 
 def _applied_host_bodies(running_ir: dict | None,
                          resulting_ir: dict | None) -> list:
-    """The host bodies an apply installed or changed.
+    """The host code an apply installed or changed.
 
     A plan artifact carries a compiled composition, not the compile report the
     authoring door uses, so attribution here is by comparison: an extern whose
-    body differs from the running generation's entry for the same name (or is
-    new) is a body this apply put in place. A body the apply left untouched is
-    not part of its disclosure.
+    bodies or refs differ from the running generation's entry for the same
+    name (or is new) is host code this apply put in place. Host code the
+    apply left untouched is not part of its disclosure.
     """
     before = {entry.get("name"): entry
               for entry in (running_ir or {}).get("externs") or []}
     applied = []
     for extern in (resulting_ir or {}).get("externs") or []:
-        bodies = extern.get("bodies") or {}
-        if not bodies:
+        if not has_host_code(extern):
             continue
         prior = before.get(extern.get("name")) or {}
-        if (prior.get("bodies") or {}) == bodies:
+        if host_code_of(prior) == host_code_of(extern):
             continue
         applied.append(host_body_entry(extern))
     return sorted(applied, key=lambda entry: str(entry.get("extern")))
@@ -712,8 +741,8 @@ def _applied_generation_origin(origin: dict | None, running_ir: dict | None,
     for entry in ((origin or {}).get(AUTHORED_HOST_BODIES_KEY) or []):
         current = live.get(entry.get("extern")) or {}
         previous = running.get(entry.get("extern")) or {}
-        if (not current.get("bodies")
-                or (previous.get("bodies") or {}) != current["bodies"]):
+        if (not has_host_code(current)
+                or host_code_of(previous) != host_code_of(current)):
             continue
         carried.append(host_body_entry(current))
     merged = {entry.get("extern"): entry for entry in carried}
@@ -721,7 +750,7 @@ def _applied_generation_origin(origin: dict | None, running_ir: dict | None,
                if authored_host_bodies is None else authored_host_bodies)
     for entry in applied:
         current = live.get(entry.get("extern")) or {}
-        if not current.get("bodies"):
+        if not has_host_code(current):
             continue
         entry = host_body_entry(current)
         merged[entry["extern"]] = entry
