@@ -7834,6 +7834,17 @@ def _lower_pure_expr_node(expr, scope: dict, callables: set, alias_fns: dict,
         if expr.name not in scope and expr.name not in callables:
             _reject_foreign_name(expr.name, filename, expr.line)  # item 384
             _reject_module_private(expr.name, filename, expr.line, types)
+            if _is_record_type(expr.name, types):
+                # issue #3492: `P { ... }` parses as the value `P` followed by a
+                # block; `P` is a declared TYPE, and revl builds records from a
+                # typed binding — say that instead of "declare it with let/var".
+                raise RevlError(
+                    filename, expr.line,
+                    f"`{expr.name}` is a declared type, not a value — a record is "
+                    f"built from a typed binding",
+                    hint=f"write `let p: {expr.name} = {{ ... }}` instead of "
+                         f"`{expr.name} {{ ... }}`",
+                    code="G1", category="binding")
             raise RevlError(filename, expr.line, f"`{expr.name}` is not declared in this function",
                             hint="declare it with `let`/`var` or add it as a parameter (G1)",
                             code="G1", category="binding")
