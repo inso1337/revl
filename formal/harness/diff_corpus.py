@@ -185,6 +185,28 @@ def corpus_files() -> list[Path]:
     return out
 
 
+def _used_services(path: Path, prog) -> dict:
+    """The services a corpus file's `use` declarations bring in, resolved the
+    way compile_files resolves them (relative to the importing file first, then
+    the repo root that makes `stdlib/...` spellings work). Issue #3640: a
+    required service declared in a `use`d module must reach the bound index, or
+    a crossing into it produces no F row and the oracle never judges it."""
+    from revl._paths import stdlib_root  # noqa: PLC0415
+
+    services: dict = {}
+    for use in prog.uses or []:
+        for candidate in (path.parent / use.path, stdlib_root().parent / use.path):
+            if not candidate.is_file():
+                continue
+            used = Parser(candidate.read_text(encoding="utf-8"),
+                          str(candidate)).parse()
+            for svc in used.services:
+                if use.names is None or svc.name in use.names:
+                    services.setdefault(svc.name, svc)
+            break
+    return services
+
+
 def _route(callee: object) -> tuple[str, str] | None:
     """(root, chain) for a call callee, incl. nested field chains.
 
@@ -4864,6 +4886,10 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             tsv.append("\t".join(["N", rel]))
             continue
         svc_objs = {svc.name: svc for svc in prog.services}
+        # issue #3640: `use`d modules' services join the bound index too, so a
+        # crossing into a required service from a used module gets its F row.
+        for name, svc in _used_services(path, prog).items():
+            svc_objs.setdefault(name, svc)
         services = {n: {m: md.emission for m, md in s.methods.items()}
                     for n, s in svc_objs.items()}
         bounds = _bound_index(svc_objs)
