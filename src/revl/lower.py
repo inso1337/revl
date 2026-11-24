@@ -838,13 +838,10 @@ def _is_mangled_name(name: str) -> bool:
 
 def _reject_dunder_name(name: str, kind: str, owner: str,
                         filename: str, line: int) -> None:
-    """Refuse a dunder / prototype name in a `kind` (`field`/`method`/`config
-    field`) position, naming its `owner` (a record, service or component, or
-    a record literal or update). A no-op for every ordinary name, so nothing
     """Refuse a dunder / prototype name, or a name Python would mangle, in a
     `kind` (`field`/`method`/`config field`) position, naming its `owner`
-    (record / service / component). A no-op for every ordinary name, so nothing
-    that compiled before is affected."""
+    (record / service / component, or a record literal or update). A no-op for
+    every ordinary name, so nothing that compiled before is affected."""
     if _is_mangled_name(name):
         raise RevlError(
             filename, line,
