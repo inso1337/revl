@@ -488,9 +488,17 @@ fn binop_type(op: Str, lt: Str, rt: Str, tt: Tt) -> Infer {
   }
   if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%") {
     if (lt != "" && !is_numeric(lt)) {
+      // issue #3491: `+` also concatenates Str (handled above), so its refusal
+      // names what `+` accepts, not just the arithmetic types
+      if (op == "+") {
+        return mismatch("operand of `+`", "Str, Int or Float", lt)
+      }
       return mismatch("operand of `".concat(op).concat("`"), "Int", lt)
     }
     if (rt != "" && !is_numeric(rt)) {
+      if (op == "+") {
+        return mismatch("operand of `+`", "Str, Int or Float", rt)
+      }
       return mismatch("operand of `".concat(op).concat("`"), "Int", rt)
     }
     if (op == "/") {
