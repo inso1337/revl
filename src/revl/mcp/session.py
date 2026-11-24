@@ -6350,10 +6350,8 @@ class Session:
         return AdmitVerdict(True, handle=AdmitHandle(self, keys), keys=keys)
 
     @_one_turn
-    def _wire_turn(self, turn_doc: dict, *,
-                   bundle: dict | None = None) -> tuple[str, ...]:
     def _wire_turn(self, turn_doc: dict, *, bundle: dict | None = None,
-                   declared: dict | None = None) -> tuple[str, ...]:
+                   bundeclared: dict | None = None) -> tuple[str, ...]:
         """Plug an admitted turn's components into the LIVE driver with the
         session owner active — so every frame the turn builds joins the same
         live-frame registry the enclosing session's commit/abort iterate — then
