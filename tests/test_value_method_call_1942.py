@@ -32,7 +32,7 @@ from pathlib import Path
 import pytest
 
 from revl.compiler import compile_source
-from revl.lower import _BUILTIN_METHODS
+from revl.lower import _BUILTIN_METHODS, _stdlib_fn_hint
 from revl.errors import RevlError
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -78,8 +78,11 @@ def test_a_non_builtin_method_on_a_stdlib_value_is_refused(stem):
     with pytest.raises(RevlError) as excinfo:
         compile_source(_src(stem), f"{stem}.rvl")
     assert excinfo.value.message == _message(*REFUSED[stem])
+    # issue #3500: the hint also names the stdlib function that does the
+    # refused method, when one matches (`map` -> `list_map`); `frob` has none
     assert excinfo.value.hint == (
-        "records carry data, not methods; call functions as `f(x)` (G6)")
+        "records carry data, not methods; call functions as `f(x)` (G6)"
+        + _stdlib_fn_hint(*REFUSED[stem]))
 
 
 @pytest.mark.parametrize("stem", ADMITTED)
