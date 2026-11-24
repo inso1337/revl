@@ -178,8 +178,11 @@ tier gets from node are not in a page:
    The script erases types with the TypeScript compiler the package already
    depends on, and rewrites every relative `.ts` specifier to the JavaScript
    file it resolves to. Outputs land flat in `<out-dir>`, so the default
-   emission (`import ... from '../runtime.ts'`) becomes `./runtime.js`, beside
-   the module. A relative `.ts` specifier that resolves to a file the step was
+   emission (`import ... from '../runtime.ts'`, the `--runtime-import` default)
+   becomes `./runtime.js`, beside the module. A build outside this checkout
+   cannot pass `../runtime.ts` as a strip input; it passes
+   `revl emit --backend ts --runtime-import ./runtime.ts ...` and lists its own
+   `runtime.ts` copy instead (issue #3531). A relative `.ts` specifier that resolves to a file the step was
    not given fails the step, because the page could not load it either. The
    step also refuses, by name, what it cannot rewrite or erase: an enum or a
    namespace that is not `declare`d (a `declare`d one is erased and kept), a

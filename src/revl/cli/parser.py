@@ -3013,6 +3013,14 @@ def build_parser() -> argparse.ArgumentParser:
                                "for the backend's native runtime")
     emit_cmd.add_argument("-o", "--output", default=None, metavar="PATH",
                           help="output path (default: stdout)")
+    emit_cmd.add_argument("--runtime-import", default=None, metavar="PATH",
+                          help="the import specifier the emitted module writes for the "
+                               "runtime (typescript backend only; default "
+                               "'../runtime.ts'). The browser target loads a flat "
+                               "'./runtime.js' beside the module, so a build outside "
+                               "this checkout passes `--runtime-import ./runtime.ts` "
+                               "and lists its own runtime copy as a strip input "
+                               "(docs/ts-runtime-contract.md, issue #3531)")
 
     verify_cmd = sub.add_parser(
         "verify",
