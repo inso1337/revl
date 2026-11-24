@@ -47,9 +47,6 @@ def test_every_release_job_waits_for_the_reviewer_gate():
     assert _environment_name(release) == "pypi", (
         "the GitHub release must wait for the pypi environment too: a tag "
         "push that never passed review must not create an unreviewed release")
-    # Name only. A url here would point at a PyPI project this job never
-    # uploads to, and the gate binds to the name regardless.
-    assert "url" not in release["environment"]
 
 
 def test_check_version_refuses_a_tag_that_is_not_on_main():

@@ -40,7 +40,7 @@ import threading
 import time
 import types
 import weakref
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from typing import Any, Callable, Optional
 
 # The confidentiality choke point (item 256 Slice 3): `confidential.py`, the
@@ -92,6 +92,9 @@ __all__ = [
     # item 443: the operator E-Stop (docs/design/443-estop.md)
     "arm_estop_latch", "clear_estop", "estop", "estop_engaged",
     "estop_from_latch", "estop_latch_path", "estop_residue", "estop_state",
+    # issue #2758: the drift control's read-only actuator
+    "ReadOnlyRefused", "arm_read_only_latch", "read_only_engaged",
+    "read_only_latch_path",
     # issue #1932: the built-in `Result` cases, defined ONCE for every module
     "Ok", "Err",
 ]
@@ -298,6 +301,21 @@ def _json_type_ok(value, json_type: str) -> bool:
     return True
 
 
+def _json_schema_key(key) -> str:
+    """Render one model-chosen object key for a validation fault (issue #3120).
+
+    A JSON object key is untrusted response content just like a value: a model
+    can echo a secret the program's own prompt fed it back out as a key. The
+    key reaches the fault message directly (an unexpected property under a closed
+    object) and, under `additionalProperties` as a schema, becomes part of the
+    PATH a nested error is built from. The same exact-value scrub the const/enum
+    branches apply to the observed value applies here; an ordinary key still
+    renders verbatim, so a developer sees the real malformed response."""
+    if confidential.is_secret_value(key):
+        return confidential.REDACTED
+    return str(key)
+
+
 def _json_schema_error(value, schema, path: str = "$"):
     """Validate ``value`` against the derived JSON-Schema subset the revl mapping
     emits (item 257, §3). Returns an error string for the FIRST violation, or
@@ -355,13 +373,16 @@ def _json_schema_error(value, schema, path: str = "$"):
         extra = schema.get("additionalProperties", True)
         for key, item in value.items():
             if key in props:
-                err = _json_schema_error(item, props[key], f"{path}.{key}")
+                err = _json_schema_error(item, props[key],
+                                         f"{path}.{_json_schema_key(key)}")
                 if err is not None:
                     return err
             elif extra is False:
-                return f"{path}: unexpected property {key!r}"
+                return (f"{path}: unexpected property "
+                        f"{_json_schema_key(key)!r}")
             elif isinstance(extra, dict):
-                err = _json_schema_error(item, extra, f"{path}.{key}")
+                err = _json_schema_error(item, extra,
+                                         f"{path}.{_json_schema_key(key)}")
                 if err is not None:
                     return err
 
@@ -523,8 +544,13 @@ def grammar_honoured_error(value, schema, path: str = "$"):
         declared = list(schema["properties"])
         observed = list(value)
         if observed != declared:
+            # item 416c / issue #3120: `observed` is the model's own member
+            # list, so a member name the program's prompt fed the model can
+            # come back here as a key; the path may already carry one from a
+            # Map above. Both are scrubbed, exactly like the schema fault.
+            rendered = [_json_schema_key(k) for k in observed]
             return (f"{path}: the stated grammar pins the members "
-                    f"{declared!r}; the completion has {observed!r}")
+                    f"{declared!r}; the completion has {rendered!r}")
         for name, sub in schema["properties"].items():
             err = grammar_honoured_error(value[name], sub, f"{path}.{name}")
             if err is not None:
@@ -533,7 +559,8 @@ def grammar_honoured_error(value, schema, path: str = "$"):
     extra = schema.get("additionalProperties")
     if isinstance(extra, dict) and isinstance(value, dict):
         for name, item in value.items():
-            err = grammar_honoured_error(item, extra, f"{path}.{name}")
+            err = grammar_honoured_error(item, extra,
+                                         f"{path}.{_json_schema_key(name)}")
             if err is not None:
                 return err
         return None
@@ -944,7 +971,15 @@ def revl_declare_model_decision(**members) -> None:
     (`origins`), what the candidates were and which was taken (`candidates`,
     `chosen`), how it was asked (`sampling`), under which rule
     (`policy_digest`), how far down the ladder and why (`fallback_depth`,
-    `fallback_reason`), and where it ran (`role`, `residence`).
+    `fallback_reason`), where it ran (`role`, `residence`), and how much of the
+    model's reasoning span the host returned (`reasoning`: its `visibility`, a
+    `tokens` count tagged `host-reported`, and a `digest` of returned reasoning
+    text only when the origins permit one).
+
+    `reasoning` is REQUIRED by envelope 3.0. A host that reported no span says
+    `none-reported` rather than omitting the member, because an omitted member
+    reads exactly like a run that had nothing to hide. The text itself is never
+    declared; only its digest, and only over a non-disclosing input.
 
     It may NOT name `component`, `step_index` or `outcome`: the crossing is the
     one the recorder just made and the outcome is the one the validation seam
@@ -1671,8 +1706,11 @@ def extern_emit(ctx, name: "str", fn, args: "tuple", caps: "tuple" = (),
     transparent frame keeps a recorded site on the emitted module's own line
     rather than on this helper."""
     _revl_transparent_frame = True
-    # issue #1504: refuse BEFORE the crossing is recorded or its host body runs
+    # issue #1504: refuse BEFORE the crossing is recorded or its host body runs.
+    # issue #2758: a read-only hold refuses the same new crossing, AFTER the
+    # E-Stop so a suspend is never masked by a read-only hold.
     _estop_check(name)
+    _read_only_check(name)
     # issue #2688: the declared ceiling, enforced at the same seam and before
     # the same point. Only a crossing that DECLARES a budget meters (and only a
     # budgeted crossing traces), so an undeclared one is byte-identical.
@@ -1955,7 +1993,11 @@ def plug(ctx, component: dict, config=None):
 #: fibers whose body is *currently* activating — a stack, innermost last. A host
 #: resource created inside a body (`Map.new()`) registers onto the top frame, so
 #: it is attributed to the activation (hence the instance) that acquired it.
-_ACTIVATING: list["Frame"] = []
+#: Context-local (issue #3380): a tuple in a context variable, so a session on
+#: another thread never sees this one's frames, and a task a body starts
+#: inherits the body's frame with its copied context.
+_ACTIVATING: "contextvars.ContextVar[tuple]" = contextvars.ContextVar(
+    "_revl_activating", default=())
 
 #: ctx -> the Frame of the activation on that context, for a context that
 #: cannot carry the frame itself (no instance `__dict__`). Every cordis context
@@ -2016,8 +2058,9 @@ def _register_resource(resource: Any) -> None:
     Called from `_Closable.__init__`; a no-op when nothing is activating (a
     resource made outside any component body — e.g. a bare test — is not
     instance state and is simply not tracked)."""
-    if _ACTIVATING:
-        _ACTIVATING[-1]._resources.append(resource)
+    activating = _ACTIVATING.get()
+    if activating:
+        activating[-1]._resources.append(resource)
 
 
 def _frame_for_ctx(ctx: Any) -> "Optional[Frame]":
@@ -2192,7 +2235,11 @@ def spawn(ctx, component: dict, config, realms):
 # tracing (test/demo observability for the stub stdlib)
 # ---------------------------------------------------------------------------
 
-_trace: Optional[Callable[[str], None]] = None
+#: the primary trace callback. Context-local (issue #3380): each session's
+#: driver installs its own before it drives its loop, and the tasks that loop
+#: runs copy it, so two sessions on two threads each trace to their own sink.
+_TRACE: "contextvars.ContextVar[Optional[Callable[[str], None]]]" = (
+    contextvars.ContextVar("_revl_trace", default=None))
 _observers: list = []
 
 
@@ -2204,9 +2251,12 @@ def set_trace(callback: Optional[Callable[[str], None]]) -> None:
     separate list and are **not** disturbed by this call, so a demo can hold
     its own subscription across a driver's install/teardown of the primary
     callback.
+
+    The callback is held in the calling context: a thread, or an asyncio task,
+    and the tasks started from it afterwards. One installed inside a task is
+    gone when that task ends.
     """
-    global _trace
-    _trace = callback
+    _TRACE.set(callback)
 
 
 def add_trace(callback: Callable[[str], None]) -> Callable[[], None]:
@@ -2241,7 +2291,7 @@ def remove_trace(callback: Callable[[str], None]) -> bool:
 
 def trace_observers() -> int:
     """How many callbacks are currently receiving events (primary included)."""
-    return len(_observers) + (1 if _trace is not None else 0)
+    return len(_observers) + (1 if _TRACE.get() is not None else 0)
 
 
 # item 259 slice 2 (docs/design/259-checked-parallel-emissions.md §4.1, HIGH-1):
@@ -2279,8 +2329,9 @@ def _record(event: str) -> None:
         # the parallel group's join rather than emitting to the real sink now.
         sinks[-1].append(event)
         return
-    if _trace is not None:
-        _trace(event)
+    trace = _TRACE.get()
+    if trace is not None:
+        trace(event)
     for observer in list(_observers):
         observer(event)
 
@@ -3060,7 +3111,7 @@ class _CallScope:
     def __enter__(self) -> "_CallScope":
         # an activation that starts INSIDE this call (a spawn) registers on its
         # own frame's cordis stack; `declared_crossing` compares depths
-        self._activating = len(_ACTIVATING)
+        self._activating = len(_ACTIVATING.get())
         self._token = _CALL_SCOPE.set(self)
         return self
 
@@ -3146,7 +3197,7 @@ def declared_crossing(label: str, compensate: Optional[Callable[[], Any]] = None
     def _wrap(fn):
         def _enter():
             scope = _CALL_SCOPE.get()
-            if scope is None or len(_ACTIVATING) > scope._activating:
+            if scope is None or len(_ACTIVATING.get()) > scope._activating:
                 return None   # no scope, or an activation body: it registers on cordis's stack
             scope.crossed.append(label)
             return scope
@@ -3218,12 +3269,15 @@ def declared_crossing(label: str, compensate: Optional[Callable[[], Any]] = None
 # from — the deferral queue, the discharge escrow, the live-frame registry —
 # never the runtime's per-call current frame (`_FRAME_BY_CTX`).
 #
-# The owner is process-global and single-slot, exactly like `_trace`: one driver
-# runs a session at a time. When NO owner is registered (`_SESSION_OWNER is
-# None`), every `Frame` behaves byte-identically to the pre-245 world — a clean
-# drain discharges at unload (implicit commit), the compatibility clause.
+# The owner is context-local (issue #3380), exactly like the trace: the driver
+# registers it on its own thread before it drives its loop, every task that
+# loop runs copies it, and a second session on another thread has its own.
+# When NO owner is registered (`session_owner()` is None), every `Frame`
+# behaves byte-identically to the pre-245 world: a clean drain discharges at
+# unload (implicit commit), the compatibility clause.
 
-_SESSION_OWNER: "Optional[SessionOwner]" = None
+_SESSION_OWNER: "contextvars.ContextVar[Optional[SessionOwner]]" = (
+    contextvars.ContextVar("_revl_session_owner", default=None))
 
 
 def set_session_owner(owner: "SessionOwner") -> None:
@@ -3232,20 +3286,20 @@ def set_session_owner(owner: "SessionOwner") -> None:
     The driver calls this once at session start, before loading the
     composition, so each activation `Frame.__init__` joins the owner's registry.
     Idempotent-ish: replacing an owner mid-session is a caller error, not
-    guarded here (one driver owns one session)."""
-    global _SESSION_OWNER
-    _SESSION_OWNER = owner
+    guarded here (one driver owns one session). Registered in the calling
+    context: a thread, or an asyncio task and the tasks started from it."""
+    _SESSION_OWNER.set(owner)
 
 
 def clear_session_owner() -> None:
     """Unregister the session owner (the driver calls this at commit/abort/unload
-    end). Frames built afterwards get the pre-245 implicit-commit semantics."""
-    global _SESSION_OWNER
-    _SESSION_OWNER = None
+    end). Frames built afterwards in this context get the pre-245
+    implicit-commit semantics; a task that copied the owner keeps it."""
+    _SESSION_OWNER.set(None)
 
 
 def session_owner() -> "Optional[SessionOwner]":
-    return _SESSION_OWNER
+    return _SESSION_OWNER.get()
 
 
 def _hold_for_session(entry: Any) -> bool:
@@ -3308,6 +3362,10 @@ def _hold_for_session(entry: Any) -> bool:
 
 _ESTOP_LATCH_ENV = "REVL_ESTOP_LATCH"
 
+#: The ambient read-only latch (issue #2758): the drift control's narrowing
+#: response. An explicit path may also be armed with `arm_read_only_latch`.
+_READ_ONLY_LATCH_ENV = "REVL_READ_ONLY_LATCH"
+
 #: The merged residue schema's two E-Stop `kind` discriminators (docs/design/
 #: teardown-contract.md, "The merged residue schema"). `estop-stranded` is a
 #: registered entry whose inverse or compensation was NEVER ATTEMPTED;
@@ -3326,6 +3384,12 @@ _ESTOP: Optional[dict] = None
 #: crossing seam stats it, so an operator in another terminal can halt a
 #: running composition without a control socket.
 _ESTOP_LATCH: Optional[str] = None
+
+#: An explicit read-only latch path (`arm_read_only_latch`), or None to fall
+#: back to `REVL_READ_ONLY_LATCH`. The drift monitor writes the file when it
+#: fires the `read-only` response; every EFFECTFUL crossing seam refuses while
+#: it is present, while a pure read still proceeds (issue #2758).
+_READ_ONLY_LATCH: Optional[str] = None
 
 #: The crossings currently DISPATCHED and unconfirmed, innermost last. At most
 #: one is unconfirmed per activation at any instant, which is what bounds the
@@ -3361,7 +3425,18 @@ def fail_error(message) -> RuntimeError:
     from any other RuntimeError an activation can raise (a host stub's refusal,
     a runtime guard, a host body's own `raise`). The error is an ordinary
     RuntimeError in every other respect: its type, its traceback line and its
-    pickling are unchanged."""
+    pickling are unchanged.
+
+    The message is funnelled through `confidential.redact_text` before the
+    exception is built (issue #3141). A `fail` step is a disclosure sink: its
+    text is recorded on the FAILED fiber and read back by `revl_load` and
+    `revl_state`, and the lifecycle driver prints it. A remembered `Secret[T]`
+    value is replaced wherever it appears in the sentence, so `fail
+    config.token` and `fail "x" + config.token` both carry the placeholder
+    while the surrounding diagnostic survives. The check is exact-valued, so a
+    `fail` that mentions no registered secret is byte-identical."""
+    if isinstance(message, str):
+        message = confidential.redact_text(message)
     err = RuntimeError(message)
     err._revl_activation_fail = True
     return err
@@ -3398,6 +3473,28 @@ class EstopHalted(RuntimeError):
         self.halt = dict(halt)
 
 
+class ReadOnlyRefused(RuntimeError):
+    """Raised at an effectful crossing seam while a drift control has narrowed
+    the composition to read-only (issue #2758).
+
+    Deliberately NOT an `EstopHalted`: the instance is alive, its reads still
+    work, and nothing is stranded. Only a crossing that could change the world
+    is refused. The refusal happens BEFORE the host body runs, the same seam
+    `estop_gated` uses, so a read-only hold cannot leak one effect while the
+    control is arming."""
+
+    def __init__(self, where: str, record: Optional[dict] = None) -> None:
+        hold = record or {}
+        super().__init__(
+            f"READ-ONLY engaged: `{where}` was refused. "
+            f"reason: {hold.get('reason', 'drift control: read-only')}; "
+            f"operator: {hold.get('operator', 'unknown')}. The composition may "
+            "still read; a fresh admission or an operator clearing the latch is "
+            "the way back (issue #2758).")
+        self.where = where
+        self.record = dict(hold)
+
+
 def arm_estop_latch(path: Optional[str]) -> None:
     """Point the crossing seams at a cross-process E-Stop latch file.
 
@@ -3412,6 +3509,65 @@ def arm_estop_latch(path: Optional[str]) -> None:
 def estop_latch_path() -> Optional[str]:
     """The latch file this process watches, or None."""
     return _ESTOP_LATCH or (os.environ.get(_ESTOP_LATCH_ENV) or None)
+
+
+def arm_read_only_latch(path: Optional[str]) -> None:
+    """Point the NEW effectful crossing seams at a cross-process read-only hold.
+
+    The drift monitor (`revl.drift_monitor`) writes the file when it fires the
+    `read-only` response; a host may also arm the path explicitly. Passing None
+    disarms the explicit path and falls back to `REVL_READ_ONLY_LATCH`. No hold
+    armed means no extra open at any crossing, so a run that never engages drift
+    control is byte-identical."""
+    global _READ_ONLY_LATCH
+    _READ_ONLY_LATCH = path
+
+
+def read_only_latch_path() -> Optional[str]:
+    """The read-only latch file this process watches, or None."""
+    return _READ_ONLY_LATCH or (os.environ.get(_READ_ONLY_LATCH_ENV) or None)
+
+
+def _read_only_latch_record() -> Optional[dict]:
+    """The read-only hold at the latch path, or None when no latch is armed.
+
+    Same fail-closed rule as `_latch_record` and `revl.drift_monitor.
+    read_read_only`: a latch that exists but does not parse, or cannot be read,
+    still narrows authority. Only a genuinely absent latch (FileNotFoundError)
+    reads as absent; a corrupted hold that could be read as "no hold" would let
+    a drift response be switched off by damaging one file."""
+    path = read_only_latch_path()
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            record = json.load(handle)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return {"readOnly": True, "reason": "read-only latch (unreadable)",
+                "operator": "unknown"}
+    except (ValueError, TypeError):
+        return {"readOnly": True, "reason": "read-only latch (unreadable)",
+                "operator": "unknown"}
+    if not isinstance(record, dict):
+        return {"readOnly": True, "reason": "read-only latch (unreadable)",
+                "operator": "unknown"}
+    return record
+
+
+def read_only_engaged() -> bool:
+    """Whether a drift control has narrowed this process to read-only."""
+    return _read_only_latch_record() is not None
+
+
+def _read_only_check(where: str) -> None:
+    """The effectful seam: refuse a new crossing while the read-only hold is in
+    force. Reads do not come through here, so the narrowing is exactly "no new
+    world-changing crossing" rather than a second E-Stop."""
+    record = _read_only_latch_record()
+    if record is not None:
+        raise ReadOnlyRefused(where, record)
 
 
 def _latch_record() -> Optional[dict]:
@@ -3503,11 +3659,13 @@ def estop_gated(name: str):
         if inspect.iscoroutinefunction(fn):
             async def _gated_async(*args, **kwargs):
                 _estop_check(name)
+                _read_only_check(name)
                 return await fn(*args, **kwargs)
             wrapped = _gated_async
         else:
             def _gated(*args, **kwargs):
                 _estop_check(name)
+                _read_only_check(name)
                 return fn(*args, **kwargs)
             wrapped = _gated
         wrapped.__name__ = fn.__name__
@@ -3796,6 +3954,12 @@ class Frame:
         # before the frame's first write to it.
         self._open_journal: Any = None
         self._journal: dict = {}
+        # issue #3304: the (map, key) slots the open bracket's forward write
+        # journaled (None: no bracket opened since the last adopt), and the
+        # slots whose newest adopted record is an absolute table inverse with
+        # only such records adopted since (`adopt_bracket`)
+        self._bracket_slots: Optional[set] = None
+        self._coalesce: set = set()
         # Phase-2 residue (teardown-contract.md's `compensation-residue`):
         # one record per compensation that raised or was skipped past the
         # budget. Best-effort introspection for this activation; the merged
@@ -3838,7 +4002,7 @@ class Frame:
         # the session verdict instead of the activation's own clean unload. None
         # is the compatibility clause: drain discharges at unload, byte-identical
         # to the pre-245 world.
-        self._owner: "Optional[SessionOwner]" = _SESSION_OWNER
+        self._owner: "Optional[SessionOwner]" = _SESSION_OWNER.get()
         if self._owner is not None:
             self._owner.register_frame(self)
         # item 245: set by `drain`'s mid-session-withdrawal branch, so the
@@ -4161,6 +4325,7 @@ class Frame:
             self._take_journal()      # a forward that raised left it open
         prev = _JOURNAL.get()
         self._open_journal = prev
+        self._bracket_slots = set()
         _JOURNAL.set(prev + (self,))
 
     def _take_journal(self) -> bool:
@@ -4268,7 +4433,7 @@ class Frame:
             async def _async_tracked():
                 iterator = body().__aiter__()
                 while True:
-                    _ACTIVATING.append(frame)
+                    token = _ACTIVATING.set(_ACTIVATING.get() + (frame,))
                     try:
                         value = await iterator.__anext__()
                     except StopAsyncIteration:
@@ -4277,14 +4442,14 @@ class Frame:
                         frame._take_journal()   # a forward that raised (issue #1945)
                         raise
                     finally:
-                        _ACTIVATING.pop()
+                        _ACTIVATING.reset(token)
                     yield frame._guard(value)
             return _async_tracked
 
         def _tracked_gen():
             iterator = iter(body())
             while True:
-                _ACTIVATING.append(frame)
+                token = _ACTIVATING.set(_ACTIVATING.get() + (frame,))
                 try:
                     value = next(iterator)
                 except StopIteration:
@@ -4293,19 +4458,60 @@ class Frame:
                     frame._take_journal()   # a forward that raised (issue #1945)
                     raise
                 finally:
-                    _ACTIVATING.pop()
+                    _ACTIVATING.reset(token)
                 yield frame._guard(value)
         return _tracked_gen
 
     def adopt(self, effect: Any) -> Any:
         """Join an effect created while ACTIVE to this component's accumulator."""
+        # issue #3304: a record that is not an absolute table inverse may read
+        # or write any key when it replays, so no later record is coalesced
+        # across it, and no bracket's slots carry over to a later adopt
+        self._coalesce.clear()
+        self._bracket_slots = None
         self._adopted.append(effect)
+        return effect
+
+    def adopt_bracket(self, effect: Any) -> Any:
+        """`adopt` for a provide-method bracket whose `undo` the emitter proved
+        an ABSOLUTE table inverse on a literal or named key (issue #3304):
+        `insert -> remove`, or the #1980 restore `match prev { Some(v) =>
+        m.insert(k, v), None => m.remove(k) }`. (The `insert_if_absent` CAS
+        must be bound, `let ok = effect ...`, so it is a method `let-effect`
+        adopted through `acquire` and plain `adopt`, never coalesced.) Such
+        an inverse writes only its own `(map, key)`, reads nothing the frame
+        changes, and sets the key to one fixed value.
+
+        When the forward write journaled exactly one `(map, key)` and the frame
+        already holds such a record for it, with only such records adopted
+        since, the new record is released WITHOUT RUNNING. Inverses replay
+        LIFO: the new record would run first and the kept one after it, with
+        only records on other keys between them, so the key ends at the kept
+        record's value either way. The world, the `NotReversed` verdict (it
+        compares against the same value from before the frame's first write)
+        and every other key are the same, and the frame holds one record per
+        key instead of one per call.
+
+        Not coalesced: a recorded timeline (its `step_back` replays its own
+        per-step list, which may already have run the kept record), a forward
+        that journaled more or fewer keys, and anything `adopt` adopted since
+        the kept record."""
+        slots, self._bracket_slots = self._bracket_slots, None
+        if slots is None or len(slots) != 1 \
+                or getattr(self.ctx, "_revl_timeline", None) is not None:
+            return self.adopt(effect)
+        (slot,) = slots
+        if slot in self._coalesce and _release_unrun(effect):
+            return effect
+        self._adopted.append(effect)
+        self._coalesce.add(slot)
         return effect
 
     def acquire(self, label: str, get: Callable[[], Any], undo: Callable[[Any], Any]) -> Any:
         """A ``let-effect`` step inside a provide-method body: run the
         acquisition through the effect protocol, adopt it, return the value."""
         _estop_check(f"{self.name}.{label}")   # item 443
+        _read_only_check(f"{self.name}.{label}")   # issue #2758
         holder: list = []
 
         frame = self
@@ -4723,6 +4929,7 @@ class Frame:
         the driver is always the owner, so this refusal is a guard against a
         misconfigured embedding, never a normal path."""
         _estop_check(f"{receiver}.{method}")   # item 443
+        _read_only_check(f"{receiver}.{method}")   # issue #2758
         if self._owner is None:
             raise RuntimeError(
                 "a deferred emission needs a session owner runtime (the deferral "
@@ -4794,6 +5001,7 @@ class Frame:
         # is the scenario the E-Stop exists for. Refused before the token is
         # spent, so a halt never leaves an approval consumed-but-unfired.
         _estop_check(f"{self.name}.{capability}")
+        _read_only_check(f"{self.name}.{capability}")   # issue #2758
         owner = self._owner
         if owner is None or not owner.approval_enforced \
                 or (isinstance(handle, dict) and handle.get("passthrough")):
@@ -5015,6 +5223,7 @@ class Frame:
 
     def _dispose_adopted(self) -> Any:
         adopted, self._adopted = self._adopted, []
+        self._coalesce.clear()
         if not adopted:
             return None
 
@@ -5630,6 +5839,7 @@ class _Deferred:
         # crosses after the button. The queue entry is left owed and enumerated,
         # never quietly dropped.
         _estop_check(f"{self.receiver}.{self.method}")
+        _read_only_check(f"{self.receiver}.{self.method}")   # issue #2758
         self.fired = True
         fire, self._fire = self._fire, None
         if fire is not None:
@@ -7786,7 +7996,12 @@ class Stream:
 class TimerHandle:
     """One armed timer. Live until it is cancelled (`every`, and an `after`
     before it fires) or has fired to completion (`after`). Cancellation is the
-    schedule's inverse — idempotent, and a no-op once the timer is spent."""
+    schedule's inverse: idempotent, and a no-op once the timer is spent.
+
+    Issue #3377: the clock holds a handle only while it is live. Cancelling
+    it, or an `after` firing, releases it from ``Clock._timers`` and drops its
+    body, so a host that swaps for hours neither scans dead handles on every
+    ``advance`` nor keeps the generation that armed them alive."""
 
     __slots__ = ("serial", "mode", "interval_ms", "_body", "state", "next_at", "fired")
 
@@ -7817,8 +8032,17 @@ class TimerHandle:
         if self.state != "live":
             return False
         self.state = "cancelled"
+        self._release()
         _record(f"{self._tag}.cancel")
         return True
+
+    def _release(self) -> None:
+        """Leave the clock's live list and drop the body (issue #3377)."""
+        try:
+            Clock._timers.remove(self)
+        except ValueError:
+            pass  # already released (an `after` body that cancelled itself)
+        self._body = None
 
     def _fire(self) -> None:
         self.fired += 1
@@ -7830,6 +8054,7 @@ class TimerHandle:
             # the same `cancel` verb so the residue trace stays balanced and the
             # teardown's own `handle.cancel()` is a clean no-op.
             self.state = "done"
+            self._release()
             _record(f"{self._tag}.cancel")
 
     def __repr__(self) -> str:  # pragma: no cover — debugging aid
@@ -7841,10 +8066,14 @@ class Clock:
     :meth:`advance`; timer firings are deterministic timeline steps, not
     wall-clock races (docs/time-coeffect.md)."""
 
+    #: How many of the most recent firings :meth:`firings` keeps (issue
+    #: #3377). The log is a test aid; a host that runs for hours never reads it.
+    FIRINGS_CAP = 1024
+
     _now_ms = 0
     _serial = 0
-    _timers: list = []      # every TimerHandle ever armed, registration order
-    _firings: list = []     # (timer serial, now_ms) per firing, in fire order
+    _timers: list = []      # the live TimerHandles, registration order
+    _firings: deque = deque(maxlen=FIRINGS_CAP)  # (timer serial, now_ms), fire order
 
     @classmethod
     def now(cls) -> int:
@@ -7882,11 +8111,22 @@ class Clock:
     def pending(cls) -> int:
         """Live timers — a teardown that abandons one leaves this > 0 (mirrors
         ``Job.pending``); the countable form of the no-orphaned-interval proof."""
-        return sum(1 for t in cls._timers if t.state == "live")
+        return len(cls._timers)
+
+    @classmethod
+    def next_due(cls) -> int | None:
+        """Milliseconds from :meth:`now` until the earliest live timer is due,
+        or ``None`` with no live timer. A host pumping :meth:`advance` from a
+        real monotonic source sleeps this long, then advances by it, so a
+        timer fires on its tick rather than on a fixed slice (issue #3377)."""
+        if not cls._timers:
+            return None
+        return min(t.next_at for t in cls._timers) - cls._now_ms
 
     @classmethod
     def firings(cls) -> list:
-        """The recorded firing log: ``(timer serial, fired-at ms)`` in order."""
+        """The recorded firing log: ``(timer serial, fired-at ms)`` in order,
+        the most recent :attr:`FIRINGS_CAP` firings only."""
         return list(cls._firings)
 
     @classmethod
@@ -7894,7 +8134,7 @@ class Clock:
         cls._now_ms = 0
         cls._serial = 0
         cls._timers = []
-        cls._firings = []
+        cls._firings = deque(maxlen=cls.FIRINGS_CAP)
 
 
 def schedule_every(interval_ms: int, body: Callable[[], Any]) -> TimerHandle:
@@ -7949,10 +8189,29 @@ def _journal_note(store: Any, key: Any, verb: str) -> None:
     if not stack:
         return
     prior = store.data.get(key, _ABSENT)
+    slot = (id(store), key)
     for frame in stack:
-        frame._journal.setdefault((id(store), key), (store, key, prior, verb))
+        frame._journal.setdefault(slot, (store, key, prior, verb))
+        # issue #3304: the keys an open bracket's forward write touched (an
+        # `undo` replaying under the journal has no bracket open)
+        if frame._open_journal is not None and frame._bracket_slots is not None:
+            frame._bracket_slots.add(slot)
     if key not in store._journaled:
         store._journaled[key] = (prior, stack[0], verb)
+
+
+def _release_unrun(effect: Any) -> bool:
+    """Take a cordis effect off its fiber without running its disposers
+    (issue #3304, `Frame.adopt_bracket`); whether it was one. Anything else (a
+    simulated context's `None`) is left alone and adopted as before."""
+    fiber = getattr(getattr(effect, "_ctx", None), "fiber", None)
+    disposables = getattr(fiber, "_disposables", None)
+    runner = getattr(effect, "_runner", None)
+    if disposables is None or runner is None or not disposables.delete(effect):
+        return False
+    effect._remove = None
+    runner.epoch = False      # a stray call is a no-op, never the inverse
+    return True
 
 
 def _not_reversed(frame: Any, store: Any, key: Any, prior: Any, verb: str,
@@ -8008,7 +8267,8 @@ class Map(_Closable):
         self._reported: set = set()
         # the activation that acquired this map: a reversal failure found at
         # release is recorded on it, because its teardown releases the map
-        self._owner = _ACTIVATING[-1] if _ACTIVATING else None
+        activating = _ACTIVATING.get()
+        self._owner = activating[-1] if activating else None
 
     @classmethod
     def new(cls) -> "Map":

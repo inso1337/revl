@@ -90,6 +90,97 @@ def test_refused_at_an_llm_prompt():
     _refuses(_agent("      let t = emit charge(u)\n      let r = emit prompt(t)"))
 
 
+def test_refused_through_a_closure_capture_at_a_log():
+    """Issue #3110: a closure CAPTURE is a carrier. `f("z")` is called with a
+    clean literal, but the callee VALUE holds the `Secret[T]`. The callee value's
+    taint joins for every indirect call, INDEPENDENT of `any_sink`, so this
+    sink-free program (it declares no `Trusted[T]` sink) refuses."""
+    err = _refuses(_agent(
+        "      let t = emit charge(u)\n"
+        "      let f = (a: Str) => t\n"
+        "      let x = emit logit(f(\"z\"))"))
+    assert "disclosure sink" in err.message
+
+
+def test_refused_through_a_closure_capture_at_an_llm_prompt():
+    """The same carrier at the prompt crossing: the captured value reaches the
+    model context through a clean argument list."""
+    err = _refuses(_agent(
+        "      let t = emit charge(u)\n"
+        "      let f = (a: Str) => t\n"
+        "      let r = emit prompt(f(\"z\"))"))
+    assert "disclosure sink" in err.message
+
+
+def test_refused_through_a_closure_that_concatenates_the_capture():
+    """The capture is joined through the arrow's body, so a prefix does not
+    launder it: `"p" + t` inside the arrow is still the token."""
+    err = _refuses(_agent(
+        "      let t = emit charge(u)\n"
+        "      let f = (a: Str) => \"p\" + t\n"
+        "      let x = emit logit(f(\"z\"))"))
+    assert "disclosure sink" in err.message
+
+
+def test_refused_at_the_provide_return_through_a_closure_capture():
+    """The return half of the same carrier: a `Secret[T]` captured by an arrow
+    and returned as `f("q")` crosses the service / MCP bridge."""
+    src = (
+        _PRELUDE
+        + "service Ops { emission fn go(u: Str) -> Str }\n"
+        + "component Agent provides ops: Ops {\n  provide ops {\n"
+        + "    fn go(u) {\n"
+        + "      let t = emit charge(u)\n"
+        + "      let f = (a: Str) => t\n"
+        + "      return f(\"q\")\n"
+        + "    }\n  }\n}\n")
+    err = _refuses(src)
+    assert "MCP tool return" in err.message
+
+
+def test_refused_through_a_closure_minted_by_a_fn():
+    """An arrow returned by a fn carries its captures out through the fn's
+    return: the inferred signature makes `mk(t)` carry the token even though the
+    arrow is never written at the call site."""
+    err = _refuses(_agent(
+        "      let t = emit charge(u)\n"
+        "      let f = mk(t)\n"
+        "      let x = emit logit(f(\"z\"))",
+        extra="fn mk(s: Str) -> (Str) -> Str { return (x: Str) => s }\n"))
+    assert "disclosure sink" in err.message
+
+
+def test_refused_through_a_closure_passed_to_a_helper_fn():
+    """The indirect call is inside the helper: `apply` calls its parameter, and
+    the inferred signature flows the closure value to `apply`'s return."""
+    err = _refuses(_agent(
+        "      let t = emit charge(u)\n"
+        "      let f = (a: Str) => t\n"
+        "      let x = emit logit(apply(f))",
+        extra="fn apply(f: (Str) -> Str) -> Str { return f(\"q\") }\n"))
+    assert "disclosure sink" in err.message
+
+
+def test_a_closure_over_a_clean_value_is_admitted_at_a_log():
+    """The control that keeps the join exact: the closure carries its captured
+    value's ACTUAL taint, so a closure over a trusted value still compiles."""
+    compile_source(_agent(
+        "      let d = \"safe\"\n"
+        "      let f = (x: Str) => d\n"
+        "      let x = emit logit(f(\"z\"))"), "flow.rvl")
+
+
+def test_a_closure_parameter_shadowing_a_tainted_binding_is_clean():
+    """A parameter SHADOWS an outer binding of the same name, so the body reads
+    the parameter and not the captured token. The capture join seeds the arrow's
+    parameters clean; without that seed, the closure is tainted by a value its
+    body never reads and the program is refused."""
+    compile_source(_agent(
+        "      let t = emit charge(u)\n"
+        "      let f = (t: Str) => t\n"
+        "      let x = emit logit(f(\"z\"))"), "flow.rvl")
+
+
 def test_refused_at_an_mcp_tool_return():
     """The value a `provide` method returns crosses the service / MCP bridge to a
     client that never declared a `Secret[T]` receiver — refused at the return."""
@@ -108,6 +199,37 @@ def test_refused_at_an_undeclared_receiver_across_a_capability_crossing():
     err = _refuses(_agent(
         "      let t = emit charge(u)\n      emit snk.out(t)",
         extra="service Sink { emission fn out(s: Str) -> Int }\n",
+        reqs="requires snk: Sink "))
+    assert "emission crossing" in err.message
+
+
+@pytest.mark.parametrize("crossing", [
+    "let r = emit snk.out(t)",
+    "let r = 1 + (emit snk.out(t))",
+    'let r = u == "a" ? emit snk.out(t) : 0',
+])
+def test_refused_at_a_value_form_capability_crossing(crossing):
+    """Issue #3122: an undeclared receiver reached through the VALUE form of the
+    emission. Lowering erases the `emit` marker on a call written as a value, and
+    the receiver check used to live only in the statement-emit arm, so a binding,
+    a nested expression and a ternary arm all compiled with the secret handed to
+    a plain `Str` receiver."""
+    err = _refuses(_agent(
+        "      let t = emit charge(u)\n      " + crossing,
+        extra="service Sink { emission fn out(s: Str) -> Int }\n",
+        reqs="requires snk: Sink "))
+    assert "emission crossing" in err.message
+
+
+def test_refused_at_a_value_form_crossing_through_a_service_typed_local():
+    """Issue #3122, the service-typed receiver spelling: a call through a value
+    of service type is the same operation crossing, so its value form checks the
+    receiver too. The lowered node names no service, so the walk resolves the
+    operation by name, the same keying the declared receivers use."""
+    err = _refuses(_agent(
+        "      let s = emit charge(u)\n      let r = emit t.out(s)",
+        extra="service Sink { emission fn out(x: Str) -> Int }\n",
+        sig="fn go(t: Sink, u: Str) -> Int", params="t, u",
         reqs="requires snk: Sink "))
     assert "emission crossing" in err.message
 
@@ -133,6 +255,17 @@ def test_declared_secret_service_operation_parameter_admits_the_crossing():
         extra="service Vault { emission fn store(x: Secret[Str]) -> Int }\n",
         reqs="requires vault: Vault ")
     compile_source(src, "admit.rvl")  # compiles — the receiver declared it
+
+
+def test_declared_secret_receiver_admits_a_value_form_crossing():
+    """The value form admits exactly what the statement form admits: a
+    `Secret[T]` parameter on the required operation is a declared receiver,
+    whether the emission is written as a statement or bound to a name."""
+    src = _agent(
+        "      let t = emit charge(u)\n      let r = emit vault.store(t)",
+        extra="service Vault { emission fn store(x: Secret[Str]) -> Int }\n",
+        reqs="requires vault: Vault ")
+    compile_source(src, "admit_value.rvl")  # compiles — the receiver declared it
 
 
 def test_declared_secret_extern_parameter_admits_the_crossing():
@@ -263,6 +396,22 @@ def test_a8_bound_key_is_refused_at_a_secret_service_receiver_via_emit():
         + "  provide ops {\n"
         + "    fn go(u) {\n      let s = emit complete(u)\n"
         + "      emit vault.store(s)\n      return 0\n    }\n  }\n}\n")
+    assert _code_of(src) == "G-SECRET"
+
+
+def test_a8_bound_key_is_refused_at_a_value_form_service_receiver():
+    """Issue #3122, the bound-key half: the same crossing written as a value
+    (`let r = emit snk.out(t)`) must refuse the provider key exactly as the
+    statement form does. A plain `Str` receiver is an undeclared one."""
+    src = (
+        _BOUND_PRELUDE
+        + "service Sink { emission fn out(s: Str) -> Int }\n"
+        + "service Ops { emission fn go(u: Str) -> Int }\n"
+        + "component Agent requires snk: Sink provides ops: Ops {\n"
+        + "  provide ops {\n    fn go(u) {\n"
+        + "      let t = emit complete(u)\n"
+        + "      let r = emit snk.out(t)\n"
+        + "      return 0\n    }\n  }\n}\n")
     assert _code_of(src) == "G-SECRET"
 
 
@@ -437,6 +586,82 @@ def test_a_config_free_program_keeps_an_inert_walk():
 
 
 # ===========================================================================
+# 6a. The spawn config hand-off is a receiver too (issue #3132).
+# ===========================================================================
+#
+# `spawn Child with { v: t }` hands the value to the child's config field, which
+# is the receiving side of a component-boundary crossing. A field declared
+# `Secret[T]` is a declared receiver; a plain field is an undeclared one, so a
+# `confidential` or `secret` value handed to it must be refused at the hand-off
+# rather than laundered into the child's ordinary data.
+
+_SPAWN_SINK = (
+    "service Sink { emission fn put(v: Str) -> Int }\n")
+
+
+def _spawner(field: str) -> str:
+    """A `Child` whose only config field is `field`, spawned with a `Secret[T]`
+    value in it, plus the untouched provider body the plain-field shape needs."""
+    return (
+        _PRELUDE
+        + _SPAWN_SINK
+        + "component Child provides s: Sink {\n"
+        + "  config { v: " + field + ' = "" }\n'
+        + "  provide s { fn put(x: Str) { return 0 } }\n"
+        + "}\n"
+        + "service Ops { emission fn go(u: Str) -> Int }\n"
+        + "component Agent provides ops: Ops {\n"
+        + "  provide ops {\n    fn go(u: Str) {\n"
+        + "      let t = emit charge(u)\n"
+        + "      let w = effect spawn Child with { v: t } undo w.dispose()\n"
+        + "      return 0\n    }\n  }\n}\n")
+
+
+def test_a_spawn_config_hand_off_refuses_a_confidential_value_in_a_plain_field():
+    """Issue #3132: a plain `Str` config field is an undeclared receiver, so the
+    payment token is refused at the hand-off. Before the fix it compiled and the
+    child could log `config.v` as ordinary data."""
+    err = _refuses(_spawner("Str"))
+    assert "spawn config" in err.message
+    assert "config.v" in err.message
+
+
+def _bound_spawner(field: str) -> str:
+    return (
+        _BOUND_PRELUDE
+        + "service Sink { emission fn put(v: Str) -> Int }\n"
+        + "component Child provides s: Sink {\n"
+        + "  config { v: " + field + ' = "" }\n'
+        + "  provide s { fn put(x: Str) { return 0 } }\n"
+        + "}\n"
+        + "service Ops { emission fn go(u: Str) -> Int }\n"
+        + "component Agent provides ops: Ops {\n"
+        + "  provide ops {\n    fn go(u: Str) {\n"
+        + "      let t = emit complete(u)\n"
+        + "      let w = effect spawn Child with { v: t } undo w.dispose()\n"
+        + "      return 0\n    }\n  }\n}\n")
+
+
+def test_a_spawn_config_hand_off_refuses_the_bound_key():
+    """The bound-key half of issue #3132: a provider key reflected into a spawn
+    config field is refused with G-SECRET at the hand-off, not logged by the
+    child as a plain `Str`."""
+    assert _code_of(_bound_spawner("Str")) == "G-SECRET"
+
+
+def test_a_spawn_config_hand_off_refuses_the_bound_key_at_a_secret_field():
+    """A8 disjointness on the hand-off: a `Secret[Str]` config field is a
+    declared receiver for `confidential`, never for the `secret` bound key."""
+    assert _code_of(_bound_spawner("Secret[Str]")) == "G-SECRET"
+
+
+def test_a_spawn_config_hand_off_admits_a_declared_secret_field():
+    """The false-positive control: a field declared `Secret[Str]` IS a declared
+    receiver, so the same hand-off compiles when the child never discloses it."""
+    assert _code_of(_spawner("Secret[Str]")) is None
+
+
+# ===========================================================================
 # 6. An interface-only carrier: a declared operation return is confidential.
 # ===========================================================================
 #
@@ -517,3 +742,152 @@ def test_a_plain_out_of_unit_return_is_not_minted_confidential():
            + "service Vault { emission[vault.mint] fn get() -> Str }\n"
            + _secret_caller())
     compile_source(src, "out_of_unit_plain_secret.rvl")  # must not raise
+
+
+# ===========================================================================
+# 8. A verified-fn parser declassifier does NOT launder `confidential` (#3113).
+# ===========================================================================
+#
+# `verified fn wash(x) -> Trusted[Str]` declassifies an `Untrusted` parser input
+# for the G9 authority rule. It is NOT a downgrade for the `confidential`
+# origin: the declassifier branch used to check only `_carries_secret`, so a
+# `Secret[Str]` payment token handed to `wash` came back CLEAN and reached a log
+# or an LLM prompt with no `endorse[confidential]`. A `confidential` value
+# downgrades ONLY at the declared, audited slot (§7c), so the crossing is
+# refused at the declassifier - the same unconditional refusal a bound `secret`
+# already gets there (4a.3).
+
+# The program from the issue report, verbatim.
+_VERIFIED_FN_WASH = (
+    "extern emission[payment.charge] fn charge(a: Str) -> Secret[Str] "
+    "= @py { return a }\n"
+    "extern emission[log] fn logit(m: Str) -> Int = @py { return 0 }\n"
+    "verified fn wash(x: Str) -> Trusted[Str] { return x }\n"
+    "service Ops { emission fn go(u: Str) -> Int }\n"
+    "component Agent provides ops: Ops {\n  provide ops {\n"
+    "    fn go(u: Str) {\n      let t = emit charge(u)\n      let c = wash(t)\n"
+    "      let x = emit logit(c)\n      return 0\n    }\n  }\n}\n"
+)
+
+_WASH = "verified fn wash(x: Str) -> Trusted[Str] { return x }\n"
+
+
+def test_a_verified_fn_declassifier_does_not_launder_a_secret_return():
+    """#3113, the reported program: washing the token before logging it must be
+    refused, at the declassifier, with G-SECRET-FLOW."""
+    err = _refuses(_VERIFIED_FN_WASH)
+    assert "verified-fn declassifier" in err.message
+    assert "argument 1 of `wash`" in err.message
+
+
+def test_a_verified_fn_declassifier_does_not_launder_a_secret_into_a_prompt():
+    """The same escape with the log replaced by an LLM prompt: a washed token
+    must not reach the model context either."""
+    _refuses(_agent(
+        "      let t = emit charge(u)\n      let c = wash(t)\n"
+        "      let r = emit prompt(c)", extra=_WASH))
+
+
+def test_the_verified_fn_still_clears_the_other_origins():
+    """The fix does not disable the parser declassifier: a value with no
+    `confidential` origin still washes clean and reaches the log."""
+    compile_source(_agent(
+        "      let c = wash(u)\n      let x = emit logit(c)", extra=_WASH),
+        "verified_fn_clean.rvl")  # must not raise
+
+
+def test_a_declared_endorse_confidential_before_the_verified_fn_is_admitted():
+    """The one legal downgrade still works through the same shape: endorse the
+    token at a declared slot, then wash the now-clean value."""
+    src = (
+        "extern emission[payment.charge] fn charge(a: Str) -> Secret[Str] "
+        "= @py { return a }\n"
+        "extern emission[log] fn logit(m: Str) -> Int = @py { return 0 }\n"
+        + _WASH
+        + "service Ops { emission endorse[confidential] fn go(u: Str) -> Int }\n"
+        + "component Agent provides ops: Ops {\n  provide ops {\n"
+        + "    fn go(u: Str) {\n      let t = emit charge(u)\n"
+        + "      let d = endorse[confidential](t, reason = \"charge settled\")\n"
+        + "      let c = wash(d)\n      let x = emit logit(c)\n"
+        + "      return 0\n    }\n  }\n}\n")
+    compile_source(src, "verified_fn_endorse.rvl")  # must not raise
+
+
+# ===========================================================================
+# 9. A wrapper of the verified-fn declassifier does not launder either (#3113).
+# ===========================================================================
+#
+# The declassifier returns CLEAN, so a plain fn that wraps it used to get a
+# signature in which its parameter goes nowhere: the caller's `confidential` (or
+# bound `secret`) value came back clean and reached a log. The wrapper's
+# signature now records that the parameter reaches a declassifier
+# (`_Signature.declassifies_at`, the sibling of `persists_at`), transitively,
+# and the caller that hands it a `secret` or `confidential` value is refused.
+
+_LAUNDER = _WASH + "fn launder(p: Str) -> Str { return wash(p) }\n"
+
+
+def test_a_wrapper_of_the_declassifier_does_not_launder_a_secret_return():
+    err = _refuses(_agent(
+        "      let t = emit charge(u)\n      let c = launder(t)\n"
+        "      let x = emit logit(c)", extra=_LAUNDER))
+    assert "verified-fn declassifier (`wash`" in err.message
+    assert "argument 1 of `launder`" in err.message
+
+
+def test_a_trusted_returning_wrapper_does_not_launder_a_secret_return():
+    """The same wrapper declaring `-> Trusted[Str]`: a plain (non-verified) fn is
+    not a declassifier, so the qualifier on its return changes nothing."""
+    _refuses(_agent(
+        "      let t = emit charge(u)\n      let c = launder(t)\n"
+        "      let x = emit logit(c)",
+        extra=_WASH + "fn launder(p: Str) -> Trusted[Str] { return wash(p) }\n"))
+
+
+def test_a_wrapper_of_a_wrapper_does_not_launder_a_secret_return():
+    err = _refuses(_agent(
+        "      let t = emit charge(u)\n      let c = outer(t)\n"
+        "      let x = emit logit(c)",
+        extra=_LAUNDER + "fn outer(q: Str) -> Str { return launder(q) }\n"))
+    assert "outer -> launder -> wash" in err.message
+
+
+def test_a_wrapper_of_the_declassifier_does_not_launder_a_bound_key():
+    """The bound-key twin: `launder(emit complete(u))` into a host sink. The
+    direct call of the declassifier was already refused (4a.3); through a
+    wrapper it is now refused the same way, with G-SECRET."""
+    src = (
+        _BOUND_PRELUDE
+        + "extern emission[log] fn logit(m: Str) -> Int = @py { return 0 }\n"
+        + _LAUNDER
+        + "service Ops { emission fn go(u: Str) -> Int }\n"
+        + "component Agent provides ops: Ops {\n  provide ops {\n"
+        + "    fn go(u) {\n      let c = launder(emit complete(u))\n"
+        + "      let x = emit logit(c)\n      return 0\n    }\n  }\n}\n")
+    assert _code_of(src) == "G-SECRET"
+
+
+def test_a_service_method_wrapping_the_declassifier_does_not_launder():
+    """The method-call shape: a required-service operation whose in-unit
+    provider body washes its parameter. The provide method's signature carries
+    the same record, so `emit l.launder(t)` is refused at the caller."""
+    src = (
+        _PRELUDE + _WASH
+        + "service Laund { emission fn launder(x: Str) -> Str }\n"
+        + "component Washer provides l: Laund {\n  provide l {\n"
+        + "    fn launder(x) {\n      return wash(x)\n    }\n  }\n}\n"
+        + "service Ops { emission fn go(u: Str) -> Int }\n"
+        + "component Agent requires l: Laund provides ops: Ops {\n"
+        + "  provide ops {\n    fn go(u: Str) {\n"
+        + "      let t = emit charge(u)\n      let c = emit l.launder(t)\n"
+        + "      let x = emit logit(c)\n      return 0\n    }\n  }\n}\n")
+    err = _refuses(src)
+    assert "Washer.launder -> wash" in err.message
+
+
+def test_a_clean_value_through_the_wrapper_still_compiles():
+    """The record refuses only a `secret` or `confidential` argument: a plain
+    value with neither origin still passes through the wrapper to the log."""
+    compile_source(_agent(
+        "      let c = launder(u)\n      let x = emit logit(c)", extra=_LAUNDER),
+        "wrapper_clean.rvl")  # must not raise

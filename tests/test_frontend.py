@@ -328,6 +328,7 @@ REJECTIONS = {
     # the position the `emit` sits in, and a marker written there is refused.
     "g4_nested_unmarked_emission.rvl": "call to emission `b.fetch` must be marked `emit` (G4)",
     "g4_nested_emit_expression.rvl": "`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)",
+    "g4_required_verb_token_through_fn.rvl": "but this implementation emits through `fs` (reaching `fs.ingest`, `helper()`)",
     # issue #1427: the same rule, on the spellings the two fixtures above do
     # not reach. Both of them nest a REQUIRED SERVICE crossing in an ACTIVATION
     # body with an UNSCOPED declaration, so three axes went unmeasured: the
@@ -481,6 +482,17 @@ REJECTIONS = {
     # unit can no longer disclose the token into an ordinary sink.
     "gsecret_service_return_discloses.rvl":
         "a Secret[T] value flows into an extern host call (a disclosure sink)",
+    # The closure CAPTURE half of the same carriers (issue #3110): the callee
+    # VALUE's taint used to join only inside the `any_sink` branch, so a
+    # sink-free program judged `f("z")` from its clean literal alone. A
+    # `Secret[T]`, a capability-bound key and a `Retained[T, P]` value captured
+    # by a closure then reached a log, an ordinary extern or a persistence sink
+    # and compiled. The join is independent of `any_sink`, because each of the
+    # three is a flow guarantee about the value.
+    "gsecret_closure_capture_discloses.rvl":
+        "a Secret[T] value flows into an extern host call (a disclosure sink)",
+    "gsecret_bound_key_closure_capture_discloses.rvl":
+        "a capability-bound secret flows into an extern host call",
     # roadmap item 512: the PLACEMENT dimension. A `model role` says where a
     # model call runs, and an action that routes the `confidential` origin to a
     # role declared `off_device` is refused naming the action, the origin and
@@ -506,6 +518,11 @@ REJECTIONS = {
     # deadline in the fixture is absolutely past, so the file refuses under any
     # clock; a declared legal hold on the policy would override it.
     "gretain_expired_at_persistence_sink.rvl":
+        "data past its retention deadline may not be written to durable storage",
+    # The closure CAPTURE shape of the same refusal (issue #3110): `f("z")`
+    # carries the retained value out of a clean argument list, so the same
+    # join of the callee value's taint is what puts the origin at the sink.
+    "gretain_closure_capture_at_persistence_sink.rvl":
         "data past its retention deadline may not be written to durable storage",
     "g6_impure_statement.rvl": "plain expressions have no effect to record (G6)",
     # roadmap item 129: closures capture BY VALUE (syntax-2.0 §3.5). A closure

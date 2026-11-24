@@ -8,7 +8,8 @@ For a wasm component every one of those three sets is statically decidable:
     coeffect/route channel per required key the body reached);
   * the *declared caps* are the G8 boundary reach (the same capability tokens
     `revl audit` enumerates, docs/capabilities.md);
-  * the *policy-allowed* set is the item-33 boundary allow-list.
+  * the *policy-allowed* set is the item-33 boundary allow-list, less
+    whatever a `may not reach` rule denies (deny wins, as in `evaluate`).
 
 A `@py`/`@ts` host body is G8-opaque, so its host calls are not enumerable and
 this full chain is enforceable only at the wasm tier -- which is exactly why
@@ -47,6 +48,8 @@ from .policy import (
     Policy,
     _allow_for,
     _allowed,
+    _deny_for,
+    _deny_matches,
     component_realms,
     component_reach,
 )
@@ -87,7 +90,7 @@ def wasm_import_capabilities(wat: str) -> set[str]:
 class LeastAuthorityBreach:
     """One way a wasm component breaches the least-authority chain."""
 
-    leg: str  # "import>declared" | "declared>policy"
+    leg: str  # "import>declared" | "declared>policy" | "declared>deny"
     component: str
     capabilities: tuple[str, ...]  # the offending capability tokens
 
@@ -102,6 +105,14 @@ class LeastAuthorityBreach:
                 f"{self._named()} it does not declare -- the emitted module's "
                 f"import section exceeds its declared/reached capabilities "
                 f"(host imports subset-of declared caps FAILED)"
+            )
+        if self.leg == "declared>deny":
+            return (
+                f"least-authority (289): wasm component `{self.component}` "
+                f"reaches {_plural('capability', self.capabilities)} "
+                f"{self._named()} a `may not reach` rule of the boundary "
+                f"policy denies -- deny wins over any allow "
+                f"(declared caps subset-of policy-allowed FAILED)"
             )
         return (
             f"least-authority (289): wasm component `{self.component}` declares "
@@ -118,6 +129,11 @@ class LeastAuthorityBreach:
                 "requires, so this is a by-construction invariant; a failure "
                 "is an emitter regression (docs/design/411-sandbox-placement.md)"
             )
+        if self.leg == "declared>deny":
+            return (
+                "drop the capability from the component, or narrow the "
+                "policy's `may not reach` rule (docs/boundary-policy.md)"
+            )
         return (
             "widen the boundary policy's allow-list for this component, or "
             "drop the capability from the component -- a wasm cell gets least "
@@ -125,8 +141,9 @@ class LeastAuthorityBreach:
         )
 
     def as_error(self, filename: str | None = None) -> RevlError:
-        tail = ("the declared capabilities" if self.leg == "import>declared"
-                else "the policy allow-list")
+        tail = {"import>declared": "the declared capabilities",
+                "declared>deny": "what the policy's deny rule permits"}.get(
+                    self.leg, "the policy allow-list")
         steps = [
             TraceStep(self.component, "component", filename, None,
                       f"wasm cell reaching {self._named()}"),
@@ -149,6 +166,7 @@ def component_breaches(
     import_caps: set[str],
     declared_caps: set[str],
     allow: tuple[str, ...] | None,
+    deny: tuple[str, ...] = (),
 ) -> list[LeastAuthorityBreach]:
     """Every least-authority breach for one wasm component, in chain order.
 
@@ -156,7 +174,11 @@ def component_breaches(
     ``declared subset-of policy`` (the least-authority gate). ``allow`` is the
     component's resolved allow-list, or ``None`` when no allow rule constrains
     it (then the policy leg is vacuous -- an unconstrained component reaches
-    what it likes, exactly as `policy.evaluate` treats it).
+    what it likes, exactly as `policy.evaluate` treats it). ``deny`` is the
+    union of the patterns of every `may not reach` rule selecting the
+    component (issue #3185): a declared or imported capability matching one is
+    refused whatever the allow-list says, since deny wins in `policy.evaluate`
+    too.
 
     ``declared_caps`` is the G8 reach token set, in which `*` (``UNBOUNDED``)
     is the TOP of the lattice -- a bare ``emission``, "any capability" -- and
@@ -192,6 +214,17 @@ def component_breaches(
         if beyond:
             breaches.append(LeastAuthorityBreach("declared>policy", component, beyond))
 
+    # issue #3185: the deny rules, via the predicate `policy.evaluate` uses.
+    # Before this the leg read the allow-list only, so a `may not reach` rule
+    # never refused a wasm cell. Both sets are checked: an import outside the
+    # declared set is already the first leg's breach, but it is still a reach
+    # the policy denies, and naming it here costs nothing.
+    if deny:
+        denied = tuple(sorted(c for c in set(declared) | set(imports)
+                              if _deny_matches(c, deny)))
+        if denied:
+            breaches.append(LeastAuthorityBreach("declared>deny", component, denied))
+
     return breaches
 
 
@@ -216,9 +249,14 @@ def least_authority_breaches(
         declared = {r.token for r in component_reach(audit, name)}
         import_caps = wasm_import_capabilities(modules[name])
         allow = None
+        deny: tuple[str, ...] = ()
         if policy is not None:
-            allow = _allow_for(policy, name, component_realms(manifest, name))
-        breaches.extend(component_breaches(name, import_caps, declared, allow))
+            realms = component_realms(manifest, name)
+            allow = _allow_for(policy, name, realms)
+            deny = tuple(dict.fromkeys(
+                pat for rule in _deny_for(policy, name, realms)
+                for pat in rule.patterns))
+        breaches.extend(component_breaches(name, import_caps, declared, allow, deny))
     return breaches
 
 

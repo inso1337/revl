@@ -76,6 +76,13 @@ A file is a module. `use` imports **pure** declarations only: types,
 functions, services. Components are never imported: they are *composed*, by
 the linker, over a manifest. This keeps the two composition mechanisms from
 blurring: `use` is compile-time and pure; the manifest is runtime and stateful.
+An importer does not lower or check a used module's components, so a type or
+requirement error in a component body there does not break the importer
+(`tests/test_consumer_declarations_only.py`). The module is still parsed and
+resolved whole, though (syntax, `asset` files, refs, host body files): the
+importer needs its source, and a syntax error or a missing asset anywhere in
+it, a component body included, breaks the importer. revl has no compile
+against a dependency's service declarations alone.
 
 ```revl sketch
 use "./tokens.rvl" { Token, TokenKind, keyword_set }
@@ -1141,7 +1148,8 @@ decl        := ['pub'] (typedecl | fndecl | service | extern)
              | ['lifecycle'] test                              (§7.1)
              | composition                                     (§4c)
 typedecl    := 'type' IDENT generics? '=' (record | variant ('|' variant)*)
-fndecl      := ['verified'] 'fn' IDENT '(' tparams? ')' ['->' type] block
+fndecl      := ['verified'] 'fn' IDENT '(' tparams? ')' ['->' type]
+               ['ensures' expr] block             -- run as a prop test (function-specs.md)
 methoddecl  := ['route' METHOD STRING] modifier* 'fn' IDENT '(' tparams? ')' ['->' type]
 METHOD      := 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head'   -- item 457
 component   := (unchanged from 1.x) + blockeffect + fail
@@ -1185,8 +1193,12 @@ resolves it to a bind table (path scalars by name, a `Bearer` header credential,
 a `Request` escape hatch, query parameters on safe verbs, one record body on
 unsafe verbs) and a return classification (`T`, `Result[T, ApiError]`, or a
 handler-owned `Response`), refusing anything ambiguous while naming the operation
-and the parameter. `revl serve --http` honours the route, `revl export openapi`
-projects it, and `revl export client` builds a typed method from it. Authorization
+and the parameter. A `route get` or `route head` on an operation whose reach is
+an emission is refused too (issue #3186): a browser sends no `Origin` on the
+cross-site GET a page can fire at any address, so a state-changing route must use
+`post`, `put`, `patch` or `delete`. `revl serve --http` honours the route, `revl
+export openapi` projects it, and `revl export client` builds a typed method from
+it. Authorization
 is deliberately NOT in the clause: it is the explicit `auth.validate` step a
 handler makes on a required `Auth` service, and neither the router, the exported
 document nor the client carries anything that could stand in for it.

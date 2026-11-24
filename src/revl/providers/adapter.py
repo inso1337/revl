@@ -33,19 +33,35 @@ from .config import Binding
 from .transport import ProviderError, redact, request_json
 
 
-def read_credential(env_var: str, environ=None) -> str:
-    """The credential in `env_var`, read now. The error names the variable and
-    never a value. `environ` is a mapping, a lookup function, or None for
-    `os.environ`."""
+def read_credential(env_var: str, environ=None, *, role: str | None = None
+                    ) -> str:
+    """The credential in `env_var`, read now. The error never holds a value.
+    `environ` is a mapping, a lookup function, or None for `os.environ`.
+
+    With `role`, the error names the role and not the variable: a variable
+    that is not set may be a pasted key, and the name would print it."""
     if callable(environ):
         value = environ(env_var)
     else:
         value = (os.environ if environ is None else environ).get(env_var)
     if not value:
+        if role is not None:
+            raise ProviderError(
+                f"the environment variable named in `api_key_env` for role "
+                f"`{role}` is not set (or is empty); it is where this role's "
+                f"credential is read from")
         raise ProviderError(
             f"the environment variable `{env_var}` is not set (or is empty); "
             f"it is where this role's credential is read from")
     return value
+
+
+def _snippet(raw) -> str:
+    """The start of an unusable reply, for an error message."""
+    try:
+        return str(raw)[:400]
+    except Exception:  # noqa: BLE001 - a reply that cannot be shown is not shown
+        return "<unprintable>"
 
 
 class Adapter:
@@ -73,9 +89,11 @@ class Adapter:
 
     def __repr__(self) -> str:
         b = self.binding
+        # the variable's name is left out: it may be a pasted key
         return (f"Adapter(role={b.role!r}, provider={b.provider!r}, "
                 f"model={b.model!r}, endpoint={b.base_url!r}, "
-                f"residence={b.residence!r}, credential_env={b.api_key_env!r})")
+                f"residence={b.residence!r}, "
+                f"has_credential={bool(b.api_key_env)})")
 
     @property
     def managed(self) -> bool:
@@ -88,7 +106,7 @@ class Adapter:
 
     def _credential(self):
         b = self.binding
-        credential = (read_credential(b.api_key_env, self._lookup)
+        credential = (read_credential(b.api_key_env, self._lookup, role=b.role)
                       if b.api_key_env else None)
         return credential, ((credential,) if credential else ())
 
@@ -109,7 +127,8 @@ class Adapter:
         started = time.monotonic()
         raw = request_json(url, body=body, headers=headers,
                            timeout=self.binding.timeout, secrets=secrets,
-                           label=self.label)
+                           label=self.label,
+                           max_bytes=self.binding.max_reply_bytes)
         self._device, self._device_options = device, options
         return {**raw, "revl_load_seconds": time.monotonic() - started}
 
@@ -121,7 +140,8 @@ class Adapter:
         self._device, self._device_options = None, {}
         return request_json(url, body=body, headers=headers,
                             timeout=self.binding.timeout, secrets=secrets,
-                            label=self.label)
+                            label=self.label,
+                            max_bytes=self.binding.max_reply_bytes)
 
     def residency(self) -> dict | None:
         """What the server reports holding for this model, or None when it
@@ -137,7 +157,8 @@ class Adapter:
         return request_json(
             url, headers=headers,
             timeout=self.binding.timeout if timeout is None else timeout,
-            secrets=secrets, label=self.label)
+            secrets=secrets, label=self.label,
+            max_bytes=self.binding.max_reply_bytes)
 
     def resident_in(self, raw: dict) -> dict | None:
         """This binding's model's entry in a `residency_report()`, or None."""
@@ -159,11 +180,17 @@ class Adapter:
             url, headers, body = self._wire.build(b, request, credential)
         started = time.monotonic()
         raw = request_json(url, body=body, headers=headers, timeout=b.timeout,
-                           secrets=secrets, label=self.label)
+                           secrets=secrets, label=self.label,
+                           max_bytes=b.max_reply_bytes)
         try:
             completion = self._wire.parse(raw, request)
-        except (KeyError, IndexError, TypeError, ValueError) as exc:
-            snippet = redact(str(raw)[:400], secrets)
+        except ProviderError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - the reply is untrusted
+            # not only the lookup errors: a reply whose `message` is a list
+            # makes `.get` an AttributeError, and none of it may escape as
+            # anything but a ProviderError naming the role (issue #3111)
+            snippet = redact(_snippet(raw), secrets)
             raise ProviderError(
                 redact(f"{self.label}: unexpected response shape from {url} "
                        f"({type(exc).__name__}: {exc}); body={snippet}",
