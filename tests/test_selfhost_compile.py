@@ -2574,11 +2574,10 @@ GENERIC_VARIANT_LOUD_REFUSALS: dict[str, str] = {
 # over `Mb[Int]` binds `Int`, so returning it as `Str` is a mismatch); both
 # were admitted by the reference too before the fix. Each entry fails in either
 # direction, on the reference or on the gate.
-GENERIC_VARIANT_SILENT_ADMITS = ("arm_binds_second_parameter",
+GENERIC_VARIANT_SILENT_ADMITS = ("aggregate_missing_agreed",
+                                 "arm_binds_second_parameter",
                                  "arm_binds_substituted_payload")
 # The one remaining difference is #2981 and NOT a generic-variant construction:
-# a match over the PROVIDED `Aggregate[Str]` that leaves out `Agreed`. The
-# reference refuses it (PR #2934's `test_aggregate_missing_agreed_is_refused`)
 # while the self-host gate admits it, because the provided type has no declared
 # `cases` row to judge. Silent direction, tracked separately.
 GENERIC_VARIANT_SILENT_ADMITS = ("aggregate_missing_agreed",)
@@ -2634,8 +2633,7 @@ def test_generic_variant_misuse_is_refused_with_the_reference_message(
 
 @pytest.mark.parametrize("name", GENERIC_VARIANT_SILENT_ADMITS)
 def test_generic_variant_difference_is_a_known_silent_admit(compile_to, name):
-    """Issue #2402: the reference refuses it, the native chain still emits.
-    """Issue #2981: the reference refuses it, the native chain still emits.
+    """Issues #2402 and #2981: the reference refuses it, the native chain still emits.
     Fails the day the native chain refuses too, so the entry is removed."""
     source, message = _generic_variant_silent_admit_doc(name)
     with pytest.raises(RevlError) as refused:
