@@ -130,16 +130,13 @@ from revl import ui_family  # the shipped computer-use reversibility registry
 from revl.compiler import compile_files
 from revl.diagnostics import classify
 from revl.errors import RevlError
-# The cardinality fold and the two shape facts its tree builder needs (item
-# 260, issue #2743). `cardinality` is the shipped analysis, whose report is
-# the CARD row's right-hand side; `_retry_mult` and `_is_arrow_binding_step`
-# are the checker's definitions of the shape, imported rather than respelled
-# (a change to either is a change to the row, not a silent agreement). The
-# COUNT is NOT imported: the reference folds it independently
-# (`_card_fold`) and the Lean model (`RevL.Cardinality.bound`) is the third
-# reading.
-from revl.cardinality import (cardinality, _collect_arrow_bindings,
-                              _is_arrow_binding_step, _retry_mult)
+# The shipped cardinality analysis (item 260, issue #2743), whose report is
+# the CARD row's right-hand side. Nothing else is imported from it: the
+# reference rebuilds the crossing command and derives the retry multiplier
+# and the arrow-binding shape from the IR itself (`_card_retry`,
+# `_card_arrow_names`), so a change to the checker's arithmetic or to its
+# helpers is a CARD finding and not a silent agreement.
+from revl.cardinality import cardinality
 from revl.typecheck import _HOST_ACQUIRE_VERBS  # the shipped acquire-verb table
 from revl.typecheck import parse_type  # the shipped type-head splitter
 # The config-is-data tables (item 378), imported rather than restated: the
@@ -2375,11 +2372,24 @@ def g9coverage_coverage() -> list[str]:
 #       command equals the reported number (`RevLOracle.cardRowB`), and the
 #       reference folds the same rows independently (`_card_fold`).
 #
-# The two sides are independent in the way the harness requires: the tree is
-# built from the IR's step/expression structure by `_card_steps`/`_card_expr`
-# below, the checker's report is the shipped `cardinality()`, and the Lean
-# decider is `RevL.Cardinality.bound`. A change to the arithmetic in ANY of
-# the three shows up as a `CARD … fail` or as a reference/formal mismatch.
+# WHAT IS INDEPENDENT, AND WHAT IS NOT. The checker's report is the shipped
+# `cardinality()`. The exported command is built from the IR by
+# `_card_steps`/`_card_expr`, and the number the row compares is the fold of
+# that command, computed twice (Lean `bound`, Python `_card_fold`). Derived
+# here and not taken from the checker: the sum and the max, the retry
+# multiplier (`_card_retry`, read from the service method's `retry` in the
+# IR) and the recognition of an arrow binding (`_card_arrow_names`). NOT
+# independent: the traversal follows `cardinality.count_steps` and
+# `count_expr` arm for arm (which nodes are `if`, `match`, a `req` call, a
+# spawn-handle call), and which method declares which capability token is
+# read from the same IR table. A bug in what counts as a crossing, or in
+# where a branch sits, is shared by both sides and is not found by this row.
+#
+# THE ROW GOES RED. A `CARD` row whose fold differs from the reported bound is
+# a fatal finding (`cardinality_coverage`), naming the file, component and
+# capability. Both sides print `fail` for it and so agree with each other, so
+# the differential alone would count it as agreement; the finding is what
+# turns it into a red gate.
 #
 # WHAT IS OUT OF THE ROW, AND COUNTED. The exporter builds a tree only for
 # the shapes it can mirror faithfully: a crossing in an `if` arm, a
@@ -2393,12 +2403,18 @@ def g9coverage_coverage() -> list[str]:
 # `_CARD_CENSUS["unbounded"]` and carry no `CR`: there is no finite number to
 # compare, and the theorem says nothing about an unbounded body.
 #
+# THE LOOP CASE IS NOT ON THE CORPUS. Every loop that reaches the token is
+# declined above, so no exported command contains a `loop` node: the loop
+# multiply is proved in Lean (`RevL.Cardinality.runs_le_bound`, witnessed by
+# `witness_loop_runs`) and is not exercised by this row.
+#
 # THE RATCHET. `cardinality_coverage` fails the gate unless the corpus
 # exercises both combinators (a sequence and a branch), the row has rows at
-# all, and ADDING ONE CROSSING to a row's command flips its verdict from ok
-# to fail. A fold or rebuild that ignored the exported count fails that
-# mutation; `RevLOracle.cardRowB_iff` is what rules out a constant Lean
-# decider, which this Python mutation cannot reach.
+# all, and ADDING ONE CROSSING to a row's command flips that row's verdict
+# from ok to fail. The mutation is on the Python side only: it runs the
+# serializer, the reference rebuild and `_card_fold`, so a fold or rebuild
+# that ignored the exported count fails it. `RevLOracle.cardRowB_iff` is what
+# rules out a constant Lean decider, which this mutation cannot reach.
 
 #: One exported command per (file, component, token): the tree and the
 #: checker's reported bound. Read by `cardinality_coverage`.
@@ -2464,6 +2480,36 @@ def _card_fold(tree: tuple) -> int:
     return tree[1] * _card_fold(tree[2])
 
 
+def _card_retry(spec: dict) -> int:
+    """How many times one crossing of a service method may fire per
+    activation: the first attempt plus the declared `retry` ceiling. Read off
+    the IR's method spec here and not off the checker's `_retry_mult`, so a
+    change to the checker's multiplier disagrees with this row."""
+    return (spec.get("retry") or 0) + 1
+
+
+def _card_arrow_binding(step) -> bool:
+    """A `let` or an assignment whose value is an arrow literal: an arrow
+    bound to a name, counted at its invocations and not where it is written."""
+    if not isinstance(step, dict) or step.get("step") not in ("let", "assign"):
+        return False
+    value = step.get("value")
+    return isinstance(value, dict) and value.get("kind") == "arrow"
+
+
+def _card_arrow_names(node, out: set) -> None:
+    """The names a component body binds an arrow to, by `let` or assignment,
+    at any depth."""
+    if isinstance(node, dict):
+        if _card_arrow_binding(node):
+            out.add(node.get("name"))
+        for child in node.values():
+            _card_arrow_names(child, out)
+    elif isinstance(node, list):
+        for child in node:
+            _card_arrow_names(child, out)
+
+
 def _card_steps(steps, token: str, requires: dict, services: dict,
                 arrows: set):
     """One body (a list of IR steps) as a crossing shape for `token`, or
@@ -2506,7 +2552,7 @@ def _card_steps(steps, token: str, requires: dict, services: dict,
                 if sub is None:
                     return None
                 out.append(sub)
-        elif _is_arrow_binding_step(step):
+        elif _card_arrow_binding(step):
             continue
         else:
             sub = _card_expr(step, token, requires, services, arrows)
@@ -2555,7 +2601,7 @@ def _card_expr(node, token: str, requires: dict, services: dict,
                     declared = spec.get("capabilities")
                     tokens = sorted(declared) if declared is not None else ["*"]
                     if token in tokens:
-                        total.extend([("x",)] * _retry_mult(spec))
+                        total.extend([("x",)] * _card_retry(spec))
             callee = node.get("callee")
             if isinstance(callee, dict) and callee.get("kind") == "field":
                 recv = callee.get("target")
@@ -2569,7 +2615,7 @@ def _card_expr(node, token: str, requires: dict, services: dict,
                         tokens = (sorted(declared)
                                   if declared is not None else ["*"])
                         if token in tokens:
-                            total.extend([("x",)] * _retry_mult(spec))
+                            total.extend([("x",)] * _card_retry(spec))
         if kind == "match":
             scrutinee = _card_expr(node.get("scrutinee"), token, requires,
                                    services, arrows)
@@ -2648,9 +2694,8 @@ def cardinality_rows(rel: str, doc: dict) -> list[str]:
                 "does not carry")
             continue
         requires = comp.get("requires") or {}
-        arrow_bindings: dict = {}
-        _collect_arrow_bindings(comp.get("body") or [], arrow_bindings)
-        arrows = set(arrow_bindings)
+        arrows: set = set()
+        _card_arrow_names(comp.get("body") or [], arrows)
         for token, info in sorted(entry["per_capability"].items()):
             if info.get("kind") != "bounded":
                 _CARD_CENSUS["unbounded"] = \
@@ -2723,15 +2768,26 @@ def _card_shape_counts(tree: tuple, out: dict) -> None:
         _card_shape_counts(tree[2], out)
 
 
-def cardinality_coverage() -> list[str]:
-    """The non-vacuity ratchet for the `CT`/`CR`/`CARD` rows (item 260).
+def cardinality_coverage(reference: dict | None = None,
+                         formal: dict | None = None) -> list[str]:
+    """The findings of the `CT`/`CR`/`CARD` rows (item 260, issue #2743).
 
-    The row has to fail when there is nothing to decide, when the corpus
-    never exercises a combinator, and when the decider stops reading the
-    count. The last is a MUTATION: adding one crossing to a row's exported
-    command must flip that row's verdict from `ok` to `fail`, because the
-    model's count then exceeds the number the checker reported. A `cardRowB`
-    that returned a constant, or a reference that ignored the tree, fails it.
+    A DISAGREEMENT IS A FINDING. A row whose fold differs from the number the
+    checker reported is one fatal finding, naming the file, component and
+    capability. The reference and the Lean oracle compute the same
+    `fold == reported`, so both print `fail` and the differential counts that
+    as agreement; this is what makes the row able to go red when the shipped
+    analysis and the model disagree. `reference` and `formal` are the two
+    sides' `CARD` verdict maps (`Verdicts.cards`), so a row either side calls
+    `fail` is a finding even when the Python fold here says `ok`.
+
+    The row also has to fail when there is nothing to decide, when the corpus
+    never exercises a combinator, and when the fold stops reading the count.
+    The last is a MUTATION: adding one crossing to EVERY row's exported
+    command must make the reference rebuild and fold differ from the reported
+    bound. The mutation is on the Python side only (serializer, rebuild,
+    `_card_fold`); `RevLOracle.cardRowB_iff` is what rules out a constant
+    Lean decider.
 
     The `unmodelled` and `unbounded` counts are printed, never silently
     dropped: a corpus that moved every row out of the fragment would otherwise
@@ -2745,6 +2801,20 @@ def cardinality_coverage() -> list[str]:
         findings.append(
             "cardinality: no CARD row at all - the row would decide nothing")
         return findings
+    bad: dict = {}
+    for key, (tree, bound) in sorted(_CARD_ROWS.items()):
+        counted = _card_fold(tree)
+        if counted != bound:
+            bad[key] = (f"the model counts {counted} and the checker "
+                        f"reports {bound}")
+    for side, verdicts in (("reference", reference), ("formal", formal)):
+        for key, verdict in sorted((verdicts or {}).items()):
+            if verdict != "ok" and key not in bad:
+                bad[key] = f"the {side} row is `{verdict}`"
+    for (rel, comp, token), why in sorted(bad.items()):
+        findings.append(
+            f"cardinality: {rel}: {comp}: capability {token!r}: {why}, so "
+            "the model and the shipped analysis disagree")
     shapes: dict = {}
     for _key, (tree, _bound) in sorted(_CARD_ROWS.items()):
         _card_shape_counts(tree, shapes)
@@ -2756,30 +2826,32 @@ def cardinality_coverage() -> list[str]:
         findings.append(
             "cardinality: no exported command has a branch, so the row never "
             "decides that a bound takes the worse arm")
-    flipped = 0
+    unflipped = []
     for (rel, comp, token), (tree, bound) in sorted(_CARD_ROWS.items()):
+        if (rel, comp, token) in bad:
+            continue    # already a finding; the mutation says nothing new
         # Mutate the EXPORTED command by adding one crossing and run it back
         # through the same serializer and reference rebuild the real row uses,
-        # so a broken serializer or rebuild fails this too. The Lean decider
-        # is ruled out separately by `cardRowB_iff`.
+        # so a broken serializer or rebuild fails this too.
         mutated = ("s", tree, ("x",))
         counter = [0]
         node_rows: list[str] = []
         root = _card_emit_rows(node_rows, rel, comp, token, counter, mutated)
         nodes = {int(r.split("\t")[4]): r.split("\t")[5:] for r in node_rows}
         rebuilt = _card_from_rows(nodes, root)
-        if rebuilt is not None and _card_fold(rebuilt) != bound:
-            flipped += 1
-            break
-    if not flipped:
+        if rebuilt is None or _card_fold(rebuilt) == bound:
+            unflipped.append(f"{rel}: {comp}: {token!r}")
+    if unflipped:
         findings.append(
-            "cardinality: adding one crossing to every exported command "
-            "changes no verdict - the row does not read the count")
+            "cardinality: adding one crossing to an exported command "
+            f"changes no verdict for {len(unflipped)} row(s), the first "
+            f"being {unflipped[0]} - the row does not read the count")
     if not findings:
         print(f"cardinality: {len(_CARD_ROWS)} bounded capability rows, "
               f"{shapes.get('s', 0)} sequences and {shapes.get('b', 0)} "
-              f"branches exercised, each verdict flipping under one added "
-              f"crossing; unbounded={_CARD_CENSUS.get('unbounded', 0)} "
+              f"branches exercised, no row disagreeing with the checker, "
+              f"each verdict flipping under one added crossing; "
+              f"unbounded={_CARD_CENSUS.get('unbounded', 0)} "
               f"unmodelled={_CARD_CENSUS.get('unmodelled', 0)} "
               f"refused-files={_CARD_CENSUS.get('refused', 0)}")
     return findings
@@ -7643,11 +7715,8 @@ class Verdicts(NamedTuple):
     ev: dict[str, str]
     ir_disjoint: dict[str, str]
     ir_kept: dict[str, str]
-<<<<<<< HEAD
     splits: dict[str, tuple]
-=======
     cards: dict[tuple[str, str, str], str]
->>>>>>> 68ff02fb7 (formal: state the emission cardinality bound and check it on the corpus (#2743))
 
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
@@ -7666,12 +7735,7 @@ class Verdicts(NamedTuple):
                 + len(self.inv)
                 + len(self.sw) + len(self.a5) + len(self.gc)
                 + len(self.g1cov)
-<<<<<<< HEAD
-                + len(self.ev) + len(self.ir_disjoint) + len(self.ir_kept) + len(self.splits))
-=======
-                + len(self.ev) + len(self.ir_disjoint) + len(self.ir_kept))
-                + len(self.ev) + len(self.cards))
->>>>>>> 68ff02fb7 (formal: state the emission cardinality bound and check it on the corpus (#2743))
+                + len(self.ev) + len(self.ir_disjoint) + len(self.ir_kept) + len(self.splits) + len(self.cards))
 
 
 
@@ -7934,13 +7998,7 @@ def parse_verdicts(text: str) -> Verdicts:
                     a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
             places, model_reach, councils, g9, retain, inv, sw, a5, gc, g1cov,
-<<<<<<< HEAD
-            ev, ir_disjoint, ir_kept, splits)
-=======
-            ev, ir_disjoint, ir_kept)
-                    places, model_reach, councils, g9, retain, inv, sw, a5,
-                    gc, ev, cards)
->>>>>>> 68ff02fb7 (formal: state the emission cardinality bound and check it on the corpus (#2743))
+            ev, ir_disjoint, ir_kept, splits, cards)
 
 
 
@@ -8866,12 +8924,7 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
                     configs, a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
                     places, model_reach, councils, g9, retain, inv, sw, a5,
-<<<<<<< HEAD
-                    gc, g1cov, ev, ir_disjoint, ir_kept, splits)
-=======
-                    gc, g1cov, ev, ir_disjoint, ir_kept)
-                    gc, ev, cards)
->>>>>>> 68ff02fb7 (formal: state the emission cardinality bound and check it on the corpus (#2743))
+            ev, ir_disjoint, ir_kept, splits, cards)
 
 
 #: What the REFERENCE decided for each config field, for the CD row's
@@ -10431,13 +10484,9 @@ def main() -> int:
             ("a5", ref.a5, formal.a5),
             ("emission_value", ref.ev, formal.ev),
             ("ir_disjoint", ref.ir_disjoint, formal.ir_disjoint),
-<<<<<<< HEAD
             ("ir_kept", ref.ir_kept, formal.ir_kept),
-            ("split", ref.splits, formal.splits)):
-=======
-            ("ir_kept", ref.ir_kept, formal.ir_kept)):
+            ("split", ref.splits, formal.splits),
             ("cardinality", ref.cards, formal.cards)):
->>>>>>> 68ff02fb7 (formal: state the emission cardinality bound and check it on the corpus (#2743))
 
         for key, want in refmap.items():
             got = gotmap.get(key)
@@ -10477,15 +10526,8 @@ def main() -> int:
         f"{len(ref.inv)} inverse refusals + "
         f"{len(ref.sw)} witnessed-site refusals + "
         f"{len(ref.ir_disjoint)} IR documents (G2)): "
-<<<<<<< HEAD
         f"{len(ref.splits)} split-step crash cuts): "
-=======
-        f"{len(ref.cards)} cardinality bounds) — "
-<<<<<<< HEAD
->>>>>>> 68ff02fb7 (formal: state the emission cardinality bound and check it on the corpus (#2743))
-=======
         f"{len(ref.cards)} cardinality bounds): "
->>>>>>> f1756e09b (formal: pin the CARD row's Python half in the plain test job (#2743))
 
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
@@ -10517,7 +10559,7 @@ def main() -> int:
     mismatches.extend(a5_coverage())
     mismatches.extend(ir_alignment(ref))
     mismatches.extend(ir_coverage())
-    mismatches.extend(cardinality_coverage())
+    mismatches.extend(cardinality_coverage(ref.cards, formal.cards))
     mismatches.extend(polarity_coverage(polarity))
 
     for m in mismatches[:10]:
