@@ -9286,6 +9286,7 @@ def test_an_annotated_provide_method_let_is_checked_as_the_reference_checks_it(
         "    }\n"
         "  }\n"
         "}\n")
+    _agree(admit, src)
 @pytest.mark.parametrize("case", _HANDOFF_MAP_3342,
                          ids=[n for n, _, _ in _HANDOFF_MAP_3342])
 def test_handoff_typed_map_agrees_3342(admit, case):
