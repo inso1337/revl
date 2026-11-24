@@ -3790,7 +3790,7 @@ def check_ast(expr, expected: str | None, tenv: dict, types: dict,
     if actual and not compatible(expected, actual, types):
         err = mismatch(filename, line, where, expected, actual,
                        why=unresolved_nominal_reason(expected, actual, types))
-    refuse_nested_widening(expr, expected, actual, tenv, types, filename, where)
+        refuse_nested_widening(expr, expected, actual, tenv, types, filename, where)
         if (parse_type(expected)[0] == "Int" and parse_type(actual)[0] == "Float"
                 and isinstance(expr, ExprBin) and expr.op == "/"
                 and parse_type(infer_ast(expr.left, tenv, types))[0] == "Int"
