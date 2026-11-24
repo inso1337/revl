@@ -98,6 +98,14 @@ does not fit the declared type, and a `configure` against a row whose component
 declares no config at all are three refusals. A config typo is the most common
 way a layered composition breaks in practice, and here it never reaches a run.
 
+The same typing applies to the host config table (`--config`, `Session.load`'s
+map): scalars and lists type as their JSON shape, and a field declared as a
+variant (`type Colour = Red | Green`) takes the wire tag `{"$kind": "Green"}`
+(`"$value"` added for a payload case) — the load-time check accepts exactly the
+declared cases and the runtime rebuilds the case instance, so `config.c ==
+Green` compares like with like. Any other shape for a variant field is refused
+at load, naming the field and the declared type (issue #3595).
+
 ## Addressing: two spellings, both exact
 
 ```revl sketch

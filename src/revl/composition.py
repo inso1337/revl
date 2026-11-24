@@ -51,7 +51,7 @@ from .synthesize import (
     HOST_SHIMS, OBSERVER_METHOD, cap_token, check_address, check_remotable,
     synthesize_provider)
 from .tls_pin import check_pin
-from .typecheck import compatible
+from .typecheck import compatible, parse_type
 
 # The project's own origin. Reserved and unmintable by anyone else: a third
 # party's rows are scoped to its `[trucs]` key, never to `.` (426 §1.2).
@@ -419,7 +419,29 @@ def _check_claims(row: RowDecl, header: _Header, doc: str,
     return claims, extra
 
 
-def _row_value_type(value: object, declared: str | None) -> str | None:
+def _variant_wire_type(value: object, declared: str | None,
+                       types: dict | None) -> str | None:
+    """Issue #3595: the host-config encoding of a variant value is the wire
+    tag `{"$kind": "<case>"}` (plus `"$value"` for a payload case). It types as
+    the declared variant when the tag names one of its cases. Any other dict
+    for a variant-declared field types as a mismatch, so the load-time check
+    refuses it naming the field and the declared type. None when the field is
+    not a variant (records and scalars are untouched)."""
+    if not isinstance(declared, str) or not types:
+        return None
+    head, _ = parse_type(declared)
+    entry = types.get(head)
+    if not (isinstance(entry, dict) and entry.get("kind") == "variant"):
+        return None
+    kind = value.get("$kind") if isinstance(value, dict) else None
+    if isinstance(kind, str) and any(case.get("name") == kind
+                                     for case in entry.get("cases") or []):
+        return declared
+    return f'variant wire tag {{"$kind": {kind!r}}}'
+
+
+def _row_value_type(value: object, declared: str | None,
+                    types: dict | None = None) -> str | None:
     """Surface type of a row config value, for the check against `declared`.
 
     A scalar is typed as a config default is. A list (issue #3357) is typed
@@ -427,16 +449,22 @@ def _row_value_type(value: object, declared: str | None) -> str | None:
     otherwise the first element type that does not, so the refusal names it. An
     empty list takes the declared element type. On a non-list field a list is
     typed by its first element (`List[?]` when empty), so it never fits a
-    scalar type."""
+    scalar type. A dict against a variant-declared field is the wire tag
+    (issue #3595)."""
     if not isinstance(value, list):
-        return _config_default_type(value)
+        scalar = _config_default_type(value)
+        if scalar is not None:
+            return scalar
+        if isinstance(value, dict):
+            return _variant_wire_type(value, declared, types)
+        return None
     elem, inner = None, declared or ""
     if inner.startswith("Opt[") and inner.endswith("]"):
         inner = inner[len("Opt["):-1]
     if inner.startswith("List[") and inner.endswith("]"):
         elem = inner[len("List["):-1]
     for item in value:
-        got = _config_default_type(item)
+        got = _config_default_type(item) or _variant_wire_type(item, elem, types)
         if got is not None and (elem is None or not compatible(elem, got)):
             return f"List[{got}]"
     return f"List[{elem or '?'}]"
@@ -444,7 +472,8 @@ def _row_value_type(value: object, declared: str | None) -> str | None:
 
 def _check_config(row: RowDecl, header: _Header, doc: str,
                   rel: str, *, rowless: bool = False,
-                  required: bool = True) -> dict[str, object]:
+                  required: bool = True,
+                  types: dict | None = None) -> dict[str, object]:
     """A config value that does not fit the declared type does not admit, and
     the refusal names the field and the declared type (426 §3.2). Same shape as
     `_lower_lifecycle_config` (lower.py:4197), one tier up.
@@ -467,7 +496,7 @@ def _check_config(row: RowDecl, header: _Header, doc: str,
                 f"`{name}` is not a config field of `{header.name}` "
                 f"({'host config' if rowless else owner})",
                 hint=f"config fields of `{header.name}` in `{rel}`: {known}")
-        actual = _row_value_type(value, cfg.type)
+        actual = _row_value_type(value, cfg.type, types)
         if actual is not None and not compatible(cfg.type, actual):
             raise RevlError(
                 doc, line,
@@ -2568,7 +2597,8 @@ def configure_rows_from_host(document: dict, config: dict | None,
                        config=[(n, v, 1) for n, v in supplied.items()])
         _check_config(decl, _IRHeader(component), where,
                       component.get("source") or "<module>",
-                      rowless=True, required=required and name in started)
+                      rowless=True, required=required and name in started,
+                      types=(document or {}).get("types"))
     if not rows:
         return document
     changed = False
@@ -2584,7 +2614,8 @@ def configure_rows_from_host(document: dict, config: dict | None,
                        component=row.get("component"),
                        config=[(n, v, 1) for n, v in merged.items()])
         checked = _check_config(decl, _IRHeader(component), where,
-                                row.get("source", "?"))
+                                row.get("source", "?"),
+                                types=(document or {}).get("types"))
         new_row = dict(row)
         new_row["config"] = checked
         new_row["provenance"] = [

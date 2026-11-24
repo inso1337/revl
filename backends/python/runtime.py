@@ -6453,9 +6453,18 @@ def _flush_config_trace(name: str) -> Optional[dict]:
     resolved, defaulted, secret_fields = _pending_config
     _pending_config = None
     RESOLVED_CONFIG[name] = resolved
+    def _dump(value):
+        try:
+            return json.dumps(value)
+        except TypeError:
+            # issue #3595: a variant config value is a native case instance at
+            # runtime; the trace line carries its wire form instead.
+            import bridge  # noqa: PLC0415 — same backend dir as runtime
+            return json.dumps(bridge._encode_value(value))
+
     body = ", ".join(
         f"{key}=" + (f'"{confidential.REDACTED}"' if key in secret_fields
-                     else json.dumps(resolved[key]))
+                     else _dump(resolved[key]))
         for key in sorted(resolved))
     tail = f" [defaults: {', '.join(defaulted)}]" if defaulted else ""
     _record(f"{name}.config {{{body}}}{tail}")
