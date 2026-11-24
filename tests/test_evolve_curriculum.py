@@ -465,7 +465,6 @@ def test_medium_tasks_name_a_dispatch_the_reference_really_has(curriculum):
 
 # --------------------------------------------------------------------------- #
 # Design documents (slice 4): a slice table row whose oracle is not there.      #
-# Mutation testing (slice 7): a refusal a mutant removes and no test notices.   #
 # --------------------------------------------------------------------------- #
 def test_design_tasks_name_a_row_and_an_oracle_that_is_really_missing(
         curriculum):
@@ -568,13 +567,9 @@ def _staged_snapshot(tmp_path, issues):
 
 
 def test_tracker_tasks_are_the_snapshot_issues_that_name_a_verifier_in_the_tree(
-def test_mutation_tasks_are_the_ledger_survivors_and_name_a_real_refusal_arm(
         derived):
     """Re-derived by reading the committed snapshot by hand: a task for every
     open issue that names a verifier which is in the tree, and for no other."""
-    """Re-derived by reading the committed ledger and the target source by
-    hand: each recorded survivor is a task, and the line the task points at is
-    an `if` whose next line raises, which is what a refusal arm is."""
     import json
 
     tool, derivations = derived
@@ -591,19 +586,6 @@ def test_mutation_tasks_are_the_ledger_survivors_and_name_a_real_refusal_arm(
     for task in mine.values():
         assert task.artifact == "tests/fixtures/tracker_snapshot.json"
         assert (ROOT / task.mechanism).is_file()
-    ledger = json.loads((ROOT / "tests" / "fixtures"
-                         / "mutation_survivors.json").read_text(encoding="utf-8"))
-    assert ledger["survivors"], "the ledger records no survivor; test is vacuous"
-    mine = [t for d in derivations if d.source == "mutation-survivors"
-            for t in d.tasks]
-    assert len(mine) == len(ledger["survivors"])
-    lines = (ROOT / ledger["target"]).read_text(encoding="utf-8").splitlines()
-    for task in mine:
-        assert task.artifact == ledger["target"] and task.tier == "easy"
-        line = int(task.locator.rsplit("line ", 1)[1])
-        assert lines[line - 1].lstrip().startswith("if "), (task.task_id, line)
-        assert "raise RevlError" in lines[line], (task.task_id, line)
-        assert "survives" in task.gap and "--check" in task.verify
 
 
 def test_the_tracker_source_never_touches_the_network(derived, monkeypatch):
@@ -621,9 +603,6 @@ def test_the_tracker_source_never_touches_the_network(derived, monkeypatch):
     monkeypatch.setattr(subprocess, "Popen", refuse)
     monkeypatch.setattr(socket, "create_connection", refuse)
     assert tool.adapter_tracker().tasks
-_ONE_ARM = '''\
-class RevlError(Exception):
-    pass
 
 
 def test_a_staged_snapshot_fills_the_tracker_rung_and_a_gone_verifier_empties_it(
@@ -642,11 +621,6 @@ def test_a_staged_snapshot_fills_the_tracker_rung_and_a_gone_verifier_empties_it
         {"number": 3, "title": "c", "labels": [], "verifiers": []}]))
     assert [t.task_id for t in present.tasks] == ["tracker/1"]
     assert present.tasks[0].tier == "medium"
-def check(n):
-    if n < 0:
-        raise RevlError("negative")
-    return n
-'''
 
     gone_dir = tmp_path / "gone"
     gone_dir.mkdir()
@@ -655,9 +629,6 @@ def check(n):
          "verifiers": ["tests/test_selfhost_gone_900.py"]}]))
     assert gone.tasks == ()
     assert gone.rungs() == {"medium"}, "an empty source must declare its rung"
-_PINNED = '''\
-import pytest
-from guard import RevlError, check
 
 
 def test_a_missing_or_malformed_tracker_snapshot_is_not_an_empty_tracker(
@@ -672,14 +643,66 @@ def test_a_missing_or_malformed_tracker_snapshot_is_not_an_empty_tracker(
     bad.write_text('{"issues": 3}', encoding="utf-8")
     with pytest.raises(ValueError, match="no `issues` list"):
         tool.adapter_tracker(bad)
-def test_negative_is_refused():
-    with pytest.raises(RevlError):
-        check(-1)
 
 
 def test_the_tier_of_a_missing_oracle_is_read_off_its_named_path(derived):
     """`_oracle_signal` is the one place a missing oracle's rung is decided,
     and it is a total function of the path, not of a table of documents."""
+    tool, _ = derived
+    tier = lambda p: tool.tier(tool._oracle_signal(p))      # noqa: E731
+    assert tier("tests/test_diagnostics.py") == "easy"
+    assert tier("tests/test_selfhost_ambient.py") == "medium"
+    assert tier("tests/test_gate_crate_admit.py") == "medium"
+    assert tier("tests/test_selfhost_crate_admit.py") == "expert"
+
+
+# --------------------------------------------------------------------------- #
+# Mutation testing (slice 7): a refusal a mutant removes and no test notices.   #
+# --------------------------------------------------------------------------- #
+def test_mutation_tasks_are_the_ledger_survivors_and_name_a_real_refusal_arm(
+        derived):
+    """Re-derived by reading the committed ledger and the target source by
+    hand: each recorded survivor is a task, and the line the task points at is
+    an `if` whose next line raises, which is what a refusal arm is."""
+    import json
+
+    tool, derivations = derived
+    ledger = json.loads((ROOT / "tests" / "fixtures"
+                         / "mutation_survivors.json").read_text(encoding="utf-8"))
+    assert ledger["survivors"], "the ledger records no survivor; test is vacuous"
+    mine = [t for d in derivations if d.source == "mutation-survivors"
+            for t in d.tasks]
+    assert len(mine) == len(ledger["survivors"])
+    lines = (ROOT / ledger["target"]).read_text(encoding="utf-8").splitlines()
+    for task in mine:
+        assert task.artifact == ledger["target"] and task.tier == "easy"
+        line = int(task.locator.rsplit("line ", 1)[1])
+        assert lines[line - 1].lstrip().startswith("if "), (task.task_id, line)
+        assert "raise RevlError" in lines[line], (task.task_id, line)
+        assert "survives" in task.gap and "--check" in task.verify
+
+
+_ONE_ARM = '''\
+class RevlError(Exception):
+    pass
+
+
+def check(n):
+    if n < 0:
+        raise RevlError("negative")
+    return n
+'''
+
+_PINNED = '''\
+import pytest
+from guard import RevlError, check
+
+
+def test_negative_is_refused():
+    with pytest.raises(RevlError):
+        check(-1)
+
+
 def test_the_good_path():
     assert check(1) == 1
 '''
@@ -717,11 +740,6 @@ def test_a_weakened_arm_is_a_task_and_the_pinned_one_is_not(derived, tmp_path):
     negate-guard mutant is still killed by the happy-path test, which the
     negated guard makes refuse a good input."""
     tool, _ = derived
-    tier = lambda p: tool.tier(tool._oracle_signal(p))      # noqa: E731
-    assert tier("tests/test_diagnostics.py") == "easy"
-    assert tier("tests/test_selfhost_ambient.py") == "medium"
-    assert tier("tests/test_gate_crate_admit.py") == "medium"
-    assert tier("tests/test_selfhost_crate_admit.py") == "expert"
     pinned = tool.adapter_mutation_survivors(
         root=_mutation_tree(tmp_path / "pinned", _PINNED))
     assert pinned.tasks == () and pinned.rungs() == {"easy"}
