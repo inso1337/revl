@@ -703,6 +703,11 @@ _EVIDENCE_STATUS_THRESHOLDS = {
     "gauntlet": ("admissible", "present"),
     "publisher": ("trusted",),
     "capabilities": ("present",),
+    # issue #2804: what the evidence LICENSES. `exact` holds only for an exact
+    # verdict; `sampled` holds for a sampled one or a stronger one. No producer
+    # of `exact` exists yet, so an `exact` clause fails today, which is the point:
+    # a sampled-only candidate grades `review` or `canary` and never `admit`.
+    "strength": ("exact", "sampled"),
 }
 
 # issue #2753: the operator-declared SOFT outcomes. A soft rule (`<subject>
@@ -730,7 +735,7 @@ _OUTCOME_RANK = {
 # `attestation` and `publisher` are checked against operator-held inputs (a key,
 # a trust set), so they are never self-attested.
 _SELF_ATTESTING_FACETS = frozenset({"fault-sweep", "inverse-roundtrip",
-                                    "gauntlet"})
+                                    "gauntlet", "strength"})
 
 # The declaration-strength floors (item 290, §3.2, adopting 309's order). Item
 # 309 records `declared`/`keyed` in the IR (lower.py `_idempotent_register`) and
@@ -2496,6 +2501,15 @@ def _clause_verdict(facet: str, threshold: str, assessment, bundle,
         ok = status == "present"
         return ClauseVerdict(facet, threshold, status, ok, "verified", "")
 
+    if facet == "strength":
+        # issue #2804: the fact is the statement an approver reads, with the
+        # count and bound the sample supports, never the bare tag.
+        from .registry import strength_statement  # noqa: PLC0415
+        ok = (status == "exact" if threshold == "exact"
+              else status in ("sampled", "exact"))
+        fact = strength_statement(getattr(bundle, "promotion", None))
+        return ClauseVerdict(facet, threshold, fact, ok, standing, "")
+
     return ClauseVerdict(facet, threshold, status, False, standing, "")
 
 
@@ -2577,6 +2591,13 @@ def _rule_reports(policy: Policy, audit: dict, mcp_components: frozenset,
                 elif facet in _SELF_ATTESTING_FACETS:
                     if facet == "gauntlet" and rule.scope == "mcp":
                         standing = "operator-run"
+                    elif facet == "strength":
+                        # issue #2804: verified only when the signed payload
+                        # names the promotion. A valid attestation that never
+                        # bound it vouches for nothing about it.
+                        standing = ("verified"
+                                    if assessment.verified.get("strength")
+                                    else "self-attested")
                     elif (has_valid_attest
                           and assessment.facets.get("attestation") == "valid"):
                         standing = "verified"
@@ -3893,8 +3914,11 @@ def render_explain(result: dict) -> str:
             for c in r["clauses"]:
                 glyph = "PASS" if c["pass"] else "FAIL"
                 detail = f"   {c['detail']}" if c.get("detail") else ""
+                # a fact wider than its column (the `strength` sentence, issue
+                # #2804) keeps a gap before `required`, not a glued word
+                gap = "  " if len(c["fact"]) >= 24 else ""
                 lines.append(
-                    f"    {c['facet']:<18}{c['fact']:<24}"
+                    f"    {c['facet']:<18}{c['fact']:<24}{gap}"
                     f"required {c['threshold']:<10}({c['standing']}) "
                     f"{glyph}{detail}")
         if comp.get("outcome"):

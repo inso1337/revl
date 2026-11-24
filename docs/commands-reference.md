@@ -567,6 +567,18 @@ to `quarantine` when the policy declares `quarantine required`, and otherwise to
 the gate's own `refuse`. When several soft clauses fail, the strictest outcome
 wins (`review` over `canary` over `observe`).
 
+The `strength` facet (issue #2804) grades what a recorded promotion verdict
+licenses: `strength exact` holds only for an exact verdict, `strength sampled` for
+a promoted sample or better. Nothing produces `exact` yet, so the rule below grades
+a sampled-only candidate `review` and never `admit`. The clause's `fact` is the
+sentence an approver reads: `sampled, 30 observations, failure rate below 0.1 at 95
+percent on the paths the window exercised`, or `bound not quotable`, or `1 diverged,
+no bound quoted`.
+
+```
+component vendored-* review on evidence [strength exact] self-attested
+```
+
 The `--json` report carries an `outcome` object per component and one overall
 (worst) outcome. Each names the clause that decided it, except `admit`, where
 no clause decided anything and `decidedBy` is `null`. The overall outcome is the

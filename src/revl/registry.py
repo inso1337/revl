@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 from collections.abc import Iterable
@@ -157,6 +158,10 @@ _VERSION_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\Z")
 #   compensation.json      _recovery_surface(ir)         (items 247/309, #2697)
 #   provenance.json        assembled source/build provenance (the reproducible
 #                          hashes the index records + the interchange toolchain)
+#   promotion.json         the `revl promote` verdict (`revl.shadow-promotion`)
+#                          the publisher recorded for this release, verbatim;
+#                          the one facet that is a DECISION and not a
+#                          projection of the source (issue #2804)
 #
 # A missing file is `unavailable` (ranked below present-and-valid), never read
 # as valid; a tampered attestation is `invalid` (ranked at the bottom, or
@@ -176,10 +181,15 @@ EVIDENCE_PROVENANCE = "provenance.json"
 EVIDENCE_CEILINGS = "ceilings.json"
 EVIDENCE_SECRET_SINKS = "secret-sinks.json"
 EVIDENCE_COMPENSATION = "compensation.json"
+# Issue #2804: the promotion verdict a release was promoted on. Unlike every
+# file above it is not reproducible from source: it records a shadow window,
+# so `build_evidence` never writes it. It binds it when the entry ships one.
+EVIDENCE_PROMOTION = "promotion.json"
 EVIDENCE_FILES = (
     EVIDENCE_ATTESTATION, EVIDENCE_GAUNTLET, EVIDENCE_FAULT_SWEEP,
     EVIDENCE_INVERSE_ROUNDTRIP, EVIDENCE_CAPABILITIES, EVIDENCE_PROVENANCE,
     EVIDENCE_CEILINGS, EVIDENCE_SECRET_SINKS, EVIDENCE_COMPENSATION,
+    EVIDENCE_PROMOTION,
 )
 
 
@@ -283,6 +293,10 @@ class EvidenceBundle:
     # knowledge slice 4 (issue #1762): the component's knowledge records, as
     # `{"kind": "revl.knowledge", "records": [...]}`, bound like a dossier
     knowledge: dict | None = None
+    # issue #2804: the `revl.shadow-promotion` verdict the release was promoted
+    # on, graded by the `strength` facet. A DECISION recorded by the publisher,
+    # not a projection of the source.
+    promotion: dict | None = None
 
     def present(self) -> tuple[str, ...]:
         """The facet names this bundle actually carries, for diagnostics."""
@@ -295,6 +309,7 @@ class EvidenceBundle:
             ("ceilings", self.ceilings),
             ("secret-sinks", self.secret_sinks),
             ("compensation", self.compensation),
+            ("strength", self.promotion),
         ):
             if value is not None:
                 names.append(name)
@@ -341,6 +356,9 @@ class EvidenceAssessment:
             parts.append(self._mark("gauntlet", "gauntlet admissible"))
         if self.facets.get("publisher") == "trusted":
             parts.append("trusted publisher")
+        strength = self.facets.get("strength")
+        if strength in ("sampled", "exact"):
+            parts.append(self._mark("strength", f"evidence {strength}"))
         return ", ".join(parts) if parts else "no evidence"
 
 
@@ -376,6 +394,124 @@ def _gauntlet_status(dossier: dict | None) -> str:
     if not isinstance(dossier, dict):
         return "unavailable"
     return "admissible" if dossier.get("verdict") == "admissible" else "present"
+
+
+# Issue #2804: the `strength` facet. A promotion verdict (`revl.shadow_promotion`)
+# tags its behavioural evidence `exact` (the whole recorded domain was compared,
+# or the property was proved) or `sampled` (a sample of the paths traffic took).
+# The kind is spelled here, not imported: this module is on the compiler's import
+# chain and `revl.shadow_promotion` is not, and a test pins the two spellings.
+_PROMOTION_KIND = "revl.shadow-promotion"
+_PROMOTION_DECISIONS = ("PROMOTE", "REFUSE", "REVERT")
+
+# The document kinds that may state `exact`. EMPTY on purpose. The shadow route
+# compares a sample by construction, so a `revl.shadow-promotion` verdict never
+# honestly states `exact`, and no other producer exists yet (whole-history
+# replay, issue #2749, is the first that would). A document that claims `exact`
+# from a kind not listed here is `invalid`, never read as `exact`: a facet that
+# believed the tag it was handed would be the self-written strength this exists
+# to keep out.
+_EXACT_PRODUCERS: frozenset = frozenset()
+
+
+def _tally_counts(doc) -> tuple:
+    """``(paired, diverged)`` from a promotion document's tally, or ``None``
+    when the tally is absent or not a consistent count. Counts are plain
+    integers in a sane range and ``agreed + diverged == paired``: a document
+    whose own numbers do not add up is not evidence of anything."""
+    tally = doc.get("tally") if isinstance(doc, dict) else None
+    if not isinstance(tally, dict):
+        return None
+    counts = []
+    for name in ("paired", "agreed", "diverged"):
+        value = tally.get(name)
+        if not isinstance(value, int) or isinstance(value, bool) \
+                or not 0 <= value <= 10 ** 12:
+            return None
+        counts.append(value)
+    paired, agreed, diverged = counts
+    if paired < 1 or agreed + diverged != paired:
+        return None
+    return (paired, diverged)
+
+
+def _strength_status(doc: dict | None) -> str:
+    """Grade a promotion document for the `strength` facet.
+
+    ``exact`` > ``sampled`` > ``not-promoted`` > ``unavailable`` > ``invalid``.
+    Only a ``PROMOTE`` verdict licenses anything: a ``REFUSE`` or ``REVERT``
+    verdict is evidence AGAINST the candidate, so reading its sample tag as
+    strength would let a refused window satisfy ``strength sampled``. A verdict
+    that read no evidence carries no tag and is ``unavailable``. A document that
+    is not a promotion verdict, whose tag or decision is outside the closed
+    vocabulary, or whose PROMOTE tally is not a consistent count of at least
+    one observation, is ``invalid``: fail closed, never read as a weaker honest
+    grade."""
+    if doc is None:
+        return "unavailable"
+    if not isinstance(doc, dict) or doc.get("kind") != _PROMOTION_KIND:
+        return "invalid"
+    tag = doc.get("evidence_strength")
+    if tag is None:
+        return "unavailable"
+    if tag == "exact":
+        return "exact" if _PROMOTION_KIND in _EXACT_PRODUCERS else "invalid"
+    if tag != "sampled":
+        return "invalid"
+    decision = doc.get("decision")
+    if decision not in _PROMOTION_DECISIONS:
+        return "invalid"
+    if decision != "PROMOTE":
+        return "not-promoted"
+    return "sampled" if _tally_counts(doc) is not None else "invalid"
+
+
+def _quotable_bound(value) -> float | None:
+    """The failure-rate bound as a float in (0, 1], or ``None`` when the
+    document carries anything else: a string, a bool, NaN, infinity, a negative
+    or a number above one. A bound outside that range is not a probability
+    bound, so it is never printed as one."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        bound = float(value)
+    except OverflowError:
+        return None
+    if not math.isfinite(bound) or not 0.0 < bound <= 1.0:
+        return None
+    return bound
+
+
+def strength_statement(doc: dict | None) -> str:
+    """One sentence stating what a promotion document's evidence is: its tag,
+    the count it rests on and the bound that count supports, or that none is
+    quoted. This is the text an approver reads where a bare pass used to be
+    (issue #2804), so it states the SAMPLE, never a verdict about the candidate.
+
+    Every number comes from the document's own tally and is printed only when
+    :func:`_tally_counts` accepts it, so a document that cannot be read says so
+    rather than inventing or echoing a count. The decision is printed only when
+    it is one of the closed three."""
+    status = _strength_status(doc)
+    if status == "unavailable":
+        return "no promotion evidence"
+    if status == "invalid":
+        return "promotion evidence is malformed or states a strength no " \
+               "producer here may state"
+    counts = _tally_counts(doc)
+    if counts is None:
+        return f"{status}, observation count not recorded"
+    paired, diverged = counts
+    head = f"{status}, {paired} observation{'' if paired == 1 else 's'}"
+    if status == "not-promoted":
+        return f"{head}, the verdict was {doc['decision']}"
+    if diverged:
+        return f"{head}, {diverged} diverged, no bound quoted"
+    bound = _quotable_bound(doc.get("failure_rate_upper_95"))
+    if bound is not None:
+        return (f"{head}, failure rate below {bound:.4g} at 95 percent "
+                f"on the paths the window exercised")
+    return f"{head}, bound not quotable"
 
 
 def _attestation_status(att: dict | None, *, key: bytes | None,
@@ -486,6 +622,10 @@ def assess_evidence(bundle: EvidenceBundle, *, key: bytes | None = None,
                         else "unavailable",
         "compensation": "present" if bundle.compensation is not None
                         else "unavailable",
+        # issue #2804: what the evidence LICENSES, not how it was tested. Like
+        # the reviewer facets it stays out of `rank_key`: a fact for the policy
+        # layer, not a score.
+        "strength": _strength_status(bundle.promotion),
     }
     vouched = _vouched_facets(bundle, attestation)
     verified = {facet: facet in vouched for facet in _BOUND_FACETS}
@@ -539,6 +679,9 @@ _BOUND_FACETS = {
     "compensation": "compensation",
     # knowledge slice 4 (issue #1762): a signed entry vouches for its records
     "knowledge": "knowledge",
+    # issue #2804: a signed entry vouches for its promotion verdict, so one
+    # edited after signing breaks the attestation like any other bound dossier.
+    "strength": "promotion",
 }
 
 
@@ -905,6 +1048,7 @@ def load_evidence_bundle(entry_dir: str | os.PathLike) -> EvidenceBundle:
         secret_sinks=_read_json(ev / EVIDENCE_SECRET_SINKS),
         compensation=_read_json(ev / EVIDENCE_COMPENSATION),
         knowledge=load_knowledge(entry_dir),
+        promotion=_read_json(ev / EVIDENCE_PROMOTION),
     )
 
 
@@ -2852,4 +2996,5 @@ __all__ = ["Registry", "RegistryEntry", "EvidenceBundle", "EvidenceAssessment",
            "RELEASE_CHANGELOG_FILENAME", "BUMP_VERIFIED", "BUMP_UNVERIFIABLE",
            "BUMP_FIRST_RELEASE", "SCHEME_SEMVER", "SCHEME_OPAQUE", "SCHEMES",
            "EVIDENCE_DIRNAME", "EVIDENCE_FILES",
-           "EVIDENCE_CEILINGS", "EVIDENCE_SECRET_SINKS", "EVIDENCE_COMPENSATION"]
+           "EVIDENCE_CEILINGS", "EVIDENCE_SECRET_SINKS", "EVIDENCE_COMPENSATION",
+           "EVIDENCE_PROMOTION", "strength_statement"]
