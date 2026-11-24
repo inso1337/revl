@@ -74,3 +74,28 @@ def test_cli_grammar_default_prints_the_prose_summary(capsys):
 def test_cli_grammar_prompt_flag_prints_the_dense_grammar(capsys):
     assert main(["grammar", "--prompt"]) == 0
     assert capsys.readouterr().out == PROMPT_GRAMMAR
+
+
+def test_prompt_grammar_lists_every_reserved_word_issue_3493():
+    # the reserved-words section is generated from the lexer's KEYWORDS set,
+    # so this cannot drift: a keyword added to the lexer without landing here
+    # fails this test
+    import re
+
+    from revl.lexer import KEYWORDS
+    missing = [w for w in sorted(KEYWORDS)
+               if not re.search(rf"\b{re.escape(w)}\b", PROMPT_GRAMMAR)]
+    assert missing == [], f"reserved words missing from the prompt grammar: {missing}"
+
+
+def test_the_reserved_word_refusal_points_at_the_published_list_issue_3493():
+    import pytest
+
+    from revl import compile_source
+    from revl.errors import RevlError
+
+    with pytest.raises(RevlError) as excinfo:
+        compile_source('type Op = { name: Str, after: Str }\n', "f.rvl")
+    text = str(excinfo.value)
+    assert "`after` is a reserved keyword" in text
+    assert "revl grammar --prompt" in text

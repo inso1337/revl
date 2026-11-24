@@ -2730,7 +2730,8 @@ class Parser:
                 # wanted reads as a parser confusion, not a naming mistake
                 hint = (f"`{tok.value}` is a reserved keyword — it cannot "
                         "name a field, variable, parameter, or method; "
-                        "pick another name")
+                        "pick another name (the full list is the last section "
+                        "of `revl grammar --prompt`)")
             raise RevlError(self.filename, tok.line,
                             f"expected {wanted}, found {got}", hint)
         return self.next()
