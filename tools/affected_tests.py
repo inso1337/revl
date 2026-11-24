@@ -132,6 +132,10 @@ BENCH_DEPENDENT_TESTS = (
     # corpus data and the refusal codes, and (in the slow lane) re-measures
     # every row against the committed table.
     "tests/test_saga_defect_corpus_2736.py",
+    # Issue #2736, second slice: loads `bench/saga_defects/run_temporal.py`,
+    # derives every Temporal port, and checks the committed Temporal results
+    # against the corpus data and the revl results.
+    "tests/test_saga_defect_temporal_2736.py",
     # Issues #2195 / #2197: loads `bench/admission_latency.py` by path and runs
     # its scenario against the compile hot path.
     "tests/test_compile_hot_path_2195_2197.py",

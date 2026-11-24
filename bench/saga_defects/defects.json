@@ -1,10 +1,10 @@
 {
-  "about": "Seeded-defect saga corpus (issue #2736, first slice). One row per defect: a small saga with a known saga defect, the defect written down before any version of the saga, and the catch point the corpus expects. The revl verdict is measured by `python3 bench/saga_defects/run.py`; the Temporal port and independently written sagas are the second slice and are not scored here.",
+  "about": "Seeded-defect saga corpus (issue #2736, first slice). One row per defect: a small saga with a known saga defect, the defect written down before any version of the saga, and the catch point the corpus expects. The revl verdict is measured by `python3 bench/saga_defects/run.py`; the Temporal port of each row is scored by `python3 bench/saga_defects/run_temporal.py`; independently written sagas are not in the corpus yet.",
   "issue": 2736,
   "slice": "revl corpus and verdict runner",
   "systems": {
     "revl": "measured here",
-    "temporal": "not scored in this slice; the hand port and its score are the second slice of issue #2736"
+    "temporal": "scored by `python3 bench/saga_defects/run_temporal.py` against a real Temporal dev server; see bench/saga_defects/temporal/ and bench/results/saga-defect-corpus-temporal.md"
   },
   "failureModel": "One failure is injected after a top-level step of the saga component completes, in program order (the `revl test --sweep` model; docs/fault-tests.md section 9). The sequential, single-fault model does not cover concurrency, clock or random coeffects.",
   "verdicts": {
@@ -26,7 +26,19 @@
       "description": "The inventory hold carries no undo, so a failed checkout would leave the reservation standing. Same defect kind as `missing-undo-auth` (an `effect` with no `undo`), seeded at the other call site of the same saga: the two rows are one defect kind at two call sites, not two defects.",
       "expected": "compile",
       "expectedCode": "G4",
-      "expectedLine": 38
+      "expectedLine": 38,
+      "temporal": {
+        "expected": "fault-test",
+        "workflow": "checkout",
+        "summary": "The hold's compensation is never registered.",
+        "edits": [
+          {
+            "file": "workflows.ts",
+            "find": "    compensations.unshift(() => a.release('sku-1', 1))\n",
+            "replace": ""
+          }
+        ]
+      }
     },
     {
       "id": "missing-undo-auth",
@@ -37,7 +49,19 @@
       "description": "The payment authorization carries no undo, so a failed checkout would keep the charge. Same defect kind as `missing-undo-hold` (an `effect` with no `undo`), seeded at the other call site of the same saga: the two rows are one defect kind at two call sites, not two defects.",
       "expected": "compile",
       "expectedCode": "G4",
-      "expectedLine": 39
+      "expectedLine": 39,
+      "temporal": {
+        "expected": "fault-test",
+        "workflow": "checkout",
+        "summary": "The authorization's compensation is never registered.",
+        "edits": [
+          {
+            "file": "workflows.ts",
+            "find": "    compensations.unshift(() => a.refund('order-1', 4200))\n",
+            "replace": ""
+          }
+        ]
+      }
     },
     {
       "id": "unmarked-settle",
@@ -48,7 +72,11 @@
       "description": "The irreversible settlement is written as `effect ... undo`; an emission must be marked `emit` with a `compensate` slot.",
       "expected": "compile",
       "expectedCode": "G4",
-      "expectedLine": 39
+      "expectedLine": 39,
+      "temporal": {
+        "expected": "no-counterpart",
+        "reason": "The defect is writing an irreversible settlement as a reversible effect with an inverse. Temporal TypeScript has one shape for both: an activity and a compensation the workflow registers. There is no marker to omit, so no program is the same saga with this defect."
+      }
     },
     {
       "id": "emit-plain-method",
@@ -59,7 +87,11 @@
       "description": "A reversible operation is marked `emit`, claiming an irreversibility it does not have.",
       "expected": "compile",
       "expectedCode": "G4",
-      "expectedLine": 38
+      "expectedLine": 38,
+      "temporal": {
+        "expected": "no-counterpart",
+        "reason": "The defect is marking a reversible operation as an emission. Temporal TypeScript has no emission marker, so there is nothing to mark wrongly."
+      }
     },
     {
       "id": "undo-not-release",
@@ -70,7 +102,11 @@
       "description": "A host acquisition is undone on a sibling handle, so its own resource would stay open while the teardown reports a clean release.",
       "expected": "compile",
       "expectedCode": "G4",
-      "expectedLine": 21
+      "expectedLine": 21,
+      "temporal": {
+        "expected": "no-counterpart",
+        "reason": "The defect is a provider's host acquisition undone on the wrong handle, in the provider's own activation. A Temporal workflow has no provider activation or bound handles; an activity's worker-local resources are outside the saga's steps. The saga-level relative, an inverse aimed at the wrong target, is scored under `wrong-release-sku` and `wrong-refund-order`."
+      }
     },
     {
       "id": "manual-teardown",
@@ -81,7 +117,11 @@
       "description": "The author writes the teardown order by hand in a provide-method undo; the inverse reaches an emission, which a bracket inverse may not cross.",
       "expected": "compile",
       "expectedCode": "G5",
-      "expectedLine": 35
+      "expectedLine": 35,
+      "temporal": {
+        "expected": "no-counterpart",
+        "reason": "The refusal is that a bracket inverse may not cross a boundary. Every Temporal compensation is an activity and crosses the boundary by construction, so the same saga with this change is an ordinary saga, not a defective one."
+      }
     },
     {
       "id": "emission-with-undo",
@@ -93,7 +133,11 @@
       "expected": "compile",
       "expectedCode": "G6",
       "expectedLine": 38,
-      "refusal": "parse"
+      "refusal": "parse",
+      "temporal": {
+        "expected": "no-counterpart",
+        "reason": "The refusal is a parse error on an `undo` clause attached to an emission. Temporal TypeScript has no such clause."
+      }
     },
     {
       "id": "dependency-cycle",
@@ -104,7 +148,11 @@
       "description": "Two saga components require each other's provision, so neither can ever activate (G3 is link-time acyclicity of component dependencies, not step order).",
       "expected": "compile",
       "expectedCode": "G3",
-      "expectedLine": 10
+      "expectedLine": 10,
+      "temporal": {
+        "expected": "no-counterpart",
+        "reason": "The defect is two components that require each other's provisions. A Temporal worker has no component dependency graph, so there is nothing to make cyclic."
+      }
     },
     {
       "id": "failing-inverse",
@@ -114,7 +162,19 @@
       "file": "sagas/failing_inverse.rvl",
       "description": "The charge's inverse is present and well-shaped but calls a host helper that raises during the unwind.",
       "expected": "fault-test",
-      "component": "Checkout"
+      "component": "Checkout",
+      "temporal": {
+        "expected": "fault-test",
+        "workflow": "checkout",
+        "summary": "The refund compensation raises.",
+        "edits": [
+          {
+            "file": "activities.ts",
+            "find": "    const held = state.payments.get(order) ?? 0\n    if (held === cents) {\n      state.payments.delete(order)\n    } else {\n      state.payments.set(order, held - cents)\n    }\n",
+            "replace": "    throw new Error('refund service down')\n"
+          }
+        ]
+      }
     },
     {
       "id": "failing-compensation",
@@ -124,7 +184,19 @@
       "file": "sagas/failing_compensation.rvl",
       "description": "The settlement's compensation is present but calls a host helper that raises during phase two.",
       "expected": "fault-test",
-      "component": "Checkout"
+      "component": "Checkout",
+      "temporal": {
+        "expected": "fault-test",
+        "workflow": "checkout",
+        "summary": "The settlement's compensation raises.",
+        "edits": [
+          {
+            "file": "activities.ts",
+            "find": "    state.reversed.push(order)\n",
+            "replace": "    throw new Error('receipt store down')\n"
+          }
+        ]
+      }
     },
     {
       "id": "missing-compensate",
@@ -134,7 +206,19 @@
       "file": "sagas/missing_compensate.rvl",
       "description": "The irreversible settlement declares no compensation, so a later failure has no recorded follow-up action.",
       "expected": "missed",
-      "component": "Checkout"
+      "component": "Checkout",
+      "temporal": {
+        "expected": "missed",
+        "workflow": "checkout",
+        "summary": "The settlement's compensation is never registered.",
+        "edits": [
+          {
+            "file": "workflows.ts",
+            "find": "    compensations.unshift(() => a.reverse('order-1', 4200))\n",
+            "replace": ""
+          }
+        ]
+      }
     },
     {
       "id": "wrong-refund-order",
@@ -144,7 +228,29 @@
       "file": "sagas/wrong_refund_order.rvl",
       "description": "The charge for one order is undone by a refund for a different order. The payment store is an opaque host boundary in this saga, so the fault sweep cannot see which order was refunded.",
       "expected": "missed",
-      "component": "Checkout"
+      "component": "Checkout",
+      "temporal": {
+        "expected": "missed",
+        "workflow": "checkout",
+        "summary": "The refund targets another order, behind a payment store the test cannot read.",
+        "edits": [
+          {
+            "file": "workflows.ts",
+            "find": "a.refund('order-1', 4200)",
+            "replace": "a.refund('order-2', 4200)"
+          },
+          {
+            "file": "activities.ts",
+            "find": "    state.payments.set(order, cents)\n",
+            "replace": "    // the payment store is an opaque host boundary: no state a test can read\n"
+          },
+          {
+            "file": "activities.ts",
+            "find": "    const held = state.payments.get(order) ?? 0\n    if (held === cents) {\n      state.payments.delete(order)\n    } else {\n      state.payments.set(order, held - cents)\n    }\n",
+            "replace": "    // the payment store is an opaque host boundary: no state a test can read\n"
+          }
+        ]
+      }
     },
     {
       "id": "wrong-release-sku",
@@ -154,7 +260,24 @@
       "file": "sagas/wrong_release_sku.rvl",
       "description": "The two inventory holds release each other's sku: the first hold's undo releases the second hold's key and the second's releases the first's. The derived order is mechanically LIFO, but the hand-written inverse targets are swapped, so the first hold's own key survives its step. The provider is Map-backed, so the sweep's host-residue check sees the un-reversed write.",
       "expected": "fault-test",
-      "component": "Checkout"
+      "component": "Checkout",
+      "temporal": {
+        "expected": "fault-test",
+        "workflow": "checkout",
+        "summary": "Two holds release each other's sku.",
+        "edits": [
+          {
+            "file": "workflows.ts",
+            "find": "    compensations.unshift(() => a.release('sku-1', 1))\n    await a.reserve('sku-1', 1)\n",
+            "replace": "    compensations.unshift(() => a.release('sku-2', 1))\n    await a.reserve('sku-1', 1)\n"
+          },
+          {
+            "file": "workflows.ts",
+            "find": "    // step 2: authorize the payment\n    compensations.unshift(() => a.refund('order-1', 4200))\n    await a.charge('order-1', 4200)\n",
+            "replace": "    // step 2: hold the second item\n    compensations.unshift(() => a.release('sku-1', 1))\n    await a.reserve('sku-2', 1)\n"
+          }
+        ]
+      }
     },
     {
       "id": "partial-refund",
@@ -165,7 +288,19 @@
       "description": "The charge is undone by a refund of half the amount: the inverse is present and well-shaped but reverts only part of the effect. The ledger provider keeps the charged amount in a `Map` and a refund subtracts from it, so half a refund leaves the other half behind; the sweep's host-residue check sees that residue (with a full refund the same saga passes every sweep unit).",
       "changedAfterMeasurement": "The first version's provider removed the whole row on any refund, so the defect could not show and the row was measured as `missed`. After that measurement the provider was changed to keep the amount, and the description and the expected verdict (now `fault-test`) were rewritten.",
       "expected": "fault-test",
-      "component": "Checkout"
+      "component": "Checkout",
+      "temporal": {
+        "expected": "fault-test",
+        "workflow": "checkout",
+        "summary": "The refund returns half of the charge.",
+        "edits": [
+          {
+            "file": "workflows.ts",
+            "find": "a.refund('order-1', 4200)",
+            "replace": "a.refund('order-1', 2100)"
+          }
+        ]
+      }
     },
     {
       "id": "noop-compensation",
@@ -175,7 +310,19 @@
       "file": "sagas/noop_compensation.rvl",
       "description": "The compensation calls a helper that returns success without reversing anything.",
       "expected": "missed",
-      "component": "Checkout"
+      "component": "Checkout",
+      "temporal": {
+        "expected": "missed",
+        "workflow": "checkout",
+        "summary": "The settlement's compensation does nothing.",
+        "edits": [
+          {
+            "file": "activities.ts",
+            "find": "    state.reversed.push(order)\n",
+            "replace": "    // returns success without reversing anything\n"
+          }
+        ]
+      }
     },
     {
       "id": "double-release",
@@ -185,7 +332,62 @@
       "file": "sagas/double_release.rvl",
       "description": "The compensation and the hold's own inverse release the same hold; the second release is a silent no-op in this provider.",
       "expected": "missed",
-      "component": "Checkout"
+      "component": "Checkout",
+      "temporal": {
+        "expected": "missed",
+        "workflow": "checkout",
+        "summary": "The settlement's compensation releases the hold the hold's own compensation releases.",
+        "edits": [
+          {
+            "file": "workflows.ts",
+            "find": "a.reverse('order-1', 4200)",
+            "replace": "a.release('sku-1', 1)"
+          }
+        ]
+      }
+    }
+  ],
+  "temporalOnly": [
+    {
+      "id": "wrong-lifo-order",
+      "kind": "wrong-lifo-order",
+      "description": "The compensations are pushed instead of unshifted, so the unwind runs oldest first. Cannot be written in revl: teardown order is derived from source order, and the only author control is the target of each inverse. It is scored here because Temporal TypeScript lets the author write the order.",
+      "temporal": {
+        "expected": "fault-test",
+        "workflow": "checkout",
+        "summary": "The unwind order is reversed.",
+        "edits": [
+          {
+            "file": "workflows.ts",
+            "find": "    compensations.unshift(() => a.release('sku-1', 1))\n",
+            "replace": "    compensations.push(() => a.release('sku-1', 1))\n"
+          },
+          {
+            "file": "workflows.ts",
+            "find": "    compensations.unshift(() => a.refund('order-1', 4200))\n",
+            "replace": "    compensations.push(() => a.refund('order-1', 4200))\n"
+          },
+          {
+            "file": "workflows.ts",
+            "find": "    compensations.unshift(() => a.reverse('order-1', 4200))\n",
+            "replace": "    compensations.push(() => a.reverse('order-1', 4200))\n"
+          }
+        ]
+      }
+    }
+  ],
+  "temporalControls": [
+    {
+      "id": "checkout-clean",
+      "description": "The clean checkout port, no seeded change.",
+      "workflow": "checkout",
+      "edits": []
+    },
+    {
+      "id": "migrator-clean",
+      "description": "The port of examples/migrator.rvl, no seeded change: a lock, an await and an emission with a compensation.",
+      "workflow": "migrator",
+      "edits": []
     }
   ]
 }

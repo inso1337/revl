@@ -3110,6 +3110,8 @@ jobs:
       # go back to failing on the toolchain rather than on revl. Prove it first.
       - run: temporal --version
       - run: cd tests/temporal_exit && npm ci
+      # the seeded-defect saga corpus scores its Temporal ports on the same server
+      - run: cd bench/saga_defects/temporal && npm ci
       - name: Boot a Temporal dev server and wait for it
         run: |
           temporal server start-dev --headless --ip 127.0.0.1 --port 7233 \
@@ -3121,7 +3123,7 @@ jobs:
             sleep 2
           done
           echo "the Temporal dev server never became healthy"; cat /tmp/temporal-dev.log; exit 1
-      - run: pytest tests/test_temporal_exit_saga.py backends/typescript/test_temporal_target.py -q
+      - run: pytest tests/test_temporal_exit_saga.py tests/test_saga_defect_temporal_2736.py backends/typescript/test_temporal_target.py -q
         env:
           # The item-253 exit gate. Past it NOTHING skips: the test asserts on
           # node and the SDK install rather than skipping over them, so a
