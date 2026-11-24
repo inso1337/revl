@@ -547,6 +547,10 @@ def test_report_json_emits_per_test_payload_and_preserves_verdict(tmp_path):
     assert payload["total"] == 4
     assert payload["passed"] == 3
     assert payload["failed"] == 1
+    # issue #3508: the run's own payload states how many tests were collected
+    # (the `--list` number) and how many ran, so a runner needs one call
+    assert payload["collected"] == 4
+    assert payload["ran"] == 4
     assert [t["name"] for t in payload["tests"]] == [
         "one is one", "two is two", "empty body passes", "fails on purpose",
     ]
@@ -555,6 +559,19 @@ def test_report_json_emits_per_test_payload_and_preserves_verdict(tmp_path):
     assert statuses["one is one"] == "pass"
     assert statuses["fails on purpose"] == "fail"
     assert result.stderr == ""
+
+
+def test_report_json_states_collected_and_ran_under_a_filter(tmp_path):
+    # issue #3508: with `--filter P`, `collected` is the filtered count — the
+    # same number `--list --filter P` prints — and `ran` matches it, so the
+    # runner can check "every collected test ran" from this one call.
+    source = _write_rvl(tmp_path, "mixed.rvl", _MIXED)
+    result = _cli(tmp_path, str(source), "--report", "json", "--filter", "is")
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["collected"] == 2
+    assert payload["ran"] == 2
+    assert [t["name"] for t in payload["tests"]] == ["one is one", "two is two"]
 
 
 def test_report_tap_emits_tap_lines(tmp_path):
