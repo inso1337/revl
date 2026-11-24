@@ -66,6 +66,10 @@
 //     @go body uses an Encoder with `SetEscapeHTML(false)`).
 //   * KEY ORDER is record-declaration / insertion order (py dict, ts object).
 //   * booleans/null spelled `true`/`false`/`null`; ints exact incl. > 2^53.
+//   * an ABSENT Opt member keeps its key as `null` on every tier (issue #3642):
+//     py's None is already null; ts answers `null` from the replacer for the
+//     `undefined` a None member lowers to, where the bare `JSON.stringify`
+//     would DROP the key.
 //   * FLOATS: values that share a decimal form across Python and JS (e.g. 1.5,
 //     -0.25) are byte-identical; a WHOLE-NUMBER float (1.0 vs 1), -0.0, or an
 //     extreme-exponent float can still format differently between the two
@@ -411,6 +415,11 @@ pub extern pure fn json_stringify(v: Any) -> Str
       const prefix = "@@revlBigInt" + "0".repeat(zeros) + ":";
       const marks: string[] = [];
       const wire = JSON.stringify(v, (_k, x) => {
+        // issue #3642: an absent Opt member is `undefined` on this tier, and
+        // JSON.stringify DROPS an undefined member; py writes it as `null`.
+        // Answer `null` from the replacer so the key survives as `null`,
+        // byte-identical with py (top-level None included: "null").
+        if (x === undefined) { return null; }
         // JSON.stringify maps a non-finite number to `null`: a SILENT
         // substitution of a different value, not a refusal. A non-finite Float
         // is reachable (`/` is IEEE true division: `1.0/0.0` is `inf` on every

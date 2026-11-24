@@ -102,6 +102,21 @@ CORPUS = [
 #: exported json-tagged struct fields). GO_CORPUS is the full corpus.
 GO_CORPUS = list(CORPUS)
 
+#: absent/present Opt corpus (issue #3642): py writes an absent Opt member as
+#: `null` (None is Python None); ts must too — its replacer answers `null` for
+#: the `undefined` a None member lowers to, where bare `JSON.stringify` would
+#: DROP the key. py/ts only: a go record's Opt field lowers to the RevlOpt
+#: struct (item 434), whose wire form is the go record caveat, not this contract.
+OPT_CORPUS = [
+    ("record_absent_opt",
+     'type R = { a: Opt[Str], c: Str }\nfn v() -> R { return { a: None, c: "y" } }',
+     r'{"a":null,"c":"y"}'),
+    ("record_present_opt",
+     'type R = { a: Opt[Str], c: Str }\nfn v() -> R { return { a: Some("x"), c: "y" } }',
+     r'{"a":"x","c":"y"}'),
+    ("opt_none_scalar", 'fn v() -> Opt[Int] { return None }', r'null'),
+]
+
 
 def _run(tier: str, decl: str, expected: str) -> tuple[str, str]:
     """Compile a probe that asserts `json_stringify(v()) == expected` and run it
@@ -120,8 +135,8 @@ def _run(tier: str, decl: str, expected: str) -> tuple[str, str]:
     return RUNNERS[tier](ir)
 
 
-@pytest.mark.parametrize("name,decl,expected", CORPUS,
-                         ids=[c[0] for c in CORPUS])
+@pytest.mark.parametrize("name,decl,expected", CORPUS + OPT_CORPUS,
+                         ids=[c[0] for c in CORPUS + OPT_CORPUS])
 @pytest.mark.parametrize("tier", ["py", "ts"])
 def test_py_and_ts_emit_the_canonical_bytes(tier, name, decl, expected):
     """py and ts — the two primary tiers, and the two the verified bug split —
