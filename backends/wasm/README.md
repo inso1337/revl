@@ -195,6 +195,36 @@ boundary shapes the substrate carries, with the exact refusal each emits — is
   but deliberately did not itself carry: "a host wanting to build a real WAL on
   this tier" is exactly `run_wasm`'s drain.
 
+## Confinement on the run path (issue #3189)
+
+`revl run --backend wasm` applies the boundary policy's wasm component limits
+to every component it boots, not only to a quarantine candidate. `run_wasm`
+resolves the ceilings once (`wasm_confinement.limits_from_policy`: conservative
+defaults with no policy, and a `wasm components confined` policy that names no
+limits is refused) and passes them in the harness spec. The harness builds an
+`Engine` configured for fuel and epoch interruption, installs a store limiter,
+and gives every store the fuel budget, the linear-memory ceiling and a
+wall-clock epoch deadline before any module is plugged. A composition that hits
+a ceiling traps, reports `PARTIAL` with the runtime's reason on a `note raised`
+line, and exits nonzero. A harness that outlives the wall ceiling (plus a
+startup grace) is killed together with its whole process group, and the same
+kill runs if the driver is interrupted (Ctrl-C) or fails while the harness is
+alive.
+
+The `wall` ceiling is an epoch deadline fixed when each store is created, so it
+measures elapsed wall time since that component was plugged, not that
+component's own execution time. In a composition of several components the
+first component's deadline therefore spans every later boot and the whole
+teardown: a composition whose total round trip exceeds `wall` is stopped (a
+ceiling that traps during teardown fails the round trip) even though no single
+component ran that long. Size `wall` for the whole boot-to-teardown round trip.
+
+The emitted module's import section is also read back from the bytes the
+harness will compile and held to the same byte-level check the canonical and
+quarantine paths apply (`check_component_imports`). If the installed runtime or
+wasmtime cannot apply a ceiling, the harness refuses to run rather than run the
+composition unconfined.
+
 ## Widths: `Int` is i64, addresses are i32
 
 `Int` is 64-bit two's complement with trapping overflow on every revl tier

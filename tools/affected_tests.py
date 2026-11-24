@@ -132,6 +132,10 @@ BENCH_DEPENDENT_TESTS = (
     # corpus data and the refusal codes, and (in the slow lane) re-measures
     # every row against the committed table.
     "tests/test_saga_defect_corpus_2736.py",
+    # Issue #2736, second slice: loads `bench/saga_defects/run_temporal.py`,
+    # derives every Temporal port, and checks the committed Temporal results
+    # against the corpus data and the revl results.
+    "tests/test_saga_defect_temporal_2736.py",
     # Issues #2195 / #2197: loads `bench/admission_latency.py` by path and runs
     # its scenario against the compile hot path.
     "tests/test_compile_hot_path_2195_2197.py",
@@ -256,6 +260,10 @@ SELFHOST_ORACLE_TESTS = {
     "checker": ("tests/test_selfhost_checker.py",),
     "compile": ("tests/test_selfhost_compile.py",),
     "emit_go": ("tests/test_selfhost_emit_go.py",),
+    # The Go emitter is split across files (issue #3098); one oracle covers all.
+    "emit_go_comp": ("tests/test_selfhost_emit_go.py",),
+    "emit_go_core": ("tests/test_selfhost_emit_go.py",),
+    "emit_go_module": ("tests/test_selfhost_emit_go.py",),
     "emit_java": ("tests/test_selfhost_emit_java.py",),
     "emit_py": ("tests/test_selfhost_emit_py.py",),
     "emit_rust": ("tests/test_selfhost_emit_rust.py",),
@@ -1795,6 +1803,17 @@ def select(changed, root) -> dict:
             pytest_nodes |= hits
             reasons.append(f"src/revl/{module} (leaf)")
             continue
+        # --- claims (issue #2846) ------------------------------------------- #
+        # The root registry and the repository gate have no `test_<stem>.py`
+        # for the generic tools/ rule to find, so without this arm each falls
+        # to FULL. The compiler-side parser needs no arm: the `src/revl/**`
+        # block above selects the tests that import `revl.claims`.
+        if f in ("claims.toml", "tools/check_claims.py"):
+            pytest_nodes.add("tests/test_claims.py")
+            pytest_nodes.add("tests/test_claims_gate.py")
+            reasons.append(f"{f} (claims registry + repo gate)")
+            continue
+
         if f.startswith("src/"):
             return _full(f"unmapped source path {f} -> full")
 

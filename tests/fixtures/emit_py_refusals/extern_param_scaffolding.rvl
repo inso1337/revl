@@ -1,0 +1,3 @@
+// A parameter in the emitter's `_revl*` scaffolding namespace cannot keep the
+// spelling an inline `@py` body uses (issue #3604).
+extern pure fn g(_revl_config: Int) -> Int = @py { return 1 }

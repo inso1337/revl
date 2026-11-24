@@ -24,6 +24,7 @@ the cordis-py runtime (they skip when it is absent, never reported as passing).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -51,8 +52,25 @@ _BASE = """composition Demo {
 %(stack)s}
 """
 
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
 _PINNED = {"lockVersion": 1,
-           "trucs": [{"name": "pg_database", "sourceHash": "a" * 64}]}
+           "trucs": [{"name": "pg_database", "sourceHash": _sha(_PG_COMPONENT)}]}
+
+
+def _pin(proj: Path, name: str) -> None:
+    """Pin `name` in `truc.lock` to the real hash of its vendored
+    `component.rvl`, the pin `truc add` writes."""
+    lock_path = proj / "truc.lock"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    digest = _sha((proj / "trucs" / name / "component.rvl").read_text(
+        encoding="utf-8"))
+    for row in lock["trucs"]:
+        if row["name"] == name:
+            row["sourceHash"] = digest
+    lock_path.write_text(json.dumps(lock, indent=2), encoding="utf-8")
 
 
 def _project(tmp_path: Path, *, stack: str = "", lock: dict | None = _PINNED,
@@ -93,6 +111,7 @@ def _add_metrics_kit(proj: Path) -> None:
         "layer MetricsKit for Demo {\n"
         '  add row @metrics from "component.rvl" provides metrics\n'
         "}\n")
+    _pin(proj, "metrics_kit")
 
 
 def _add_evil_layer(proj: Path) -> None:
@@ -101,10 +120,12 @@ def _add_evil_layer(proj: Path) -> None:
     (proj / "secret.rvl").write_text(_PG_COMPONENT)
     evil = proj / "trucs" / "evil"
     evil.mkdir(parents=True, exist_ok=True)
+    (evil / "component.rvl").write_text(_PG_COMPONENT, encoding="utf-8")
     (evil / "layer.rvl").write_text(
         "layer Evil for Demo {\n"
         '  add row @stolen from "../../secret.rvl" provides db\n'
         "}\n")
+    _pin(proj, "evil")
 
 
 # --------------------------------------------------------------------------- #
@@ -165,6 +186,81 @@ def test_apply_admits_a_pinned_composition_and_writes_the_assembly(tmp_path):
     assembly = proj / "build" / "assembly.json"
     assert assembly.exists()
     assert "PgDb" in assembly.read_text(encoding="utf-8")
+
+
+def test_apply_refuses_a_vendored_component_that_no_longer_matches_its_pin(
+        tmp_path):
+    """Issue #3207. The pin is an integrity proof, not only a presence check: a
+    vendored `component.rvl` changed after it was pinned is refused with the
+    `hash drift` wording `truc assemble --check` uses, and build/ never appears."""
+    proj = _project(tmp_path)
+    assert json.loads(_host.apply(str(proj), False))["code"] == 0
+    pinned = _sha(_PG_COMPONENT)
+    component = proj / "trucs" / "pg_database" / "component.rvl"
+    component.write_text(_PG_COMPONENT.replace("fn query(q) = q",
+                                               "fn query(q) = q + q"))
+    report = json.loads(_host.apply(str(proj), False))
+    assert report["code"] == 1
+    assert "hash drift" in report["message"]
+    assert "trucs/pg_database/component.rvl" in report["message"]
+    assert pinned in report["message"]
+    assert report["sources"] == ""
+    _host.write_assembly(str(proj), report["sources"])
+    assert not (proj / "build").exists()
+
+
+def test_apply_refuses_a_stack_truc_whose_component_no_longer_matches_its_pin(
+        tmp_path):
+    """Issue #3207, stack side: a vendored stack layer reads its own truc's
+    component, so the check must fire where the project names the layer."""
+    proj = _records_project(
+        tmp_path, site="  grant records_kit::@records with { approvals, writer }\n")
+    assert json.loads(_host.apply(str(proj), False))["code"] == 0
+    component = proj / "trucs" / "records_kit" / "component.rvl"
+    component.write_text(component.read_text(encoding="utf-8") + "// edited\n")
+    report = json.loads(_host.apply(str(proj), False))
+    assert report["code"] == 1
+    assert "hash drift" in report["message"]
+    assert "trucs/records_kit/component.rvl" in report["message"]
+    assert report["sources"] == ""
+
+
+def test_apply_refuses_a_stack_truc_with_no_lock_row(tmp_path):
+    """A vendored stack layer is reached through the pin like a row is: no lock
+    row for its truc is refused as an unpinned truc."""
+    proj = _records_project(
+        tmp_path, site="  grant records_kit::@records with { approvals, writer }\n")
+    (proj / "truc.lock").write_text(json.dumps({"lockVersion": 1, "trucs": []}),
+                                    encoding="utf-8")
+    report = json.loads(_host.apply(str(proj), False))
+    assert report["code"] == 1
+    assert "unpinned truc" in report["message"]
+
+
+def test_apply_refuses_a_pinned_truc_whose_component_is_gone_or_not_text(
+        tmp_path):
+    """A pinned component replaced by bytes that are not UTF-8 is a mismatch
+    with the pin, not a crash; a deleted one is refused as a missing source."""
+    proj = _project(tmp_path)
+    component = proj / "trucs" / "pg_database" / "component.rvl"
+    component.write_bytes(b"\xff\xfe\x00")
+    report = json.loads(_host.apply(str(proj), False))
+    assert report["code"] == 1 and "hash drift" in report["message"]
+    component.unlink()      # refused earlier still: the row's source is gone
+    report = json.loads(_host.apply(str(proj), False))
+    assert report["code"] == 1 and "does not exist" in report["message"]
+
+
+def test_stack_check_refuses_a_vendored_component_that_no_longer_matches_its_pin(
+        tmp_path):
+    """Issue #3207, resolution side: `stack check` resolves through the same
+    gate, so a drifted vendored component is refused there too."""
+    proj = _project(tmp_path)
+    (proj / "trucs" / "pg_database" / "component.rvl").write_text(
+        _PG_COMPONENT + "\n", encoding="utf-8")
+    report = json.loads(_host.stack_check(str(proj)))
+    assert report["code"] == 1
+    assert "hash drift" in report["message"]
 
 
 def test_apply_refuses_an_unpinned_truc_and_leaves_build_untouched(tmp_path):
@@ -234,7 +330,8 @@ def _records_project(tmp_path: Path, site: str | None) -> Path:
         '[assembly]\nname = "demo"\nentry = ["base.rvl"]\n')
     (tmp_path / "truc.lock").write_text(json.dumps(
         {"lockVersion": 1,
-         "trucs": [{"name": "records_kit", "sourceHash": "a" * 64}]}))
+         "trucs": [{"name": "records_kit", "sourceHash": _sha(
+             (kit / "component.rvl").read_text(encoding="utf-8"))}]}))
     return tmp_path
 
 

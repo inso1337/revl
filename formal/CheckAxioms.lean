@@ -24,6 +24,18 @@ import RevL
 #print axioms RevL.G2.linkOK_requires_closed
 #print axioms RevL.G2.realm_separation_admitted
 #print axioms RevL.G2.same_realm_conflict_refused
+-- G2 over the IR image (issue #2739): the invariant stated over the lowered
+-- document the BACKENDS read (`provides`, the sparse `isolate` map and the
+-- document's own `templates`), from the source composition's link judgment and
+-- the document keeping the source's slots, with the admitted tenants document
+-- and the lost-realm and template mutations as witnesses.
+#print axioms RevL.G2.source_linkOK_ir_disjoint
+#print axioms RevL.G2.ir_disjoint_iff_source_disjoint
+#print axioms RevL.G2.tenants_ir_kept
+#print axioms RevL.G2.tenants_ir_disjoint
+#print axioms RevL.G2.isolate_entry_is_load_bearing
+#print axioms RevL.G2.lost_realm_is_caught_by_kept
+#print axioms RevL.G2.template_exclusion_is_load_bearing
 
 -- G3: the layering certificate excludes dependency cycles, and the link
 -- judgment supplies the certificate (so the hypothesis is dischargeable).
@@ -187,6 +199,19 @@ import RevL
 #print axioms RevL.G9.authority_refusal_is_not_universal
 #print axioms RevL.G9.sink_rules_are_distinct
 #print axioms RevL.G9.secret_refusal_is_load_bearing
+
+-- G9 two-run non-interference over a value model (issue #2738): the flow
+-- rules above are stated for labels; these are stated for runs of the value
+-- model in RevL.Lemmas.TaintLemmas, where crossings and joins add the inputs
+-- they read. The two breaking witnesses show the `Flow` hypothesis and the
+-- `confidential` proviso are load-bearing.
+#print axioms RevL.G9.secret_noninterference
+#print axioms RevL.G9.leak_needs_declassifier
+#print axioms RevL.G9.execution_labels_match_the_flow
+#print axioms RevL.G9.endorse_gate_preserves_foreign_origins
+#print axioms RevL.G9.noninterference_witness
+#print axioms RevL.G9.declassify_breaks_noninterference
+#print axioms RevL.G9.unadmitted_secret_endorse_breaks_noninterference
 
 -- TODO 3 / R4: the abort's residue surface is exactly what the runtime
 -- reports, stated over the small-step semantics that accumulates the log
@@ -597,3 +622,16 @@ import RevL
 #print axioms RevL.A5.fixtures_decided
 #print axioms RevL.A5.a5_not_vacuous
 #print axioms RevL.A5.witness_bites
+
+-- Issue #2741: a two-member parallel fan-out group over the shipped `SemStep`.
+-- `ParStep`/`ParSteps` run both members against one shared world and log, so
+-- G7 and A8 do not move. The theorems say every interleaving is a sequential
+-- run, what the abort that follows leaves (R4's equation), and why a member
+-- the plan-order run skips must have an inverse; see
+-- RevL/Theorems/ParallelFanout.lean.
+#print axioms RevL.Fanout.par_run_is_a_sequential_run
+#print axioms RevL.Fanout.group_abort_leaves_exactly_the_emissions
+#print axioms RevL.Fanout.group_abort_reverts_when_nothing_crossed
+#print axioms RevL.Fanout.both_interleavings_are_taken
+#print axioms RevL.Fanout.over_fired_witnessed_member_is_undone
+#print axioms RevL.Fanout.over_fired_emission_is_residue

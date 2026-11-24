@@ -44,6 +44,7 @@ import json
 import socket
 import sys
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -949,6 +950,25 @@ def test_every_link_is_reached_at_runtime_by_this_file(tmp_path):
     runner.handle(honest_task(record, task_id="t-once"))
     reached.add(runner.handle(honest_task(record,
                                           task_id="t-once"))["link"])
+    # issue #3154: a task issued long ago, and a peer that cannot write its
+    # run record down.
+    stale = pd.build_task(
+        pool_id=record["pool_id"],
+        charter_digest=pp.canonical_digest(record), peer_id=WORKER,
+        task_id="t-stale", artifact=PURE_SOURCE, runner=pd.RUNNER_TEST_PY,
+        effect_class=EffectClass.PURE,
+        at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+        grant={"caps": sorted(ENTRY_CAPS), "budgets": {}},
+        policy_digest=pp.canonical_digest(record))
+    reached.add(runner.handle(pd.sign_task(stale, OPERATOR_ID))["link"])
+    unwritable = tmp_path / "not-a-directory"
+    unwritable.write_text("x", encoding="utf-8")
+    keeper = pd.PeerRunner(
+        charter_record=record, identity=WORKER_ID,
+        operator_public=OPERATOR_ID.public(),
+        workspace=tmp_path / "keeper-work", timeout=120.0)
+    keeper.seen_path = unwritable / pd.SEEN_FILE
+    reached.add(keeper.handle(honest_task(record, task_id="t-keep"))["link"])
 
     ledger = _ledger_with_one_dispatch()
     reached.add(ledger.dispatch(task_id="t-1", peer_id=WORKER,

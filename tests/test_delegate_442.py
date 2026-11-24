@@ -13,13 +13,15 @@ This slice adds the typed handle and confines it, reusing shipped machinery:
     exactly as it confines an acquire handle, so it cannot escape the scope
     that received it (design §3.3 D2, §4.3 C3/C4).
 
-Checker-only, no new grammar. Verdict-invariant for every existing program:
-nothing in the shipped corpus names `Delegate`.
+This file covers the type and confinement half: the typed handle, the borrow
+confinement (D2/B1), and the depth bound (D4). The mint (`effect lease` naming
+a wiring key), the delegatee's typed call, the ledger record and the runtime
+crossing live in `tests/test_delegate_442_mint.py`,
+`tests/test_delegate_442_ledger.py` and `tests/test_delegate_442_runtime.py`.
 
-Not in this slice (see the PR body / roadmap remainder): the mint (`effect
-lease` naming a wiring key, yielding the typed handle), the D3 augmented-graph
-acyclicity check, the D4 depth bound at a call argument, the ledger `subject` /
-`chain` fields, and the `revl audit` surface.
+Still out: D3's augmented-graph acyclicity check, D2's dedicated clause-5
+diagnostic (B1's generic borrow diagnostic covers the position today), and the
+`revl audit` surface.
 """
 
 import sys

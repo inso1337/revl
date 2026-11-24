@@ -120,6 +120,16 @@ sitting beside the executable (the packaged install layout), and finally a
 runtime archive **baked into the executable itself**. `REVL_LSP_CACHE` and
 `REVL_LSP_RUNTIME_PIN` override where and under what key the cache lands.
 
+The cache root is `REVL_LSP_CACHE`, else an absolute `XDG_CACHE_HOME`, else
+`$HOME/.cache`; it is never the shared temp directory, and with none of those
+available the engine reports a visible diagnostic instead of extracting. A
+relative `XDG_CACHE_HOME` or `HOME` is ignored and a relative `REVL_LSP_CACHE`
+is refused, since they would resolve against the editor's working directory.
+An already-extracted `<pin>` tree is reused only when the user running the
+server owns it (and its parent directory) and neither its group nor others can
+write it; anything else is refused with a diagnostic naming the path, and the
+fix is to remove it so the runtime is extracted afresh.
+
 The first four name the runtime as a SEPARATE file, so the distributable is the
 binary plus that file. The baked-in source is the genuinely single distributed
 FILE: a build that sets `REVL_LSP_EMBED_RUNTIME` to a pinned runtime archive

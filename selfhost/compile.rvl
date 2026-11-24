@@ -2464,21 +2464,35 @@ fn ad_used_modules_refusal(source: Str, path: Str) -> Str {
 // `pub fn`, a `pub type`, a `pub extern` and every `service`, `pub` or not
 // (`_LoadedModule.public_fns`, `public_types`, `public_externs`, `services`).
 // `fns`, `types` and `externs` hold the names declared without `pub`.
-type AdDecls = { open: List[Str], fns: List[Str], types: List[Str], externs: List[Str] }
+// `values` holds the `pub` fn and extern names; `vnames` and `vlines` every fn and
+// extern name with its line, whatever its visibility (issue #3364).
+type AdDecls = { open: List[Str], fns: List[Str], types: List[Str], externs: List[Str],
+                 values: List[Str], vnames: List[Str], vlines: List[Int] }
 
 // `decls` with the name `name` of a declaration of kind `kind` ("fn", "type",
-// "extern" or "service") added, open when `public` says so.
-fn ad_add_decl(decls: AdDecls, kind: Str, name: Str, public: Bool) -> AdDecls {
+// "extern" or "service") added, open when `public` says so. A fn or extern also
+// joins `values` when public, and `vnames` with its `line` (the line of its `fn`
+// or, for an extern, of its `extern` keyword) whatever its visibility: those two
+// are what an importing module may not redeclare (issue #3364).
+fn ad_add_decl(decls: AdDecls, kind: Str, name: Str, public: Bool, line: Int) -> AdDecls {
+  let is_value = (kind == "fn") || (kind == "extern")
+  let values = (public && is_value) ? decls.values.push(name) : decls.values
+  let vnames = is_value ? decls.vnames.push(name) : decls.vnames
+  let vlines = is_value ? decls.vlines.push(line) : decls.vlines
   if (public || (kind == "service")) {
-    return { open: decls.open.push(name), fns: decls.fns, types: decls.types, externs: decls.externs }
+    return { open: decls.open.push(name), fns: decls.fns, types: decls.types, externs: decls.externs,
+             values: values, vnames: vnames, vlines: vlines }
   }
   if (kind == "fn") {
-    return { open: decls.open, fns: decls.fns.push(name), types: decls.types, externs: decls.externs }
+    return { open: decls.open, fns: decls.fns.push(name), types: decls.types, externs: decls.externs,
+             values: values, vnames: vnames, vlines: vlines }
   }
   if (kind == "type") {
-    return { open: decls.open, fns: decls.fns, types: decls.types.push(name), externs: decls.externs }
+    return { open: decls.open, fns: decls.fns, types: decls.types.push(name), externs: decls.externs,
+             values: values, vnames: vnames, vlines: vlines }
   }
-  return { open: decls.open, fns: decls.fns, types: decls.types, externs: decls.externs.push(name) }
+  return { open: decls.open, fns: decls.fns, types: decls.types, externs: decls.externs.push(name),
+           values: values, vnames: vnames, vlines: vlines }
 }
 
 // The declarations of the module tokens `ts`. Every head is read at bracket
@@ -2490,7 +2504,8 @@ fn ad_add_decl(decls: AdDecls, kind: Str, name: Str, public: Bool) -> AdDecls {
 // private type, as the reference parser records it. The
 // module parsed already (`ad_used_modules_refusal`), so no head is malformed.
 fn ad_decls(ts: List[Token]) -> AdDecls {
-  var out: AdDecls = { open: [], fns: [], types: [], externs: [] }
+  var out: AdDecls = { open: [], fns: [], types: [], externs: [], values: [], vnames: [], vlines: [] }
+  var extern_line = 0
   var depth = 0
   var public = false
   var in_extern = false
@@ -2508,16 +2523,20 @@ fn ad_decls(ts: List[Token]) -> AdDecls {
       let named = ad_kind(ts, at_name, "ident")
       if (w == "fn") {
         if (named) {
-          out = ad_add_decl(out, in_extern ? "extern" : "fn", ts[at_name].text, public)
+          out = ad_add_decl(out, in_extern ? "extern" : "fn", ts[at_name].text, public,
+                            in_extern ? extern_line : ts[i].line)
         }
         public = false
         in_extern = false
       }
       if (((w == "type") || (w == "service")) && named) {
-        out = ad_add_decl(out, w, ts[i + 1].text, public)
+        out = ad_add_decl(out, w, ts[i + 1].text, public, ts[i].line)
         public = false
       }
-      if (w == "extern") { in_extern = true }
+      if (w == "extern") {
+        in_extern = true
+        extern_line = ts[i].line
+      }
       if (w == "pub") { public = true }
       if ((w == "use") || (w == "component") || (w == "test")) {
         public = false
@@ -2527,7 +2546,7 @@ fn ad_decls(ts: List[Token]) -> AdDecls {
     // `event NAME(...)` / `event NAME { ... }` declares a private type.
     if ((depth == 0) && (k == "ident") && (ts[i].text == "event") && ad_kind(ts, i + 1, "ident")
         && (ad_kind(ts, i + 2, "(") || ad_kind(ts, i + 2, "{"))) {
-      out = ad_add_decl(out, "type", ts[i + 1].text, false)
+      out = ad_add_decl(out, "type", ts[i + 1].text, false, ts[i].line)
     }
     i += 1
   }
@@ -2557,14 +2576,39 @@ fn ad_use_refusal(ts: List[Token], i: Int, path: Str) -> Str {
   }
   if (!ad_kind(ts, i + 2, "{")) { return "" }
   let decls = ad_decls(lex_src(read_module_text(dep)))
+  var named: List[Str] = []
   var j = i + 3
   while (ad_kind(ts, j, "ident")) {
     let why = ad_name_refusal(decls, ts[j].text, dep)
     if (why != "") { return at.concat(why) }
+    if (ul_has(decls.values, ts[j].text)) { named = named.push(ts[j].text) }
     j += 1
     if (ad_kind(ts, j, ",")) { j += 1 }
   }
-  return ""
+  return ad_declared_locally_refusal(ad_decls(ts), named, target, ts[i].line)
+}
+
+// Issue #3364: a fn or extern that a `use` list imports may not also be declared
+// by the importing module (`compiler.py::_refuse_import_declared_locally`). Two
+// declarations of one name in a file are a duplicate; an import and a declaration
+// are the same collision. Refused at the earliest local declaration of an
+// imported name, "" when none is declared. `named` holds the imported names that
+// are a fn or extern of the used module, `local` the importer's own declarations.
+fn ad_declared_locally_refusal(local: AdDecls, named: List[Str], target: Str,
+                               use_line: Int) -> Str {
+  var best = 0 - 1
+  var k = 0
+  while (k < local.vnames.length()) {
+    if (ul_has(named, local.vnames[k]) && ((best < 0) || (local.vlines[k] < local.vlines[best]))) {
+      best = k
+    }
+    k += 1
+  }
+  if (best < 0) { return "" }
+  let line = local.vlines[best].to_str()
+  return "line ".concat(line).concat(": `").concat(local.vnames[best]).concat("` is imported from ")
+    .concat(target).concat(" on line ").concat(use_line.to_str()).concat(" and declared on line ")
+    .concat(line).concat("; rename one of them")
 }
 
 // `REFUSED|BAD|<module>: line N: <message>` for the first `use`, breadth first

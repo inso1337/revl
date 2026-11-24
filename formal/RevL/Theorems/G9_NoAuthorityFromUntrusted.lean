@@ -522,4 +522,234 @@ theorem g9_context_hypotheses_are_inhabited :
       decide
     exact h "web.fetch" (by simp [untrustedCtx]) hw
 
+/-! ## Two-run non-interference over a value model (issue #2738)
+
+The theorems above are rules at the sink: they say which labels an
+admitted path may carry, never what a run computes. The ledger once sold
+the `Trusted[T]`/`Secret[T]` half as "non-interference **Done**", which a
+reader takes for the Goguen-Meseguer property. This section states a
+two-run property over the value model in `RevL.Lemmas.TaintLemmas` (`Val`,
+`VStep`, `stepV`, `execV`), where crossings and joins ADD the inputs they
+read to the running data.
+
+`secret_noninterference`: two runs of one admitted `Flow` whose inputs
+agree wherever the disclosure sink can see them (`InputsAgree`) end with
+the flow's output label, and with the same data whenever that label is
+admitted by a disclosure sink, provided no declassifier on the path clears
+`confidential`. Both hypotheses on the declassifiers do work:
+`unadmitted_secret_endorse_breaks_noninterference` shows the `Flow`
+hypothesis cannot be dropped (an `endorse[secret]` that `Flow` refuses
+makes the output observable and different), and
+`declassify_breaks_noninterference` shows the `confidential` proviso
+cannot be dropped (an admitted `endorse[confidential]` publishes the
+data). `leak_needs_declassifier` is the
+contrapositive: an observable difference needs a declassifier that clears
+`confidential` on the path.
+
+**What this is not.** It is a property of a model defined here, not of the
+language and not of the Python checker, which the differential oracle
+decides on the corpus; `RevL.G9Flow` and the oracle do not read these
+definitions. The observer is the disclosure sink only. Implicit flows
+(control dependence), timing, termination, the other sinks and the
+emission surface are not modelled, and the data of a run is a sum, not an
+arbitrary computation. -/
+
+/-- **Two-run non-interference of the value model.** See the section
+header. The label half says both runs end with the flow's own output
+label (`execution_labels_match_the_flow`); the data half is the content. -/
+theorem secret_noninterference {P : Profile} {G : Grants}
+    {ℓin ℓout : Label} {st : List VStep} {ρ₁ ρ₂ : Inputs}
+    (hf : Flow P G ℓin (st.map VStep.toStep) ℓout)
+    (hag : InputsAgree ρ₁ ρ₂ st)
+    (hnc : ∀ d, VStep.declassify d ∈ st → ¬ Clears d Origin.confidential)
+    (v₁ v₂ : Val) (h₁ : v₁.label = ℓin) (h₂ : v₂.label = ℓin)
+    (hin : Admits Sink.disclosure ℓin → v₁.data = v₂.data) :
+    (execV ρ₁ st v₁).label = ℓout ∧ (execV ρ₂ st v₂).label = ℓout ∧
+    (Admits Sink.disclosure ℓout →
+      (execV ρ₁ st v₁).data = (execV ρ₂ st v₂).data) :=
+  execV_lowEq st v₁ v₂ hf hag hnc h₁ h₂ hin
+
+/-- **The declassification exception.** If the two runs end observable and
+with different data, a declassifier on the path clears `confidential`.
+This is the contrapositive of `secret_noninterference`, so the exception
+is the one thing the theorem excludes, not a separate assumption. -/
+theorem leak_needs_declassifier
+    {P : Profile} {G : Grants} {ℓin ℓout : Label} {st : List VStep}
+    {ρ₁ ρ₂ : Inputs}
+    (hf : Flow P G ℓin (st.map VStep.toStep) ℓout)
+    (hag : InputsAgree ρ₁ ρ₂ st)
+    (v₁ v₂ : Val) (h₁ : v₁.label = ℓin) (h₂ : v₂.label = ℓin)
+    (hin : Admits Sink.disclosure ℓin → v₁.data = v₂.data)
+    (hobs : Admits Sink.disclosure ℓout)
+    (hdiff : (execV ρ₁ st v₁).data ≠ (execV ρ₂ st v₂).data) :
+    ∃ d, VStep.declassify d ∈ st ∧ Clears d Origin.confidential := by
+  by_cases h : ∃ d, VStep.declassify d ∈ st ∧ Clears d Origin.confidential
+  · exact h
+  · exfalso
+    have hnc : ∀ d, VStep.declassify d ∈ st → ¬ Clears d Origin.confidential :=
+      fun d hd hc => h ⟨d, hd, hc⟩
+    exact hdiff ((secret_noninterference hf hag hnc v₁ v₂ h₁ h₂ hin).2.2 hobs)
+
+/-- The label of a run is the label `Flow` states for the same path. -/
+theorem execution_labels_match_the_flow {P : Profile} {G : Grants}
+    {ℓin ℓout : Label} {st : List VStep} {ρ : Inputs}
+    (hf : Flow P G ℓin (st.map VStep.toStep) ℓout)
+    (v : Val) (hv : v.label = ℓin) :
+    (execV ρ st v).label = ℓout :=
+  execV_label_eq st v hf hv
+
+/-- **An `endorse[o]` gate cannot launder a foreign origin.** A path whose
+declassifiers are all `endorse[o]` leaves every other origin on the label
+(the semantic form of item 249, Finding 1). -/
+theorem endorse_gate_preserves_foreign_origins {st : List VStep}
+    {o o' : Origin} {ρ : Inputs} {v : Val}
+    (hgate : ∀ d, VStep.declassify d ∈ st → d.kind = DeclassKind.endorse o)
+    (hne : o' ≠ o) (ho : o' ∈ v.label) :
+    o' ∈ (execV ρ st v).label := by
+  refine execV_preserves_uncleared_origin o' ρ st v ?_ ho
+  intro d hd hcl
+  have hk := hgate d hd
+  have hb : (o == o') = true := by
+    simpa [Clears, hk, clearsB] using hcl
+  exact hne (eq_of_beq hb).symm
+
+/-! ### Non-vacuity witnesses (roadmap item 418, step 8) -/
+
+/-- Input data for the witnesses. -/
+def inputsA : Inputs := fun i => i + 3
+
+/-- Agrees with `inputsA` at input 0 and differs at every other input. -/
+def inputsB : Inputs := fun i => if i = 0 then 3 else i + 100
+
+/-- A path that reads only input 0, a `web` crossing. -/
+def observablePath : List VStep := [VStep.source Origin.web 0, VStep.propagate]
+
+/-- A path that reads two inputs: a `web` crossing and an `fs` join. -/
+def secretPath : List VStep :=
+  [VStep.source Origin.web 0, VStep.join [Origin.fs] 1, VStep.propagate]
+
+/-- **The theorem is not vacuous, on both sides of the observer.**
+
+* An observable run: a public entry value and a `web` crossing, run on two
+  input assignments that differ at input 1 and agree at input 0, the only
+  one read. The output label is admitted by the disclosure sink and the
+  two data agree, derived from `secret_noninterference`.
+* A `secret`-labelled entry value, 7 against 9, run through the same kind
+  of path with a `web` crossing and an `fs` join: both runs end with the
+  flow's label, which carries `secret`, so the disclosure sink does not
+  admit it, and the data really do differ. The observer cannot see the
+  difference and the theorem says nothing about it, which is the point. -/
+theorem noninterference_witness :
+    (Flow untrustedAuthor [] [] [Step.source Origin.web, Step.propagate]
+        [Origin.web] ∧
+      Admits Sink.disclosure ([Origin.web] : Label) ∧
+      (execV inputsA observablePath ⟨4, []⟩).data =
+        (execV inputsB observablePath ⟨4, []⟩).data ∧
+      inputsA 1 ≠ inputsB 1) ∧
+    (Flow untrustedAuthor [] [Origin.secret]
+        [Step.source Origin.web, Step.join [Origin.fs], Step.propagate]
+        [Origin.fs, Origin.web, Origin.secret] ∧
+      ¬ Admits Sink.disclosure ([Origin.fs, Origin.web, Origin.secret] : Label) ∧
+      (execV inputsA secretPath ⟨7, [Origin.secret]⟩).label =
+        [Origin.fs, Origin.web, Origin.secret] ∧
+      (execV inputsA secretPath ⟨9, [Origin.secret]⟩).label =
+        [Origin.fs, Origin.web, Origin.secret] ∧
+      (execV inputsA secretPath ⟨7, [Origin.secret]⟩).data ≠
+        (execV inputsA secretPath ⟨9, [Origin.secret]⟩).data) := by
+  have hobsf : Flow untrustedAuthor [] [] [Step.source Origin.web, Step.propagate]
+      [Origin.web] :=
+    Flow.source Origin.web [] [Step.propagate] [Origin.web]
+      (Flow.propagate [Origin.web] [] [Origin.web] (Flow.nil [Origin.web]))
+  have hsecf : Flow untrustedAuthor [] [Origin.secret]
+      [Step.source Origin.web, Step.join [Origin.fs], Step.propagate]
+      [Origin.fs, Origin.web, Origin.secret] :=
+    Flow.source Origin.web [Origin.secret]
+      [Step.join [Origin.fs], Step.propagate]
+      [Origin.fs, Origin.web, Origin.secret]
+      (Flow.join [Origin.fs] [Origin.web, Origin.secret]
+        [Step.propagate] [Origin.fs, Origin.web, Origin.secret]
+        (Flow.propagate [Origin.fs, Origin.web, Origin.secret]
+          [] [Origin.fs, Origin.web, Origin.secret]
+          (Flow.nil [Origin.fs, Origin.web, Origin.secret])))
+  have hweb : Admits Sink.disclosure ([Origin.web] : Label) :=
+    ⟨by decide, by decide⟩
+  refine ⟨⟨hobsf, hweb, ?_, by decide⟩, ⟨hsecf, ?_, ?_, ?_, by decide⟩⟩
+  · exact (secret_noninterference (ρ₁ := inputsA) (ρ₂ := inputsB)
+      (st := observablePath) hobsf
+      ⟨fun _ => by decide, trivial⟩
+      (fun d hd => by simp [observablePath] at hd)
+      ⟨4, []⟩ ⟨4, []⟩ rfl rfl (fun _ => rfl)).2.2 hweb
+  · intro h
+    exact h.1 (by decide)
+  · exact (secret_noninterference (ρ₁ := inputsA) (ρ₂ := inputsA)
+      (st := secretPath) hsecf
+      ⟨fun _ => rfl, fun _ => rfl, trivial⟩
+      (fun d hd => by simp [secretPath] at hd)
+      ⟨7, [Origin.secret]⟩ ⟨9, [Origin.secret]⟩ rfl rfl
+      (fun h => absurd (by decide) h.1)).1
+  · exact (secret_noninterference (ρ₁ := inputsA) (ρ₂ := inputsA)
+      (st := secretPath) hsecf
+      ⟨fun _ => rfl, fun _ => rfl, trivial⟩
+      (fun d hd => by simp [secretPath] at hd)
+      ⟨7, [Origin.secret]⟩ ⟨9, [Origin.secret]⟩ rfl rfl
+      (fun h => absurd (by decide) h.1)).2.1
+
+/-- **The `confidential` proviso is load-bearing.** An ADMITTED
+`endorse[confidential]` on a value labelled `web` and `confidential`
+leaves the foreign `web` origin on the label and makes the output
+observable, and the two runs, entry data 1 against 2, now end with
+different data. The declassifier clears `confidential`, so it is exactly
+the exception `leak_needs_declassifier`
+names, and `endorse_gate_preserves_foreign_origins` keeps `web`. -/
+theorem declassify_breaks_noninterference :
+    Flow untrustedAuthor [Origin.confidential]
+        [Origin.web, Origin.confidential]
+        [Step.declassify endorseConfidential] [Origin.web] ∧
+    Admits Sink.disclosure ([Origin.web] : Label) ∧
+    Clears endorseConfidential Origin.confidential ∧
+    (execV inputsA [VStep.declassify endorseConfidential]
+        ⟨1, [Origin.web, Origin.confidential]⟩).data ≠
+      (execV inputsA [VStep.declassify endorseConfidential]
+        ⟨2, [Origin.web, Origin.confidential]⟩).data ∧
+    Origin.web ∈ (execV inputsA [VStep.declassify endorseConfidential]
+        ⟨1, [Origin.web, Origin.confidential]⟩).label := by
+  refine ⟨?_, ⟨by decide, by decide⟩, by decide, by decide, ?_⟩
+  · exact Flow.declassify endorseConfidential
+      [Origin.web, Origin.confidential] [] [Origin.web]
+      ⟨fun _ => rfl, by decide, by decide⟩
+      (Flow.nil [Origin.web])
+  · exact endorse_gate_preserves_foreign_origins
+      (st := [VStep.declassify endorseConfidential])
+      (o := Origin.confidential) (o' := Origin.web)
+      (by
+        intro d hd
+        rw [List.mem_singleton] at hd
+        cases hd
+        rfl)
+      (by decide) (by simp)
+
+/-- An `endorse[secret]`, which `kindOK` refuses. -/
+def secretEndorse : Declassifier := ⟨.endorse Origin.secret, true⟩
+
+/-- **The `Flow` hypothesis is load-bearing.** The `endorse[secret]` step
+is not an admitted flow under any profile and grants
+(`endorse_secret_refused`), yet `execV` runs it: it takes `secret` off the
+label, so the output is observable, and the two runs, entry data 1 against
+2, end with different data. Dropping `hf` from `secret_noninterference`
+would make it false. -/
+theorem unadmitted_secret_endorse_breaks_noninterference :
+    (∀ (P : Profile) (G : Grants) (out : Label),
+        ¬ Flow P G [Origin.secret] [Step.declassify secretEndorse] out) ∧
+    Admits Sink.disclosure
+      (execV inputsA [VStep.declassify secretEndorse]
+        ⟨1, [Origin.secret]⟩).label ∧
+    (execV inputsA [VStep.declassify secretEndorse]
+        ⟨1, [Origin.secret]⟩).data ≠
+      (execV inputsA [VStep.declassify secretEndorse]
+        ⟨2, [Origin.secret]⟩).data := by
+  refine ⟨?_, ⟨by decide, by decide⟩, by decide⟩
+  intro P G out hf
+  cases hf with
+  | declassify _ _ _ _ hok _ => exact endorse_secret_refused hok
+
 end RevL.G9

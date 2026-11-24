@@ -1,0 +1,130 @@
+// The revl stdlib CHANNEL module: the same-origin page-to-page provider of
+// `Wire` (`stdlib/wire.rvl`, issue #3418, first slice). ts tier only.
+//
+// A composition hosted in a browser page writes `requires wire: Wire`, as it
+// would for a server, and a row
+//
+//     row @wire from "stdlib/channel.rvl" provides wire
+//       config { channel: "world-1" }
+//
+// picks this provider: other pages of the same origin, in the same browser,
+// join over the browser's `BroadcastChannel` of that name and the program
+// reads their `Knock`s through `Wire`. The program does not change from the
+// one that serves sockets (`stdlib/socket.rvl`).
+//
+// ------------------------------------------------------------------- scope
+// One origin: a `BroadcastChannel` reaches only pages of the origin that
+// opened it, in one browser profile. That is this provider's whole answer to
+// "who may connect"; the `who` of an `Opened` knock is the label the joining
+// page offered, its own claim and not an identity. A channel keeps no secret:
+// every page of the origin hears every message, so a line number and the ids a
+// line and the host go by can be read and forged by any page of the origin.
+// Cross-origin pages and peer data channels are other providers of the same
+// `Wire`. A browser slows the timers of a hidden tab, so choose `silence` for
+// the tab that hosts.
+//
+// ----------------------------------------------------------------- the crossing
+// The channel is `acquire`: a handle the row's teardown releases
+// (`channel_shut`), which tells every open line the host is gone and closes the
+// channel. The three verbs are `emission` and declare the contract's tokens,
+// `wire.take`, `wire.say`, `wire.close`, as `stdlib/socket.rvl` does, so
+// `revl audit` prints `channel_take [wire.take]` and a grant names the verb.
+//
+// ----------------------------------------------------------------- the host
+// `backends/typescript/revl_channel_ts.ts` is the engine: one `@ts ref` per
+// extern (the `stdlib/fs.rvl` door). It uses only web globals, so a page can
+// load it. It also exports `join`, the joining end a page calls where a socket
+// client would use `WebSocket`: `peer.take(most)`, `peer.say(text)`,
+// `peer.leave()`.
+//
+// ------------------------------------------------------------------- limits
+// Each is this component's config, never a constant in host code:
+//   most     a text message over `most` UTF-8 bytes shuts the line `TooLarge`
+//            and none of it is delivered.
+//   held     a channel cannot be paused. A line that makes `held` knocks wait
+//            for `take` is shut `TooFast`, and a join while `held` knocks wait
+//            is shut `Refused`; nothing already queued is dropped.
+//   lines    a join past `lines` open lines is shut `Refused` and makes no
+//            knock.
+//   beat     milliseconds between the host's beats; a joined page answers.
+//   silence  milliseconds without a word from a line before the host shuts it
+//            `Silent`. A page that was only slow is told its line has
+//            `Expired` and joins again. A page that closes and says so shuts
+//            `Closed`.
+// No `limit`: a channel shows no unwritten bytes, and the browser delivers in
+// order and completely, so the contract's order rule holds without a setting.
+// There is one host per channel name: a second one stops and its next `take`
+// throws, naming the channel.
+
+use "stdlib/wire.rvl" { Knock, Kind, Why, Wire, why_str }
+
+// Everything that is the channel's own, built from the provider's config.
+pub type Door = { channel: Str, most: Int, held: Int, lines: Int, beat: Int,
+                  silence: Int }
+
+// One knock as the host hands it over: `kind` is "opened", "said" or "shut",
+// `why` is `why_str` of the reason on "shut" and "" otherwise.
+type Raw = { seq: Int, kind: Str, why: Str, line: Int, who: Str, text: Str }
+
+// The inverse of `why_str`, for the host's spelling. An unknown spelling is the
+// host's defect, read as `Refused` rather than a fault inside `take`.
+fn why_of(s: Str) -> Why {
+  if (s == "closed") { return Closed }
+  if (s == "silent") { return Silent }
+  if (s == "too_large") { return TooLarge }
+  if (s == "too_slow") { return TooSlow }
+  if (s == "too_fast") { return TooFast }
+  if (s == "expired") { return Expired }
+  if (s == "host_gone") { return HostGone }
+  return Refused
+}
+
+fn kind_of(r: Raw) -> Kind {
+  if (r.kind == "opened") { return Opened }
+  if (r.kind == "said") { return Said }
+  return Shut(why_of(r.why))
+}
+
+fn knocks_of(raws: List[Raw]) -> List[Knock] {
+  var out = []
+  for (r of raws) {
+    out = out.push({ seq: r.seq, kind: kind_of(r), line: r.line, who: r.who,
+                     text: r.text })
+  }
+  return out
+}
+
+// `Hub` is an opaque handle: the host's open channel and its lines.
+pub type Hub = Opaque
+
+extern acquire fn channel_listen(door: Door) -> Hub undo channel_shut(result)
+  = @ts ref listen from "../backends/typescript/revl_channel_ts.ts"
+extern acquire fn channel_shut(h: Hub) -> Unit undo settled()
+  = @ts ref shut from "../backends/typescript/revl_channel_ts.ts"
+extern pure fn settled() -> Unit
+  = @ts ref settled from "../backends/typescript/revl_channel_ts.ts"
+
+extern emission[wire.take] fn channel_take(h: Hub, most: Int) -> List[Raw]
+  = @ts ref take from "../backends/typescript/revl_channel_ts.ts"
+extern emission[wire.say] fn channel_say(h: Hub, line: Int, text: Str) -> Bool
+  = @ts ref say from "../backends/typescript/revl_channel_ts.ts"
+extern emission[wire.close] fn channel_close(h: Hub, line: Int, why: Str,
+                                             text: Str) -> Bool
+  = @ts ref close from "../backends/typescript/revl_channel_ts.ts"
+
+component ChannelWire provides wire: Wire {
+  config { channel: Str, most: Int = 65536, held: Int = 1024, lines: Int = 256,
+           beat: Int = 2000, silence: Int = 8000 }
+  let door = effect channel_listen({ channel: config.channel, most: config.most,
+                                     held: config.held, lines: config.lines,
+                                     beat: config.beat,
+                                     silence: config.silence }) undo channel_shut(door)
+  provide wire {
+    fn take(most) {
+      let raws = emit channel_take(door, most)
+      return knocks_of(raws)
+    }
+    fn say(line, text) = emit channel_say(door, line, text)
+    fn close(line, why, text) = emit channel_close(door, line, why_str(why), text)
+  }
+}

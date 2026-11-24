@@ -109,9 +109,18 @@ facet's statuses already form a total order (the `_RANK` tables in
 | gauntlet          | admissible > present > unavailable         | `admissible`, `present`    |
 | publisher         | trusted > present > unavailable            | `trusted`                  |
 | capabilities      | present > unavailable                      | `present`                  |
+| strength          | exact > sampled > not-promoted > unavailable > invalid | `exact`, `sampled` |
 
 Notes:
 
+- `strength` (issue #2804) grades what a promotion verdict LICENSES rather than
+  how an artifact was tested: `sampled` says the verdict rests on a sample of the
+  paths traffic took, `exact` that the whole recorded domain was compared or the
+  property was proved. Nothing produces `exact` yet, so `strength exact` fails
+  today and a sampled-only candidate can grade `review` or `canary` through the
+  graded outcomes but never `admit`. `strength sampled` holds only for a `PROMOTE`
+  verdict. The facet is self-attested like the dossiers, so a clause on it needs a
+  binding `attestation valid` clause or `self-attested`.
 - `attestation invalid` ranks BELOW `unavailable` (a tampered attestation is
   worse than none, exactly as the resolve ranks it), so no satisfiable
   threshold ever admits an invalid attestation.

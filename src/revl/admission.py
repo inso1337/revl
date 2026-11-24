@@ -53,6 +53,9 @@ def _service_from_ir(name: str, spec: dict) -> ServiceDecl:
         methods[mname].untrusted_params = frozenset(
             i for i, p in enumerate(ps) if p.get("untrusted"))
         methods[mname].returns_qualifier = mspec.get("returns_qualifier")
+        # issue #3238: the full set a return holding both qualifiers carries
+        methods[mname].returns_qualifiers = tuple(
+            mspec.get("returns_qualifiers") or ())
         # issue #1952: the comment block the IR carries on the operation, read
         # back so this projection is faithful to the entry it came from — the
         # rebuilt decl re-emits the author's text rather than dropping it. `doc`
