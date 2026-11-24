@@ -1150,12 +1150,6 @@ def _changed_targets(old_ir: dict, new_ir: dict) \
     return changed
 
 
-def _snapshot_targets(snap: dict | None) \
-        -> list[tuple[str, frozenset[str]]] | None:
-    """A restore's targets (see :func:`_restore_targets`)."""
-    return _restore_targets(snap)[0]
-
-
 def _restore_targets(snap: dict | None, profile=None) \
         -> tuple[list[tuple[str, frozenset[str]]] | None, dict[str, str]]:
     """A restore's targets, derived from the composition its `sources` compile
@@ -1296,7 +1290,7 @@ def _cold_load_activation_emits(arguments: dict) -> bool:
         return True
 
 
-def _targets(verb: str, session, arguments: dict) \
+def _targets(verb: str, session, arguments: dict, restore_profile=None) \
         -> list[tuple[str, frozenset[str]]] | None:
     """The components a management verb touches, as (name, labels) targets.
 
@@ -1314,7 +1308,10 @@ def _targets(verb: str, session, arguments: dict) \
     component it replaced compiled cleanly for the handler and not for the
     derivation (which dropped `replacing`), so an undecidable target set turned
     both the operator gate and an enforced lease into no-ops on exactly the
-    swap that needed them most."""
+    swap that needed them most.
+
+    `restore_profile` is the profile a `restore` derivation compiles under (the
+    boot's realm bindings, :func:`_restore_targets`); other verbs ignore it."""
     ir = session.ir
     if verb == "swap":
         inline = any(arguments.get(k) is not None
@@ -1334,7 +1331,7 @@ def _targets(verb: str, session, arguments: dict) \
             return None
         return _live_targets(candidate)
     if verb == "restore":
-        return _snapshot_targets(arguments.get("snapshot"))
+        return _restore_targets(arguments.get("snapshot"), restore_profile)[0]
     if verb in {"approve", "override"}:
         # item 471: the `override` verb scopes to the crossing component exactly
         # as `approve` does, through the same ticket-hash resolution — an override

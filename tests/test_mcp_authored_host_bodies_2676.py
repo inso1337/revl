@@ -374,7 +374,7 @@ def test_restore_stores_provenance_on_the_live_generation_and_history(
         return {"restored": True}
 
     monkeypatch.setattr(server.SESSION, "restore", restore)
-    monkeypatch.setattr(server._leases, "check", lambda *_args: None)
+    monkeypatch.setattr(server._leases, "check", lambda *_args, **_kwargs: None)
     result = server._tool_restore({"snapshot": {"sources": origin}})
 
     assert result["restored"] is True
