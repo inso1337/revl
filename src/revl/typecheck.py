@@ -66,6 +66,8 @@ Two expression dialects are covered:
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import dataclasses
 import math
 
@@ -1756,12 +1758,16 @@ _BUILTIN_SIG = {
     # source reader folds a CR byte to LF and `"..."` carries no escapes, so a
     # carriage return or a NUL has no other spelling in pure revl.
     "to_char": ("Int", [], "Str"),
-    # The total, value-returning forms (docs/arithmetic.md, "Still open"):
-    # same rounding convention as their faulting counterparts, but a zero
-    # divisor yields `Err(reason)` instead of faulting — `fail` cannot serve
-    # here (it is a component construct, refused in a pure fn), so the error
-    # travels as a value. The Err payload is `Str` because it is the one
-    # type every tier can hold in a Result without new representation.
+    # The total, value-returning forms (docs/arithmetic.md, "The total
+    # arithmetic forms"): same value as their faulting counterparts where
+    # that value fits, `Err(reason)` instead of the fault otherwise — `fail`
+    # cannot serve here (it is a component construct, refused in a pure fn),
+    # so the error travels as a value. The Err payload is `Str` because it is
+    # the one type every tier can hold in a Result without new
+    # representation.
+    "checked_add": ("Int", ["Int"], "Result[Int, Str]"),
+    "checked_sub": ("Int", ["Int"], "Result[Int, Str]"),
+    "checked_mul": ("Int", ["Int"], "Result[Int, Str]"),
     "checked_div_trunc": ("Int", ["Int"], "Result[Int, Str]"),
     "checked_div_floor": ("Int", ["Int"], "Result[Int, Str]"),
     "checked_div_euclid": ("Int", ["Int"], "Result[Int, Str]"),
@@ -2287,9 +2293,58 @@ def _extend_arm_tenv(stmt, tenv: dict, types: dict, filename: str | None) -> Non
                    else infer_ast(stmt.value, tenv, types, filename))
 
 
+# issue #3400: lowering asks for the type of each operand of an operator
+# (`_lower_pure_expr`), and `infer_ast` answers by walking the operand's whole
+# subtree, so a chain of n operators cost n*n/2 inferences: 3000 `+` took over
+# a minute and a half. Inside `infer_memo()` a non-raising inference is kept
+# for the pass, keyed on the node, the type environment and the type table
+# (by identity, all three held by the entry so no id is reused while it
+# lives), so each node of an expression is inferred once. A raising
+# inference (`filename` given) is never memoised: its diagnostics stay exactly
+# where they were.
+_INFER_MEMO: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "revl_infer_memo", default=None)
+
+
+@contextlib.contextmanager
+def infer_memo():
+    """Keep non-raising `infer_ast` answers for the duration of the block.
+
+    Re-entrant: a nested scope shares the outermost one's memo. The caller
+    owns the soundness condition: no type environment handed to `infer_ast`
+    inside the block is mutated in a way that changes the type of an
+    expression already inferred under it.
+    """
+    if _INFER_MEMO.get() is not None:
+        yield
+        return
+    token = _INFER_MEMO.set({})
+    try:
+        yield
+    finally:
+        _INFER_MEMO.reset(token)
+
+
+def infer_memo_active() -> bool:
+    return _INFER_MEMO.get() is not None
+
+
 def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str | None:
     """Best-effort type of a parser-AST expression. With `filename`, definite
     operator/branch/argument mismatches raise; without it, never raises."""
+    memo = _INFER_MEMO.get()
+    if memo is None or filename is not None:
+        return _infer_ast(expr, tenv, types, filename)
+    key = (id(expr), id(tenv), id(types))
+    hit = memo.get(key)
+    if hit is not None and hit[0] is expr and hit[1] is tenv and hit[2] is types:
+        return hit[3]
+    result = _infer_ast(expr, tenv, types, None)
+    memo[key] = (expr, tenv, types, result)
+    return result
+
+
+def _infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str | None:
     from .parser import (
         ExprArrow, ExprBin, ExprBlockArm, ExprCall, ExprField, ExprHole,
         ExprIf, ExprIndex, ExprList, ExprLit, ExprMatch, ExprOptCall,
@@ -3620,8 +3675,68 @@ def check_ast(expr, expected: str | None, tenv: dict, types: dict,
 
 # ------------------------------------------------------- IR inference (components)
 
+# Issue #3457: the component-stratum operator arms of
+# `lower._lower_component_pure_expr` ask `infer_ir` for each operand's type
+# after lowering it, and each answer walked the operand's subtree, so a chain
+# of n operators in a provide method cost about n*n/2 inferences. Inside
+# `infer_ir_memo()` a non-raising inference is kept for the pass. Unlike
+# `infer_ast`'s memo the type environment is keyed by CONTENT, not identity:
+# the component lowering binds and unbinds names in `env.type_env` in place
+# (match-arm payloads, arrow parameters, setup `let`s), and a content key
+# cannot return an answer computed under different bindings. The node, the
+# type table and the service table are keyed by identity (held by the entry so
+# no id is reused while it lives); `infer_ir` reads none of the keys the
+# lowering adds to a node after inferring it (`operands`, `widen`). A raising
+# inference (`filename` given) is never memoised, and neither is one whose
+# environment holds an unhashable value.
+_INFER_IR_MEMO: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "revl_infer_ir_memo", default=None)
+
+
+@contextlib.contextmanager
+def infer_ir_memo():
+    """Keep non-raising `infer_ir` answers for the duration of the block.
+
+    Re-entrant: a nested scope shares the outermost one's memo. The caller
+    owns the soundness condition: neither the type table nor the service table
+    is mutated inside the block, and no IR node is changed in a key `infer_ir`
+    reads after it was inferred."""
+    if _INFER_IR_MEMO.get() is not None:
+        yield
+        return
+    token = _INFER_IR_MEMO.set({})
+    try:
+        yield
+    finally:
+        _INFER_IR_MEMO.reset(token)
+
+
+def infer_ir_memo_active() -> bool:
+    return _INFER_IR_MEMO.get() is not None
+
+
 def infer_ir(node, tenv: dict, types: dict, services: dict,
              filename: str | None = None, line: int = 0) -> str | None:
+    """Best-effort type of a lowered component-body IR node; see
+    `_infer_ir`. Memoised inside `infer_ir_memo()` (issue #3457)."""
+    memo = _INFER_IR_MEMO.get()
+    if memo is None or filename is not None or not isinstance(node, dict):
+        return _infer_ir(node, tenv, types, services, filename, line)
+    try:
+        key = (id(node), id(types), id(services), tuple(tenv.items()))
+        hit = memo.get(key)
+    except TypeError:  # an unhashable value in the environment
+        return _infer_ir(node, tenv, types, services, filename, line)
+    if hit is not None and hit[0] is node and hit[1] is types \
+            and hit[2] is services:
+        return hit[3]
+    result = _infer_ir(node, tenv, types, services, filename, line)
+    memo[key] = (node, types, services, result)
+    return result
+
+
+def _infer_ir(node, tenv: dict, types: dict, services: dict,
+              filename: str | None = None, line: int = 0) -> str | None:
     """Best-effort type of a lowered component-body IR node. `services` maps
     service name -> ServiceDecl; `tenv` maps *safe* names -> types.
 

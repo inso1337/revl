@@ -194,6 +194,11 @@ def _merge_resulting_ir(running_ir: dict | None, candidate_ir: dict,
         "functions": list(functions.values()),
         "externs": list(externs.values()),
         "manifest": candidate_ir.get("manifest") or running_ir.get("manifest") or {},
+        # issue #3484: the composition rows the components start from. A
+        # candidate admitted from a composition document carries its own;
+        # a module candidate leaves the running rows in force.
+        **({"rows": rows} if (rows := candidate_ir.get("rows")
+                              or running_ir.get("rows")) else {}),
     }
 
 

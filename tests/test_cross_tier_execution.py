@@ -64,7 +64,10 @@ that way on openjdk 26.0.2.
 
 import importlib.util
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -1413,6 +1416,7 @@ def test_wasm_has_no_map_to_index():
     with pytest.raises(Exception) as excinfo:
         _emit("wasm", MAP_INDEX_MISS)
     assert "is not lowerable" in str(excinfo.value)
+    assert "Map[" in str(excinfo.value), excinfo.value
 
 
 def test_str_ordering_agrees_everywhere():
@@ -1667,6 +1671,92 @@ def test_checked_division_lowers_on_every_tier():
     assert "(i64.eqz" in wat and "revl: division by zero" in wat
 
 
+# ------------------------------------------------- the total arithmetic forms
+#
+# `+`, `-` and `*` have value-returning counterparts too: `checked_add`,
+# `checked_sub` and `checked_mul` return `Result[Int, Str]` — Ok(value) where
+# the faulting operation is in range, Err("revl: Int overflow") where it
+# traps. The default operators are deliberately unchanged: they still trap,
+# as `INT_OVERFLOW` below asserts. The total forms are named methods, never an
+# operator or a block that turns checking off (docs/arithmetic.md).
+
+CHECKED_ARITH = """
+pub fn hi() -> Int { return 9223372036854775807 }
+pub fn lo() -> Int { return 0 - 9223372036854775807 - 1 }
+pub fn ca(a: Int, b: Int) -> Result[Int, Str] { return a.checked_add(b) }
+pub fn cs(a: Int, b: Int) -> Result[Int, Str] { return a.checked_sub(b) }
+pub fn cm(a: Int, b: Int) -> Result[Int, Str] { return a.checked_mul(b) }
+pub fn ca_is(a: Int, b: Int, want: Int, iserr: Bool) -> Bool {
+  return match ca(a, b) { Ok(v) => !iserr && v == want, Err(e) => iserr && e == "revl: Int overflow" }
+}
+pub fn cs_is(a: Int, b: Int, want: Int, iserr: Bool) -> Bool {
+  return match cs(a, b) { Ok(v) => !iserr && v == want, Err(e) => iserr && e == "revl: Int overflow" }
+}
+pub fn cm_is(a: Int, b: Int, want: Int, iserr: Bool) -> Bool {
+  return match cm(a, b) { Ok(v) => !iserr && v == want, Err(e) => iserr && e == "revl: Int overflow" }
+}
+test "checked add in range"              { assert ca_is(1, 2, 3, false) }
+test "checked add Err at MAX + 1"        { assert ca_is(hi(), 1, 0, true) }
+test "checked add Err at MIN + -1"       { assert ca_is(lo(), 0 - 1, 0, true) }
+test "checked sub in range"              { assert cs_is(5, 7, 0 - 2, false) }
+test "checked sub Err at MIN - 1"        { assert cs_is(lo(), 1, 0, true) }
+test "checked sub Err at MAX - -1"       { assert cs_is(hi(), 0 - 1, 0, true) }
+test "checked mul in range"              { assert cm_is(6, 7, 42, false) }
+test "checked mul Err at MAX * 2"        { assert cm_is(hi(), 2, 0, true) }
+test "checked mul Err at MIN * -1"       { assert cm_is(lo(), 0 - 1, 0, true) }
+test "checked mul Err at -1 * MIN"       { assert cm_is(0 - 1, lo(), 0, true) }
+"""
+
+
+@pytest.mark.parametrize("tier", FAST_TIERS)
+def test_checked_arithmetic_returns_values(tier: str):
+    status, message = _run(tier, CHECKED_ARITH)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier}: {message}"
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (cargo/javac are slow)")
+@pytest.mark.parametrize("tier", SLOW_TIERS)
+def test_checked_arithmetic_returns_values_slow(tier: str):
+    status, message = _run(tier, CHECKED_ARITH)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier}: {message}"
+
+
+def test_checked_arithmetic_lowers_on_every_tier():
+    """The total arithmetic forms produce a Result value on each tier through
+    that tier's Result representation, and every tier carries the overflow as
+    Err rather than as a fault: tagged classes on python, the built-in
+    `{ kind, value }` shape on TS, std Result on rust, RevlResult on java and
+    go, a tagged cell on wasm."""
+    py = _emit("python", CHECKED_ARITH)
+    for helper in ("_revl_checked_add", "_revl_checked_sub", "_revl_checked_mul"):
+        assert f"def {helper}" in py, helper
+    ts = _emit("typescript", CHECKED_ARITH)
+    for helper in ("revlCheckedAdd", "revlCheckedSub", "revlCheckedMul"):
+        assert f"function {helper}" in ts, helper
+    assert "r < REVL_I64_MIN || r > REVL_I64_MAX" in ts
+    rust = _emit("rust", CHECKED_ARITH)
+    for op in ("checked_add", "checked_sub", "checked_mul"):
+        assert f"a.{op}(b)" in rust, op
+    assert 'Err::<i64, String>("revl: Int overflow".to_string())' in rust
+    java = _emit("java", CHECKED_ARITH)
+    for helper in ("revlCheckedAdd", "revlCheckedSub", "revlCheckedMul"):
+        assert helper in java, helper
+    assert "Math.addExact" in java and "Math.multiplyExact" in java
+    go = _emit("go", CHECKED_ARITH)
+    assert 'RevlResult[int64, string]{ErrV: "revl: Int overflow"}' in go
+    assert "RevlResult[int64, string]{OkV: _r, Ok: true}" in go
+    wasm = _emit("wasm", CHECKED_ARITH)
+    wat = wasm["functions"] if isinstance(wasm, dict) else wasm
+    for instruction in ("(i64.add", "(i64.sub", "(i64.mul"):
+        assert instruction in wat, instruction
+    assert "revl: Int overflow" in wat
+
+
 # --------------------------------------------------------- the pairing law
 #
 # Every remainder pairs with a division, and the pair satisfies
@@ -1753,19 +1843,36 @@ def test_ieee_float_semantics_slow(tier: str):
     assert status == "pass", f"{tier} is not IEEE 754: {message}"
 
 
-def test_wasm_refuses_float_by_name():
-    """The wasm tier lowers Int/Bool and nothing else numeric, so `Float` is a
-    *deliberate* limit — it must refuse with a reason rather than emit
-    something that quietly is not IEEE.
+def test_wasm_float_is_ieee_binary64():
+    """`Float` is a native `f64` on the wasm tier (issue #3295), so the claim
+    this test used to make (Float is refused by name rather than emitted as
+    something that quietly is not IEEE) turned into the positive half: what is
+    emitted IS IEEE binary64. A Float literal is an exact `f64.const`, an
+    addition is a run-time `f64.add` rather than an exactly folded constant,
+    and on wasmtime `0.1 + 0.2` answers `0.30000000000000004`, the binary64
+    result, not `0.3`. The tier's remaining numeric-adjacent refusal by name is
+    `Map`, pinned by `test_wasm_has_no_map_to_index`.
     """
-    from revl.errors import RevlError
     import importlib.util as _il
     spec = _il.spec_from_file_location("emit_wasm_ieee", ROOT / "backends" / "wasm" / "emit.py")
     module = _il.module_from_spec(spec)
     spec.loader.exec_module(module)
-    with pytest.raises((RevlError, Exception)) as failure:
-        module.emit(compile_source("pub fn f() -> Float { return 1.5 }", "f.rvl"))
-    assert "Float" in str(failure.value)
+    literal = module.emit(compile_source("pub fn f() -> Float { return 1.5 }", "f.rvl"))
+    literal = literal["functions"] if isinstance(literal, dict) else literal
+    assert "(result f64)" in literal and "(f64.const 0x1.8000000000000p+0)" in literal, literal
+    wat = module.emit(compile_source(
+        "pub fn f(a: Float, b: Float) -> Float { return a + b }", "f.rvl"))
+    wat = wat["functions"] if isinstance(wat, dict) else wat
+    assert "(f64.add)" in wat, wat
+    if shutil.which("wasmtime") is None:
+        pytest.skip("wasmtime not installed: emitted f64 checked, not executed")
+    with tempfile.TemporaryDirectory() as scratch:
+        path = Path(scratch) / "f.wat"
+        path.write_text(wat, encoding="utf-8")
+        out = subprocess.run(["wasmtime", "--invoke", "f", str(path), "0.1", "0.2"],
+                             capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip().splitlines()[-1] == "0.30000000000000004", out.stdout
 
 
 def test_go_equality_is_not_native_comparison():
@@ -1941,7 +2048,12 @@ def test_bounded_tiers_emit_checked_int_negation():
     tier's checked mechanism, never the host's wrapping unary minus."""
     assert "revlSub(0, " in _emit("go", NEG_INT_MIN)
     assert "revlNeg(" in _emit("java", NEG_INT_MIN)
-    assert "revlI64(-" in _emit("typescript", NEG_INT_MIN)
+    # issue #2904: in a fn body ts tests the bound inline and traps through
+    # `revlI64`; the execution half is test_negation_of_int_min_traps.
+    ts = _emit("typescript", NEG_INT_MIN)
+    assert ("(BigInt.asIntN(64, $revl_i64 = -x) === $revl_i64"
+            " ? $revl_i64 : revlI64($revl_i64))") in ts
+    assert "if (BigInt.asIntN(64, v) !== v) throw new RangeError('revl: Int overflow')" in ts
 
 
 # -------------------------------------------------- Int.MIN / -1 overflows too

@@ -39,8 +39,12 @@ silently dropped is a setting the operator believes is in force.
   value. Credentials are read from the environment variable `api_key_env`
   names, at request time, and live nowhere else.
 * **A credential where the variable NAME goes.** `api_key_env` must be an
-  environment variable name. A pasted key is not one (it has a `-`, or starts
-  with a digit), so it is refused, again without echoing it.
+  environment variable name in the usual upper-case form (`[A-Z_][A-Z0-9_]*`,
+  at most 64 characters). A pasted key is not one: most carry a lower-case
+  letter (`hf_...`, `ghp_...`, `gsk_...`, `AIza...`), a `-` (`sk-ant-...`) or
+  a leading digit, so it is refused, again without echoing it. A key that
+  happens to fit the form is not caught here, so no later message prints the
+  variable's name when it is not set either.
 * **A credential in the URL.** `https://user:key@host` and a query string
   (`?key=...`) are both refused: a URL is printed in errors and logs, and a key
   inside one would travel with it.
@@ -65,6 +69,7 @@ from urllib.parse import urlsplit
 
 from . import wire_anthropic, wire_gemini, wire_ollama, wire_openai
 from .structured import MODES as STRUCTURED_MODES
+from .transport import DEFAULT_MAX_REPLY_BYTES
 
 #: `{provider: wire module}`, in the order a refusal lists them. Each wire
 #: module names its own `PROVIDER` and `FIELDS`, so this is the one place the
@@ -86,7 +91,8 @@ RESIDENCES = ("on_device", "off_device")
 
 _COMMON_FIELDS = frozenset({
     "provider", "model", "base_url", "api_key_env", "max_tokens",
-    "temperature", "timeout", "residence", "reaches", "structured_output",
+    "temperature", "timeout", "max_reply_bytes", "residence", "reaches",
+    "structured_output",
 })
 _PROVIDER_FIELDS = {provider: wire.FIELDS for provider, wire in WIRES.items()}
 
@@ -97,6 +103,10 @@ _CREDENTIAL_FIELDS = frozenset({
 })
 
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+#: What `api_key_env` may hold: an upper-case variable name. A lower-case or
+#: mixed-case value is far more likely a pasted key (`hf_...`, `ghp_...`,
+#: `gsk_...`, `AIza...`) than a variable, and the name is printed later.
+_API_KEY_ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,63}\Z")
 _GEMINI_MODEL = re.compile(r"[A-Za-z0-9._-]+\Z")
 _GCP_NAME = re.compile(r"[a-z0-9-]+\Z")
 
@@ -124,10 +134,15 @@ class Binding:
     provider: str
     model: str
     base_url: str
-    api_key_env: str | None = None
+    #: not in the repr: while the variable is unset, a pasted key that fits
+    #: the name shape would print with it
+    api_key_env: str | None = field(default=None, repr=False)
     max_tokens: int = DEFAULT_MAX_TOKENS
     temperature: float = 0.0
     timeout: float = DEFAULT_TIMEOUT
+    #: the most bytes of an endpoint's reply that are read before the call is
+    #: refused (`revl.providers.transport`).
+    max_reply_bytes: int = DEFAULT_MAX_REPLY_BYTES
     #: the EFFECTIVE residence: derived from the endpoint, or the operator's
     #: downgrade of it. Never wider than what the endpoint allows.
     residence: str = "off_device"
@@ -271,13 +286,15 @@ def _binding(role: str, entry, source: str) -> Binding:
 
     env = entry.get("api_key_env")
     if env is not None and (not isinstance(env, str)
-                            or not _ENV_NAME.match(env)):
+                            or not _API_KEY_ENV_NAME.match(env)):
         # never echo the value: the commonest way to get here is pasting the
         # key itself where its variable's name goes
         raise _refuse(where, "`api_key_env` must be the NAME of an environment "
-                             "variable (letters, digits and `_`); the value "
-                             "given is not one, and it is not repeated here in "
-                             "case it is the credential itself")
+                             "variable, in upper case (capital letters, "
+                             "digits and `_`, at most 64 characters, for "
+                             "example `ANTHROPIC_API_KEY`); the value given "
+                             "is not one, and it is not repeated here in case "
+                             "it is the credential itself")
     if provider in ("anthropic", "gemini") and env is None:
         raise _refuse(where, f"provider {provider} is a hosted API and needs "
                              f"`api_key_env`, the name of the environment "
@@ -352,6 +369,9 @@ def _binding(role: str, entry, source: str) -> Binding:
                             entry.get("temperature", 0.0), float, 0.0),
         timeout=_number(where, "timeout",
                         entry.get("timeout", DEFAULT_TIMEOUT), float, 0.001),
+        max_reply_bytes=_number(
+            where, "max_reply_bytes",
+            entry.get("max_reply_bytes", DEFAULT_MAX_REPLY_BYTES), int, 1024),
         residence=residence, reaches=tuple(reaches), api=api,
         project=project, location=location,
         anthropic_version=entry.get("anthropic_version",

@@ -22,7 +22,7 @@ It adds no new primitive — it only *composes* the base `Str` methods item 11
 already froze, and those lower on every tier. So the kit works on **py, ts, rs,
 go, java and wasm the day it lands**, with no per-tier follow-up. It
 deliberately avoids the two base methods that do not lower on wasm
-(`Str.repeat`, `List.indexOf`); `contains` / `index_of` use `Str.indexOf`,
+(`Str.repeat`, and `List.indexOf` where the element has no comparison on wasm); `contains` / `index_of` use `Str.indexOf`,
 which does (`docs/stdlib-2.0.md`).
 
 The one subtlety the purity forces: **revl plain strings carry no escapes** —

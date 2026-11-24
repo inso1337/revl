@@ -88,6 +88,16 @@ TOOL_VERB = {
     # scoped `may approve on payments` grant is usable while other components are
     # live.
     "revl_approve": "approve",
+    # issue #2991: the approval query surface is READ-ONLY, but reading the
+    # questions, their blast radius and their history is the same authority as
+    # answering them - a bystander who could enumerate what an irreversible
+    # crossing would reach and who is being asked is inside the approval
+    # boundary. So it gates under `approve`, never ungated like `revl_quorum`
+    # (which reads one hash the caller already holds). `_approvals_targets`
+    # resolves a `show` hash to its crossing component; `list`/`stats` name no
+    # one component, so they scope to the whole composition and need the
+    # literal `may approve on *`, whatever target keys the arguments add.
+    "revl_approvals": "approve",
     # item 379: revoking a standing grant early is the mirror of granting it —
     # withdrawing consent is the SAME authority as saying yes, so `revl_revoke`
     # gates under the same `approve` verb. Its `_approve_targets` branch resolves
@@ -429,18 +439,39 @@ class Operator:
         """
         return bool(self.mints)
 
-    def allows(self, verb: str, labels: frozenset[str]) -> tuple[bool, Grant | None]:
+    def allows(self, verb: str, labels: frozenset[str],
+               deny_labels: frozenset[str] | None = None,
+               was_labels: frozenset[str] | None = None,
+               ) -> tuple[bool, Grant | None]:
         """Decide one (verb, target) pair. Deny wins over allow; an allow must
-        exist for the pair or it is refused (closed by default)."""
+        exist for the pair or it is refused (closed by default).
+
+        `deny_labels`, when given, is the label set a `may not` is matched
+        against. `was_labels`, when given, is the label set the target had in
+        the running composition: an allow must select the target on BOTH sides
+        of a change, so a candidate cannot add a realm its grant matches to a
+        component the grant does not already cover (issue #3188). An added
+        component has no running side; a removed one is matched on the only
+        side it has."""
+        deny_on = labels if deny_labels is None else deny_labels
         for grant in self.grants:
             if not grant.allow and grant.covers_verb(verb) \
-                    and grant.covers_subject(labels):
+                    and grant.covers_subject(deny_on):
                 return False, grant  # explicit prohibition
-        for grant in self.grants:
-            if grant.allow and grant.covers_verb(verb) \
-                    and grant.covers_subject(labels):
-                return True, grant
-        return False, None  # no allow selects it — refused
+        sides = (labels,) if was_labels is None else (labels, was_labels)
+        chosen: Grant | None = None
+        for side in sides:
+            on_side = next(
+                (grant for grant in self.grants
+                 if grant.allow and grant.covers_verb(verb)
+                 and grant.covers_subject(side)),
+                None,
+            )
+            if on_side is None:
+                return False, None  # no allow selects it on this side
+            if chosen is None:
+                chosen = on_side
+        return True, chosen
 
 
 @dataclass(frozen=True)
@@ -952,6 +983,10 @@ class Decision:
       into the causal trace on an authorized management action.
     * ``why`` — the policy-style refusal trace, when refused.
     * ``message`` — the human refusal line.
+    * ``disk_reads``: for an authorized `restore`, the modules the gate's
+      compile read from disk (path -> sha256, ``{}`` when it read none or did
+      not compile). The handler refuses a boot compile that reads otherwise
+      (issue #3197).
     """
 
     gated: bool
@@ -961,10 +996,50 @@ class Decision:
     subjects: tuple[str, ...] = ()
     why: WhyTrace | None = None
     message: str | None = None
+    disk_reads: dict | None = None
 
 
 def _labels_for(ir: dict, name: str, realms) -> frozenset[str]:
     return frozenset({name}) | frozenset(realms)
+
+
+class ChangedLabels(frozenset):
+    """The labels of a component a swap changes (issue #3188).
+
+    As a set it is the labels an ALLOW is matched against on the candidate
+    side: the name plus the realms the candidate puts the component in (the
+    running manifest's realms when the swap removes it). `was` is the allow
+    label set for the running side, or None when the component is new: an
+    allow must select the component on both sides, so editing its realm
+    clauses cannot put it inside a grant it is otherwise outside.
+
+    `deny` is the set a `may not` is matched against: those labels plus the
+    realms the running manifest puts it in, so a deny applies to where the
+    component was as well as where it goes.
+
+    The two differ on purpose. Matching an allow against the union would let
+    the realm a component is leaving satisfy an allow it does not satisfy
+    where it goes, and the realm being added satisfy one it does not have
+    where it was."""
+
+    deny: frozenset[str]
+    was: frozenset[str] | None
+
+    def __new__(cls, labels, deny, was=None):
+        self = super().__new__(cls, labels)
+        self.deny = frozenset(deny) | self
+        self.was = None if was is None else frozenset(was)
+        return self
+
+
+def deny_labels_of(labels: frozenset[str]) -> frozenset[str]:
+    """The label set a `may not` is matched against for one target."""
+    return labels.deny if isinstance(labels, ChangedLabels) else labels
+
+
+def was_labels_of(labels: frozenset[str]) -> frozenset[str] | None:
+    """The running-side label set an allow is also matched against, if any."""
+    return labels.was if isinstance(labels, ChangedLabels) else None
 
 
 def _live_targets(ir: dict | None) -> list[tuple[str, frozenset[str]]] | None:
@@ -996,7 +1071,17 @@ def _changed_targets(old_ir: dict, new_ir: dict) \
         -> list[tuple[str, frozenset[str]]]:
     """The components a swap actually touches: those added, removed, or whose
     IR entry differs (modulo provenance) between the running composition and
-    the candidate. Realms come off whichever side declares the component."""
+    the candidate.
+
+    Each label set is a `ChangedLabels`. The allow labels come off whichever
+    side declares the component, preferring the candidate, and `was` carries
+    the running side's labels for a component present on both sides: an allow
+    must select it on both, so a candidate cannot add a realm its grant
+    matches to a component the grant does not cover. The deny labels add the
+    running manifest's realms, so a deny applies to where a component was as
+    well as where it goes (issue #3188). Reading only one side let the swap
+    itself choose the labels the gate saw, so a candidate that added or moved
+    a realm escaped a realm-scoped rule."""
     from ..policy import component_realms  # noqa: PLC0415 — read-only reuse of item 33
 
     old = {c["name"]: _semantic(c) for c in old_ir.get("components") or []}
@@ -1007,27 +1092,74 @@ def _changed_targets(old_ir: dict, new_ir: dict) \
     for name in sorted(set(old) | set(new)):
         if old.get(name) == new.get(name):
             continue  # untouched by this swap
-        man = new_man if name in new else old_man
-        source_ir = new_ir if name in new else old_ir
-        changed.append((name, _labels_for(source_ir, name,
-                                          component_realms(man, name))))
+        candidate_side = name in new
+        declaring_ir = new_ir if candidate_side else old_ir
+        declaring_man = new_man if candidate_side else old_man
+        allow = _labels_for(declaring_ir, name,
+                            component_realms(declaring_man, name))
+        was = (_labels_for(old_ir, name, component_realms(old_man, name))
+               if candidate_side and name in old else None)
+        changed.append((name, ChangedLabels(allow, deny=was or frozenset(),
+                                           was=was)))
     return changed
 
 
 def _snapshot_targets(snap: dict | None) \
-        -> list[tuple[str, frozenset[str]]]:
-    """A restore's targets, read from the snapshot manifest without compiling
-    (a snapshot is re-admitted by the handler; gating only needs the names)."""
-    if not isinstance(snap, dict):
-        return [("*", frozenset({WHOLE}))]
-    manifest = (snap.get("manifest") or {})
-    from ..policy import component_realms  # noqa: PLC0415 — read-only reuse of item 33
+        -> list[tuple[str, frozenset[str]]] | None:
+    """A restore's targets (see :func:`_restore_targets`)."""
+    return _restore_targets(snap)[0]
 
-    targets = []
-    for entry in manifest.get("components") or []:
-        name = entry.get("name")
-        targets.append((name, frozenset({name}) | component_realms(manifest, name)))
-    return targets or [("*", frozenset({WHOLE}))]
+
+def _restore_targets(snap: dict | None, profile=None) \
+        -> tuple[list[tuple[str, frozenset[str]]] | None, dict[str, str]]:
+    """A restore's targets, derived from the composition its `sources` compile
+    to, never from the `manifest` the caller writes; and what that compile
+    read from disk.
+
+    A snapshot document is caller-supplied JSON, so its `manifest` and `meta`
+    are claims, not evidence. Reading them scoped the gate to a composition the
+    caller described rather than the one that boots: an operator granted
+    `restore` on one subject could name that subject there while its sources
+    compiled and loaded anything (issue #3197). This compiles the same sources
+    the handler re-admits, as `_targets` does for a `load` candidate.
+
+    The disk reads: a snapshot may leave a module out of its in-memory
+    sources, and the compile then reads it from disk. The handler compiles
+    again to boot, so a write between the two reads would boot a composition
+    the gate never decided on. The modules this compile read are returned as
+    path -> sha256 (:func:`persist.read_digests`), and the handler refuses a
+    boot compile whose reads differ. The texts are not copied into the
+    snapshot: a module read from disk keeps resolving its `asset`, `ref` and
+    body files beside it.
+
+    Two compiles stay (this one, and the handler's under the authoring
+    profile) and they cannot disagree on the component set: they read the
+    same texts (checked by digest), and `profile` here carries the boot
+    compile's operator realm bindings and nothing else, so a `realm(?NAME)`
+    placeholder binds to the same realm in both. Every other profile field
+    may only REFUSE a compile, never reshape the composition a successful one
+    produces. Without the bindings an unbound placeholder failed this compile
+    alone, the target set became undecidable, and a `may restore on *`
+    holder's `may not restore on <name>` deny never met the component the
+    boot then bound and loaded. Otherwise unprofiled by the same rule as
+    :func:`_compile_candidate`: it derives names and realms, lowers no host
+    body and boots nothing, and accepts everything the profiled one does.
+
+    The targets are ``None`` when the document names no sources or does not
+    compile: an *undecidable* target set, which :func:`decide` fails closed
+    on, with no disk reads, so the boot may read nothing from disk either. An
+    empty composition compiles to no targets and is scoped to the whole
+    composition too (:func:`_live_targets`)."""
+    if not isinstance(snap, dict):
+        return [("*", frozenset({WHOLE}))], {}
+    from .persist import read_digests, recompile_snapshot  # noqa: PLC0415 - lazy, no cycle
+
+    report: dict = {}
+    try:
+        ir = recompile_snapshot(snap, profile=profile, report=report)
+    except Exception:  # noqa: BLE001 - a failed derivation must not widen
+        return None, {}
+    return _live_targets(ir), read_digests(report.get("disk_reads"))
 
 
 def _compile_candidate(arguments: dict, manifest: dict | None = None,
@@ -1180,8 +1312,7 @@ def _targets(verb: str, session, arguments: dict) \
 def _approve_targets(session, arguments: dict) \
         -> list[tuple[str, frozenset[str]]] | None:
     """A `revl_approve`'s target: the crossing component the approval names,
-    resolved WITHOUT running anything (the same resolve-without-running pattern
-    `_snapshot_targets` uses for `restore`). A ticket `hash` resolves against the
+    resolved WITHOUT running anything. A ticket `hash` resolves against the
     session's outstanding-ticket table; a proactive item-344 `capability` grant
     resolves against the live class map. Either way the target scopes to the
     crossing component and its realms, so a subject-scoped `may approve on
@@ -1267,10 +1398,59 @@ def _distillation_targets(session, arguments: dict) \
     return out
 
 
+def _approvals_targets(session, arguments: dict) \
+        -> list[tuple[str, frozenset[str]]] | None:
+    """A `revl_approvals` call's target (issue #2991), resolved from the ACTION.
+
+    `show` reads one ticket, so a hash the outstanding-ticket table holds scopes
+    to that ticket's crossing component, exactly as `revl_approve` does. `list`
+    and `stats` read every component's tickets, so they scope to the whole
+    composition (None, which `decide` fails closed to `*`) whatever other keys
+    the arguments carry: `_approve_targets` would read `hash`, `requestId`,
+    `capability`, `offerId` or `rule` and scope a whole-table read to one
+    component. An unknown hash is undecidable too, so a scoped operator gets
+    the same refusal for it as for another component's ticket."""
+    if arguments.get("action") != "show":
+        return None
+    ticket_hash = arguments.get("hash")
+    tickets = getattr(session, "_tickets", None) or {}
+    if not isinstance(ticket_hash, str) or ticket_hash not in tickets:
+        return None
+    return _approve_targets(session, {"hash": ticket_hash})
+
+
+def _approvals_refusal(operator: Operator, verb: str, arguments: dict,
+                       ) -> tuple[WhyTrace, str]:
+    """The ONE refusal a `revl_approvals` call gets (issue #2991). It names the
+    action and never the resolved component or whether a `may not` matched, so
+    a refused `show` cannot tell a scoped operator whether a hash names a
+    ticket, or whose ticket it is."""
+    action = arguments.get("action")
+    action = action if action in {"list", "show", "stats"} else "query"
+    need = ("a grant over the ticket's crossing component" if action == "show"
+            else "`may approve on *`")
+    message = (f"operator `{operator.token}` may not read approvals with "
+               f"`{action}`: it needs `{verb}` authority, {need} (operator "
+               f"capabilities, item 55; issue #2991)")
+    why = WhyTrace(
+        kind="operator-authority", subject=operator.token, shape=CHAIN,
+        steps=[
+            TraceStep(operator.token, "operator", None, None,
+                      f"attempts `{verb}`"),
+            TraceStep("the approval query", "component", None, None,
+                      f"target of `{verb}`", ("*",)),
+        ])
+    return why, message
+
+
 def _refusal(operator: Operator, verb: str,
              offender: tuple[str, frozenset[str]], grant: Grant | None,
              ) -> tuple[WhyTrace, str]:
     name, labels = offender
+    if isinstance(labels, ChangedLabels):
+        # name every side of the change, whether a deny matched or an allow
+        # failed: the realm the component was in is part of the target too
+        labels = deny_labels_of(labels)
     subject = name if name != WHOLE else "the whole composition"
     named = sorted(l for l in labels if l != WHOLE) or ["*"]
     if grant is not None:  # an explicit `may not`
@@ -1417,7 +1597,8 @@ def mint_refusal(operator: Operator | None, *, capability: str,
             f"470 stage 3). Widen the `may mint` line, or mint within it")
 
 
-def decide(session, tool_name: str, arguments: dict) -> Decision:
+def decide(session, tool_name: str, arguments: dict, *,
+           restore_profile=None) -> Decision:
     """Gate one MCP verb dispatch against the session's bound operator.
 
     Returns a :class:`Decision`. When no operator is bound (no profile) or the
@@ -1444,7 +1625,11 @@ def decide(session, tool_name: str, arguments: dict) -> Decision:
     running composition is refused by the handler outright (`load` never
     replaces or activates a live composition). The gate is kept for that
     already-live case, and for every state-changing verb (swap/edit/unload/
-    restore/undo)."""
+    restore/undo).
+
+    `restore_profile` is the profile a `restore`'s target derivation compiles
+    under: the boot compile's operator realm bindings only (issue #3197, see
+    :func:`_restore_targets`)."""
     verb = TOOL_VERB.get(tool_name)
     if verb is None and tool_name in COMPOSED_TOOL_VERB:
         # a composed verb: gated as the operation it performs underneath, and
@@ -1466,7 +1651,16 @@ def decide(session, tool_name: str, arguments: dict) -> Decision:
             and not _cold_load_activation_emits(arguments):
         return Decision(gated=False)  # cold load: not yet a privileged mutation
 
-    targets = _targets(verb, session, arguments)
+    approvals = tool_name == "revl_approvals"
+    disk_reads = None
+    if approvals:
+        targets = _approvals_targets(session, arguments)
+    elif verb == "restore":
+        # issue #3197: the handler boots only what this compile read
+        targets, disk_reads = _restore_targets(arguments.get("snapshot"),
+                                               restore_profile)
+    else:
+        targets = _targets(verb, session, arguments)
     if targets is None:
         # UNDECIDABLE — fail closed. The gate cannot work out which components
         # this action touches, so it scopes the action to the unnameable whole
@@ -1480,12 +1674,15 @@ def decide(session, tool_name: str, arguments: dict) -> Decision:
 
     for offender in targets:
         _name, labels = offender
-        allowed, grant = operator.allows(verb, labels)
+        allowed, grant = operator.allows(verb, labels, deny_labels_of(labels),
+                                         was_labels_of(labels))
         if not allowed:
-            why, message = _refusal(operator, verb, offender, grant)
+            why, message = (_approvals_refusal(operator, verb, arguments)
+                            if approvals
+                            else _refusal(operator, verb, offender, grant))
             return Decision(gated=True, allowed=False, operator=operator.token,
                             verb=verb, why=why, message=message)
 
     subjects = tuple(sorted(name for name, _ in targets))
     return Decision(gated=True, allowed=True, operator=operator.token,
-                    verb=verb, subjects=subjects)
+                    verb=verb, subjects=subjects, disk_reads=disk_reads)

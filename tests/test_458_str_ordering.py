@@ -50,14 +50,14 @@ with `operands: "Str"` — the same additive annotation, on the same key, that
 `Float / Float` from the node alone. ts and java then route through a
 `revlStrCmp` that compares SCALARS AS NUMBERS, and both `Map.keys()` sorts
 reuse it. py, go and rust are already in code-point order and are untouched.
-wasm still refuses the form BY NAME and should keep doing so: a refusal is
-honest where a wrong answer is not.
+wasm refused the form BY NAME when this item landed; issue #3145 lowered it
+through a byte-wise `$str_cmp` (UTF-8 byte order is code-point order).
 
 NON-VACUITY CONTROLS, and they carry weight here:
 `test_an_int_comparison_still_uses_the_host_operator` proves the routing
 discriminates on the annotation rather than rewriting every `<`, and
-`test_wasm_still_refuses_str_ordering_by_name` proves the close did not turn
-the honest refusal into a silent lowering. Both pass before and after.
+`test_wasm_orders_str_by_code_point_through_str_cmp` now pins the wasm lowering
+that replaced the refusal.
 """
 
 import os
@@ -259,13 +259,16 @@ def test_the_already_correct_tiers_are_untouched(backend: str):
     assert "a < b" in emitted, emitted
 
 
-def test_wasm_still_refuses_str_ordering_by_name():
-    """NON-VACUITY, and the point of the whole item: this tier has no string
-    comparison to lower, and it says so at emit time. A refusal is honest; the
-    close must not have turned it into a silent lowering."""
-    with pytest.raises(Exception) as excinfo:
-        _emit("wasm", STR_LT)
-    assert "relational operator" in str(excinfo.value)
+def test_wasm_orders_str_by_code_point_through_str_cmp():
+    """Issue #3145 lifted the by-name refusal: wasm lowers a `Str` relational
+    through `$str_cmp`, a byte comparison that is code-point order for UTF-8.
+    The executed ordering is pinned in
+    `backends/wasm/test_list_index_str_cmp_empty_3145.py`; this pins that the
+    form emits, and that a mixed comparison is still refused by name."""
+    emitted = _emit("wasm", STR_LT)
+    assert "(call $str_cmp)" in str(emitted), emitted
+    with pytest.raises(Exception, match="relational operator"):
+        _emit("wasm", "fn f(a: Str, b: Int) -> Bool { return a < b }")
 
 
 # ------------------------------------------- the comparators, read directly

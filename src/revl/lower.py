@@ -63,6 +63,10 @@ from .typecheck import (
     bind_local as _bind_typed_local,
     check_ir,
     infer_ast,
+    infer_memo,
+    infer_memo_active,
+    infer_ir_memo,
+    infer_ir_memo_active,
     infer_ir,
     mismatch,
     pin_hole,
@@ -300,9 +304,12 @@ _BUILTIN_METHODS = {
     # The reverse of `codepoint_at` (issue #2285, docs/stdlib-2.0.md
     # §Int.to_char): Int receiver, no argument, a one-code-point Str or "".
     "to_char": 0,
-    # The total forms (docs/arithmetic.md): a zero divisor is the *point*
-    # here, so these are deliberately absent from _DIVIDES_BY below — a
-    # literal zero argument is refused for the faulting operations only.
+    # The total forms (docs/arithmetic.md): same operands as their faulting
+    # counterparts, `Result[Int, Str]` instead of a fault. A zero divisor is
+    # the *point* of the checked division forms, so those four are
+    # deliberately absent from _DIVIDES_BY below — a literal zero argument is
+    # refused for the faulting operations only.
+    "checked_add": 1, "checked_sub": 1, "checked_mul": 1,
     "checked_div_trunc": 1, "checked_div_floor": 1,
     "checked_div_euclid": 1, "checked_mod": 1,
     # The Map value type (docs/stdlib-2.0.md §Map). Names disjoint from the
@@ -815,8 +822,9 @@ def _is_dunder_name(name: str) -> bool:
 def _reject_dunder_name(name: str, kind: str, owner: str,
                         filename: str, line: int) -> None:
     """Refuse a dunder / prototype name in a `kind` (`field`/`method`/`config
-    field`) position, naming its `owner` (record / service / component). A no-op
-    for every ordinary name, so nothing that compiled before is affected."""
+    field`) position, naming its `owner` (a record, service or component, or
+    a record literal or update). A no-op for every ordinary name, so nothing
+    that compiled before is affected."""
     if _is_dunder_name(name):
         raise RevlError(
             filename, line,
@@ -4266,7 +4274,10 @@ def _refuse_effect_position_bound_externs_in_fn_body(
     deferred/witnessed/acquire rules but do not participate in the #2842
     module-function check; component values are resolved in
     `_lower_component_pure_expr`, where lexical scope is available."""
-    from .parser import ExprArrow, ExprCall, ExprVar
+    from .parser import (
+        ExprArrow, ExprBlockArm, ExprCall, ExprMatch, ExprVar, ForStmt,
+        LetPatternStmt, LetStmt,
+    )
 
     witnessed = _witnessed_extern_names(program)
     acquire_undo = {
@@ -4284,7 +4295,8 @@ def _refuse_effect_position_bound_externs_in_fn_body(
 
     def _walk(node, where: str, in_arrow: bool = False, calls: bool = True,
               check_emission_values: bool = True,
-              check_acquire_values: bool = False):
+              check_acquire_values: bool = False,
+              filename: str = filename, bound: frozenset = frozenset()):
         nonlocal first_witnessed, first_teardown, first_emission_value
         nonlocal first_acquire_value
         if isinstance(node, ExprArrow):
@@ -4295,11 +4307,14 @@ def _refuse_effect_position_bound_externs_in_fn_body(
             first_teardown = _deferred_value_refusal(node.name, where,
                                                      filename, node.line)
         if check_emission_values and isinstance(node, ExprVar) \
-                and node.name in emission_values and first_emission_value is None:
+                and node.name in emission_values and node.name not in bound \
+                and first_emission_value is None:
             # A callable that reaches an irreversible extern cannot escape as
             # a value: the eventual dispatch has no named `emit` call site.
             # Direct call heads are skipped below, so ordinary calls retain
-            # their existing treatment and `emit send(...)` stays valid.
+            # their existing treatment and `emit send(...)` stays valid. A
+            # parameter, `let`, `for` variable, match binding or lambda
+            # parameter in scope (`bound`) shadows the extern (issue #3354).
             first_emission_value = _emission_value_refusal(
                 node.name, emission_values[node.name], filename, node.line)
         if check_emission_values and isinstance(node, ExprArrow) \
@@ -4311,14 +4326,18 @@ def _refuse_effect_position_bound_externs_in_fn_body(
                 first_emission_value = _emission_arrow_refusal(
                     hit[0], emission_values[hit[0]], filename, node.line)
         if check_acquire_values and isinstance(node, ExprVar) \
-                and node.name in acquire_undo and first_acquire_value is None:
+                and node.name in acquire_undo and node.name not in bound \
+                and first_acquire_value is None:
             # Issue #2972: the acquire class follows the value, exactly as the
             # emission class does above. The direct call in a `fn` body is
             # refused below (item 399) because the teardown accumulator that
             # registers the declared `undo` does not exist there; a value has
             # the same problem with no call site at all. Callee positions are
             # skipped by the walk (the `callee` field is not visited), so a
-            # real call keeps its own refusal above.
+            # real call keeps its own refusal above. A name the body binds in
+            # scope at the read (a parameter, a `let`, a `for` or arrow
+            # binder, a match payload) is that binding, not the extern
+            # (issue #2985).
             first_acquire_value = _acquire_value_refusal(
                 node.name, f"in {where}", filename, node.line)
         if calls and isinstance(node, ExprCall) and isinstance(node.callee, ExprVar):
@@ -4361,23 +4380,46 @@ def _refuse_effect_position_bound_externs_in_fn_body(
                          "from there (docs/design/245-session-commit.md)",
                     code="G4", category="deferred",
                 )
-        if hasattr(node, "__dataclass_fields__"):
+        def _sub(child, inner=bound):
+            _walk(child, where, in_arrow, calls, check_emission_values,
+                  check_acquire_values, filename, inner)
+
+        if isinstance(node, ExprArrow):
+            _sub(node.body, bound | set(node.params))
+        elif isinstance(node, ExprMatch):
+            _sub(node.scrutinee)
+            for _pattern, bind, body in node.arms:
+                _sub(body, bound | {bind} if bind else bound)
+        elif isinstance(node, ForStmt):
+            _sub(node.iterable)
+            _sub(node.body, bound | {node.bind})
+        elif isinstance(node, ExprBlockArm):
+            _sub(node.stmts + [node.tail])
+        elif hasattr(node, "__dataclass_fields__"):
             for f in type(node).__dataclass_fields__:
                 child = getattr(node, f)
                 if f == "callee" and isinstance(node, ExprCall) \
                         and isinstance(child, ExprVar):
                     continue  # the callee position is a CALL, judged above
-                _walk(child, where, in_arrow, calls, check_emission_values,
-                      check_acquire_values)
+                _sub(child)
         elif isinstance(node, (list, tuple)):
+            # a statement list is a block: a `let` binds from the next
+            # statement to the block's end (issue #3354)
+            inner = bound
             for x in node:
-                _walk(x, where, in_arrow, calls, check_emission_values,
-                      check_acquire_values)
+                _sub(x, inner)
+                if isinstance(x, LetStmt):
+                    inner = inner | {x.name}
+                elif isinstance(x, LetPatternStmt):
+                    inner = inner | set(_pattern_binds(x.pattern))
 
     for fn in program.fn_decls:
-        for stmt in fn.body:
-            _walk(stmt, f"the body of fn `{fn.name}`",
-                  check_acquire_values=True)
+        # the diagnostic names the file the fn is in, not the compile's first
+        # file, and its parameters shadow a same-named extern (issue #3354)
+        _walk(fn.body, f"the body of fn `{fn.name}`",
+              check_acquire_values=True,
+              filename=getattr(fn, "source", "") or filename,
+              bound=frozenset(p.name for p in fn.params))
     for test in program.tests:
         for stmt in test.body:
             _walk(stmt, f"the body of test `{test.name}`",
@@ -4463,6 +4505,29 @@ def _acquire_value_refusal(name: str, where: str, filename: str,
         f"declared `undo` teardown would be dropped, leaving the acquisition "
         f"irreversible (G4)",
         hint=hint,
+        code="G4", category="acquire",
+    )
+
+
+def _acquire_call_refusal(name: str, filename: str, line: int) -> RevlError:
+    """A plain call of an `acquire` extern inside a provide-method body (issue
+    #2985), the call twin of `_acquire_value_refusal`.
+
+    The call is not the root of an `effect`/`let-effect` bracket, so no step is
+    built and the `undo` the declaration asserts is never registered. The
+    bracketed acquisition is itself refused in this position ("only `spawn` may
+    be acquired"), so the unbracketed call must not be the spelling that gets
+    through. An arrow whose body makes the call reaches here too: its body is
+    lowered in the method's environment."""
+    return RevlError(
+        filename, line,
+        f"`acquire` extern `{name}` cannot be called inside a provide-method "
+        f"body, where only `spawn` may be acquired; its declared `undo` "
+        f"teardown would be dropped, leaving the acquisition irreversible (G4)",
+        hint="the acquisition belongs in the component's activation body, "
+             "where the teardown accumulator registers its declared `undo`; "
+             "bind the handle there and use it in the method, or use `spawn` "
+             "for a request-scoped instance (docs/design-v2-instances.md)",
         code="G4", category="acquire",
     )
 
@@ -4751,6 +4816,13 @@ _ROUTE_METHODS = ("get", "post", "put", "patch", "delete", "head")
 _ROUTE_QUERY_METHODS = ("get", "head", "delete")
 _ROUTE_BODY_METHODS = ("post", "put", "patch")
 
+#: the two verbs a browser sends from ANY page without an `Origin` header: an
+#: `<img>`, `<script>` or `<link>` GET, a form GET, or a top-level navigation.
+#: Issue #3186: a mutating operation routed with one is reachable from every page
+#: the operator visits, so an operation whose reach is an emission may not use
+#: them.
+_ROUTE_ORIGINLESS_METHODS = ("get", "head")
+
 
 def _route_scalar(type_name: str | None) -> bool:
     return type_name in _ROUTE_SCALARS
@@ -4786,6 +4858,9 @@ def _method_route_ir(m, types: dict, filename: str, service_name: str) -> dict:
         template does not name;
       * a `Bearer` / `Request` parameter appearing more than once;
       * a non-scalar / non-`Opt[scalar]` query parameter on a safe verb;
+      * a `route get` or `route head` on an `emission` operation (issue #3186):
+        a browser sends no `Origin` on the cross-site GET a page can fire, so an
+        emission reached by one fires from any page the operator visits;
       * anything other than exactly one record body on an unsafe verb;
       * a body / query / path type that is not `fully_expressible` (item 257);
       * a `Result[T, E]` return whose `E` is not `ApiError`.
@@ -4803,6 +4878,14 @@ def _method_route_ir(m, types: dict, filename: str, service_name: str) -> dict:
     def refuse(message: str, hint: str | None = None):
         raise RevlError(filename, line, message, hint=hint,
                         code="G4", category="route")
+
+    if m.emission and method in _ROUTE_ORIGINLESS_METHODS:
+        refuse(f"{where} is an `emission` operation, but is routed with `{method}`",
+               hint="a browser sends no Origin on a cross-site GET (an <img>, "
+                    "<script>, <link>, form GET or top-level navigation), so any "
+                    "page the operator visits could fire it; route an emission "
+                    "with `post`, which a cross-site page cannot send without a "
+                    "preflighted Origin")
 
     try:
         template = _route_template_names(path)
@@ -6285,8 +6368,21 @@ def _check_generatable(filename: str, line: int, type_name: str, types: dict,
 
 def _lower_prop_tests(program: Program, filename: str, types: dict,
                       services: dict | None = None) -> list:
-    """Lower `prop test` blocks to IR prop units (docs/prop-test.md)."""
-    if not program.prop_tests:
+    """Lower `prop test` blocks to IR prop units (docs/prop-test.md).
+
+    Issue #2705 adds the second source of units: a `fn` with an `ensures`
+    clause is lowered to a generated property over the fn's parameter types
+    whose body binds `result` to one call of the fn and asserts the clause.
+    The expansion lives here, at lowering, rather than as a synthesized
+    `PropTestDecl` in the parsed program, so the fn's types and value names are
+    the ones the module merge already resolved and the fn's own callable scope
+    is the one the property body lowers in. The unit carries `spec_of`/`spec`
+    so the runner and the audit can attribute the result to the function
+    (docs/function-specs.md).
+    """
+    spec_fns = [fn for fn in program.fn_decls
+                if getattr(fn, "ensures", None) is not None]
+    if not program.prop_tests and not spec_fns:
         return []
     merged_callables = (_HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | _DECLASSIFY_BUILTINS
                         | {fn.name for fn in program.fn_decls}
@@ -6294,6 +6390,30 @@ def _lower_prop_tests(program: Program, filename: str, types: dict,
     units: list[dict] = []
     seen: set[str] = set()
     scoped: dict = {}
+
+    def _unit(name, params, stmts, decl_file, callables, provenance=None):
+        scope: dict[str, bool] = {}
+        type_env: dict[str, str] = {}
+        for param in params:
+            check_type_wellformed(decl_file, param.line, param.type)
+            _check_generatable(decl_file, param.line, param.type, types, name)
+            scope[param.name] = False
+            type_env[param.name] = param.type
+        body: list[dict] = []
+        check_list_index_bounds(stmts, decl_file)
+        for stmt in stmts:
+            _lower_pure_stmt(stmt, scope, callables, {}, body, decl_file,
+                             type_env, types)
+        unit = {
+            "name": name,
+            "params": [{"name": _predeclared_mangle(p.name), "type": p.type}
+                       for p in params],
+            "body": body,
+        }
+        if provenance:
+            unit.update(provenance)
+        return unit
+
     for decl in program.prop_tests:
         callables = _block_callables(program, decl, merged_callables, scoped)
         # issue #1904, as in `_lower_tests`: a prop test carried in from an
@@ -6302,23 +6422,28 @@ def _lower_prop_tests(program: Program, filename: str, types: dict,
         if decl.name in seen:
             raise RevlError(decl_file, decl.line, f"duplicate prop test `{decl.name}`")
         seen.add(decl.name)
-        scope: dict[str, bool] = {}
-        type_env: dict[str, str] = {}
-        for param in decl.params:
-            check_type_wellformed(decl_file, param.line, param.type)
-            _check_generatable(decl_file, param.line, param.type, types, decl.name)
-            scope[param.name] = False
-            type_env[param.name] = param.type
-        body: list[dict] = []
-        check_list_index_bounds(decl.body, decl_file)
-        for stmt in decl.body:
-            _lower_pure_stmt(stmt, scope, callables, {}, body, decl_file, type_env, types)
-        units.append({
-            "name": decl.name,
-            "params": [{"name": _predeclared_mangle(p.name), "type": p.type}
-                       for p in decl.params],
-            "body": body,
-        })
+        units.append(_unit(decl.name, decl.params, decl.body, decl_file, callables))
+
+    for fn in spec_fns:
+        spec = fn.ensures
+        decl_file = program.decl_files.get(id(fn), filename)
+        name = f"{fn.name} ensures"
+        if name in seen:
+            raise RevlError(
+                decl_file, spec.line,
+                f"`fn {fn.name}`'s spec is checked as prop test `{name}`, "
+                "which is already declared",
+                hint="rename the `prop test`, or the function")
+        seen.add(name)
+        callables = _block_callables(program, fn, merged_callables, scoped)
+        call = ExprCall(ExprVar(fn.name, spec.line),
+                        [ExprVar(p.name, p.line) for p in fn.params],
+                        spec.line)
+        stmts = [LetStmt("result", call, False, spec.line),
+                 AssertStmt(spec.expr, spec.line)]
+        units.append(_unit(name, fn.params, stmts, decl_file, callables,
+                           {"spec_of": fn.name, "spec": spec.text,
+                            "spec_file": decl_file}))
     return units
 
 
@@ -7147,17 +7272,29 @@ def _lower_let_pattern_stmt(stmt: LetPatternStmt, scope: dict, callables: set, a
                                      "only one is live.)")
         value_type = _expr_static_type(stmt.value, type_env, types)
         spec = types.get(value_type or "")
-        if spec is not None:
+        # A structural value (an anonymous record literal, or a name bound to
+        # one) is checked against its own shape, the same way a record update
+        # on it is (issue #3536): naming a field it lacks used to compile.
+        struct = structural_fields(value_type) if value_type else None
+        fields = None
+        if struct is not None:
+            fields = struct
+        elif spec is not None:
             if spec.get("kind") != "record":
                 raise RevlError(
                     filename, stmt.line,
                     f"record destructuring requires a record, but `{render_type(value_type)}` is not a record",
                 )
             fields = spec.get("fields", {})
+        if fields is not None:
             for name in names:
                 if name not in fields:
-                    raise RevlError(filename, pattern.line,
-                                    f"`{name}` is not a field of record `{render_type(value_type)}`")
+                    raise RevlError(
+                        filename, pattern.line,
+                        f"record destructuring names `{name}`, which is not a field of "
+                        f"`{render_type(value_type)}`",
+                        hint=f"fields: {', '.join(f'`{f}`' for f in sorted(fields))}",
+                    )
         elif value_type is not None and parse_type(value_type)[0] in _BUILTIN_NONRECORD:
             raise RevlError(
                 filename, stmt.line,
@@ -7166,8 +7303,8 @@ def _lower_let_pattern_stmt(stmt: LetPatternStmt, scope: dict, callables: set, a
         value_ir = _lower_pure_expr(stmt.value, scope, callables, alias_fns, filename, type_env, types)
         for name in names:
             scope[name] = stmt.mutable
-            if spec is not None:
-                type_env[name] = spec.get("fields", {})[name]
+            if spec is not None and struct is None:
+                type_env[name] = fields[name]
         body.append({
             "step": "let_pattern",
             "pattern": "record",
@@ -7609,6 +7746,26 @@ def _refuse_foreign_increment(expr, filename: str, type_env: dict | None,
 
 def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filename: str,
                      type_env: dict | None = None, types: dict | None = None) -> dict:
+    """Lower one pure-stratum expression.
+
+    Issue #3400: the operator arms below ask `infer_ast` for the type of each
+    operand after lowering it, and each answer walks the operand's subtree, so
+    the outermost call opens an `infer_memo()` and every node of the
+    expression is inferred once. Sound here because every statement scope this
+    lowering opens inside an expression works on a copy (`dict(type_env)`), so
+    no environment an operand was inferred under changes meanwhile.
+    """
+    if infer_memo_active():
+        return _lower_pure_expr_node(expr, scope, callables, alias_fns, filename,
+                                     type_env, types)
+    with infer_memo():
+        return _lower_pure_expr_node(expr, scope, callables, alias_fns, filename,
+                                     type_env, types)
+
+
+def _lower_pure_expr_node(expr, scope: dict, callables: set, alias_fns: dict,
+                          filename: str, type_env: dict | None = None,
+                          types: dict | None = None) -> dict:
     type_env = type_env if type_env is not None else {}
     types = types if types is not None else {}
     if isinstance(expr, ExprHole):
@@ -7942,10 +8099,14 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         # exactly this reason, and a bare `var` read (`{ x: v }`) is the same
         # copy — the value is taken, the mutable cell is not captured, so the
         # `var` still never escapes its function. Both forms lower identically.
+        for name, _ in expr.fields:
+            _reject_dunder_name(name, "field", "a record literal", filename, expr.line)
         return {"kind": "record",
                 "fields": [[name, _lower_pure_expr(e, scope, callables, alias_fns, filename, type_env, types)]
                            for name, e in expr.fields]}
     if isinstance(expr, ExprRecordUpdate):
+        for name, _ in expr.updates:
+            _reject_dunder_name(name, "field", "a record update", filename, expr.line)
         return {"kind": "record_update",
                 "base": _lower_pure_expr(expr.base, scope, callables, alias_fns, filename, type_env, types),
                 "updates": [[name, _lower_pure_expr(e, scope, callables, alias_fns, filename, type_env, types)]
@@ -8251,17 +8412,33 @@ def _component_header_stub(comp: ComponentDecl, filename: str) -> dict:
     topology complete from the parts available BEFORE body lowering — the
     `requires`/`provides` clauses on the `component` declaration — and mark it
     `poisoned` so the body-walking post-passes (taint, spawn bounds/attenuation,
-    holes) skip it. `isolate`/`routes` are body statements, so a stub carries
-    none: its provisions sit in the shared realm, which is exactly enough to
-    stop the route-check fabrication and keep G2/G3 sound over its keys."""
-    return {
+    holes) skip it. `isolate` is a body statement, so a stub carries none: its
+    provisions sit in the shared realm, which is exactly enough to stop the
+    route-check fabrication and keep G2/G3 sound over its keys.
+
+    A multi-realm route over a REQUIRED key is carried (issue #3360): it is
+    what makes a component that requires and provides one key a router rather
+    than a self-cycle, so a stub without it fabricated a G3 refusal next to the
+    real one (an unknown strategy, say). Only the realm set travels; a route
+    over a key the header does not require is the body's own refusal."""
+    from .parser import RouteStmt
+    requires = {local for local, _svc, _line in comp.requires}
+    stub = {
         "name": comp.name,
         "source": comp.source or filename,
-        "requires": {local for local, _svc, _line in comp.requires},
+        "requires": requires,
         "provides": {key for key, _svc, _line in comp.provides},
         "body": [],
         "poisoned": True,
     }
+    routes: dict = {}
+    for stmt in comp.body or ():
+        if isinstance(stmt, RouteStmt) and stmt.key in requires \
+                and stmt.key not in routes:
+            routes[stmt.key] = {"realms": list(stmt.realms), "strategy": None}
+    if routes:
+        stub["routes"] = routes
+    return stub
 
 
 def _raise_collected(errors: list[RevlError], program: Program) -> None:
@@ -10261,6 +10438,26 @@ def _component_scope_value_is_callee(name: str, env: Env,
 
 def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables: set,
                                pure_only: bool = False) -> dict:
+    """Lower one component-stratum expression.
+
+    Issue #3457: the operator arms below ask `infer_ir` for the type of each
+    operand after lowering it, and each answer walked the operand's subtree,
+    so the outermost call opens an `infer_ir_memo()` and every node of the
+    expression is inferred once per type environment. Sound under the in-place
+    binds this lowering makes to `env.type_env` because that memo keys the
+    environment by content.
+    """
+    if infer_ir_memo_active():
+        return _lower_component_pure_expr_node(expr, env, scope, callables,
+                                               pure_only)
+    with infer_ir_memo():
+        return _lower_component_pure_expr_node(expr, env, scope, callables,
+                                               pure_only)
+
+
+def _lower_component_pure_expr_node(expr, env: Env, scope: dict[str, str],
+                                    callables: set,
+                                    pure_only: bool = False) -> dict:
     filename = env.filename
     line = getattr(expr, "line", 0)
 
@@ -10707,6 +10904,21 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 # caller bracketed with `_acquire_position`.
                 if expr is not getattr(env, "_host_acquire_root", None):
                     _refuse_unpositioned_witnessed_call(name, env, filename, line)
+                    # issue #2985: the acquire class follows the CALL as well
+                    # as the value. Inside a provide-method body the bracketed
+                    # acquisition is refused outright, so the plain call
+                    # (`let h = open_sock()`, `return open_sock().fd`, or the
+                    # body of an arrow) cannot buy the reach the bracket does
+                    # not have: no effect step is built, so the declared
+                    # `undo` is never registered.
+                    # A teardown slot (`undo`) or an `emit` expression lowers
+                    # under its own mode and keeps its own rules (item 308,
+                    # the re-mint refusal), as the witnessed rule above does.
+                    if (getattr(env, "in_provide_method", False)
+                            and getattr(env, "_expr_mode", "setup") == "setup"
+                            and (getattr(env, "extern_class", None) or {})
+                            .get(name) == "acquire"):
+                        raise _acquire_call_refusal(name, filename, line)
                 return node
         if isinstance(expr.callee, ExprField) and expr.callee.name in _BUILTIN_METHODS:
             method = expr.callee.name
@@ -10856,11 +11068,17 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
     if isinstance(expr, ExprRecord):
         if isinstance(expr, ExprAsset):  # item 459 F1
             _require_resolved_asset(expr, env.filename)
+        for name, _ in expr.fields:
+            _reject_dunder_name(name, "field", "a record literal", env.filename,
+                                expr.line)
         return {"kind": "record",
                 "fields": [[name, _lower_component_pure_expr(e, env, scope, callables,
                                                              pure_only)]
                            for name, e in expr.fields]}
     if isinstance(expr, ExprRecordUpdate):
+        for name, _ in expr.updates:
+            _reject_dunder_name(name, "field", "a record update", env.filename,
+                                expr.line)
         return {"kind": "record_update",
                 "base": _lower_component_pure_expr(expr.base, env, scope, callables,
                                                    pure_only),
@@ -12670,7 +12888,7 @@ def _refuse_builtin_type_value(name: str, env: "Env", filename: str,
         hint = ("a bracket inverse releases the handle its bracket bound: "
                 "`let h = effect Map.new() undo h.drop()`. A builtin method "
                 "computes a new value and releases nothing, so it is never an "
-                "inverse (docs/rejections.md#g4--inverse-or-emit)")
+                "inverse (docs/rejections.md#g4-inverse-or-emit)")
     else:
         hint = ("a builtin method is called on a value of the type "
                 "(`xs.<method>()`), never on the type, and a builtin type is "
@@ -14435,6 +14653,48 @@ def _poison_failed_binding(stmt, env: "Env") -> None:
     env.type_env[safe] = POISON
 
 
+# ------------------------------------------- the access walk's observation (G1)
+#
+# THE SEAM THE FORMAL G1 COVERAGE ROW PINS (issue #2744). G1 is enforced by
+# name resolution DURING lowering (`_lower_postfix`), so the checker has no
+# separate walk function to wrap the way the G9 row wraps
+# `taint._walk_component_methods`. The obligation the coverage theorem states
+# is about the walk that lowering IS: every scope a component body induces is
+# opened and each of its top-level statements is REACHED BY THE LOWERING LOOP.
+# A visit is recorded at the loop head, before the statement is dispatched, so
+# the log observes that the loop reached the statement, not that name
+# resolution then ran on it: a dispatch that skipped a reached statement would
+# still log a full walk. `formal/harness/diff_corpus.py` observes that by
+# installing a log here for the duration of ONE `compile_files` call.
+#
+# None in production: every call site is one branch and a module-global
+# lookup, and nothing is allocated or mutated while the log stays None. No
+# behaviour depends on the log. The
+# entries are `("scope", component, label, (param, ...))` when a provide
+# method's scope opens (its declared parameters are seeded there) and
+# `("visit", component, label, ())` once per statement the loop reached.
+# The harness is the only reader; a renamed or moved call site leaves the log
+# short, which the coverage row reports as its own blind spot rather than as
+# the checker having skipped a statement.
+_ACCESS_WALK: "list[tuple[str, str, str, tuple[str, ...]]] | None" = None
+
+
+def _note_access_scope(component: str, scope: str,
+                       params: list[str]) -> None:
+    """Record that the walk opened one scope of one component body."""
+    log = _ACCESS_WALK
+    if log is not None:
+        log.append(("scope", component, scope, tuple(params)))
+
+
+def _note_access_visit(component: str, scope: str) -> None:
+    """Record that the lowering loop reached one statement of one scope,
+    before it is dispatched."""
+    log = _ACCESS_WALK
+    if log is not None:
+        log.append(("visit", component, scope, ()))
+
+
 def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], filename: str,
                      callables: set | None = None, types: dict | None = None,
                      emitting_fns: set | None = None,
@@ -14850,6 +15110,12 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
     # this pass has to bound (item 485)
     check_list_index_bounds(comp.body, filename)
     for stmt in comp.body:
+        # the G1 coverage observation (issue #2744): the loop REACHES this
+        # activation statement here, before any branch decides what it lowers
+        # to, so the log records the reach and not the resolution. A provide block is its own scope and is recorded by
+        # `_lower_provide`, not as an activation statement.
+        if not isinstance(stmt, ProvideStmt):
+            _note_access_visit(comp.name, "activation")
         if isinstance(stmt, HandoffStmt):
             # `handoff <key>: <Type>` (roadmap item 53): the verified state
             # hand-off of a stateful provider. A prelude declaration — it names
@@ -15685,7 +15951,14 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 raise RevlError(filename, getattr(ms, "line", method.line),
                                 "unexpected statement in method control-flow body")
 
+        # the G1 coverage observation (issue #2744): the walk opens this
+        # provide method's scope with exactly the parameters it seeds into the
+        # method's environment, then records each statement the loop reaches,
+        # before it is dispatched.
+        _note_access_scope(comp.name, f"{stmt.key}.{method.name}",
+                           list(env.params))
         for mstmt in method.body:
+            _note_access_visit(comp.name, f"{stmt.key}.{method.name}")
             if returned:
                 raise RevlError(filename, mstmt.line, "unreachable statement after `return`")
             verified_here = getattr(mstmt, "verified", False)

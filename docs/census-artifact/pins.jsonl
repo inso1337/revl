@@ -44,6 +44,8 @@
 
 ["reference", "src/revl/holes.py"]
 
+["reference", "src/revl/host_body.py"]
+
 ["reference", "src/revl/hostfile.py"]
 
 ["reference", "src/revl/hostref.py"]

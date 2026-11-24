@@ -1,0 +1,28 @@
+// issue #3095: a `provide` component whose host `let-effect` bind collides
+// with the emitter's own scaffolding. The activation local is declared through
+// the binding ladder (`ctx` -> `ctx_` in the frontend, `ctx__` at the backend),
+// and the provider class field, constructor parameter and constructor argument
+// must use the SAME escaped name. A raw bind name passed the emitter's `ctx`
+// (or named a local the apply method never declares), and a raw field name
+// collided with the provider's own context field. The trivial `fn` forces
+// ir_version 3.
+fn seed() -> Int {
+  return 0
+}
+
+service Store {
+  fn get(key: Str) -> Opt[Int]
+  emission fn put(key: Str, value: Int)
+}
+
+component Ledger provides store: Store {
+  let ctx = effect Map.new() undo ctx.drop()
+
+  provide store {
+    fn get(key) = ctx.get(key)
+    fn put(key, value) {
+      effect ctx.insert(key, value)
+      undo   ctx.remove(key)
+    }
+  }
+}
