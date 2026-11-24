@@ -1,0 +1,26 @@
+// ACCEPTED - G4: a provide method narrows its emission scope to the one verb
+// it calls on a required service.
+//
+// `Task.go` is declared `emission[fs.ingest]`: the requires key `fs` followed
+// by the verb the body calls. A crossing `emit fs.ingest(...)` is covered by
+// the key `fs` or by `fs.ingest`, so `Task.go` need not declare `emission[fs]`
+// (every verb of the key) or a bare `emission` (no scope at all).
+//
+// The companion `examples/rejections/g4_dotted_capability_key.rvl` declares
+// `emission[fs.write]` on the same body and is refused: `fs.write` is what
+// `Store.ingest` itself declares, a boundary of the component providing
+// `Store`, not a name for this component's crossing. The token that narrows a
+// crossing is the key and the verb, read off `requires fs` and `emit fs.ingest`
+// in this file alone (docs/capabilities.md, "What is not transitive").
+
+service Store { emission[fs.write] fn ingest(row: Str) -> Int }
+service Task { emission[fs.ingest] fn go() -> Int }
+
+component Worker requires fs: Store provides task: Task {
+  provide task {
+    fn go() {
+      emit fs.ingest("row")
+      return 0
+    }
+  }
+}

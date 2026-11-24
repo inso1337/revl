@@ -1916,7 +1916,9 @@ fn mk_comp(nm: Str, rq: List[Bind], pv: List[Provide],
   return { name: nm, reqs: rq, provs: pv, setup: su }
 }
 
-fn mk_ev2(l: List[Str], c: List[Str]) -> Ev { return { labels: l, caps: c } }
+fn mk_ev2(l: List[Str], c: List[Str], u: List[Str]) -> Ev {
+  return { labels: l, caps: c, unnamed: u }
+}
 
 fn tbl_or_empty(built: TblR) -> Tt {
   if (built.err != "") { return Map.empty() }
@@ -2993,7 +2995,7 @@ fn reached_caps(called: List[Str], caps: CapsT, i: Int,
 // reason instead of decided for the wrong one.
 type Ctx = { compName: Str, reqMap: Map[Str, Str], svcs: Map[Str, SvcD],
              fns: Map[Str, FnD], caps: CapsT, tt: Tt }
-type Ev  = { labels: List[Str], caps: List[Str] }
+type Ev  = { labels: List[Str], caps: List[Str], unnamed: List[Str] }
 type Ck  = { ctx: Ctx, env: List[Bind], ev: Ev, msg: Str }
 
 type MethR = { m: MethSig, ok: Bool }
@@ -3101,7 +3103,7 @@ fn refuse_ck(ck: Ck, msg: Str) -> Ck {
   return { ctx: ck.ctx, env: ck.env, ev: ck.ev, msg: msg }
 }
 
-fn empty_ev() -> Ev { return { labels: [], caps: [] } }
+fn empty_ev() -> Ev { return { labels: [], caps: [], unnamed: [] } }
 
 fn bind_map(env: List[Bind]) -> Map[Str, Str] {
   var m: Map[Str, Str] = Map.empty()
@@ -3155,7 +3157,7 @@ fn note_host_emission(s: Stmt, ck: Ck) -> Ck {
   // carry the label once
   return { ctx: ck.ctx, env: ck.env,
            ev: mk_ev2(union_into(ck.ev.labels, ["a host emission"]),
-                      ck.ev.caps),
+                      ck.ev.caps, ck.ev.unnamed),
            msg: ck.msg }
 }
 
@@ -3217,7 +3219,7 @@ fn order_ev_labels(before: List[Str], grown: List[Str],
 fn ck_ordered(before: Ev, ck: Ck, step: Bool) -> Ck {
   return { ctx: ck.ctx, env: ck.env,
            ev: mk_ev2(order_ev_labels(before.labels, ck.ev.labels, step),
-                      ck.ev.caps),
+                      ck.ev.caps, ck.ev.unnamed),
            msg: ck.msg }
 }
 
@@ -3631,7 +3633,7 @@ fn req_call(root: Str, meth: Str, args: List[Expr], mode: Int,
   var ev = ck.ev
   if (decl.isEm && mode == mode_head()) {
     let lab = ev.labels.push(root.concat(".").concat(meth))
-    ev = mk_ev2(lab, union_into(ev.caps, [root]))
+    ev = mk_ev2(lab, union_into(ev.caps, [root]), ev.unnamed)
   }
   return walk_args(args, 0, arg_mode(mode), mk_ck2(ck.ctx, ck.env, ev, ""))
 }
@@ -3660,7 +3662,7 @@ fn fn_call(name: Str, args: List[Expr], mode: Int, ck: Ck) -> Ck {
   if (ck.ctx.caps.has(name)) {
     let cc = caps_of(ck.ctx.caps, name)
     let lab = ev.labels.push(name.concat("()"))
-    ev = mk_ev2(lab, union_into(ev.caps, cc))
+    ev = mk_ev2(lab, union_into(ev.caps, cc), union_into(ev.unnamed, cc))
   }
   let wck = walk_args(args, 0, arg_mode(mode),
                       mk_ck2(ck.ctx, ck.env, ev, ""))
@@ -3712,6 +3714,39 @@ fn fn_sig_check(name: Str, args: List[Expr], ck: Ck) -> Ck {
   return ck
 }
 
+// issue #3485: a crossing `emit k.m(...)` through required key `k` is covered
+// by `k` or by `k.m`, the key followed by the verb it calls, and by nothing
+// else. A key is covered one verb at a time when every one of its crossing
+// labels (`k.m`) is declared; `*`, a key with no crossing label, and a key
+// reached any other way (`unnamed`: a reached fn's declared scope) stay.
+// Mirrors emission_analysis.py's `_admit_required_scopes` and its `unname`.
+fn verb_covered(cap: Str, labels: List[Str], caps: List[Str],
+                unnamed: List[Str]) -> Bool {
+  if (cap == "*" || list_contains(unnamed, cap)) { return false }
+  let pre = cap.concat(".")
+  var seen = false
+  var i = 0
+  while (i < labels.length()) {
+    if (starts_with(labels[i], pre)) {
+      if (!list_contains(caps, labels[i])) { return false }
+      seen = true
+    }
+    i += 1
+  }
+  return seen
+}
+
+fn drop_verb_covered(extra: List[Str], labels: List[Str], caps: List[Str],
+                     unnamed: List[Str]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < extra.length()) {
+    if (!verb_covered(extra[i], labels, caps, unnamed)) { out = out.push(extra[i]) }
+    i += 1
+  }
+  return out
+}
+
 // The upper-bound verdict for one provision method, ported from lower.py's
 // provider check: plain declarations must reach no emission at all;
 // `emission[caps]` declarations bound *which* boundary.
@@ -3722,7 +3757,8 @@ fn g4_verdict(svcName: Str, mname: Str, decl: MethSig, ev: Ev) -> Str {
       .concat(quote_join(ev.labels))
   }
   if (decl.isEm && decl.caps.length() > 0) {
-    let extra = sort_strs(minus_list(ev.caps, decl.caps))
+    let extra = sort_strs(drop_verb_covered(minus_list(ev.caps, decl.caps),
+                                            ev.labels, decl.caps, ev.unnamed))
     if (extra.length() > 0) {
       var msg = "`".concat(svcName).concat(".").concat(mname)
         .concat("` is declared `emission[").concat(decl.caps.join(", "))

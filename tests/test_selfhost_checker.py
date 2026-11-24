@@ -465,6 +465,9 @@ extern emission fn charge(cents: Int) -> Int = @py { return 1 }
 
 
 ACCEPTED_PROGRAMS = [
+    # issue #3485: `emission[fs.ingest]` names the one crossing `emit fs.ingest`
+    ("g4 key dot verb narrows the emission scope",
+     (ROOT / "examples" / "g4_required_verb_token.rvl").read_text(encoding="utf-8")),
     # `pub` is a visibility PREFIX, not a declaration head — the single largest
     # parse gap on this surface, and the one that made every `stdlib/*.rvl` and
     # every `pub fn`-bearing selfhost source unreachable to this checker.
@@ -1029,6 +1032,47 @@ component C provides db: Database {
      _fixture("g4_capability_not_declared.rvl"),
      "`Cache.put` is declared `emission[db]`, but this implementation emits "
      "through `bus` (reaching `db.execute`, `bus.publish`)"),
+    # issue #3485: a crossing `emit fs.ingest(...)` is covered by `fs` or by
+    # `fs.ingest`, never by the token `Store.ingest` itself declares
+    ("g4 dotted capability key",
+     _fixture("g4_dotted_capability_key.rvl"),
+     "`Task.go` is declared `emission[fs.write]`, but this implementation emits "
+     "through `fs` (reaching `fs.ingest`)"),
+    ("g4 key dot verb covers only the verb it names", """
+service Store { emission[fs.write] fn ingest(row: Str) -> Int
+                emission[fs.write] fn purge() -> Int }
+service Task { emission[fs.ingest] fn go() -> Int }
+component Worker requires fs: Store provides task: Task {
+  provide task {
+    fn go() {
+      emit fs.ingest("row")
+      emit fs.purge()
+      return 0
+    }
+  }
+}
+""",
+     "`Task.go` is declared `emission[fs.ingest]`, but this implementation emits "
+     "through `fs` (reaching `fs.ingest`, `fs.purge`)"),
+    # a key reached through a fn whose extern declares that key has no verb to
+    # name it by: `emission[wire.take]` covers `emit wire.take(...)` and nothing else
+    ("g4 key dot verb does not cover a key reached through a fn", """
+extern emission[wire] fn host_poke(n: Int) -> Int = @py { return 1 }
+fn helper(n: Int) -> Int { return host_poke(n) }
+service Wire { emission fn take(most: Int) -> Int }
+service Beat { emission[wire.take] fn beat() -> Int }
+component Game requires wire: Wire provides b: Beat {
+  provide b {
+    fn beat() -> Int {
+      let knocks = emit wire.take(512)
+      let x = emit helper(1)
+      return 0
+    }
+  }
+}
+""",
+     "`Beat.beat` is declared `emission[wire.take]`, but this implementation emits "
+     "through `wire` (reaching `wire.take`, `helper()`)"),
     ("g4 unmarked emission",
      _fixture("g4_unmarked_emission.rvl"),
      "call to emission `db.execute` must be marked `emit` (G4)"),

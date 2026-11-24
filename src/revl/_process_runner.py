@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import contextvars
 import json
 import os
 import signal
@@ -208,6 +209,19 @@ def _estop_watch(name: str, runtime_mod, poll: float = _ESTOP_POLL) -> None:
             sys.stdout.flush()
             os._exit(_ESTOP_EXIT)  # noqa: SLF001 — no teardown, by design
         time.sleep(poll)
+
+
+def _start_estop_watch(name: str, runtime_mod) -> threading.Thread:
+    """Start the E-Stop watcher for this process (`_estop_watch`), carrying the
+    calling thread's context: the runtime's trace is context-local (issue
+    #3380), so the halt the watcher engages from the latch records its console
+    line like every other host event only if the watcher's thread has the
+    trace `run()` installed."""
+    thread = threading.Thread(target=contextvars.copy_context().run,
+                              args=(_estop_watch, name, runtime_mod),
+                              name="revl-estop", daemon=True)
+    thread.start()
+    return thread
 
 
 def _eval_probe(expr: str, namespace: dict, args_out: list | None = None,
@@ -883,8 +897,6 @@ async def run(spec: dict, spec_path=None) -> None:
     estop_latch = spec.get("estopLatch") or os.environ.get("REVL_ESTOP_LATCH")
     if estop_latch:
         runtime_mod.arm_estop_latch(estop_latch)
-        threading.Thread(target=_estop_watch, args=(name, runtime_mod),
-                         name="revl-estop", daemon=True).start()
 
     def log(channel: str, subject: str, detail: str = "") -> None:
         # issue #814: the funnel for every CHANNEL-format console line this
@@ -902,6 +914,11 @@ async def run(spec: dict, spec_path=None) -> None:
 
     runtime_mod.set_trace(lambda event: log("host", event.split(" ", 1)[0],
                                             event.split(" ", 1)[1] if " " in event else ""))
+    if estop_latch:
+        # the watcher starts once the trace is installed, and under a copy of
+        # this context: the trace is context-local (issue #3380), and the halt
+        # the watcher engages records its `host | estop` line through it
+        _start_estop_watch(name, runtime_mod)
 
     from revl.compiler import compile_files  # noqa: PLC0415
     # The full composition IR this process compiles from `spec["files"]`. Every

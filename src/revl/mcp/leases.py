@@ -392,10 +392,19 @@ def advise(session, targets: list[str] | None,
 
 def advise_plan(session, arguments: dict, now: float | None = None) -> list[dict]:
     """Advisory warnings for ``revl_plan`` — defensive, so a plan is never
-    broken by lease bookkeeping."""
+    broken by lease bookkeeping.
+
+    Deriving the targets compiles the candidate, and :func:`advise` only ever
+    warns about a lease another operator holds (the :func:`_exempt` rule), so
+    with no such lease in the book the advice is empty before any compile.
+    Enforcement (:func:`check`) does not take this shortcut."""
     if not getattr(session, "loaded", False):
         return []
+    now = time.time() if now is None else now
     try:
+        me = holder_identity(session)
+        if all(_exempt(lease, me) for lease in _book(session).active(now)):
+            return []
         targets = _swap_targets(session, arguments)
     except Exception:  # noqa: BLE001 — advice must never break the plan
         return []

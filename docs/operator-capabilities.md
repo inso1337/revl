@@ -98,9 +98,15 @@ Grammar (blank lines and `#` comments ignored):
   `override`, `estop`, `deploy`, `call`, `lease`, `fork`, and `replay`. `*`
   matches every verb.
 * **subjects** — globs (`fnmatch`) matched against a target component's **name**
-  *or* any **realm** it is isolated into. `tenant_a*` matches the realm
-  `tenant_a` and the component `tenant_a_cache` alike; `*` matches anything.
-  Omit `on <subject>` to mean `on *`.
+  or its **realms**. `tenant_a*` matches the realm `tenant_a` and the component
+  `tenant_a_cache` alike; `*` matches anything. Omit `on <subject>` to mean
+  `on *`. A `may` selects a component when one of its subjects matches the
+  component's name, or when **every** realm the component is isolated into is
+  matched by some `may` subject of that operator for the verb: a component
+  serving `tenant_a` and `tenant_b` is outside `may swap on tenant_a*` alone,
+  inside `may swap on tenant_a*, tenant_b*` (or two such lines), and inside a
+  grant on its name. A component with no realm is selected by its name or by
+  `*` only. A `may not` applies when **any** of the component's labels matches.
 * **allow vs deny** — `may` contributes a capability; `may not` prohibits, and
   **deny wins** over any allow (exactly as in the boundary policy). An operator
   is **closed by default**: a verb with no allow that selects the target is
@@ -260,6 +266,22 @@ operator ops may mint * uses * ttl *
 which bounds nothing and says so, and is worth writing because it is the
 difference between an authority nobody declared and one somebody did.
 
+### A standing grant is not bound to an operator
+
+A standing grant is session-scoped and is not bound to any operator. It is keyed by the capability and the reach closure,
+so it covers every class-(c) call reaching that capability under the same
+closure from any operator the profile lets `call` it, until its `uses` or TTL
+run out. The `may mint` declaration above bounds what an operator may mint; it
+does not make the grant belong to that operator or to the one whose ticket it
+answered. The single-use hash approval is the operator-bound shape: it binds to
+the operator that proposed the call (issue #3216), and only that operator's
+identical re-issue spends it.
+
+To scope who may reach a capability under a standing grant, use the `call` verb:
+grant it with `may call on <subject>` to the operators that should reach it, and
+`may not call on <subject>` to keep the others out (deny wins). That is the
+only place the profile says who may call; the grant does not.
+
 ## Binding a session to an operator
 
 A session runs *as* one operator. The identity is set at serve time:
@@ -407,13 +429,15 @@ candidate's compile for a `load`, the snapshot's `sources` for a `restore`.
   removed, or whose IR entry differs (modulo provenance) from the running
   composition. So "may swap within tenant_a" permits changing a `tenant_a`
   component in a multi-realm composition, and refuses changing a `tenant_b`
-  one. An allow must select a changed component on **both** sides: the realms
-  the running composition puts it in and the realms the candidate puts it in,
-  so a candidate cannot add a realm its grant matches to a component the grant
-  does not already cover. A `may not` is matched against the union of both
-  sides, so a swap that moves a component out of a realm is still selected by
-  a `may not` rule on the realm it leaves. A no-op or server-side re-admit
-  targets the whole composition.
+  one, including a component isolated into both `tenant_a` and `tenant_b`: it
+  serves tenant_b too, and the allow selects it only when it matches the
+  component's name or every realm it is in. An allow must select a changed
+  component on **both** sides: the realms the running composition puts it in
+  and the realms the candidate puts it in, so a candidate cannot add a realm
+  its grant matches to a component the grant does not already cover. A `may
+  not` is matched against the union of both sides, so a swap that moves a
+  component out of a realm is still selected by a `may not` rule on the realm
+  it leaves. A no-op or server-side re-admit targets the whole composition.
 * **load** — every component in the candidate (a cold boot instantiates all).
 * **restore**: every component the snapshot's `sources` compile to, the
   composition that actually boots. The document's `manifest` and
@@ -427,13 +451,15 @@ candidate's compile for a `load`, the snapshot's `sources` for a `restore`.
   composition (each operates on all of it).
 * **estop** (item 443) — the whole running composition too, and deliberately:
   a halt that stopped one component would not be a halt. So a subject-scoped
-  `may estop on tenant_a*` authorizes only while every live component is in
-  `tenant_a*`; an operator who must always be able to hit the button needs
+  `may estop on tenant_a*` authorizes only while every live component is
+  isolated only into `tenant_a*` realms; an operator who must always be able
+  to hit the button needs
   `may estop on *`.
 * **deploy** (item 476, issue #830) — the whole running composition, because a
   deploy reconfigures it as ONE coordinated unit across a machine boundary: a
   subject-scoped `may deploy on tenant_a*` authorizes only while every live
-  component is in `tenant_a*`. It has its own verb rather than folding into
+  component is isolated only into `tenant_a*` realms. It has its own verb
+  rather than folding into
   `swap` because a deploy crosses a machine boundary, which an operator must be
   able to authorize separately from a same-host swap: being trusted to hot-swap
   a component locally is not the same as being trusted to push the composition

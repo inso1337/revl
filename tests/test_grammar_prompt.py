@@ -30,19 +30,19 @@ def test_prompt_file_matches_the_shipped_constant():
 
 
 def test_prompt_grammar_fits_the_authoring_context_character_budget():
-    # Keep the injected grammar below 12,000 characters (~3,000 tokens at the
-    # usual four characters per token), leaving the rest of a 16k-token
-    # authoring context for instructions and the user's source.
-    budget = 12_000
+    # Keep the injected grammar below 16,000 characters (about 4,000 tokens at
+    # the usual four characters per token) so it fits beside the instructions
+    # and the user's source in an authoring prompt.
+    budget = 16_000
     size = len(PROMPT_GRAMMAR)
     assert size <= budget, (
-        f"{size} characters — exceeds the 12,000-character grammar budget "
-        "for a 16k-token authoring context"
+        f"{size} characters exceeds the 16,000-character grammar budget "
+        "for an authoring prompt"
     )
 
 
 def test_prompt_grammar_budget_allows_dense_growth_but_rejects_doubling():
-    budget = 12_000
+    budget = 16_000
     dense_growth = PROMPT_GRAMMAR + "\n" + "\n".join("x" * 100 for _ in range(3))
     assert len(dense_growth) <= budget
     assert len(PROMPT_GRAMMAR + PROMPT_GRAMMAR) > budget

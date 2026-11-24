@@ -443,15 +443,18 @@ def _row_value_type(value: object, declared: str | None) -> str | None:
 
 
 def _check_config(row: RowDecl, header: _Header, doc: str,
-                  rel: str, *, rowless: bool = False) -> dict[str, object]:
+                  rel: str, *, rowless: bool = False,
+                  required: bool = True) -> dict[str, object]:
     """A config value that does not fit the declared type does not admit, and
     the refusal names the field and the declared type (426 §3.2). Same shape as
     `_lower_lifecycle_config` (lower.py:4197), one tier up.
 
     `rowless` (issue #3535): `row` stands for a host table of a component no
     composition row places. Its fields are typed the same way and the refusal
-    names the component instead of a row; required-ness stays with the
-    runtime's own check, as it was for such a component."""
+    names the component instead of a row. A declared field with no default
+    that the host table does not supply is refused too, naming the component,
+    the field and its type (issue #3596); `required=False` leaves it to a
+    caller that runs its own required-config preflight (`revl run`)."""
     given: dict[str, object] = {}
     owner = (f"component `{header.name}`" if rowless
              else f"row `@{row.label}`")
@@ -476,6 +479,18 @@ def _check_config(row: RowDecl, header: _Header, doc: str,
                      "(426 §3.2)")
         given[name] = value
     if rowless:
+        missing = [cfg for name, cfg in header.config.items()
+                   if cfg.default is None and name not in given]
+        if required and missing:
+            listed = ", ".join(f"`{cfg.name}` (`{cfg.type}`)"
+                               for cfg in missing)
+            raise RevlError(
+                doc, row.line,
+                f"component `{header.name}` is missing required config "
+                f"{listed}: no composition row places it and the host config "
+                "does not supply it",
+                hint=f"supply `{missing[0].name}` in the host config table "
+                     f"for `{header.name}`")
         return given
     missing = [name for name, cfg in header.config.items()
                if cfg.default is None and name not in given]
@@ -2509,7 +2524,8 @@ HOST_LAYER = "<host>"
 
 
 def configure_rows_from_host(document: dict, config: dict | None,
-                             where: str = "<host config>") -> dict:
+                             where: str = "<host config>", *,
+                             required: bool = True) -> dict:
     """The admitted `document` with the host-supplied config table folded into
     its rows, at the invocation overlay's rank (issue #3484, 426 §3.1 level 3).
 
@@ -2520,7 +2536,11 @@ def configure_rows_from_host(document: dict, config: dict | None,
     manifest's copy of it then say what the component runs with. A table for a
     component no row places is typed by the same check (issue #3535), so a
     wrongly typed or undeclared field is refused here too, and otherwise left
-    to the runtime as before. A swap's successor must therefore still declare
+    to the runtime as before. When the host table names such a component,
+    a required field (no default) it leaves out is refused here as well
+    (issue #3596), so it never reaches activation; a component the host
+    config does not name keeps the runtime's own check; `required=False` leaves
+    that to the caller's own preflight. A swap's successor must therefore still declare
     every field the session's host config sets; to drop one, unload and load
     again with a host config that no longer names it. Returns
     `document` itself when nothing changes, otherwise a copy (the caller's
@@ -2531,8 +2551,15 @@ def configure_rows_from_host(document: dict, config: dict | None,
         return document
     by_name = {c["name"]: c for c in (document or {}).get("components") or []}
     # issue #3535: a table for a component no row places is typed against the
-    # component's declared config by the same check, before any runtime starts
+    # component's declared config by the same check, before any runtime starts;
+    # issue #3596: a required field that table leaves out is refused too. A
+    # component the host config does not name keeps the runtime's own check.
     placed = {row.get("component") for row in rows}
+    # the components the runtime starts at load, in `revl run`'s own sense
+    # (`run._load_order`): a template is spawned with its config, so the host
+    # table is not where its required fields come from
+    started = set(((document or {}).get("manifest") or {}).get("loadOrder")
+                  or by_name)
     for name, supplied in config.items():
         component = by_name.get(name)
         if component is None or name in placed or not isinstance(supplied, dict):
@@ -2541,7 +2568,7 @@ def configure_rows_from_host(document: dict, config: dict | None,
                        config=[(n, v, 1) for n, v in supplied.items()])
         _check_config(decl, _IRHeader(component), where,
                       component.get("source") or "<module>",
-                      rowless=True)
+                      rowless=True, required=required and name in started)
     if not rows:
         return document
     changed = False

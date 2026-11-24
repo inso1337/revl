@@ -932,6 +932,19 @@ answers with the roster of known ones rather than with nothing.
 
 ## Drive a live session
 
+One session runs at a time per process. The Python runtime keeps part of the
+running session's state once for the whole process (the registry of live
+instances, the clock and its timers, the table of frames; the session's owner,
+host trace and activating stack are its own), so two sessions
+driven from two threads take turns: a `revl_load`, `revl_swap`, `revl_call` or
+any other verb that runs a session's code waits while another session's verb
+runs on another thread. After 30 s of waiting it fails with a `SESSION_BUSY`
+error naming the session and thread that hold the turn. A verb of a second
+session started on the thread that holds the turn (from inside a method body)
+fails at once, since waiting there would never end. `revl_estop` does not wait.
+Each session still gets a thread of its own; the price is that one session's
+step can delay another's by up to its own length.
+
 ### `revl_load`
 
 Boot a composition IN MEMORY and hold it live. Nothing is written to disk, so a
@@ -1945,6 +1958,25 @@ with `proposer`. Approving the same raiser again returns the yes already minted.
 Another operator sending the byte-identical call after a yes gets its own ticket.
 A quorum yes covers the operator who asked the question it answers. With no
 operator profile there is one identity, and the behaviour is unchanged.
+
+A standing grant is not bound that way. It is session-scoped and is not bound to
+any operator: the grant is keyed by the capability and the reach closure, so it
+covers every class-(c) call that reaches that capability under the same closure
+(differing arguments included), from any operator the profile lets `call` it,
+until its `uses` run out or its TTL lapses. It does not record or check who
+asked, and it is not limited to the operator whose ticket it was minted from.
+The single-use `hash` approval is the operator-bound shape. To limit who can
+reach the capability under a grant, scope the `call` verb in the operator
+profile, with `may not call on <subject>` for the operators that must stay out
+([operator-capabilities.md](operator-capabilities.md)); the grant itself does
+not do it.
+
+Under `--author-trust trusted` the ticket names the host code a yes lets run
+in `unreviewedHostCode` (and, for a ticket that replaces a running composition,
+`runningHostCode` and `newHostCode`; see docs/mcp-bridge.md). An extern backed
+by a host-module ref (`= @py ref <symbol> from "<path>"`) is listed like an
+inline body, with the ref's pinned sha256 as its digest and its `path` and
+`symbol` under `refs`, so a ref whose pin moved is new host code (issue #3347).
 
 The ticket carries `ceilings` (issue #1755): for each class-(c) capability it
 asks about, the crossing component's item-260 crossing ceiling, read from
