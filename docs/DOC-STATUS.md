@@ -95,6 +95,7 @@ regenerated rather than edited.
 | fault-tests.md | needs-work | 71 |  |
 | federation.md | current | 16 |  |
 | fix-code.md | needs-work | 10 |  |
+| float-math-proposal.md | current | 0 |  |
 | fmt.md | needs-work | 1 |  |
 | frontend-assets.md | needs-work | 13 |  |
 | function-specs.md | needs-work | 0 |  |
