@@ -3,7 +3,7 @@ import RevL.Semantics
 /-!
 # A2: no acquisition after a provision, stated over the LIFO stack
 
-`docs/rejections.md#a2` and `docs/contract-errata.md`: an effect
+`docs/rejections.md#a2-no-acquisition-after-a-provision` and `docs/contract-errata.md`: an effect
 acquired after `provide` would be reverted while dependents can still call
 the service. The checker refuses the shape at lowering
 (`src/revl/lower.py`, `_dispatch_action`): once `provide_seen_line` is set

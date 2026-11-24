@@ -59,9 +59,19 @@ it, and the CI lint job runs it with `continue-on-error`, so a finding shows
 in the log without reddening the job. It becomes a hard check once the ledger
 is small and the tree is used to it.
 
+ANCHORS. The same scan also resolves Markdown `path.md` links with an
+`#anchor` fragment against the GitHub anchor of every heading in the tree
+(issue #3215). A short `#g1` does not resolve to `## G1: declared access`; the
+real anchor is `#g1-declared-access`. Prose in Markdown, Lean, TSV, shell and
+YAML is scanned, plus a Markdown table held in a Python string (a generated
+page's fixture is documentation too); ordinary code literals are not links.
+Anchor findings are always hard: unlike a moved `path:line`, there is no
+historical reason to keep a link to a heading that never existed.
+
 Usage:
     python3 tools/check_doc_refs.py                 # report only
     python3 tools/check_doc_refs.py --check         # exit 1 on a new finding
+    python3 tools/check_doc_refs.py --anchors       # only broken `#anchor` links
     python3 tools/check_doc_refs.py --write             # repair unique moves
     python3 tools/check_doc_refs.py --write-ledger      # author the baseline
 """
@@ -102,6 +112,27 @@ REF_PATTERN = re.compile(
 REF_SHAPE = re.compile(
     r"^(?P<path>[A-Za-z0-9_./-]+\.(?:py|rvl|ts|go|java|rs|md))"
     r":(?P<line>[0-9]+)$")
+
+#: One `path.md` reference with an `#anchor` fragment. The leading guard
+#: rejects a URL (`https://host/docs/x.md#y`): the path must start at a word
+#: boundary, not after a slash or another path character.
+ANCHOR_REF_PATTERN = re.compile(
+    r"(?<![\w./-])(?P<path>[A-Za-z0-9_./-]+\.md)#(?P<anchor>[A-Za-z0-9_-]+)")
+
+#: Text files whose links are prose. Code literals are not links: a Python
+#: test may hold a Markdown table as a fixture string, and judging it as a
+#: rendered link would report the fixture rather than the documentation. The
+#: formal-status notes and the shell/YAML workflow comments are prose, so they
+#: are scanned.
+ANCHOR_SOURCE_SUFFIXES = frozenset({
+    ".md", ".lean", ".tsv", ".sh", ".yml", ".yaml", ".rvl", ".py",
+})
+
+#: Build-tool directories that can hold a copy of the docs (a vendored
+#: checkout, a generated site) and are not the documented tree. A pytest
+#: basetemp (`pytest-of-<user>`) is a test fixture tree, not the docs either.
+ANCHOR_SKIP_DIRS = frozenset({"node_modules", "target", "dist", "build"})
+ANCHOR_SKIP_PREFIXES = ("pytest-of-",)
 
 #: One entry per adopted finding, so a reviewer reads a diff rather than a blob.
 LEDGER_HEADER = (
@@ -150,6 +181,31 @@ class Finding:
     line: int
     kind: str        # "missing" | "stale"
     detail: str      # e.g. "no such file" or "file has 2043 lines"
+
+
+@dataclass(frozen=True)
+class AnchorReference:
+    """One `path.md#anchor` spelling in a citing file."""
+
+    source: str
+    target: str
+    anchor: str
+    line: int
+
+
+@dataclass(frozen=True)
+class BrokenAnchor:
+    """An anchor reference whose file or heading does not resolve."""
+
+    source: str
+    target: str
+    anchor: str
+    line: int
+    kind: str        # "missing-file" | "missing-heading"
+
+    @property
+    def spelling(self) -> str:
+        return f"{self.target}#{self.anchor}"
 
 
 @dataclass(frozen=True)
@@ -245,6 +301,177 @@ def _archived(rel: str) -> bool:
     """
     return any(rel == archive or rel.startswith(archive + "/")
                for archive in ARCHIVE_ROOTS)
+
+
+def _slug(text: str) -> str:
+    """The GitHub anchor of a heading, as GitHub generates it.
+
+    Inline markup is text: a link renders its label, code drops its backticks.
+    Lowercase, punctuation removed, spaces to hyphens. `\\w` keeps Unicode
+    letters and digits (and `_`), which GitHub keeps too.
+    """
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    text = text.replace("`", "")
+    text = text.strip().lower()
+    text = re.sub(r"[^\w\- ]", "", text)
+    return text.replace(" ", "-")
+
+
+def _heading_anchors(text: str) -> set:
+    """Every ATX heading anchor in one Markdown document.
+
+    A fenced block is not prose: a `#` line in it is not a heading. Duplicate
+    headings get GitHub's `-1`, `-2` suffixes, including the case where a
+    literal heading already spells the suffixed anchor.
+    """
+    anchors = set()
+    counts = {}
+    fence = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        marker = re.match(r"^(```+|~~~+)", stripped)
+        if marker:
+            kind = marker.group(1)[0]
+            if fence is None:
+                fence = kind
+            elif fence == kind:
+                fence = None
+            continue
+        if fence is not None:
+            continue
+        match = re.match(r"^(#{1,6})\s+(.*?)\s*#*\s*$", stripped)
+        if match is None:
+            continue
+        base = _slug(match.group(2))
+        if not base:
+            continue
+        slug = base
+        number = counts.get(base, 0)
+        while slug in anchors:
+            number += 1
+            slug = f"{base}-{number}"
+        counts[base] = number
+        anchors.add(slug)
+    return anchors
+
+
+def _anchor_sources(root: pathlib.Path) -> list:
+    """`(path, rel)` for text files whose Markdown links are prose."""
+    root = root.resolve()
+    sources = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.suffix not in ANCHOR_SOURCE_SUFFIXES:
+            continue
+        rel = path.relative_to(root).as_posix()
+        if _hidden(rel):
+            continue
+        if any(part in ANCHOR_SKIP_DIRS
+               or part.startswith(ANCHOR_SKIP_PREFIXES)
+               for part in rel.split("/")):
+            continue
+        sources.append((path, rel))
+    return sources
+
+
+def _anchor_index(root: pathlib.Path) -> dict:
+    """`rel -> heading anchors` for every Markdown file in the tree."""
+    root = root.resolve()
+    index = {}
+    for path in sorted(root.rglob("*.md")):
+        rel = path.relative_to(root).as_posix()
+        if _hidden(rel):
+            continue
+        if any(part in ANCHOR_SKIP_DIRS
+               or part.startswith(ANCHOR_SKIP_PREFIXES)
+               for part in rel.split("/")):
+            continue
+        index[rel] = _heading_anchors(_text(path))
+    return index
+
+
+def _python_table_anchors(path: pathlib.Path) -> list:
+    """`(line, target, anchor)` from Markdown table literals in Python.
+
+    Code literals are not links, but a generated-table fixture is a fragment of
+    documentation that a test pins; a short anchor there would put the broken
+    link back into the generated page. Only a string that carries a table row
+    (`|`) is considered, so an ordinary fixture string that is not documentation
+    is not judged. Token positions keep the reported line meaningful.
+    """
+    source = _text(path)
+    found = []
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(source).readline)
+        for token in tokens:
+            if token.type != tokenize.STRING or "|" not in token.string:
+                continue
+            for match in ANCHOR_REF_PATTERN.finditer(token.string):
+                line = token.start[0] + token.string[:match.start()].count("\n")
+                found.append((line, match.group("path"), match.group("anchor")))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        for match in ANCHOR_REF_PATTERN.finditer(source):
+            found.append((source[:match.start()].count("\n") + 1,
+                          match.group("path"), match.group("anchor")))
+    return found
+
+
+def scan_anchors(root: pathlib.Path = REPO_ROOT) -> tuple:
+    """`AnchorReference`s in the tree, one per spelling per citing file."""
+    root = root.resolve()
+    references = []
+    for path, rel in _anchor_sources(root):
+        if path.suffix == ".py":
+            found = _python_table_anchors(path)
+        else:
+            text = _text(path)
+            found = [(text[:m.start()].count("\n") + 1, m.group("path"),
+                      m.group("anchor"))
+                     for m in ANCHOR_REF_PATTERN.finditer(text)]
+        seen = set()
+        for line, target, anchor in found:
+            key = (target, anchor)
+            if key in seen:
+                continue
+            seen.add(key)
+            references.append(AnchorReference(rel, target, anchor, line))
+    return tuple(references)
+
+
+def _anchor_target(root: pathlib.Path, reference: AnchorReference) -> str | None:
+    """The repository-relative Markdown file a link means, or None.
+
+    A link is relative to its citing file; the root-relative spelling this
+    tree also uses is accepted. The first existing file wins, as in `resolve`.
+    """
+    for candidate in (root / reference.target,
+                      (root / reference.source).parent / reference.target):
+        try:
+            rel = candidate.resolve().relative_to(root)
+        except ValueError:
+            continue
+        if candidate.is_file():
+            return rel.as_posix()
+    return None
+
+
+def anchor_findings(root: pathlib.Path = REPO_ROOT) -> tuple:
+    """Broken `path.md#anchor` references, in a stable order."""
+    root = root.resolve()
+    index = _anchor_index(root)
+    findings = []
+    for reference in scan_anchors(root):
+        target = _anchor_target(root, reference)
+        if target is None:
+            findings.append(BrokenAnchor(reference.source, reference.target,
+                                         reference.anchor, reference.line,
+                                         "missing-file"))
+        elif reference.anchor not in index.get(target, set()):
+            findings.append(BrokenAnchor(reference.source, reference.target,
+                                         reference.anchor, reference.line,
+                                         "missing-heading"))
+    findings.sort(key=lambda f: (f.source, f.target, f.anchor, f.line))
+    return tuple(findings)
 
 
 def scan(root: pathlib.Path = REPO_ROOT) -> tuple:
@@ -594,6 +821,19 @@ def _describe(finding: Finding) -> str:
             f"{finding.cited}:{finding.line} ({finding.detail})")
 
 
+def anchor_text(findings: tuple, limit: int = 40) -> str:
+    """One line for a clean anchor scan, or the broken links with their sites."""
+    if not findings:
+        return "anchors: 0 broken"
+    lines = [f"anchors: {len(findings)} broken"]
+    for finding in findings[:limit]:
+        lines.append(f"  {finding.kind:15}  {finding.source}:{finding.line}  "
+                     f"cites {finding.spelling}")
+    if len(findings) > limit:
+        lines.append(f"  ... and {len(findings) - limit} more")
+    return "\n".join(lines)
+
+
 def report_text(report: Report, limit: int = 40) -> str:
     """The summary and the findings, as text. Findings recorded in the ledger
     are not printed again; they are already one entry each on disk."""
@@ -637,7 +877,8 @@ def report_text(report: Report, limit: int = 40) -> str:
 
 def main(argv: list | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Check hand-written path:line references (issue #2844).",
+        description="Check hand-written path:line and path.md#anchor references "
+                    "(issues #2844 and #3215).",
         allow_abbrev=False)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check", action="store_true",
@@ -647,11 +888,23 @@ def main(argv: list | None = None) -> int:
     mode.add_argument("--write-ledger", "--baseline", dest="write_ledger",
                      action="store_true",
                      help="record the current findings as the baseline")
+    mode.add_argument("--anchors", action="store_true",
+                     help="check Markdown `path.md#anchor` links only")
     parser.add_argument("--root", type=pathlib.Path, default=REPO_ROOT,
                         help="repository root to scan (default: this tree)")
     parser.add_argument("--ledger", type=pathlib.Path, default=LEDGER,
                         help="ledger path (default: tools/doc_refs_ledger.json)")
     args = parser.parse_args(argv)
+
+    if args.anchors:
+        broken = anchor_findings(args.root)
+        print(anchor_text(broken))
+        if broken:
+            print("\nRED: link each reference to a heading anchor that exists.",
+                  file=sys.stderr)
+            return 1
+        print("\nOK: every Markdown anchor resolves.")
+        return 0
 
     report = build_report(args.root, args.ledger)
 
@@ -687,7 +940,9 @@ def main(argv: list | None = None) -> int:
               file=sys.stderr)
         return 2
 
+    broken = anchor_findings(args.root)
     print(report_text(report))
+    print(anchor_text(broken))
     if args.check and report.new_findings:
         print("\nRED: the findings above are not in the ledger.", file=sys.stderr)
         print("    Repair the reference, or record it with a reason:",
@@ -695,8 +950,14 @@ def main(argv: list | None = None) -> int:
         print("    python3 tools/check_doc_refs.py --write-ledger",
               file=sys.stderr)
         return 1
+    if args.check and broken:
+        print("\nRED: a Markdown link points at a heading anchor that does "
+              "not exist.", file=sys.stderr)
+        print("    Link the real anchor (for `## G1: declared access`, that is "
+              "`#g1-declared-access`).", file=sys.stderr)
+        return 1
     if args.check:
-        print("\nOK: every finding is in the ledger.")
+        print("\nOK: every finding is in the ledger and every anchor resolves.")
     return 0
 
 

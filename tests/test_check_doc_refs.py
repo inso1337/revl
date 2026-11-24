@@ -323,6 +323,58 @@ def test_an_archived_document_is_a_frozen_quote_not_a_claim(tmp_path):
     assert [(f.kind, f.cited) for f in findings] == [("stale", "src/thing.py")]
 
 
+def test_a_markdown_link_uses_the_github_anchor_of_its_heading(tmp_path):
+    root = _tree(tmp_path)
+    _write(root, "docs/rejections.md", "## G1: declared access\n")
+    page = _write(root, "docs/page.md", "[G1](rejections.md#g1)\n")
+    tool = _tool()
+    assert [(f.kind, f.target, f.anchor) for f in tool.anchor_findings(root)] == [
+        ("missing-heading", "rejections.md", "g1")]
+    page.write_text("[G1](rejections.md#g1-declared-access)\n", encoding="utf-8")
+    assert tool.anchor_findings(root) == ()
+
+
+def test_a_link_to_an_absent_file_is_an_anchor_finding(tmp_path):
+    root = _tree(tmp_path)
+    _write(root, "docs/page.md", "[G1](missing.md#g1-declared-access)\n")
+    assert [(f.kind, f.target) for f in _tool().anchor_findings(root)] == [
+        ("missing-file", "missing.md")]
+
+
+def test_duplicate_headings_get_github_suffixes(tmp_path):
+    tool = _tool()
+    assert tool._slug("G1: declared access") == "g1-declared-access"
+    assert tool._heading_anchors(
+        "## Same\n## Same\n## Same 1\n") == {"same", "same-1", "same-1-1"}
+
+
+def test_anchor_mode_is_red_on_a_broken_link_and_green_after_the_fix(tmp_path):
+    root = _tree(tmp_path)
+    _write(root, "docs/rejections.md", "## A2: no acquisition after a provision\n")
+    page = _write(root, "docs/page.md", "[A2](rejections.md#a2)\n")
+    tool = _tool()
+    ledger = tmp_path / "ledger.json"
+    assert tool.main(["--root", str(root), "--ledger", str(ledger),
+                      "--write-ledger"]) == 0
+    # `--check` is the advisory pre-PR step: an anchor finding is hard even
+    # when every path:line finding is in the ledger.
+    assert tool.main(["--root", str(root), "--ledger", str(ledger),
+                      "--check"]) == 1
+    assert tool.main(["--root", str(root), "--anchors"]) == 1
+    page.write_text(
+        "[A2](rejections.md#a2-no-acquisition-after-a-provision)\n",
+        encoding="utf-8")
+    assert tool.main(["--root", str(root), "--anchors"]) == 0
+
+
+def test_the_real_tree_has_no_broken_markdown_anchors():
+    tool = _tool()
+    # Vacuity: the scan must see both sides, or a clean verdict is meaningless.
+    assert len(tool.scan_anchors(ROOT)) > 100
+    assert any("rejections.md" in r.target for r in tool.scan_anchors(ROOT))
+    assert tool.anchor_findings(ROOT) == ()
+
+
 def test_the_committed_ledger_covers_the_real_tree():
     tool = _tool()
     report = tool.build_report(ROOT, tool.LEDGER)

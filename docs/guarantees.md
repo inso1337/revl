@@ -80,7 +80,7 @@ source docs. A4 and A7 are not assigned. Definitions are quoted from the
 
 | Code | Rule (one line) | Enforced at | Origin |
 | ---- | --------------- | ----------- | ------ |
-| [A1](rejections.md#a1-iteration-boundaries-exist-only-during-activation) | iteration boundaries exist only during activation (`await` only in a component body) | lower | Cordis paradigm (paper section 4.3.2, cited in rejections.md#a1) |
+| [A1](rejections.md#a1-iteration-boundaries-exist-only-during-activation) | iteration boundaries exist only during activation (`await` only in a component body) | lower | Cordis paradigm (paper section 4.3.2, cited in rejections.md#a1-iteration-boundaries-exist-only-during-activation) |
 | [A2](rejections.md#a2-no-acquisition-after-a-provision) | no acquisition after a provision | linker | Cordis paradigm lifecycle ordering (LIFO + withdrawal guard); explicit paper anchor unconfirmed |
 | [A3](rejections.md#a3-host-safe-identifiers) | host-safe identifiers (renames, never refuses) | lowering transform | revl-original (lowering rename transform) |
 | [A5](rejections.md#a5-compensation-accompanies-an-emission) | compensation accompanies an emission: a verb whose reversibility class is `compensatable` must fill its `compensate` slot, and one whose class has no inverse may not | parser (extern declaration), via the `ui_family` registry; reported as G4 / `reversibility` | revl-original (emission/compensation design, DESIGN.md section 3.5; computer-use reversibility registry, `src/revl/ui_family.py`, roadmap item 522) |

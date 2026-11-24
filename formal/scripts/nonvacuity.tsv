@@ -249,7 +249,7 @@ RevL.A2.proof_pass_is_withdrawals_then_releases	instance	RevL.A2.a2_not_vacuous,
 RevL.A2.withdrawals_precede_releases	instance	RevL.A2.a2_not_vacuous,RevL.A2.fixture_opens_the_window	the same instance; the fixture's pass violates the conclusion, so the ordering claim is not true of every body
 RevL.A2.teardown_labels	instance	RevL.A2.a2_not_vacuous	okBody's commit teardown is the two labels in that order, and the halted teardown is empty
 RevL.A2.fixture_refused	concrete	-	the fold refuses [acquire, provide, acquire], the shape of a2_acquire_after_provide.rvl
-RevL.A2.fixture_release_before_withdrawal	concrete	-	the fixture's proof pass under commit and abort runs a release before the withdrawal: the window docs/rejections.md#a2 describes
+RevL.A2.fixture_release_before_withdrawal	concrete	-	the fixture's proof pass under commit and abort runs a release before the withdrawal: the window docs/rejections.md#a2-no-acquisition-after-a-provision describes
 RevL.A2.fixture_opens_the_window	necessity	RevL.A2.fixture_release_before_withdrawal,RevL.A2.a2_not_vacuous	the refused pass is computed, and the refusal is not universal: okBody's pass satisfies the ordering claim
 RevL.A2.a2_not_vacuous	concrete	-	okBody = [acquire, provide]: admitted by the fold and the rule, stack [release, withdrawal], commit and abort passes [withdrawal, release], halted pass empty
 RevL.G4Deferred.legalB_iff	instance	RevL.G4Deferred.deferred_not_vacuous,RevL.G4Deferred.fixtures_decided	legalB decides true on a component call (Legal) and false on a fn-body call and a component value, so the per-reach verdict is mutation-sensitive
