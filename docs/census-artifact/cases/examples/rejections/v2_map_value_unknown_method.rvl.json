@@ -1,1 +1,1 @@
-{"case": "examples/rejections/v2_map_value_unknown_method.rvl", "buckets": ["agree-refuse/T1"]}
+{"case": "examples/rejections/v2_map_value_unknown_method.rvl", "buckets": ["msg-mismatch/T1"]}
