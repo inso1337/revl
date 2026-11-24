@@ -2759,9 +2759,11 @@ def build_parser() -> argparse.ArgumentParser:
              "forged undetected, and nothing on it is secret — the artifact "
              "source crosses in the clear")
     pool_serve.add_argument("--workdir", default=None, metavar="DIR",
-                            help="where artifacts are written and run "
-                                 "(default: a fresh temporary directory that "
-                                 "is removed on exit)")
+                            help="where artifacts are written and run, and "
+                                 "where the ids of the tasks this peer has "
+                                 "run are kept, so a restart does not run one "
+                                 "again (default: a fresh temporary directory "
+                                 "that is removed on exit, which forgets them)")
     pool_serve.add_argument("--timeout", type=float, default=300.0,
                             metavar="SECONDS",
                             help="how long one artifact may run (default: 300)")
