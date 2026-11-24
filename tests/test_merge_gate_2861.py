@@ -14,7 +14,6 @@ be a wall rather than a rule.
 """
 from __future__ import annotations
 
-import importlib.util
 import io
 import json
 import os
@@ -27,11 +26,10 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-_SPEC = importlib.util.spec_from_file_location(
-    "revl_merge_gate", ROOT / "tools" / "merge_gate.py")
-mg = importlib.util.module_from_spec(_SPEC)
-sys.modules[_SPEC.name] = mg
-_SPEC.loader.exec_module(mg)
+sys.path.insert(0, str(ROOT / "tests"))
+from _load_by_path import load_by_path  # noqa: E402
+
+mg = load_by_path("revl_merge_gate", ROOT / "tools" / "merge_gate.py")
 
 HEAD = "a" * 40
 TIP = "b" * 40
