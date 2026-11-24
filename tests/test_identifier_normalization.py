@@ -302,6 +302,10 @@ def test_dollar_interpolation_guard_now_covers_the_single_quoted_spelling():
     # gated on `quote == '"'`, so `'hi ${name}'` silently emitted literal text.
     err = _err("pub fn greet(name: Str) -> Str { return 'hi ${name}' }\n")
     assert "does not interpolate" in err
+    # issue #3502: the message says the shape is REFUSED (not emitted literal),
+    # and names the verbatim form that keeps `${...}` as data
+    assert "REFUSED" in err
+    assert '"""echo ${HOME}"""' in err
 
 
 def test_triple_quoted_verbatim_strings_still_carry_template_source():
