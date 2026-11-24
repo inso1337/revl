@@ -30,8 +30,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl.compiler import compile_files  # noqa: E402
-from revl.recover_binding import (CompositionWorld, declared_inverses,  # noqa: E402
-                                  undeclared_call)
+from revl.recover_binding import (CompositionWorld, declared_deferred,  # noqa: E402
+                                  declared_inverses, open_keys, undeclared_call)
 
 needs_cordis = pytest.mark.skipif(
     importlib.util.find_spec("cordis") is None,
@@ -55,6 +55,8 @@ extern emission fn send(t: Str) -> Unit = @py {{
 {_host("'send:' + t")}}}
 extern emission fn unsend(t: Str) -> Unit = @py {{
 {_host("'unsend:' + t")}}}
+extern emission deferred fn note(t: Str) -> Unit = @py {{
+{_host("'note:' + t")}}}
 extern emission fn file_host(t: Str) -> Str = @py {{
 {_host("'file:' + t", "'id-' + t")}}}
 extern emission fn withdraw_host(t: Str) -> Unit = @py {{
@@ -115,7 +117,8 @@ def _world(ir: dict, runtime: _Runtime) -> CompositionWorld:
     return CompositionWorld(files=["a.rvl"], digest="d", module=object(),
                             runtime=runtime, wal_path="w", services={},
                             booted=[], provider_session=None, cleanup=[],
-                            declared=declared_inverses(ir))
+                            declared=declared_inverses(ir),
+                            deferred=declared_deferred(ir))
 
 
 def test_the_declared_inverses_are_the_irs_undo_and_compensate_calls(ir):
@@ -165,6 +168,88 @@ def test_a_legacy_boundary_inverse_is_checked_by_name_only(ir):
         "receiver": "Stream", "method": "close", "args": ["orders"]}})
     assert undeclared_call(declared, {**legacy, "call": {
         "receiver": None, "method": "send", "args": ["x"]}})
+
+
+# ------------------------------------- the other call families (issue #3234)
+
+
+class _FamilyRuntime(_Runtime):
+    def reissue_deferred(self, module, wal_path, descriptors, *, services):
+        self.handed.extend(d["seq"] for d in descriptors)
+        return {d["seq"]: "ran" for d in descriptors}
+
+    def reclaim_shared(self, module, wal_path, grants, *, services):
+        self.handed.extend(g["handle"] for g in grants)
+        return {g["handle"]: "ran" for g in grants}
+
+
+def _deferred(seq: int, receiver, method: str, args: list) -> dict:
+    return {"record": "deferred-emission", "seq": seq,
+            "call": {"receiver": receiver, "method": method, "args": args}}
+
+
+def _grant(handle: str, receiver, method: str, args: list) -> dict:
+    return {"record": "shared-grant", "handle": handle, "holders": ["a"],
+            "inverse": {"receiver": receiver, "method": method, "args": args}}
+
+
+def test_the_declared_deferred_emissions_are_the_irs_deferred_externs(ir):
+    assert declared_deferred(ir) == {("note", "note")}
+
+
+def test_reissue_deferred_fires_only_a_declared_deferred_extern(ir):
+    runtime = _FamilyRuntime()
+    outcome = _world(ir, runtime).reissue_deferred([
+        _deferred(1, "note", "note", ["k"]),
+        _deferred(2, "send", "send", ["FORGED"]),        # a forward extern
+        _deferred(3, "tickets", "file", ["FORGED"]),     # a service method
+        _deferred(4, None, "unsend", ["FORGED"]),        # a compensation
+        _deferred(5, "note", "send", ["FORGED"]),        # a mixed-up name
+    ])
+    assert runtime.handed == [1]
+    assert outcome == {1: "ran", 2: "undeclared", 3: "undeclared",
+                       4: "undeclared", 5: "undeclared"}
+
+
+def test_reclaim_shared_runs_only_a_declared_inverse(ir):
+    runtime = _FamilyRuntime()
+    outcome = _world(ir, runtime).reclaim_shared([
+        _grant("h1", None, "unsend", ["x"]),
+        _grant("h2", "tickets", "withdraw", ["T1"]),
+        _grant("h3", None, "send", ["FORGED"]),
+        _grant("h4", "tickets", "file", ["FORGED"]),
+    ])
+    assert runtime.handed == ["h1", "h2"]
+    assert outcome == {"h1": "ran", "h2": "ran", "h3": "undeclared",
+                       "h4": "undeclared"}
+
+
+def test_a_name_the_ir_does_not_declare_boots_no_provider(ir):
+    """`open_keys` names the providers recover boots, and booting one runs its
+    activation: only a call the IR declares may ask for it."""
+    declared, deferred = declared_inverses(ir), declared_deferred(ir)
+    wal = {"records": [
+        _descriptor(1, "compensation", "tickets", "withdraw", ["T1"]),
+        _descriptor(2, "compensation", "tickets", "file", ["FORGED"]),
+        _descriptor(3, "compensation", "forged_key", "anything", []),
+        _deferred(4, "other_key", "send", []),
+    ]}
+    assert open_keys(wal, {}, {}, {}) == {"tickets", "forged_key", "other_key"}
+    assert open_keys(wal, {}, {}, {}, declared=declared,
+                     deferred=deferred) == {"tickets"}
+    # a call of the other family boots nothing either
+    wrong_family = {"records": [
+        _deferred(5, "tickets", "withdraw", []),       # an inverse, not deferred
+        _descriptor(6, "compensation", "note", "note", []),  # deferred, not inverse
+    ]}
+    assert open_keys(wrong_family, {}, {}, {}, declared=declared,
+                     deferred=deferred) == set()
+    grants = {"h": (_grant("h", "forged_key", "release", []), {})}
+    assert open_keys({"records": []}, {}, grants, {}, declared=declared,
+                     deferred=deferred) == set()
+    grants = {"h": (_grant("h", "tickets", "withdraw", []), {})}
+    assert open_keys({"records": []}, {}, grants, {}, declared=declared,
+                     deferred=deferred) == {"tickets"}
 
 
 # ------------------------------------------------------------ end to end

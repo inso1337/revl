@@ -145,6 +145,8 @@ from .tee_quote import (
     DevMacRoot,
     HardwareRoot,
     QuoteFormatError,
+    SEV_TCB_LAYOUT_MILAN_GENOA,
+    SEV_TCB_LAYOUT_TURIN,
     QuoteVerdict,
     RootError,
     build_sev_snp_report,
@@ -236,19 +238,36 @@ _QE_IDENTITY_RE = re.compile(r"[0-9a-f]{64}")
 
 # The SEV-SNP TCB version (`TCB_VERSION`, 8 bytes at report offsets 0x038 and
 # 0x180) is read little-endian by `parse_sev_snp_report`, so report byte N is
-# bits 8N..8N+7 of the integer and byte 0 is its least significant byte. The
-# layout below is Milan's and Genoa's (AMD SEV-SNP firmware ABI, `union
-# tcb_version` in Linux): bootloader byte 0, TEE byte 1, bytes 2 to 5 reserved,
-# SNP byte 6, microcode byte 7. Turin moves the fields (an FMC byte first), and
-# this root does not read the processor family from a report, so a
-# Turin-layout report is not covered: it is compared on the Milan/Genoa bytes.
-# Each component is compared on its own byte, so a high SVN in one cannot offset
-# a low one in another, and the reserved bytes are never compared, so a set
-# reserved bit cannot inflate a TCB past a floor.
-SEV_TCB_COMPONENTS = (("bootloader", 0), ("TEE", 1), ("SNP", 6),
-                      ("microcode", 7))
-SEV_TCB_RESERVED_BYTES = (2, 3, 4, 5)
-SEV_TCB_VERSION_MASK = 0xFFFF00000000FFFF
+# bits 8N..8N+7 of the integer and byte 0 is its least significant byte. AMD
+# changed the layout between processor generations (SEV-SNP firmware ABI, `union
+# tcb_version` in Linux, and the `TcbVersion` decoders of the virtee/sev crate):
+#
+#   milan-genoa  bootloader byte 0, TEE byte 1, bytes 2 to 5 reserved,
+#                SNP byte 6, microcode byte 7
+#   turin        FMC byte 0, bootloader byte 1, TEE byte 2, SNP byte 3,
+#                bytes 4 to 6 reserved, microcode byte 7
+#
+# `tee_quote.sev_tcb_layout` decides which a report uses from the version and the
+# CPUID family and model the firmware stamps into it, and a report whose
+# generation it does not know (Venice, an unstamped version 3) has no layout, so
+# its TCB is not compared and it is refused. Each component is compared on its own
+# byte, so a high SVN in one cannot offset a low one in another, and a reserved
+# byte is never compared, so a set reserved bit cannot inflate a TCB past a floor.
+SEV_TCB_LAYOUTS = {
+    SEV_TCB_LAYOUT_MILAN_GENOA: (("bootloader", 0), ("TEE", 1), ("SNP", 6),
+                                 ("microcode", 7)),
+    SEV_TCB_LAYOUT_TURIN: (("FMC", 0), ("bootloader", 1), ("TEE", 2),
+                           ("SNP", 3), ("microcode", 7)),
+}
+SEV_TCB_RESERVED = {
+    SEV_TCB_LAYOUT_MILAN_GENOA: (2, 3, 4, 5),
+    SEV_TCB_LAYOUT_TURIN: (4, 5, 6),
+}
+# The `TeeRequirement` member that holds the floor for each layout.
+_SEV_FLOOR_FIELDS = {
+    SEV_TCB_LAYOUT_MILAN_GENOA: "sev_min_tcb",
+    SEV_TCB_LAYOUT_TURIN: "sev_turin_min_tcb",
+}
 
 
 class TeeError(ValueError):
@@ -471,11 +490,20 @@ class TeeRequirement:
     ``tdx`` states what this placement demands of a TDX quote beyond its MRTD
     (:class:`TdxPolicy`). A requirement with ``tdx=None`` proves no TDX runtime
     fact, so :func:`tee_admits` refuses a TDX quote rather than admitting it on
-    MRTD alone. ``sev_min_tcb`` is the minimum SEV-SNP TCB version a report must
-    carry; its bootloader, TEE, SNP and microcode SVNs are each compared, so
-    firmware older than the floor in any one of them is refused. A floor with a
-    reserved byte set is refused here: no report is compared on that byte, so it
-    would read as a demand that is never checked.
+    MRTD alone.
+
+    ``sev_min_tcb`` and ``sev_turin_min_tcb`` are the minimum SEV-SNP TCB version a
+    report must carry, one per layout AMD uses: ``sev_min_tcb`` for a Milan or
+    Genoa report (bootloader byte 0, TEE byte 1, SNP byte 6, microcode byte 7) and
+    ``sev_turin_min_tcb`` for a Turin report (FMC byte 0, bootloader byte 1, TEE
+    byte 2, SNP byte 3, microcode byte 7). Each component is compared, so firmware
+    older than the floor in any one of them is refused. A SEV-SNP report is
+    refused unless the requirement states the floor for ITS layout, and a report
+    whose layout this root does not know is refused outright: ``0`` is the
+    explicit statement that the operator demands no minimum, so a requirement that
+    says nothing about the TCB cannot be mistaken for one that accepts any. A floor
+    with a reserved byte set is refused here: no report is compared on that byte,
+    so it would read as a demand that is never checked.
     """
 
     bundle: str
@@ -486,6 +514,7 @@ class TeeRequirement:
     max_age_s: float = DEFAULT_MAX_AGE_S
     tdx: Optional[TdxPolicy] = None
     sev_min_tcb: Optional[int] = None
+    sev_turin_min_tcb: Optional[int] = None
 
     def __post_init__(self) -> None:
         _require_sha256(self.bundle, "the approved bundle")
@@ -522,21 +551,24 @@ class TeeRequirement:
             raise TeeError(
                 f"tdx must be a TdxPolicy or absent, got "
                 f"{type(self.tdx).__name__}")
-        if self.sev_min_tcb is not None:
-            if (not isinstance(self.sev_min_tcb, int)
-                    or isinstance(self.sev_min_tcb, bool)
-                    or not 0 <= self.sev_min_tcb < 1 << 64):
+        for layout, name in _SEV_FLOOR_FIELDS.items():
+            floor = getattr(self, name)
+            if floor is None:
+                continue
+            if (not isinstance(floor, int) or isinstance(floor, bool)
+                    or not 0 <= floor < 1 << 64):
                 raise TeeError(
-                    f"sev_min_tcb must be an unsigned 64-bit TCB version, got "
-                    f"{self.sev_min_tcb!r}")
-            for byte in SEV_TCB_RESERVED_BYTES:
-                if (self.sev_min_tcb >> (8 * byte)) & 0xFF:
+                    f"{name} must be an unsigned 64-bit TCB version, got "
+                    f"{floor!r}")
+            for byte in SEV_TCB_RESERVED[layout]:
+                if (floor >> (8 * byte)) & 0xFF:
+                    components = ", ".join(
+                        f"{label} (byte {at})"
+                        for label, at in SEV_TCB_LAYOUTS[layout])
                     raise TeeError(
-                        f"sev_min_tcb 0x{self.sev_min_tcb:016x} sets reserved byte "
-                        f"{byte} of the SEV-SNP TCB version; only the bootloader "
-                        f"(byte 0), TEE (byte 1), SNP (byte 6) and microcode "
-                        f"(byte 7) SVNs are compared, so that byte would be a "
-                        f"floor nothing checks")
+                        f"{name} 0x{floor:016x} sets reserved byte {byte} of the "
+                        f"{layout} SEV-SNP TCB version; only {components} are "
+                        f"compared, so that byte would be a floor nothing checks")
 
 
 # --------------------------------------------------------------------------
@@ -1033,23 +1065,41 @@ def _tdx_policy_refusal(verdict: QuoteVerdict, policy: TdxPolicy) -> str:
     return ""
 
 
-def _sev_tcb_refusal(verdict: QuoteVerdict, floor: int) -> str:
-    """Compare the SEV-SNP report's TCB version against a floor, component by
-    component (:data:`SEV_TCB_COMPONENTS`), so a high SVN in one component cannot
-    offset a low one in another. The reserved bytes are not compared, so a set
-    reserved bit cannot inflate a report past the floor."""
-    for name, value in (("reported_tcb", verdict.sev_reported_tcb),
-                        ("current_tcb", verdict.sev_current_tcb)):
-        for component, byte in SEV_TCB_COMPONENTS:
+def _sev_tcb_refusal(verdict: QuoteVerdict, requirement: TeeRequirement) -> str:
+    """Compare the SEV-SNP report's TCB version against the requirement's floor
+    for the report's layout, component by component (:data:`SEV_TCB_LAYOUTS`), so
+    a high SVN in one component cannot offset a low one in another. The reserved
+    bytes are not compared, so a set reserved bit cannot inflate a report past the
+    floor. A report whose layout is unknown, or whose layout the requirement states
+    no floor for, is refused: a TCB that cannot be compared is not a TCB that
+    passes."""
+    layout = verdict.sev_tcb_layout
+    if layout not in SEV_TCB_LAYOUTS:
+        return (
+            "the SEV-SNP report names a processor generation whose TCB_VERSION "
+            "layout this root does not know (only Milan, Genoa and Turin are "
+            "read), so its TCB cannot be compared and the report is refused "
+            "rather than read with another generation's layout")
+    name = _SEV_FLOOR_FIELDS[layout]
+    floor = getattr(requirement, name)
+    if floor is None:
+        return (
+            f"the SEV-SNP report is a {layout} report and the requirement states "
+            f"no {name}, so no TCB floor was demanded of it: set {name} to the "
+            f"minimum TCB, or to 0 to accept any TCB explicitly")
+    for label, value in (("reported_tcb", verdict.sev_reported_tcb),
+                         ("current_tcb", verdict.sev_current_tcb)):
+        for component, byte in SEV_TCB_LAYOUTS[layout]:
             reported_byte = (value >> (8 * byte)) & 0xFF
             floor_byte = (floor >> (8 * byte)) & 0xFF
             if reported_byte < floor_byte:
                 return (
-                    f"the SEV-SNP report's {name} is 0x{value:016x}, below the "
-                    f"requirement's minimum TCB 0x{floor:016x}: the {component} "
-                    f"SVN, component byte {byte}, is 0x{reported_byte:02x} where "
-                    f"the floor is 0x{floor_byte:02x}, so the platform's firmware "
-                    f"is older than the operator permits")
+                    f"the SEV-SNP report's {label} is 0x{value:016x}, below the "
+                    f"requirement's minimum TCB 0x{floor:016x} ({name}): the "
+                    f"{component} SVN, component byte {byte}, is "
+                    f"0x{reported_byte:02x} where the floor is 0x{floor_byte:02x}, "
+                    f"so the platform's firmware is older than the operator "
+                    f"permits")
     return ""
 
 
@@ -1091,19 +1141,21 @@ def _hardware_policy_refusal(verdict: Optional[QuoteVerdict],
             "so the placement refuses rather than accepting on MRTD alone; name "
             "the permitted runtime measurements in TdxPolicy, or say "
             "accept_mrtd_only=True to accept the narrower claim")
-    if requirement.sev_min_tcb is not None:
+    sev_floor_stated = (requirement.sev_min_tcb is not None
+                        or requirement.sev_turin_min_tcb is not None)
+    if is_sev:
+        problem = _sev_tcb_refusal(verdict, requirement)
+        if problem:
+            return problem
+    elif sev_floor_stated:
         if not hardware:
             return (
                 "the requirement states a SEV-SNP TCB floor, but the evidence is a "
                 "symmetric-MAC record: nothing hardware-rooted was checked, so it "
                 "carries no TCB to compare")
-        if not is_sev:
-            return (
-                "the requirement states a SEV-SNP TCB floor, but the evidence is a "
-                "TDX quote, which carries no SEV-SNP TCB")
-        problem = _sev_tcb_refusal(verdict, requirement.sev_min_tcb)
-        if problem:
-            return problem
+        return (
+            "the requirement states a SEV-SNP TCB floor, but the evidence is a "
+            "TDX quote, which carries no SEV-SNP TCB")
     return ""
 
 

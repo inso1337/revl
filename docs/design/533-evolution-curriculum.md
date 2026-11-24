@@ -18,7 +18,7 @@ Sources studied, all at `c136eae6`: `tools/oracle_construct_reach.py`,
 
 A curriculum is auditable when a task can be regenerated from the tree rather
 than recalled, and when its rung is read off a measurement rather than
-asserted. `tools/evolve_curriculum.py` does both: five adapters read five of
+asserted. `tools/evolve_curriculum.py` does both: seven adapters read seven of
 the review's eight sources and emit one task per gap the source exhibits, each
 task carrying the repository path it was derived from, the locator inside it,
 the gap in one line, the change site, and the mechanism that decides the task
@@ -107,7 +107,7 @@ test_tier_is_a_total_function_of_the_signal` asserts that every task's rung
 equals `tier(task.signal)` and that two tasks with the same triple never carry
 different rungs, so a source cannot smuggle a difficulty in.
 
-## 3. The five adapters, and the gap each one reads
+## 3. The seven adapters, and the gap each one reads
 
 ### 3.1 `construct-reach` (source: known gaps) -> medium, 244 tasks
 
@@ -228,6 +228,69 @@ directories, so the census is the mechanism the task names. Rung: hard. A task
 is emitted only if the reference still refuses the program, so a stale record
 cannot invent one, and a missing record directory returns no signal so `check`
 reds on the source instead of reading `hard` as empty.
+
+### 3.6 `design-docs` (source: design documents) -> varies with the oracle named
+
+Slice 4. A design document states its own acceptance, and the slice table is
+where it does so most precisely: a row says which oracle decides the slice. A
+row that names a test under `tests/` which is not in the tree is a stated exit
+with no mechanism that verifies it, and the task is to write the oracle the
+document already names.
+
+Only a path under `tests/` in a slice table's own row counts, where a slice
+table is one whose header opens with `Slice`, `Step`, `Phase` or `Stage`. A path
+in prose or in a different kind of table is not a promise a slice plan makes: of
+the two table rows in `docs/design/` that name a missing test file at this
+commit, only one is in a slice table. `456-ambient-and-prog-export.md` slice B
+names `tests/test_selfhost_ambient.py`; `backend-runtime-fork-status-2026-09.md`
+names `tests/test_reentrancy.py` in a commit table about another repository, and
+taking it would be inventing a task (`test_a_path_outside_a_slice_table_is_not_
+a_design_task` is the negative control).
+
+The rung varies with the oracle named, and an oracle that does not exist has no
+corpus to read, so `_oracle_signal` reads it off the path by the naming the
+tree already uses: a `test_selfhost_*` file compares `src/revl` with
+`selfhost/*.rvl` (two implementations), a `crate` or `native` file adds the
+gate crate, and any other file is one implementation checking itself. Breadth is
+1, because one test file is one curated corpus. This is an approximation, stated
+as one: it is a total function of the path rather than a table of documents, and
+the written oracle's real corpus replaces it. Slice B of design 456 therefore
+lands on medium. Every named oracle declares its signal whether or not the file
+exists, so a tree with no slice gap left is an empty reachable rung and not a
+source that stopped reading, and a missing `docs/design/` is an error.
+
+### 3.7 `tracker` (source: the tracker) -> varies with the verifier an issue names
+
+Slice 6, and the source that would need the network. The curriculum has to stay
+computable in a checkout with none, so it never calls GitHub. `tools/tracker_
+snapshot.py --write` is the only place that does: it reads the open issues once
+and commits what a task needs to `tests/fixtures/tracker_snapshot.json`, and
+everything downstream reads the file. Per issue it keeps the number, the title,
+the labels, and `verifiers`, the in-tree paths under `tests/` and `tools/` the
+body names, in order of first appearance. The body itself is not kept: a task
+derives from the artifact a verifier names, not from prose, and a snapshot that
+quoted bodies would be a second copy of the tracker that rots against it.
+`--check` validates the file's shape offline and
+`test_the_tracker_source_never_touches_the_network` makes `subprocess` and the
+socket layer refuse for the whole derivation.
+
+An open issue is a task when it names a verifier that is in the tree: that is
+the issue saying which mechanism decides it is done, which every task here has
+to name. An issue that names none, or only files that are gone, is a task nobody
+can verify, and deriving one would invent the verifier. At the slice-6 commit
+the snapshot holds 321 open issues and 67 of them name an in-tree verifier. The
+rung is that verifier's, by the same reading slice 4 gives an oracle
+(`_oracle_signal`); the issue's labels say nothing about how many
+implementations must agree and are not read. That reading puts 50 of the 67 on
+easy (a `tools/` script or a test with no self-host in its name) and 17 on
+medium, which makes this the largest source on the easy rung; section 5.4's
+point stands, the population is a measurement of the tree and nothing here makes
+it balanced.
+
+What an offline snapshot cannot know is stated, not hidden: an issue closed
+after it was taken is still a task until the next `--write`. A missing snapshot
+is an error, and a snapshot whose named files have all gone is an empty
+reachable rung.
 
 ## 4. Non-vacuity: the tasks, and the gate
 
@@ -432,7 +495,7 @@ before it does.
 
 ## 6. Slice plan
 
-Slices 1 and 3 are landed. Each later slice states the source it adds, the rung
+Slices 1, 3, 4 and 6 are landed. Each later slice states the source it adds, the rung
 it is expected to land on, and the oracle that would catch it going vacuous.
 
 | slice | source added | expected rung | fixture / oracle |
@@ -440,9 +503,9 @@ it is expected to land on, and the oracle that would catch it going vacuous.
 | 1 (landed) | known gaps, known historical bugs, the tree's own programs, formal obligations | medium, hard, easy, expert | `tests/test_evolve_curriculum.py`, 16 tests, gate firing proved both directions |
 | 2 | the `compile` and `gate_census` oracles of `tools/oracle_construct_reach.py`, once issue #1203's fix for the `_ir_reach` string-value defect in section 3.1 has landed | medium | the same reach report, read through its shrink-only ledger |
 | 3 (landed) | cross-tier differential probes: the `examples/rejections/` programs the census parks in `no-objection-out-of-slice`, which the lower oracle's `REJECTED_PROGRAMS` cannot carry yet | hard | the committed census record; `tests/test_selfhost_lower.py` for the oracle, and a task must name a program the reference refuses and the port does not (section 3.5) |
-| 4 | design documents: a slice table row in `docs/design/*.md` whose named oracle does not exist in `tests/` | varies with the oracle named | the doc's own slice table; the gap is checkable by looking for the test file |
+| 4 (landed) | design documents: a slice table row in `docs/design/*.md` whose named oracle does not exist in `tests/` | varies with the oracle named (medium for slice B of design 456) | the doc's own slice table; the gap is checkable by looking for the test file (section 3.6) |
 | 5 | generated adversarial programs: `tools/fuzz_frontend.py` seeds that survive to a divergence | hard | the fuzz corpus; a seed is only a task while it still diverges |
-| 6 | the tracker | varies | offline snapshot only, so the curriculum stays computable in a checkout with no network |
+| 6 (landed) | the tracker | varies with the verifier an issue names | an offline snapshot only, so the curriculum stays computable in a checkout with no network (section 3.7) |
 | 7 | mutation testing, which the issue is right that this tree does not have | expert | see section 7 |
 
 ## 7. Mutation testing is absent and stays absent in slice 3
@@ -460,7 +523,7 @@ the *subject* and asks whether the suite notices. They fail on different things
 and only the second is a difficulty signal, because it measures whether the
 suite that scores a candidate is sensitive enough to be worth scoring against.
 
-Slices 1 and 3 do not add it, and do not pretend to. It is slice 7 because it is
+Slices 1, 3, 4 and 6 do not add it, and do not pretend to. It is slice 7 because it is
 the one source whose machinery does not exist, and because it interacts with
 issue #1207: a mutation test a candidate can read is not a hidden mutation
 test, so where the mutants live is that item's question and not this one's.
@@ -470,11 +533,11 @@ test, so where the mutants live is that item's question and not this one's.
 - It does not claim the four rungs are equally hard, or that the ladder is
   calibrated against anything. Section 5 is the measurement, and it is
   negative on both proxies the tree offers.
-- It does not claim to read all eight sources. It reads five. The other three
-  sources are slices 4 (design documents), 5 (fuzz seeds) and 6 (the tracker),
-  each with a named oracle; slice 2 is an extra oracle, not one of the eight.
+- It does not claim to read all eight sources. It reads seven. The other one is
+  slice 5 (fuzz seeds), with a named oracle; slice 2 is an extra oracle, not one
+  of the eight.
 - It does not claim the derived tasks are a complete list of what is wrong with
-  the tree. They are the gaps five artifacts exhibit, no more.
+  the tree. They are the gaps seven artifacts exhibit, no more.
 - It does not touch the reward (issue #1206) or the held-out scoring set
   (issue #1207). A curriculum task names a mechanism that verifies it; whether
   that mechanism is one the candidate could read is #1207's question, and every

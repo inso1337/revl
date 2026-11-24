@@ -532,8 +532,8 @@ class _StubDriver:
         type(self).torn_down += 1
 
 
-def _drive(tmp_path, toml_text, driver=None):
-    app = _write(tmp_path, "app.rvl", _APP)
+def _drive(tmp_path, toml_text, driver=None, app_text=_APP, app_arg=None):
+    app = _write(tmp_path, "app.rvl", app_text)
     toml = _write(tmp_path, "t.toml", toml_text)
     specs: dict = {}
     real = _placement.subprocess.Popen
@@ -557,7 +557,8 @@ def _drive(tmp_path, toml_text, driver=None):
          mock.patch.object(_placement, "_new_relay_manager",
                            lambda pid, img: _sbrt.SeamRelayManager(pid, img, docker="")), \
          mock.patch.object(_placement.subprocess, "Popen", fake_popen):
-        rc = _placement.run_placement([app], toml, once=True)
+        rc = _placement.run_placement([app if app_arg is None else app_arg],
+                                      toml, once=True)
     return rc, specs
 
 
@@ -569,6 +570,57 @@ _SANDBOX_TOML = (
     'secret = "postgres://S3CRET@h/db"\n'
     '[config.Untrusted]\n'
     'tuning = "ok"\n')
+
+
+_USE_APP = 'use "lib/util.rvl" as util\n' + _APP
+
+
+def test_the_sandboxed_process_gets_compile_input_files_not_directories(tmp_path):
+    """Issue #3198: what crosses into the boundary is the composition's compile
+    input FILES (its roots and every `use` dependency), each its own file mount.
+    The conductor's working directory and the source directories themselves must
+    not be handed to the body."""
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib" / "util.rvl").write_text(
+        "service Util { fn ping() -> Str }\n", encoding="utf-8")
+    seen: dict = {}
+
+    class _Recording(_StubDriver):
+        def preflight(self, pname, env, ctx):
+            seen.update(ctx)
+            return super().preflight(pname, env, ctx)
+
+    rc, specs = _drive(tmp_path, _SANDBOX_TOML, driver=_Recording(),
+                       app_text=_USE_APP)
+    assert rc == 0, seen
+    files = [Path(f) for f in seen["files"]]
+    assert all(path.is_file() for path in files), files
+    assert tmp_path / "app.rvl" in files
+    assert tmp_path / "lib" / "util.rvl" in files
+    assert tmp_path not in files
+    # the root the confined process re-compiles is absolute, so it resolves with
+    # the working directory unmounted
+    assert specs["sandbox_Untrusted"]["files"] == [str(tmp_path / "app.rvl")]
+
+
+def test_a_relative_root_is_resolved_before_launch(tmp_path, monkeypatch):
+    """Issue #3198: a root the operator named relative to the conductor's
+    working directory is resolved to an absolute path before the spec is
+    written, so the confined process recompiles it with no working-directory
+    mount to resolve it against."""
+    seen: dict = {}
+
+    class _Recording(_StubDriver):
+        def preflight(self, pname, env, ctx):
+            seen.update(ctx)
+            return super().preflight(pname, env, ctx)
+
+    monkeypatch.chdir(tmp_path)
+    rc, specs = _drive(tmp_path, _SANDBOX_TOML, driver=_Recording(),
+                       app_arg="app.rvl")
+    assert rc == 0, seen
+    assert specs["sandbox_Untrusted"]["files"] == [str(tmp_path / "app.rvl")]
+    assert all(Path(f).is_absolute() for f in seen["files"])
 
 
 def test_sibling_secret_is_not_in_the_sandboxed_spec(tmp_path):

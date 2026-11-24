@@ -26,6 +26,7 @@ CLI surface (the bootstrapped `.rvl` toolchain), and are not exercised here.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -55,6 +56,18 @@ composition Demo {
 """
 
 
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+_KIT_COMPONENT = """
+use "services.rvl" { }
+component KitMetrics provides metrics: Metrics {
+  provide metrics { fn tick() = 1 }
+}
+"""
+
+
 def _base(stack: str = "") -> str:
     return _BASE % {"stack": stack}
 
@@ -76,7 +89,7 @@ def _project(tmp_path: Path, *, lock: dict | None = None) -> Path:
 
 
 _PINNED = {"lockVersion": 1,
-           "trucs": [{"name": "pg_database", "sourceHash": "a" * 64}]}
+           "trucs": [{"name": "pg_database", "sourceHash": _sha(_PG_COMPONENT)}]}
 
 
 # --------------------------------------------------------------------------- #
@@ -132,12 +145,13 @@ def test_a_stack_layer_from_path_outside_its_truc_is_refused(tmp_path):
     row (§4.1)."""
     doc = _project(tmp_path, lock={
         "lockVersion": 1,
-        "trucs": [{"name": "pg_database", "sourceHash": "a" * 64},
-                  {"name": "evil", "sourceHash": "b" * 64}]})
+        "trucs": [{"name": "pg_database", "sourceHash": _sha(_PG_COMPONENT)},
+                  {"name": "evil", "sourceHash": _sha(_PG_COMPONENT)}]})
     # a secret the project keeps outside any truc
     (tmp_path / "secret.rvl").write_text(_PG_COMPONENT)
     evil = tmp_path / "trucs" / "evil"
     evil.mkdir(parents=True)
+    (evil / "component.rvl").write_text(_PG_COMPONENT, encoding="utf-8")
     (evil / "layer.rvl").write_text("""
 layer Evil for Demo {
   add row @stolen from "../../secret.rvl" provides db
@@ -156,17 +170,12 @@ def test_a_stack_layer_reading_its_own_truc_is_admitted(tmp_path):
     inside its OWN truc directory resolves."""
     doc = _project(tmp_path, lock={
         "lockVersion": 1,
-        "trucs": [{"name": "pg_database", "sourceHash": "a" * 64},
-                  {"name": "metrics_kit", "sourceHash": "b" * 64}]})
+        "trucs": [{"name": "pg_database", "sourceHash": _sha(_PG_COMPONENT)},
+                  {"name": "metrics_kit", "sourceHash": _sha(_KIT_COMPONENT)}]})
     kit = tmp_path / "trucs" / "metrics_kit"
     kit.mkdir(parents=True)
     (kit / "services.rvl").write_text("service Metrics { fn tick() -> Int }\n")
-    (kit / "component.rvl").write_text("""
-use "services.rvl" { }
-component KitMetrics provides metrics: Metrics {
-  provide metrics { fn tick() = 1 }
-}
-""")
+    (kit / "component.rvl").write_text(_KIT_COMPONENT, encoding="utf-8")
     (kit / "layer.rvl").write_text("""
 layer MetricsKit for Demo {
   add row @metrics from "component.rvl" provides metrics
@@ -210,8 +219,8 @@ def test_row_table_is_byte_identical_across_differing_registry_indexes(tmp_path)
 # --------------------------------------------------------------------------- #
 
 _STD_LOCK = {"lockVersion": 1,
-             "trucs": [{"name": "pg_database", "sourceHash": "a" * 64},
-                       {"name": "evil", "sourceHash": "b" * 64}]}
+             "trucs": [{"name": "pg_database", "sourceHash": _sha(_PG_COMPONENT)},
+                       {"name": "evil", "sourceHash": _sha(_PG_COMPONENT)}]}
 
 
 def _evil_layer(tmp_path: Path, spelling: str, key: str = "db") -> Path:
@@ -220,6 +229,7 @@ def _evil_layer(tmp_path: Path, spelling: str, key: str = "db") -> Path:
     (tmp_path / "secret.rvl").write_text(_PG_COMPONENT)
     evil = tmp_path / "trucs" / "evil"
     evil.mkdir(parents=True)
+    (evil / "component.rvl").write_text(_PG_COMPONENT, encoding="utf-8")
     (evil / "layer.rvl").write_text(f"""
 layer Evil for Demo {{
   add row @s from "{spelling}" provides {key} config {{ {cfg} }}

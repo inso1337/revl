@@ -127,6 +127,7 @@ CORPUS = [
     "optionals.rvl",   # optional-call chaining (opt receiver)
     "mixed.rvl",       # a cross-section of the above in three functions
     "user_names_like_temps.rvl",  # user locals spelled like emitter temporaries (issue #2913)
+    "extern_param_names.rvl",  # an inline extern body's parameters keep their spelling (issue #3604)
     "chains.rvl",  # long one-operator chains written flat, both renderers (issue #3403)
     # component/service documents (slice 2, item 185)
     "services_basic.rvl",    # SERVICES table, req/provide, effect accumulator, a provide method
@@ -870,6 +871,21 @@ def test_a_py_ref_extern_is_named_not_emitted_empty(emitted, reference, tmp_path
     assert reason is None, reason
 
 
+@pytest.mark.parametrize("fixture, marker", [
+    ("extern_param_keyword.rvl", "<<UNSUPPORTED-EXTERN:param f from keyword>>"),
+    ("extern_param_scaffolding.rvl",
+     "<<UNSUPPORTED-EXTERN:param g _revl_config scaffolding>>"),
+])
+def test_an_inline_extern_parameter_the_reference_refuses_is_marked_by_the_port(
+        emitted, fixture, marker):
+    """The port has no refusal channel: where the reference refuses an inline
+    extern's parameter by name (issue #3604), it answers a named marker."""
+    ir = compile_files([str(REFUSALS_DIR / fixture)])
+    got = emitted["emit_py_src"](ir)
+    assert marker in got
+    assert "def f(" not in got and "def g(" not in got
+
+
 # A `Stream.source()` that DECLARES its replay backlog (item 130 §4.5) is the
 # one `host` shape the port still refuses. The reference renders the
 # declaration as a keyword argument (`_replay_kwarg`); the port answers the
@@ -1057,6 +1073,16 @@ def test_a_pub_fn_spelled_like_an_emitter_temporary_is_refused_by_name(reference
     with pytest.raises(reference.EmitError,
                        match="pub fn '_run' is spelled like the python emitter "
                              "temporary '_run'"):
+        reference.emit(ir)
+
+
+def test_an_inline_extern_keyword_parameter_is_refused_by_name(reference):
+    """An inline `@py` body names its parameters itself, so one Python cannot
+    bind is refused rather than renamed away from the body's spelling
+    (issue #3604)."""
+    ir = compile_files([str(REFUSALS_DIR / "extern_param_keyword.rvl")])
+    with pytest.raises(reference.EmitError,
+                       match="extern `f` parameter 'from' is a Python keyword"):
         reference.emit(ir)
 
 

@@ -5,6 +5,9 @@
   "excluded": [
     "selfhost/checker.rvl",
     "selfhost/emit_go.rvl",
+    "selfhost/emit_go_comp.rvl",
+    "selfhost/emit_go_core.rvl",
+    "selfhost/emit_go_module.rvl",
     "selfhost/emit_java.rvl",
     "selfhost/emit_py.rvl",
     "selfhost/emit_rust.rvl",
