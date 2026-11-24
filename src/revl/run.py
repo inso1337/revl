@@ -37,6 +37,7 @@ import os
 import signal
 import sys
 import time
+import traceback
 import types
 from pathlib import Path
 from typing import NamedTuple
@@ -1240,6 +1241,21 @@ def _loop_has_runnable(loop) -> bool:
                for timer in scheduled)
 
 
+def _failure_cause(err) -> str:
+    """One line naming a FAILED settle's cause (issue #3473): the exception
+    type and message for a host body that raised, the refusal text itself
+    for a :class:`RevlError` (its ``str`` already carries the location and
+    hint, so the type name would only repeat it). ``None`` means the fiber
+    carries no error object at all — said plainly, never fabricated."""
+    if err is None:
+        return "no cause recorded"
+    if isinstance(err, RevlError):
+        return str(err) or type(err).__name__
+    text = str(err)
+    name = type(err).__name__
+    return f"{name}: {text}" if text else name
+
+
 class _Driver:
     """Boots and holds one composition on a cordis.Context, with a compact
     trace, an interactive REPL, and a no-residue teardown. Modeled on
@@ -1445,6 +1461,24 @@ class _Driver:
         # fail the composition, not only the log line.
         if new == "FAILED" and fiber.name not in self._failed_fibers:
             self._failed_fibers.append(fiber.name)
+        if new == "FAILED":
+            # issue #3473: a FAILED settle prints its cause on stderr, so a
+            # red run names why (a host body's exception, a failed
+            # requirement's refusal) instead of forcing a bisect. The full
+            # traceback rides the causal trace behind --trace.
+            err = getattr(fiber, "_error", None)
+            print(f"error: component `{fiber.name}` FAILED: {_failure_cause(err)}",
+                  file=sys.stderr, flush=True)
+            if self.tracing:
+                record = self._stamp_header(why_runtime.make_event(
+                    self._seq, self.generation, "fiber-failed", fiber.name,
+                    f"{self.FiberState(old).name} -> FAILED",
+                    why_runtime.cause_trigger(_failure_cause(err)),
+                    ts=time.monotonic()))
+                if err is not None:
+                    record["traceback"] = "".join(traceback.format_exception(err))
+                self._events.append(record)
+                self._seq += 1
         # observation window (open during a `--withdraw`): capture each fiber
         # the moment it comes to rest in a down state. `from` is the fiber's
         # state at the START of the window, so a UNLOADING waypoint collapses
