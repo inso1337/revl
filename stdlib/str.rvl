@@ -27,14 +27,16 @@
 //                            str_newline, str_char }
 
 // ------------------------------------------------------------ character classes
-// ASCII whitespace, matching Python `str.strip()`'s ASCII set: space (32),
-// tab (9), LF (10), VT (11), FF (12), CR (13). Total on the empty string
-// (answers `false`) so a caller may probe a zero-length slice without a fault.
+// ASCII whitespace, the same four characters as the `Str.is_space()` builtin
+// (docs/stdlib-2.0.md): space (32), tab (9), LF (10), CR (13). VT (11) and FF
+// (12) are deliberately NOT here: the builtin set is the six-tier contract, and
+// this free helper must not answer differently from the method spelling. Total
+// on the empty string (answers `false`) so a caller may probe a zero-length
+// slice without a fault.
 pub fn is_space(c: Str) -> Bool {
   if (c.length() == 0) { return false }
   let x = c.charCodeAt(0)
-  if (x == 32) { return true }
-  return x >= 9 && x <= 13
+  return x == 32 || x == 9 || x == 10 || x == 13
 }
 
 // A word char in the `re` sense: `[A-Za-z0-9_]`. Total on empty (false).
@@ -68,8 +70,9 @@ fn is_sp_tab(c: Str) -> Bool {
 // ------------------------------------------------------------------- trimming
 // Strip leading AND trailing ASCII whitespace. Drop-in for the hand-rolled
 // `trim` (selfhost/emit_py.rvl, space-only) and `trim_ws` (selfhost/checker.rvl,
-// space/tab/LF/CR): identical on their inputs (type spellings), and a strict
-// superset of both (also strips VT/FF), matching Python `str.strip()` for ASCII.
+// space/tab/LF/CR): a superset of the first and identical to the second, and
+// the same set the `Str.is_space()` builtin uses. In particular VT/FF are kept,
+// because the builtin keeps them (issue #3466).
 pub fn trim(s: Str) -> Str {
   var a = 0
   var b = s.length()

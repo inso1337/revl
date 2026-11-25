@@ -41,8 +41,8 @@ fault.
 
 | fn | signature | semantics |
 |---|---|---|
-| `is_space(c)` | `Str -> Bool` | is the first code point ASCII whitespace (`space`/`\t`/`\n`/`\v`/`\f`/`\r`); `""` → `false` |
-| `trim(s)` | `Str -> Str` | strip leading+trailing ASCII whitespace (Python `str.strip()` for ASCII) |
+| `is_space(c)` | `Str -> Bool` | is the first code point ASCII whitespace (`space`/`\t`/`\n`/`\r`), the same set as the `Str.is_space()` builtin; VT and FF are not whitespace here; `""` → `false` |
+| `trim(s)` | `Str -> Str` | strip leading+trailing ASCII whitespace (space, tab, LF, CR); VT and FF are kept |
 | `lstrip(s)` | `Str -> Str` | strip leading ASCII whitespace |
 | `rstrip(s)` | `Str -> Str` | strip trailing ASCII whitespace |
 | `contains(s, sub)` | `(Str, Str) -> Bool` | does `s` contain `sub`; `""` is contained in every string |
@@ -122,8 +122,8 @@ It reproduces CPython's `Lib/textwrap.py` algorithm exactly:
    tab-indented line share the empty margin).
 4. strip `margin` from the start of every line.
 
-The whitespace class in dedent is **only `[ \t]`** — never `\n\r\v\f` — which is
-why `dedent` uses the private `is_sp_tab`, not the wider `is_space`. Byte-
+The whitespace class in dedent is **only `[ \t]`** — never `\n\r`, which is
+why `dedent` uses the private `is_sp_tab`, not the line/CR set `is_space` carries. Byte-
 exactness is pinned in `tests/test_str_stdlib.py` two ways: a table of
 hand-picked cases covering every branch (tab margins, whitespace-only-line
 normalisation, divergent margins → empty common prefix, no-trailing-newline),

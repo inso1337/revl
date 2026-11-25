@@ -21,9 +21,12 @@ every tier the day it lands and adds no new primitive. This suite proves:
 import importlib.util
 import random
 import re
+import shutil
 import sys
+import tempfile
 import textwrap
 import types
+import uuid
 from pathlib import Path
 
 import pytest
@@ -57,6 +60,7 @@ fn t_str_char_code(code: Int) -> Int { return str_char(code).charCodeAt(0) }
 fn t_join_newline(parts: List[Str]) -> Str { return parts.join(str_newline()) }
 fn t_is_space(c: Str) -> Bool { return is_space(c) }
 fn t_trim(s: Str) -> Str { return trim(s) }
+fn t_is_space_builtin(c: Str) -> Bool { return c.is_space() }
 fn t_lstrip(s: Str) -> Str { return lstrip(s) }
 fn t_rstrip(s: Str) -> Str { return rstrip(s) }
 fn t_contains(s: Str, sub: Str) -> Bool { return contains(s, sub) }
@@ -171,9 +175,39 @@ def test_module_file_is_the_documented_surface():
     ("   ", ""),                 # all whitespace
     ("\t\n hi \r\n", "hi"),      # mixed ASCII whitespace
     ("  a b  ", "a b"),          # interior space kept
+    ("\x0bhi\x0c", "\x0bhi\x0c"),  # VT / FF kept, as the builtin keeps them
 ])
 def test_trim(ns, s, exp):
-    assert ns["t_trim"](s) == exp == s.strip()
+    assert ns["t_trim"](s) == exp
+
+
+@pytest.mark.parametrize("c", [" ", "\t", "\n", "\r", "\x0b", "\x0c", "x", ""])
+def test_free_is_space_agrees_with_the_builtin(ns, c):
+    # Issue #3466: the free helper and the method are one contract. VT/FF are
+    # outside it, so neither spelling calls them whitespace.
+    assert ns["t_is_space"](c) == ns["t_is_space_builtin"](c)
+
+
+def test_free_and_builtin_is_space_agree_in_a_compiled_consumer():
+    # Self-contained (own temp dir, no pytest tmp_path) so a receipt can run
+    # this node against both commits without the module fixture.
+    d = Path(tempfile.gettempdir()) / f"revl-str-3466-{uuid.uuid4().hex}"
+    d.mkdir()  # explicit 0o777; tempfile.mkdtemp's 0o700 is unwritable confined
+    try:
+        shutil.copyfile(STDLIB, d / "str.rvl")
+        main = d / "main.rvl"
+        main.write_text(
+            'use "str.rvl" { is_space }\n'
+            "fn free(c: Str) -> Bool { return is_space(c) }\n"
+            "fn method(c: Str) -> Bool { return c.is_space() }\n",
+            encoding="utf-8")
+        ns = _exec_python(compile_files([str(main)]))
+        for c in (" ", "\t", "\n", "\r"):
+            assert ns["free"](c) is ns["method"](c) is True, c
+        for c in ("\x0b", "\x0c"):
+            assert ns["free"](c) is ns["method"](c) is False, c
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 @pytest.mark.parametrize("s", ["  hi  ", "", "   ", "\t x \n", "x"])
@@ -258,7 +292,7 @@ def test_type_args_end_to_end(ns):
 
 @pytest.mark.parametrize("c,exp", [
     (" ", True), ("\t", True), ("\n", True), ("\r", True),
-    ("\x0b", True), ("\x0c", True),     # VT / FF, in Python's ASCII strip set
+    ("\x0b", False), ("\x0c", False),   # VT / FF are not in the builtin set
     ("x", False), ("0", False), ("", False),   # empty is total -> False
 ])
 def test_is_space(ns, c, exp):
