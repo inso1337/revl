@@ -7176,6 +7176,22 @@ fn ctx_bind(cx: Ctx, names: List[Str]) -> Ctx {
            acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr, acqRoot: cx.acqRoot }
 }
 
+// The same context with its scope REPLACED — issue #3657: a provide method
+// sees the activation bindings (the setup body's `let`s), its own parameters
+// and its own body's binders, never ANOTHER method's, so a name one method
+// binds and another reads is the G1 the reference draws.
+fn ctx_scope(cx: Ctx, names: List[Str]) -> Ctx {
+  return { svcs: cx.svcs, ambOps: cx.ambOps, reqMap: cx.reqMap,
+           caps: cx.caps, colored: cx.colored,
+           emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
+           scopeNames: names, fnNames: cx.fnNames,
+           compName: cx.compName,
+           fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
+           handles: cx.handles, provKeySvc: cx.provKeySvc,
+           provAlias: cx.provAlias, svcTys: cx.svcTys, localArrows: cx.localArrows,
+           acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr, acqRoot: cx.acqRoot }
+}
+
 // The same context carrying the host-acquire position phrase of the statement
 // being walked.
 fn ctx_acq(cx: Ctx, where: Str) -> Ctx {
@@ -7400,6 +7416,16 @@ fn provs_scope(pvs: List[Provide], i: Int, acc: List[Str]) -> List[Str] {
 
 fn scope_names_of(comp: CompD) -> List[Str] {
   return provs_scope(comp.provs, 0, stmt_binds(comp.setup, 0, []))
+}
+
+// Issue #3657: one provide method's scope — the activation bindings plus that
+// method's own parameters and body binders. `scope_names_of` merges every
+// method's binders into one set, which admits a name one method binds and
+// another reads; the reference resolves per method (its save/restore around
+// each provide method).
+fn method_scope_of(comp: CompD, pm: ProvM) -> List[Str] {
+  return union_into(stmt_binds(comp.setup, 0, []),
+                    union_into(pm.params, stmt_binds(pm.body, 0, [])))
 }
 
 fn build_maps(pg: Prog) -> Ctx {
@@ -10687,10 +10713,11 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind],
       // is lowered.
       let sigv = a6_annotation_verdict(pv, mi, decl, gtys)
       if (sigv.v != "") { return sigv }
-      let mcx = ctx_svc(ctx_arrows(
+      let mcx = ctx_scope(ctx_svc(ctx_arrows(
         ctx_alias(pcx, alias_in(pm.body, 0, pcx.handles, setupAlias)),
         arrows_in(pm.body, 0, setupArrows)),
-        svc_tys_in(pm.body, 0, svc_param_tys(setupSvcTys, pm, decl, pcx), pcx))
+        svc_tys_in(pm.body, 0, svc_param_tys(setupSvcTys, pm, decl, pcx), pcx)),
+        method_scope_of(comp, pm))
       // `_check_rebind`, run by the reference DURING the body lowering: it
       // interleaves with the walk below statement by statement, so the earlier
       // SOURCE LINE wins (both are read in statement order). A walk verdict with
