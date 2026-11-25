@@ -1525,6 +1525,31 @@ class _Driver:
         head, _, rest = event.partition(" ")
         self._log("host", head, rest)
 
+    def _log_failure(self, name: str, err) -> None:
+        """Issue #3473: the moment a fiber settles FAILED, its cause goes to
+        stderr on one line naming the component - the exception type and
+        message for a host body that raised, the refusal text and code for a
+        RevlError (a failed requirement). The full traceback is printed behind
+        the causal-trace flag (`--trace`/`--withdraw`) only. `_error` is
+        cordis's own attribute; a FAILED settle that carries none says so
+        rather than inventing a cause."""
+        if err is None:
+            detail = "FAILED with no error recorded on the fiber"
+        elif isinstance(err, RevlError):
+            code = diagnostics.classify(err).get("code")
+            detail = f"FAILED: {err.message}"
+            if code:
+                detail = f"{detail} ({code})"
+        else:
+            detail = f"FAILED: {type(err).__name__}: {err}"
+        print(f"  cause  | {name:<18}| {detail}".rstrip(), file=sys.stderr,
+              flush=True)
+        if self.tracing and err is not None and not isinstance(err, RevlError):
+            tb = "".join(traceback.format_exception(
+                type(err), err, err.__traceback__)).rstrip()
+            for line in tb.splitlines():
+                print(f"         | {'':<18}| {line}", file=sys.stderr, flush=True)
+
     def _on_fiber(self, _this, fiber, old) -> None:
         new = self.FiberState(fiber.state).name
         self._log("fiber", fiber.name, f"{self.FiberState(old).name} -> {new}")
@@ -1550,6 +1575,8 @@ class _Driver:
                     record["traceback"] = "".join(traceback.format_exception(err))
                 self._events.append(record)
                 self._seq += 1
+        if new == "FAILED":
+            self._log_failure(fiber.name, getattr(fiber, "_error", None))
         # observation window (open during a `--withdraw`): capture each fiber
         # the moment it comes to rest in a down state. `from` is the fiber's
         # state at the START of the window, so a UNLOADING waypoint collapses
