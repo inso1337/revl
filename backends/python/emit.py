@@ -96,6 +96,7 @@ _IMPORT_ALIAS = {
     "declared_crossing": "_revl_declared_crossing",
     "site_compensation": "_revl_site_compensation",
     "fail_error": "_revl_fail_error",
+    "redact_text": "_revl_redact_text",
 }
 _RESERVED = _HOST_ROOTS | {"self"}
 
@@ -6329,7 +6330,11 @@ def _revl_load_failed(fiber, name, where):
     # purpose still loads quietly (issues #1895, #1859).
     err = getattr(fiber, "_error", None)
     if getattr(err, "_revl_activation_fail", False):
-        raise AssertionError("{}: load {}: {}".format(where, name, err)) from err
+        # issue #3348: the error text goes through the same redaction funnel as
+        # `emission-failed`, so an activation error quoting a `Secret[T]` value
+        # cannot leak into the test failure text.
+        raise AssertionError("{}: load {}: {}".format(
+            where, name, _revl_redact_text(str(err)))) from err
 
 
 async def _revl_call(root, key, method, args, where):
@@ -6341,9 +6346,11 @@ async def _revl_call(root, key, method, args, where):
         for name in _REVL_PROVIDERS.get(key, ()):
             err = getattr(_REVL_LIVE.get(name), "_error", None)
             if err is not None:
+                # issue #3348: redacted like every other host error text.
                 raise AssertionError(
                     "{}: no provider for key {!r}: its provider {} failed to activate: "
-                    "{}: {}".format(where, key, name, type(err).__name__, err)) from err
+                    "{}: {}".format(where, key, name, type(err).__name__,
+                                   _revl_redact_text(str(err)))) from err
         raise AssertionError(
             "{}: no provider for key {!r} \u2014 its component is loaded but not ACTIVE; "
             "a component with an unmet `requires` stays PENDING (R2)".format(where, key))
@@ -7466,6 +7473,10 @@ def emit(ir: dict) -> str:
         # idempotent emissions — see `_REVL_IDEMPOTENT` and `_revl_call` below.
         | ({"plug", "set_trace", "retry_idempotent", "_frame_for_ctx"}
            if lifecycle else set())
+        # issue #3348: the lifecycle harness wraps a host activation error into
+        # an `AssertionError` through `redact_text`, so the import is needed only
+        # when a lifecycle test exists — a lifecycle-free document is unchanged.
+        | ({"redact_text"} if lifecycle else set())
         # item 102: only a lifecycle test with an `advance` step drives the
         # clock coeffect, so `Clock` is imported (for `advance`/`reset`) only
         # then — a timer-free document's output is unchanged.

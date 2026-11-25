@@ -239,3 +239,221 @@ def test_load_and_state_return_a_redacted_fail_message():
     for out in (loaded, state):
         error = out["components"][0]["error"]
         assert error == {"type": "RuntimeError", "message": REDACTED}, out
+
+
+# ---------------------------------------------------------------------------
+# #3348: residue records, the flush report and the generated lifecycle driver
+# carry the SAME redacted text as `emission-failed`
+# ---------------------------------------------------------------------------
+
+
+def test_error_record_redacts_a_registered_secret_out_of_the_message():
+    """The funnel every residue/WAL site routes through (issue #3348)."""
+    confidential.register_secret_value(CANARY)
+    record = runtime._error_record(
+        ValueError("undo rejected credential " + CANARY))
+    assert record == {"type": "ValueError",
+                      "message": "undo rejected credential " + REDACTED}
+    assert CANARY not in record["message"]
+
+
+def test_error_record_leaves_an_ordinary_error_verbatim():
+    """The control: no registered secret means byte-identical text."""
+    record = runtime._error_record(RuntimeError("plain inverse fault"))
+    assert record == {"type": "RuntimeError", "message": "plain inverse fault"}
+
+
+def test_redact_text_passes_non_string_values_through():
+    assert runtime.redact_text(123) == 123
+    assert runtime.redact_text(None) is None
+
+
+def _bare_frame():
+    return runtime.Frame(object(), "C")
+
+
+def test_a_failed_phase2_compensation_records_redacted_error_text():
+    """Site 1: `Frame._run_compensations` records a raising offset's error."""
+    confidential.register_secret_value(CANARY)
+
+    def undo():
+        raise ValueError("offset refused credential " + CANARY)
+
+    frame = _bare_frame()
+    entry = runtime._Compensation(frame, undo, method="ops.rollback")
+    frame._run_compensations([entry])
+
+    [record] = frame.compensation_residue
+    assert record["outcome"] == "failed"
+    assert record["attempted"] == {"phase": 2}
+    assert record["error"] == {"type": "ValueError",
+                               "message": "offset refused credential " + REDACTED}
+    assert CANARY not in record["error"]["message"]
+
+
+def test_a_failed_phase1_inverse_records_redacted_error_text():
+    """Site 2: `Frame._record_phase1_residue` records a raising bracket/restore."""
+    confidential.register_secret_value(CANARY)
+    frame = _bare_frame()
+    frame._record_phase1_residue(
+        lambda: None, ValueError("restore refused credential " + CANARY))
+
+    [record] = frame.compensation_residue
+    assert record["kind"] == "bracket-fault"
+    assert record["attempted"] == {"phase": 1}
+    assert record["error"]["message"] == "restore refused credential " + REDACTED
+    assert CANARY not in record["error"]["message"]
+
+
+def test_a_failed_ui_transaction_unit_records_redacted_error_text():
+    """Site 3: the failed unit's run record (`Frame._unwind_ui_unit`)."""
+    confidential.register_secret_value(CANARY)
+    frame = _bare_frame()
+
+    class _Unit:
+        name = "ops.charge"
+        failed_step = "charge"
+        crossed = ["ops.charge"]
+        transactional = []
+        compensations = []
+        labels = {}
+
+    frame._unwind_ui_unit(_Unit(), ValueError("unit refused token " + CANARY))
+
+    [run] = frame.ui_transaction_runs
+    assert run["error"] == {"type": "ValueError",
+                            "message": "unit refused token " + REDACTED}
+    assert CANARY not in run["error"]["message"]
+
+
+def test_a_failed_flush_records_redacted_error_in_report_and_wal(tmp_path):
+    """Site 4: `SessionOwner._flush` — the flush report, the in-memory residue
+    and the durable `flush-residue` WAL row all carry the scrubbed text."""
+    path = tmp_path / "flush.wal"
+    wal = replay.WriteAheadLog(str(path), ir={}, generation=1).open()
+    confidential.register_secret_value(CANARY)
+
+    def host():
+        raise ValueError("sink refused credential " + CANARY)
+
+    deferred = wal.record_deferred_emission(receiver="sink", method="enqueue",
+                                            args=["q0"])
+    d = runtime._Deferred("sink", "enqueue", ["q0"], host)
+    d.seq = deferred["seq"]
+    owner = runtime.SessionOwner(wal_getter=lambda: wal)
+    owner._queue.append(d)
+
+    report = owner._flush()
+    wal.close()
+
+    [residue] = report["flushResidue"]
+    assert residue["type"] == "ValueError"
+    assert residue["message"] == "sink refused credential " + REDACTED
+    assert CANARY not in residue["message"]
+    [held] = owner.flush_residue
+    assert held["error"]["message"] == "sink refused credential " + REDACTED
+    [row] = [r for r in read_wal(str(path))["records"]
+             if r.get("record") == "flush-residue"]
+    assert row["error"]["message"] == "sink refused credential " + REDACTED
+    assert CANARY not in str(row)
+
+
+def test_escrowed_restore_and_offset_failures_record_redacted_text():
+    """Sites 5/6: `SessionOwner.finalize_abort` replays escrowed entries; a
+    raising restore (phase 1) and a raising offset (phase 2) both record the
+    scrubbed text on the owner's residue."""
+    confidential.register_secret_value(CANARY)
+    frame = _bare_frame()
+    owner = runtime.SessionOwner()
+
+    def restore(witness):
+        raise ValueError("restore refused credential " + CANARY)
+
+    def offset():
+        raise ValueError("offset refused credential " + CANARY)
+
+    txn = runtime._Transactional(frame, restore, witness={"id": 1})
+    comp = runtime._Compensation(frame, offset, method="ops.rollback")
+    owner._escrow.extend([txn, comp])
+    owner.begin_abort()
+    owner.finalize_abort()
+
+    by_kind = {r["kind"]: r for r in owner.compensation_residue}
+    assert set(by_kind) == {"restore-residue", "compensation-residue"}
+    for record in by_kind.values():
+        assert record["outcome"] == "failed"
+        assert CANARY not in record["error"]["message"]
+        assert REDACTED in record["error"]["message"]
+    assert by_kind["restore-residue"]["attempted"] == {"phase": 1}
+    assert by_kind["compensation-residue"]["attempted"] == {"phase": 2}
+
+
+def _emit(source: str) -> str:
+    from _backend_import import backend_emitter  # noqa: PLC0415
+    return backend_emitter("python").emit(compile_source(source, "t.rvl"))
+
+
+_BOX_DOC = (
+    "service Box { fn label() -> Str }\n"
+    "component BoxC provides box: Box {\n"
+    "  provide box {\n"
+    "    fn label() = \"b\"\n"
+    "  }\n"
+    "}\n"
+)
+
+
+def test_the_lifecycle_harness_wraps_host_error_text_in_redaction():
+    """emit.py: `_revl_load_failed` and `_revl_call` route the host error text
+    through `_revl_redact_text`, and the import is emitted for a lifecycle
+    document."""
+    source = _emit(_BOX_DOC + (
+        'lifecycle test "t" {\n'
+        "  load BoxC\n"
+        "  let x = call box.label()\n"
+        "  assert x == \"b\"\n"
+        "  unload BoxC\n"
+        "  assert no_residue\n"
+        "}\n"))
+    assert "redact_text as _revl_redact_text" in source
+    assert source.count("_revl_redact_text(str(err))") == 2
+
+
+def test_a_document_without_a_lifecycle_test_does_not_import_redact_text():
+    """The control: byte-identity — no lifecycle test, no harness, no import."""
+    assert "redact_text" not in _emit(_BOX_DOC)
+
+
+@needs_cordis
+def test_the_lifecycle_driver_redacts_a_host_activation_error(capsys):
+    """End-to-end for the emit.py half: a component whose activation raises a
+    host error quoting the secret fails the lifecycle `call` through
+    `_revl_call`'s provider-failed branch; the reported AssertionError text
+    must carry the marker, not the secret."""
+    from revl import test as revl_test  # noqa: PLC0415
+
+    confidential.register_secret_value(CANARY)
+    source = (
+        "extern pure fn noop() -> Unit = @py { return }\n"
+        "extern acquire fn boom() -> Unit undo noop() = @py { raise "
+        "ValueError('activation rejected credential " + CANARY + "') }\n"
+        "service Ops { fn run() -> Int }\n"
+        "component Agent provides ops: Ops {\n"
+        "  effect boom() undo noop()\n"
+        "  provide ops {\n"
+        "    fn run() { return 1 }\n"
+        "  }\n"
+        "}\n"
+        'lifecycle test "activation fault" {\n'
+        "  load Agent\n"
+        "  let x = call ops.run()\n"
+        "  assert x == 1\n"
+        "}\n"
+    )
+    ir = compile_source(source, "issue_3348.rvl")
+    status, summary = revl_test.run_py(ir)
+    text = summary if isinstance(summary, str) else " ".join(map(str, summary))
+    captured = capsys.readouterr().out
+    assert status == "fail", (status, text, captured)
+    assert CANARY not in text + captured, (text, captured)
+    assert REDACTED in captured, (text, captured)
