@@ -3104,6 +3104,39 @@ class _FlowChecker:
         self._check_sinks(callee, arg_taints, node)
         self._check_declassifier_reach(callee, arg_taints, node)
 
+        # issue #3470: a `confidential` (`Secret[T]`) argument may enter a
+        # callable ONLY through a parameter declared `Secret[T]`
+        # (`model.confidential_params`). Passing it to a plain `T` parameter
+        # used to drop the origin at the call, so a one-line helper fn between
+        # the secret and a disclosure sink compiled. Refuse at the call site,
+        # naming the callee and — when the callee's inferred signature reaches
+        # one — the sink the value would reach inside it.
+        if (not self.infer and self.enforce
+                # externs, endorse/declassifiers and emission crossings have
+                # their own sink-kind refusals with their own messages; this
+                # check covers only plain user fns and provide methods.
+                and callee not in self.model.extern_names
+                and callee != "endorse"
+                and callee not in self.model.declassifiers
+                and not self._emission_callee(node)):
+            declared_conf = self.model.confidential_params.get(callee) or {}
+            sig = self.signatures.get(callee)
+            for index, at in enumerate(arg_taints):
+                if not _carries_confidential(at) or index in declared_conf:
+                    continue
+                sink_note = ""
+                if sig is not None:
+                    hit = sig.reaches_sink.get(index)
+                    if hit is not None:
+                        sink_note = (f", and `{callee}`'s parameter {index + 1} "
+                                     f"reaches the disclosure sink `{hit[0]}` "
+                                     f"inside its body")
+                self._refuse_confidential(
+                    callee,
+                    f"a plain parameter of `{callee}` (its type carries no "
+                    f"`Secret[T]` qualifier){sink_note}",
+                    index, at, node)
+
         # item 472 follow-up: the same retention refusal THROUGH a call. The
         # direct lookup above finds a sink the CALLER names; this finds one the
         # CALLEE's body reaches. A service operation is the case that matters: its
