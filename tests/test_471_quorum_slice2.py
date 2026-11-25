@@ -491,16 +491,17 @@ def test_the_override_verb_scopes_to_the_crossing_component(tmp_path):
                   {"hash": ticket["hash"], "reason": "r"}).allowed
 
 
-def test_escalation_gates_under_approve_and_the_reader_is_ungated():
+def test_escalation_gates_under_approve_and_the_reader_gates_too():
     """Escalation only narrows authority (the remaining path is the separately
     granted override), so it needs no authority beyond the one to answer the
-    question. The decision-graph reader decides nothing and is deliberately
-    ungated, recorded as such in the authority-gate suite's own table."""
+    question. The decision-graph reader decides nothing, but the graph names
+    who is being asked and who voted, so since issue #3397 it gates under
+    `approve` scoped to the ticket's component, like a `show`."""
     assert op.TOOL_VERB["revl_escalate"] == "approve"
     assert op.TOOL_VERB["revl_override"] == "override"
     assert op.TOOL_VERB["revl_override"] != op.TOOL_VERB["revl_approve"]
     assert op.TOOL_VERB["revl_revoke"] == "approve"
-    assert "revl_quorum" not in op.TOOL_VERB
+    assert op.TOOL_VERB["revl_quorum"] == "approve"
     advertised = {tool["name"] for tool in server.TOOLS}
     assert {"revl_escalate", "revl_override", "revl_quorum"} <= advertised
 
