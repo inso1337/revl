@@ -6343,7 +6343,11 @@ class _V3Emitter:
         need a third local for the computed value, whose sign is part of the
         overflow test."""
         if isinstance(node, dict):
-            if node.get("method") in _CHECKED_FORMS and "_cdiv" not in node:
+            if node.get("method") in _CHECKED_FORMS:
+                # Re-stamp on every emission. The component loop hands the
+                # same function body to each component that reaches it, and
+                # `emit` can be called twice on one IR: keeping an earlier
+                # id would skip the locals for the second copy (#3420).
                 self._cdiv_counter += 1
                 node["_cdiv"] = self._cdiv_counter
                 names.extend([f"cdiv_{self._cdiv_counter}_a",
