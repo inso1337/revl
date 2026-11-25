@@ -2379,6 +2379,19 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
                 _duplicate_symbol_message("function", decl.name,
                                           first_file, decl_file))
         seen[decl.name] = decl_file
+        if decl.name.startswith("__") and not decl.name.endswith("__"):
+            # issue #3582: Python rewrites such a name inside a class body
+            # (`__h` becomes `_Class__h`), so while the module-level `def __h`
+            # keeps its spelling, a call to the fn from a provided method is
+            # mangled and raises NameError at run time. Refuse the name here,
+            # next to the dunder refusals (#3135/#319), rather than emit code
+            # that breaks when called.
+            raise RevlError(
+                decl_file, decl.line,
+                f"function name `{decl.name}` is not allowed: a name starting with "
+                f"`__` and not ending with `__` is name-mangled by Python inside a "
+                f"class body, so a call to it from a provided method would not "
+                f"reach it on the py tier - rename it (issue #3582)")
     # Install the block-arm lift sink for the duration of fn-body lowering: a
     # statement-block match arm is lambda-lifted into a synthetic helper fn
     # (`_lift_block_arm`) collected here, then appended to `fns` below. `taken`
@@ -4471,6 +4484,9 @@ def _refuse_effect_position_bound_externs_in_fn_body(
             # the body binds in scope at the read (a parameter, a `let`, a
             # `for` or arrow binder, a match payload) is that binding, not the
             # extern (issue #3479, same rule as the emission/acquire checks).
+                and node.name not in bound and first_teardown is None:
+            # a value, not a call: the callee position is skipped below. A name
+            # the body binds in scope (`bound`) shadows the extern (issue #3479).
             first_teardown = _deferred_value_refusal(node.name, where,
                                                      filename, node.line)
         if check_emission_values and isinstance(node, ExprVar) \
@@ -4520,7 +4536,8 @@ def _refuse_effect_position_bound_externs_in_fn_body(
                          "(docs/design/243-witnessed-externs.md)",
                     code="G4", category="witnessed",
                 )
-            elif first_teardown is None and name in acquire_undo:
+            elif first_teardown is None and name in acquire_undo \
+                    and name not in bound:
                 first_teardown = RevlError(
                     filename, node.line,
                     f"`acquire` extern `{name}` cannot be called in {where}; its "
@@ -4533,7 +4550,8 @@ def _refuse_effect_position_bound_externs_in_fn_body(
                          "externs.md)",
                     code="G4", category="acquire",
                 )
-            elif first_teardown is None and name in deferred:
+            elif first_teardown is None and name in deferred \
+                    and name not in bound:
                 route = (f"inside an arrow in {where}" if in_arrow
                          else f"in {where}")
                 first_teardown = RevlError(
@@ -4588,9 +4606,11 @@ def _refuse_effect_position_bound_externs_in_fn_body(
               filename=getattr(fn, "source", "") or filename,
               bound=frozenset(p.name for p in fn.params))
     for test in program.tests:
-        for stmt in test.body:
-            _walk(stmt, f"the body of test `{test.name}`",
-                  check_emission_values=False)
+        # the whole body as ONE block, so a `let` binds from the next statement
+        # to the end (issue #3479): walking statement-by-statement would drop
+        # the binding for every later statement
+        _walk(test.body, f"the body of test `{test.name}`",
+              check_emission_values=False)
     if deferred:
         # a component CALLS a deferred extern under its `emit` marker, which is
         # enqueued wherever it appears; only a VALUE reference is refused there
@@ -8633,24 +8653,36 @@ def _component_header_stub(comp: ComponentDecl, filename: str) -> dict:
     what makes a component that requires and provides one key a router rather
     than a self-cycle, so a stub without it fabricated a G3 refusal next to the
     real one (an unknown strategy, say). Only the realm set travels; a route
-    over a key the header does not require is the body's own refusal."""
-    from .parser import RouteStmt
+    over a key the header does not require is the body's own refusal.
+
+    A single-realm `isolate <key> in realm(...)` pin is carried too (issue
+    #3480): without it the stub's provisions sat in the shared realm, so a
+    router routing to one of them drew a fabricated "no component provides
+    `<key>` in realm `<realm>`" on top of the body's real refusal."""
+    from .parser import IsolateStmt, RouteStmt
     requires = {local for local, _svc, _line in comp.requires}
+    provides = {key for key, _svc, _line in comp.provides}
     stub = {
         "name": comp.name,
         "source": comp.source or filename,
         "requires": requires,
-        "provides": {key for key, _svc, _line in comp.provides},
+        "provides": provides,
         "body": [],
         "poisoned": True,
     }
     routes: dict = {}
+    isolate: dict = {}
     for stmt in comp.body or ():
         if isinstance(stmt, RouteStmt) and stmt.key in requires \
                 and stmt.key not in routes:
             routes[stmt.key] = {"realms": list(stmt.realms), "strategy": None}
+        elif isinstance(stmt, IsolateStmt) and stmt.key not in isolate \
+                and (stmt.key in provides or stmt.key in requires):
+            isolate[stmt.key] = stmt.realm
     if routes:
         stub["routes"] = routes
+    if isolate:
+        stub["isolate"] = isolate
     return stub
 
 
