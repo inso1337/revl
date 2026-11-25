@@ -127,6 +127,7 @@ from revl import lower  # the lowering walk, observed (issue #2744)
 from revl import recovery
 from revl import taint  # the shipped walk, observed (issue #2108)
 from revl import ui_family  # the shipped computer-use reversibility registry
+from revl._paths import stdlib_root
 from revl.compiler import compile_files
 from revl.diagnostics import classify
 from revl.errors import RevlError
@@ -4899,6 +4900,51 @@ def ir_fact_rows(rel: str, lowered: dict) -> tuple[list[str], int]:
     return rows, foreign
 
 
+def _resolve_use_file(path: Path, use_path: str) -> Path | None:
+    """The file a `use` path names, resolved in the compiler's own order
+    (`revl.compiler._Loader.resolve_use`): relative to the importing file
+    first, then each `REVL_IMPORT_PATH` entry, then the revl stdlib's parent
+    (so a bare `use \"stdlib/wire.rvl\"` reaches the repo's stdlib)."""
+    candidates = [path.parent / use_path]
+    for entry in os.environ.get("REVL_IMPORT_PATH", "").split(os.pathsep):
+        if entry.strip():
+            candidates.append(Path(entry.strip()) / use_path)
+    candidates.append(stdlib_root().parent / use_path)
+    for cand in candidates:
+        if cand.is_file():
+            return cand
+    return None
+
+
+def _used_module_services(path: Path, prog) -> dict:
+    """The services a file's NAMED `use` imports bring into its service table
+    (issue #3640). `compile_files` merges exactly these into the composition
+    service table — a service is referred to by its interface name, not a
+    module-qualified path, so an alias (`use \"m.rvl\" as m`) imports none —
+    and this exporter must see the same table or a crossing into a used
+    module's service (`emit wire.take(...)` under `requires wire: Wire` with
+    `use \"stdlib/wire.rvl\" { Wire }`) gets no (cap, bound) pair and no F row.
+    A name the file itself declares wins, as the merged program's own
+    declaration does."""
+    out: dict = {}
+    for use in prog.uses:
+        if use.names is None:
+            continue
+        used_path = _resolve_use_file(path, use.path)
+        if used_path is None:
+            continue
+        try:
+            used = Parser(used_path.read_text(encoding="utf-8"),
+                          str(used_path)).parse()
+        except RevlError:
+            continue
+        for name in use.names:
+            svc = next((s for s in used.services if s.name == name), None)
+            if svc is not None and svc.name not in out:
+                out[svc.name] = svc
+    return out
+
+
 def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
     """Parse the corpus; return (tsv rows, per-file facts, census)."""
     _IR_UNLOWERED.clear()
@@ -4936,6 +4982,11 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             tsv.append("\t".join(["N", rel]))
             continue
         svc_objs = {svc.name: svc for svc in prog.services}
+        # issue #3640: services from `use`d modules enter the table exactly as
+        # compile_files merges them, so crossings into them get bounds and F
+        # rows (the file's own declarations win a name clash).
+        for _n, _svc in _used_module_services(path, prog).items():
+            svc_objs.setdefault(_n, _svc)
         services = {n: {m: md.emission for m, md in s.methods.items()}
                     for n, s in svc_objs.items()}
         bounds = _bound_index(svc_objs)

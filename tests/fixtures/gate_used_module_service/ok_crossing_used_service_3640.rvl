@@ -1,0 +1,24 @@
+// ADMITTED: the service `Wire` is declared in a `use`d module
+// (stdlib/wire.rvl), not in this file, and the provide method's crossings
+// `wire.take` / `wire.say` are covered by the method's own
+// `emission[wire.take, wire.say, wire.close]` clause. Issue #3640: the formal
+// exporter used to build its service table from the file's OWN
+// `prog.services` only, so `Wire` was never in the bound index and no F row
+// was written for these crossings — the oracle never judged them. The file
+// name's prefix is the expected verdict (`ok_` admitted); the F row is pinned
+// by tests/test_formal_used_module_service_3640.py.
+use "stdlib/wire.rvl" { Wire, Knock }
+
+service Beat {
+  emission[wire.take, wire.say, wire.close] fn beat() -> Int
+}
+
+component Game requires wire: Wire provides b: Beat {
+  provide b {
+    fn beat() -> Int {
+      let knocks = emit wire.take(512)
+      let ok = emit wire.say(1, "hi")
+      return 0
+    }
+  }
+}
