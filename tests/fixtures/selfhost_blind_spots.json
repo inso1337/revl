@@ -303,6 +303,7 @@
       "Internal pre-lowered WAT node injected by _ComponentEmitter._to_v3/_delegate, not a frontend source construct. Pure modules render source expressions directly and never enter this component bridge.": [
         "kind=__wat"
       ],
+      "Interpolation and indexOf/join/split/to_char demand helper bodies absent from the selfhost preamble and are explicit oracle deferrals. Component format is the older $0-template encoding rewritten to interp; ordinary binary Str concatenation is covered. Issue #3619 added the reference's `$str_char_class` helper for the four ASCII classifiers; the selfhost wasm preamble does not carry it yet, so those four join the same deferral.": [
       "Issue #1979 (with #1369 item 522 slice 3): `_refuse_ui_transaction_units` reads the computer-use transaction units the frontend computes and refuses the whole document by name \u2014 this tier's method-time compensation is component-instance state drained by `deactivate` (session granularity), never at the unit boundary the frontend computes \u2014 while skipping the activation-scoped plan (`key=<activation>`, which the activation frame settles itself). No wasm corpus document can carry it: a computer-use document is REFUSED rather than emitted, which is exactly what tests/fixtures/emit_wasm_refusals/ui_transaction_unit.rvl records. The runtime proof is tests/test_selfhost_emit_wasm.py::test_a_ui_transaction_unit_is_refused_by_name_on_both_sides.": [
         "key=<activation>"
       ],
