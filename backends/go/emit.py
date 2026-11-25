@@ -9764,6 +9764,33 @@ def _emit_v3_go_journalled_emission(name: str, params: str, arg_list: str,
     return lines, inner
 
 
+def _v3_extern_param(ext_name: object, pname: object) -> str:
+    """The Go spelling of a parameter of an extern with an inline `@go` body
+    (issue #3620). The body is host text copied verbatim and names its
+    parameters itself, so they keep their spelling: no predeclared rung (a
+    parameter `max` was emitted `max_` while its body read the builtin `max`)
+    and no emitter-reserved rung. A spelling Go cannot bind as a parameter (a
+    language keyword), or one in the emitter's helper namespace
+    (`_REVL_HELPER_PREFIX_RE`, which the config/secret seams bind inside the
+    same body), cannot keep it, so it is refused at emit naming the extern,
+    the parameter and the tier rather than renamed away from the body's
+    spelling. Predeclared names (`max`, `len`, ...) bind fine as Go parameters
+    and are kept verbatim; the literals `nil`/`true`/`false`/`iota` do not,
+    because the journalled wrapper writes a bare `false` in the same scope."""
+    if not isinstance(pname, str) or not _RAW_IDENT_RE.match(pname):
+        raise EmitError(
+            f"extern `{ext_name}`: invalid extern parameter identifier: {pname!r}")
+    if pname in _GO_LANGUAGE_KEYWORDS or pname in ("nil", "true", "false", "iota"):
+        why = "is a Go keyword or literal"
+    elif _REVL_HELPER_PREFIX_RE.match(pname) is not None:
+        why = "is in the emitter's helper namespace"
+    else:
+        return pname
+    raise EmitError(
+        f"extern `{ext_name}` parameter {pname!r} {why}, so the go tier cannot "
+        "keep the spelling its inline @go body uses: rename the parameter")
+
+
 def _emit_v3_go_externs(externs: list, ctx: _V3GoCtx,
                         journal: bool = False) -> list[str]:
     """`journal` (record mode on the component tier, issue #2345) wraps each
@@ -9776,10 +9803,6 @@ def _emit_v3_go_externs(externs: list, ctx: _V3GoCtx,
         out.extend(_GO_EXTERN_CONFIG_SCAFFOLD)
     for ext in externs:
         name = _v3_ident(ext.get("name"), "extern name")
-        params = ", ".join(
-            f"{_v3_ident(p.get('name'), 'extern parameter')} {_go_v3_type(p.get('type'), ctx.types)}"
-            for p in ext.get("params") or []
-        )
         ret = _go_v3_type(ext.get("returns"), ctx.types)
         sig_ret = f" {ret}" if ret else ""
         bodies = ext.get("bodies") or {}
@@ -9799,6 +9822,13 @@ def _emit_v3_go_externs(externs: list, ctx: _V3GoCtx,
         _body_lines, check_host_body = _host_body_scanner()
         check_host_body("go", body,
                         where=f"extern `{ext.get('name')}`", error=EmitError)
+        # issue #3620: an inline @go body spells its parameters by their source
+        # names, so both the signature and the forward list keep that spelling
+        # (`_v3_extern_param` refuses a name Go cannot bind, by name).
+        params = ", ".join(
+            f"{_v3_extern_param(ext.get('name'), p.get('name'))} {_go_v3_type(p.get('type'), ctx.types)}"
+            for p in ext.get("params") or []
+        )
         # item 421 F6: an extern whose DECLARED return was `Secret[T]` is the
         # ORIGIN — where the value enters the value world, the case a
         # receiver-end marking misses (`let t = emit mint(); effect
@@ -9809,7 +9839,7 @@ def _emit_v3_go_externs(externs: list, ctx: _V3GoCtx,
         # every call site is covered without the body being rewritten. Absent
         # unless the author declared it.
         arg_list = ", ".join(
-            _v3_ident(p.get("name"), "extern parameter")
+            _v3_extern_param(ext.get("name"), p.get("name"))
             for p in ext.get("params") or [])
         if journal and ext.get("class") == "emission":
             # the WAL sink rides with the teardown preamble; ask for it

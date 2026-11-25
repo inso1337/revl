@@ -1241,6 +1241,43 @@ def test_a_refused_import_directive_spelling_is_marked_like_the_reference(
     assert "<<UNSUPPORTED-EXTERN-IMPORT-DIRECTIVE:stamp>>" in emitted["emit_go_src"](ir)
 
 
+# issue #3620: an inline `@go` extern body spells its parameters by their
+# source names, so the port keeps that spelling byte-identical — predeclared
+# names (`max`, `len`) included. A name the reference refuses (`_v3_extern_param`:
+# a Go language keyword, or the emitter's `revl*`/`_revl*` helper namespace)
+# is a named marker here, as the port has no raise channel.
+def test_an_extern_param_named_like_a_go_predeclared_is_byte_identical(
+        emitted, reference, tmp_path):
+    path = tmp_path / "param.rvl"
+    path.write_text("extern pure fn bump(max: Int, len: Int) -> Int\n"
+                    "= @go { return max + len }\n"
+                    "pub fn f(x: Int) -> Int { return bump(x, x) }\n")
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir), emitted["emit_go_src"](ir)
+    assert "func bump(max int64, len int64) int64 {" in want
+    assert "<<UNSUPPORTED" not in got
+    assert got == want
+
+
+@pytest.mark.parametrize("param, marker", [
+    ("func", "<<UNSUPPORTED-EXTERN:param f func keyword>>"),
+    ("map", "<<UNSUPPORTED-EXTERN:param f map keyword>>"),
+    ("nil", "<<UNSUPPORTED-EXTERN:param f nil literal>>"),
+    ("revlAdd", "<<UNSUPPORTED-EXTERN:param f revlAdd helper>>"),
+    ("_revl_config", "<<UNSUPPORTED-EXTERN:param f _revl_config helper>>"),
+])
+def test_an_extern_param_the_reference_refuses_is_a_named_port_refusal(
+        emitted, reference, tmp_path, param, marker):
+    path = tmp_path / "param.rvl"
+    path.write_text(f"extern pure fn f({param}: Int) -> Int = @go {{ return 1 }}\n")
+    ir = compile_files([str(path)])
+    with pytest.raises(reference.EmitError, match="parameter"):
+        reference.emit(ir)
+    got = emitted["emit_go_src"](ir)
+    assert marker in got
+    assert "func f(" not in got
+
+
 # item 560 / issue #1914: the one key pair the injective mangling cannot split
 # ---------------------------------------------------------------------------
 # `tests/fixtures/emit_go_refusals/host_identifier_collision.rvl` is the only

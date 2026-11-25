@@ -163,6 +163,27 @@ fn has_revl_prefix(name: Str) -> Bool {
   return c >= 65 && c <= 90
 }
 
+// The 25 Go LANGUAGE keywords (`_GO_LANGUAGE_KEYWORDS` in the reference): the
+// only names Go cannot bind as a parameter. Predeclared names (`max`, `len`,
+// `nil`, ...) bind fine and are NOT here.
+fn is_go_language_keyword(name: Str) -> Bool {
+  return list_contains(["break", "case", "chan", "const", "continue", "default",
+                        "defer", "else", "fallthrough", "for", "func", "go", "goto",
+                        "if", "import", "interface", "map", "package", "range",
+                        "return", "select", "struct", "switch", "type", "var"], name)
+}
+
+// `go_extern_param_refusal` (issue #3620): "" when an inline `@go` extern
+// body's parameter can keep its source spelling — every name but a Go
+// language keyword or literal and the emitter's `revl*`/`_revl*` helper
+// namespace — else why the reference (`_v3_extern_param`) refuses it by name.
+pub fn go_extern_param_refusal(name: Str) -> Str {
+  if (is_go_language_keyword(name)) { return "keyword" }
+  if (name == "nil" || name == "true" || name == "false" || name == "iota") { return "literal" }
+  if (has_revl_prefix(name)) { return "helper" }
+  return ""
+}
+
 // `_camel` verbatim (item 390): snake_or_lower / `-` -> UpperCamel, keeping the
 // tail of each part as-is. This is the reference `_camel` byte-for-byte
 // (`p[:1].upper() + p[1:]`, NOT `.capitalize()`, which would lowercase the tail

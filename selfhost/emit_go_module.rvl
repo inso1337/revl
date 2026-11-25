@@ -17,8 +17,8 @@ use "../stdlib/str.rvl" { rstrip, trim }
 // key — no re-hand-roll (byte-fuzz-pinned against Python `sorted()`).
 use "../stdlib/list.rvl" { list_sort, list_contains }
 use "./emit_go_core.rvl" {
-  Fout, TypeTables, collect_reserved, emit_stmts, flow_hints, go_string,
-  go_type, gv_of, is_addsubmul, is_word_char, json_tag, line,
+  Fout, TypeTables, collect_reserved, emit_stmts, flow_hints, go_extern_param_refusal,
+  go_string, go_type, gv_of, is_addsubmul, is_word_char, json_tag, line,
   listed_type_params, newline, node_kind, node_op, node_operands, num_str,
   replace_all, set_fh, set_scan, tab, type_words, v3_field_ident, v3_ident
 }
@@ -313,8 +313,14 @@ pub fn emit_externs(externs: List[Any], gv: Map[Str, Str]) -> Eout {
     var name = v3_ident(raw_name)
     var ps = []
     var args = []
+    var refused = ""
     for (p of value_list(value_field(ext, "params"))) {
-      let pname = v3_ident(value_str(value_field(p, "name")))
+      // issue #3620: an inline @go body spells its parameters by their source
+      // names, so they keep that spelling; a name the reference refuses
+      // (`go_extern_param_refusal`) is collected here and named below.
+      let pname = value_str(value_field(p, "name"))
+      let why = go_extern_param_refusal(pname)
+      if (refused == "" && why != "") { refused = `${pname} ${why}` }
       ps = ps.push(`${pname} ${go_type(value_field(p, "type"), gv)}`)
       args = args.push(pname)
     }
@@ -330,7 +336,11 @@ pub fn emit_externs(externs: List[Any], gv: Map[Str, Str]) -> Eout {
       out = out.push("")
     } else {
       let body = trim(value_str(go_body))
-      if (has_extra_linebreak(body)) {
+      if (refused != "") {
+        // issue #3620: the reference refuses this parameter by name at emit
+        out = out.push(`<<UNSUPPORTED-EXTERN:param ${name} ${refused}>>`)
+        out = out.push("")
+      } else if (has_extra_linebreak(body)) {
         out = out.push(`<<UNSUPPORTED-EXTERN-linebreak:${name}>>`)
         out = out.push("")
       } else {
