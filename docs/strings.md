@@ -219,6 +219,16 @@ Nothing downstream of the lexer changed. The motivating use is an agent
 authoring a real multi-line `.rvl` component from inside the lighthouse
 workload without string concatenation.
 
+### Template escapes (issue #3503)
+
+A backtick template has **the same two escapes as a plain string**, adapted to
+its delimiter: `` \` `` is a literal backtick (and does not close the template),
+and `\\` is one literal backslash. Every other backslash sequence stays
+verbatim, exactly as in `"..."`. So the two single-line forms differ **only** in
+interpolation: `` `\\(x` `` is the two characters `\(` just as `"\\("` is —
+moving a string into a template to interpolate one name does not change any
+backslash in it. A bare `$` stays literal; only a complete `${...}` interpolates.
+
 ### The float-rendering sub-decision — **ECMAScript `Number::toString`**
 
 Here §0 *does* win, cleanly: `${x}` shares its template syntax with JS, and

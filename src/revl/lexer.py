@@ -205,8 +205,18 @@ def _skip_trivia(source: str, i: int, n: int, tv: _Trivia) -> int:
         end = _char_literal_end(source, i, n)
         return end if end is not None else i
     if mode == "raw":
-        j = source.find(c, i + 1)
-        return n if j < 0 else j + 1
+        # issue #3503: a raw (backtick) span honours the backslash-backtick
+        # and backslash-backslash escapes, so an escaped backtick does not
+        # close it.
+        j = i + 1
+        while j < n:
+            if source[j] == "\\":
+                j += 2
+                continue
+            if source[j] == c:
+                return j + 1
+            j += 1
+        return n
     if mode == "escape":
         j = i + 1
         while j < n:
@@ -727,9 +737,9 @@ def _closing_backtick_is_stray(source: str, body_start: int, close: int) -> bool
 
     revl backtick templates most often carry a host language (JS/HTML/CSS), and
     a host `//` line comment or `/* … */` block comment can legitimately contain
-    a backtick — ``// read the `answer` field``. Since the template has no
-    backtick escape, that first embedded backtick closes the template and the
-    host tail reparses as revl. We flag the close as suspect when BOTH hold:
+    a backtick — ``// read the `answer` field``. An UNESCAPED embedded backtick
+    (a backslash-backtick is the escape, issue #3503) still closes the template
+    and the host tail reparses as revl. We flag the close as suspect when BOTH hold:
 
     * the closing backtick's own line, within the template body, opens a host
       comment before the backtick — a `//` on the line, or an unclosed `/*`
@@ -784,8 +794,9 @@ def _lex_template(source: str, i: int, line: int, filename: str):
     `suspect` is `None`, or `(start_line, close_line)` when the closing backtick
     looks like a STRAY backtick that closed the template early — one sitting
     inside a host-language `//` line comment or an open `/*` block comment, with
-    live host text still trailing it on the same line (item 365). revl has no
-    backtick escape, so a contributor's `` // read the `answer` field `` closes
+    live host text still trailing it on the same line (item 365). An unescaped
+    backtick still closes it (a backslash-backtick is the escape, issue #3503),
+    so a contributor's `` // read the `answer` field `` closes
     the template at the first embedded backtick and its tail reparses as revl
     declarations; the parser turns this flag into a diagnostic that points back
     here instead of naming the unrelated identifier the tail happens to hold.
@@ -800,6 +811,16 @@ def _lex_template(source: str, i: int, line: int, filename: str):
     body_start = i
     while i < n:
         c = source[i]
+        if c == "\\" and i + 1 < n and source[i + 1] in ("`", "\\"):
+            # issue #3503: a template has the same two escapes as a plain
+            # string -- a backslash-backtick is a literal backtick (and does
+            # not close the template), a backslash-backslash is one literal
+            # backslash -- so the two single-line forms differ only in
+            # interpolation. Any other backslash-x stays verbatim, exactly as
+            # in a plain string.
+            buf.append(source[i + 1])
+            i += 2
+            continue
         if c == '`':
             if buf:
                 parts.append(("text", "".join(buf)))

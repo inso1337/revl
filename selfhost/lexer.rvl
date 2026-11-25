@@ -385,12 +385,16 @@ fn skip_dquote(source: Str, j: Int, n: Int) -> Int {
   return n
 }
 
-// Index just past a backtick-delimited raw span opening at `j`.
+// Index just past a backtick-delimited raw span opening at `j`. Issue #3503:
+// the span honours the \` and \\ escapes, so an escaped backtick does not
+// close it (mirrors the reference `_skip_trivia` raw mode).
 fn skip_backtick(source: Str, j: Int, n: Int) -> Int {
   var k = j + 1
   while (k < n) {
-    if (source.codepoint_at(k) == 96) { return k + 1 }
-    k += 1
+    if (source.codepoint_at(k) == 92) { k += 2 } else {
+      if (source.codepoint_at(k) == 96) { return k + 1 }
+      k += 1
+    }
   }
   return n
 }
@@ -474,6 +478,19 @@ fn scan_template(source: Str, i: Int) -> Scan {
         nl += inner.nl
         j = inner.j + 1
         handled = true
+      }
+      if (!handled) {
+        // issue #3503: a template has the same two escapes as a plain string
+        // — \` is a literal backtick (and does not close the template), \\ is
+        // one backslash (mirrors the reference `_lex_template`).
+        if (cc == 92 && j + 1 < n) {
+          let nx = source.codepoint_at(j + 1)
+          if (nx == 96 || nx == 92) {
+            buf = buf.concat(source.charAt(j + 1))
+            j += 2
+            handled = true
+          }
+        }
       }
       if (!handled) {
         if (cc == 10) { nl += 1 }
