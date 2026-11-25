@@ -565,6 +565,9 @@ def _classify(e: RevlError) -> str:
     if ("is not a case of" in m
             or "record update names" in m
             or "record destructuring requires a record" in m
+            # issue #3592: the unknown-field arm, now that the gate ports it
+            # for structural, nominal and applied-generic records alike.
+            or "record destructuring names" in m
             or "type alias cycle" in m
             # all four of `_DIVIDES_BY`, not only `mod`: `div_trunc`,
             # `div_floor` and `div_euclid` draw the identical sentence and were
@@ -1862,6 +1865,16 @@ fn f() -> Int {
   let pt = { x: 1, y: 2 }
   let { x, y } = pt
   return x
+}
+"""),
+    # issue #3592: the applied generic instantiates (`Box[Int]` is `{v: Int}`),
+    # so its real field binds and the field type flows.
+    ("record destructuring of a generic record, real field", """
+type Box[T] = { v: T }
+
+fn f(b: Box[Int]) -> Int {
+  let { v } = b
+  return v + 1
 }
 """),
     # ---- a scoped extern crossing a provide-method boundary (issue #1240) --
@@ -3605,6 +3618,33 @@ type Status = Active | Retired
 fn f(s: Status) -> Int {
   let { a } = s
   return 1
+}
+""", "TYPE"),
+    # issue #3592: the unknown-field arm, for a nominal record, a structural
+    # record and an APPLIED GENERIC (the reference resolved the field table by
+    # the full spelling `Box[Int]`, which is not a declared name, so it used
+    # to admit these).
+    ("record destructuring of a nominal record naming a missing field", """
+type P = { x: Int }
+
+fn f(p: P) -> Int {
+  let { zz } = p
+  return 0
+}
+""", "TYPE"),
+    ("record destructuring of a structural record naming a missing field", """
+fn f() -> Int {
+  let r = { x: 1 }
+  let { q } = r
+  return 0
+}
+""", "TYPE"),
+    ("record destructuring of a generic record naming a missing field", """
+type Box[T] = { v: T }
+
+fn f(b: Box[Int]) -> Int {
+  let { z } = b
+  return 0
 }
 """, "TYPE"),
     # ---- the `a host emission` reach label (issue #1254) -------------------

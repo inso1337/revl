@@ -814,6 +814,14 @@ def render_type(type_name: str | None) -> str | None:
     return type_name.replace(_TPARAM, "") if type_name else type_name
 
 
+def fields_hint(fields: dict) -> str:
+    """The `fields: ...` hint of a field-listing refusal. A record with no
+    fields says so, instead of printing an empty list (issue #3592)."""
+    if not fields:
+        return "the record declares no fields"
+    return f"fields: {', '.join(f'`{f}`' for f in sorted(fields))}"
+
+
 def unify(param: str | None, actual: str | None, subst: dict,
           types: dict | None = None) -> bool:
     """Match a (marked) parameter type against an argument type, growing
@@ -2760,7 +2768,7 @@ def _infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> st
                         filename, line,
                         f"record update names `{name}`, which is not a field of "
                         f"`{render_type(base_t)}`",
-                        hint=f"fields: {', '.join(f'`{f}`' for f in sorted(declared))}",
+                        hint=fields_hint(declared),
                     )
                 check_ast(value, declared.get(name), tenv, types, filename,
                           f"update of field `{name}`")
@@ -2780,7 +2788,7 @@ def _infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> st
                     filename, line,
                     f"record update names `{name}`, which is not a field of "
                     f"`{render_type(base_t)}`",
-                    hint=f"fields: {', '.join(f'`{f}`' for f in sorted(declared))}",
+                    hint=fields_hint(declared),
                 )
             check_ast(value, declared.get(name), tenv, types, filename,
                       f"update of field `{name}`")
@@ -3743,7 +3751,7 @@ def check_ast(expr, expected: str | None, tenv: dict, types: dict,
                         filename, line,
                         f"record update names `{name}`, which is not a field of "
                         f"`{render_type(base_t)}`",
-                        hint=f"fields: {', '.join(f'`{f}`' for f in sorted(declared))}",
+                        hint=fields_hint(declared),
                     )
                 check_ast(value, declared.get(name), tenv, types, filename,
                           f"update of field `{name}` of `{render_type(base_t)}`")
@@ -4040,7 +4048,7 @@ def _infer_ir(node, tenv: dict, types: dict, services: dict,
                     filename, line,
                     f"record update names `{name}`, which is not a field of "
                     f"`{render_type(base_t)}`",
-                    hint=f"fields: {', '.join(f'`{f}`' for f in sorted(declared))}",
+                    hint=fields_hint(declared),
                 )
             ftype = declared.get(name)
             if filename and vt and ftype and not compatible(ftype, vt, types):

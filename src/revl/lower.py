@@ -71,6 +71,8 @@ from .typecheck import (
     mismatch,
     pin_hole,
     null_error,
+    fields_hint,
+    nominal_record_fields,
     parse_type,
     POISON,
     refuse_nested_widening,
@@ -7278,7 +7280,13 @@ def _lower_let_pattern_stmt(stmt: LetPatternStmt, scope: dict, callables: set, a
                                      "(Disjoint sibling blocks may reuse a name, since "
                                      "only one is live.)")
         value_type = _expr_static_type(stmt.value, type_env, types)
-        spec = types.get(value_type or "")
+        # The declared-type table is keyed by the head name, so an applied
+        # generic (`Box[Int]`) resolves through `nominal_record_fields`, which
+        # substitutes the type arguments into the declared field types
+        # (issue #3592: looking the full spelling up used to miss, and the
+        # field check with it).
+        head, _ = parse_type(value_type)
+        spec = types.get(head or "")
         # A structural value (an anonymous record literal, or a name bound to
         # one) is checked against its own shape, the same way a record update
         # on it is (issue #3536): naming a field it lacks used to compile.
@@ -7292,7 +7300,8 @@ def _lower_let_pattern_stmt(stmt: LetPatternStmt, scope: dict, callables: set, a
                     filename, stmt.line,
                     f"record destructuring requires a record, but `{render_type(value_type)}` is not a record",
                 )
-            fields = spec.get("fields", {})
+            resolved = nominal_record_fields(value_type, types)
+            fields = resolved if resolved is not None else spec.get("fields", {})
         if fields is not None:
             for name in names:
                 if name not in fields:
@@ -7300,7 +7309,7 @@ def _lower_let_pattern_stmt(stmt: LetPatternStmt, scope: dict, callables: set, a
                         filename, pattern.line,
                         f"record destructuring names `{name}`, which is not a field of "
                         f"`{render_type(value_type)}`",
-                        hint=f"fields: {', '.join(f'`{f}`' for f in sorted(fields))}",
+                        hint=fields_hint(fields),
                     )
         elif value_type is not None and parse_type(value_type)[0] in _BUILTIN_NONRECORD:
             raise RevlError(
