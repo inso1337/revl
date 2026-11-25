@@ -66,6 +66,16 @@
 //     @go body uses an Encoder with `SetEscapeHTML(false)`).
 //   * KEY ORDER is record-declaration / insertion order (py dict, ts object).
 //   * booleans/null spelled `true`/`false`/`null`; ints exact incl. > 2^53.
+//   * an absent `Opt` member KEEPS its key as `null` on py and ts (issue
+//     #3642): ts represents `None` as `undefined`, which `JSON.stringify`
+//     would drop from the object entirely, so the @ts replacer maps
+//     `undefined` to `null` — the same bytes py's `json.dumps(None)` writes.
+//     GO CAVEAT: go lowers an Opt to the two-value `RevlOpt` struct (item
+//     434 (d)), which `encoding/json` marshals as `{"Value":"","Ok":false}`
+//     rather than `null`, so on go an Opt member stringifies to that struct on
+//     EVERY value, absent or present — pinned by
+//     test_go_opt_still_marshals_as_the_revlopt_struct until the go prelude
+//     teaches `RevlOpt` a MarshalJSON (its own roadmap item).
 //   * FLOATS: values that share a decimal form across Python and JS (e.g. 1.5,
 //     -0.25) are byte-identical; a WHOLE-NUMBER float (1.0 vs 1), -0.0, or an
 //     extreme-exponent float can still format differently between the two
@@ -420,6 +430,15 @@ pub extern pure fn json_stringify(v: Any) -> Str
         if (typeof x === "number" && !Number.isFinite(x)) {
           throw new TypeError("json_stringify: a non-finite Float has no JSON representation (RFC 8259 section 6)");
         }
+        // issue #3642: `None` is `undefined` on this tier, and JSON.stringify
+        // DROPS an object member whose value is `undefined` — so a record with
+        // an absent Opt member lost the key entirely, where py (`json.dumps`
+        // writes None as null) kept it as `"a":null`. A `pure` fn must not
+        // diverge per tier (docs/syntax-2.0.md §3.4), so map undefined to null
+        // here: the member keeps its key as JSON null on every tier. (This
+        // also makes a top-level `json_stringify(None)` return "null", as py
+        // does, instead of the bare `undefined` JSON.stringify yields.)
+        if (x === undefined) return null;
         return typeof x === "bigint" ? prefix + (marks.push(x.toString()) - 1) + "@@" : x;
       });
       if (marks.length === 0) return wire;

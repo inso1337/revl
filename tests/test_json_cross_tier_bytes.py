@@ -96,11 +96,30 @@ CORPUS = [
     # JSON null via a genuine parsed null value (revl's Opt None is a distinct
     # ADT with a tier-specific representation, not a JSON null)
     ("null", 'fn v() -> Any { return json_parse("null") }', r'null'),
+    # --- Opt (issue #3642): an absent Opt member keeps its key as null ---
+    # ts represents None as `undefined`, which JSON.stringify DROPS from an
+    # object; the @ts replacer maps it to null so all three tiers agree.
+    ("opt_member_absent",
+     'type R = { a: Opt[Str], c: Str }\nfn v() -> R { return { a: None, c: "y" } }',
+     r'{"a":null,"c":"y"}'),
+    ("opt_member_present",
+     'type R = { a: Opt[Str], c: Str }\nfn v() -> R { return { a: Some("x"), c: "y" } }',
+     r'{"a":"x","c":"y"}'),
+    ("opt_top_level_none", 'fn v() -> Opt[Str] { return None }', r'null'),
+    ("opt_top_level_some", 'fn v() -> Opt[Str] { return Some("x") }', r'"x"'),
+    ("list_opt_mixed", 'fn v() -> List[Opt[Int]] { return [Some(1), None] }',
+     r'[1,null]'),
 ]
 
 #: go now renders every shape byte-identically, records included (item 390:
-#: exported json-tagged struct fields). GO_CORPUS is the full corpus.
-GO_CORPUS = list(CORPUS)
+#: exported json-tagged struct fields) — except Opt (issue #3642): go lowers an
+#: Opt to the two-value `RevlOpt` struct (item 434 (d)), which `encoding/json`
+#: marshals as `{"Value":"","Ok":false}` rather than `null`, so Opt shapes are
+#: py/ts-only here and go's current bytes are pinned by
+#: `test_go_opt_still_marshals_as_the_revlOpt_struct` until the go prelude
+#: teaches `RevlOpt` to marshal as JSON (its own roadmap item, like the record
+#: caveat before item 390 fixed records).
+GO_CORPUS = [c for c in CORPUS if not c[0].startswith(("opt_", "list_opt"))]
 
 
 def _run(tier: str, decl: str, expected: str) -> tuple[str, str]:
@@ -143,6 +162,22 @@ def test_go_emits_the_canonical_bytes_on_supported_shapes(name, decl, expected):
     if status == "skip":
         pytest.skip(f"go: {message}")
     assert status == "pass", f"go drifted on {name!r}: {message}"
+
+
+def test_go_opt_still_marshals_as_the_revlopt_struct():
+    """Issue #3642's go half, pinned as the known separate defect: go lowers an
+    absent Opt to `RevlOpt[string]{Value: "", Ok: false}` (item 434 (d)), and
+    `encoding/json` marshals that struct as `{"Value":"","Ok":false}` — not the
+    `null` py and ts write. Opt shapes are excluded from GO_CORPUS above until
+    the go prelude teaches `RevlOpt` a `MarshalJSON` that writes `null`/`Value`;
+    this pin passes today and fails when that fix lands, so the caveat flips to
+    a positive the way item 390's record pin did."""
+    status, message = _run("go", 'type R = { a: Opt[Str], c: Str }\n'
+                                 'fn v() -> R { return { a: None, c: "y" } }',
+                           r'{"a":{"Value":"","Ok":false},"c":"y"}')
+    if status == "skip":
+        pytest.skip(f"go: {message}")
+    assert status == "pass", f"go Opt bytes changed: {message}"
 
 
 def test_go_record_now_stringifies_canonically():
