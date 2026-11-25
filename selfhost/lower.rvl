@@ -7893,8 +7893,11 @@ fn dfr_callee_name(e: Expr) -> Str {
 fn dfr_expr(e: Expr, dn: List[Str], emissionValues: Map[Str, Str], where: Str,
             inArrow: Bool, calls: Bool, bound: List[Str]) -> Str {
   return match e {
-    // issue #3354: a local in scope (`bound`) shadows an emission extern
-    Var(n) => contains(dn, n) ? dfr_value_msg(n, where)
+    // issue #3354: a local in scope (`bound`) shadows an emission extern.
+    // issue #3479: the same holds for a `deferred` extern — a parameter, `let`,
+    // `for` or arrow binder, or match payload in scope at the read is that
+    // binding, not the extern, exactly as the reference's `bound` test reads.
+    Var(n) => contains(dn, n) && !contains(bound, n) ? dfr_value_msg(n, where)
       : (mget_str(emissionValues, n) != "" && !contains(bound, n)
          ? emission_value_msg(n, mget_str(emissionValues, n)) : ""),
     Call(c) => dfr_call(c.target, c.args, dn, emissionValues, where, inArrow, calls, bound),
@@ -8002,9 +8005,9 @@ fn dfr_stmts(ss: List[Stmt], i: Int, dn: List[Str],
 
 // `dfr_stmts` with the names in scope (issue #3354), kept as `evl_stmts` keeps
 // them: a binding statement binds from the next statement to the end of its
-// block, and `marks` holds the scope's length at each open block. Only the
-// emission-value check reads `bound`; the deferred checks stay by name, as the
-// reference's are.
+// block, and `marks` holds the scope's length at each open block. Both the
+// emission-value and the deferred checks read `bound` (issue #3479: the
+// reference's `bound` test shadows a same-named extern in either class).
 fn dfr_scoped(ss: List[Stmt], i: Int, dn: List[Str],
               emissionValues: Map[Str, Str], where: Str,
               calls: Bool, bound: List[Str], marks: List[Int]) -> Verd {
@@ -8057,8 +8060,9 @@ fn deferred_reach_refusal(ts: List[Token], pg: Prog) -> Verd {
   while (i < pg.fns.length()) {
     let f = pg.fns[i]
     if (!f.isEmExtern && !f.isAsyncExtern) {
-      let v = dfr_stmts(f.body, 0, dn, Map.empty(),
-                        "the body of fn `".concat(f.name).concat("`"), true)
+      let v = dfr_scoped(f.body, 0, dn, Map.empty(),
+                         "the body of fn `".concat(f.name).concat("`"), true,
+                         param_names(f.params), [])
       if (v.v != "") { return v }
     }
     i += 1

@@ -15108,7 +15108,7 @@ fn dfr_callee_name(e: Expr) -> String {
 
 fn dfr_expr(e: Expr, dn: &[String], emissionValues: std::collections::HashMap<String, String>, where_: &str, inArrow: bool, calls: bool, bound: Vec<String>) -> String {
     return match e {
-    Expr::Var(n) => if contains__m2(dn, &n) { dfr_value_msg(&n, where_) } else { if ((mget_str(emissionValues.clone(), n.clone()) != "") && (!contains__m2(&bound, &n))) { emission_value_msg(&n, &mget_str(emissionValues.clone(), n.clone())) } else { String::from("") } },
+    Expr::Var(n) => if (contains__m2(dn, &n) && (!contains__m2(&bound, &n))) { dfr_value_msg(&n, where_) } else { if ((mget_str(emissionValues.clone(), n.clone()) != "") && (!contains__m2(&bound, &n))) { emission_value_msg(&n, &mget_str(emissionValues.clone(), n.clone())) } else { String::from("") } },
     Expr::Call(c) => { let c = *c; dfr_call(c.target.clone(), &c.args, dn, emissionValues.clone(), where_, inArrow, calls, bound.clone()) },
     Expr::OptCall(c) => { let c = *c; dfr_call(c.target.clone(), &c.args, dn, emissionValues.clone(), where_, inArrow, calls, bound.clone()) },
     Expr::Field(f) => { let f = *f; dfr_expr(f.target.clone(), dn, emissionValues.clone(), where_, inArrow, calls, bound.clone()) },
@@ -15269,7 +15269,7 @@ fn deferred_reach_refusal(ts: Vec<Token>, pg: Prog) -> Verd {
     while (i < pg.fns.revl_length()) {
         let f = (pg.fns)[(i) as usize].clone();
         if ((!f.isEmExtern) && (!f.isAsyncExtern)) {
-            let v = dfr_stmts(&f.body, 0i64, &dn, std::collections::HashMap::new(), &((String::from("the body of fn `").revl_concat(&f.name)).revl_concat("`")), true);
+            let v = dfr_scoped(&f.body, 0i64, &dn, std::collections::HashMap::new(), &((String::from("the body of fn `").revl_concat(&f.name)).revl_concat("`")), true, param_names(&f.params), &(vec![]));
             if (v.v != "") {
                 return v;
             }

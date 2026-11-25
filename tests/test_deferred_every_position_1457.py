@@ -197,3 +197,33 @@ def test_a_plain_value_reference_to_an_ordinary_extern_is_unchanged():
         "      let r = apply(note, sink, msg)\n      return r\n    }\n",
         _APPLY + "extern pure fn note(a: Str, b: Str) -> Unit = @py { return }\n")
     assert compile_source(src, "t.rvl")
+
+
+# ------------------------------------------------------------- issue #3479
+
+_DFR = ("extern emission deferred fn deliver(sink: Str, msg: Str) = @py { return }\n")
+
+
+def test_a_parameter_named_like_a_deferred_extern_shadows_it():
+    compile_source(_DFR + "fn f(deliver: Int) -> Int { return deliver }\n", "t.rvl")
+
+
+def test_a_let_binding_named_like_a_deferred_extern_shadows_it():
+    compile_source(_DFR + "fn f() -> Int { let deliver = 2\n return deliver }\n",
+                   "t.rvl")
+
+
+def test_an_arrow_parameter_named_like_a_deferred_extern_shadows_it():
+    compile_source(_DFR + "fn f() -> Int { let h = (deliver: Int) => deliver\n"
+                          " return h(1) }\n", "t.rvl")
+
+
+def test_a_bare_deferred_value_read_is_still_refused():
+    err = _refusal(_DFR + "fn k() -> Int { let g = deliver\n return 0 }\n")
+    assert "is passed as a function value in the body of fn `k`" in err.message
+
+
+def test_a_shadowed_parameter_does_not_excuse_a_bare_read_in_another_fn():
+    err = _refusal(_DFR + "fn f(deliver: Int) -> Int { return deliver }\n"
+                          "fn k() -> Int { let g = deliver\n return 0 }\n")
+    assert "is passed as a function value in the body of fn `k`" in err.message
