@@ -524,6 +524,12 @@ REJECTIONS = {
     # join of the callee value's taint is what puts the origin at the sink.
     "gretain_closure_capture_at_persistence_sink.rvl":
         "data past its retention deadline may not be written to durable storage",
+    # The closure ARGUMENT shape of the same refusal (issue #3349): the value
+    # reaches the sink as the arrow's parameter, whose own type is a plain
+    # `Str`, so the unnameable indirect call treats the argument as a
+    # persistence sink and refuses at the call.
+    "gretain_closure_argument_at_persistence_sink.rvl":
+        "data past its retention deadline may not be written to durable storage",
     "g6_impure_statement.rvl": "plain expressions have no effect to record (G6)",
     # roadmap item 129: closures capture BY VALUE (syntax-2.0 §3.5). A closure
     # that ASSIGNS to a captured binding is reference capture, which would break

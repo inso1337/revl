@@ -1318,6 +1318,7 @@
    "examples/rejections/g4_emission_widens_declared_capability.rvl",
    "examples/rejections/g4_first_class_emission_value.rvl",
    "examples/rejections/g4_required_verb_token_through_fn.rvl",
+   "examples/rejections/gretain_closure_argument_at_persistence_sink.rvl",
    "examples/rejections/gretain_closure_capture_at_persistence_sink.rvl",
    "examples/rejections/gsecret_bound_key_closure_capture_discloses.rvl",
    "examples/rejections/gsecret_closure_capture_discloses.rvl",

@@ -257,7 +257,7 @@ The six host columns share their verdict wherever a register does not separate t
 | `T3` | no repro | no repro | no repro | no repro | no repro | no repro | no repro | [`src/revl/gate.py`](../src/revl/gate.py) |
 | `G-COUNCIL-SPLIT` | proved | proved | proved | proved | proved | proved | proved | [`examples/rejections/gcouncilsplit_on_tie_allow.rvl`](../examples/rejections/gcouncilsplit_on_tie_allow.rvl) |
 | `G-MODEL-PLACE` | proved | proved | proved | proved | proved | proved | proved | [`examples/rejections/gmodelplace_confidential_off_device.rvl`](../examples/rejections/gmodelplace_confidential_off_device.rvl) |
-| `G-RETAIN` | proved | proved | proved | proved | proved | proved | unimpl | [`examples/rejections/gretain_closure_capture_at_persistence_sink.rvl`](../examples/rejections/gretain_closure_capture_at_persistence_sink.rvl) |
+| `G-RETAIN` | proved | proved | proved | proved | proved | proved | unimpl | [`examples/rejections/gretain_closure_argument_at_persistence_sink.rvl`](../examples/rejections/gretain_closure_argument_at_persistence_sink.rvl) |
 | `G-SECRET` | proved | proved | proved | proved | proved | proved | unimpl | [`examples/rejections/gsecret_bound_key_closure_capture_discloses.rvl`](../examples/rejections/gsecret_bound_key_closure_capture_discloses.rvl) |
 | `G-SECRET-FLOW` | proved | proved | proved | proved | proved | proved | unimpl | [`examples/rejections/gsecret_closure_capture_discloses.rvl`](../examples/rejections/gsecret_closure_capture_discloses.rvl) |
 | `T-UNRESOLVED` | no repro | no repro | no repro | no repro | no repro | no repro | no repro | [`src/revl/typecheck.py`](../src/revl/typecheck.py) |
