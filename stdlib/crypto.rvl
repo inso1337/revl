@@ -23,6 +23,13 @@
 //   ct_equal(a, b)      -> Bool  constant-time equality of two strings
 //   random_token(n)     -> Str   2n hex chars from n cryptographic random bytes
 //
+// plus the hex/b64url bridge at the bottom of the file: `sha256` spells its
+// digest as hex (the storage spelling), while the web-text protocols that
+// CONSUME a digest want the RAW bytes in base64url (a PKCE S256 challenge, a
+// JWT segment). `hex_to_bytes`, `hex_to_b64url` and `sha256_b64url` are that
+// bridge, pure revl over stdlib/base64.rvl, so no caller hand-writes a
+// hex-to-bytes step or a base64url encoder in test code.
+//
 // `sha256` / `hmac_sha256` / `ct_equal` are `pure`: same inputs, same output,
 // no observable effect, no entropy, nothing to release or revert. (docs/
 // syntax-2.0.md already types the canonical `extern pure fn sha256`.)
@@ -96,7 +103,13 @@
 //
 // Import with a named `use`:
 //
-//     use "stdlib/crypto.rvl" { sha256, hmac_sha256, ct_equal, random_token }
+//     use "stdlib/crypto.rvl" { sha256, hmac_sha256, ct_equal, random_token,
+//       hex_to_bytes, hex_to_b64url, sha256_b64url }
+
+// The base64url byte encoder the hex/digest bridge below is built on.
+// stdlib/base64.rvl is pure revl with no externs, so this import adds no
+// boundary crossing of its own.
+use "stdlib/base64.rvl" { Base64Error, b64url_encode_bytes }
 
 // ------------------------------------------------------------------ sha256
 // Hex-encoded SHA-256 of the UTF-8 bytes of `data`. Lower-case hex, 64 chars.
@@ -317,3 +330,71 @@ pub extern emission fn random_token(n: Int) -> Str
     }
     return hex;
   }
+
+// ------------------------------------------- hex and the base64url bridge
+// `sha256` returns lower-case HEX because a hex digest round-trips through a
+// database TEXT column and compares with `ct_equal`; that is the STORAGE
+// spelling. The web-text protocols that consume a digest want the RAW bytes in
+// base64url instead: a PKCE S256 challenge is base64url of the raw SHA-256
+// digest (RFC 7636 section 4.2) and a JWT segment is base64url of raw bytes
+// (RFC 7515). These doors are that bridge, pure revl over stdlib/base64.rvl,
+// so the answer is the same on every tier and no test file re-derives it.
+
+// The value of one hex digit code point, or -1. Both cases are accepted,
+// because a caller may hold an upper-cased digest.
+fn hex_digit_value(code: Int) -> Int {
+  if (code >= 48 && code <= 57) { return code - 48 }   // 0-9 -> 0..9
+  if (code >= 97 && code <= 102) { return code - 87 }  // a-f -> 10..15
+  if (code >= 65 && code <= 70) { return code - 55 }   // A-F -> 10..15
+  return 0 - 1
+}
+
+// The bytes of a hex text (the spelling `sha256`, `hmac_sha256` and
+// `random_token` all emit). Refuses an odd length and a non-hex character with
+// its offset, as `Err(Str)`; `""` is `Ok([])`.
+pub fn hex_to_bytes(hex: Str) -> Result[List[Int], Str] {
+  let n = hex.length()
+  if (n.mod(2) != 0) {
+    var message = "hex text has an odd length "
+    message = message.concat(n.to_str())
+    message = message.concat("; bytes come in digit pairs")
+    return Err(message)
+  }
+  var out: List[Int] = []
+  var i = 0
+  while (i < n) {
+    let hi = hex_digit_value(hex.charCodeAt(i))
+    let lo = hex_digit_value(hex.charCodeAt(i + 1))
+    if (hi < 0 || lo < 0) {
+      var message = "character `"
+      message = message.concat(hex.slice(i, i + 2))
+      message = message.concat("` is not a hex digit (0-9 a-f A-F)")
+      return Err(message)
+    }
+    out = out.push(hi * 16 + lo)
+    i += 2
+  }
+  return Ok(out)
+}
+
+// Unpadded base64url of the bytes of a hex digest: the PKCE/JWT spelling of a
+// digest without passing through hex by hand. Bad hex is refused as `Err` with
+// code `invalid-hex`.
+pub fn hex_to_b64url(hex: Str) -> Result[Str, Base64Error] {
+  return match hex_to_bytes(hex) {
+    Ok(bytes) => b64url_encode_bytes(bytes),
+    Err(msg) => Err({ code: "invalid-hex", message: msg }),
+  }
+}
+
+// The PKCE S256 challenge (RFC 7636 section 4.2) in one call: unpadded
+// base64url of the RAW 32-byte SHA-256 digest of `data`. `sha256`'s contract is
+// 64 lower-case hex chars (pinned by the NIST vectors in
+// tests/test_crypto_stdlib.py), so `hex_to_b64url` cannot fail here; the `Err`
+// arm returns the error text rather than inventing a challenge value.
+pub fn sha256_b64url(data: Str) -> Str {
+  return match hex_to_b64url(sha256(data)) {
+    Ok(s) => s,
+    Err(e) => e.message,
+  }
+}
