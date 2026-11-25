@@ -109,10 +109,12 @@ assert Clock.firings()[2] == (1, 30)      # the 3rd firing, at 30ms
 
 `Clock.advance` fires every due timer earliest-first, ties broken by arm order,
 re-arming `every` timers across the whole span — a total, reproducible ordering
-across any number of interleaved timers. A production driver would pump `advance`
-from a real monotonic source; the reference tier keeps it explicit so tests are
-deterministic. The Python (`backends/python/runtime.py`) and TypeScript
-(`backends/typescript/runtime.ts`) clocks agree tick-for-tick.
+across any number of interleaved timers. Under `revl test`/replay the harness
+drives `advance` explicitly, so tests stay deterministic; under `revl run` and
+`revl serve` the host pumps `advance` from a real monotonic source (issue
+#3440: `pump_clock_from_wall` on the run loop, `WallClockPump` while served), so
+an `every` timer fires at run time. The Python (`backends/python/runtime.py`)
+and TypeScript (`backends/typescript/runtime.ts`) clocks agree tick-for-tick.
 
 A host that pumps `advance` from a real clock asks the clock when to wake
 (issue #3377): `Clock.next_due()` (TypeScript `Clock.nextDue()`) is the number

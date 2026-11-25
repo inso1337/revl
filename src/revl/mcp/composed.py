@@ -208,7 +208,8 @@ def _error(request_id, code: int, message: str) -> dict:
 
 def serve_composition(ir: dict, config: dict | None = None, *,
                       composition: str = "revl", stdin=None, stdout=None,
-                      declared: DeclaredTypes | None = None) -> int:
+                      declared: DeclaredTypes | None = None,
+                      wall_clock: bool = False) -> int:
     """Boot `ir` into a live session and serve its provided operations.
 
     Booting is admission: a composition is loaded through the same
@@ -221,8 +222,15 @@ def serve_composition(ir: dict, config: dict | None = None, *,
     # there is nothing to replay through the gate later (session.py documents
     # None as "this session cannot be snapshotted").
     session.load(ir, config or {}, origin=None)
+    # issue #3440: while the composition is served live, drive the timer
+    # clock from the wall so `every` timers fire
+    if wall_clock:
+        session.start_wall_clock()
     server = ComposedServer(session, composition=composition, declared=declared)
     for withheld in server._withheld.values():
         # stderr: stdout is the protocol stream
         print(f"revl serve --mcp: withheld: {withheld.message()}", file=sys.stderr)
-    return server.serve(stdin, stdout)
+    try:
+        return server.serve(stdin, stdout)
+    finally:
+        session.stop_wall_clock()

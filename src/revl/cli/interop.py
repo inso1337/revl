@@ -689,13 +689,14 @@ def _run_serve(args) -> int:
                                                          for f in args.files]}
                                               if operator is not None else None),
                                       refuse_ungated_emissions=getattr(
-                                          args, "refuse_ungated_emissions", False))
+                                          args, "refuse_ungated_emissions", False),
+                                      wall_clock=True)
             except (ExposureError, TransportError) as error:
                 print(f"error: {error}", file=sys.stderr)
                 return 1
         from ..mcp.composed import serve_composition  # noqa: PLC0415
         return serve_composition(ir, config, composition=args.composition,
-                                 declared=declared)
+                                 declared=declared, wall_clock=True)
     except SessionError as error:
         print(f"error: {error}", file=sys.stderr)
         return 3
