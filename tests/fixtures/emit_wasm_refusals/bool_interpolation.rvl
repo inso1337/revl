@@ -1,0 +1,2 @@
+// WASM reference supports Str, Int and Float interpolation, not Bool.
+fn render(b: Bool) -> Str { return `${b}` }

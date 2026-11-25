@@ -15,10 +15,9 @@
 // linear-memory + checked-arithmetic helper preamble (`_helper_funcs`). The
 // byte-reproducible corner is a FUNCTION-ONLY v3 document (no components, no
 // user types, no externs, no tests, NO STRINGS/LISTS/RECORDS) over the SCALAR
-// value ABI — Int (i64) / Int32 (i32) / Bool (i32) — which is the corner of the
+// value ABI — Int (i64) / Int32 (i32) / Bool (i32) / Float (f64) — which is the corner of the
 // reference's `_V3Emitter.emit` -> `_emit_function` -> `_emit_stmts` / `_expr`
-// that needs NO data segments (heap_start stays 0) and NONE of the demand-driven
-// helpers (f64_to_str / str_index_of / str_split / str_join). Covered:
+// that originally needed no data segments or demand-driven helpers. Covered:
 //
 //   * the module scaffold — the 4-line banner, `(module`, the exported memory,
 //     the hp bump-pointer global at 0 (no data segments — no strings), the
@@ -32,26 +31,24 @@
 //     local), return, if/else, while, the bare-expr `(drop)`, and assert;
 //   * `_expr` — lit (Int i64.const / Bool i32.const), var (param/local slot),
 //     bin (the checked int_add/int_sub/int_mul and their int32_* twins, `%` as
-//     i64.rem_s, `/` REFUSED by name because it is true division and so yields
-//     Float, the i64/i32 comparisons, `&&`/`||` as i32.and/i32.or), un (`!` as
+//     i64.rem_s, native f64 arithmetic/comparisons and true division,
+//     the i64/i32 comparisons, `&&`/`||` as i32.and/i32.or), un (`!` as
 //     i32.eqz, `-` as a checked subtract-from-zero), and the Int32->Int `widen`
 //     marker as i64.extend_i32_s.
+//
+//   * native Float values and widening, lossless memory slots, and Float
+//     to_str/interpolation through the reference's demand-pulled f64_to_str
+//     helper (fractional or out-of-range finite values still trap); UTF-8
+//     template text and k-ary concatenation share the existing memory ABI.
 //
 // ============================================================ WHAT IT DEFERS
 // Reported for follow-on wasm-emitter slices, deliberately OUT of this slice —
 // each is a real reference surface this slice does not reach (its fixtures avoid
 // it), NOT an approximation:
-//   * ANY value that touches linear memory — Str, List, records, tagged unions
-//     (Opt/Result/user variants), and the whole canonical-ABI layout: string
-//     literals pool into `data` segments and move heap_start, and every such
-//     value threads the alloc / str_ptr / slot machinery and the nested
-//     scratch-pointer stack (`_acquire_tmp`) — a much larger, allocation-shaped
-//     surface than the scalar corner;
-//   * Float end to end: `/` yields Float, so it is refused BY NAME wherever it
-//     appears (issue #2201), and interpolating a Float pulls in the f64_to_str
-//     Grisu/Ryu helper;
-//     the stdlib builtins (str_split/str_join/str_index_of and every `builtin`/
-//     `len` node); the `for` loop (its list iteration is a memory walk);
+//   * Remaining demand-driven builtins (including str_split, str_join,
+//     str_index_of, to_char), tagged reads/match/coalescing, and total
+//     checked division; the scalar Float formatting fence matches the
+//     reference and is not extended by the port.
 //   * COMPONENTS / SERVICES entirely (`_ComponentEmitter` — realms, `provide`/
 //     `req`/`config`, spawn/instances, the component-dialect expression kinds),
 //     `match`/`adt` over tagged cells, arrow values (no closures on this tier),
@@ -61,21 +58,24 @@
 // ------------------------------------------------------ the erased-IR boundary
 // Navigation of the IR is PURE revl through stdlib/value.rvl's accessors, exactly
 // as the other self-host stages do: every byte of emitter LOGIC (dispatch, the
-// scope/width threading, the S-expression string building) is revl. Only two
-// genuine HOST-FORMATTING primitives stay `@py` (item-180 "NOT obsoleted"):
-// `num_str` (the Int-literal numeral, i.e. `str(value)`) and `newline` (the one
-// genuine U+000A line separator).
+// scope/width threading, the S-expression string building) is revl. The
+// HOST-FORMATTING primitives stay `@py` (item-180 "NOT obsoleted"):
+// `num_str` (Int numeral), `float_hex` (bit-exact Float numeral), and
+// `newline` (the genuine U+000A line separator).
 use "../stdlib/value.rvl" {
   value_kind, value_is_null, value_field,
   value_list, value_str, value_int, value_bool,
   value_keys, value_children
 }
 use "../stdlib/list.rvl" { list_sort, list_dedup, list_contains }
+use "../stdlib/str.rvl" { str_utf8_bytes }
 
 // ------------------------------------------------- host formatting (kept @py)
 // The literal-body host numeral: `_expr` renders an Int literal's numeral as
 // `str(value)`. Sourced here so the text is exactly Python's.
 extern pure fn num_str(v: Any) -> Str = @py { return str(v) }
+// Bit-exact WAT hexadecimal literal formatting, like the reference's float.hex.
+extern pure fn float_hex(v: Any) -> Str = @py { return float.hex(v) }
 // A real newline — the line SEPARATOR (`"\n".join(lines)` in the reference).
 extern pure fn newline() -> Str = @py { return chr(10) }
 
@@ -84,8 +84,8 @@ fn node_kind(n: Any) -> Str { return value_str(value_field(n, "kind")) }
 fn node_op(n: Any) -> Str { return value_str(value_field(n, "op")) }
 fn node_operands(n: Any) -> Str { return value_str(value_field(n, "operands")) }
 
-// `_wasm_ty`: Int is the only 64-bit revl type here; Bool/Int32/addresses are i32.
-fn wty(ty: Str) -> Str { if (ty == "Int") { return "i64" } return "i32" }
+// `_wasm_ty`: Int is i64, Float f64, Bool/Int32/addresses i32.
+fn wty(ty: Str) -> Str { if (ty == "Int") { return "i64" } if (ty == "Float") { return "f64" } return "i32" }
 
 fn map_get(m: Map[Str, Str], k: Str) -> Str {
   return match m.lookup(k) { Some(v) => v, None => "" }
@@ -99,7 +99,8 @@ fn wd_of(widths: Map[Str, Str], n: Str) -> Str {
   return w
 }
 
-fn rstrip(s: Str) -> Str {
+// Distinct from stdlib/str.rvl's rstrip imported with the UTF-8 encoder.
+fn wat_rstrip(s: Str) -> Str {
   var i = s.length()
   var go = true
   while (go && i > 0) {
@@ -112,7 +113,7 @@ fn rstrip(s: Str) -> Str {
 // Python `str.strip()`: drop leading and trailing ASCII whitespace. Used to
 // clean the comma-split type args in `split_types` (`Result[Int, Str]`).
 fn str_strip(s: Str) -> Str {
-  let r = rstrip(s)
+  let r = wat_rstrip(s)
   var i = 0
   var go = true
   while (go && i < r.length()) {
@@ -146,10 +147,8 @@ fn is_comparison(op: Str) -> Bool { return is_cmp(op) || is_bool_op(op) }
 // `_bin_instr`: the single wasm instruction for `op` over `operand_ty` operands.
 // In the scalar subset `&&`/`||` always see Bool operands and the checked
 // arithmetic always sees Int/Int32, so the reference's None-returning guards
-// (Str/List/`??`) are unreachable here. `/` has NO instruction at any width:
-// it is true division, so `Int / Int` is Float (docs/arithmetic.md), and Float
-// is refused BY NAME on this tier. `i64.div_s` here answered a silent 3 where
-// the language says 3.5: see `render_bin`.
+// (Str/List/`??`) are unreachable here. True division is routed through
+// float_instr by render_bin, never through i64.div_s.
 fn bin_instr(op: Str, opnd: Str) -> Str {
   if (op == "&&") { return "i32.and" }
   if (op == "||") { return "i32.or" }
@@ -188,6 +187,7 @@ fn infer_ty(node: Any, sty: Map[Str, Str]) -> Str {
     let vk = value_kind(value_field(node, "value"))
     if (vk == "bool") { return "Bool" }
     if (vk == "int") { return "Int" }
+    if (vk == "float") { return "Float" }
     if (vk == "str") { return "Str" }
     return ""
   }
@@ -195,7 +195,6 @@ fn infer_ty(node: Any, sty: Map[Str, Str]) -> Str {
   if (k == "bin") {
     let op = node_op(node)
     if (is_comparison(op)) { return "Bool" }
-    if (node_operands(node) == "Float") { return "Float" }
     // Bitwise ops are Int32-only regardless of the (absent) operands annotation
     // (item 366, docs/arithmetic.md).
     if (op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>") { return "Int32" }
@@ -435,22 +434,24 @@ fn render_checked_arith(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr
 // allocates their bytes, an `i32` base pointer is the value, and every field/
 // element is one 8-byte SLOT written as an i64 (`_slot_store`). This block mirrors
 // the reference's `_record_expr` / `_list_expr` / `_slot_store` / `_acquire_tmp`
-// byte-for-byte for the SCALAR-and-ASCII-Str element subset (nested records/lists
-// included; non-ASCII Str content, Float, and tagged/Map values stay out).
+// byte-for-byte for scalar and Str elements (including UTF-8) and nested
+// records/lists. Other deferred value families have their own boundaries.
 
 // `_SLOT` = 8. One 8-byte value slot; an `Int` sits there natively, a Bool or a
-// pointer is zero-extended in (`_slot_store`) so the eight bytes read back whole.
+// pointer is zero-extended in (`_slot_store`), while Float stores its IEEE bits.
 fn slot_store(addr: Str, value: Str, ty: Str) -> Str {
   if (ty == "Int") { return `(i64.store ${addr} ${value})` }
+  if (ty == "Float") { return `(i64.store ${addr} (i64.reinterpret_f64 ${value}))` }
   return `(i64.store ${addr} (i64.extend_i32_u ${value}))`
 }
 
 // `_slot_load`: the read twin of `slot_store`. The eight bytes come back as an
-// i64; an `Int` is the value, everything narrower (Bool / a pointer) is wrapped
+// i64; an `Int` is the value, Float reinterprets the bits, and narrower values are wrapped
 // down to its i32 view — so a field/element/payload reads back exactly what was
 // stored (slice 4: field/index/for reads and tagged-payload reads).
 fn slot_load(addr: Str, ty: Str) -> Str {
   if (ty == "Int") { return `(i64.load ${addr})` }
+  if (ty == "Float") { return `(f64.reinterpret_i64 (i64.load ${addr}))` }
   return `(i32.wrap_i64 (i64.load ${addr}))`
 }
 
@@ -675,12 +676,22 @@ fn adt_cell_ty(node: Any, s: Scope, expected: Str) -> Str {
 // to the renderer.
 fn infer_val_ty(node: Any, s: Scope) -> Str {
   if (value_str(value_field(node, "widen")) == "Int") { return "Int" }
+  if (value_str(value_field(node, "widen")) == "Float") { return "Float" }
   let k = node_kind(node)
   if (k == "if") { return infer_val_ty(value_field(node, "then"), s) }
-  if (k == "bin" && node_op(node) == "+") {
-    let left = infer_val_ty(value_field(node, "left"), s)
-    if (left == "Str" || is_list_type(left)) { return left }
+  if (k == "bin") {
+    let op = node_op(node)
+    if (op == "/") { return "Float" }
+    if (op == "+" || op == "-" || op == "*" || op == "%") {
+      let left = infer_val_ty(value_field(node, "left"), s)
+      if (op == "+" && (left == "Str" || is_list_type(left))) { return left }
+      if (node_operands(node) == "Float" || left == "Float" ||
+          infer_val_ty(value_field(node, "right"), s) == "Float") { return "Float" }
+    }
   }
+  if (k == "un" && node_op(node) == "-" &&
+      (node_operands(node) == "Float" || infer_val_ty(value_field(node, "operand"), s) == "Float")) { return "Float" }
+  if (k == "interp") { return "Str" }
   if (k == "list") { return list_type_of(node, s, "") }
   if (k == "record") { return record_type_of(node, s, "") }
   if (k == "field") {
@@ -817,6 +828,14 @@ fn expr_max_depth(node: Any, base: Int) -> Int {
     for (a of value_list(value_field(node, "args"))) {
       let cm = expr_max_depth(a, base + 1)
       if (cm > m) { m = cm }
+    }
+    return m
+  }
+  if (k == "interp") {
+    var m = -1
+    for (part of value_list(value_field(node, "parts"))) {
+      let pair = value_list(part)
+      if (value_str(pair[0]) == "expr") { m = max_i(m, expr_max_depth(pair[1], base)) }
     }
     return m
   }
@@ -1012,17 +1031,28 @@ fn trap_free_operand(node: Any, s: Scope) -> Bool {
   return false
 }
 
+// Float conversion at an arithmetic/comparison site or an explicit IR widen.
+fn to_f64(value: WExpr) -> WExpr {
+  if (value.ty == "Float") { return value }
+  if (value.ty == "Int") { return { wat: `(f64.convert_i64_s ${value.wat})`, ty: "Float" } }
+  if (value.ty == "Int32") { return { wat: `(f64.convert_i32_s ${value.wat})`, ty: "Float" } }
+  return { wat: `<<UNSUPPORTED-FLOAT-OPERAND:${value.ty}>>`, ty: "" }
+}
+
+fn float_instr(op: Str) -> Str {
+  if (op == "+") { return "f64.add" }
+  if (op == "-") { return "f64.sub" }
+  if (op == "*") { return "f64.mul" }
+  if (op == "/") { return "f64.div" }
+  if (op == "%") { return `call $f64_mod` }
+  let suf = cmp_suffix(op)
+  if (suf.endsWith("_s")) { return "f64.".concat(suf.slice(0, suf.length() - 2)) }
+  return "f64.".concat(suf)
+}
+
 fn render_bin(node: Any, s: Scope, depth: Int) -> WExpr {
   let op = node_op(node)
   if (op == "??") { return { wat: "<<UNSUPPORTED-coalesce>>", ty: "" } }
-  // `/` is TRUE division: `Int / Int` is Float (docs/arithmetic.md), `7 / 2` is
-  // 3.5, and Float is refused on this tier BY NAME: the same refusal the
-  // reference raises. `i64.div_s` here was a silent 3 in the one position the
-  // tier allows Float (a `${…}` part), which is exactly what this port must not
-  // answer, and `f64.div` is no better: `$f64_to_str` traps on a finite float
-  // that is not integer-valued (docs/strings.md) where `/` is documented total.
-  // `%` is Int-only and keeps `i64.rem_s` (it traps at a zero divisor).
-  if (op == "/") { return { wat: "<<UNSUPPORTED-TRUE-DIVISION:Float>>", ty: "" } }
   let ln = value_field(node, "left")
   let rn = value_field(node, "right")
   let lty = infer_val_ty(ln, s)
@@ -1036,6 +1066,14 @@ fn render_bin(node: Any, s: Scope, depth: Int) -> WExpr {
       (call ${helper})`
     if (op == "!=" || op == "!==") { wat = wat.concat(`${newline()}      (i32.eqz)`) }
     return { wat: wat, ty: op == "+" ? "Str" : "Bool" }
+  }
+  if ((is_cmp(op) || op == "+" || op == "-" || op == "*" || op == "/" || op == "%") &&
+      (op == "/" || node_operands(node) == "Float" || lty == "Float" || rty == "Float")) {
+    let left = to_f64(render_expr(ln, scope_at(s, node, "left"), "", depth))
+    let right = to_f64(render_expr(rn, scope_at(s, node, "right"), "", depth))
+    return { wat: `${left.wat}
+      ${right.wat}
+      (${float_instr(op)})`, ty: is_cmp(op) ? "Bool" : "Float" }
   }
   if (is_bool_op(op) && !trap_free_operand(rn, s)) {
     // item 458. `&&`/`||` SHORT-CIRCUIT: the right operand runs only when the
@@ -1100,6 +1138,7 @@ fn render_un(node: Any, s: Scope, depth: Int) -> WExpr {
       (i32.const -1)
       (i32.xor)`, ty: "Int32" }
   }
+  if (operand.ty == "Float") { return { wat: `(f64.neg ${operand.wat})`, ty: "Float" } }
   // `-`: a checked subtract-from-zero at the operand's width (`0 - MIN` traps).
   // item 432(g): a constant operand folds, which is why `-5` is one `i64.const`.
   let zw = operand.ty == "Int32" ? "i32" : "i64"
@@ -1198,7 +1237,8 @@ fn render_builtin(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr {
     let elemty = list_elem(tty)
     let arg = render_expr(args[0], scope_item(s, node, "args", 0), elemty, depth)
     var el = arg.wat
-    if (elemty != "Int") { el = `(i64.extend_i32_u ${arg.wat})` }
+    if (elemty == "Float") { el = `(i64.reinterpret_f64 ${arg.wat})` }
+    else { if (elemty != "Int") { el = `(i64.extend_i32_u ${arg.wat})` } }
     return { wat: `${t.wat}
       ${el}
       (call $list_push)`, ty: tty }
@@ -1256,6 +1296,10 @@ fn render_builtin(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr {
     return { wat: `(call ${call} ${t.wat} ${arg.wat})`, ty: "Int" }
   }
   if (method == "to_str") {
+    if (tty == "Float") {
+      let t = render_expr(tnode, scope_at(s, node, "target"), "Float", depth)
+      return { wat: `(call $f64_to_str ${t.wat})`, ty: "Str" }
+    }
     let t = render_expr(tnode, scope_at(s, node, "target"), "Int", depth)
     return { wat: `(call $int_to_str ${t.wat})`, ty: "Str" }
   }
@@ -1360,6 +1404,42 @@ fn render_if(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr {
         (else ${otherwise.wat}))`, ty: then.ty }
 }
 
+// Template segments are rendered left-to-right; Float and Int share their
+// conversion helpers with the corresponding to_str builtins.
+fn render_interp(node: Any, s: Scope, depth: Int) -> WExpr {
+  var rendered: List[Str] = []
+  var i = 0
+  for (part of value_list(value_field(node, "parts"))) {
+    let pair = value_list(part)
+    if (value_str(pair[0]) == "text") {
+      rendered = rendered.push(map_get(s.strs, value_str(pair[1])))
+    } else {
+      let piece = render_expr(pair[1], scope_item(s, node, "parts", i), "", depth)
+      if (piece.ty == "Str") { rendered = rendered.push(piece.wat) }
+      else {
+        if (piece.ty == "Int") { rendered = rendered.push(`${piece.wat}
+      (call $int_to_str)`) }
+        else {
+          if (piece.ty == "Float") { rendered = rendered.push(`${piece.wat}
+      (call $f64_to_str)`) }
+          else { return { wat: `<<UNSUPPORTED-INTERP:${piece.ty}>>`, ty: "" } }
+        }
+      }
+    }
+    i = i + 1
+  }
+  let k = rendered.length()
+  if (k == 0) {
+    let ptr = map_get(s.strs, "")
+    if (ptr == "") { return { wat: "<<UNSUPPORTED-INTERP:unpooled-empty>>", ty: "" } }
+    return { wat: ptr, ty: "Str" }
+  }
+  if (k == 1) { return { wat: rendered[0], ty: "Str" } }
+  let helper = k == 2 ? "$str_concat" : `$str_concat${num_str(k)}`
+  return { wat: `${rendered.join(newline().concat("      "))}
+      (call ${helper})`, ty: "Str" }
+}
+
 fn render_inner(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr {
   let k = node_kind(node)
   if (k == "lit") {
@@ -1370,6 +1450,13 @@ fn render_inner(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr {
       return { wat: "(i32.const 0)", ty: "Bool" }
     }
     if (vk == "int") { return { wat: `(i64.const ${num_str(v)})`, ty: "Int" } }
+    if (vk == "float") {
+      let numeral = float_hex(v)
+      if (!numeral.startsWith("0x") && !numeral.startsWith("-0x")) {
+        return { wat: "<<UNSUPPORTED-FLOAT-LITERAL>>", ty: "" }
+      }
+      return { wat: `(f64.const ${numeral})`, ty: "Float" }
+    }
     // A Str literal is a pointer into the pooled `data` segment (`_str_ptr`):
     // its `(i32.const <offset>)` was computed once, when the pool was laid out,
     // and threaded here through the scope.
@@ -1402,6 +1489,7 @@ fn render_inner(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr {
     }
     return render_direct_call(node, s, depth)
   }
+  if (k == "interp") { return render_interp(node, s, depth) }
   if (k == "bin") { return render_bin(node, s, depth) }
   if (k == "un") { return render_un(node, s, depth) }
   if (k == "list") { return render_list(node, s, expected, depth) }
@@ -1423,6 +1511,9 @@ fn render_expr(node: Any, s: Scope, expected: Str, depth: Int) -> WExpr {
   if (value_str(value_field(node, "widen")) == "Int") {
     let inner = render_inner(node, s, expected, depth)
     return { wat: `(i64.extend_i32_s ${inner.wat})`, ty: "Int" }
+  }
+  if (value_str(value_field(node, "widen")) == "Float") {
+    return to_f64(render_inner(node, s, "", depth))
   }
   return render_inner(node, s, expected, depth)
 }
@@ -1802,7 +1893,7 @@ fn emit_function(fnode: Any, strs: Map[Str, Str], rectypes: Any, functions: List
   var decls = sig
   for (n of localOrder) { decls = decls.push(`(local $${n} ${wd_of(r.widths, n)})`) }
   // `$fn.<name>`, the spelling every call uses (issue #1756)
-  let header = rstrip(`(func $fn.${name} (export "${name}") ${decls.join(" ")}`)
+  let header = wat_rstrip(`(func $fn.${name} (export "${name}") ${decls.join(" ")}`)
   var bodystr = "nop"
   if (bodyLines.length() > 0) { bodystr = bodyLines.join(`${newline()}    `) }
   else { if (return_ty != "Unit" && return_ty != "") { bodystr = "unreachable" } }
@@ -2246,12 +2337,6 @@ fn helper_preamble() -> Str {
           (i64.gt_s (local.get $v) (i64.const 2147483647)))
       (then unreachable))
     (i32.wrap_i64 (local.get $v)))
-  (func $list_slot (param $list i32) (param $i i64) (result i32)
-    (if (i64.ge_u (local.get $i) (i64.extend_i32_u (i32.load (local.get $list))))
-      (then unreachable))
-    (i32.add (local.get $list)
-      (i32.add (i32.const 8)
-               (i32.mul (i32.wrap_i64 (local.get $i)) (i32.const 8)))))
   (func $list_push (param $list i32) (param $elem i64) (result i32)
     (local $n i32)
     (local $p i32)
@@ -2329,7 +2414,13 @@ fn helper_preamble() -> Str {
         (i32.add (local.get $s) (i32.const 8))
         (i32.mul (local.get $from) (i32.const 8)))
       (i32.mul (local.get $len) (i32.const 8)))
-    (local.get $p))"""
+    (local.get $p))
+  (func $list_slot (param $list i32) (param $i i64) (result i32)
+    (if (i64.ge_u (local.get $i) (i64.extend_i32_u (i32.load (local.get $list))))
+      (then unreachable))
+    (i32.add (local.get $list)
+      (i32.add (i32.const 8)
+               (i32.mul (i32.wrap_i64 (local.get $i)) (i32.const 8)))))"""
 }
 
 // ------------------------------------------------------- the string-literal ABI
@@ -2337,7 +2428,7 @@ fn helper_preamble() -> Str {
 // is named by the byte OFFSET of its length prefix; `_str_ptr` hands out that
 // offset as an `(i32.const <offset>)`. This slice mirrors the reference's
 // `_collect_string_literals` + `_wat_bytes` + `_str_ptr` byte-for-byte for
-// ASCII string literals (see the header note on the multi-byte exclusion).
+// UTF-8 string literals using stdlib/str.rvl's str_utf8_bytes.
 
 // `_align4`/`_align8` as integer arithmetic — for the non-negative offsets here
 // `((x+3)/4)*4` is exactly the reference's `(x+3) & ~3`.
@@ -2366,20 +2457,15 @@ fn wat_byte(b: Int) -> Str {
   return "\\".concat(hex2(b))
 }
 
-// The full `_wat_bytes(len.to_bytes(4,'little') + raw)` payload of one ASCII
-// string: a little-endian u32 length prefix then one `wat_byte` per character
-// (for ASCII, `charCodeAt` is the byte and `length()` is the byte count).
-fn wat_data(v: Str) -> Str {
-  let n = v.length()
+// The full _wat_bytes payload: a little-endian u32 UTF-8 byte count
+// followed by the encoded bytes, not Unicode scalar values.
+fn wat_data(raw: List[Int]) -> Str {
+  let n = raw.length()
   var out = wat_byte(n % 256)
   out = out.concat(wat_byte(n.div_trunc(256) % 256))
   out = out.concat(wat_byte(n.div_trunc(65536) % 256))
   out = out.concat(wat_byte(n.div_trunc(16777216) % 256))
-  var i = 0
-  while (i < n) {
-    out = out.concat(wat_byte(v.charCodeAt(i)))
-    i = i + 1
-  }
+  for (b of raw) { out = out.concat(wat_byte(b)) }
   return out
 }
 
@@ -2396,6 +2482,14 @@ fn collect_lits(node: Any, acc: List[Str]) -> List[Str] {
     if (node_kind(node) == "lit") {
       let vv = value_field(node, "value")
       if (value_kind(vv) == "str") { a = a.push(value_str(vv)) }
+    }
+    // All template text is pooled before walking expression children, in
+    // the reference's first-encounter order.
+    if (node_kind(node) == "interp") {
+      for (part of value_list(value_field(node, "parts"))) {
+        let pair = value_list(part)
+        if (value_str(pair[0]) == "text") { a = a.push(value_str(pair[1])) }
+      }
     }
     // a total arithmetic form's Err reason comes from the emitter, not from a
     // literal in the source, so it is pooled where the call sits
@@ -2551,6 +2645,134 @@ fn calls_name(hay: Str, name: Str) -> Bool {
   return hay.indexOf(`(call ${name}${newline()}`) >= 0
 }
 
+// Canonical Float rendering of the reference's supported subset. Other
+// finite values trap rather than produce a noncanonical decimal string.
+fn float_to_str_helper() -> Str { return """  (func $f64_to_str (param $x f64) (result i32)
+    (local $p i32)
+    (if (f64.ne (local.get $x) (local.get $x))
+      (then
+        (local.set $p (call $alloc_str (i32.const 3)))
+        (i32.store8 (i32.add (local.get $p) (i32.const 4)) (i32.const 78))
+        (i32.store8 (i32.add (local.get $p) (i32.const 5)) (i32.const 97))
+        (i32.store8 (i32.add (local.get $p) (i32.const 6)) (i32.const 78))
+        (return (local.get $p))))
+    (if (f64.eq (f64.abs (local.get $x)) (f64.const inf))
+      (then
+        (if (f64.lt (local.get $x) (f64.const 0))
+          (then
+            (local.set $p (call $alloc_str (i32.const 9)))
+            (i32.store8 (i32.add (local.get $p) (i32.const 4)) (i32.const 45))
+            (i32.store (i32.add (local.get $p) (i32.const 5)) (i32.const 0x69666e49))
+            (i32.store (i32.add (local.get $p) (i32.const 9)) (i32.const 0x7974696e)))
+          (else
+            (local.set $p (call $alloc_str (i32.const 8)))
+            (i32.store (i32.add (local.get $p) (i32.const 4)) (i32.const 0x69666e49))
+            (i32.store (i32.add (local.get $p) (i32.const 8)) (i32.const 0x7974696e))))
+        (return (local.get $p))))
+    (if (i32.and
+          (f64.eq (local.get $x) (f64.trunc (local.get $x)))
+          (f64.lt (f64.abs (local.get $x)) (f64.const 0x1p+63)))
+      (then (return (call $int_to_str (i64.trunc_f64_s (local.get $x))))))
+    (unreachable))""" }
+
+// Native wasm has no floating remainder opcode; mirror the reference helper.
+fn float_mod_helper() -> Str { return """  (func $f64_mod (param $a f64) (param $b f64) (result f64)
+    (local $x f64) (local $y f64) (local $d f64)
+    (if (f64.ne (local.get $a) (local.get $a))
+      (then (return (f64.const nan))))
+    (if (f64.eq (f64.abs (local.get $a)) (f64.const inf))
+      (then (return (f64.const nan))))
+    (if (f64.ne (local.get $b) (local.get $b))
+      (then (return (f64.const nan))))
+    (if (f64.eq (local.get $b) (f64.const 0))
+      (then (return (f64.const nan))))
+    (local.set $x (f64.abs (local.get $a)))
+    (local.set $y (f64.abs (local.get $b)))
+    (if (f64.lt (local.get $x) (local.get $y))
+      (then (return (local.get $a))))
+    (local.set $d (local.get $y))
+    (block $scaled
+      (loop $scale
+        (br_if $scaled (f64.gt
+          (f64.mul (local.get $d) (f64.const 2))
+          (local.get $x)))
+        (local.set $d (f64.mul (local.get $d) (f64.const 2)))
+        (br $scale)))
+    (block $done
+      (loop $outer
+        (br_if $done (f64.lt (local.get $x) (local.get $y)))
+        (if (f64.ge (local.get $x) (local.get $d))
+          (then (local.set $x (f64.sub (local.get $x) (local.get $d)))))
+        (local.set $d (f64.mul (local.get $d) (f64.const 0.5)))
+        (br $outer)))
+    (f64.copysign (local.get $x) (local.get $a)))""" }
+
+// Read only complete k-ary calls, then deduplicate and sort numerically:
+// helper order is independent of the order templates occur in the source.
+fn concat_arities(rendered: Str) -> List[Int] {
+  var arities: List[Int] = []
+  for (suffix of rendered.split("(call $str_concat")) {
+    let end = suffix.indexOf(")")
+    if (end > 0) {
+      let token = suffix.slice(0, end)
+      let k = token.to_int() ?? 0
+      if (k >= 3 && num_str(k) == token) {
+        var next: List[Int] = []
+        var inserted = false
+        for (old of arities) {
+          if (!inserted && k <= old) { next = next.push(k); inserted = true }
+          if (old != k) { next = next.push(old) }
+        }
+        if (!inserted) { next = next.push(k) }
+        arities = next
+      }
+    }
+  }
+  return arities
+}
+
+// item 432(d): one length pass, allocation and copy per part. Match the
+// reference's helper text, including the two explanatory WAT comments.
+fn concat_n_helper(k: Int) -> Str {
+  var params: List[Str] = []
+  var i = 0
+  while (i < k) {
+    params = params.push(`(param $a${num_str(i)} i32)`)
+    i = i + 1
+  }
+  var lines = [
+    "  ;; item 432(d): one concat per template literal — one length",
+    "  ;; pass, one allocation, one copy per part.",
+    `  (func $str_concat${num_str(k)} ${params.join(" ")} (result i32)`
+  ]
+  i = 0
+  while (i < k) { lines = lines.push(`    (local $l${num_str(i)} i32)`); i = i + 1 }
+  lines = lines.push("    (local $p i32)").push("    (local $o i32)")
+  i = 0
+  while (i < k) {
+    let n = num_str(i)
+    lines = lines.push(`    (local.set $l${n} (i32.load (local.get $a${n})))`)
+    i = i + 1
+  }
+  var total = "(local.get $l0)"
+  i = 1
+  while (i < k) {
+    total = `(i32.add ${total} (local.get $l${num_str(i)}))`
+    i = i + 1
+  }
+  lines = lines.push(`    (local.set $p (call $alloc_str ${total}))`)
+  lines = lines.push("    (local.set $o (i32.add (local.get $p) (i32.const 4)))")
+  i = 0
+  while (i < k) {
+    let n = num_str(i)
+    lines = lines.push(`    (memory.copy (local.get $o) (i32.add (local.get $a${n}) (i32.const 4)) (local.get $l${n}))`)
+    if (i < k - 1) { lines = lines.push(`    (local.set $o (i32.add (local.get $o) (local.get $l${n})))`) }
+    i = i + 1
+  }
+  lines = lines.push("    (local.get $p))")
+  return lines.join(newline())
+}
+
 // The preamble with every unreachable helper removed. `rendered` is the emitted
 // function bodies, which are the roots (every one of them is exported).
 fn prune_preamble(pre: Str, rendered: Str) -> Str {
@@ -2657,8 +2879,9 @@ pub fn emit_wasm_src(ir: Any) -> Str {
   var offset = 0
   for (v of lits) {
     strs = strs.set(v, `(i32.const ${num_str(offset)})`)
-    dataLines = dataLines.push(`  (data (i32.const ${num_str(offset)}) "${wat_data(v)}")`)
-    offset = align4(offset + 4 + v.length())
+    let bytes = str_utf8_bytes(v)
+    dataLines = dataLines.push(`  (data (i32.const ${num_str(offset)}) "${wat_data(bytes)}")`)
+    offset = align4(offset + 4 + bytes.length())
   }
   let heap = align8(offset)
 
@@ -2679,8 +2902,19 @@ pub fn emit_wasm_src(ir: Any) -> Str {
   // which helpers survive the sweep is read off what the bodies actually call.
   var blocks = []
   for (f of functions) { blocks = blocks.push(emit_function(f, strs, rectypes, functions)) }
-  let pruned = prune_preamble(helper_preamble(), blocks.join(newline()))
+  let rendered = blocks.join(newline())
+  var pre = helper_preamble()
+  if (calls_name(rendered, "$f64_to_str")) { pre = pre.concat(newline()).concat(float_to_str_helper()) }
+  if (calls_name(rendered, "$f64_mod")) { pre = pre.concat(newline()).concat(float_mod_helper()) }
+  var concat_helpers: List[Str] = []
+  for (k of concat_arities(rendered)) { concat_helpers = concat_helpers.push(concat_n_helper(k)) }
+  // The generated helpers are already demanded; their calls also root
+  // alloc_str in the ordinary preamble sweep. Append them after pruning to
+  // keep the preceding WAT comments with their intended helper.
+  let roots = rendered.concat(newline()).concat(concat_helpers.join(newline()))
+  let pruned = prune_preamble(pre, roots)
   if (pruned != "") { lines = lines.push(pruned) }
+  lines = lines.concat(concat_helpers)
   for (c of type_comments(rectypes)) { lines = lines.push(c) }
   for (c of unsupported_comments(ir)) { lines = lines.push(c) }
   for (c of uncarried_components(ir)) { lines = lines.push(c) }
@@ -2698,7 +2932,8 @@ pub fn emit_wasm_src(ir: Any) -> Str {
 }
 
 // ---------------------------------------------------------------- in-file tests
-test "wasm widths: Int is i64, everything else i32" {
+test "wasm widths: Int is i64, Float is f64, Bool and pointers i32" {
+  assert wty("Float") == "f64"
   assert wty("Int") == "i64"
   assert wty("Int32") == "i32"
   assert wty("Bool") == "i32"
@@ -2720,8 +2955,8 @@ test "bin_instr picks the width and the checked helpers" {
   assert bin_instr("+", "Int") == `call $int_add`
   assert bin_instr("*", "Int32") == `call $int32_mul`
   assert bin_instr("%", "Int") == "i64.rem_s"
-  // issue #2201: `/` has no instruction at either width: `Int / Int` is Float,
-  // and this tier refuses Float by name (render_bin answers the marker).
+  // True division uses float_instr instead of an integer instruction.
+  assert float_instr("/") == "f64.div"
   assert bin_instr("/", "Int") == ""
   assert bin_instr("/", "Int32") == ""
   assert bin_instr("&&", "Bool") == "i32.and"

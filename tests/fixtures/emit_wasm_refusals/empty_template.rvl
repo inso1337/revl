@@ -1,0 +1,2 @@
+// The reference requires the empty string to be explicitly pooled elsewhere.
+fn render() -> Str { return `` }
