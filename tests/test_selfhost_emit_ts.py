@@ -527,6 +527,46 @@ def test_a_reserved_service_key_is_refused_by_name(emitted, reference):
     assert got.count("<<UNSUPPORTED-RESERVED-SERVICE-KEY:") == 3
 
 
+def test_a_provider_capture_named_ctx_ladders_like_the_reference(emitted, reference):
+    """Issue #3573: a capture named `ctx` is bound by the frontend as `ctx_`;
+    the local ladder must take the scaffolding (`EMITTER_RESERVED`) rung too, so
+    both emitters declare `const ctx__` and read `ctx__` — byte-identical."""
+    source = """
+fn seed() -> Int {
+  return 0
+}
+
+service Store {
+  fn get(key: Str) -> Opt[Int]
+  emission fn put(key: Str, value: Int)
+}
+
+component Ledger provides store: Store {
+  let ctx = effect Map.new() undo ctx.drop()
+
+  provide store {
+    fn get(key) = ctx.get(key)
+    fn put(key, value) {
+      effect ctx.insert(key, value)
+      undo   ctx.remove(key)
+    }
+  }
+}
+"""
+    ir = compile_source(source, "capture_ctx_3573.rvl")
+    want = reference.emit(ir)
+    assert "const ctx__ = host.Map.new()" in want
+    assert "return ctx__.get(key)" in want
+    got = emitted["emit_ts_src"](ir)
+    assert got == want
+    # the same document with a non-scaffolding capture name is unchanged
+    source_cfg = source.replace("ctx", "cfg").replace("Cfg", "Cfg")
+    ir2 = compile_source(source.replace("let ctx", "let cfg").replace("undo ctx", "undo cfg")
+                         .replace("ctx.get", "cfg.get").replace("ctx.insert", "cfg.insert")
+                         .replace("ctx.remove", "cfg.remove"), "capture_cfg.rvl")
+    assert emitted["emit_ts_src"](ir2) == reference.emit(ir2)
+
+
 def test_an_ordinary_service_key_carries_no_reserved_marker(
         emitted, reference, tmp_path):
     """The positive control for issue #2390: ordinary keys keep the bytes."""
