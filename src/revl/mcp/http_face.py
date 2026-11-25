@@ -1487,9 +1487,12 @@ def serve_http(ir: dict, config: dict | None = None, *,
     session.load(ir, config or {}, record=approval_policy is not None,
                  origin=origin)
     # issue #3440: while the composition is served live, drive the timer
-    # clock from the wall so `every` timers fire (stopped in the finally)
+    # clock from the wall so `every` timers fire (stopped in the finally).
+    # getattr: a test double session may not carry the pump methods.
     if wall_clock:
-        session.start_wall_clock()
+        _start = getattr(session, "start_wall_clock", None)
+        if _start is not None:
+            _start()
     # item 457: wire the live module's decoder so a routed handler binding a typed
     # `Request` (whose `method`/`body` are variants) sees native case instances.
     decode = _live_decoder(session)
@@ -1536,7 +1539,9 @@ def serve_http(ir: dict, config: dict | None = None, *,
     except KeyboardInterrupt:
         pass
     finally:
-        session.stop_wall_clock()
+        _stop = getattr(session, "stop_wall_clock", None)
+        if _stop is not None:
+            _stop()
         if listener is not None:
             listener.stop()
         httpd.server_close()

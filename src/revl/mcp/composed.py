@@ -223,9 +223,12 @@ def serve_composition(ir: dict, config: dict | None = None, *,
     # None as "this session cannot be snapshotted").
     session.load(ir, config or {}, origin=None)
     # issue #3440: while the composition is served live, drive the timer
-    # clock from the wall so `every` timers fire
+    # clock from the wall so `every` timers fire. getattr: a test double
+    # session may not carry the pump methods.
     if wall_clock:
-        session.start_wall_clock()
+        _start = getattr(session, "start_wall_clock", None)
+        if _start is not None:
+            _start()
     server = ComposedServer(session, composition=composition, declared=declared)
     for withheld in server._withheld.values():
         # stderr: stdout is the protocol stream
@@ -233,4 +236,6 @@ def serve_composition(ir: dict, config: dict | None = None, *,
     try:
         return server.serve(stdin, stdout)
     finally:
-        session.stop_wall_clock()
+        _stop = getattr(session, "stop_wall_clock", None)
+        if _stop is not None:
+            _stop()

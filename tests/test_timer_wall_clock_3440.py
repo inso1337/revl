@@ -64,7 +64,7 @@ def _env() -> dict:
 def _ticks(log: Path) -> int:
     if not log.exists():
         return 0
-    return len([line for line in log.read_text(errors="replace").splitlines()
+    return len([line for line in log.read_text(encoding="utf-8", errors="replace").splitlines()
                 if line.strip()])
 
 
@@ -72,7 +72,7 @@ def _wait_for(marker: str, out: Path, deadline: float = 20.0) -> None:
     """Poll the child's captured output until `marker` appears (boot done)."""
     end = time.monotonic() + deadline
     while time.monotonic() < end:
-        if out.exists() and marker in out.read_text(errors="replace"):
+        if out.exists() and marker in out.read_text(encoding="utf-8", errors="replace"):
             return
         time.sleep(0.05)
     raise AssertionError(f"{marker!r} never appeared in {out}")
@@ -82,7 +82,7 @@ def _wait_for(marker: str, out: Path, deadline: float = 20.0) -> None:
 def test_revl_run_drives_the_timer_clock_from_the_wall_3440(tmp_path):
     app, log = _write_app(tmp_path)
     out = tmp_path / "run.out"
-    with out.open("w") as out_f:
+    with out.open("w", encoding="utf-8") as out_f:
         proc = subprocess.Popen(
             [sys.executable, "-u", "-m", "revl", "run", str(app)],
             cwd=str(tmp_path), env=_env(), stdin=subprocess.PIPE,
@@ -105,7 +105,7 @@ def test_revl_run_drives_the_timer_clock_from_the_wall_3440(tmp_path):
 def test_revl_serve_http_drives_the_timer_clock_from_the_wall_3440(tmp_path):
     app, log = _write_app(tmp_path)
     out = tmp_path / "serve.out"
-    with out.open("w") as out_f:
+    with out.open("w", encoding="utf-8") as out_f:
         proc = subprocess.Popen(
             [sys.executable, "-u", "-m", "revl", "serve", "--http", str(app),
              "--host", "127.0.0.1", "--port", "0"],
