@@ -3919,7 +3919,8 @@ def _lattice_size(signatures: dict, scope_env: dict) -> int:
 
 
 def check_taint(program, fns, components, model: TaintModel,
-                filename: str, untrusted: bool = False) -> None:
+                filename: str, untrusted: bool = False,
+                tests: list | None = None) -> None:
     """Refuse any untrusted value that reaches a sink without a declassifier
     (G9). No-op — and byte-identical — when the program uses no qualifier and
     declares no `route` (a routed operation's parameters are request values, so
@@ -3992,6 +3993,27 @@ def check_taint(program, fns, components, model: TaintModel,
             fn_prov[fn["name"]] = (set(checker.declassified),
                                    list(checker.declassify_records),
                                    set(checker.reaches))
+
+    # issue #3471: a plain `test` body is the same callable scope a `fn` body
+    # is, so the flow verdict applies there too - a `Secret[T]` (or untrusted)
+    # value reaching a sink inside a `test` is refused exactly as in a `fn`.
+    # Lifecycle tests are excluded: their bodies are activation steps, not a
+    # pure expression scope.
+    if tests:
+        test_decls = {d.name: (program.decl_files.get(id(d), filename), d.line)
+                      for d in getattr(program, "tests", ()) or ()}
+        for t in tests:
+            if t.get("lifecycle"):
+                continue
+            tname = t.get("name") or ""
+            tfile, tline = test_decls.get(tname, (filename, 0))
+            tchecker = _FlowChecker(model, tfile, tline, signatures=signatures,
+                                    endorse_allowed=model.declared_endorse.get(
+                                        tname, frozenset()),
+                                    endorse_label=tname,
+                                    known_callables=known, any_sink=any_sink,
+                                    untrusted=untrusted, scope_env=scope_env)
+            tchecker.run(t.get("body") or [], {})
 
     # the fn -> fn call graph, walked only when a top-level fn actually declassifies
     # (empty otherwise, so an endorse-free program stays byte-identical). Lets a

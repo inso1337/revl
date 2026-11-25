@@ -355,7 +355,12 @@ what cannot be named cannot be proven safe.
 Entirely in [taint.py](../../src/revl/taint.py): the `TaintModel` gains the
 signature tables, `check_taint` ([taint.py](../../src/revl/taint.py))
 gains the fixpoint driver, and the call site in
-[lower.py](../../src/revl/lower.py) is unchanged. No backend is touched;
+[lower.py](../../src/revl/lower.py) hands it the lowered `fn`s, component
+bodies AND plain `test` bodies: a `test` body is the same callable scope a
+`fn` body is, so the sink check applies there too (issue #3471 - a
+`Secret[T]` handed to an ordinary extern parameter inside a `test` is
+refused with the same G-SECRET-FLOW code as in a `fn`, at the test body's
+own line). No backend is touched;
 the `model.active` gate ([taint.py](../../src/revl/taint.py)) keeps a
 qualifier-free program byte-identical, and B widens `active` to include
 derived sources/sinks only when Slice D's profile turns them on.

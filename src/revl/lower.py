@@ -9695,11 +9695,18 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     # byte-identical to before.
     _collect(_synthesize_sync_monomorphs, fns, sync_monomorphs)
 
+    # `test` bodies are lowered here: after the component loop, so a broken
+    # component still reports itself first (lifecycle tests check against the
+    # component declarations), and BEFORE the taint verdict, so a plain `test`
+    # body is flow-checked exactly like a `fn` body (issue #3471: the
+    # disclosure-sink check applies inside a `test` too).
+    tests = _collect(_lower_tests, program, program.filename, types, services)
+
     # Taint/provenance verdict (item 249, Slice A): refuse any untrusted-origin
     # value that reaches a `Trusted[T]` sink without a declassifier on its path
     # (G9). No-op and byte-identical when the program declared no qualifier.
     _collect(check_taint, program, fns, live_components, taint_model,
-             program.filename, untrusted=untrusted)
+             program.filename, untrusted=untrusted, tests=tests)
 
     # state hand-off admission (roadmap item 53): a candidate provider that
     # *accepts* a `handoff` on a key some running provider *exports* must accept
@@ -9832,9 +9839,8 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     _collect(_check_evaluator_boundary, live_components, services,
              program.filename, manifest=manifest)
 
-    # lifecycle tests are lowered last: they check against the component
-    # declarations, so a broken component must report itself first
-    tests = _collect(_lower_tests, program, program.filename, types, services)
+    # (`test` bodies were lowered above, ahead of the taint verdict - issue
+    # #3471; the ordering against broken components is unchanged.)
     prop_tests = _collect(_lower_prop_tests, program, program.filename, types, services)
 
     # item 387: a plain `test`/`prop test` body is a pure SYNC context. Finish
