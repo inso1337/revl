@@ -83,10 +83,11 @@ tier). `Map.new`/`Pool.open` host builtins stay refused with it.
 The fixed-shape stdlib surface (docs/stdlib-2.0.md) lowers over the canonical
 ABI model. The substrate's rule: **`length`, `push`, `concat`, `slice`,
 `charAt`, `charCodeAt`, plus the reader builtins `split`, `join` and `Str`'s
-`indexOf`, `startsWith`, `endsWith`, `codepoint_at` (and the
-arithmetic/rendering builtins) lower; `repeat`, the `Map` operations,
-`List.indexOf` over a List of records/lists/Float and the four ASCII
-classifiers (`is_digit`, `is_alpha`, `is_alnum`, `is_space`) do not.**
+`indexOf`, `startsWith`, `endsWith`, `codepoint_at`, the four ASCII
+classifiers (`is_digit`, `is_alpha`, `is_alnum`, `is_space` via
+`$str_char_class`) and the arithmetic/rendering builtins lower; `repeat`,
+the `Map` operations and `List.indexOf` over a List of records/lists/Float
+do not.**
 
 | builtin | on | wasm? | notes / exact refusal |
 |---|---|---|---|
@@ -105,6 +106,7 @@ classifiers (`is_digit`, `is_alpha`, `is_alnum`, `is_space`) do not.**
 | `indexOf(v)` | List of any other element | ❌ | `indexOf is not lowerable on this tier yet for List — the element comparison has no representation here for 'List[...]' (only List[Str]/List[Int]/List[Int32]/List[Bool] have one); use a hosted backend` |
 | `split(sep)` | Str | ✅ | `$str_split` → `List[Str]`: JS-shape (trailing empties kept, `""` → per-code-point pieces) |
 | `join(sep)` | List[Str] | ✅ | `$str_join`: elements joined by `sep` over the bump heap; `[]` → `""` |
+| `is_digit()` / `is_alpha()` / `is_alnum()` / `is_space()` | Str | ✅ | `$str_char_class`: u32 byte-length must be exactly 1, then the ASCII range/equality test for the class; empty or multi-byte receiver is `false`, never a fault. Pulled in on demand like the reader helpers |
 | `repeat(n)` | Str | ❌ | `unsupported builtin method 'repeat'` |
 | `set` / `lookup` / `has` / `size` / `keys` / `remove` | Map | ❌ | `` `set` is not lowerable on this tier yet — the Map value type has no representation here; use a hosted backend`` |
 The harness's *reader* artifacts now cross to the substrate: the durable pipe
@@ -114,11 +116,11 @@ linear-memory `Str`/`List` ABI, closing the gap the concat-built **writer**
 (`log_line`) already crossed. The three reader helpers are pulled into a module
 only on demand (like `$f64_to_str`), so a component that never splits/joins/
 searches keeps a byte-identical helper preamble. What still does **not** run on
-the substrate is `repeat`, the `Map` operations, `List.indexOf` over a List of
-records, lists or Floats (a List of Str/Int/Int32/Bool is fine) and the four
-ASCII classifiers `is_digit` / `is_alpha` / `is_alnum` / `is_space`
-(`unsupported builtin method 'is_digit'`); those are emitted as compile-time
-refusals, so a wasm target never silently degrades.
+the substrate is `repeat`, the `Map` operations and `List.indexOf` over a List
+of records, lists or Floats (a List of Str/Int/Int32/Bool is fine); those are
+emitted as compile-time refusals, so a wasm target never silently degrades.
+The four ASCII classifiers `is_digit` / `is_alpha` / `is_alnum` / `is_space`
+crossed in #3619 via the demand-gated `$str_char_class` helper.
 
 Two language-surface forms the module-function lowering also takes (issue #3145):
 
