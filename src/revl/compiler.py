@@ -300,7 +300,7 @@ def escaping_use_path(path: str) -> bool:
     return normalized == ".." or normalized.startswith(".." + os.sep)
 
 
-def _read_module_text(abs_path: str) -> str:
+def _read_module_text(abs_path: str, *, raw_texts: dict[str, str] | None = None) -> str:
     """Read a `use`d module's text from disk, exactly once (issue #1779).
 
     `_ModuleLoader.load` reads through this and parses the text it returns, so
@@ -310,8 +310,15 @@ def _read_module_text(abs_path: str) -> str:
     holding a loader: `tests/test_admission_use_confinement.py` patches it to
     prove that a confined compile consults nothing on disk, and that the
     patched seam is on the read path at all."""
-    with open(abs_path, encoding="utf-8") as handle:
-        return handle.read()
+    if raw_texts is None:
+        with open(abs_path, encoding="utf-8") as handle:
+            return handle.read()
+    # Preserve the exact UTF-8 input (including line endings) for a caller
+    # comparing compiles. The parser still receives its usual normalized text.
+    with open(abs_path, encoding="utf-8", newline="") as handle:
+        raw = handle.read()
+    raw_texts[abs_path] = raw
+    return raw.replace("\r\n", "\n").replace("\r", "\n")
 
 
 class _ModuleLoader:
@@ -335,7 +342,8 @@ class _ModuleLoader:
                  profile: AdmissionProfile | None = None,
                  profiles: dict[str, AdmissionProfile | None] | None = None,
                  operator_sources: dict[str, str] | None = None,
-                 *, disk_relative_use: bool = True) -> None:
+                 *, disk_relative_use: bool = True,
+                 record_module_inputs: bool = False) -> None:
         # issue #3152: whether a `use` in an in-memory module may resolve
         # relative to that module's own (caller-named) directory on disk. True
         # is the historical behaviour and every operator door keeps it; the
@@ -405,6 +413,11 @@ class _ModuleLoader:
         # MCP door reads it to tell whether a compile reached a file an export
         # wrote, which `dependencies` cannot say for an install-origin path.
         self.disk_reads: dict[str, str] = {}
+        # Opt-in witness for comparing two compiles. Equal file contents alone
+        # do not establish that each use resolved to the same module.
+        self.module_resolutions: list[tuple] | None = [] if record_module_inputs else None
+        self.module_realpaths: dict[str, str] = {}
+        self.module_raw_texts: dict[str, str] = {}
         # issue #3198: every NON-module host file this compile read from disk: a
         # `@backend file` body, a `ref` target, an `asset`. A container-sandboxed
         # process re-compiles its roots inside the boundary (item 337), so the
@@ -581,10 +594,10 @@ class _ModuleLoader:
         virtual_importer = in_memory or self.has_source(importer_path)
         if virtual_importer and not self._disk_relative_use:
             if self.has_source(primary):
-                self._note_stdlib_shadow(use.path, primary, "importer-relative")
+                self._note_resolved_use(importer_path, use.path, primary, "importer-relative")
                 return primary
         elif self._exists(primary):
-            self._note_stdlib_shadow(use.path, primary, "importer-relative")
+            self._note_resolved_use(importer_path, use.path, primary, "importer-relative")
             return primary
         for base in self._search_path:
             candidate = os.path.join(base, use.path)
@@ -605,7 +618,7 @@ class _ModuleLoader:
                 if _contained(os.path.realpath(candidate),
                               os.path.realpath(base)):
                     self._install_root_of.setdefault(os.path.abspath(candidate), base)
-                self._note_stdlib_shadow(use.path, candidate, f"search path {base}")
+                self._note_resolved_use(importer_path, use.path, candidate, f"search path {base}")
                 return candidate
         if not self._disk_relative_use:
             # Issue #3152: do not hand the caller the install tree either, and
@@ -683,8 +696,8 @@ class _ModuleLoader:
             category="admission",
         )
 
-    def _note_stdlib_shadow(self, written: str, resolved: str,
-                            origin: str) -> None:
+    def _note_resolved_use(self, importer: str, written: str, resolved: str,
+                           origin: str) -> None:
         """Record a `use "stdlib/..."` that resolved somewhere OTHER than the
         stdlib this compiler ships (roadmap 422 F7).
 
@@ -708,6 +721,9 @@ class _ModuleLoader:
         the substitute is hostile, and a vendored copy is the common honest
         case. The drift check (item 389, `revl doctor`) is the other half and
         answers a different question: which VERSION, not which FILE."""
+        if self.module_resolutions is not None:
+            self.module_resolutions.append((importer, written, resolved,
+                                            os.path.realpath(resolved), origin))
         if not written.startswith("stdlib/"):
             return
         real = os.path.realpath(resolved)
@@ -747,7 +763,11 @@ class _ModuleLoader:
                 # re-read of a path that may have moved. The read goes through
                 # the named `_read_module_text` seam so a confined compile can
                 # still be proved to touch nothing on disk.
-                read = _read_module_text(abs_path)
+                if self.module_resolutions is not None:
+                    read = _read_module_text(abs_path, raw_texts=self.module_raw_texts)
+                    self.module_realpaths[abs_path] = os.path.realpath(abs_path)
+                else:
+                    read = _read_module_text(abs_path)
                 program = parse_text(read, abs_path)
                 self.disk_reads[abs_path] = read
                 self._note_dependency(abs_path, read)
@@ -1407,7 +1427,9 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     `@backend file` body read from disk), so a caller that has to reproduce
     this compile elsewhere (the container-sandboxed runner's item-337
     recompile) can name its exact input set. It is never part of the returned
-    document.
+    document. With `report["record_module_inputs"] = True`, the report also
+    records the unnormalized disk text, real paths and use resolutions in
+    `report["module_inputs"]` for comparing two compiles.
 
     Under the export rule (`_export_rule`, issue #2547), on unless the MCP
     server turned it off, an operator compile that names or reaches a file
@@ -1460,7 +1482,9 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
     # byte-identical for the default and single-profile paths.
     loader = _ModuleLoader(sources, profile, profiles=per_root_profiles,
                            operator_sources=operator_sources,
-                           disk_relative_use=disk_relative_use)
+                           disk_relative_use=disk_relative_use,
+                           record_module_inputs=bool(report is not None
+                                                     and report.get("record_module_inputs")))
     # item 396: mark every root abspath before loading, so the root-scoped
     # no-extern check and body-file resolution skip apply even to a root that is
     # reached as another root's `use` dependency.
@@ -1923,6 +1947,13 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
         # compiled for each.
         report["dependencies"] = dict(loader.dependencies)
         report["disk_reads"] = dict(loader.disk_reads)
+        if loader.module_resolutions is not None:
+            report["module_inputs"] = {
+                "resolutions": loader.module_resolutions,
+                "realpaths": loader.module_realpaths,
+                "raw_texts": loader.module_raw_texts,
+                "stdlib": loader._stdlib_real_and_parent(),
+            }
         # issue #3198: the non-module files the compile read (ref, asset, host
         # body), so a container-sandboxed recompile can be handed their mounts.
         report["host_file_reads"] = sorted(loader.host_file_reads)

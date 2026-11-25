@@ -15,6 +15,7 @@ into one early-exit call. The load-bearing claims under test:
 """
 
 import sys
+from importlib import import_module
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_source  # noqa: E402
 from revl.mcp import ship as _ship  # noqa: E402
+from revl.mcp import server as _server  # noqa: E402
 from revl.mcp.server import handle  # noqa: E402
 
 
@@ -205,3 +207,83 @@ component Watcher requires cache: Cache provides log: Log {
     assert payload["roundTrips"]["saved"] == 3
     assert "swap" in payload
     _call("revl_unload", {})
+
+
+@pytest.mark.parametrize("case", ["stable", "edited-import", "line-ending",
+                                 "import-resolution", "explicit-manifest"])
+def test_ship_applied_files_reuse_admission_only_for_the_same_imports(
+    tmp_path, monkeypatch, case,
+):
+    pytest.importorskip("cordis")
+    monkeypatch.setattr(_server, "SESSION", _server.Session())
+    monkeypatch.setattr(_server, "AUTHORING", _server.AuthoringTrust(roots=(str(tmp_path),)))
+    base = tmp_path / "cache.rvl"
+    base.write_text(RUNNING_SRC, encoding="utf-8")
+    helper = tmp_path / "value.rvl"
+    if case == "import-resolution":
+        search_root = tmp_path / "imports"
+        search_root.mkdir()
+        monkeypatch.setenv("REVL_IMPORT_PATH", str(search_root))
+        helper = search_root / helper.name
+    helper.write_text("pub fn value() -> Int { return 1 }\n", encoding="utf-8")
+    consumer = tmp_path / "watcher.rvl"
+    consumer.write_text(
+        'use "value.rvl" { value }\n'
+        'service Log { fn note(m: Str) -> Int }\n'
+        'component Watcher requires cache: Cache provides log: Log {\n'
+        '  provide log { fn note(m) = value() }\n'
+        '}\n',
+        encoding="utf-8",
+    )
+
+    assert _call("revl_load", {"source": RUNNING_SRC})["ok"]
+    try:
+        compiles = []
+        original_compile = _server.compile_files
+
+        def count_compile(*args, **kwargs):
+            compiles.append(kwargs.get("manifest") is not None)
+            return original_compile(*args, **kwargs)
+
+        monkeypatch.setattr(_server, "compile_files", count_compile)
+        monkeypatch.setattr(import_module("revl.plan"), "compile_files", count_compile)
+        edited = case in ("edited-import", "line-ending", "import-resolution")
+        if edited:
+            original_plan = _server._tool_plan
+
+            def plan_then_edit(arguments):
+                result = original_plan(arguments)
+                if case == "edited-import":
+                    helper.write_text("pub fn value() -> Int { return 2 }\n", encoding="utf-8")
+                elif case == "line-ending":
+                    helper.write_bytes(helper.read_bytes().replace(b"\n", b"\r\n"))
+                else:
+                    (tmp_path / helper.name).write_bytes(helper.read_bytes())
+                return result
+
+            monkeypatch.setattr(_server, "_tool_plan", plan_then_edit)
+
+        arguments = {"files": [str(base), str(consumer)], "apply": True}
+        if case == "explicit-manifest":
+            arguments["manifest"] = _server.SESSION.ir
+        payload = _call("revl_ship", arguments)
+        if edited:
+            assert payload["ok"] is False and payload["shipped"] is False, payload
+            assert payload["stoppedAt"] == "swap"
+            assert payload["admitted"] is False and payload["swapped"] is False
+            assert _server.SESSION.ir and {
+                component["name"] for component in _server.SESSION.ir["components"]
+            } == {"C"}
+        assert compiles.count(True) == (3 if case == "explicit-manifest" else 2), compiles
+        assert len(compiles) == (5 if case == "explicit-manifest" else 4)
+        if edited:
+            # Start again so admission and the plan both see the edited import.
+            monkeypatch.setattr(_server, "_tool_plan", original_plan)
+            compiles.clear()
+            payload = _call("revl_ship", arguments)
+            assert len(compiles) == 4 and compiles.count(True) == 2, compiles
+        assert payload.get("shipped"), payload
+        result = _call("revl_call", {"key": "log", "method": "note", "args": ["test"]})
+        assert result["result"] == (2 if case == "edited-import" else 1), result
+    finally:
+        _call("revl_unload", {})

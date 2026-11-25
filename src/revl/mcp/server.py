@@ -71,6 +71,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -877,7 +878,8 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
     pending = _export_jail.exported_texts(files) if from_files else {}
     while True:
         _ride_exported(pending, authored, assets, modules or {})
-        seen: dict = {}
+        seen: dict = ({"record_module_inputs": True}
+                      if report is not None and report.get("record_module_inputs") else {})
         profile = base if inline or authored else None
         document = _compile_candidate(source, files, manifest,
                                       {**assets, **authored, **(modules or {})},
@@ -1149,7 +1151,8 @@ def _candidate_of(arguments: dict) -> tuple:
 
 def _compile(source: str | None, files: list[str] | None,
              modules: dict | None, *,
-             manifest: dict | None = None, replacing: tuple = ()) -> dict:
+             manifest: dict | None = None, replacing: tuple = (),
+             compile_report: dict | None = None) -> dict:
     """`compile_under_authoring` for the verbs THIS module dispatches, plus the
     one side effect only they want: remembering the host bodies the compile
     carried, so a class-(c) approval ticket cannot understate what a yes lets
@@ -1159,7 +1162,8 @@ def _compile(source: str | None, files: list[str] | None,
     `modules` is POSITIONAL and has no default: a verb passes the whole
     candidate, `*_candidate_of(arguments)`, or it does not compile. The
     keyword-with-default it used to be is how three verbs dropped it."""
-    compile_report: dict = {}
+    if compile_report is None:
+        compile_report = {}
     ir = compile_under_authoring(source, files, manifest=manifest,
                                  modules=modules, replacing=replacing,
                                  report=compile_report)
@@ -1890,7 +1894,7 @@ def _tool_counterfactual(arguments: dict) -> dict:
         return _session_error(str(error))
 
 
-def _tool_swap(arguments: dict) -> dict:
+def _tool_swap(arguments: dict, *, ship_admission: _ShipAdmission | None = None) -> dict:
     """Admit a candidate against what is running, then hot-swap it in. A
     rejected candidate changes nothing — that is the whole point.
 
@@ -1930,40 +1934,92 @@ def _tool_swap(arguments: dict) -> dict:
 
     # issue #1700: compiled as sent, stored canonical, and the answer says which
     sent, stored, canon = _canonical.prepare(arguments)
-    return _canonical.attach(_swap_inline(sent, stored, replacing, before), canon)
+    return _canonical.attach(
+        _swap_inline(sent, stored, replacing, before, ship_admission=ship_admission), canon)
 
 
-def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dict:
+def _ship_module_inputs(compile_report: dict) -> dict | None:
+    """Limit reuse to ordinary disk modules whose complete input set was observed."""
+    if (compile_report.get("authored") is not False
+            or compile_report.get("host_file_reads") != []
+            or "module_inputs" not in compile_report
+            or not compile_report.get("disk_reads")):
+        return None
+    inputs = compile_report["module_inputs"]
+    if (inputs["raw_texts"].keys() != compile_report["disk_reads"].keys()
+            or any(path != real for path, real in inputs["realpaths"].items())):
+        return None
+    return inputs
+
+
+@dataclass(frozen=True)
+class _ShipAdmission:
+    files: tuple[str, ...]
+    manifest: dict
+    replacing: tuple
+    authoring: AuthoringTrust
+    inputs: dict
+
+    def matches(self, source, files, modules, replacing) -> bool:
+        return (source is None and not modules and tuple(files or ()) == self.files
+                and replacing == self.replacing and not AUTHORING.providers
+                and AUTHORING == self.authoring and SESSION.ir == self.manifest)
+
+
+def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before,
+                 *, ship_admission: _ShipAdmission | None = None) -> dict:
     """The inline half of `revl_swap`: admit the candidate as sent, then swap it
     in with `stored` (its canonical form) as the held source."""
     # issue #1446: like `revl_load` (#1444), a swap that does not succeed
     # changes nothing, so the candidate's host bodies are recorded only once it
     # is running. Compiled without `_compile`'s side effect for that reason.
     source, files, modules = _candidate_of(arguments)
-    try:
-        compile_under_authoring(source, files, modules=modules,
-                                manifest=SESSION.ir, replacing=replacing)
-    except RevlError as error:
-        rejected = report(error)
-        rejected["admitted"] = False
-        rejected["swapped"] = False
-        rejected["note"] = "the running composition is untouched"
-        return rejected
-
-    # admitted: recompile the whole composition so the swap is a full
-    # generation (the same shape `revl run --watch` reloads)
     compile_report: dict = {}
-    try:
-        full = compile_under_authoring(source, files, modules=modules,
-                                       report=compile_report)
-    except RevlError as error:
-        rejected = report(error)
-        rejected["admitted"] = True
-        rejected["swapped"] = False
-        rejected["note"] = ("the candidate is admissible against the running "
-                            "composition, but is not a complete composition on "
-                            "its own — pass the full source set to swap")
-        return rejected
+    full = None
+    if ship_admission is not None and ship_admission.matches(source, files, modules, replacing):
+        # The full-generation compile is needed anyway. Compare what it
+        # actually read, including the resolution of each import, with what
+        # ship admitted. Re-reading paths first would leave a second window
+        # for a changed import to reach the generation we install.
+        compile_report["record_module_inputs"] = True
+        try:
+            full = compile_under_authoring(source, files, modules=modules,
+                                           report=compile_report)
+        except RevlError:
+            # Preserve the original diagnostic order if the full compile
+            # fails (e.g. an admitted candidate is incomplete on its own).
+            compile_report.clear()
+        else:
+            if (not ship_admission.matches(source, files, modules, replacing)
+                    or _ship_module_inputs(compile_report) != ship_admission.inputs):
+                return _session_error(
+                    "candidate inputs or admission context changed during ship; run revl_ship again",
+                    admitted=False, swapped=False)
+
+    if full is None:
+        try:
+            compile_under_authoring(source, files, modules=modules,
+                                    manifest=SESSION.ir, replacing=replacing)
+        except RevlError as error:
+            rejected = report(error)
+            rejected["admitted"] = False
+            rejected["swapped"] = False
+            rejected["note"] = "the running composition is untouched"
+            return rejected
+
+        # admitted: recompile the whole composition so the swap is a full
+        # generation (the same shape `revl run --watch` reloads)
+        try:
+            full = compile_under_authoring(source, files, modules=modules,
+                                           report=compile_report)
+        except RevlError as error:
+            rejected = report(error)
+            rejected["admitted"] = True
+            rejected["swapped"] = False
+            rejected["note"] = ("the candidate is admissible against the running "
+                                "composition, but is not a complete composition on "
+                                "its own — pass the full source set to swap")
+            return rejected
     # issue #1700: the held source is canonical
     # issue #1779: and what this compile READ rides with it, so the swapped-in
     # generation anchors records to the files it actually compiled
@@ -4977,7 +5033,7 @@ def _untrusted_author() -> bool:
     return AUTHORING.profile() is not None
 
 
-def _tool_admit(arguments: dict) -> dict:
+def _tool_admit(arguments: dict, *, compile_report: dict | None = None) -> dict:
     running = arguments.get("manifest")
     if running is None:
         return {"ok": False, "diagnostics": [{
@@ -4996,8 +5052,8 @@ def _tool_admit(arguments: dict) -> dict:
     # candidates at all). A genuine G2 — the candidate colliding with a
     # NON-replaced provider — still surfaces here.
     try:
-        ir = _compile(*_candidate_of(arguments),
-                      manifest=running, replacing=replacing)
+        ir = _compile(*_candidate_of(arguments), manifest=running,
+                      replacing=replacing, compile_report=compile_report)
     except RevlError as error:
         rejected = report(error)
         rejected["admitted"] = False
@@ -5080,6 +5136,33 @@ def _tool_ship(arguments: dict) -> dict:
     server already holds — so the running IR is not re-sent to admit against
     it. The orchestration lives in `ship.py`; this is the thin wiring that
     hands it the existing per-stage handlers and the live session."""
+    source, files, modules = _candidate_of(arguments)
+    if (arguments.get("apply") and source is None and files and not modules
+            and arguments.get("manifest") is None and SESSION.loaded
+            and not AUTHORING.providers and not AUTHORING.host_code):
+        admission = None
+
+        def admit_for_ship(staged_args):
+            nonlocal admission
+            if staged_args.get("manifest") is None:
+                return _tool_admit(staged_args)
+            manifest = deepcopy(staged_args["manifest"])
+            candidate_files = tuple(staged_args["files"])
+            authoring = AUTHORING
+            replacing = tuple(staged_args.get("replacing") or ())
+            compile_report = {"record_module_inputs": True}
+            result = _tool_admit(staged_args, compile_report=compile_report)
+            inputs = _ship_module_inputs(compile_report)
+            if result.get("admitted") and inputs is not None:
+                admission = _ShipAdmission(candidate_files, manifest, replacing, authoring, inputs)
+            return result
+
+        def swap_for_ship(staged_args):
+            return _tool_swap(staged_args, ship_admission=admission)
+
+        return _ship.ship(arguments, check=_tool_check, admit=admit_for_ship,
+                          plan=_tool_plan, swap=swap_for_ship, session=SESSION)
+
     return _ship.ship(arguments,
                       check=_tool_check, admit=_tool_admit, plan=_tool_plan,
                       swap=_tool_swap, session=SESSION)
