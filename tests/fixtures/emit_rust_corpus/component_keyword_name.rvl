@@ -1,0 +1,13 @@
+// issue #3404: a component whose snake-case factory name is a Rust keyword
+// (`Box` -> `box`). The lookup key stays "box"; the emitted fn is `box_()`.
+service Greeter {
+  fn greet(who: Str) -> Str
+}
+
+component Box provides greeting: Greeter {
+  provide greeting {
+    fn greet(who) {
+      return who
+    }
+  }
+}

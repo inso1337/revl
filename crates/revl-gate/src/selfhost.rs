@@ -8350,7 +8350,7 @@ fn emit_comp_step(comp: Value, step: Value, ir: Value, ctx_: Ctx__m1, map_values
 fn emit_component(comp: Value, services: Value, ir: Value) -> Vec<String> {
     let name = value_str(value_field(comp.clone(), String::from("name")));
     let cname = mangle(name.clone());
-    let snk = snake(name.clone());
+    let snk = mangle(snake(name.clone()));
     let tables = build_type_tables(value_field(ir.clone(), String::from("types")));
     let fr = fr_map(ir.clone());
     let provs = value_field(comp.clone(), String::from("provides"));
@@ -8423,7 +8423,7 @@ fn emit_component(comp: Value, services: Value, ir: Value) -> Vec<String> {
 fn emit_component_new(comp: Value, services: Value, ir: Value) -> Vec<String> {
     let name = value_str(value_field(comp.clone(), String::from("name")));
     let cname = mangle(name.clone());
-    let snk = snake(name.clone());
+    let snk = mangle(snake(name.clone()));
     let tables = build_type_tables(value_field(ir.clone(), String::from("types")));
     let fr = fr_map(ir.clone());
     let provs = value_field(comp.clone(), String::from("provides"));
@@ -8949,7 +8949,7 @@ fn emit_bridge(ir: Value) -> Vec<String> {
     out.push(String::from("    match name {"));
     for comp in components.clone() {
         let snk = snake(value_str(value_field(comp.clone(), String::from("name"))));
-        out.push(format!("        \"{}\" => Some({}()),", snk, snk));
+        out.push(format!("        \"{}\" => Some({}()),", snk, mangle(snk.clone())));
     }
     out.push(String::from("        _ => None,"));
     out.push(String::from("    }"));
@@ -8982,7 +8982,7 @@ fn emit_bridge(ir: Value) -> Vec<String> {
         out.push(format!("            let ctx = _revl_isolate_ctx(ctx, \"{}\");", snk));
         if (fields.revl_length() > 0i64) {
             out.push(format!("            let _c = config.get(\"{}\").cloned().unwrap_or(serde_json::Value::Null);", pascal));
-            out.push(format!("            Some(ctx.plugin({}(), {}Config {{", snk, pascal));
+            out.push(format!("            Some(ctx.plugin({}(), {}Config {{", mangle(snk.clone()), pascal));
             for field in fields.clone() {
                 let fname = mangle(value_str(value_field(field.clone(), String::from("name"))));
                 let ftype = rust_type(value_field(field.clone(), String::from("type")));
@@ -9007,7 +9007,7 @@ fn emit_bridge(ir: Value) -> Vec<String> {
             }
             out.push(String::from("            }))"));
         } else {
-            out.push(format!("            Some(ctx.plugin({}(), ()))", snk));
+            out.push(format!("            Some(ctx.plugin({}(), ()))", mangle(snk.clone())));
         }
         out.push(String::from("        },"));
     }

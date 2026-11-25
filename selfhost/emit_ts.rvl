@@ -322,6 +322,20 @@ fn mangle(name: Str) -> Str {
 // deferred (the covered corpus is clean), so this is the A3 rename only.
 fn ident(name: Str) -> Str { return mangle(name) }
 
+// `_ident(name, role, JS_GLOBAL_RESERVED)`: the ADT case FACTORY is a
+// module-level binding, so a case named `Promise` or `undefined` must not
+// replace the global every emitted body reads bare. Only the BINDING moves;
+// the tag string stays the source spelling (issue #3404).
+fn mangle_js_global(name: Str) -> Str {
+  var root = name
+  while (root.length() > 0) {
+    if (is_js_reserved(root) || is_js_global(root)) { return name.concat("_") }
+    if (root.charAt(root.length() - 1) != "_") { return name }
+    root = root.slice(0, root.length() - 1)
+  }
+  return name
+}
+
 // ------------------------------------------- module-scope names (issue #3127)
 // A top-level `fn`/extern/component binds a MODULE-scope name, so a user
 // `fn undefined` or `fn BigInt` replaced the JS global every other function of
@@ -2727,12 +2741,13 @@ fn emit_ts_types(types: Any) -> List[Str] {
       out = out.push("")
       for (case of cases) {
         let cname = ident(value_str(value_field(case, "name")))
+        let fname = mangle_js_global(value_str(value_field(case, "name")))
         let payload = value_field(case, "payload")
         if (value_is_null(payload)) {
-          out = out.push(`export function ${cname}(): ${nm} {`)
+          out = out.push(`export function ${fname}(): ${nm} {`)
           out = out.push(`  return { kind: ${json_dumps(cname)} }`)
         } else {
-          out = out.push(`export function ${cname}(value: ${ts_type(value_str(payload))}): ${nm} {`)
+          out = out.push(`export function ${fname}(value: ${ts_type(value_str(payload))}): ${nm} {`)
           out = out.push(`  return { kind: ${json_dumps(cname)}, value }`)
         }
         out = out.push("}")

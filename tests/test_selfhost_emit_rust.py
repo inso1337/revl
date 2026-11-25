@@ -337,6 +337,9 @@ CORPUS = [
     "prelude_names.rvl",     # issue #1920: a service named `Box` takes the
                              #   type-name reservation (`Box_`), and a captured
                              #   `extern acquire` handle is held by value
+    "component_keyword_name.rvl",  # issue #3404: a component `Box` whose
+                             #   snake-case factory is the Rust keyword `box`
+                             #   emits `box_()`; the lookup key stays `box`
     "reserved_type_names.rvl",  # issue #2328: a user record `Box` and variant
                              #   `Vec` take the type-name reservation (`Box_`,
                              #   `Vec_`) at every position they are spelled
