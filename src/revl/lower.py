@@ -7841,6 +7841,18 @@ def _lower_pure_expr_node(expr, scope: dict, callables: set, alias_fns: dict,
         if expr.name not in scope and expr.name not in callables:
             _reject_foreign_name(expr.name, filename, expr.line)  # item 384
             _reject_module_private(expr.name, filename, expr.line, types)
+            # issue #3492: `P { ... }` (the Rust/Go/Swift spelling) names a
+            # declared TYPE, not a value — the G1 text sent authors to declare
+            # a variable named `P`. Say how a record is actually built.
+            spec = types.get(expr.name) if isinstance(types, dict) else None
+            if isinstance(spec, dict) and spec.get("kind") == "record":
+                raise RevlError(
+                    filename, expr.line,
+                    f"`{expr.name}` is a type, not a value — a record is built "
+                    f"from a typed binding",
+                    hint=f"write `let p: {expr.name} = {{ ... }}` — the type goes "
+                         f"on the binding, not in front of the literal",
+                    code="G1", category="binding")
             raise RevlError(filename, expr.line, f"`{expr.name}` is not declared in this function",
                             hint="declare it with `let`/`var` or add it as a parameter (G1)",
                             code="G1", category="binding")
