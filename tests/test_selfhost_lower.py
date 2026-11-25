@@ -4640,6 +4640,36 @@ def test_parse_refused_programs_agree(admit, case):
         f"corpus bug: the reference does not refuse {name} at parse time"
     assert admit(src) == "BAD|" + ref_msg
 
+# #3401, #3446: the reference has no `_lower_pure_expr` arm for an `emit`, so a
+# module fn holding one in a brace body is refused. The gate used to read the
+# body as ordinary statements and admit it.
+_EMIT_IN_FN_BODY_PROGRAMS = [
+    ("returned emit",
+     "fn f(x: Int) -> Int { return emit x }"),
+    ("let-bound emit",
+     "fn f(x: Int) -> Int {\n  let y = emit x\n  return y\n}"),
+    ("emit statement",
+     "fn f(x: Int) -> Int {\n  emit x\n  return x\n}"),
+    ("let-bound emission call (#3446)",
+     "service Bus { emission fn send(n: Int) -> Int }\n"
+     "fn f(n: Int) -> Int {\n"
+     "  let x = emit bus.send(n)\n"
+     "  return n\n"
+     "}"),
+]
+
+
+@pytest.mark.parametrize("case", _EMIT_IN_FN_BODY_PROGRAMS,
+                         ids=[n for n, _ in _EMIT_IN_FN_BODY_PROGRAMS])
+def test_an_emit_in_a_module_fn_body_is_refused(admit, case):
+    name, src = case
+    ref_tag, ref_msg = _ref(src)
+    assert ref_tag == "OUT:" + ref_msg, \
+        f"corpus bug: the reference does not refuse {name} while lowering"
+    assert ref_msg == "unexpected expression in fn body", (name, ref_msg)
+    assert admit(src) == "BAD|" + ref_msg, name
+
+
 
 @pytest.mark.parametrize("binding", ["let", "var"])
 @pytest.mark.parametrize("annotation", ["", ": Str"])

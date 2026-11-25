@@ -2977,6 +2977,9 @@ fn p_fn_v(ts: List[Token], i: Int, pg: Prog, ver: Bool) -> PStep {
     return { pg: bad_prog(pg, "unbalanced braces in fn body"), i: ts.length() }
   }
   let body = p_stmts(ts, rti + 1, bend - 1, [])
+  if (stmts_have_emit(body, 0)) {
+    return mk_step(bad_prog(pg, "unexpected expression in fn body"), bend)
+  }
   let tot = tot_block(ts, rti, [])
   return mk_step(push_fn(pg, { name: nm, isEmExtern: false,
                               isAsyncExtern: false,
@@ -3083,6 +3086,16 @@ fn arms_have_emit(xs: List[ArmN], i: Int) -> Bool {
 fn parts_have_emit(xs: List[PartN], i: Int) -> Bool {
   if (i >= xs.length()) { return false }
   return expr_has_emit(xs[i].e) || parts_have_emit(xs, i + 1)
+}
+
+// Whether an `emit` sits anywhere in a brace body. `_lower_pure_expr` has no
+// arm for one, so the reference refuses a module fn holding an emit in value
+// position (`return emit x`, `let y = emit x`) or as a step (#3401, #3446).
+fn stmts_have_emit(ss: List[Stmt], i: Int) -> Bool {
+  if (i >= ss.length()) { return false }
+  let s = ss[i]
+  if (s.kind == "emit") { return true }
+  return expr_has_emit(s.e) || stmts_have_emit(ss, i + 1)
 }
 
 // ------------------------------------------------ verified totality edges
