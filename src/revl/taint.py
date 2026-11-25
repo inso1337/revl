@@ -3281,6 +3281,9 @@ class _FlowChecker:
         if step in ("while", "for"):
             self._loop(stmt, env)
             return
+        if step == "if":
+            self._if(stmt, env)
+            return
         if step in ("return", "emit", "expr", "fail"):
             self._emit_args = None
             expr = stmt.get("expr") or stmt.get("value")
@@ -3495,6 +3498,52 @@ class _FlowChecker:
                 self.fn_refs.pop(name, None)
         else:
             self.fn_refs.pop(name, None)
+
+    def _if(self, stmt, env: dict) -> None:
+        """An `if` statement walked branch by branch (issue #3232): each arm
+        runs on its OWN copy of the environment, and the merge point JOINS
+        every binding across the arms and the fall-through — a branch
+        assignment must never overwrite a variable's taint, or a value tainted
+        on one path would reach a sink as clean on the other. The fall-through
+        entry env is one of the joined paths (it is the only path past an
+        if-without-else; with an else it is idempotent, since both arms start
+        from copies of it and `_join` is idempotent). `fn_refs` joins the same
+        way, keeping a reference only when every path agrees on it, so an
+        indirect call off a branch-bound name stays over-approximated."""
+        cond = stmt.get("cond")
+        if cond is not None:
+            self.taint_of(cond, env)  # visit the condition's sinks
+        paths = [dict(env)]
+        ref_paths = [dict(self.fn_refs)]
+        for slot in ("then", "else"):
+            body = stmt.get(slot)
+            if not body:
+                continue
+            branch_env = dict(env)
+            saved_refs = self.fn_refs
+            self.fn_refs = dict(saved_refs)
+            try:
+                self.run(body, branch_env)
+            finally:
+                branch_refs = self.fn_refs
+                self.fn_refs = saved_refs
+            paths.append(branch_env)
+            ref_paths.append(branch_refs)
+        merged: dict = {}
+        for path in paths:
+            for key, value in path.items():
+                old = merged.get(key)
+                merged[key] = value if old is None else _join(old, value)
+        merged_refs: dict = {}
+        for name in {n for refs in ref_paths for n in refs}:
+            values = {refs[name] for refs in ref_paths if name in refs}
+            if len(values) == 1:
+                (only,) = values
+                if only is not None:
+                    merged_refs[name] = only
+        env.clear()
+        env.update(merged)
+        self.fn_refs = merged_refs
 
     def _loop(self, stmt, env: dict) -> None:
         """A `while`/`for` body walked to a fixed point (Slice B3, body-local back
