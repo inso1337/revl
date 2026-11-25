@@ -348,6 +348,11 @@ class Token:
     kind: str          # 'ident' | 'kw' | 'int' | 'float' | 'string' | 'template' | 'arrow' | symbol | 'eof'
     value: object
     line: int
+    # Half-open source span, for readers that need the text between tokens
+    # rather than its value (issue #3499's failed-assert message). Side-band
+    # like `stray_backtick`: `-1` when a fragment was not produced by `lex`.
+    start: int = -1
+    end: int = -1
 
 
 def lex(source: str, filename: str, line_offset: int = 0) -> list[Token]:
@@ -374,6 +379,10 @@ def lex(source: str, filename: str, line_offset: int = 0) -> list[Token]:
                 line = line_offset + source.count("\n", 0, position) + 1
                 raise RevlError(filename, line, "source contains a lone surrogate")
     tokens: list[Token] = []
+
+    def add(tok: Token, start: int, end: int) -> None:
+        tok.start, tok.end = start, end
+        tokens.append(tok)
     i, line, n = 0, 1 + line_offset, len(source)
     while i < n:
         c = source[i]
@@ -388,25 +397,28 @@ def lex(source: str, filename: str, line_offset: int = 0) -> list[Token]:
         elif c in _OPERATORS_BY_FIRST and (matched := next(
                 (op for op in _OPERATORS_BY_FIRST[c]
                  if source.startswith(op, i)), None)) is not None:
-            tokens.append(Token("arrow" if matched == "->" else matched, matched, line))
+            add(Token("arrow" if matched == "->" else matched, matched, line), i, i + len(matched))
             i += len(matched)
         elif source.startswith('"""', i):
             # Triple-quoted verbatim string: raw text (newlines included) up to
             # the next `"""`. Distinct from the single-`"` form only in that it
             # may span lines; both yield the same `string` token kind.
             start_line = line
+            start = i
             i, value, line = _lex_triple_string(source, i + 3, line, filename)
-            tokens.append(Token("string", value, start_line))
+            add(Token("string", value, start_line), start, i)
         elif c == '"':
+            start = i
             i, value = _lex_string(source, i + 1, line, filename)
-            tokens.append(Token("string", value, line))
+            add(Token("string", value, line), start, i)
         elif c == "'":
             # Single-quoted string (item 382). revl has no char type, so `'a'`
             # / `'hello'` lex as a `Str`, identical in token kind and escape
             # handling to `"..."` — the same dual-spelling muscle-memory ergonomic
             # revl already grants with `==`/`===`. Only `\'` and `\\` are escapes.
+            start = i
             i, value = _lex_string(source, i + 1, line, filename, quote="'")
-            tokens.append(Token("string", value, line))
+            add(Token("string", value, line), start, i)
         elif c == '`':
             # The token's line is where the template OPENS, not where it closes
             # (issue #313). A template spanning lines 2-5 used to report every
@@ -414,6 +426,7 @@ def lex(source: str, filename: str, line_offset: int = 0) -> list[Token]:
             # line 5, pointing the reader at the closing backtick instead of at
             # the expression. `"""` strings above already do this correctly.
             start_line = line
+            start = i
             i, parts, line, suspect, interp_lines = _lex_template(
                 source, i + 1, line, filename)
             tok = Token("template", parts, start_line)
@@ -427,8 +440,9 @@ def lex(source: str, filename: str, line_offset: int = 0) -> list[Token]:
                 # (item 365). Not a Token field, so token equality and every
                 # accepted program lex identically; only the error path reads it.
                 tok.stray_backtick = suspect
-            tokens.append(tok)
+            add(tok, start, i)
         elif c in _IDENT_START:
+            start = i
             j = i
             while j < n and source[j] in _IDENT_CONT:
                 j += 1
@@ -460,12 +474,14 @@ def lex(source: str, filename: str, line_offset: int = 0) -> list[Token]:
                     hint="interpolation needs a backtick template: write "
                          "`` `hi ${name}` `` (docs/strings.md)",
                 )
-            tokens.append(Token("kw" if word in KEYWORDS else "ident", word, line))
+            add(Token("kw" if word in KEYWORDS else "ident", word, line), start, j)
             i = j
         elif c in _ASCII_DIGIT:
+            start = i
             i, tok = _lex_number(source, i, line, filename)
-            tokens.append(tok)
+            add(tok, start, i)
         elif c == "@" and i + 1 < n and source[i + 1] in _IDENT_START:
+            start = i
             # Host block: `@backend { <verbatim, brace-balanced> }`.
             # The body is host text, not revl, so it is consumed here by
             # scanning balanced braces rather than tokenizing the contents.
@@ -484,14 +500,14 @@ def lex(source: str, filename: str, line_offset: int = 0) -> list[Token]:
                 if p is None:
                     raise RevlError(filename, line, f"unterminated @{backend} host body")
                 body = source[k + 1:p]
-                tokens.append(Token("hostbody", (backend, body), line))
+                add(Token("hostbody", (backend, body), line), start, p + 1)
                 line += source[i:p + 1].count("\n")
                 i = p + 1
             else:
-                tokens.append(Token("@", "@", line))
+                add(Token("@", "@", line), start, start + 1)
                 i += 1
         elif c in SYMBOLS or c in SINGLE_OPERATORS:
-            tokens.append(Token(c, c, line))
+            add(Token(c, c, line), i, i + 1)
             i += 1
         elif c == "#":
             # item 384: `#` is the Python/shell line-comment lead-in — revl
@@ -511,7 +527,7 @@ def lex(source: str, filename: str, line_offset: int = 0) -> list[Token]:
             _reject_non_ascii_ident(source, i, line, filename)
         else:
             raise RevlError(filename, line, f"unexpected character {c!r}")
-    tokens.append(Token("eof", None, line))
+    add(Token("eof", None, line), i, i)
     return tokens
 
 

@@ -1985,6 +1985,19 @@ fn empty_list_ann(value: Any, name: Str, known: Map[Str, Str]) -> Str {
 // -------------------------------------------------------------- statements
 // `_v3_stmt`: one fn-body or test-body step -> its emitted lines (`acx.test_mode`
 // selects the in-file test form of `assert`).
+// `assert_head`: `<file>:<line>: assert <source>` (issue #3499), matching the
+// reference emitter; a document without the keys falls back to the old text.
+fn assert_head(node: Any, text: Str) -> Str {
+  let file = value_str(value_field(node, "file"))
+  let line = value_int(value_field(node, "line"))
+  var where = ""
+  if (file != "" && line != 0) { where = `${file}:${line}` }
+  else if (file != "") { where = file }
+  else if (line != 0) { where = `line ${line}` }
+  if (where == "") { return `assert ${text}` }
+  return `${where}: assert ${text}`
+}
+
 fn v3_stmt(node: Any, indent: Int, counter: Int, acx: ACx) -> StmtOut {
   let step = value_str(value_field(node, "step"))
   let pad = ind(indent)
@@ -2095,12 +2108,14 @@ fn v3_stmt(node: Any, indent: Int, counter: Int, acx: ACx) -> StmtOut {
   if (step == "assert") {
     let e = value_field(node, "expr")
     let op = value_str(value_field(e, "op"))
-    if (a.test_mode) { return test_assert(e, pad, counter, a) }
+    if (a.test_mode) { return test_assert(node, e, pad, counter, a) }
     if (node_kind(e) == "bin" && list_contains(["==", "===", "!=", "!==", "<", ">", "<=", ">="], op)) {
       let left = expr(value_field(e, "left"), counter, a)
       let right = expr(value_field(e, "right"), left.counter, a)
       let tsop = ts_bin_op(op)
-      let shown = json_dumps(`${left.text} ${tsop} ${right.text}`)
+      var source = value_str(value_field(node, "source"))
+      if (source == "") { source = `${left.text} ${tsop} ${right.text}` }
+      let shown = json_dumps(assert_head(node, source))
       var condition = `$revl_l ${tsop} $revl_r`
       if (node_operands(e) == "Str" && is_relational(op)) {
         condition = `revlStrCmp($revl_l, $revl_r) ${tsop} 0`
@@ -2115,7 +2130,9 @@ fn v3_stmt(node: Any, indent: Int, counter: Int, acx: ACx) -> StmtOut {
       ], counter: right.counter }
     }
     let r = expr(e, counter, a)
-    return { lines: [`${pad}if (!(${r.text})) throw new Error("assertion failed")`], counter: r.counter }
+    var source = value_str(value_field(node, "source"))
+    if (source == "") { source = r.text }
+    return { lines: [`${pad}if (!(${r.text})) throw new Error(${json_dumps(assert_head(node, source))})`], counter: r.counter }
   }
   // item 379 / 391: bare loop control -> the host keyword (frame-neutral).
   if (step == "break") { return { lines: [`${pad}break`], counter: counter } }
@@ -2127,14 +2144,16 @@ fn v3_stmt(node: Any, indent: Int, counter: Int, acx: ACx) -> StmtOut {
 // (revl's `==` is IEEE on Float, which vitest's `toStrictEqual` is not) inside
 // vitest's `expect`, with the rendered source and both values in the message;
 // the message shows the SOURCE operator. Anything else is `toBeTruthy()`.
-fn test_assert(e: Any, pad: Str, counter: Int, a: ACx) -> StmtOut {
+fn test_assert(node: Any, e: Any, pad: Str, counter: Int, a: ACx) -> StmtOut {
   let op = value_str(value_field(e, "op"))
   if (node_kind(e) == "bin" && list_contains(["==", "===", "!=", "!=="], op)) {
     let left = expr(value_field(e, "left"), counter, a)
     let right = expr(value_field(e, "right"), left.counter, a)
     var want = "true"
     if (op == "!=" || op == "!==") { want = "false" }
-    let shown = json_dumps(`${left.text} ${op} ${right.text}`)
+    var source = value_str(value_field(node, "source"))
+    if (source == "") { source = `${left.text} ${op} ${right.text}` }
+    let shown = json_dumps(assert_head(node, source))
     return { lines: [
       `${pad}{ const $revl_l = ${left.text}, $revl_r = ${right.text};`,
       `${pad}  expect(revlEq($revl_l, $revl_r), ${shown} + "\n  left  = " + revlShow($revl_l) + "\n  right = " + revlShow($revl_r)).toBe(${want}) }`

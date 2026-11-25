@@ -523,7 +523,7 @@ def test_unfiltered_output_is_unchanged(tmp_path):
         "PASS one is one\n"
         "PASS two is two\n"
         "PASS empty body passes\n"
-        "FAIL fails on purpose: 1 == 2\n"
+        f"FAIL fails on purpose: {os.path.relpath(source, ROOT)}:5: assert 1 == 2\n"
         "  left  = 1\n"
         "  right = 2\n"
     )

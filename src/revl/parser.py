@@ -2262,6 +2262,9 @@ class ExprStmt:
 class AssertStmt:
     expr: object
     line: int
+    #: The revl text between `assert` and the expression's last token (issue
+    #: #3499), empty when the statement was synthesised rather than parsed.
+    source: str = ""
 
 
 @dataclass
@@ -2609,6 +2612,19 @@ def _component_header(name: str, requires: list, provides: list,
     return " ".join(parts) + " {"
 
 
+def _span_text(source: str, toks: list, start: int, end: int) -> str:
+    """The source between token indexes [`start`, `end`) (issue #3499)."""
+    if end <= start:
+        return ""
+    first, last = toks[start], toks[end - 1]
+    if first.start < 0 or last.end < first.start:
+        return ""
+    # `lex` drops a leading BOM before counting offsets; keep this source slice
+    # on the same origin.
+    base = 1 if source.startswith("\ufeff") else 0
+    return source[base + first.start:base + last.end]
+
+
 class Parser:
     def __init__(self, source: str, filename: str, line_offset: int = 0):
         self.filename = filename
@@ -2617,6 +2633,7 @@ class Parser:
         # every checker diagnostic on them carry the line the fragment occupies
         # in the real file instead of line 1 (issue #313).
         self.toks = lex(source, filename, line_offset=line_offset)
+        self._source = source
         # issue #1952: the lexer drops `//` comments, so the raw text is kept
         # (already split into lines, so a file with many operations is scanned
         # once, not once per operation) to recover the comment block directly
@@ -8514,7 +8531,10 @@ class Parser:
             # anything else is a pure Bool expression over the test's `let`
             # bindings; an unbound bare word is caught in lowering, where the
             # binding scope is known, and reported as an unknown assertion
-            return AssertStmt(self.pure_expr(), tok.line)
+            start = self.pos
+            expr = self.pure_expr()
+            return AssertStmt(expr, tok.line,
+                              _span_text(self._source, self.toks, start, self.pos))
         if tok.kind == "ident" and tok.value == "swap":
             # `swap C -> C2` cannot exist: G2 forbids two components in one
             # document from providing the same key, so a replacement provider
@@ -8838,7 +8858,10 @@ class Parser:
             return self.for_stmt()
         if tok.kind == "kw" and tok.value == "assert":
             self.next()
-            return AssertStmt(self.pure_expr(), tok.line)
+            start = self.pos
+            expr = self.pure_expr()
+            return AssertStmt(expr, tok.line,
+                              _span_text(self._source, self.toks, start, self.pos))
         if tok.kind == "kw" and tok.value in ("break", "continue"):
             return self._loop_control_stmt(tok)
         if tok.kind == "ident" and self._assign_ahead():
