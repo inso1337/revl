@@ -119,7 +119,10 @@ def _rpc(port, rpc_method, params=None, *, token=None, rid=1, headers=None,
         params["_meta"] = dict(meta)
     sent = {"MCP-Protocol-Version": PROTOCOL_VERSION, "Mcp-Method": rpc_method}
     if rpc_method == "tools/call":
-        sent["Mcp-Name"] = params.get("name", "")
+        # a well-behaved client names the verb the call RESOLVES to: through the
+        # `revl_verbs` hatch that is the inner verb, not the hatch (issue #3537)
+        from revl.mcp.disclosure import resolved_call
+        sent["Mcp-Name"] = resolved_call(params)[0] or ""
     sent.update(headers or {})
     return _send(port, {"jsonrpc": "2.0", "id": rid, "method": rpc_method,
                         "params": params}, token=token, headers=sent,
@@ -665,6 +668,52 @@ def test_resolved_call_sees_through_the_hatch():
     listy = {"name": "revl_verbs",
              "arguments": {"name": "revl_approve", "args": []}}
     assert resolved_call(listy)[0] == "revl_verbs"
+
+
+@needs_cordis
+def test_mcp_name_header_binds_the_verb_a_hatch_call_resolves_to(serving, fresh,
+                                                                tmp_path):
+    """Issue #3537: over HTTP the `Mcp-Name` header of a `revl_verbs` hatch
+    call is checked against the RESOLVED verb, not the hatch. A header naming
+    `revl_verbs` while the inner call is another verb is refused before
+    dispatch; naming the resolved verb is accepted, exactly as a direct call."""
+    _load_shout(fresh, quorum=True)
+    counting = _Counting(ServerDispatcher(server))
+    transport = serving(counting)
+    port = _port(transport)
+    sink = str(tmp_path / "q.log")
+    asked = _payload(port, "alice", "revl_call",
+                     {"key": "ops", "method": "shout", "args": [sink, "q"]})
+    ticket_hash = asked["ticket"]["hash"]
+    seen_before = list(counting.handled)
+    hatch = {"name": "revl_verbs",
+             "arguments": {"name": "revl_approve", "args": {"hash": ticket_hash}}}
+    # header names the hatch, inner verb is revl_approve: refused, and nothing
+    # new reaches the dispatcher
+    status, body, _ = _rpc(port, "tools/call", hatch, token=SECRETS["bob"],
+                           headers={"Mcp-Name": "revl_verbs"})
+    assert status == 400 and body["error"]["code"] == -32020, (status, body)
+    assert counting.handled == seen_before
+    assert [r for r in _wal(fresh) if r.get("record") == "quorum-vote"] == []
+    # header names the resolved verb: accepted and reaches the quorum code
+    status, body, _ = _rpc(port, "tools/call", hatch, token=SECRETS["bob"],
+                           headers={"Mcp-Name": "revl_approve"})
+    assert status == 200, (status, body)
+    assert body["result"]["structuredContent"]["ok"] is True
+    assert [(v["voter"], v["boundBy"]) for v in
+            _wal(fresh) if v.get("record") == "quorum-vote"] == [("bob", "transport")]
+    # a lookup-form hatch resolves to itself, so `revl_verbs` IS its name
+    status, body, _ = _rpc(port, "tools/call",
+                           {"name": "revl_verbs", "arguments": {"topic": "ops"}},
+                           token=SECRETS["alice"],
+                           headers={"Mcp-Name": "revl_verbs"})
+    assert status == 200, (status, body)
+    # a direct call keeps its existing binding: header must equal the tool name
+    status, body, _ = _rpc(port, "tools/call",
+                           {"name": "revl_state", "arguments": {}},
+                           token=SECRETS["alice"],
+                           headers={"Mcp-Name": "revl_verbs"})
+    assert status == 400 and body["error"]["code"] == -32020, (status, body)
 
 
 def test_a_hatch_estop_is_an_estop_for_the_profile_gate():
