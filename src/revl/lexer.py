@@ -676,10 +676,12 @@ def _reject_dollar_interpolation(text: str, line: int, filename: str) -> None:
         return
     raise RevlError(
         filename, line,
-        'a plain `"..."` string does not interpolate — the `${...}` is emitted '
-        "as literal text",
+        'a plain `"..."` string does not interpolate — a complete `${...}` in it '
+        "is refused, not emitted literally (issue #3502)",
         hint="interpolation needs a backtick template: write "
-             "`` `hi ${name}` `` (docs/strings.md)",
+             "`` `hi ${name}` ``; for literal `${...}` text (shell, JS, another "
+             "template) use a triple-quoted string `\"\"\"echo ${HOME}\"\"\"` "
+             "(docs/strings.md)",
     )
 
 

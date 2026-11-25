@@ -183,7 +183,12 @@ characters `a`, `\`, `n`, `b` (a backslash and an `n`), not a newline.
 A `$` is an **ordinary literal character** too (item 203): every `$`-shape
 inside a plain string (`$name`, `$$`, and the WAT/target fragments the
 self-host tiers emit like `"call $int_add"`) is literal text, because in
-2.0 interpolation lives *only* in backtick templates (`` `${name}` ``). The old
+2.0 interpolation lives *only* in backtick templates (`` `${name}` ``).
+One exception is **refused on purpose** (issue #3502): a *complete* `${...}`
+shape in a plain string is a likely forgotten backtick, so the lexer refuses
+it rather than emit it literally — write a backtick template to interpolate,
+or a triple-quoted `"""..."""` string for literal `${...}` text (shell, JS,
+another template quoted as data). The old
 1.x meanings (`$name` = interpolation, `$$` = an escaped dollar) are gone; a 1.x
 file still migrates with `revl fmt --migrate`, which rewrites `"$name"` to a
 template under a migrate-specific gate (a deliberate literal→interpolation
