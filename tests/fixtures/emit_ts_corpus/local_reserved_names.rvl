@@ -1,0 +1,8 @@
+// Locals named like the JS globals and emitted helpers that the checked Int
+// arithmetic reads bare (issue #3431). The reference renames each; the
+// self-hosted emitter must produce the same bytes.
+pub fn big(BigInt: Int) -> Int {
+  let revlI64 = (x: Int) => 7
+  let undefined = 3
+  return BigInt * 2 + revlI64(0) + undefined
+}

@@ -412,15 +412,24 @@ fn collides_with_module_name(name: Str) -> Bool {
   return false
 }
 
-// The module half of `_mangle_local` (issue #3127): a local spelled exactly
-// like one of the document's module-level names takes the spelling that name's
-// own read takes, because a read cannot tell the two apart. The rest of the
-// reference's local family (the globals and helpers a local would shadow, and
-// the document's escape rung) is not ported yet (issue #3179), so any other
-// local keeps the keyword ladder.
+// `_mangle_local`: a local spelled exactly like one of the document's
+// module-level names takes the spelling that name's own read takes, because a
+// read cannot tell the two apart. Any other local that would shadow a JS
+// global, a runtime import or an emitted helper takes the same one-rung escape
+// the reference's `_reserved_for_locals` family uses (issue #3431): a local
+// `BigInt`, `undefined` or `revlI64` is renamed before the emitted Int
+// arithmetic reads the global/helper of that spelling.
 fn local_ident(name: Str, module: Map[Str, Str]) -> Str {
   if (module.has(name)) { return mangle_module(name) }
-  return ident(name)
+  var root = name
+  while (root.length() > 0) {
+    if (is_js_reserved(root) || is_emitter_reserved(root) || module_reserved(root)) {
+      return name.concat("_")
+    }
+    if (root.charAt(root.length() - 1) != "_") { return name }
+    root = root.slice(0, root.length() - 1)
+  }
+  return name
 }
 
 // The document's module-level value names (`_module_value_names`): fns,
