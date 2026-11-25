@@ -28,8 +28,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl.compiler import compile_source  # noqa: E402
+from revl.errors import RevlError  # noqa: E402
 from revl.mcp.fillspec import enrich  # noqa: E402
 from revl.mcp.server import handle  # noqa: E402
+from revl.parser import parse_text  # noqa: E402
 
 
 def _call(tool: str, arguments: dict) -> dict:
@@ -196,7 +198,19 @@ def _idiom_names() -> list[str]:
 @pytest.mark.parametrize("name", _idiom_names())
 def test_every_served_idiom_compiles(name):
     served = _call("revl_idiom", {"name": name})["idiom"]
-    compile_source(served["example"], f"{name}.rvl")
+    example = served["example"]
+    try:
+        compile_source(example, f"{name}.rvl")
+    except RevlError as e:
+        # a composition-document idiom (e.g. `grant`) is refused BY NAME on the
+        # module path (issue #3532); it must still parse as a composition
+        # document - its rows resolve against real files, which a served
+        # sketch does not carry, so the parse is the compile check here
+        if "not a module" in e.message:
+            program = parse_text(example, f"{name}.rvl")
+            assert program.compositions, "the idiom must declare its composition"
+        else:
+            raise
 
 
 # ------------------------------------------------ the docs' scaffold example
