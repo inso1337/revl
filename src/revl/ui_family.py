@@ -234,7 +234,8 @@ def is_reserved(token: str) -> bool:
     SELECTOR (a `capability <glob>` policy rule, a `secret K for C` binding)
     does not come through here: this is the declaration-site check, and a
     policy written against a verb must keep working."""
-    return token.split(".", 1)[0] in ROOTS
+    from .emission_analysis import cap_head  # noqa: PLC0415 - lazy (parser imports this module)
+    return cap_head(token) in ROOTS
 
 
 def refusal(token: str, kind: str) -> tuple[str, str] | None:

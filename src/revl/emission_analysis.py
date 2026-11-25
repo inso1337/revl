@@ -56,11 +56,24 @@ def _is_async_fn_type(type_name: str | None) -> bool:
 _HOST_CONFINED_CAP_ROOTS = frozenset({"fs"})
 
 
+def cap_head(token: str) -> str:
+    """The capability head (first dotted segment) of a token, with any
+    item-294 parameter list stripped first: `model(calls=3)` -> `model`,
+    `model.complete(calls=3)` -> `model`, `db.insert` -> `db`, `fs` -> `fs`.
+
+    The ONE reader every scope-set check routes through (issue #3376): a
+    ceiling narrows a crossing's cone under the same scope, it does not change
+    the scope, so `model(calls=3)` still declares the `model` scope. The sink,
+    persistence and model-crossing readers all call this, so they cannot drift
+    apart again (#3194 fixed the persistence reader, #3376 the model one)."""
+    return token.split("(", 1)[0].split(".", 1)[0]
+
+
 def _cap_realm_root(token: str) -> str:
     """The realm root (first dotted segment) of a capability token, with any
     item-294 parameter list (`fs.write(path="…")`) stripped first. `net.api` ->
     `net`, `fs` -> `fs`, `fs.write(path="/d")` -> `fs`."""
-    return token.split("(", 1)[0].split(".", 1)[0]
+    return cap_head(token)
 
 
 def cap_scope_enumerated_not_run(caps) -> bool:

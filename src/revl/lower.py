@@ -15575,8 +15575,9 @@ def _crosses_computer_use(body: list, env: "Env") -> bool:
     verb. Additive: a method that crosses none carries no key, so every other
     program's IR is byte-identical."""
     from . import ui_family  # noqa: PLC0415 - leaf module, no cycle
+    from .emission_analysis import cap_head  # noqa: PLC0415 - lazy, avoids cycle
     _, caps = _method_emissions(body, env)
-    return any(cap.split(".", 1)[0] in ui_family.ROOTS for cap in caps
+    return any(cap_head(cap) in ui_family.ROOTS for cap in caps
                if isinstance(cap, str))
 
 
