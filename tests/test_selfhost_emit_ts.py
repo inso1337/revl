@@ -560,7 +560,6 @@ component Ledger provides store: Store {
     got = emitted["emit_ts_src"](ir)
     assert got == want
     # the same document with a non-scaffolding capture name is unchanged
-    source_cfg = source.replace("ctx", "cfg").replace("Cfg", "Cfg")
     ir2 = compile_source(source.replace("let ctx", "let cfg").replace("undo ctx", "undo cfg")
                          .replace("ctx.get", "cfg.get").replace("ctx.insert", "cfg.insert")
                          .replace("ctx.remove", "cfg.remove"), "capture_cfg.rvl")
