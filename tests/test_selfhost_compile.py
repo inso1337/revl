@@ -137,6 +137,14 @@ def compile_to(compile_rvl):
 
 
 @pytest.fixture(scope="module")
+def compile_to_at(compile_rvl):
+    """The path-taking native driver. A document's name is provenance the
+    emitters now print in assert diagnostics (issue #3499), so a byte-exact
+    comparison against `compile_files([path])` must pass the same path."""
+    return compile_rvl["compile_to_at"]
+
+
+@pytest.fixture(scope="module")
 def admit(compile_rvl):
     """The native frontend admission gate (verdict only)."""
     return compile_rvl["admit"]
@@ -284,7 +292,7 @@ def _fixture_path(subdir: str, name: str) -> Path:
     "tier,subdir,name", NATIVE_CORPUS_PARAMS,
     ids=[f"{t}:{n}" for t, _, n in NATIVE_CORPUS])
 def test_native_compile_is_byte_identical_with_no_reference(
-        compile_to, reference_emit, tier, subdir, name):
+        compile_to_at, reference_emit, tier, subdir, name):
     """THE HEADLINE. The whole chain, end to end, on one function document:
     ``compile_to(source, tier)`` — which runs lower_to_ir + emit_<tier>_src, both
     native, in one co-compiled revl artifact — produces the target source
@@ -297,8 +305,9 @@ def test_native_compile_is_byte_identical_with_no_reference(
     path = _fixture_path(subdir, name)
     source = path.read_text(encoding="utf-8")
 
-    # native output — source string in, target bytes out; nothing else touched
-    got = compile_to(source, tier)
+    # native output — source string in, target bytes out; the corpus path is
+    # provenance the assert diagnostics print, not an input to the compiler
+    got = compile_to_at(source, tier, str(path.relative_to(ROOT)))
     assert not got.startswith(("REFUSED|", "UNKNOWN_TIER|")), (
         f"native driver did not emit for {tier}:{name}: {got[:80]!r}")
 
@@ -314,7 +323,7 @@ def test_native_compile_is_byte_identical_with_no_reference(
     "tier,subdir,name", COMPONENT_CORPUS,
     ids=[f"{t}:{n}" for t, _, n in COMPONENT_CORPUS])
 def test_native_compile_of_component_program_is_byte_identical(
-        compile_to, reference_emit, tier, subdir, name):
+        compile_to_at, reference_emit, tier, subdir, name):
     """THE CAPSTONE (roadmap item 262). The whole chain, end to end, on a COMPONENT
     or extern document: ``compile_to(source, tier)`` — lower_to_ir + emit_<tier>_src,
     both native, one co-compiled artifact — produces the target source BYTE-FOR-BYTE
@@ -330,7 +339,7 @@ def test_native_compile_of_component_program_is_byte_identical(
     path = _fixture_path(subdir, name)
     source = path.read_text(encoding="utf-8")
 
-    got = compile_to(source, tier)
+    got = compile_to_at(source, tier, str(path.relative_to(ROOT)))
     assert not got.startswith(("REFUSED|", "UNKNOWN_TIER|")), (
         f"native driver did not emit for {tier}:{name}: {got[:80]!r}")
 
@@ -464,7 +473,7 @@ WIRED_TIER_CORPUS = (
     "tier,subdir,name", WIRED_TIER_CORPUS,
     ids=[f"{t}:{n}" for t, _, n in WIRED_TIER_CORPUS])
 def test_native_compile_on_the_tiers_wired_by_item_146(
-        compile_to, reference_emit, tier, subdir, name):
+        compile_to_at, reference_emit, tier, subdir, name):
     """The three tiers item 146 gap 2 admitted, held to the same standard as the
     first three: ``compile_to(source, tier)`` — native frontend, native IR
     producer, native emitter, ONE co-compiled revl artifact — produces the target
@@ -473,7 +482,7 @@ def test_native_compile_on_the_tiers_wired_by_item_146(
     path = _fixture_path(subdir, name)
     source = path.read_text(encoding="utf-8")
 
-    got = compile_to(source, tier)
+    got = compile_to_at(source, tier, str(path.relative_to(ROOT)))
     assert not got.startswith(("REFUSED|", "UNKNOWN_TIER|")), (
         f"native driver did not emit for {tier}:{name}: {got[:80]!r}")
 
@@ -962,7 +971,8 @@ def test_the_residual_is_located_in_lower_not_in_the_emitter(
             "IR, so this document is an EMITTER gap, not a lower.rvl gap — the "
             "emitter half of item 146 no longer holds over the enumerated corpus")
 
-        if compile_rvl["compile_to_at"](path.read_text(encoding="utf-8"), tier, str(path)) != want:
+        if compile_rvl["compile_to_at"](path.read_text(encoding="utf-8"), tier,
+                                        str(path.resolve().relative_to(ROOT))) != want:
             diverged.append(name)
 
     expected = list(LOWER_GAP_DOCS[tier])
@@ -2785,12 +2795,12 @@ _SECRET_DOCS = [("py", "emit_py_corpus"), ("ts", "emit_ts_corpus")]
 
 @pytest.mark.parametrize("tier,subdir", _SECRET_DOCS, ids=[t for t, _ in _SECRET_DOCS])
 def test_native_compile_carries_the_declared_secret_marking(
-        compile_to, reference_emit, tier, subdir):
+        compile_to_at, reference_emit, tier, subdir):
     """A program declaring `Secret[T]` compiles natively to the same bytes the
     reference compile produces — markings included."""
     path = _fixture_path(subdir, "secrets.rvl")
     source = path.read_text(encoding="utf-8")
-    got = compile_to(source, tier)
+    got = compile_to_at(source, tier, str(path.relative_to(ROOT)))
     assert not got.startswith(("REFUSED|", "UNKNOWN_TIER|")), got[:80]
     want = reference_emit[tier](compile_files([str(path)]))
     assert got == want

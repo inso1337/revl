@@ -1724,12 +1724,16 @@ fn dr_scan(node: Any, name: Str) -> DrScan {
   }
   if (!value_is_object(node)) { return { ok: true, lets: lets } }
   let keys = value_keys(node)
+  let nk = node_kind(node)
+  let st = value_str(value_field(node, "step"))
   for (k of keys) {
     if (k == name) { return { ok: false, lets: [] } }
+    // An assert's diagnostic provenance is presentation text, not a value the
+    // body reads: the author's `f['x']` spelling must not make every `f` field
+    // read look direct (issue #3499, matching the reference's skip).
+    if (st == "assert" && (k == "source" || k == "file")) { continue }
     let v = value_field(node, k)
     if (value_kind(v) == "str" && value_str(v) == name) {
-      let nk = node_kind(node)
-      let st = value_str(value_field(node, "step"))
       if (k == "name" && (nk == "var" || nk == "field")) { continue }
       if (k == "name" && (st == "let" || st == "assign") && list_contains(keys, "value") && !list_contains(keys, "op")) {
         lets = lets.push(node)
@@ -1809,7 +1813,11 @@ fn dr_tally(text: Str, counts: Map[Str, Any], delta: Int) -> Map[Str, Any] {
 fn dr_count(node: Any, counts: Map[Str, Any]) -> Map[Str, Any] {
   var out = counts
   if (value_is_object(node)) {
+    let st = value_str(value_field(node, "step"))
     for (k of value_keys(node)) {
+      // The assert provenance is presentation, not a reference the body makes
+      // (issue #3499; the reference skips the same keys).
+      if (st == "assert" && (k == "source" || k == "file")) { continue }
       out = dr_tally(k, out, 1)
       out = dr_count(value_field(node, k), out)
     }

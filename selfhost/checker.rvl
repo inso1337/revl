@@ -34,7 +34,7 @@
 // a plain-declared provision method whose body reaches an `emission`
 // extern (directly or through a named fn call chain) is refused.
 
-use "./lexer.rvl" { Token, lex_src }
+use "./lexer.rvl" { Token, lex_src, mk_tok }
 use "./parser.rvl" { Expr, ParamN, InitN, ArmN, PartN, CallN, FieldN,
                     parse_expr_str, is_bad, expr_at, params_at, type_at }
 // The stdlib kits (items 193/194) that replace this file's hand-rolled string
@@ -1656,7 +1656,7 @@ pub type Prog = { services: List[SvcD], fns: List[FnD], comps: List[CompD],
 // account). Total means total.
 fn tkc(ts: List[Token], i: Int) -> Token {
   if (i >= 0 && i < ts.length()) { return ts[i] }
-  return { kind: "eof", text: "", line: 0 }
+  return mk_tok("eof", "", 0)
 }
 
 fn atk(ts: List[Token], i: Int, k: Str) -> Bool { return tkc(ts, i).kind == k }

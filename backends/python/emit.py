@@ -1636,7 +1636,13 @@ def _dict_read_strings(node: Any, counts: dict) -> None:
     IR does not otherwise show. Any other string that happens to contain the
     name (a string literal, a test title) only costs the fast path."""
     if isinstance(node, dict):
+        # `assert` carries the author-facing `source` text (issue #3499). It is
+        # presentation, not a reference: the call it shows is already in `expr`,
+        # and counting the raw spelling again would open the fast path (#3407).
+        skip = {"source", "file"} if node.get("step") == "assert" else ()
         for k, v in node.items():
+            if k in skip:
+                continue
             _dict_read_tally(k, counts, 1)
             _dict_read_strings(v, counts)
     elif isinstance(node, list):

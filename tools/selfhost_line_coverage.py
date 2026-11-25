@@ -167,6 +167,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import copy
 import importlib.util
 import json
 import os
@@ -252,6 +253,56 @@ def corpus_documents(tier: str) -> list[Path]:
     directory = ROOT / "tests" / "fixtures" / f"emit_{tier}_corpus"
     return [directory / name
             for name in sorted(set(re.findall(r'"([^"]+\.rvl)"', block.group(1))))]
+
+
+
+
+def _has_assert_step(ir: dict) -> bool:
+    """True when the IR carries at least one assert statement."""
+    def walk(node) -> bool:
+        if isinstance(node, dict):
+            if node.get("step") == "assert":
+                return True
+            return any(walk(value) for value in node.values())
+        if isinstance(node, list):
+            return any(walk(value) for value in node)
+        return False
+
+    return walk(ir)
+
+
+def legacy_assert_variants(ir: dict):
+    """The same document as a pre-#3499 IR, with assert provenance stripped.
+
+    Current lowering always stamps `file`, `line` and `source` onto an assert
+    step, so no corpus document can reach the reference emitter's old-message
+    fallbacks. Those fallbacks are still supported input (an IR produced before
+    #3499), and the self-host port mirrors them; drive the variants so the
+    statements are measured, and keep
+    `tests/test_selfhost_emit_<tier>.py` asserting byte agreement on the same
+    variants. `source` goes in every variant; `file`/`line` vary to exercise the
+    file-only and line-only heads as well as the no-provenance head."""
+    def strip(step: dict, keep_file: bool, keep_line: bool) -> None:
+        step.pop("source", None)
+        if not keep_file:
+            step.pop("file", None)
+        if not keep_line:
+            step.pop("line", None)
+
+    def walk(node, keep_file: bool, keep_line: bool) -> None:
+        if isinstance(node, dict):
+            if node.get("step") == "assert":
+                strip(node, keep_file, keep_line)
+            for value in node.values():
+                walk(value, keep_file, keep_line)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value, keep_file, keep_line)
+
+    for keep_file, keep_line in ((True, False), (False, True), (False, False)):
+        variant = copy.deepcopy(ir)
+        walk(variant, keep_file, keep_line)
+        yield variant
 
 
 def refusal_documents(tier: str) -> list[Path]:
@@ -541,8 +592,13 @@ def measure_selfhost() -> dict:
             cov.start()
             try:
                 with selfhost_module(tier, reference, scratch) as (module, _):
+                    entry = _entry(module, tier)
                     for document in corpus_documents(tier):
-                        _entry(module, tier)(compile_files([str(document)]))
+                        ir = compile_files([str(document)])
+                        entry(ir)
+                        if _has_assert_step(ir):
+                            for variant in legacy_assert_variants(ir):
+                                entry(variant)
                     # The refusal corpus, driven the same way and NOT wrapped.
                     # The port's contract on a document the reference refuses is
                     # to answer it by name, not to crash: a traceback out of here

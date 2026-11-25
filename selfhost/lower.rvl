@@ -231,7 +231,7 @@
 // tag and the message; for the code-less refusals ("SPAWN"/"HANDOFF"/"ROUTE" and
 // the code-less "G1"/"PRELUDE" families) the message text is the ground truth.
 
-use "./lexer.rvl" { Token, lex_src }
+use "./lexer.rvl" { Token, lex_src, lex_src_at, mk_tok, tok_reline }
 use "./parser.rvl" { Expr, ParamN, InitN, ArmN, PartN, CallN, FieldN,
                     is_bad, expr_at, params_at, fn_params_at, param_defaults_at, ParamDflt,
                     type_at, nesting_limit,
@@ -457,7 +457,22 @@ type Prog = { fns: List[FnD], svcs: List[SvcD], comps: List[CompD], bad: Str }
 // by tools/fuzz_frontend.py; the reproducer is `fn t])->t[`.
 fn tkc(ts: List[Token], i: Int) -> Token {
   if (i >= 0 && i < ts.length()) { return ts[i] }
-  return { kind: "eof", text: "", line: 0 }
+  return mk_tok("eof", "", 0)
+}
+
+// The exact source text between token indexes [start, end): the first token's
+// spelling, then each following token's preceding gap and spelling. `lex_src`
+// records both, so a lowering path holding only the token stream can still
+// quote the author's assertion (issue #3499).
+fn span_text(ts: List[Token], start: Int, end: Int) -> Str {
+  if (end <= start) { return "" }
+  var out = ts[start].raw
+  var k = start + 1
+  while (k < end) {
+    out = out.concat(ts[k].before).concat(ts[k].raw)
+    k += 1
+  }
+  return out
 }
 
 fn atk(ts: List[Token], i: Int, k: Str) -> Bool { return tkc(ts, i).kind == k }
@@ -2315,7 +2330,7 @@ fn ba_tail_start(ts: List[Token], lo: Int, hi: Int) -> Int {
 }
 
 fn ba_tok(kind: Str, line: Int) -> Token {
-  return { kind: kind, text: kind, line: line }
+  return mk_tok(kind, kind, line)
 }
 
 fn ba_append(a: List[Token], bs: List[Token]) -> List[Token] {
@@ -2334,7 +2349,7 @@ fn ba_one_line(xs: List[Token], line: Int) -> List[Token] {
   var out: List[Token] = []
   var i = 0
   while (i < xs.length()) {
-    out = out.push({ kind: xs[i].kind, text: xs[i].text, line: line })
+    out = out.push(tok_reline(xs[i], line))
     i += 1
   }
   return out
@@ -12690,7 +12705,7 @@ fn ends_expr(t: Token) -> Bool {
 // this. `tkc` itself is left alone: its other callers never index backwards,
 // and widening it would be a behaviour change outside this slice.
 fn tkl(ts: List[Token], i: Int) -> Token {
-  if (i < 0) { return { kind: "eof", text: "", line: 0 } }
+  if (i < 0) { return mk_tok("eof", "", 0) }
   return tkc(ts, i)
 }
 
@@ -29407,8 +29422,12 @@ fn cir_setup_stmt(ts: List[Token], lo: Int, cx: CCtx, sc: List[Bind],
     if (is_bad(r.e) || r.i <= lo + 1) { return bad_setup() }
     let ae = cir_expr(r.e, sc, hostSc, cx)
     if (!ae.ok) { return bad_setup() }
-    return { ok: true,
-             js: "{\"step\": \"assert\", \"expr\": ".concat(ae.js).concat("}"),
+    let at = tkc(ts, lo)
+    let js = "{\"step\": \"assert\", \"expr\": ".concat(ae.js)
+      .concat(", \"file\": ").concat(jstr(at.file))
+      .concat(", \"line\": ").concat(at.line.to_str())
+      .concat(", \"source\": ").concat(jstr(span_text(ts, lo + 1, r.i))).concat("}")
+    return { ok: true, js: js,
              e: Bad(""), isExpr: false, sc: sc, muts: muts, i: r.i }
   }
   if (atw(ts, lo, "if")) {
@@ -34228,8 +34247,11 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
   if (t.kind == "kw" && t.text == "assert") {
     let r = expr_at(ts, i + 1)
     if (is_bad(r.e) || r.i <= i + 1) { return mk_one("", env, muts, hi) }
-    return mk_one("{\"step\":\"assert\",\"expr\":".concat(lir_expr(r.e, env, al)).concat("}"),
-                  env, muts, r.i)
+    let js = "{\"step\":\"assert\",\"expr\":".concat(lir_expr(r.e, env, al))
+      .concat(",\"file\":").concat(jstr(t.file))
+      .concat(",\"line\":").concat(t.line.to_str())
+      .concat(",\"source\":").concat(jstr(span_text(ts, i + 1, r.i))).concat("}")
+    return mk_one(js, env, muts, r.i)
   }
   // item 379 / 391: bare loop control. Additive step kinds, no payload but a
   // `line` for diagnostics (the reference `_lower_pure_stmt` carries `line` on
@@ -34723,7 +34745,7 @@ fn lift_rw(ts: List[Token], lo: Int, hi: Int, env: List[Bind], marks: Map[Str, I
       if (lift_under_arm(opens, scrut)) { return { toks: [], orig: [], blobs: [], ok: false } }
       let a = lift_arm(ts, i, e, mget_int(scrut, b.to_str()) - 1, env, marks, births, al)
       if (!a.ok) { return { toks: [], orig: [], blobs: [], ok: false } }
-      out = out.push(t).push({ kind: "ident", text: lift_ph(i), line: t.line })
+      out = out.push(t).push(mk_tok("ident", lift_ph(i), t.line))
       orig = orig.push(i).push(0 - 1)
       blobs = blobs.push({ name: lift_ph_json(i), ty: a.blob })
       i = e
@@ -36161,8 +36183,12 @@ fn lir_life_step(ts: List[Token], i: Int, hi: Int, env: List[Bind],
     }
     let r = expr_at(ts, i + 1)
     if (is_bad(r.e) || r.i <= i + 1) { return life_fail(env) }
-    return life_step("{\"step\": \"assert\", \"expr\": "
-      .concat(lir_expr(r.e, env, al)).concat("}"), r.i, env)
+    let js = "{\"step\": \"assert\", \"expr\": "
+      .concat(lir_expr(r.e, env, al))
+      .concat(", \"file\": ").concat(jstr(t.file))
+      .concat(", \"line\": ").concat(t.line.to_str())
+      .concat(", \"source\": ").concat(jstr(span_text(ts, i + 1, r.i))).concat("}")
+    return life_step(js, r.i, env)
   }
   return life_fail(env)
 }
@@ -36525,7 +36551,7 @@ pub fn lower_to_ir_at(src: Str, fname: Str) -> Str {
 // containing root, `sha256` of the bytes, install-origin `root` kind) is the
 // driver's `ref_probe`; this entry only stamps what it is handed.
 pub fn lower_to_ir_refs_at(src: Str, fname: Str, rows: List[Str]) -> Str {
-  let ts = lex_src(src)
+  let ts = lex_src_at(src, fname)
   // The transparent aliases this program declares, resolved ONCE and threaded
   // into every declaration reader below. `_resolve_type_aliases` runs once over
   // the whole program on the reference side too, ahead of the type table and the
@@ -39671,7 +39697,7 @@ test "lower_to_ir keeps both fns around a one-line named test block" {
   // named spelling this dropped `two` from the IR entirely, silently. The
   // `tests` section is now emitted too, byte-identical to the reference.
   assert lower_to_ir("""fn one() -> Int { return 1 } test "t" { assert one() == 1 } fn two() -> Int { return 2 }""")
-    == """{"ir_version": 3, "services": {}, "components": [], "functions": [{"name":"one","params":[],"returns":"Int","public":false,"body":[{"step":"return","expr":{"kind":"lit","value":1}}]},{"name":"two","params":[],"returns":"Int","public":false,"body":[{"step":"return","expr":{"kind":"lit","value":2}}]}], "tests": [{"name": "t", "body": [{"step":"assert","expr":{"kind":"bin","op":"==","left":{"kind":"call","callee":{"kind":"var","name":"one"},"args":[]},"right":{"kind":"lit","value":1}}}]}]}"""
+    == """{"ir_version": 3, "services": {}, "components": [], "functions": [{"name":"one","params":[],"returns":"Int","public":false,"body":[{"step":"return","expr":{"kind":"lit","value":1}}]},{"name":"two","params":[],"returns":"Int","public":false,"body":[{"step":"return","expr":{"kind":"lit","value":2}}]}], "tests": [{"name": "t", "body": [{"step":"assert","expr":{"kind":"bin","op":"==","left":{"kind":"call","callee":{"kind":"var","name":"one"},"args":[]},"right":{"kind":"lit","value":1}},"file":"<string>","line":1,"source":"one() == 1"}]}]}"""
 }
 
 test "lower_to_ir lowers a config read in a provide method (component spine)" {

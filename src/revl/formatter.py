@@ -631,8 +631,26 @@ def _finalize(lines: list[str]) -> str:
 # --------------------------------------------------------------------------
 
 def _canonical_ir(ir: dict) -> str:
-    """A byte-stable canonical string for an IR document."""
-    return json.dumps(ir, sort_keys=True, ensure_ascii=False)
+    """A byte-stable canonical string for an IR document.
+
+    `assert` steps carry the author-facing `file`/`line`/`source` diagnostics
+    (issue #3499). They are presentation only: no checker or emitter reads them
+    to decide meaning, and a formatter that collapses blank lines legitimately
+    moves a statement to another line. Excluding them here keeps the IR
+    identity gate about compiled meaning rather than about where the assertion
+    happened to sit in the source.
+    """
+    def strip_location(node):
+        if isinstance(node, dict):
+            if node.get("step") == "assert":
+                node = {k: v for k, v in node.items()
+                        if k not in ("file", "line", "source")}
+            return {k: strip_location(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [strip_location(v) for v in node]
+        return node
+
+    return json.dumps(strip_location(ir), sort_keys=True, ensure_ascii=False)
 
 
 def _token_signature(source: str, filename: str):

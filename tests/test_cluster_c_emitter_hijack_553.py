@@ -1000,7 +1000,9 @@ _A3_PLAIN_DIGEST = {
     # driver's runtime-helper imports to the same sigil and its load handle to
     # `$revl_f`. A program with no lifecycle test, or a binding outside that
     # driver, is unchanged.
-    "typescript": "ed679cf45dd83655fa7d7a8935ef7e63a53cf8d8033f502e5364a5edf9a95f77",
+    # issue #3499 made a failing assert name its source line, so every
+    # test-bearing module moves; this fixture carries two tests.
+    "typescript": "157c0a333e96cd7938a90924816999d0318ddcd36af65969b53b662b5bdb5390",
     "java": "954352a27d29f3ce72adbad77ae1ff2921899db6c2255d91a4f454c165149310",
 }
 
