@@ -4100,10 +4100,12 @@ fn p_route_stmt(ts: List[Token], i: Int, end: Int, provh: List[Bind],
                        setup, iso, rts, icept, hoff, action)
   }
   if (rc.strat != "" && !contains(known_strategies(), rc.strat)) {
-    // issue #3360: the route is kept, as lower.py's header stub keeps it, so
+    // issues #3360/#3481: the refused route is kept, and every later route over
+    // a required key is carried too, as lower.py's header stub carries them, so
     // the refused router is still a router and draws no G3 self-cycle
-    return mk_refuse(provs, setup, iso,
-      rts.push({ key: key, rlms: rc.rlms, strat: "" }),
+    let rs = rts.push({ key: key, rlms: rc.rlms, strat: "" })
+    let all = route_stub_scan(ts, rc.i, end, reqh, rs)
+    return mk_refuse(provs, setup, iso, all,
       tagged("ROUTE", route_strategy_msg(rc.strat, key, cname)), ts, i)
   }
   return p_comp_body(ts, rc.i, end, provh, reqh, cname, provs, setup, iso,
@@ -4111,6 +4113,37 @@ fn p_route_stmt(ts: List[Token], i: Int, end: Int, provh: List[Bind],
                      icept, hoff, action)
 }
 
+
+// Issue #3481: when a route is refused for an unknown strategy, the reference's
+// header stub still carries every OTHER multi-realm route over a required key
+// from the parsed component body, so the refused component remains a router and
+// no G3 self-cycle is fabricated. Scan the rest of the body for those routes
+// before returning the strategy refusal. Only top-level statements are read; a
+// brace (a `provide` block or a setup guard) is skipped whole, as `comp.body`
+// holds the component's own statements rather than a nested block's.
+fn route_stub_scan(ts: List[Token], i: Int, end: Int, reqh: List[Bind],
+                   rts: List[Route]) -> List[Route] {
+  if (i >= end) { return rts }
+  if (atw(ts, i, "isolate")) {
+    let kl = qkey_len(ts, i + 1)
+    if (atw(ts, i + 1 + kl, "in") && ati(ts, i + 2 + kl, "realms")) {
+      let key = qkey_text(ts, i + 1)
+      let rc = p_route_clause(ts, i + 2 + kl)
+      if (rc.ok) {
+        let nrs = bind_has(reqh, key) && !routes_has(rts, key, 0)
+          ? rts.push({ key: key, rlms: rc.rlms, strat: "" })
+          : rts
+        return route_stub_scan(ts, rc.i, end, reqh, nrs)
+      }
+    }
+    return route_stub_scan(ts, skip_line(ts, i), end, reqh, rts)
+  }
+  if (atk(ts, i, "{")) {
+    let e = close_brace(ts, i)
+    if (e != 0 - 1) { return route_stub_scan(ts, e + 1, end, reqh, rts) }
+  }
+  return route_stub_scan(ts, i + 1, end, reqh, rts)
+}
 // The realm a component resolves `key` in: its isolate binding, else shared.
 fn realm_of(iso: List[ProvKey], key: Str, i: Int) -> Str {
   if (i >= iso.length()) { return "" }

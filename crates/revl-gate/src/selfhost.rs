@@ -12234,9 +12234,36 @@ fn p_route_stmt(ts: Vec<Token>, i: i64, end: i64, provh: &[Bind], reqh: &[Bind],
         return p_comp_body(ts.clone(), skip_line(&ts, i), end, provh, reqh, cname, provs, setup, iso, rts, icept, hoff, action);
     }
     if ((rc.strat != "") && (!contains__m2(&known_strategies(), &rc.strat))) {
-        return mk_refuse(provs, setup, iso, rts.revl_push(Route { key: key.clone(), rlms: rc.rlms.clone(), strat: String::from("") }), tagged("ROUTE", &route_strategy_msg(&rc.strat, &key, cname)), &ts, i);
+        let rs = rts.revl_push(Route { key: key.clone(), rlms: rc.rlms.clone(), strat: String::from("") });
+        let all = route_stub_scan(&ts, rc.i, end, reqh, rs.clone());
+        return mk_refuse(provs, setup, iso, all, tagged("ROUTE", &route_strategy_msg(&rc.strat, &key, cname)), &ts, i);
     }
     return p_comp_body(ts, rc.i, end, provh, reqh, cname, provs, setup, iso, rts.revl_push(Route { key: key, rlms: rc.rlms.clone(), strat: rc.strat.clone() }), icept, hoff, action);
+}
+
+fn route_stub_scan(ts: &[Token], i: i64, end: i64, reqh: &[Bind], rts: Vec<Route>) -> Vec<Route> {
+    if (i >= end) {
+        return rts;
+    }
+    if atw(ts, i, "isolate") {
+        let kl = qkey_len(ts, (i).checked_add(1i64).expect("revl: Int overflow"));
+        if (atw(ts, ((i).checked_add(1i64).expect("revl: Int overflow")).checked_add(kl).expect("revl: Int overflow"), "in") && ati(ts, ((i).checked_add(2i64).expect("revl: Int overflow")).checked_add(kl).expect("revl: Int overflow"), "realms")) {
+            let key = qkey_text(ts, (i).checked_add(1i64).expect("revl: Int overflow"));
+            let rc = p_route_clause(ts, ((i).checked_add(2i64).expect("revl: Int overflow")).checked_add(kl).expect("revl: Int overflow"));
+            if rc.ok {
+                let nrs = if (bind_has(reqh, &key) && (!routes_has(&rts, &key, 0i64))) { rts.revl_push(Route { key: key.clone(), rlms: rc.rlms.clone(), strat: String::from("") }) } else { rts.clone() };
+                return route_stub_scan(ts, rc.i, end, reqh, nrs);
+            }
+        }
+        return route_stub_scan(ts, skip_line(ts, i), end, reqh, rts);
+    }
+    if atk(ts, i, "{") {
+        let e = close_brace(ts, i);
+        if (e != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            return route_stub_scan(ts, (e).checked_add(1i64).expect("revl: Int overflow"), end, reqh, rts);
+        }
+    }
+    return route_stub_scan(ts, (i).checked_add(1i64).expect("revl: Int overflow"), end, reqh, rts);
 }
 
 fn realm_of(iso: &[ProvKey], key: &str, i: i64) -> String {
