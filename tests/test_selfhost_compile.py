@@ -1670,14 +1670,15 @@ def test_native_driver_resolves_a_use_on_the_import_path(
     assert got == want
 
 
-def test_native_driver_does_not_yet_refuse_a_bare_private_call_3004(
+def test_native_driver_refuses_a_bare_private_call_3004_3544(
         compile_rvl, tmp_path, monkeypatch):
-    """Issue #3004, pinned self-host gap: the reference refuses a BARE call to
-    another module's non-`pub` fn as module-private (G1), as it refuses the
-    named import of it. The native driver does not yet: its module admission
-    (`ad_imports_refusal`, selfhost/compile.rvl) reads only the names a `use`
-    list spells, and selfhost/lower.rvl's name resolver switches off for a text
-    with a `use`. This test turns red when the rule is ported; flip it then."""
+    """Issues #3004/#3544: the reference refuses a BARE call to another
+    module's non-`pub` fn as module-private (G1), as it refuses the named
+    import of it. The native driver now refuses it the same way:
+    `ad_bare_private_refusal`/`ad_priv_rewrite` (selfhost/compile.rvl) check
+    the document's own IR and rewrite the gate's requirement sentence when the
+    name is a pure dependency's private declaration, because the gate's name
+    resolver switches off for a text with a `use`."""
     monkeypatch.delenv("REVL_IMPORT_PATH", raising=False)
     # `one` is imported so lib.rvl's pure declarations join the program; a
     # module reached only for a service contributes no fn at all
@@ -1690,7 +1691,89 @@ def test_native_driver_does_not_yet_refuse_a_bare_private_call_3004(
     with pytest.raises(RevlError, match="`helper` is module-private in"):
         compile_files([str(doc)])
     got = compile_rvl["compile_to_at"](doc.read_text(encoding="utf-8"), "py", str(doc))
-    assert "module-private" not in got, got[:300]
+    assert got.startswith("REFUSED|G1|"), got[:200]
+    assert "`helper` is module-private in" in got, got[:300]
+    assert "cannot be imported (G1)" in got, got[:300]
+
+
+def test_native_driver_refuses_a_bare_private_call_in_a_fn_body_3544(
+        compile_rvl, tmp_path, monkeypatch):
+    """Issue #3544, the fn-body shape: a bare `helper(one())` in a `fn` body is
+    module-private G1 on both engines — the driver used to emit it (the link
+    carried the extern in), because the gate's resolver is off for a `use`
+    text."""
+    monkeypatch.delenv("REVL_IMPORT_PATH", raising=False)
+    (tmp_path / "lib.rvl").write_text(
+        _LIB_STORE + "pub fn one() -> Int { return 1 }\n"
+        "fn helper(x: Int) -> Int { return x }\n", encoding="utf-8")
+    doc = tmp_path / "doc.rvl"
+    doc.write_text('use "./lib.rvl" { Store, one }\n\n'
+                   'pub fn f() -> Int { return helper(one()) }\n', encoding="utf-8")
+    with pytest.raises(RevlError, match="`helper` is module-private in"):
+        compile_files([str(doc)])
+    got = compile_rvl["compile_to_at"](doc.read_text(encoding="utf-8"), "py", str(doc))
+    assert got.startswith("REFUSED|G1|"), got[:200]
+    assert "`helper` is module-private in" in got, got[:300]
+
+
+def test_native_driver_refuses_a_bare_private_extern_call_3544(
+        compile_rvl, tmp_path, monkeypatch):
+    """Issue #3544, the extern shape: a bare call to a used module's non-`pub`
+    extern is module-private G1 — the driver used to LINK the extern in and
+    emit the call, a false accept the reference never makes."""
+    monkeypatch.delenv("REVL_IMPORT_PATH", raising=False)
+    (tmp_path / "lib.rvl").write_text(
+        _LIB_STORE
+        + "pub extern pure fn open(p: Str) -> Int = @py { return 1 }\n"
+        + "extern pure fn raw(p: Str) -> Int = @py { return 2 }\n",
+        encoding="utf-8")
+    doc = tmp_path / "doc.rvl"
+    doc.write_text('use "./lib.rvl" { Store, open }\n\n'
+                   'pub fn f() -> Int { return raw("x") + open("y") }\n',
+                   encoding="utf-8")
+    with pytest.raises(RevlError, match="`raw` is module-private in"):
+        compile_files([str(doc)])
+    got = compile_rvl["compile_to_at"](doc.read_text(encoding="utf-8"), "py", str(doc))
+    assert got.startswith("REFUSED|G1|"), got[:200]
+    assert "`raw` is module-private in" in got, got[:300]
+
+
+def test_native_driver_keeps_the_generic_g1_for_a_service_only_use_3544(
+        compile_rvl, tmp_path, monkeypatch):
+    """Issue #3544, the boundary: a module `use`d for its service ALONE is not
+    a pure dependency, so the reference does not put its private names in its
+    `module_private` map — a bare read of one draws the generic G1, which the
+    driver now spells too (not the module-private sentence)."""
+    monkeypatch.delenv("REVL_IMPORT_PATH", raising=False)
+    (tmp_path / "lib.rvl").write_text(
+        _LIB_STORE + "fn helper(x: Int) -> Int { return x }\n", encoding="utf-8")
+    doc = tmp_path / "doc.rvl"
+    doc.write_text('use "./lib.rvl" { Store }\n\n'
+                   'pub fn f() -> Int { return helper(1) }\n', encoding="utf-8")
+    with pytest.raises(RevlError, match="`helper` is not declared in this function"):
+        compile_files([str(doc)])
+    got = compile_rvl["compile_to_at"](doc.read_text(encoding="utf-8"), "py", str(doc))
+    assert got == "REFUSED|G1|`helper` is not declared in this function", got[:200]
+
+
+def test_native_driver_admits_a_pub_extern_call_3544(
+        compile_rvl, tmp_path, monkeypatch):
+    """Positive control for the bare-private check (over a linkable module —
+    externs and a service only): a call to an imported `pub extern` is
+    admitted and emitted, as the reference admits it."""
+    monkeypatch.delenv("REVL_IMPORT_PATH", raising=False)
+    (tmp_path / "lib.rvl").write_text(
+        _LIB_STORE
+        + "pub extern pure fn open(p: Str) -> Int = @py { return 1 }\n"
+        + "extern pure fn raw(p: Str) -> Int = @py { return 2 }\n",
+        encoding="utf-8")
+    doc = tmp_path / "doc.rvl"
+    doc.write_text('use "./lib.rvl" { Store, open }\n\n'
+                   'pub fn f() -> Int { return open("y") }\n', encoding="utf-8")
+    compile_files([str(doc)])
+    got = compile_rvl["compile_to_at"](doc.read_text(encoding="utf-8"), "py", str(doc))
+    assert not got.startswith("REFUSED"), got[:200]
+
 
 
 def test_native_import_check_passes_every_stdlib_and_truc_module(compile_rvl):

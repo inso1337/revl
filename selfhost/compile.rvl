@@ -96,7 +96,7 @@ use "./emit_go.rvl" { emit_go_src }
 use "./emit_java.rvl" { emit_java_src }
 use "./emit_wasm.rvl" { emit_wasm_src }
 use "../stdlib/json.rvl" { json_parse }
-use "../stdlib/value.rvl" { value_field, value_has, value_list, value_str }
+use "../stdlib/value.rvl" { value_field, value_has, value_keys, value_list, value_str }
 use "../stdlib/str.rvl" { str_newline, str_tab }
 
 // The tiers whose self-host emitter is byte-exact against its reference on this
@@ -2647,6 +2647,187 @@ fn ad_imports_refusal(source: Str, path: Str) -> Str {
   return ""
 }
 
+// Issue #3544 (the bare-reference half of #3004). `pure` is the reference's
+// `module_private` map — {bare name: declaring module} for every non-`pub`
+// `fn`/`extern` of a module the document `use`s for something other than a
+// service alone (a PURE dependency, the reference's `included` set). `soft`
+// holds the private names of modules reached only through a service import:
+// the reference does not put those in its map, so a bare read of one draws the
+// generic G1 instead of the module-private sentence. Both minus a name any
+// module of the closure declares `pub` (that body is missing an import, not
+// reaching into another module's implementation) and minus any name the
+// document itself declares (the composition's own name is in scope where read).
+// Walked breadth first exactly like `ad_imports_refusal`.
+type AdPriv = { pmap: Map[Str, Str], soft: List[Str] }
+
+fn ad_private_map(source: Str, path: Str) -> AdPriv {
+  if (path == "") { return { pmap: Map.empty(), soft: [] } }
+  var pubs: List[Str] = []
+  var paths: List[Str] = [path]
+  var srcs: List[Str] = [source]
+  var ispure: List[Bool] = [true]
+  var q = 0
+  while (q < paths.length()) {
+    let ts = lex_src(srcs[q])
+    var depth = 0
+    var i = 0
+    while (i < ts.length()) {
+      let k = ts[i].kind
+      if ((k == "{") || (k == "[") || (k == "(")) { depth += 1 }
+      if ((k == "}") || (k == "]") || (k == ")")) { depth -= 1 }
+      if ((depth == 0) && ad_kw(ts, i, "use") && ad_kind(ts, i + 1, "string")) {
+        let dep = module_path(paths[q], ts[i + 1].text)
+        if ((dep != "") && !ul_has(paths, dep)) {
+          let dep_src = read_module_text(dep)
+          let dep_ir = lower_to_ir(dep_src)
+          // a `use` name that is not a service of the module makes the module
+          // a pure dependency (the reference's `pure_dependencies`), exactly
+          // as `ul_pure_deps` decides for the link
+          var dep_pure = false
+          var j = i + 3
+          while (ad_kind(ts, j, "ident")) {
+            if (ul_service_entry(dep_ir, ts[j].text) == "") { dep_pure = true }
+            j += 1
+            if (ad_kind(ts, j, ",")) { j += 1 }
+          }
+          paths = paths.push(dep)
+          srcs = srcs.push(dep_src)
+          ispure = ispure.push(dep_pure)
+        }
+      }
+      i += 1
+    }
+    q += 1
+  }
+  var out_pure = Map.empty()
+  var out_soft: List[Str] = []
+  var m = 1
+  while (m < paths.length()) {
+    let decls = ad_decls(lex_src(srcs[m]))
+    var v = 0
+    while (v < decls.values.length()) { pubs = pubs.push(decls.values[v])  v += 1 }
+    let names = decls.fns.concat(decls.externs)
+    var n = 0
+    while (n < names.length()) {
+      if (!ul_has(decls.open, names[n])) {
+        if (ispure[m]) { out_pure = out_pure.set(names[n], paths[m]) }
+        else { out_soft = out_soft.push(names[n]) }
+      }
+      n += 1
+    }
+    m += 1
+  }
+  let own = ad_decls(lex_src(source))
+  var w = 0
+  while (w < own.values.length()) { pubs = pubs.push(own.values[w])  w += 1 }
+  var pmap = Map.empty()
+  let pk = out_pure.keys()
+  var a = 0
+  while (a < pk.length()) {
+    let nm = pk[a]
+    if (!ul_has(pubs, nm) && !ul_has(own.vnames, nm)) {
+      pmap = pmap.set(nm, out_pure.lookup(nm) ?? "")
+    }
+    a += 1
+  }
+  var soft: List[Str] = []
+  var s2 = 0
+  while (s2 < out_soft.length()) {
+    let nm = out_soft[s2]
+    if (!ul_has(pubs, nm) && !ul_has(own.vnames, nm)) { soft = soft.push(nm) }
+    s2 += 1
+  }
+  return { pmap: pmap, soft: soft }
+}
+
+// The first `call`/`var` node under `node` naming a private declaration of a
+// used module, spelled as the reference spells it: the module-private G1 for a
+// pure dependency's name, the generic G1 when `useSoft` (a service-only
+// import's private name is not in the reference's map), or "".
+// `value_keys`/`value_list` answer [] on any other JSON shape, so the walk is
+// total over the parsed IR.
+fn ad_priv_walk(node: Any, priv: AdPriv, useSoft: Bool, depth: Int) -> Str {
+  if (depth > 60) { return "" }
+  let ks = value_keys(node)
+  var i = 0
+  while (i < ks.length()) {
+    let k = ks[i]
+    let v = value_field(node, k)
+    let kind = value_str(value_field(node, "kind"))
+    if ((k == "name") && ((kind == "call") || (kind == "var"))) {
+      let nm = value_str(v)
+      if (priv.pmap.has(nm)) {
+        return "G1|`".concat(nm).concat("` is module-private in `")
+          .concat(priv.pmap.lookup(nm) ?? "").concat("` and cannot be imported (G1)")
+      }
+      if (useSoft && ul_has(priv.soft, nm)) {
+        return "G1|`".concat(nm).concat("` is not declared in this function")
+      }
+    }
+    let r = ad_priv_walk(v, priv, useSoft, depth + 1)
+    if (r != "") { return r }
+    i += 1
+  }
+  let ls = value_list(node)
+  var j = 0
+  while (j < ls.length()) {
+    let r = ad_priv_walk(ls[j], priv, useSoft, depth + 1)
+    if (r != "") { return r }
+    j += 1
+  }
+  return ""
+}
+
+// The bare-reference check of issue #3544: the gate's name resolver switches
+// off for a text with a `use`, so the document read alone admits a bare call
+// to a used module's non-`pub` `fn`/`extern` (and the link would then carry the
+// extern in and emit it). The reference refuses that read — module-private G1
+// for a pure dependency's name — so the driver checks the document's own IR:
+// fn/test/prop-test bodies against both maps, component bodies against the
+// pure map only (the reference answers a service-only module's private name
+// in a component body with its requirement sentence, which the gate spells).
+// `own` is the document's native IR text.
+fn ad_bare_private_refusal(source: Str, path: Str, own: Str, priv: AdPriv) -> Str {
+  if (path == "") { return "" }
+  if ((priv.pmap.size() == 0) && (priv.soft.length() == 0)) { return "" }
+  let ir = json_parse(own)
+  let soft_sections = ["functions", "tests", "prop_tests"]
+  var s = 0
+  while (s < soft_sections.length()) {
+    let items = value_list(value_field(ir, soft_sections[s]))
+    var i = 0
+    while (i < items.length()) {
+      let r = ad_priv_walk(items[i], priv, true, 0)
+      if (r != "") { return r }
+      i += 1
+    }
+    s += 1
+  }
+  let comps = value_list(value_field(ir, "components"))
+  var c = 0
+  while (c < comps.length()) {
+    let r = ad_priv_walk(comps[c], priv, false, 0)
+    if (r != "") { return r }
+    c += 1
+  }
+  return ""
+}
+
+// Issue #3544's other half: when the gate refuses a component body with its
+// requirement sentence (`G1|`X` is not a declared requirement of <C>`) and X
+// is a pure dependency's non-`pub` fn/extern, the reference spells the
+// module-private sentence instead — so the driver rewrites that one refusal.
+fn ad_priv_rewrite(refusal: Str, priv: AdPriv) -> Str {
+  if (refusal.slice(0, 3) != "G1|") { return refusal }
+  let rest = refusal.slice(3, refusal.length())
+  let at = rest.indexOf("` is not a declared requirement of ")
+  if (at == 0 - 1) { return refusal }
+  let nm = rest.slice(1, at)
+  if (!priv.pmap.has(nm)) { return refusal }
+  return "G1|`".concat(nm).concat("` is module-private in `")
+    .concat(priv.pmap.lookup(nm) ?? "").concat("` and cannot be imported (G1)")
+}
+
 // The module key of the document at `path`: its absolute path when it is on
 // disk (the key `module_path` gives every module it resolves), else `path`.
 fn ad_module_key(path: Str) -> Str {
@@ -2727,11 +2908,22 @@ pub fn compile_to_at(source: Str, tier: Str, path: Str) -> Str {
   // always; `ul_link_types` then takes the names as already lowered (`pre`) and
   // does not append them a second time.
   let full = ul_with_carried_text(named, path)
+  // Issue #3544: a bare reference in a fn/test body to a non-`pub` fn/extern of
+  // a `use`d module is the reference's module-private G1, checked on the
+  // document's own IR — the gate's name resolver switches off for a text with
+  // a `use`, so without this the link would carry the extern in and emit it.
+  // Runs only when the document-alone verdict is not already a non-G1 refusal
+  // (a check-time refusal wins, as it does in the reference).
+  let priv = ad_private_map(source, path)
+  if ((verdict == "") || (verdict.slice(0, 3) == "G1|")) {
+    let bare = ad_bare_private_refusal(source, path, alone, priv)
+    if (bare != "") { return "REFUSED|".concat(bare) }
+  }
   // Issue #2374 / #2449: and admit what the reference admits, the merged
   // text with every carried declaration spliced in, so a document case that
   // reuses a carried case's name draws the reference's ambiguity refusal.
   let carried = tc_carried_admission(source, path, verdict, full)
-  if (carried.refusal != "") { return "REFUSED|".concat(carried.refusal) }
+  if (carried.refusal != "") { return "REFUSED|".concat(ad_priv_rewrite(carried.refusal, priv)) }
   let pre = carried.names.length() > 0 ? carried.names : full.names
   let lowered = carried.names.length() > 0 ? full.text : named
   let own = lowered == source ? alone : lower_to_ir_refs(lowered, rf_ref_rows(lowered, path))
