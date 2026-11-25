@@ -1305,13 +1305,23 @@ pub struct Token {
     kind: String,
     text: String,
     line: i64,
+    before: String,
+    raw: String,
+    file: String,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Tok {
+    kind: String,
+    text: String,
+    line: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Step {
     i: i64,
     line: i64,
-    tok: Token,
+    tok: Tok,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -9357,7 +9367,20 @@ fn tkc(ts: &[Token], i: i64) -> Token {
     if ((i >= 0i64) && (i < ts.revl_length())) {
         return (ts)[(i) as usize].clone();
     }
-    return Token { kind: String::from("eof"), text: String::from(""), line: 0i64 };
+    return mk_tok(String::from("eof"), String::from(""), 0i64);
+}
+
+fn span_text(ts: &[Token], start: i64, end: i64) -> String {
+    if (end <= start) {
+        return String::from("");
+    }
+    let mut out = (ts)[(start) as usize].raw.clone();
+    let mut k = (start).checked_add(1i64).expect("revl: Int overflow");
+    while (k < end) {
+        out = (out.revl_concat(&(ts)[(k) as usize].before)).revl_concat(&(ts)[(k) as usize].raw);
+        k = (k).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
 }
 
 fn atk(ts: &[Token], i: i64, k: &str) -> bool {
@@ -10795,7 +10818,7 @@ fn ba_tail_start(ts: Vec<Token>, lo: i64, hi: i64) -> i64 {
 }
 
 fn ba_tok(kind: String, line: i64) -> Token {
-    return Token { kind: kind.clone(), text: kind.clone(), line: line };
+    return mk_tok(kind.clone(), kind.clone(), line);
 }
 
 fn ba_append(a: Vec<Token>, bs: &[Token]) -> Vec<Token> {
@@ -10812,7 +10835,7 @@ fn ba_one_line(xs: &[Token], line: i64) -> Vec<Token> {
     let mut out: Vec<Token> = vec![];
     let mut i = 0i64;
     while (i < xs.revl_length()) {
-        out.push(Token { kind: (xs)[(i) as usize].kind.clone(), text: (xs)[(i) as usize].text.clone(), line: line });
+        out.push(tok_reline((xs)[(i) as usize].clone(), line));
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
     return out;
@@ -19128,7 +19151,7 @@ fn ends_expr(t: Token) -> bool {
 
 fn tkl(ts: &[Token], i: i64) -> Token {
     if (i < 0i64) {
-        return Token { kind: String::from("eof"), text: String::from(""), line: 0i64 };
+        return mk_tok(String::from("eof"), String::from(""), 0i64);
     }
     return tkc(ts, i);
 }
@@ -34046,7 +34069,9 @@ fn cir_setup_stmt(ts: Vec<Token>, lo: i64, cx: CCtx, sc: Vec<Bind>, hostSc: &[St
         if (!ae.ok) {
             return bad_setup();
         }
-        return SetupOne { ok: true, js: (String::from("{\"step\": \"assert\", \"expr\": ").revl_concat(&ae.js)).revl_concat("}"), e: Expr::Bad(String::from("")), isExpr: false, sc: sc, muts: muts, i: r.i };
+        let at = tkc(&ts, lo);
+        let js = (((((((String::from("{\"step\": \"assert\", \"expr\": ").revl_concat(&ae.js)).revl_concat(", \"file\": ")).revl_concat(&jstr(&at.file))).revl_concat(", \"line\": ")).revl_concat(&(at.line).to_string())).revl_concat(", \"source\": ")).revl_concat(&jstr(&span_text(&ts, (lo).checked_add(1i64).expect("revl: Int overflow"), r.i)))).revl_concat("}");
+        return SetupOne { ok: true, js: js, e: Expr::Bad(String::from("")), isExpr: false, sc: sc, muts: muts, i: r.i };
     }
     if atw(&ts, lo, "if") {
         let c = expr_at(ts.clone(), (lo).checked_add(1i64).expect("revl: Int overflow"));
@@ -38611,7 +38636,8 @@ fn lir_one_stmt(ts: Vec<Token>, i: i64, hi: i64, env: Vec<Bind>, muts: Vec<Strin
         if (is_bad(r.e.clone()) || (r.i <= (i).checked_add(1i64).expect("revl: Int overflow"))) {
             return mk_one(String::from(""), env, muts, hi);
         }
-        return mk_one((String::from("{\"step\":\"assert\",\"expr\":").revl_concat(&lir_expr(r.e.clone(), env.clone(), al))).revl_concat("}"), env.clone(), muts, r.i);
+        let js = (((((((String::from("{\"step\":\"assert\",\"expr\":").revl_concat(&lir_expr(r.e.clone(), env.clone(), al.clone()))).revl_concat(",\"file\":")).revl_concat(&jstr(&t.file))).revl_concat(",\"line\":")).revl_concat(&(t.line).to_string())).revl_concat(",\"source\":")).revl_concat(&jstr(&span_text(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), r.i)))).revl_concat("}");
+        return mk_one(js, env, muts, r.i);
     }
     if ((t.kind == "kw") && ((t.text == "break") || (t.text == "continue"))) {
         let js = (((String::from("{\"step\":").revl_concat(&jstr(&t.text))).revl_concat(",\"line\":")).revl_concat(&(t.line).to_string())).revl_concat("}");
@@ -39104,7 +39130,7 @@ fn lift_rw(ts: Vec<Token>, lo: i64, hi: i64, env: Vec<Bind>, marks: std::collect
             if (!a.ok) {
                 return LiftRw { toks: vec![], orig: vec![], blobs: vec![], ok: false };
             }
-            out = (out.revl_push(t.clone())).revl_push(Token { kind: String::from("ident"), text: lift_ph(i), line: t.line });
+            out = (out.revl_push(t.clone())).revl_push(mk_tok(String::from("ident"), lift_ph(i), t.line));
             orig = (orig.revl_push(i)).revl_push((0i64).checked_sub(1i64).expect("revl: Int overflow"));
             blobs.push(Bind { name: lift_ph_json(i), ty: a.blob.clone() });
             i = e.clone();
@@ -40335,7 +40361,8 @@ fn lir_life_step(ts: Vec<Token>, i: i64, hi: i64, env: Vec<Bind>, al: std::colle
         if (is_bad(r.e.clone()) || (r.i <= (i).checked_add(1i64).expect("revl: Int overflow"))) {
             return life_fail(env);
         }
-        return life_step((String::from("{\"step\": \"assert\", \"expr\": ").revl_concat(&lir_expr(r.e.clone(), env.clone(), al))).revl_concat("}"), r.i, env.clone());
+        let js = (((((((String::from("{\"step\": \"assert\", \"expr\": ").revl_concat(&lir_expr(r.e.clone(), env.clone(), al.clone()))).revl_concat(", \"file\": ")).revl_concat(&jstr(&t.file))).revl_concat(", \"line\": ")).revl_concat(&(t.line).to_string())).revl_concat(", \"source\": ")).revl_concat(&jstr(&span_text(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), r.i)))).revl_concat("}");
+        return life_step(js, r.i, env);
     }
     return life_fail(env);
 }
@@ -40681,7 +40708,7 @@ pub fn lower_to_ir_at(src: String, fname: String) -> String {
 
 pub fn lower_to_ir_refs_at(src: String, fname: String, rows: Vec<String>) -> String {
     let src_revl_cs: std::vec::Vec<char> = src.chars().collect();
-    let ts = lex_src(src.clone());
+    let ts = lex_src_at(src.clone(), fname.clone());
     let al = alias_map(ts.clone());
     let pg = parse_prog_ts(ts.clone());
     let slots = async_slots_map(&pg.fns);
@@ -41144,6 +41171,18 @@ pub fn value_field_or(v: Value, name: String, default: Value) -> Value {
     return value_opt(v, name).unwrap_or_else(|| default);
 }
 
+pub fn mk_tok(kind: String, text: String, line: i64) -> Token {
+    return Token { kind: kind, text: text, line: line, before: String::from(""), raw: String::from(""), file: String::from("") };
+}
+
+pub fn tok_copy(t: Token) -> Token {
+    return Token { kind: t.kind.clone(), text: t.text.clone(), line: t.line, before: t.before.clone(), raw: t.raw.clone(), file: t.file.clone() };
+}
+
+pub fn tok_reline(t: Token, line: i64) -> Token {
+    return Token { kind: t.kind.clone(), text: t.text.clone(), line: line, before: t.before.clone(), raw: t.raw.clone(), file: t.file.clone() };
+}
+
 fn code0(c: &str) -> i64 {
     if (c == "") {
         return (0i64).checked_sub(1i64).expect("revl: Int overflow");
@@ -41599,7 +41638,7 @@ fn scan_host_body(source: &str, k: i64, source_revl_cs: &[char]) -> Scan {
 }
 
 fn step(source: &str, i: i64, line: i64, source_revl_cs: &[char]) -> Step {
-    let none = Token { kind: String::from(""), text: String::from(""), line: line };
+    let none = Tok { kind: String::from(""), text: String::from(""), line: line };
     let c = { source_revl_cs[(i) as usize].to_string() };
     let cc = { source_revl_cs[(i) as usize] as u32 as i64 };
     if (cc == 10i64) {
@@ -41615,46 +41654,46 @@ fn step(source: &str, i: i64, line: i64, source_revl_cs: &[char]) -> Step {
     let op = op_at(source, i, source_revl_cs);
     if (op != "") {
         let kind = if (op == "->") { String::from("arrow") } else { op.clone() };
-        return Step { i: (i).checked_add(op.revl_length()).expect("revl: Int overflow"), line: line, tok: Token { kind: kind, text: op.clone(), line: line } };
+        return Step { i: (i).checked_add(op.revl_length()).expect("revl: Int overflow"), line: line, tok: Tok { kind: kind, text: op.clone(), line: line } };
     }
     if (cc == 34i64) {
         if is_triple_at(source, i, source_revl_cs) {
             let ts = scan_triple(source, (i).checked_add(3i64).expect("revl: Int overflow"), source_revl_cs);
             if (ts.j == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-                return Step { i: (source_revl_cs.len() as i64), line: line, tok: Token { kind: String::from("error"), text: String::from("unterminated triple string"), line: line } };
+                return Step { i: (source_revl_cs.len() as i64), line: line, tok: Tok { kind: String::from("error"), text: String::from("unterminated triple string"), line: line } };
             }
-            return Step { i: ts.j, line: (line).checked_add(ts.nl).expect("revl: Int overflow"), tok: Token { kind: String::from("string"), text: ts.out.clone(), line: line } };
+            return Step { i: ts.j, line: (line).checked_add(ts.nl).expect("revl: Int overflow"), tok: Tok { kind: String::from("string"), text: ts.out.clone(), line: line } };
         }
         let ss = scan_quoted(source, (i).checked_add(1i64).expect("revl: Int overflow"), 34i64, source_revl_cs);
         if (ss.j == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-            return Step { i: (source_revl_cs.len() as i64), line: line, tok: Token { kind: String::from("error"), text: String::from("unterminated string"), line: line } };
+            return Step { i: (source_revl_cs.len() as i64), line: line, tok: Tok { kind: String::from("error"), text: String::from("unterminated string"), line: line } };
         }
         if dollar_interp(&ss.out) {
-            return Step { i: (source_revl_cs.len() as i64), line: line, tok: Token { kind: String::from("error"), text: String::from("plain string does not interpolate"), line: line } };
+            return Step { i: (source_revl_cs.len() as i64), line: line, tok: Tok { kind: String::from("error"), text: String::from("plain string does not interpolate"), line: line } };
         }
-        return Step { i: ss.j, line: line, tok: Token { kind: String::from("string"), text: ss.out.clone(), line: line } };
+        return Step { i: ss.j, line: line, tok: Tok { kind: String::from("string"), text: ss.out.clone(), line: line } };
     }
     if (cc == 96i64) {
         let st = scan_template(source, (i).checked_add(1i64).expect("revl: Int overflow"), source_revl_cs);
         if (st.j == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-            return Step { i: (source_revl_cs.len() as i64), line: line, tok: Token { kind: String::from("error"), text: String::from("bad template"), line: line } };
+            return Step { i: (source_revl_cs.len() as i64), line: line, tok: Tok { kind: String::from("error"), text: String::from("bad template"), line: line } };
         }
-        return Step { i: st.j, line: (line).checked_add(st.nl).expect("revl: Int overflow"), tok: Token { kind: String::from("template"), text: st.out.clone(), line: line } };
+        return Step { i: st.j, line: (line).checked_add(st.nl).expect("revl: Int overflow"), tok: Tok { kind: String::from("template"), text: st.out.clone(), line: line } };
     }
     if is_alpha(&c) {
         let sw = scan_word(source, i, source_revl_cs);
         let kind2 = if (keywords().revl_index_of(&sw.out) != (0i64).checked_sub(1i64).expect("revl: Int overflow")) { String::from("kw") } else { String::from("ident") };
-        return Step { i: sw.j, line: line, tok: Token { kind: kind2, text: sw.out.clone(), line: line } };
+        return Step { i: sw.j, line: line, tok: Tok { kind: kind2, text: sw.out.clone(), line: line } };
     }
     if (cc == 39i64) {
         let sq = scan_quoted(source, (i).checked_add(1i64).expect("revl: Int overflow"), 39i64, source_revl_cs);
         if (sq.j == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-            return Step { i: (source_revl_cs.len() as i64), line: line, tok: Token { kind: String::from("error"), text: String::from("unterminated string"), line: line } };
+            return Step { i: (source_revl_cs.len() as i64), line: line, tok: Tok { kind: String::from("error"), text: String::from("unterminated string"), line: line } };
         }
         if dollar_interp(&sq.out) {
-            return Step { i: (source_revl_cs.len() as i64), line: line, tok: Token { kind: String::from("error"), text: String::from("plain string does not interpolate"), line: line } };
+            return Step { i: (source_revl_cs.len() as i64), line: line, tok: Tok { kind: String::from("error"), text: String::from("plain string does not interpolate"), line: line } };
         }
-        return Step { i: sq.j, line: line, tok: Token { kind: String::from("string"), text: sq.out.clone(), line: line } };
+        return Step { i: sq.j, line: line, tok: Tok { kind: String::from("string"), text: sq.out.clone(), line: line } };
     }
     if is_digit(&c) {
         let nx = { let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = ((i).checked_add(1i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = ((i).checked_add(2i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() };
@@ -41671,18 +41710,18 @@ fn step(source: &str, i: i64, line: i64, source_revl_cs: &[char]) -> Step {
             }
             let g = scan_grouped(source, (i).checked_add(2i64).expect("revl: Int overflow"), &valid, source_revl_cs);
             if (g.j == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-                return Step { i: (source_revl_cs.len() as i64), line: line, tok: Token { kind: String::from("error"), text: String::from("bad numeric literal"), line: line } };
+                return Step { i: (source_revl_cs.len() as i64), line: line, tok: Tok { kind: String::from("error"), text: String::from("bad numeric literal"), line: line } };
             }
             let val = radix_value(&g.out, base);
             if (val == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-                return Step { i: (source_revl_cs.len() as i64), line: line, tok: Token { kind: String::from("error"), text: String::from("int literal out of 64-bit range"), line: line } };
+                return Step { i: (source_revl_cs.len() as i64), line: line, tok: Tok { kind: String::from("error"), text: String::from("int literal out of 64-bit range"), line: line } };
             }
             let gj = g.j;
-            return Step { i: gj, line: line, tok: Token { kind: String::from("int"), text: (val).to_string(), line: line } };
+            return Step { i: gj, line: line, tok: Tok { kind: String::from("int"), text: (val).to_string(), line: line } };
         }
         let ip = scan_grouped(source, i, "0123456789", source_revl_cs);
         if (ip.j == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-            return Step { i: (source_revl_cs.len() as i64), line: line, tok: Token { kind: String::from("error"), text: String::from("bad numeric literal"), line: line } };
+            return Step { i: (source_revl_cs.len() as i64), line: line, tok: Tok { kind: String::from("error"), text: String::from("bad numeric literal"), line: line } };
         }
         let mut j = ip.j;
         let mut isf = false;
@@ -41690,7 +41729,7 @@ fn step(source: &str, i: i64, line: i64, source_revl_cs: &[char]) -> Step {
         if (({ let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = (j) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = ((j).checked_add(1i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() } == ".") && is_digit(&({ let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = ((j).checked_add(1i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = ((j).checked_add(2i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() }))) {
             let fr = scan_grouped(source, (j).checked_add(1i64).expect("revl: Int overflow"), "0123456789", source_revl_cs);
             if (fr.j == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-                return Step { i: (source_revl_cs.len() as i64), line: line, tok: Token { kind: String::from("error"), text: String::from("bad numeric literal"), line: line } };
+                return Step { i: (source_revl_cs.len() as i64), line: line, tok: Tok { kind: String::from("error"), text: String::from("bad numeric literal"), line: line } };
             }
             fracpart = String::from(".").revl_concat(&fr.out);
             j = fr.j;
@@ -41709,7 +41748,7 @@ fn step(source: &str, i: i64, line: i64, source_revl_cs: &[char]) -> Step {
             if is_digit(&({ let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = (k.clone()) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = ((k).checked_add(1i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() })) {
                 let ex = scan_grouped(source, k.clone(), "0123456789", source_revl_cs);
                 if (ex.j == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-                    return Step { i: (source_revl_cs.len() as i64), line: line, tok: Token { kind: String::from("error"), text: String::from("bad numeric literal"), line: line } };
+                    return Step { i: (source_revl_cs.len() as i64), line: line, tok: Tok { kind: String::from("error"), text: String::from("bad numeric literal"), line: line } };
                 }
                 exppart = (String::from("e").revl_concat(&signstr)).revl_concat(&ex.out);
                 j = ex.j;
@@ -41719,13 +41758,13 @@ fn step(source: &str, i: i64, line: i64, source_revl_cs: &[char]) -> Step {
         let jj = j;
         if isf {
             let ftext = (ip.out.revl_concat(&fracpart)).revl_concat(&exppart);
-            return Step { i: jj, line: line, tok: Token { kind: String::from("float"), text: ftext, line: line } };
+            return Step { i: jj, line: line, tok: Tok { kind: String::from("float"), text: ftext, line: line } };
         }
         let ival = radix_value(&ip.out, 10i64);
         if (ival == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-            return Step { i: (source_revl_cs.len() as i64), line: line, tok: Token { kind: String::from("error"), text: String::from("int literal out of 64-bit range"), line: line } };
+            return Step { i: (source_revl_cs.len() as i64), line: line, tok: Tok { kind: String::from("error"), text: String::from("int literal out of 64-bit range"), line: line } };
         }
-        return Step { i: jj, line: line, tok: Token { kind: String::from("int"), text: (ival).to_string(), line: line } };
+        return Step { i: jj, line: line, tok: Tok { kind: String::from("int"), text: (ival).to_string(), line: line } };
     }
     if (cc == 64i64) {
         let nxt = { let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = ((i).checked_add(1i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = ((i).checked_add(2i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() };
@@ -41743,41 +41782,47 @@ fn step(source: &str, i: i64, line: i64, source_revl_cs: &[char]) -> Step {
             if ((kb < n1) && ({ source_revl_cs[(kb.clone()) as usize].to_string() } == "{")) {
                 let hb = scan_host_body(source, kb.clone(), source_revl_cs);
                 if (hb.j == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-                    return Step { i: (source_revl_cs.len() as i64), line: line, tok: Token { kind: String::from("error"), text: String::from("unterminated host body"), line: line } };
+                    return Step { i: (source_revl_cs.len() as i64), line: line, tok: Tok { kind: String::from("error"), text: String::from("unterminated host body"), line: line } };
                 }
                 let nl = count_nl(&({ let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = (i) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = (hb.j) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() }));
-                return Step { i: hb.j, line: (line).checked_add(nl).expect("revl: Int overflow"), tok: Token { kind: String::from("hostbody"), text: (backend.revl_concat("{")).revl_concat(&hb.out), line: line } };
+                return Step { i: hb.j, line: (line).checked_add(nl).expect("revl: Int overflow"), tok: Tok { kind: String::from("hostbody"), text: (backend.revl_concat("{")).revl_concat(&hb.out), line: line } };
             }
         }
-        return Step { i: (i).checked_add(1i64).expect("revl: Int overflow"), line: line, tok: Token { kind: String::from("@"), text: String::from("@"), line: line } };
+        return Step { i: (i).checked_add(1i64).expect("revl: Int overflow"), line: line, tok: Tok { kind: String::from("@"), text: String::from("@"), line: line } };
     }
     if (singles().revl_index_of(&c) != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-        return Step { i: (i).checked_add(1i64).expect("revl: Int overflow"), line: line, tok: Token { kind: c.clone(), text: c.clone(), line: line } };
+        return Step { i: (i).checked_add(1i64).expect("revl: Int overflow"), line: line, tok: Tok { kind: c.clone(), text: c.clone(), line: line } };
     }
-    return Step { i: (i).checked_add(1i64).expect("revl: Int overflow"), line: line, tok: Token { kind: String::from("error"), text: c, line: line } };
+    return Step { i: (i).checked_add(1i64).expect("revl: Int overflow"), line: line, tok: Tok { kind: String::from("error"), text: c, line: line } };
 }
 
 pub fn lex_src(source: String) -> Vec<Token> {
+    return lex_src_at(source, String::from(""));
+}
+
+pub fn lex_src_at(source: String, fname: String) -> Vec<Token> {
     let source_revl_cs: std::vec::Vec<char> = source.chars().collect();
     let mut out: Vec<Token> = vec![];
     let mut i = 0i64;
     let mut line = 1i64;
+    let mut prev = 0i64;
     let n = (source_revl_cs.len() as i64);
     while (i < n) {
         let s = step(&source, i, line, &source_revl_cs);
         if (s.tok.kind != "") {
-            out.push(s.tok.clone());
+            out.push(Token { kind: s.tok.kind.clone(), text: s.tok.text.clone(), line: s.tok.line, before: { let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = (prev) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = (i) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() }, raw: { let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = (i) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = (s.i) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() }, file: fname.clone() });
+            prev = s.i;
         }
         i = s.i;
         line = s.line;
     }
     let ll = line;
-    out.push(Token { kind: String::from("eof"), text: String::from(""), line: ll });
+    out.push(Token { kind: String::from("eof"), text: String::from(""), line: ll, before: { let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = (prev) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = (n) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() }, raw: String::from(""), file: fname.clone() });
     return out;
 }
 
 fn eof_tok() -> Token {
-    return Token { kind: String::from("eof"), text: String::from(""), line: 0i64 };
+    return mk_tok(String::from("eof"), String::from(""), 0i64);
 }
 
 fn tk(ts: &[Token], i: i64) -> Token {
@@ -45688,7 +45733,7 @@ fn lower_to_ir_emits_the_services_table_for_a_simple_provider() {
 
 #[test]
 fn lower_to_ir_keeps_both_fns_around_a_one_line_named_test_block() {
-    assert!((lower_to_ir(String::from("fn one() -> Int { return 1 } test \"t\" { assert one() == 1 } fn two() -> Int { return 2 }")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"one\",\"params\":[],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"lit\",\"value\":1}}]},{\"name\":\"two\",\"params\":[],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"lit\",\"value\":2}}]}], \"tests\": [{\"name\": \"t\", \"body\": [{\"step\":\"assert\",\"expr\":{\"kind\":\"bin\",\"op\":\"==\",\"left\":{\"kind\":\"call\",\"callee\":{\"kind\":\"var\",\"name\":\"one\"},\"args\":[]},\"right\":{\"kind\":\"lit\",\"value\":1}}}]}]}"));
+    assert!((lower_to_ir(String::from("fn one() -> Int { return 1 } test \"t\" { assert one() == 1 } fn two() -> Int { return 2 }")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"one\",\"params\":[],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"lit\",\"value\":1}}]},{\"name\":\"two\",\"params\":[],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"lit\",\"value\":2}}]}], \"tests\": [{\"name\": \"t\", \"body\": [{\"step\":\"assert\",\"expr\":{\"kind\":\"bin\",\"op\":\"==\",\"left\":{\"kind\":\"call\",\"callee\":{\"kind\":\"var\",\"name\":\"one\"},\"args\":[]},\"right\":{\"kind\":\"lit\",\"value\":1}},\"file\":\"<string>\",\"line\":1,\"source\":\"one() == 1\"}]}]}"));
 }
 
 #[test]
