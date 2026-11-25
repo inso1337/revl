@@ -1740,6 +1740,24 @@ fn f(r: R) -> Int {
     # The accepting twins of the G1 read rows in REJECTED_PROGRAMS. Each names
     # one member of `callables` or one binder, and a rule that missed any of
     # them would refuse a program the reference admits.
+    # issue #3657 accepting twin: per-scope G1 admits each provide method's OWN
+    # binding, so the same name bound in both methods is admitted on both
+    # engines.
+    ("a name bound in both provide methods", """service Pair { fn first() -> Int
+               fn second() -> Int }
+component Holder provides pair: Pair {
+  provide pair {
+    fn first() {
+      let tmp = 1
+      return tmp
+    }
+    fn second() {
+      let tmp = 2
+      return tmp
+    }
+  }
+}
+"""),
     ("every callable universe member read by name", """
 type Shape = Circle | Square
 extern pure fn ext(n: Int) -> Int = @py { return n }
@@ -2394,6 +2412,35 @@ component C provides s: S {
 service S { fn go() -> Int }
 component C requires d: D provides s: S {
   provide s { fn go() { let x = d   return 0 } }
+}
+""", "G1"),
+    # issue #3657: G1 is PER SCOPE for provide methods — a method sees its own
+    # parameters and locals plus the activation bindings made before its
+    # `provide` block, never a sibling method's. A local bound in `first` and
+    # read in `second` is the same `is not a declared requirement of` refusal
+    # the reference draws; a parameter of one method read in another is the
+    # same. The accepting twin (bound in BOTH methods) is in ACCEPTED_PROGRAMS.
+    ("g1 name bound in one provide method read in another", """service Pair { fn first() -> Int
+               fn second() -> Int }
+component Holder provides pair: Pair {
+  provide pair {
+    fn first() {
+      let tmp = 1
+      return tmp
+    }
+    fn second() {
+      return tmp
+    }
+  }
+}
+""", "G1"),
+    ("g1 parameter of one provide method read in another", """service Pair { fn first(x: Int) -> Int
+               fn second() -> Int }
+component Holder provides pair: Pair {
+  provide pair {
+    fn first(x) { return x }
+    fn second() { return x }
+  }
 }
 """, "G1"),
     # G1 bare-value in a SETUP body. The reference resolves a bare head the
