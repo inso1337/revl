@@ -16,7 +16,7 @@ Take one or both.
 | `revl-gate` | `revl mcp serve --provider tickets.rvl` | host code the operator writes, checked by the compiler |
 | `revl-proxy` | `revl mcp proxy -- python3 tickets-mcp.py` | an MCP server you already run, with no `.rvl` written |
 
-The second is `revl mcp proxy` (issue #1463), which **has landed** — it is in
+The second is `revl mcp proxy` (issue #1463), which **has landed**: it is in
 revl 2.0.0 (`src/revl/mcp/proxy.py`; PRs #1535 and #1557, issue closed
 2026-10-05), and this example uses it. Both routes are AGPL-3.0-only; see
 [Licensing](#licensing).
@@ -163,7 +163,7 @@ classification and the same log:
   `close_ticket` a **witnessed** mutation: it runs with no approval prompt, and
   the proxy reverts it on a clean abort or a commit that does not discharge it.
   This is the proxy's only way to make a tool reversible. It checks that the
-  inverse **name** exists in the upstream's tool list — a name the server does
+  inverse **name** exists in the upstream's tool list. A name the server does
   not list is refused at startup, with
   `--undo close_ticket=reopen_ticket: the server does not list 'reopen_ticket'`.
   What it cannot check is that the tool **does** what the name says: you are
@@ -217,8 +217,8 @@ What the verdict says, measured by the tests:
   example `tickets.file("disk full on build-7")`: "an emission is a one-way
   crossing; it has no inverse".
 - **The proxy route, killed with `--undo` declared.** `verdict: rolled-back`,
-  `residue.clean: true`, and **exit 3** — see below, because a `clean` verdict
-  here is not the whole story.
+  `residue.clean: true`, and **exit 3**. See below: a `clean` verdict here is
+  not the whole story.
 
 The exit codes are the contract, and 3 is the one to know
 (`src/revl/cli/change.py`, issue #1477):
@@ -235,7 +235,7 @@ call your ticket system, and it does not change the WAL (the tests check both).
 Its "ran" and "re-attempted" lines describe that model. So on the proxy route,
 where `--undo close_ticket=reopen_ticket` gives `close_ticket` a declared
 inverse, a kill before commit recovers **`clean: true`, exit 3, and the
-upstream's `reopen_ticket` is never called** — the test asserts the outbox still
+upstream's `reopen_ticket` is never called**. The test asserts the outbox still
 holds the `closed:` line afterwards, and `revl recover` prints on stderr:
 
 ```
@@ -252,9 +252,9 @@ system. `--model-only` is how you say you accept that, and it is deliberately
 not set in `after-agent.sh`.
 
 To execute reconstructible inverses against the real system, `revl recover
---composition FILE` binds the real world — the composition's own host bodies and
+--composition FILE` binds the real world: the composition's own host bodies and
 providers, checked against the WAL header's digest (issue #1477;
-[../../docs/crash-recovery.md](../../docs/crash-recovery.md) §5c) — and a host
+[../../docs/crash-recovery.md](../../docs/crash-recovery.md) §5c). A host
 embedding revl passes its own `World` adapter to
 `revl.recovery.recover(path, world=...)`. For route one's bare emission there is
 nothing to execute: the verdict tells an operator exactly what to reconcile by
@@ -290,7 +290,7 @@ hand.
   effect there is declared with a checked inverse in the operator's provider
   (see [../../docs/crash-recovery.md](../../docs/crash-recovery.md)). On route
   two `--undo` does make a tool reversible, but the proxy cannot check the
-  claim, and recovery does not perform it without `--composition` — the
+  claim, and recovery does not perform it without `--composition`. This is the
   `world: model` case above. Neither route here demonstrates an undo actually
   reaching the outside world after a crash.
 - **What the proxy cannot see.** Behind `revl mcp proxy` the upstream's host
