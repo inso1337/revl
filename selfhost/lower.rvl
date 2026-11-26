@@ -26120,6 +26120,97 @@ fn src_text(src: Str) -> SrcText {
   return { lines: lines.push(src.slice(start, src.length())), nl: nl }
 }
 
+// issue #3499: the reference parser captures the raw source text of every
+// `assert` statement (`_assert_source`), so a failed assert prints
+// `file:line: assert <revl source>` instead of the lowered host expression.
+// The token stream cannot rebuild that text (comments are not tokens and
+// string tokens keep their inner whitespace), so `lower_to_ir_refs_at` rides
+// the raw source and the file name on the alias map under reserved `@` keys
+// no identifier can spell; `asrc_of` slices them here exactly as the reference
+// does: lines [start_line, end_line] (1-based, inclusive), the first line cut
+// at the first `\bassert\b`, whitespace-collapsed, trailing `;`/whitespace
+// stripped, one unbalanced trailing `}` dropped. `""` when the keys are
+// absent (a direct call with a hand-built map), which keeps the step keys
+// absent exactly as the reference's `if stmt.src:` does.
+fn asrc_ws_cc(cc: Int) -> Bool {
+  return cc == 32 || cc == 9 || cc == 10 || cc == 13 || cc == 11 || cc == 12
+}
+fn asrc_word_cc(cc: Int) -> Bool {
+  return (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || (cc >= 48 && cc <= 57) || cc == 95
+}
+// the first `\bassert\b` of `line`, or -1
+fn asrc_word_at(line: Str) -> Int {
+  var i = 0
+  while (i + 6 <= line.length()) {
+    if (line.slice(i, i + 6) == "assert") {
+      let b = i == 0 ? 32 : line.charAt(i - 1).charCodeAt(0)
+      let a = i + 6 >= line.length() ? 32 : line.charAt(i + 6).charCodeAt(0)
+      if (!asrc_word_cc(b) && !asrc_word_cc(a)) { return i }
+    }
+    i += 1
+  }
+  return 0 - 1
+}
+// `" ".join(s.split())` over the ASCII whitespace set
+fn asrc_collapse(s: Str) -> Str {
+  var out = ""
+  var word = ""
+  var i = 0
+  while (i < s.length()) {
+    let cc = s.charAt(i).charCodeAt(0)
+    if (asrc_ws_cc(cc)) {
+      if (word != "") { out = out == "" ? word : out.concat(" ").concat(word)  word = "" }
+    } else { word = word.concat(s.charAt(i)) }
+    i += 1
+  }
+  if (word != "") { out = out == "" ? word : out.concat(" ").concat(word) }
+  return out
+}
+fn asrc_rstrip_ch(s: Str, ch: Str) -> Str {
+  var e = s.length()
+  while (e > 0 && s.charAt(e - 1) == ch) { e -= 1 }
+  return s.slice(0, e)
+}
+fn asrc_rstrip_ws(s: Str) -> Str {
+  var e = s.length()
+  while (e > 0 && asrc_ws_cc(s.charAt(e - 1).charCodeAt(0))) { e -= 1 }
+  return s.slice(0, e)
+}
+fn asrc_count(s: Str, ch: Str) -> Int {
+  var n = 0
+  var i = 0
+  while (i < s.length()) {
+    if (s.charAt(i) == ch) { n += 1 }
+    i += 1
+  }
+  return n
+}
+// the 1-based line of the expression's last token (token `i` is one past it)
+fn asrc_end_line(ts: List[Token], i: Int, dflt: Int) -> Int {
+  let ln = tkc(ts, i - 1).line
+  return ln > 0 ? ln : dflt
+}
+fn asrc_of(al: Map[Str, Str], start_line: Int, end_line: Int) -> Str {
+  if (!al.has("@srclines") || start_line < 1) { return "" }
+  let lines = src_text(mget_str(al, "@srclines")).lines
+  if (start_line - 1 >= lines.length()) { return "" }
+  var end = end_line
+  if (end < start_line) { end = start_line }
+  if (end > lines.length()) { end = lines.length() }
+  var first = lines[start_line - 1]
+  let at = asrc_word_at(first)
+  if (at != 0 - 1) { first = first.slice(at, first.length()) }
+  var raw = first
+  var ln = start_line
+  while (ln < end) { raw = raw.concat(" ").concat(lines[ln])  ln += 1 }
+  var text = asrc_collapse(raw)
+  text = asrc_rstrip_ws(asrc_rstrip_ch(text, ";"))
+  if (text.endsWith("}") && asrc_count(text, "}") > asrc_count(text, "{")) {
+    text = asrc_rstrip_ws(text.slice(0, text.length() - 1))
+  }
+  return text
+}
+
 // `lstrip()` for the doc recovery below: the leading whitespace Python strips,
 // by code point (space, tab, CR, VT, FF) — nothing else, so the text after the
 // `// ` prefix keeps the TRAILING whitespace the reference keeps (a plain
@@ -34358,6 +34449,23 @@ fn lir_try_return(ts: List[Token], at: Int, env: List[Bind], muts: List[Str],
   return mk_one(js, env, muts, r.i)
 }
 
+fn cat_exprs(xs: List[Expr], ys: List[Expr]) -> List[Expr] {
+  var out = xs
+  var i = 0
+  while (i < ys.length()) { out = out.push(ys[i])  i += 1 }
+  return out
+}
+
+// issue #3513: a top-level `&&` chain flattens into its operands, left to
+// right, exactly as the reference's `_split_and_chain` does; anything else is
+// a single-element list.
+fn split_and_chain(e: Expr) -> List[Expr] {
+  return match e {
+    Bin(b) => b.op == "&&" ? cat_exprs(split_and_chain(b.l), split_and_chain(b.r)) : [e],
+    _ => [e],
+  }
+}
+
 fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
                 muts: List[Str], ret: Str, marks: Map[Str, Int],
                 births: Map[Str, Str], al: Map[Str, Str]) -> StmtOne {
@@ -34478,6 +34586,27 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
       .concat(",\"file\":").concat(jstr(t.file))
       .concat(",\"line\":").concat(t.line.to_str())
       .concat(",\"source\":").concat(jstr(span_text(ts, i + 1, r.i))).concat("}")
+    return mk_one(js, env, muts, r.i)
+    // issue #3513: one assert step per top-level `&&` operand, so a failure
+    // reports the first false operand (the reference's `_split_and_chain`).
+    let ops = split_and_chain(r.e)
+    // issue #3499: the step carries the statement's line and raw source text
+    // (plus the file name) whenever the producer has the raw source, exactly
+    // as the reference's `if stmt.src:` stamps them.
+    let asrc = asrc_of(al, t.line, asrc_end_line(ts, r.i, t.line))
+    var js = ""
+    var k = 0
+    while (k < ops.length()) {
+      var one = "{\"step\":\"assert\",\"expr\":".concat(lir_expr(ops[k], env, al))
+      if (asrc != "") {
+        one = one.concat(",\"line\":").concat(t.line.to_str())
+          .concat(",\"src\":").concat(jstr(asrc))
+          .concat(",\"file\":").concat(jstr(mget_str(al, "@srcfile")))
+      }
+      one = one.concat("}")
+      js = js == "" ? one : js.concat(",").concat(one)
+      k += 1
+    }
     return mk_one(js, env, muts, r.i)
   }
   // item 379 / 391: bare loop control. Additive step kinds, no payload but a
@@ -36803,6 +36932,13 @@ pub fn lower_to_ir_refs_at(src: Str, fname: Str, rows: List[Str]) -> Str {
   // `_synthesize_sync_monomorphs`). The recolour reaches the component reader
   // too, which reads the same `colored`.
   let plan = mono_plan(pg.fns, colored, slots, al)
+  // issue #3499: the raw source and the file name ride the alias map under
+  // reserved `@` keys (no identifier can spell them, and `alias_subst` only
+  // ever looks type heads up), so the assert-step renderer in the `lir` chain
+  // reads them off the `al` every statement renderer already takes, without
+  // widening a signature. Built on `plan.al` so the `@mono:` redirect rows
+  // `mono_plan` stamps into it survive.
+  let alx = plan.al.set("@srcfile", fname).set("@srclines", src)
   // Issue #2945: the body environment a module `fn` is lowered under types a
   // sibling `fn` through `case_binds` but had no row for an `extern`, so a call
   // to one lowered as unknown. The extern rows join the callable table here,
@@ -36815,7 +36951,7 @@ pub fn lower_to_ir_refs_at(src: Str, fname: Str, rows: List[Str]) -> Str {
   let a = ir_walk(ts, 0, mk_iracc("", "", false, false, plan.colored, slots), fname, al, src_text(src))
   let ver = a.v3 ? "3" : (a.v2 ? "2" : "1")
   let fo = fns_walk(ts, 0, "", return_only_rows(ts, case_binds(ts, plan.al), plan.al), plan.colored, own_program_summary(ts),
-                    plan.al, plan.monos, plan.origins, fnty, Map.empty())
+                    alx, plan.monos, plan.origins, fnty, Map.empty())
   // issue #2317: the lifted block-arm helpers join after every module fn and
   // before the `_revl_sync` clones; a clone calls its origin's helpers.
   let taken = lift_taken(ts)
@@ -36849,7 +36985,7 @@ pub fn lower_to_ir_refs_at(src: Str, fname: Str, rows: List[Str]) -> Str {
   // section writes no key at all (a document with no test in it stays
   // byte-identical to what this producer emitted before).
   let secs = test_secs_walk(ts, 0, { tests: "", faults: "" }, return_only_rows(ts, case_binds(ts, al), al),
-                            own_program_summary(ts), al)
+                            own_program_summary(ts), alx)
   if (secs.tests != "") { out = out.concat(", \"tests\": [").concat(secs.tests).concat("]") }
   if (secs.faults != "") {
     out = out.concat(", \"fault_tests\": [").concat(secs.faults).concat("]")
@@ -39932,7 +40068,7 @@ test "lower_to_ir keeps both fns around a one-line named test block" {
   // named spelling this dropped `two` from the IR entirely, silently. The
   // `tests` section is now emitted too, byte-identical to the reference.
   assert lower_to_ir("""fn one() -> Int { return 1 } test "t" { assert one() == 1 } fn two() -> Int { return 2 }""")
-    == """{"ir_version": 3, "services": {}, "components": [], "functions": [{"name":"one","params":[],"returns":"Int","public":false,"body":[{"step":"return","expr":{"kind":"lit","value":1}}]},{"name":"two","params":[],"returns":"Int","public":false,"body":[{"step":"return","expr":{"kind":"lit","value":2}}]}], "tests": [{"name": "t", "body": [{"step":"assert","expr":{"kind":"bin","op":"==","left":{"kind":"call","callee":{"kind":"var","name":"one"},"args":[]},"right":{"kind":"lit","value":1}},"file":"<string>","line":1,"source":"one() == 1"}]}]}"""
+    == """{"ir_version": 3, "services": {}, "components": [], "functions": [{"name":"one","params":[],"returns":"Int","public":false,"body":[{"step":"return","expr":{"kind":"lit","value":1}}]},{"name":"two","params":[],"returns":"Int","public":false,"body":[{"step":"return","expr":{"kind":"lit","value":2}}]}], "tests": [{"name": "t", "body": [{"step":"assert","expr":{"kind":"bin","op":"==","left":{"kind":"call","callee":{"kind":"var","name":"one"},"args":[]},"right":{"kind":"lit","value":1}},"file":"<string>","line":1,"source":"one() == 1","line":1,"src":"assert one() == 1 } fn two() -> Int { return 2","file":"<string>"}]}]}"""
 }
 
 test "lower_to_ir lowers a config read in a provide method (component spine)" {
