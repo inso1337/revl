@@ -84,9 +84,11 @@ def test_single_comparison_unchanged(capsys):
     ir, verdict, out = _run("test \"s\" { assert 1 == 2 }\n", capsys)
     assert verdict == "fail"
     assert "1 == 2" in out and "left  = 1" in out, out
-    # exactly one assert step, same shape as before the change
+    # exactly one assert step, carrying the source position/text (#3499)
     steps = [s for t in ir["tests"] for s in t["body"] if s["step"] == "assert"]
-    assert len(steps) == 1 and set(steps[0]) == {"step", "expr"}
+    assert len(steps) == 1
+    assert steps[0]["step"] == "assert" and "expr" in steps[0]
+    assert steps[0]["line"] == 1 and steps[0]["src"] == "assert 1 == 2"
 
 
 def test_and_chain_splits_into_one_step_per_operand(capsys):
@@ -95,7 +97,7 @@ def test_and_chain_splits_into_one_step_per_operand(capsys):
     assert verdict == "pass"
     steps = [s for t in ir["tests"] for s in t["body"] if s["step"] == "assert"]
     assert len(steps) == 3
-    assert all(set(s) == {"step", "expr"} for s in steps)
+    assert all(s["step"] == "assert" and "expr" in s for s in steps)
 
 
 def test_bare_bool_operand_in_chain_stays_plain(capsys):
