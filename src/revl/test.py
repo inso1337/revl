@@ -362,12 +362,20 @@ _PY_RUNTIME_REMEDY = (
     "                    backends/python/.venv/bin/python -P -m revl test    # absolute-interpreter fallback (the `-P` is PYTHONSAFEPATH, issue #317)")
 
 
-def _render_report(results: list, report: str, function_specs: list | None = None) -> str:
+def _render_report(results: list, report: str, function_specs: list | None = None,
+                   collected: int | None = None, ran: int | None = None) -> str:
     """Serialize per-test results for `--report json|tap` (py tier).
 
     ``function_specs`` (issue #2705) is the per-function outcome of the
     `ensures` clauses this run checked; a document without one renders the
     same JSON it did before.
+
+    ``collected`` (issue #3508) is the number of named test units this
+    compilation collected — the same number `--list` prints — and ``ran`` is
+    how many ran, so a runner can check "every collected test ran" from this
+    one call's output instead of paying for a second compile with
+    `--list --filter`. Both are omitted when the caller does not pass them,
+    which keeps the older payload byte-identical.
     """
     if report == "tap":
         lines = ["TAP version 13", f"1..{len(results)}"]
@@ -382,6 +390,10 @@ def _render_report(results: list, report: str, function_specs: list | None = Non
         "failed": sum(1 for r in results if r["status"] == "fail"),
         "total": len(results),
     }
+    if collected is not None:
+        payload["collected"] = collected
+    if ran is not None:
+        payload["ran"] = ran
     if function_specs:
         payload["function_specs"] = function_specs
     return json.dumps(payload, indent=2)
@@ -482,7 +494,7 @@ def run_py(ir: dict, verbose: bool = False, report: str = None) -> tuple[str, st
     fault_entries = _fault(ir, module)
     if not entries and not fault_entries and not roundtrip_entries and not prop_entries:
         if report is not None:
-            print(_render_report([], report))
+            print(_render_report([], report, collected=len(collected_tests(ir)), ran=0))
         return ("pass", _passed(0) + "; no tests emitted by the backend")
 
     failures = 0
@@ -534,7 +546,9 @@ def run_py(ir: dict, verbose: bool = False, report: str = None) -> tuple[str, st
                       f"sh backends/python/setup.sh)")
             if not entries:
                 if report is not None:
-                    print(_render_report(results, report))
+                    print(_render_report(results, report,
+                                         collected=len(collected_tests(ir)),
+                                         ran=len(results)))
                 return ("skip", reason)
             summary.append(reason)
         else:
@@ -556,7 +570,9 @@ def run_py(ir: dict, verbose: bool = False, report: str = None) -> tuple[str, st
                       f"sh backends/python/setup.sh)")
             if not entries and not fault_entries:
                 if report is not None:
-                    print(_render_report(results, report))
+                    print(_render_report(results, report,
+                                         collected=len(collected_tests(ir)),
+                                         ran=len(results)))
                 return ("skip", reason)
             summary.append(reason)
         else:
@@ -581,7 +597,9 @@ def run_py(ir: dict, verbose: bool = False, report: str = None) -> tuple[str, st
 
     if report is not None:
         print(_render_report(results, report,
-                             function_specs=function_specs or None))
+                             function_specs=function_specs or None,
+                             collected=len(collected_tests(ir)),
+                             ran=ran_total))
     summary[0] = (f"{ran_total - failures} of {ran_total} test(s) passed"
                   if failures else _passed(ran_total))
     if failures:
