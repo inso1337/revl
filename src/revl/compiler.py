@@ -1194,6 +1194,35 @@ def _refuse_composition_document(program, filename: str) -> None:
              f"where its rows, layers and row config are resolved")
 
 
+def _has_module_decls(program) -> bool:
+    return any((program.services, program.components, program.type_decls,
+                program.event_decls, program.fn_decls, program.externs,
+                program.secrets, program.retentions, program.model_roles,
+                program.model_councils, program.tests, program.fault_tests,
+                program.prop_tests, program.capability_decls))
+
+
+def _refuse_prelinker_document(program, filename: str) -> None:
+    """Issue #3532: a composition/layer document reaching the MODULE compile
+    path used to return OK with zero components — the lowerer never reads those
+    decls, so the session verbs checked and planned an empty document. Refuse
+    by name instead; rows are admitted through the composition path (`revl run`
+    / `revl audit` / `revl compile` resolving the document, `admit_composition`).
+    A file that mixes module decls with a composition keeps the module path
+    (its components are not empty)."""
+    for decls, kind in ((program.compositions, "composition"),
+                        (program.layers, "layer")):
+        if decls and not _has_module_decls(program):
+            decl = decls[0]
+            raise RevlError(
+                filename, getattr(decl, "line", 1),
+                f"this is a {kind} document (`{kind} {decl.name}`), not a module — "
+                f"the module compiler admits no components from it",
+                hint=f"admit it through the composition path: `revl run` / `revl audit` "
+                     f"/ `revl compile` resolve {kind} documents, or "
+                     f"`admit_composition` (src/revl/composition.py)")
+
+
 def compile_source(source: str, filename: str = "<string>",
                    manifest: dict | None = None,
                    replacing: tuple[str, ...] = (),
@@ -1230,6 +1259,7 @@ def compile_source(source: str, filename: str = "<string>",
             profile = rule.source_profile(filename, profile)
         program = Parser(source, filename).parse()
         _refuse_composition_document(program, filename)
+        _refuse_prelinker_document(program, filename)   # issue #3532
         if program.uses:
             use = program.uses[0]
             raise RevlError(filename, use.line,
@@ -1519,6 +1549,8 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
     # be refused by name, never compiled to an empty document.
     for module in root_modules:
         _refuse_composition_document(module.program, module.path)
+    for module, path in zip(root_modules, paths):   # issue #3532
+        _refuse_prelinker_document(module.program, path)
     _canonicalize_identical_module_copies(loader, root_modules)
 
     merged = Program(filename=paths[0] if paths else "<none>")
