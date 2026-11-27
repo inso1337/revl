@@ -908,6 +908,16 @@ fn is_dunder_name(name: &str) -> bool {
         && bytes[2..bytes.len() - 2].iter().all(|&b| is_ident_byte(b))
 }
 
+/// A name Python's private name mangling would rewrite, by the reference's own
+/// test (`revl.lower._is_mangled_name`, issue #3135): it starts with `__` and
+/// does not end with `__`, so `__a` and `___a` are refused and `__`, `___` and
+/// `__a__` are not (the last is a dunder, decided by [`is_dunder_name`]). The
+/// reference refuses it in the same three positions as a dunder, so this
+/// certifier decides the service-method one and withholds the name.
+fn is_mangled_name(name: &str) -> bool {
+    name.starts_with("__") && !name.ends_with("__")
+}
+
 /// A name as a MANIFEST WIRE field: a non-empty run of ASCII identifier bytes.
 ///
 /// [`is_name`] is written for tokens that already came out of [`tokens`], where
@@ -1087,6 +1097,7 @@ fn parse<'a>(toks: &[&'a str]) -> Option<Parsed<'a>> {
             // so the method position is the only one it can decide.
             if toks[i] != "fn" || i + 1 >= n || !is_name(toks[i + 1])
                 || is_dunder_name(toks[i + 1])
+                || is_mangled_name(toks[i + 1])
             {
                 return None;
             }
@@ -2011,6 +2022,29 @@ mod tests {
         // surface would issue an admission the reference refuses.
         assert!(certify("service A {\n  fn f(x: Int) -> Int\n}\nservice A {\n  fn g(x: Int) -> Int\n}\n").is_none());
         assert!(certify("service A {\n  fn f(x: Int) -> Int\n  fn f(y: Int) -> Int\n}\n").is_none());
+    }
+
+    #[test]
+    fn a_name_python_would_mangle_is_not_certified() {
+        // Issue #3135: the reference refuses a service-method name that starts
+        // with `__` and does not end with `__` (Python rewrites it inside a
+        // class body), and `admit_src` raises no objection to it.
+        for source in [
+            "service S {\n  fn __a()\n}\n",
+            "service S {\n  fn __approve(x: Int) -> Int\n}\n",
+            "service S {\n  fn ___a()\n}\n",
+        ] {
+            assert!(certify(source).is_none(), "must not certify: {:?}", source);
+        }
+        // Names Python leaves alone stay inside the surface.
+        for source in [
+            "service S {\n  fn _a()\n}\n",
+            "service S {\n  fn a__()\n}\n",
+            "service S {\n  fn __()\n}\n",
+            "service S {\n  fn f(__a: Int) -> Int\n}\n",
+        ] {
+            assert!(certify(source).is_some(), "must certify: {:?}", source);
+        }
     }
 
     #[test]

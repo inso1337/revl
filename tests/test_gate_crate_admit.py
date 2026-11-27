@@ -573,6 +573,21 @@ def test_a_dunder_service_method_is_withheld(consumer):
         assert wire["admitted"] is False, wire
 
 
+def test_a_name_python_would_mangle_is_withheld(consumer):
+    """Issue #3135: the reference refuses a service-method name that starts with
+    `__` and does not end with `__`, and the native gate raises no objection, so
+    the certifier has to withhold the admission."""
+    programs = (
+        "service S {\n  fn __a()\n}\n",
+        "service S {\n  fn __approve(x: Int) -> Int\n}\n"
+        "component C provides s: S {\n  provide s {\n    fn __approve(x) = x\n  }\n}\n",
+    )
+    wires = _crate_verdicts(consumer, list(programs), "--admission")
+    for source, wire in zip(programs, wires):
+        assert _reference(source)[0] != "", source
+        assert wire["admitted"] is False, wire
+
+
 def test_a_withheld_admission_is_the_verdict_wire_verbatim(consumer):
     """Switching a consumer from `admit` to `issue_admission` may only ADD the
     admitted wire. Every other answer has to be byte-identical to the one it
