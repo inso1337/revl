@@ -905,10 +905,15 @@ def model_crossing_of(capabilities) -> str | None:
 
     The exact shape of `retention.persistence_sink_of` on this module's scope:
     only the FIRST capability with a matching head is reported, because a
-    crossing declares one resource scope.
-    """
+    crossing declares one resource scope. The head is read through the shared
+    `emission_analysis.cap_head`, which strips a resource ceiling first, so
+    `model(calls=3)` is a model crossing exactly like `model` or
+    `model.complete(calls=3)` (#3376 — the ceiling narrows the cone, it does
+    not leave the scope, so the origin-ceiling check cannot be switched off by
+    spelling one more parameter)."""
+    from .emission_analysis import cap_head  # noqa: PLC0415 - lazy, avoids cycle
     for cap in capabilities or ():
-        if str(cap).split(".", 1)[0] == MODEL_SCOPE:
+        if cap_head(str(cap)) == MODEL_SCOPE:
             return str(cap)
     return None
 

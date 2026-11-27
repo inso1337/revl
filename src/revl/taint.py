@@ -189,9 +189,10 @@ def _sink_of(capabilities) -> str | None:
     before anything had looked at it)."""
     from . import ui_family as _uif  # noqa: PLC0415 - leaf module, no cycle
 
+    from .emission_analysis import cap_head  # noqa: PLC0415 - lazy, avoids cycle
     for cap in capabilities or ():
         token = str(cap).split("(", 1)[0]
-        head = token.split(".", 1)[0]
+        head = cap_head(str(cap))
         if head in _SINK_CLASS_SCOPES:
             if _uif.is_reserved(token) and not _uif.is_taint_sink(token):
                 continue

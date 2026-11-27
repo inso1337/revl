@@ -91,9 +91,10 @@ class Spec:
         not as a distinct capability. A root that is not an injected key is
         *not* wired here — emitting a bound for it would grant authority the
         spec never handed the component."""
+        from .emission_analysis import cap_head  # noqa: PLC0415 - lazy, avoids cycle
         roots: list[str] = []
         for cap in self.capabilities:
-            root = cap.split(".", 1)[0]
+            root = cap_head(str(cap))
             if root in self.requires and root not in roots:
                 roots.append(root)
         return sorted(roots)

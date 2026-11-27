@@ -445,3 +445,68 @@ def test_model_crossing_of_reads_the_declared_capability():
     assert model_route.model_crossing_of(None) is None
     # `modelling.x` is not a `model` scope: the head is matched whole.
     assert model_route.model_crossing_of(["modelling.x"]) is None
+
+
+# ==========================================================================
+# Issue #3376: a ceiling on the capability does not hide the scope.
+# ==========================================================================
+
+def test_cap_head_strips_a_ceiling_before_the_head_split_3376():
+    """The shared reader every scope-set check routes through: a resource
+    ceiling (`calls=3`, `path="…"`) narrows the crossing's cone under the SAME
+    scope, it does not change the scope."""
+    from revl.emission_analysis import cap_head
+
+    assert cap_head("model") == "model"
+    assert cap_head("model(calls=3)") == "model"
+    assert cap_head("model.complete(calls=3)") == "model"
+    assert cap_head("db.insert") == "db"
+    assert cap_head("fs.write(path=\"/d\")") == "fs"
+
+
+def test_the_three_scope_readers_strip_a_ceiling_3376():
+    """The model-crossing, sink and persistence readers cannot drift: all
+    three read the head through `cap_head`."""
+    from revl import model_route, retention
+    from revl.taint import _sink_of
+
+    assert model_route.model_crossing_of(["model(calls=3)"]) == "model(calls=3)"
+    assert model_route.model_crossing_of(["model.complete(calls=3)"]) == \
+        "model.complete(calls=3)"
+    assert model_route.model_crossing_of(["model"]) == "model"
+    assert model_route.model_crossing_of(["db.insert"]) is None
+    assert _sink_of(["shell(calls=2)"]) == "shell"
+    assert retention.persistence_sink_of(["db(calls=1)"]) == "db"
+
+
+def _program_with_extern_cap(route, cap):
+    externs = (f"extern emission[{cap}] fn prompt(p: Secret[Str]) -> Int "
+               "= @py { return 0 }\n")
+    return _program(route=route, externs=externs)
+
+
+def test_a_ceiling_on_the_bare_model_scope_is_still_a_model_crossing_3376():
+    """The end-to-end half: `emission[model(calls=3)]` used to record no model
+    crossing (the head read did not strip the ceiling), so the origin-ceiling
+    check was skipped and a confidential value reached an off-device placement
+    unchecked. Now it is refused exactly like `emission[model]` — this test
+    fails on main."""
+    err = _refuses(_program_with_extern_cap(
+        "  route model on summarize { * -> cloud }\n", "model(calls=3)"))
+    assert "confidential" in err.message
+    assert "model" in err.message
+
+
+def test_a_ceiling_on_a_dotted_model_scope_is_still_a_model_crossing_3376():
+    err = _refuses(_program_with_extern_cap(
+        "  route model on summarize { * -> cloud }\n", "model.complete(calls=3)"))
+    assert "model.complete" in err.message
+
+
+def test_the_on_device_control_with_a_ceiling_still_compiles_3376():
+    """The control: the ceiling narrows the cone, it does not block the
+    on-device placement — a value the route block places on the device is
+    admitted through the ceiling-bearing crossing too."""
+    _admits(_program_with_extern_cap(
+        "  route model on summarize { confidential -> local }\n",
+        "model(calls=3)"))

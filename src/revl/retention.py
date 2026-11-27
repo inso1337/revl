@@ -210,8 +210,9 @@ def persistence_sink_of(capabilities) -> Optional[str]:
     crossing's cone under the same scope, they do not change the scope. So
     `db(calls=3)` still declares the `db` sink, and the retention guarantee
     cannot be switched off by spelling one more parameter (#3194)."""
+    from .emission_analysis import cap_head  # noqa: PLC0415 - lazy, avoids cycle
     for cap in capabilities or ():
-        head = str(cap).split("(", 1)[0].split(".", 1)[0]
+        head = cap_head(str(cap))
         if head in PERSISTENCE_SINK_SCOPES:
             return head
     return None
