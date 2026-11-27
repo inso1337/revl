@@ -891,3 +891,74 @@ def test_a_clean_value_through_the_wrapper_still_compiles():
     compile_source(_agent(
         "      let c = launder(u)\n      let x = emit logit(c)", extra=_LAUNDER),
         "wrapper_clean.rvl")  # must not raise
+
+
+# ===========================================================================
+# Issue #3470: a Secret[T] argument through a PLAIN (non-Secret) fn parameter.
+# The call site used to accept a Secret[T] argument for a plain `T` parameter
+# and drop the origin, so one helper fn between the secret and a disclosure
+# sink compiled. The call is now refused unless the callee's parameter is
+# declared `Secret[T]`.
+# ===========================================================================
+
+_MINT_LEAK = (
+    'extern pure fn mint(u: Str) -> Secret[Str] = @py { return "tok-" + u }\n'
+    'extern pure fn leak(s: Str) -> Int = @py { return 0 }\n'
+)
+
+
+def test_a_secret_argument_to_a_plain_param_is_refused_3470():
+    """The issue's `hidden` example: refused at the `wrap(t)` call, naming the
+    wrapper."""
+    err = _refuses(_MINT_LEAK
+                   + "fn wrap(s: Str) -> Int { return leak(s) }\n"
+                   + 'fn hidden() -> Int { let t = mint("a"); return wrap(t) }\n')
+    assert "`wrap`" in err.message
+    assert "plain parameter" in err.message
+
+
+def test_a_secret_argument_through_two_wrappers_is_refused_3470():
+    err = _refuses(_MINT_LEAK
+                   + "fn wrap(s: Str) -> Int { return leak(s) }\n"
+                   + "fn outer(s: Str) -> Int { return wrap(s) }\n"
+                   + 'fn hidden() -> Int { let t = mint("a"); return outer(t) }\n')
+    assert "`outer`" in err.message
+
+
+def test_a_secret_argument_through_a_wrapper_in_another_module_is_refused_3470():
+    other = ("pub fn wrap(s: Str) -> Int { return leak(s) }\n")
+    src = ('use "other.rvl" { wrap }\n'
+           + _MINT_LEAK
+           + 'fn hidden() -> Int { let t = mint("a"); return wrap(t) }\n')
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(src, "flow.rvl", modules={"other.rvl": other})
+    err = excinfo.value
+    assert getattr(err, "code", None) == "G-SECRET-FLOW"
+    assert "`wrap`" in err.message
+
+
+def test_interpolated_secret_reaching_the_sink_is_refused_3470():
+    """`"${t}"` carries the confidential origin, so the sink refuses it —
+    this already held; pinned here as the interpolation arm of the rule."""
+    err = _refuses(_MINT_LEAK
+                   + 'fn hidden() -> Int { let t = mint("a"); return leak(`x${t}`) }\n')
+    assert "`leak`" in err.message
+
+
+def test_a_secret_declared_parameter_wrapper_still_compiles_3470():
+    """The dual: a wrapper whose parameter IS declared `Secret[Str]` accepts
+    the secret, and only a declared `Secret[T]` receiver may take it."""
+    compile_source(
+        _MINT_LEAK
+        + "extern pure fn keep(s: Secret[Str]) -> Int = @py { return 0 }\n"
+        + "fn wrap(s: Secret[Str]) -> Int { return keep(s) }\n"
+        + 'fn ok() -> Int { let t = mint("a"); return wrap(t) }\n',
+        "secret_wrapper_ok.rvl")  # must not raise
+
+
+def test_a_plain_value_through_the_plain_wrapper_still_compiles_3470():
+    compile_source(
+        _MINT_LEAK
+        + "fn wrap(s: Str) -> Int { return leak(s) }\n"
+        + 'fn ok() -> Int { return wrap("plain") }\n',
+        "plain_wrapper_ok.rvl")  # must not raise
