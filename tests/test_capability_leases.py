@@ -249,3 +249,33 @@ def test_lease_ttl_lapses_at_the_crossing(sink):
     with pytest.raises(ApprovalRequired):
         session.call("ops", "go", [sink, "b"])
     assert _lines(sink) == ["w:a"]           # the expired lease fired nothing
+
+
+@needs_cordis
+def test_swap_of_a_lease_holding_component_is_refused_before_teardown(sink):
+    """Issue #3584: swapping a component that holds an `effect lease` used to
+    fail at the SUCCESSOR's activation — the old generation's teardown ran the
+    lease's own `undo l.revoke()`, retiring the grant the successor needed —
+    and the rollback then failed the same way, so `ops` ended with no
+    provider. The swap is now refused in `_plan_swap`, before any teardown:
+    the running generation keeps serving, and the message names the lease."""
+    from revl.mcp.approval import ApprovalRequired
+    session = _gated_session()
+    with pytest.raises(ApprovalRequired) as exc:
+        session.load(_ir(), record=True)
+    session.mint_standing_grant(ticket_hash=exc.value.ticket["hash"])
+    session.load(_ir(), record=True)
+
+    session.call("ops", "go", [sink, "a"])
+    assert _lines(sink) == ["w:a"]
+
+    with pytest.raises(SessionError, match="swap refused before teardown") as exc2:
+        session.swap(_ir(), agent_authored=False)
+    assert 'effect lease' in str(exc2.value)
+    assert 'fs.write(path="/tmp")' in str(exc2.value)
+
+    # the running generation was never torn down: the lease is still held and
+    # the provider still answers under it
+    session.call("ops", "go", [sink, "b"])
+    assert _lines(sink) == ["w:a", "w:b"]
+    session.unload()

@@ -2648,6 +2648,34 @@ class Session:
         # running composition untouched.
         self._check_cache_applicability(ir, new_map)
         old_ir = self.ir
+        # issue #3584: a successor that acquires an `effect lease` cannot be
+        # swapped in place while the running generation holds the same lease:
+        # the old generation's teardown runs the lease's own `undo l.revoke()`,
+        # which retires the grant the successor's activation needs, so the
+        # successor failed LeaseRefused AND the rollback failed the same way,
+        # leaving the key without a provider. Refuse here, before any teardown,
+        # so gen N keeps serving; unload + load raises the lease ticket instead
+        # (`_enforce_lease_gate` at load). A live grant that is NOT the running
+        # generation's own lease is not touched by its teardown, so a successor
+        # covered by such a grant still swaps.
+        running = {(lz["component"], lz["capability"])
+                   for lz in _collect_lease_requests(old_ir)}
+        for lz in _collect_lease_requests(ir):
+            cap = lz["capability"]
+            same_as_running = (lz["component"], cap) in running
+            live = self._live_lease_grant(lz["component"], cap) is not None
+            if same_as_running or not live:
+                why = ("the running generation's teardown would revoke that "
+                       "grant (the lease's own undo), so the successor could "
+                       "not activate and the rollback would fail too"
+                       if same_as_running else
+                       "no live standing grant covers it, so the lease needs "
+                       "a ticket first")
+                raise SessionError(
+                    f"swap refused before teardown: component "
+                    f"`{lz['component']}` acquires `effect lease` on {cap}, and "
+                    f"{why}. Unload and load instead: load raises the lease "
+                    "ticket, approve it, mint the grant, and re-load")
         # item 334 disclosure gate: an AGENT-authored successor crosses the
         # trust boundary, so gen N's live OPERATOR state must not carry onto it
         # through any channel that is not explicitly declared AND §5-typed on
