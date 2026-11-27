@@ -180,21 +180,26 @@ three characters `a`, `"`, `b`, and `"a\\b"` is the three characters `a`, `\`,
 `b`. Every other backslash sequence stays verbatim: `"a\nb"` is the four
 characters `a`, `\`, `n`, `b` (a backslash and an `n`), not a newline.
 
-A `$` is an **ordinary literal character** too (item 203): every `$`-shape
-inside a plain string (`$name`, `$$`, and the WAT/target fragments the
-self-host tiers emit like `"call $int_add"`) is literal text, because in
-2.0 interpolation lives *only* in backtick templates (`` `${name}` ``).
-One exception is **refused on purpose** (issue #3502): a *complete* `${...}`
-shape in a plain string is a likely forgotten backtick, so the lexer refuses
-it rather than emit it literally — write a backtick template to interpolate,
-or a triple-quoted `"""..."""` string for literal `${...}` text (shell, JS,
-another template quoted as data). The old
-1.x meanings (`$name` = interpolation, `$$` = an escaped dollar) are gone; a 1.x
-file still migrates with `revl fmt --migrate`, which rewrites `"$name"` to a
-template under a migrate-specific gate (a deliberate literal→interpolation
-upgrade — see `formatter.ir_equivalent` with `token_preserving=False`, `revl.fmt`,
-and tests/test_fmt.py), no longer relying on the lexer to reject the input.
-A single-quoted `"` string may not span lines.
+A `$` is an **ordinary literal character** too (item 203) in every shape but
+one: `$name`, `$$`, a lone `$`, and the WAT/target fragments the self-host
+tiers emit like `"call $int_add"` are all literal text, because in 2.0
+interpolation lives *only* in backtick templates (`` `${name}` ``). The old
+1.x meanings (`$name` = interpolation, `$$` = an escaped dollar) are gone; a
+1.x file still migrates with `revl fmt --migrate`, which rewrites `"$name"` to
+a template under a migrate-specific gate (a deliberate literal→interpolation
+upgrade — see `formatter.ir_equivalent` with `token_preserving=False`,
+`revl.fmt`, and tests/test_fmt.py), no longer relying on the lexer to reject
+the input.
+
+**The one exception is a complete `${...}` shape, which is refused** (item 380,
+issue #3502). In practice it is a forgotten-backtick interpolation, and
+accepting it silently made `"hi ${name}"` compile to the literal characters —
+a wrong answer, not literal text. The message says the shape is refused and
+names both working spellings: for literal `${...}` text use a triple-quoted
+string, `"""echo ${HOME}"""`; for interpolation use a backtick template,
+`` `hi ${name}` ``. A `${` without a closing `}` (the ts emitter's `"${"`
+fragment), a bare `$`, and a plain string that also carries a backtick are not
+refused. A single-quoted `'...'` string may not span lines.
 
 For multi-line content there is a **triple-quoted** form, `"""..."""`:
 
@@ -209,6 +214,26 @@ For multi-line content there is a **triple-quoted** form, `"""..."""`:
   stripped, so a literal that opens on its own line does not begin with a blank
   line (the Python/Swift/Kotlin convention). Any further blank lines are kept.
 - **Empty.** `""""""` is the empty string.
+
+### A backtick template is verbatim except for `${...}` (issue #3503)
+
+A template body has **no escape processing at all**: not `\\`, not `\"`, not
+`\$`. A backslash is a backslash, so write exactly the characters you want.
+This is the rule; it differs from the plain string's two escapes on purpose:
+
+- `"\\(".concat(name)` is the plain-string spelling of the regex `\(x`: `\\`
+  there is one backslash.
+- `` `\\(${name}` `` is the template spelling of `\\(x`: **two** backslashes, an
+  escaped backslash followed by an open group — not the same pattern.
+- To build `\(x` in a template, write the single backslash literally:
+  `` `\(${name}` ``.
+
+Moving a string between `"..."` and a template therefore changes every
+backslash in it (the plain form has `\"` and `\\`; the template form has none).
+Re-read the backslashes when you do. A backtick cannot be escaped — it closes
+the template — so splice one in with `` `${"`"}` ``, or keep that text in a
+triple-quoted string. A literal `${` has the same problem; write it in a
+triple-quoted string (or splice it with `${"${"}`).
 
 Both forms produce the same IR string node — a triple-quoted literal is just a
 `Str` whose value may contain newlines — so this is a **lexer-only** feature:
