@@ -3000,6 +3000,27 @@ class _FlowChecker:
                     if _authority_dirty(at):
                         self._on_sink("an unnamed callable", kind, index, at,
                                       node, ("a first-class function value",))
+            # issue #3349: the same over-approximation for RETENTION. When the
+            # program declares a persistence crossing at all, every argument of
+            # an unnameable call is treated as reaching one: an expired
+            # `Retained[T, P]` value passed as an ARGUMENT (the closure body's
+            # own parameter is unqualified, so the direct sink check inside the
+            # arrow never sees the origin) must be refused here, at the call.
+            # The scope named is the declared persistence scope (sorted-first
+            # when several are declared): the unnameable callee may write to
+            # any of them, and the diagnostic must name a real one.
+            if (not self.infer and self.enforce
+                    and self.model.persistence_sinks
+                    and self.model.retention_as_of is not None):
+                _scopes = sorted(set(self.model.persistence_sinks.values()))
+                for index, at in enumerate(arg_taints):
+                    for _name in _retention_origins(at):
+                        _pol = self.model.retention_policies.get(_name)
+                        if _pol is not None and _pol.expired(
+                                self.model.retention_as_of):
+                            self._refuse_retention(
+                                "an unnameable call (a first-class function value)",
+                                _scopes[0], index, _pol, at, node)
             result = CLEAN
             for t in arg_taints:
                 result = _join(result, t)

@@ -163,6 +163,54 @@ def test_a_live_retained_value_carried_out_of_a_closure_compiles():
     compile_source(src, "retain.rvl")
 
 
+def test_an_expired_retained_value_passed_as_a_closure_argument_is_refused_3349():
+    """Issue #3349: the ARGUMENT form of the closure write. The arrow's
+    parameter `r` is a plain `Str`, so the sink check inside the arrow body
+    cannot see the origin; the unnameable indirect call now treats every
+    argument as a persistence sink when the program declares one, and refuses
+    the expired value at the call. The parameter is deliberately NOT named
+    like the outer binding — the shadowing case is pinned above."""
+    src = PAST + '''extern pure fn load(k: Str) -> Retained[Str, customer_pii] = @py { return k }
+extern emission[db.insert] fn db_put(row: Str) -> Int = @py { return 0 }
+service Ops { emission fn go(k: Str) -> Int }
+component Store provides ops: Ops {
+  provide ops {
+    fn go(k) {
+      let row = load(k)
+      let w = (r: Str) => emit db_put(r)
+      let n = w(row)
+      return n
+    }
+  }
+}
+'''
+    err = _refuses(src)
+    assert err.code == "G-RETAIN"
+    assert "may not be written to durable storage" in err.message
+    assert "customer_pii" in err.message
+
+
+def test_a_live_retained_value_passed_as_a_closure_argument_compiles_3349():
+    """The control: a value whose policy has NOT expired is admitted through
+    the same argument form — the over-approximation refuses only past the
+    deadline (a declared legal hold overrides it the same way)."""
+    src = FUTURE + '''extern pure fn load(k: Str) -> Retained[Str, customer_pii] = @py { return k }
+extern emission[db.insert] fn db_put(row: Str) -> Int = @py { return 0 }
+service Ops { emission fn go(k: Str) -> Int }
+component Store provides ops: Ops {
+  provide ops {
+    fn go(k) {
+      let row = load(k)
+      let w = (r: Str) => emit db_put(r)
+      let n = w(row)
+      return n
+    }
+  }
+}
+'''
+    compile_source(src, "retain.rvl")
+
+
 def test_a_retained_value_passed_to_a_closure_that_writes_it_is_refused():
     """A parameter that shadows the retained binding still reaches the sink
     INSIDE the arrow body: the seeded walk computes the closure's value, and the
