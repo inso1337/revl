@@ -281,7 +281,67 @@ extern pure fn module_path(base: Str, target: Str) -> Str = @py {
         if os.path.exists(cand):
             return os.path.abspath(cand)
     return ""
-}
+} = @ts {
+    // The py arm also searches the toolchain's own `stdlib/` parent; a ts host has
+    // no install tree to name, so this arm resolves against the document's
+    // directory and `REVL_IMPORT_PATH` only.
+    const nodeFs = (process as any).getBuiltinModule("node:fs");
+    const nodePath = (process as any).getBuiltinModule("node:path");
+    if (base === "" || target === "") return "";
+    const roots: string[] = [nodePath.dirname(nodePath.resolve(base))];
+    for (const entry of (process.env.REVL_IMPORT_PATH ?? "").split(nodePath.delimiter)) {
+      const trimmed = entry.trim();
+      if (trimmed !== "") roots.push(trimmed);
+    }
+    for (const root of roots) {
+      const cand = nodePath.resolve(root, target);
+      if (nodeFs.existsSync(cand)) return cand;
+    }
+    return "";
+  } = @rs {
+    fn lexical_abs(p: &std::path::Path) -> std::path::PathBuf {
+        let joined = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            std::env::current_dir().unwrap_or_default().join(p)
+        };
+        let mut out = std::path::PathBuf::new();
+        for c in joined.components() {
+            match c {
+                std::path::Component::ParentDir => {
+                    out.pop();
+                }
+                std::path::Component::CurDir => {}
+                other => out.push(other.as_os_str()),
+            }
+        }
+        out
+    }
+    // The py arm also searches the toolchain's own `stdlib/` parent; a native host
+    // has no install tree to name, so this arm resolves against the document's
+    // directory and `REVL_IMPORT_PATH` only.
+    if base.is_empty() || target.is_empty() {
+        return String::new();
+    }
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    let doc = lexical_abs(std::path::Path::new(&base));
+    roots.push(doc.parent().map(|q| q.to_path_buf()).unwrap_or_default());
+    if let Some(env) = std::env::var_os("REVL_IMPORT_PATH") {
+        for entry in std::env::split_paths(&env) {
+            let text = entry.to_string_lossy().trim().to_string();
+            if !text.is_empty() {
+                roots.push(std::path::PathBuf::from(text));
+            }
+        }
+    }
+    for root in roots {
+        let cand = root.join(&target);
+        if cand.exists() {
+            return lexical_abs(&cand).to_string_lossy().into_owned();
+        }
+    }
+    String::new()
+  }
 
 // The text of the module `module_path` resolved, or "" for the "" path.
 extern pure fn read_module_text(path: Str) -> Str = @py {
@@ -289,7 +349,19 @@ extern pure fn read_module_text(path: Str) -> Str = @py {
         return ""
     with open(path, "r", encoding="utf-8") as fh:
         return fh.read()
-}
+} = @ts {
+    if (path === "") return "";
+    const nodeFs = (process as any).getBuiltinModule("node:fs");
+    return nodeFs.readFileSync(path, "utf8").replace(/\r\n?/g, "\n");
+  } = @rs {
+    if path.is_empty() {
+        return String::new();
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(t) => t.replace("\r\n", "\n").replace("\r", "\n"),
+        Err(_) => String::new(),
+    }
+  }
 
 
 // `display_path`: the reference's `relpath_or_abs` for a document's diagnostic
@@ -374,7 +446,164 @@ extern pure fn ref_probe(base: Str, refpath: Str) -> Str = @py {
     with open(real, "rb") as fh:
         digest = hashlib.sha256(fh.read()).hexdigest()
     return digest + "|" + kind + "|" + rel.replace(os.sep, "/")
-}
+} = @ts {
+    const nodeFs = (process as any).getBuiltinModule("node:fs");
+    const nodePath = (process as any).getBuiltinModule("node:path");
+    const nodeCrypto = (process as any).getBuiltinModule("node:crypto");
+    if (base === "" || refpath === "") return "";
+    const realOf = (p: string): string => {
+      try { return nodeFs.realpathSync(p); } catch (_e) { return nodePath.resolve(p); }
+    };
+    const isFile = (p: string): boolean => {
+      try { return nodeFs.statSync(p).isFile(); } catch (_e) { return false; }
+    };
+    const docdir = realOf(nodePath.dirname(nodePath.resolve(base)));
+    const real = realOf(nodePath.resolve(docdir, refpath));
+    if (!isFile(real)) return "";
+    let jail = "";
+    let kind = "";
+    let probe = docdir;
+    for (let i = 0; i < 16; i++) {
+      if (nodePath.basename(probe) === "stdlib" && isFile(nodePath.join(probe, "fs.rvl"))) {
+        jail = nodePath.dirname(probe);
+        kind = "stdlib";
+        break;
+      }
+      const parent = nodePath.dirname(probe);
+      if (parent === probe) break;
+      probe = parent;
+    }
+    if (jail === "") jail = docdir;
+    const rel = nodePath.relative(jail, real);
+    if (rel === ".." || rel.startsWith(".." + nodePath.sep)) return "";
+    if (nodePath.isAbsolute(rel)) return "";
+    const digest = nodeCrypto.createHash("sha256").update(nodeFs.readFileSync(real)).digest("hex");
+    return digest + "|" + kind + "|" + rel.split(nodePath.sep).join("/");
+  } = @rs {
+    fn lexical_abs(p: &std::path::Path) -> std::path::PathBuf {
+        let joined = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            std::env::current_dir().unwrap_or_default().join(p)
+        };
+        let mut out = std::path::PathBuf::new();
+        for c in joined.components() {
+            match c {
+                std::path::Component::ParentDir => {
+                    out.pop();
+                }
+                std::path::Component::CurDir => {}
+                other => out.push(other.as_os_str()),
+            }
+        }
+        out
+    }
+    fn real_of(p: &std::path::Path) -> std::path::PathBuf {
+        let abs = lexical_abs(p);
+        let mut tail: Vec<std::ffi::OsString> = Vec::new();
+        let mut cur = abs.clone();
+        loop {
+            if let Ok(c) = std::fs::canonicalize(&cur) {
+                let mut out = c;
+                for t in tail.iter().rev() {
+                    out.push(t);
+                }
+                return out;
+            }
+            let name = cur.file_name().map(|n| n.to_os_string());
+            let parent = cur.parent().map(|q| q.to_path_buf());
+            match (name, parent) {
+                (Some(n), Some(q)) => {
+                    tail.push(n);
+                    cur = q;
+                }
+                _ => return abs,
+            }
+        }
+    }
+    fn sha256_bytes(bytes: &[u8]) -> String {
+        const K: [u32; 64] = [
+            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+            0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+            0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+            0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+            0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+            0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+            0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+        ];
+        let mut h: [u32; 8] = [
+            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+        ];
+        let mut msg = bytes.to_vec();
+        let bits = (bytes.len() as u64).wrapping_mul(8);
+        msg.push(0x80);
+        while msg.len() % 64 != 56 { msg.push(0); }
+        msg.extend_from_slice(&bits.to_be_bytes());
+        for block in msg.chunks(64) {
+            let mut w = [0u32; 64];
+            for i in 0..16 {
+                w[i] = u32::from_be_bytes([block[4 * i], block[4 * i + 1], block[4 * i + 2], block[4 * i + 3]]);
+            }
+            for i in 16..64 {
+                let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+                let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+                w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
+            }
+            let mut v = h;
+            for i in 0..64 {
+                let s1 = v[4].rotate_right(6) ^ v[4].rotate_right(11) ^ v[4].rotate_right(25);
+                let ch = (v[4] & v[5]) ^ (!v[4] & v[6]);
+                let t1 = v[7].wrapping_add(s1).wrapping_add(ch).wrapping_add(K[i]).wrapping_add(w[i]);
+                let s0 = v[0].rotate_right(2) ^ v[0].rotate_right(13) ^ v[0].rotate_right(22);
+                let maj = (v[0] & v[1]) ^ (v[0] & v[2]) ^ (v[1] & v[2]);
+                let t2 = s0.wrapping_add(maj);
+                v = [t1.wrapping_add(t2), v[0], v[1], v[2], v[3].wrapping_add(t1), v[4], v[5], v[6]];
+            }
+            for i in 0..8 { h[i] = h[i].wrapping_add(v[i]); }
+        }
+        let mut out = String::with_capacity(64);
+        for b in h.iter() { out.push_str(&format!("{:08x}", b)); }
+        out
+    }
+    if base.is_empty() || refpath.is_empty() {
+        return String::new();
+    }
+    let doc = lexical_abs(std::path::Path::new(&base));
+    let docdir = real_of(doc.parent().unwrap_or(std::path::Path::new("/")));
+    let real = real_of(&docdir.join(&refpath));
+    if !real.is_file() {
+        return String::new();
+    }
+    let mut jail = std::path::PathBuf::new();
+    let mut kind = "";
+    let mut probe = docdir.clone();
+    for _ in 0..16 {
+        let is_stdlib = probe.file_name().map(|n| n.to_string_lossy() == "stdlib").unwrap_or(false);
+        if is_stdlib && probe.join("fs.rvl").is_file() {
+            jail = probe.parent().map(|q| q.to_path_buf()).unwrap_or_default();
+            kind = "stdlib";
+            break;
+        }
+        match probe.parent().map(|q| q.to_path_buf()) {
+            Some(q) => probe = q,
+            None => break,
+        }
+    }
+    if jail.as_os_str().is_empty() {
+        jail = docdir.clone();
+    }
+    let rel = match real.strip_prefix(&jail) {
+        Ok(r) => r.to_path_buf(),
+        Err(_) => return String::new(),
+    };
+    let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    let bytes = match std::fs::read(&real) {
+        Ok(b) => b,
+        Err(_) => return String::new(),
+    };
+    format!("{}|{}|{}", sha256_bytes(&bytes), kind, parts.join("/"))
+  }
 
 // Index of `sub` in `s` at or after `start`, or -1. (The base `Str.indexOf`
 // takes no start offset, so the scans below carry their own.)
