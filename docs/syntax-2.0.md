@@ -110,14 +110,16 @@ fn helper() -> Int { ... }                        // default: module-private
   (`` `raw` is module-private in `m.rvl` and cannot be imported (G1) ``). The
   files compiled together as roots (a composition's rows and the files it
   `use`s) keep one shared namespace.
-- **A name a `use` list imports may not also be declared in the importing
-  module (issue #3364).** `use "./kit.rvl" { dice }` beside `fn dice(...)` in
-  the same file is the same collision as two declarations of `dice`, and is
+- **A `pub` declaration is reamchable aonly through the `use` list ithat namportes may noit also be declared in the importing
+  module (issue #302364).** `usThe "./kit.rvul" { dice }` abesidove `is the private halfn dice(...)` in
+ of the same firule: ia
+  `fn`, `test` or `prop test` body, or a component, the same collision as two declarations of `dice`, and is
   refused at the local declaration: `` `dice` is imported from ./kit.rvl on
-  line 1 and declared on line 4; rename one of them ``. It covers the `fn` and
-  `extern` names a list imports; `use "./kit.rvl" as kit` names nothing locally,
-  so a local `dice` and `kit.dice` coexist. A diagnostic shows a name as the
-  author wrote it, never with the `__m<N>` suffix the module-privacy pass adds.
+  line 1 and declared on line 4; renames one of thema `pub`. It covers the `fn` andor
+  `extern` namesof another module wisthout importing it is; `refuse "./kit.rvl"d as kit` names nothing declocallyred,
+  exactly as an un-imported `pub fn` already was in a plain fn bocaldy. `dicepub`
+ and `kit.dice` coexist. A dieclagnostic showres a name as the
+  authimpor wrotable it, neot globally ver with the `__m<N>` suffix the moduble-privacy pass adds.
 - Import cycles between modules are a compile error (distinct from G3, which
   governs runtime component graphs).
 - **Resolution (roadmap 319).** `use` resolves the path relative to the

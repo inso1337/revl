@@ -1670,26 +1670,107 @@ def test_native_driver_resolves_a_use_on_the_import_path(
     assert got == want
 
 
-def test_native_driver_does_not_yet_refuse_a_bare_private_call_3004(
-        compile_rvl, tmp_path, monkeypatch):
-    """Issue #3004, pinned self-host gap: the reference refuses a BARE call to
-    another module's non-`pub` fn as module-private (G1), as it refuses the
-    named import of it. The native driver does not yet: its module admission
-    (`ad_imports_refusal`, selfhost/compile.rvl) reads only the names a `use`
-    list spells, and selfhost/lower.rvl's name resolver switches off for a text
-    with a `use`. This test turns red when the rule is ported; flip it then."""
-    monkeypatch.delenv("REVL_IMPORT_PATH", raising=False)
-    # `one` is imported so lib.rvl's pure declarations join the program; a
-    # module reached only for a service contributes no fn at all
-    (tmp_path / "lib.rvl").write_text(
-        _LIB_STORE + "pub fn one() -> Int { return 1 }\n"
-        "fn helper(x: Int) -> Int { return x }\n", encoding="utf-8")
+# Issue #3023: the native driver agrees with the reference that a bare name no `use`
+# list spells is refused, in every body kind. `lib.rvl` declares a `pub fn`, a
+# `pub extern` and a non-`pub` fn; `one` is imported so lib's pure declarations
+# join the program (a module reached only for a service contributes no fn).
+_USELIST_LIB = (
+    _LIB_STORE
+    + "pub fn one() -> Int { return 1 }\n"
+    + "pub fn wrap(n: Int) -> Int { return n }\n"
+    + "pub extern pure fn shown(n: Int) -> Str = @py { return str(n) }\n"
+    + "fn helper(x: Int) -> Int { return x }\n")
+
+# body kind -> the document body, with `{call}` the bare call under test and
+# `{ret}` the return type that call fits (the reference types the body first)
+_USELIST_BODIES = {
+    "fn": 'pub fn f() -> {ret} {{ return {call} }}\n',
+    "test": 'test "t" {{\n  assert {call} == {call}\n}}\n',
+    "prop_test": 'prop test "p" (n: Int) {{\n  assert {call} == {call}\n}}\n',
+    "component": ("service Front {{ fn go() -> Str }}\n\n"
+                  "component App requires store: Store provides front: Front {{\n"
+                  "  provide front {{\n    fn go() = {call}\n  }}\n}}\n"),
+}
+
+
+def _uselist_doc(tmp_path, kind, call, imports="Store, one"):
+    (tmp_path / "lib.rvl").write_text(_USELIST_LIB, encoding="utf-8")
     doc = tmp_path / "doc.rvl"
-    doc.write_text('use "./lib.rvl" { Store, one }\n\n'
-                   + _STORE_COMPONENT % "helper(one())", encoding="utf-8")
+    body = _USELIST_BODIES[kind].format(
+        call=call, ret="Str" if call.startswith("shown") else "Int")
+    doc.write_text(f'use "./lib.rvl" {{ {imports} }}\n\n' + body, encoding="utf-8")
+    return doc
+
+
+@pytest.mark.parametrize("kind", sorted(_USELIST_BODIES))
+@pytest.mark.parametrize("name,call", (("wrap", "wrap(1)"), ("shown", "shown(1)")))
+def test_native_driver_refuses_an_unimported_pub_name_as_the_reference_does(
+        compile_rvl, tmp_path, monkeypatch, kind, name, call):
+    """Issue #3023: an un-imported `pub` fn or extern named bare in a fn, test,
+    prop test or component body is refused by the reference, and the native
+    driver gives the SAME refusal: tag and message. (A fn, test or prop test
+    body says "not declared in this function"; a component body says "not a
+    declared requirement of App", its own G1 sentence, in both tiers.)"""
+    monkeypatch.delenv("REVL_IMPORT_PATH", raising=False)
+    doc = _uselist_doc(tmp_path, kind, call)
+    with pytest.raises(RevlError) as refused:
+        compile_files([str(doc)])
+    want = f"REFUSED|{refused.value.code}|{refused.value.message}"
+    got = compile_rvl["compile_to_at"](doc.read_text(encoding="utf-8"), "py", str(doc))
+    assert got == want, (got[:300], want)
+    assert f"`{name}`" in want
+
+
+@pytest.mark.parametrize("kind", sorted(_USELIST_BODIES))
+def test_native_gate_admits_an_imported_pub_name_as_the_reference_does(
+        admit, tmp_path, monkeypatch, kind):
+    """The control: naming the callee in the `use` list makes the same documents
+    compile in the reference, and the native gate raises no objection either (it
+    used to refuse a component that called an imported fn). The verdict is the
+    gate's, not the driver's link stage, which separately declines to carry a
+    used module's fns."""
+    monkeypatch.delenv("REVL_IMPORT_PATH", raising=False)
+    name, call = ("shown", "shown(1)") if kind == "component" else ("wrap", "wrap(1)")
+    doc = _uselist_doc(tmp_path, kind, call, imports=f"Store, one, {name}")
+    compile_files([str(doc)])
+    assert admit(doc.read_text(encoding="utf-8")) == ""
+
+
+def test_native_driver_refuses_a_bare_private_call_3004(
+        compile_rvl, tmp_path, monkeypatch):
+    """Issue #3004, a recorded wording gap (issue #3544).
+
+    The reference refuses a BARE call to another module's non-`pub` fn as
+    module-private (G1), as it refuses the named import of it. The native driver
+    refuses the same program with the same tag, so nothing is emitted, but its
+    sentence differs: it does not read the used module's declarations on this
+    path, so a fn, test or prop test body says "not declared in this function".
+    This test asserts the driver's own sentence on purpose, as the record of the
+    gap: when #3544 makes the driver give the reference's sentence it turns red,
+    and the assertion becomes equality."""
+    monkeypatch.delenv("REVL_IMPORT_PATH", raising=False)
+    doc = _uselist_doc(tmp_path, "fn", "helper(one())")
     with pytest.raises(RevlError, match="`helper` is module-private in"):
         compile_files([str(doc)])
     got = compile_rvl["compile_to_at"](doc.read_text(encoding="utf-8"), "py", str(doc))
+    assert got.startswith("REFUSED|G1|"), got[:300]
+    assert "`helper` is not declared in this function" in got, got[:300]
+    assert "module-private" not in got, got[:300]
+
+
+def test_native_driver_refuses_a_component_bare_private_call_3004(
+        compile_rvl, tmp_path, monkeypatch):
+    """Issue #3004 in a component body: the same recorded wording gap (issue
+    #3544). The reference says module-private; the driver refuses with the
+    component's own "not a declared requirement of <C>" sentence. Pinned as the
+    record of the gap, not as agreement."""
+    monkeypatch.delenv("REVL_IMPORT_PATH", raising=False)
+    doc = _uselist_doc(tmp_path, "component", "helper(one())")
+    with pytest.raises(RevlError, match="`helper` is module-private in"):
+        compile_files([str(doc)])
+    got = compile_rvl["compile_to_at"](doc.read_text(encoding="utf-8"), "py", str(doc))
+    assert got.startswith("REFUSED|G1|"), got[:300]
+    assert "`helper` is not a declared requirement of App" in got, got[:300]
     assert "module-private" not in got, got[:300]
 
 

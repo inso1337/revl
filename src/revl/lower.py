@@ -253,6 +253,24 @@ _FOREIGN_NAME_REDIRECTS = {
 # a named import of it is. Absent for a single-source program.
 MODULE_PRIVATE_KEY = "__module_private__"
 
+# issue #3023: every `fn`/`extern` name the merged program declares. A component
+# refuses an unresolved bare name with the requirement sentence ("`x` is not a
+# declared requirement of C"), which stays the message for a module callable the
+# component's module never imported (the self-host gate words it the same way, so
+# the two tiers agree). The set only lets that refusal point at the `use` list in
+# its hint instead of suggesting a `requires` clause.
+PROGRAM_VALUES_KEY = "__program_values__"
+
+
+def _unresolved_name_hint(name, component, declared, types):
+    """The hint of a component body's "not a declared requirement" refusal."""
+    values = (types or {}).get(PROGRAM_VALUES_KEY)
+    if values is not None and name in values:
+        return (f"`{name}` is a module `fn` or `extern` that this module never "
+                f"imported: add it to the module's `use` list (G1)")
+    return (f"component {component} requires {declared} — "
+            f"add `requires {name}: <Service>`?")
+
 
 def _reject_module_private(name, filename, line, types):
     """If `name` is a non-`pub` fn/extern of a module the current body does not
@@ -9390,6 +9408,10 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     types[CASES_KEY] = _case_table(types)
     if program.module_private:
         types[MODULE_PRIVATE_KEY] = program.module_private
+    # issue #3023: the component path's "is this a module callable the body
+    # never imported?" answer (see `_unresolved_name_hint`).
+    types[PROGRAM_VALUES_KEY] = ({fn.name for fn in program.fn_decls}
+                                 | {ext.name for ext in program.externs})
     # item 130 Slice 5: the typed-event contracts. Built after the record table
     # (an event IS a record, §6) and stashed under a `__`-prefixed key, so a
     # program with no event declaration reaches every downstream section — and
@@ -10662,8 +10684,8 @@ def _lower_component_pure_expr_node(expr, env: Env, scope: dict[str, str],
             raise RevlError(
                 filename, line,
                 f"`{name}` is not a declared requirement of {env.component.name}",
-                hint=f"component {env.component.name} requires {declared} — "
-                     f"add `requires {name}: <Service>`?",
+                hint=_unresolved_name_hint(name, env.component.name, declared,
+                                           getattr(env, "types", None)),
                 code="G1", category="requirement",
             )
         _reject_foreign_name(name, filename, line)  # item 384
@@ -18423,7 +18445,7 @@ def _lower_postfix(expr: Postfix, env: Env, mode: str):
         raise RevlError(
             env.filename, expr.line,
             f"`{head}` is not a declared requirement of {comp.name}",
-            hint=f"component {comp.name} requires {declared} — add `requires {head}: <Service>`?",
+            hint=_unresolved_name_hint(head, comp.name, declared, env.types),
             code="G1", category="requirement",
         )
 
