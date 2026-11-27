@@ -485,3 +485,51 @@ def test_demo_runs_on_the_real_substrate():
     assert result.returncode == 0, result.stdout + result.stderr
     assert "all checks passed" in result.stdout
     assert "[FAIL]" not in result.stdout
+
+
+def test_a_shared_checked_fn_keeps_its_locals_on_every_emission():
+    """A checked form is stamped on the IR while its locals are minted.
+
+    The component loop hands one `functions` entry to every component that
+    reaches it, and `emit` can be called twice on one IR, so a retained stamp
+    must not skip the locals on the second copy (#3420).
+    """
+    ir = compile_source(
+        "fn add(a: Int, b: Int) -> Int {"
+        "  return match a.checked_add(b) { Ok(v) => v, Err(_) => 0 }"
+        "}\n"
+        "service Calc { fn get() -> Int }\n"
+        "service Other { fn get() -> Int }\n"
+        "component A provides calc: Calc {"
+        "  provide calc { fn get() { return add(1, 2) } }"
+        "}\n"
+        "component B provides other: Other {"
+        "  provide other { fn get() { return add(3, 4) } }"
+        "}\n"
+    )
+    modules = _emitter().emit(ir)
+    for name in ("A", "B"):
+        for slot in ("a", "b", "r"):
+            assert f"(local $cdiv_1_{slot} i64)" in modules[name], name
+    assert _emitter().emit(ir) == modules
+
+
+@needs_wasmtime
+def test_a_shared_checked_fn_runs_in_every_component(tmp_path):
+    ir = compile_source(
+        "fn add(a: Int, b: Int) -> Int {"
+        "  return match a.checked_add(b) { Ok(v) => v, Err(_) => 0 }"
+        "}\n"
+        "service Calc { fn get() -> Int }\n"
+        "service Other { fn get() -> Int }\n"
+        "component A provides calc: Calc {"
+        "  provide calc { fn get() { return add(1, 2) } }"
+        "}\n"
+        "component B provides other: Other {"
+        "  provide other { fn get() { return add(3, 4) } }"
+        "}\n"
+    )
+    modules = _emitter().emit(ir)
+    assert int(_invoke(tmp_path, "shared-a", modules["A"], "provide:calc.get")[-1]) == 3
+    assert int(_invoke(tmp_path, "shared-b", modules["B"], "provide:other.get")[-1]) == 7
+
