@@ -37,7 +37,10 @@ CASES = ROOT / "docs" / "census-artifact" / "cases" / "selfhost"
 # A change here is a change in what the gate says about the file.
 BUCKETS = {
     "checker.rvl": ["frontier-declined"],
-    "compile.rvl": ["no-objection-out-of-slice"],
+    # Re-recorded by d49c0af: the frontier scan sees 1035 items at one bracket
+    # level (bound 1024), so it declines the file before admission. The file is
+    # 138 KB, under MAX_SOURCE_BYTES, so this is not a size-class move.
+    "compile.rvl": ["frontier-declined"],
     "emit_go.rvl": ["refuse-out-of-slice/BAD"],
     "emit_go_comp.rvl": ["refuse-out-of-slice/BAD"],
     "emit_go_core.rvl": ["refuse-out-of-slice/BAD"],

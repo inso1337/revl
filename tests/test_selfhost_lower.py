@@ -4600,6 +4600,31 @@ component Layers requires layer: Layer provides layer: Layer {
     assert _ref_all(src) == [(11, "ROUTE")]
     _agree(admit, src)
 
+def test_issue_3481_a_later_route_keeps_the_refused_router(admit):
+    """A router refused for an unknown strategy still carries its later route,
+    so neither side fabricates a G3 self-cycle for the second key."""
+    src = """service Layer { fn told(what: Str) -> Str }
+service Other { fn ping() -> Str }
+component Flat provides layer: Layer, other: Other {
+  isolate layer in realm("flat")
+  isolate other in realm("flat")
+  provide layer { fn told(what) = "flat:" + what }
+  provide other { fn ping() = "flat" }
+}
+component Deep provides layer: Layer, other: Other {
+  isolate layer in realm("deep")
+  isolate other in realm("deep")
+  provide layer { fn told(what) = "deep:" + what }
+  provide other { fn ping() = "deep" }
+}
+component Layers requires layer: Layer, other: Other provides layer: Layer, other: Other {
+  isolate layer in realms("flat", "deep") strategy(all)
+  isolate other in realms("flat", "deep")
+}
+"""
+    assert _ref_all(src) == [(16, "ROUTE")]
+    _agree(admit, src)
+
 
 # Parse refusals the gate spells in the reference's words. They cannot be
 # `REJECTED_PROGRAMS` rows: `_classify` files a parse error as "OUT:<message>"
