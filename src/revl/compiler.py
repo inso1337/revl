@@ -1150,6 +1150,30 @@ def _canonicalize_identical_module_copies(
         loader._cache[path] = canonical(module)
 
 
+def _refuse_composition_document(program, filename: str) -> None:
+    """Issue #3532: a composition document (a `composition`/`layer` declaration)
+    is not a module. The module compiler admits no rows from it and used to
+    answer OK with zero components, so the session verbs (revl_check,
+    revl_load, ...) saw an empty document with no error and no warning.
+    Refuse by name and point at the composition admission path."""
+    decl = None
+    kind = ""
+    if program.compositions:
+        decl, kind = program.compositions[0], "composition"
+    elif program.layers:
+        decl, kind = program.layers[0], "layer"
+    if decl is None:
+        return
+    raise RevlError(
+        filename, getattr(decl, "line", 0) or 0,
+        f"this is a {kind} document (`{kind} {getattr(decl, 'name', '')}`), not a "
+        f"module — the module compiler admits no rows from it and would answer "
+        f"OK with zero components",
+        hint=f"admit it through the composition path (`revl audit` / `revl run` "
+             f"over the document, or `admit_composition` / `compile_composition`), "
+             f"where its rows, layers and row config are resolved")
+
+
 def compile_source(source: str, filename: str = "<string>",
                    manifest: dict | None = None,
                    replacing: tuple[str, ...] = (),
@@ -1185,6 +1209,7 @@ def compile_source(source: str, filename: str = "<string>",
             # issue #2547: text read from a file under `.revl/export/`
             profile = rule.source_profile(filename, profile)
         program = Parser(source, filename).parse()
+        _refuse_composition_document(program, filename)
         if program.uses:
             use = program.uses[0]
             raise RevlError(filename, use.line,
@@ -1466,6 +1491,10 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
     # reached as another root's `use` dependency.
     loader.mark_roots(os.path.abspath(p) for p in paths)
     root_modules = [_load_root(loader, path) for path in paths]
+    # issue #3532: a composition document handed to the module compiler must
+    # be refused by name, never compiled to an empty document.
+    for module in root_modules:
+        _refuse_composition_document(module.program, module.path)
     _canonicalize_identical_module_copies(loader, root_modules)
 
     merged = Program(filename=paths[0] if paths else "<none>")

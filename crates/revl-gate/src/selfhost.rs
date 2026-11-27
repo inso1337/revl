@@ -41442,10 +41442,14 @@ fn skip_dquote(source: &str, j: i64, n: i64, source_revl_cs: &[char]) -> i64 {
 fn skip_backtick(source: &str, j: i64, n: i64, source_revl_cs: &[char]) -> i64 {
     let mut k = (j).checked_add(1i64).expect("revl: Int overflow");
     while (k < n) {
-        if ({ source_revl_cs[(k.clone()) as usize] as u32 as i64 } == 96i64) {
-            return (k).checked_add(1i64).expect("revl: Int overflow");
+        if ({ source_revl_cs[(k.clone()) as usize] as u32 as i64 } == 92i64) {
+            k = (k).checked_add(2i64).expect("revl: Int overflow");
+        } else {
+            if ({ source_revl_cs[(k.clone()) as usize] as u32 as i64 } == 96i64) {
+                return (k).checked_add(1i64).expect("revl: Int overflow");
+            }
+            k = (k).checked_add(1i64).expect("revl: Int overflow");
         }
-        k = (k).checked_add(1i64).expect("revl: Int overflow");
     }
     return n;
 }
@@ -41536,6 +41540,16 @@ fn scan_template(source: &str, i: i64, source_revl_cs: &[char]) -> Scan {
                 nl = (nl).checked_add(inner.nl).expect("revl: Int overflow");
                 j = (inner.j).checked_add(1i64).expect("revl: Int overflow");
                 handled = true;
+            }
+            if (!handled) {
+                if ((cc == 92i64) && ((j).checked_add(1i64).expect("revl: Int overflow") < n)) {
+                    let nx = { source_revl_cs[((j).checked_add(1i64).expect("revl: Int overflow")) as usize] as u32 as i64 };
+                    if ((nx == 96i64) || (nx == 92i64)) {
+                        buf.push_str(&({ source_revl_cs[((j).checked_add(1i64).expect("revl: Int overflow")) as usize].to_string() }));
+                        j = (j).checked_add(2i64).expect("revl: Int overflow");
+                        handled = true;
+                    }
+                }
             }
             if (!handled) {
                 if (cc == 10i64) {

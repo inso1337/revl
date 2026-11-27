@@ -1,4 +1,4 @@
-// The revl stdlib BASE64URL module - RFC 4648 base64url in PURE revl.
+// The revl stdlib BASE64 module - RFC 4648 base64 AND base64url in PURE revl.
 //
 // ---------------------------------------------------------------- what this is
 // base64url is the base64 variant every web-text protocol uses to carry BYTES
@@ -12,6 +12,12 @@
 //     segment, a query value or a filename without percent-encoding;
 //   * the output is UNPADDED, so a token can be split on a delimiter such as
 //     `.` without the `=` padding hanging off a segment.
+//
+// The module also carries the STANDARD variant (RFC 4648 section 4) for
+// anything that interops with a stock base64 tool: a MIME body, the base64
+// form of a data URL, a PEM block. `base64_encode`/`base64_decode` (and the
+// byte doors) use the `+`/`/` alphabet and `=` padding; the strictness rule
+// is the same, so the two variants never disagree about what is canonical.
 //
 // This module is the primitive kit for that: encode and strict decode, in pure
 // revl, on every tier. It is deliberately NOT a token type, a signer or a
@@ -43,6 +49,13 @@
 //     rather than masking it, because a masked value would encode DIFFERENT
 //     bytes than the caller holds.
 //
+//   base64_encode(text: Str) -> Str
+//   base64_decode(text: Str) -> Result[Str, Base64Error]
+//   base64_encode_bytes / base64_decode_bytes
+//     The same four doors in the STANDARD spelling: `+` and `/` at values 62
+//     and 63, and `=` padding to a multiple of four characters. Decode there
+//     requires exactly the padding the data length calls for.
+//
 // Every fallible door returns `Result[..., Base64Error]`, never a sentinel: the
 // empty string is a legitimate value, so `""` cannot mean failure.
 //
@@ -58,6 +71,9 @@
 //                          one character; 0, 2 and 3 are the legal tails)
 //   unexpected-padding     the text carries `=`, which unpadded base64url never
 //                          does; a padded input is refused, not stripped
+//   invalid-padding        (base64_decode_bytes only) `=` appears outside the
+//                          final group, or the pad count is not the one the
+//                          data length requires
 //   invalid-character      a character outside `A-Z a-z 0-9 - _` (including the
 //                          standard-base64 `+` and `/`, and whitespace)
 //   non-canonical-tail     the unused low bits of a 2- or 3-character last group
@@ -91,8 +107,9 @@
 // Import with a named `use`:
 //
 //     use "stdlib/base64.rvl" {
-//       Base64Error, b64url_encode, b64url_decode,
-//       b64url_encode_bytes, b64url_decode_bytes,
+//       Base64Error,
+//       b64url_encode, b64url_decode, b64url_encode_bytes, b64url_decode_bytes,
+//       base64_encode, base64_decode, base64_encode_bytes, base64_decode_bytes,
 //     }
 
 // Why `text` could not be encoded or decoded. `code` is a stable machine tag a
@@ -124,9 +141,9 @@ fn alphabet() -> Str {
   return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 }
 
-// The alphabet character for a 6-bit value in 0..63.
-fn alphabet_char(v: Int) -> Str {
-  return alphabet().slice(v, v + 1)
+// The character of `alpha` for a 6-bit value in 0..63.
+fn char_of(alpha: Str, v: Int) -> Str {
+  return alpha.slice(v, v + 1)
 }
 
 // The value of one code point in the alphabet, or -1 when the code point is not
@@ -140,6 +157,24 @@ fn alphabet_value(code: Int) -> Int {
   if (code >= 48 && code <= 57) { return code + 4 }     // 0-9 -> 52..61
   if (code == 45) { return 62 }                         // '-' -> 62
   if (code == 95) { return 63 }                         // '_' -> 63
+  return 0 - 1
+}
+
+// ---------------------------------------------------- the standard alphabet
+// RFC 4648 section 4's alphabet: identical to section 5's except values 62 and
+// 63 are `+` and `/`. The decoder maps back by the same ASCII-layout arithmetic.
+fn std_alphabet() -> Str {
+  return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+}
+
+// The standard-alphabet value of one code point, or -1 when it is not in it.
+// `+` (43) is 62 and `/` (47) is 63; the URL-safe `-` and `_` are NOT in it.
+fn std_alphabet_value(code: Int) -> Int {
+  if (code >= 65 && code <= 90) { return code - 65 }    // A-Z -> 0..25
+  if (code >= 97 && code <= 122) { return code - 71 }   // a-z -> 26..51
+  if (code >= 48 && code <= 57) { return code + 4 }     // 0-9 -> 52..61
+  if (code == 43) { return 62 }                         // '+' -> 62
+  if (code == 47) { return 63 }                         // '/' -> 63
   return 0 - 1
 }
 
@@ -183,10 +218,12 @@ fn utf8_encode_scalar(cp: Int) -> List[Int] {
 }
 
 // ---------------------------------------------------------------- encode
-// Unpadded base64url of arbitrary bytes. The caller has already validated that
-// every element is a byte (`b64url_encode_bytes`), so this half stays a pure
-// three-bytes-in, four-chars-out transform with no error channel.
-fn encode_bytes(bytes: List[Int]) -> Str {
+// Base64 of arbitrary bytes over a chosen alphabet, optionally `=`-padded.
+// The caller has already validated that every element is a byte
+// (`checked_bytes`), so this half stays a pure three-bytes-in, four-chars-out
+// transform with no error channel. `pad == true` is the standard variant's
+// `=` padding.
+fn encode_bytes(bytes: List[Int], alpha: Str, pad: Bool) -> Str {
   var out = ""
   var acc = 0
   var held = 0
@@ -194,24 +231,26 @@ fn encode_bytes(bytes: List[Int]) -> Str {
     acc = acc * 256 + b
     held += 1
     if (held == 3) {
-      out = out.concat(alphabet_char(acc.div_floor(262144)))
-      out = out.concat(alphabet_char(acc.div_floor(4096).mod(64)))
-      out = out.concat(alphabet_char(acc.div_floor(64).mod(64)))
-      out = out.concat(alphabet_char(acc.mod(64)))
+      out = out.concat(char_of(alpha, acc.div_floor(262144)))
+      out = out.concat(char_of(alpha, acc.div_floor(4096).mod(64)))
+      out = out.concat(char_of(alpha, acc.div_floor(64).mod(64)))
+      out = out.concat(char_of(alpha, acc.mod(64)))
       acc = 0
       held = 0
     }
   }
   if (held == 1) {
     // one byte, 8 bits: the top 6, then the low 2 padded with four zero bits
-    out = out.concat(alphabet_char(acc.div_floor(4)))
-    out = out.concat(alphabet_char(acc.mod(4) * 16))
+    out = out.concat(char_of(alpha, acc.div_floor(4)))
+    out = out.concat(char_of(alpha, acc.mod(4) * 16))
+    if (pad) { out = out.concat("==") }
   } else if (held == 2) {
     // two bytes, 16 bits: the top 6, the middle 6, then the low 4 padded with
     // two zero bits
-    out = out.concat(alphabet_char(acc.div_floor(1024)))
-    out = out.concat(alphabet_char(acc.div_floor(16).mod(64)))
-    out = out.concat(alphabet_char(acc.mod(16) * 4))
+    out = out.concat(char_of(alpha, acc.div_floor(1024)))
+    out = out.concat(char_of(alpha, acc.div_floor(16).mod(64)))
+    out = out.concat(char_of(alpha, acc.mod(16) * 4))
+    if (pad) { out = out.concat("=") }
   }
   return out
 }
@@ -219,13 +258,13 @@ fn encode_bytes(bytes: List[Int]) -> Str {
 // Unpadded base64url TEXT for the UTF-8 bytes of `text`. Total: the empty `Str`
 // encodes to "". The inverse is `b64url_decode`.
 pub fn b64url_encode(text: Str) -> Str {
-  return encode_bytes(utf8_bytes(text))
+  return encode_bytes(utf8_bytes(text), alphabet(), false)
 }
 
-// Unpadded base64url TEXT for an arbitrary byte sequence. Refuses a list
-// element outside 0..255 (`not-a-byte`) instead of masking it, because masking
-// would encode bytes the caller does not hold.
-pub fn b64url_encode_bytes(bytes: List[Int]) -> Result[Str, Base64Error] {
+// The shared byte-range check for both encode doors: refuses a list element
+// outside 0..255 (`not-a-byte`) instead of masking it, because masking would
+// encode bytes the caller does not hold.
+fn checked_bytes(bytes: List[Int]) -> Result[List[Int], Base64Error] {
   var i = 0
   let n = bytes.length()
   while (i < n) {
@@ -238,7 +277,32 @@ pub fn b64url_encode_bytes(bytes: List[Int]) -> Result[Str, Base64Error] {
     }
     i += 1
   }
-  return Ok(encode_bytes(bytes))
+  return Ok(bytes)
+}
+
+// Unpadded base64url TEXT for an arbitrary byte sequence.
+pub fn b64url_encode_bytes(bytes: List[Int]) -> Result[Str, Base64Error] {
+  return match checked_bytes(bytes) {
+    Ok(bs) => Ok(encode_bytes(bs, alphabet(), false)),
+    Err(e) => Err(e),
+  }
+}
+
+// ------------------------------------------------- standard base64 encode
+// Padded standard base64 (RFC 4648 section 4) of the UTF-8 bytes of `text`:
+// the `+`/`/` alphabet and `=` padding to a multiple of four. Total: the
+// empty `Str` encodes to "". The inverse is `base64_decode`.
+pub fn base64_encode(text: Str) -> Str {
+  return encode_bytes(utf8_bytes(text), std_alphabet(), true)
+}
+
+// Padded standard base64 TEXT for an arbitrary byte sequence, with the same
+// `not-a-byte` refusal as the base64url door.
+pub fn base64_encode_bytes(bytes: List[Int]) -> Result[Str, Base64Error] {
+  return match checked_bytes(bytes) {
+    Ok(bs) => Ok(encode_bytes(bs, std_alphabet(), true)),
+    Err(e) => Err(e),
+  }
 }
 
 // ---------------------------------------------------------------- decode
@@ -312,6 +376,99 @@ pub fn b64url_decode_bytes(text: Str) -> Result[List[Int], Base64Error] {
 // `b64url_decode_bytes`.
 pub fn b64url_decode(text: Str) -> Result[Str, Base64Error] {
   return match b64url_decode_bytes(text) {
+    Ok(bytes) => utf8_decode(bytes),
+    Err(e) => Err(e),
+  }
+}
+
+// ------------------------------------------------- standard base64 decode
+// Strict canonical STANDARD base64 bytes (RFC 4648 section 4): the `+`/`/`
+// alphabet, and exactly the `=` padding the data length requires (none after a
+// complete group, `==` after a 2-char tail, `=` after a 3-char one). The one
+// standard decode implementation; `base64_decode` wraps it with the UTF-8
+// read, so the two doors cannot disagree about what text is acceptable.
+pub fn base64_decode_bytes(text: Str) -> Result[List[Int], Base64Error] {
+  let n = text.length()
+  if (n == 0) { return Ok([]) }
+  // Count the trailing `=`; everything before it is data.
+  var pads = 0
+  var j = n - 1
+  while (j >= 0 && text.charCodeAt(j) == 61) {
+    pads += 1
+    j -= 1
+  }
+  let m = n - pads
+  let rem = m.mod(4)
+  if (rem == 1) {
+    return Err(err("invalid-length",
+                   "a base64 text ends after 0, 2 or 3 characters of its last group; this one ends after 1"))
+  }
+  var needed = 0
+  if (rem == 2) { needed = 2 } else if (rem == 3) { needed = 1 }
+  // Scan the data first, so a garbage character is reported as such even when
+  // the padding is also wrong; the pad count itself is checked afterwards.
+  var out: List[Int] = []
+  var acc = 0
+  var held = 0
+  var i = 0
+  while (i < m) {
+    let code = text.charCodeAt(i)
+    if (code == 61) {
+      return Err(err_at("invalid-padding",
+                        "`=` is only legal as the final padding of the last group", i))
+    }
+    let v = std_alphabet_value(code)
+    if (v < 0) {
+      var message = "character `"
+      message = message.concat(text.slice(i, i + 1))
+      message = message.concat("` is not in the RFC 4648 base64 alphabet (A-Z a-z 0-9 + /)")
+      return Err(err_at("invalid-character", message, i))
+    }
+    acc = acc * 64 + v
+    held += 1
+    if (held == 4) {
+      out = out.push(acc.div_floor(65536))
+      out = out.push(acc.div_floor(256).mod(256))
+      out = out.push(acc.mod(256))
+      acc = 0
+      held = 0
+    }
+    i += 1
+  }
+  if (pads != needed) {
+    var message = "this data length needs "
+    message = message.concat(needed.to_str())
+    message = message.concat(" `=` padding character(s), got ")
+    message = message.concat(pads.to_str())
+    return Err(err_at("invalid-padding", message, j + 1))
+  }
+  if (held == 2) {
+    // 12 bits of the last 2 chars carry 1 byte; the low 4 bits are padding and
+    // MUST be zero, or a second spelling of the same byte exists.
+    if (acc.mod(16) != 0) {
+      return Err(err("non-canonical-tail",
+                     "the last group's 4 unused low bits are not zero, so this text is not the canonical spelling of its bytes"))
+    }
+    out = out.push(acc.div_floor(16))
+  } else if (held == 3) {
+    // 18 bits of the last 3 chars carry 2 bytes; the low 2 bits MUST be zero
+    // for the same reason.
+    if (acc.mod(4) != 0) {
+      return Err(err("non-canonical-tail",
+                     "the last group's 2 unused low bits are not zero, so this text is not the canonical spelling of its bytes"))
+    }
+    out = out.push(acc.div_floor(1024))
+    out = out.push(acc.div_floor(4).mod(256))
+  }
+  return Ok(out)
+}
+
+// The exact inverse of `base64_encode`: strict canonical standard base64 TEXT,
+// read back as UTF-8. Refuses wrong padding, non-canonical text and byte output
+// that is not UTF-8 (`invalid-utf8`); a caller holding arbitrary bytes uses
+// `base64_decode_bytes`.
+pub fn base64_decode(text: Str) -> Result[Str, Base64Error] {
+  return match base64_decode_bytes(text) {
     Ok(bytes) => utf8_decode(bytes),
     Err(e) => Err(e),
   }

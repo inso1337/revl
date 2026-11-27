@@ -100,6 +100,10 @@ def test_module_file_is_the_documented_surface():
     assert "pub fn b64url_encode_bytes(bytes: List[Int]) -> Result[Str, Base64Error]" in text
     assert "pub fn b64url_decode(text: Str) -> Result[Str, Base64Error]" in text
     assert "pub fn b64url_decode_bytes(text: Str) -> Result[List[Int], Base64Error]" in text
+    assert "pub fn base64_encode(text: Str) -> Str" in text
+    assert "pub fn base64_encode_bytes(bytes: List[Int]) -> Result[Str, Base64Error]" in text
+    assert "pub fn base64_decode(text: Str) -> Result[Str, Base64Error]" in text
+    assert "pub fn base64_decode_bytes(text: Str) -> Result[List[Int], Base64Error]" in text
 
 
 # ---------------------------------------------------------------- py tier

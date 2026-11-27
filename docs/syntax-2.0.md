@@ -913,6 +913,10 @@ test "put then get roundtrips" {
 - `test` blocks compile to the backend's native test idiom and run in
   `revl test`; for an AI author this closes the generate→check→run loop
   inside one file.
+- the taint/flow rules apply inside a `test` body exactly as in a `fn` body
+  (issue #3471): a `Secret[T]` or untrusted value reaching a sink there is
+  refused with the same code as in a `fn`; comparing a secret to an expected
+  value, or handing it to a declared `Secret[T]` receiver, stays legal;
 - `verified` is the opt-in strictness tier (from DESIGN §6): totality for
   functions, algebraic-law property tests for effect inverses
   (`verified effect` requires the checker to find or generate the

@@ -35,6 +35,7 @@ from revl import compile_files  # noqa: E402
 from revl.test import run_py, run_ts  # noqa: E402
 
 STDLIB = ROOT / "stdlib" / "crypto.rvl"
+BASE64 = ROOT / "stdlib" / "base64.rvl"
 
 #: a consumer that drives every primitive from `test` blocks (the RUNNERS
 #: execute these), plus `pub fn` wrappers so the externs are also reached
@@ -101,6 +102,8 @@ def crypto_ir(tmp_path_factory):
     d = tmp_path_factory.mktemp("crypto_consumer")
     (d / "stdlib").mkdir()
     shutil.copy(STDLIB, d / "stdlib" / "crypto.rvl")
+    # crypto.rvl `use`s the base64url module for its hex/digest bridge
+    shutil.copy(BASE64, d / "stdlib" / "base64.rvl")
     main = d / "main.rvl"
     main.write_text(CONSUMER, encoding="utf-8")
     return compile_files([str(main)])
@@ -135,6 +138,11 @@ def test_module_file_is_the_documented_surface():
     assert "pub extern pure fn ct_equal(a: Str, b: Str) -> Bool" in text
     # the classification decision is the design — pin its spelling
     assert "pub extern emission fn random_token(n: Int) -> Str" in text
+    # the hex/base64url bridge (issue #3501)
+    assert 'use "stdlib/base64.rvl" { Base64Error, b64url_encode_bytes }' in text
+    assert "pub fn hex_to_bytes(hex: Str) -> Result[List[Int], Str]" in text
+    assert "pub fn hex_to_b64url(hex: Str) -> Result[Str, Base64Error]" in text
+    assert "pub fn sha256_b64url(data: Str) -> Str" in text
 
 
 # ---------------------------------------------------------------- py tier
