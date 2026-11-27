@@ -122,16 +122,29 @@ One task per `(oracle, construct)` for the six `emit_<tier>` oracles and
 is 1, because `tools/selfhost_coverage.py::corpus_documents(tier)` returns one
 directory under `tests/fixtures/`. Rung: medium.
 
-The `compile` and `gate_census` oracles are skipped: neither has a per-tier
-byte-agreement oracle behind it, and `compile` reports 5 of 5 constructs
-unreached at `c136eae6` because `_ir_reach` only records `key=value` pairs
-whose value is a string, so five top-level IR section names can never be
-reached by construction. That is a defect in the report rather than 5 tasks.
-Issue #1203's in-flight change to the same tool (branch
-`agent/1203-construct-reach-ratchet`) fixes exactly that, measuring a section
-as reached when some corpus document's IR carries a non-empty value for it, so
-slice 2 picks the oracle up once that lands rather than restating the fix
-here.
+Slice 2 reads the two oracles no emitter table covers, `compile` and
+`gate_census`, through the same report and the same shrink-only ledger. They
+were skipped in slice 1 because `compile` reported 5 of 5 constructs unreached
+at `c136eae6`: `_ir_reach` only records `key=value` pairs whose value is a
+string, so five top-level IR section names could never be reached by
+construction, and that was a defect in the report rather than 5 tasks. Issue
+#1203 fixed it (a section is reached when some corpus document's IR carries a
+non-empty value for it, `_section_reach`), and `gate_census` now measures the
+census's guarantee vocabulary against the documents its own engine refuses.
+At the slice-2 commit `compile` leaves 1 construct unreached (`tests`, a section
+the native lowerer does not emit) and `gate_census` leaves 6 tags (`BOOT`,
+`FOLD`, `HANDOFF`, `HOST-ARITY`, `ROUTE`, `SPAWN`). Each is one task,
+`reach/<oracle>/<construct>`, and each task quotes the ledger's written
+disposition, so the doer does not re-derive a decision the tree already holds.
+
+The rung is read off each oracle's own corpus, not declared for the slice. The
+`compile` corpus is one directory under `tests/fixtures/`: breadth 1, medium.
+The `gate_census` corpus is the census's eight directories: breadth 8, hard,
+which is where `tier` puts a mechanism that makes two implementations agree
+over documents the author did not choose. The design expected medium for both;
+the measurement says otherwise for the second, and the ladder is a function of
+the measurement. A report that stops naming either oracle is an error, not an
+empty row, so `check` names the source rather than reading it as finished.
 
 We consume `survey()` rather than the CLI text, so the shrink-only ledger that
 issue #1203 is concurrently adding to the same tool does not move this adapter.
@@ -496,12 +509,13 @@ before it does.
 ## 6. Slice plan
 
 Slices 1, 3, 4 and 6 are landed. Each later slice states the source it adds, the rung
+Slices 1, 2 and 3 are landed. Each later slice states the source it adds, the rung
 it is expected to land on, and the oracle that would catch it going vacuous.
 
 | slice | source added | expected rung | fixture / oracle |
 |---|---|---|---|
 | 1 (landed) | known gaps, known historical bugs, the tree's own programs, formal obligations | medium, hard, easy, expert | `tests/test_evolve_curriculum.py`, 16 tests, gate firing proved both directions |
-| 2 | the `compile` and `gate_census` oracles of `tools/oracle_construct_reach.py`, once issue #1203's fix for the `_ir_reach` string-value defect in section 3.1 has landed | medium | the same reach report, read through its shrink-only ledger |
+| 2 (landed) | the `compile` and `gate_census` oracles of `tools/oracle_construct_reach.py`, read through the same report and shrink-only ledger once issue #1203's `_ir_reach` defect was closed (section 3.1) | medium (`compile`), hard (`gate_census`) | the committed ledger `tests/fixtures/oracle_construct_reach_ledger.json`; a report that drops either oracle is an error |
 | 3 (landed) | cross-tier differential probes: the `examples/rejections/` programs the census parks in `no-objection-out-of-slice`, which the lower oracle's `REJECTED_PROGRAMS` cannot carry yet | hard | the committed census record; `tests/test_selfhost_lower.py` for the oracle, and a task must name a program the reference refuses and the port does not (section 3.5) |
 | 4 (landed) | design documents: a slice table row in `docs/design/*.md` whose named oracle does not exist in `tests/` | varies with the oracle named (medium for slice B of design 456) | the doc's own slice table; the gap is checkable by looking for the test file (section 3.6) |
 | 5 | generated adversarial programs: `tools/fuzz_frontend.py` seeds that survive to a divergence | hard | the fuzz corpus; a seed is only a task while it still diverges |
@@ -524,6 +538,7 @@ and only the second is a difficulty signal, because it measures whether the
 suite that scores a candidate is sensitive enough to be worth scoring against.
 
 Slices 1, 3, 4 and 6 do not add it, and do not pretend to. It is slice 7 because it is
+Slices 1 to 3 do not add it, and do not pretend to. It is slice 7 because it is
 the one source whose machinery does not exist, and because it interacts with
 issue #1207: a mutation test a candidate can read is not a hidden mutation
 test, so where the mutants live is that item's question and not this one's.
@@ -536,6 +551,10 @@ test, so where the mutants live is that item's question and not this one's.
 - It does not claim to read all eight sources. It reads seven. The other one is
   slice 5 (fuzz seeds), with a named oracle; slice 2 is an extra oracle, not one
   of the eight.
+- It does not claim to read all eight sources. It reads five. The other three
+  sources are slices 4 (design documents), 5 (fuzz seeds) and 6 (the tracker),
+  each with a named oracle. Slice 2 reads two more oracles of a source already
+  counted, so it adds tasks and no source.
 - It does not claim the derived tasks are a complete list of what is wrong with
   the tree. They are the gaps seven artifacts exhibit, no more.
 - It does not touch the reward (issue #1206) or the held-out scoring set
