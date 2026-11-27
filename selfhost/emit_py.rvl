@@ -1486,6 +1486,13 @@ fn inplace_stmts(name: Str, value: Any) -> List[Str] {
 // `_emit_assert`: bind each side of a comparison once and report both values.
 fn emit_assert(e: Any, indent: Int) -> List[Str] {
   var out = []
+  // issue #3513: split the top-level `&&` chain into one assert per operand,
+  // so a failure names the first false operand. Mirrors _emit_assert in
+  // backends/python/emit.py byte for byte.
+  if (node_kind(e) == "bin" && node_op(e) == "&&") {
+    return emit_assert(value_field(e, "left"), indent)
+      .concat(emit_assert(value_field(e, "right"), indent))
+  }
   if (node_kind(e) == "bin" && is_cmp_op(node_op(e))) {
     let pop = py_bin_op(node_op(e))
     let left = expr(value_field(e, "left"))

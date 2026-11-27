@@ -244,6 +244,10 @@ CORPUS = [
     #     `idempotent` provider (the `_REVL_IDEMPOTENT` map), a fault test's
     #     config.
     "../emit_py_test_sections.rvl",
+    # issue #3513: `assert a && b` splits into one assert per operand in both
+    # emitters; no corpus document had a top-level `&&` in an assert, so the
+    # split branch was uncovered on both halves.
+    "../../noncensus_corpus/assert_and.rvl",
     # issue #2378: a lifecycle `load` of a component whose activation holds a
     # `fail` (the `_REVL_ACTIVATION_FAILS` table and the load check).
     "../emit_py_activation_fail.rvl",

@@ -1,0 +1,11 @@
+// Issue #3513: a top-level `&&` in an `assert` is split into one assert per
+// operand, so a failure names the first false operand. The reference
+// (backends/python/emit.py::_emit_assert) and this port (selfhost/emit_py.rvl
+// emit_assert) must emit both operands' asserts byte for byte. Kept out of
+// the census directories on purpose: an emitter-oracle document, not a
+// breadth program.
+fn two() -> Int { return 2 }
+
+test "and" {
+  assert two() == 2 && two() > 1
+}
