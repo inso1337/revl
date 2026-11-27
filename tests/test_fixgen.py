@@ -23,7 +23,7 @@ from revl.lsp import (
     fix_code,
     generate_fix,
 )
-from revl.lsp.fixgen import apply_edits
+from revl.lsp.fixgen import _g4_release_handle, apply_edits
 
 
 # ------------------------------------------------------------ fixtures
@@ -350,6 +350,170 @@ def test_g4_unbound_acquisition_declines_a_mechanical_fix():
     payload = fix_code(rejection, G4_SITE_UNBOUND)
     assert payload["ok"] is False
     assert "reason" in payload
+
+
+# ------------------------------------------------------------ SYNTAX: provider `emission fn`
+
+# a provider method spelled `emission fn`: provider methods are plain `fn`,
+# emission-ness is inherited from the service declaration
+SYNTAX_PROVIDER_EMISSION = (
+    "service Database {\n"
+    "  fn query(sql: Str) -> Int\n"
+    "  emission fn execute(sql: Str) -> Int\n"
+    "}\n"
+    "component PgDatabase provides db: Database {\n"
+    "  config { url: Str }\n"
+    "  let pool = effect Pool.open(config.url, 4) undo pool.close()\n"
+    "  provide db {\n"
+    "    fn query(sql: Str) -> Int { return 1 }\n"
+    "    emission fn execute(sql: Str) -> Int {\n"
+    "      return pool.execute(sql)\n"
+    "    }\n"
+    "  }\n"
+    "}\n"
+)
+
+# two `emission fn` on the refused line: which one the parser stopped at is
+# not read back from the line, so the generator declines
+SYNTAX_PROVIDER_EMISSION_TWICE = (
+    "service Db {\n"
+    "  emission fn a() -> Int\n"
+    "  emission fn b() -> Int\n"
+    "}\n"
+    "component Pg provides db: Db {\n"
+    "  provide db { emission fn a() = 1 emission fn b() = 2 }\n"
+    "}\n"
+)
+
+# near miss: `emission fn` at top level is a different SYNTAX refusal; the
+# generator is gated on the provider message, not on the code alone
+SYNTAX_TOPLEVEL_EMISSION = "emission fn a() -> Int { return 1 }\n"
+
+
+def test_syntax_provider_emission_drops_the_keyword_and_it_resolves():
+    rejection = _rejection(SYNTAX_PROVIDER_EMISSION)
+    assert rejection["code"] == "SYNTAX"
+    assert rejection["message"] == "expected fn, found 'emission'"
+    diag = _only_diag(SYNTAX_PROVIDER_EMISSION)
+    assert diag["range"]["start"]["line"] == 9
+    fix = generate_fix(SYNTAX_PROVIDER_EMISSION, diag)
+    assert fix is not None
+    assert fix.code == "SYNTAX"
+    assert fix.edits == [{
+        "range": {"start": {"line": 9, "character": 4},
+                  "end": {"line": 9, "character": 13}},
+        "newText": "",
+    }]
+    patched = apply_edits(SYNTAX_PROVIDER_EMISSION, fix.edits)
+    assert "    fn execute(sql: Str) -> Int {\n" in patched
+    # the service declaration keeps its `emission`
+    assert "  emission fn execute(sql: Str) -> Int\n" in patched
+    # PROOF: the patched source compiles clean
+    compile_source(patched)
+    assert compute_diagnostics(patched) == []
+    payload = fix_code(rejection, SYNTAX_PROVIDER_EMISSION)
+    assert payload["ok"] is True
+    assert payload["edits"] == fix.edits
+
+
+def test_syntax_provider_emission_declines_two_matches_on_the_line():
+    diag = _only_diag(SYNTAX_PROVIDER_EMISSION_TWICE)
+    assert diag["code"] == "SYNTAX"
+    assert diag["message"].startswith("expected fn, found 'emission'")
+    assert generate_fix(SYNTAX_PROVIDER_EMISSION_TWICE, diag) is None
+
+
+def test_syntax_toplevel_emission_is_not_the_provider_shape():
+    diag = _only_diag(SYNTAX_TOPLEVEL_EMISSION)
+    assert diag["code"] == "SYNTAX"
+    assert diag["message"].startswith(
+        "expected a top-level declaration, found 'emission'")
+    assert generate_fix(SYNTAX_TOPLEVEL_EMISSION, diag) is None
+    assert fix_code(_rejection(SYNTAX_TOPLEVEL_EMISSION),
+                    SYNTAX_TOPLEVEL_EMISSION)["ok"] is False
+
+
+# ------------------------------------------------------------ G4: release THAT handle
+
+# a host acquisition whose `undo` names the family, not the bound handle
+G4_RELEASE_HANDLE = (
+    "service Flags {\n"
+    "  fn enabled(name: Str) -> Opt[Str]\n"
+    "  fn set_flag(name: Str, on: Str)\n"
+    "}\n"
+    "component FeatureFlags provides flags: Flags {\n"
+    "  let store = effect Map.new() undo Map.drop()\n"
+    "  provide flags {\n"
+    "    fn enabled(name) = store.get(name)\n"
+    "    fn set_flag(name, on) {\n"
+    "      effect store.insert(name, on)\n"
+    "      undo   store.remove(name)\n"
+    "    }\n"
+    "  }\n"
+    "}\n"
+)
+
+# near miss: the acquisition spans two lines, so the refused line holds the
+# `let` but not the `undo`; the generator declines rather than guess
+G4_RELEASE_HANDLE_MULTILINE = (
+    "service F { fn g(n: Str) -> Opt[Str] }\n"
+    "component C provides f: F {\n"
+    "  let store = effect Map.new(\n"
+    "  ) undo Map.drop()\n"
+    "  provide f { fn g(n) = store.get(n) }\n"
+    "}\n"
+)
+
+
+def test_g4_release_handle_rewrites_the_undo_and_it_resolves():
+    rejection = _rejection(G4_RELEASE_HANDLE)
+    assert rejection["code"] == "G4"
+    assert rejection["message"].startswith(
+        "the `undo` of `let store = effect Map.new(...)` must release THAT "
+        "handle: write `undo store.drop()`")
+    diag = _only_diag(G4_RELEASE_HANDLE)
+    fix = generate_fix(G4_RELEASE_HANDLE, diag)
+    assert fix is not None
+    assert fix.code == "G4"
+    assert fix.edits == [{
+        "range": {"start": {"line": 5, "character": 36},
+                  "end": {"line": 5, "character": 46}},
+        "newText": "store.drop()",
+    }]
+    patched = apply_edits(G4_RELEASE_HANDLE, fix.edits)
+    assert "  let store = effect Map.new() undo store.drop()\n" in patched
+    # PROOF: the patched source compiles clean
+    compile_source(patched)
+    assert compute_diagnostics(patched) == []
+    payload = fix_code(rejection, G4_RELEASE_HANDLE)
+    assert payload["ok"] is True
+    assert payload["edits"] == fix.edits
+
+
+def test_g4_release_handle_declines_a_multiline_acquisition():
+    diag = _only_diag(G4_RELEASE_HANDLE_MULTILINE)
+    assert diag["code"] == "G4"
+    assert "must release THAT handle" in diag["message"]
+    assert generate_fix(G4_RELEASE_HANDLE_MULTILINE, diag) is None
+
+
+def test_g4_release_handle_declines_several_undos_on_the_line():
+    # two `undo` on one line is a parse error, so the original diagnostic is
+    # replayed over that line; the generator itself declines, before the
+    # verify gate is reached
+    text = G4_RELEASE_HANDLE.replace(
+        "undo Map.drop()", "undo x() undo Map.drop()")
+    diag = _only_diag(G4_RELEASE_HANDLE)
+    assert _g4_release_handle(G4_RELEASE_HANDLE, diag, "<lsp>.rvl") is not None
+    assert _g4_release_handle(text, diag, "<lsp>.rvl") is None
+    assert generate_fix(text, diag) is None
+
+
+def test_g4_site_undo_still_fires_alongside_the_release_handle_generator():
+    # the missing-undo shape falls through to the site-undo generator
+    payload = fix_code(_rejection(G4_SITE), G4_SITE)
+    assert payload["ok"] is True
+    assert payload["title"] == "Add the acquisition's inverse: `undo pool.close()`"
 
 
 if __name__ == "__main__":  # pragma: no cover

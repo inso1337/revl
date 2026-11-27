@@ -155,18 +155,33 @@ paths carries the prose repairs. The record itself is unchanged in shape either
 way, and the MCP `revl_check` answer carries it as classified.
 
 ### G1, G2 and R2: the verified candidate repairs
+### G4: an `undo` that does not release the bound handle
 
 A capability or admission refusal carries a `repairs` list beside `fix`
 (issue #2759): every mechanical way out the engine could verify, in a fixed
 order, rather than one sentence of advice. Three refusal kinds are covered,
 and they share the G4 entry vocabulary above (`kind`, `action`, and a verified
 `fix_code`) plus one new field, `widens_authority`:
+A host acquisition has exactly one inverse, its family's release applied to
+the handle it bound. An `undo` that names the family instead of the handle is
+refused, and the message spells the right one:
 
 | refusal | kinds |
 | --- | --- |
 | G1 `requirement` - a body reaches a key its component does not declare | `add-requires`, `remove-call` |
 | G2 `linking` - two components install the same provision key | `rename-key` |
 | R2 `admission` - a `requires` binds a service outside the granted set | `route-via-granted-service` |
+```revl reject G4
+service Flags {
+  fn enabled(name: Str) -> Opt[Str]
+}
+component FeatureFlags provides flags: Flags {
+  let store = effect Map.new() undo Map.drop()
+  provide flags {
+    fn enabled(name) = store.get(name)
+  }
+}
+```
 
 `fixgen.generate_repairs` is the engine. A generator emits candidate seeds;
 the engine applies each seed to the refused text and re-checks the patch, and
@@ -176,6 +191,9 @@ the caller's verifier, exactly as it does for the G4 `site-undo` edit, and
 attaches the survivors to the record. An empty list means the engine ran and
 nothing verified, which is different from a record produced without the text
 (the field is then absent).
+The message reads "the `undo` of `let store = effect Map.new(...)` must
+release THAT handle: write `undo store.drop()`". The quick fix replaces the
+call after `undo` with the inverse the message names, and the result is clean:
 
 Each check is a full compile, so one `report` call spends at most
 `diagnostics.REPAIR_COMPILE_BUDGET` (8) verification compiles across all its
@@ -189,6 +207,17 @@ record is unchecked too, even a smaller one. An unchecked G1/G2/R2 record keeps
 no list, as if the text were absent; an unchecked G4 record keeps its prose
 repairs with no `fix_code`, as when the verifier cannot check the patch; and an
 unchecked T2, A9 or REVL record gets no `fix_code`, so no `repairId` either.
+```revl
+service Flags {
+  fn enabled(name: Str) -> Opt[Str]
+}
+component FeatureFlags provides flags: Flags {
+  let store = effect Map.new() undo store.drop()
+  provide flags {
+    fn enabled(name) = store.get(name)
+  }
+}
+```
 
 The authority rule is the safety half. A candidate that enlarges the reach the
 source *declares* is marked `widens_authority: true`, omitted unless the
@@ -199,6 +228,11 @@ it is opt-in. `remove-call`, `rename-key` and `route-via-granted-service` are
 always narrowing. Survivors are ordered narrowest authority first, then by the
 smallest edit, then by kind, so the list is deterministic and a later learned
 ordering can only reorder verified entries.
+Only the one-line shape is rewritten: the `let`, the acquisition and a single
+trailing `undo <call>` on the refused line. An acquisition that spans lines, a
+line with a second `undo`, or a comment on the line gets no action. This and
+the `site-undo` repair above share the G4 entry: a refusal with this message
+goes to this generator, every other G4 refusal to `site-undo`.
 
 Verified means the patch clears the refusal and introduces no new diagnostic,
 not that the rewrite preserves behaviour. `rename-key` renames the second
@@ -209,10 +243,48 @@ between the two providers by deciding which one keeps the key. The record's
 the modes its generator understands, so G1's `binding` mode and G2's "differs
 from the running manifest" refusal keep the record they always had rather than
 an empty list.
+### SYNTAX: `emission fn` in a `provide` block
 
 `revl explain G1` and `revl explain G2` print their candidate kinds. R2 stays
 in the evolution curriculum's reserved set (issue #2028), so `revl explain R2`
 still refuses it on purpose; its record carries the same list.
+Provider methods are plain `fn`: whether an operation is an emission comes
+from the service declaration, so writing `emission` again on the provider
+method is a syntax error ("expected fn, found 'emission'"):
+
+```revl reject SYNTAX
+service Database {
+  fn query(sql: Str) -> Int
+  emission fn execute(sql: Str) -> Int
+}
+component Db provides db: Database {
+  provide db {
+    fn query(sql: Str) -> Int { return 1 }
+    emission fn execute(sql: Str) -> Int { return 2 }
+  }
+}
+```
+
+The quick fix deletes the `emission ` before `fn` on the refused line; the
+service declaration keeps its own:
+
+```revl
+service Database {
+  fn query(sql: Str) -> Int
+  emission fn execute(sql: Str) -> Int
+}
+component Db provides db: Database {
+  provide db {
+    fn query(sql: Str) -> Int { return 1 }
+    fn execute(sql: Str) -> Int { return 2 }
+  }
+}
+```
+
+This is the only SYNTAX refusal with a generator, and it is gated on that
+message: a top-level `emission fn`, refused as "expected a top-level
+declaration", gets nothing. A refused line with zero or several `emission fn`
+spellings declines too.
 
 ## The agent payload
 
