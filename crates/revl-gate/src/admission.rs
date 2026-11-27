@@ -1127,7 +1127,8 @@ struct Running<'a> {
 ///
 /// The accountable kinds are the provision (`C/k/r`), the requirement in its
 /// three spellings (`C<k`, `C<k/r`, `C<*k`), the route (`C>k/r1,r2`), the
-/// handoff (`C=k:T`) and the service block (`!services`, `:S` or `:S,op,op`).
+/// handoff (`C=k:T`), the declaration a handoff spelling reaches
+/// (`~T~record~f:Ty`) and the service block (`!services`, `:S` or `:S,op,op`).
 /// Everything else declines the wire, which is a withheld admission and
 /// not a refusal: a `!halted` header, and — deliberately, even
 /// though the fold has a full answer for it — a WITHDRAWAL row (`-C`). A
@@ -1307,6 +1308,28 @@ fn manifest_shape(manifest: &str) -> Option<Running<'_>> {
         if row.starts_with('-') {
             // A withdrawal. The fold decides it; this surface does not.
             return None;
+        }
+        if let Some(spec) = row.strip_prefix('~') {
+            // `~T~record~f:Ty~..` / `~T[P]~variant~A~B:Ty`: a running
+            // record or variant a handoff spelling reaches. The fold reads the
+            // members against the candidate's own declarations; this surface
+            // counts it as nothing, like the handoff row it accompanies, and
+            // reads only its head so a garbled one still declines the wire. It
+            // is read BEFORE the `=`, `>` and `<` rows below because a member's
+            // type spelling can carry a `>` (a function type) and no row of
+            // those kinds starts with `~`.
+            let mut parts = spec.split('~');
+            let head = parts.next()?;
+            let name = match head.split_once('[') {
+                Some((name, params)) if params.ends_with(']') => name,
+                Some(_) => return None,
+                None => head,
+            };
+            let kind = parts.next()?;
+            if !is_wire_name(name) || (kind != "record" && kind != "variant") {
+                return None;
+            }
+            continue;
         }
         if let Some((component, spec)) = row.split_once('=') {
             // `C=k:T` — the state shape `component` exports at `k` (item 53).
@@ -1628,6 +1651,29 @@ mod tests {
         // a garbled handoff row is still a row this surface cannot read
         for wire in ["Kv/store/;Kv=store", "Kv/store/;Kv=store:", "Kv/store/;Kv=:Str",
                      "Kv/store/;=store:Str"] {
+            assert!(certify_into("", wire).is_none(), "must not certify into {:?}", wire);
+        }
+    }
+
+    #[test]
+    fn a_declaration_row_is_read_rather_than_tripped_over() {
+        // `~T~record~f:Ty` is a running declaration a handoff spelling reaches.
+        // Like the handoff row it accompanies it is the fold's to judge, so a
+        // wire carrying one must not be declined: that would withhold this
+        // surface from every running composition whose state is a record.
+        for wire in [
+            "Kv/store/;Kv=store:St;~St~record~a:Int",
+            "Kv/store/;Kv=store:Box[Int];~Box[T]~record~v:T~w:List[Box[T]]",
+            "Kv/store/;Kv=store:V;~V~variant~A~B:Int",
+            // a member's function type carries a `>`, which no row kind of the
+            // `>` family may be mistaken for
+            "Kv/store/;Kv=store:St;~St~record~f:(Int) -> Str",
+        ] {
+            assert!(certify_into("", wire).is_some(), "must certify into {:?}", wire);
+        }
+        // a row whose head this surface cannot read is a garbled wire
+        for wire in ["Kv/store/;~", "Kv/store/;~St", "Kv/store/;~St~union~a:Int",
+                     "Kv/store/;~1St~record~a:Int", "Kv/store/;~St[T~record~a:T"] {
             assert!(certify_into("", wire).is_none(), "must not certify into {:?}", wire);
         }
     }

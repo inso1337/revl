@@ -155,3 +155,53 @@ component G provides greeter: Greeter {
         assert session.call("greeter", "hi", [])["result"] == 2
     finally:
         session.unload()
+
+
+def _cache_over(decl: str, *, version: int = 1) -> str:
+    """The cache with its hand-off state spelled by the record `St`, declared
+    as `decl`: the spelling is the same across versions, the record may not
+    be."""
+    return f"type St = {decl}\n" + _cache("Map[Str, St]", version=version)
+
+
+def test_changed_record_under_one_name_is_refused_state_intact():
+    """A successor that spells its state `St` over a record whose declaration
+    moved is refused on both swap paths, and the running cache keeps serving
+    with its entries: admission refuses the compile, and an agent-authored
+    swap of a standalone compile refuses before any teardown."""
+    from revl.mcp.session import SessionError
+
+    session = _loaded(_cache_over("{ a: Int }", version=1))
+    try:
+        session.call("cache", "put", ["bob", "99"])
+        moved = _cache_over("{ a: Int, b: Int }", version=2)
+
+        # (1) the admission gate, against the running manifest
+        with pytest.raises(RevlError, match="state hand-off on `cache` differs"):
+            compile_source(moved, "cache.rvl", manifest=session.ir,
+                           replacing=("Cache",))
+
+        # (2) the agent-authored swap, whose candidate compiled standalone
+        with pytest.raises(SessionError) as caught:
+            session.swap(compile_source(moved, "cache.rvl"),
+                         origin={"source": moved}, agent_authored=True)
+        assert caught.value.code == "STATE_UNDISCLOSED"
+        # for this reason and no other: the declarations, both printed
+        said = str(caught.value)
+        assert "declared hand-off types are not" in said, said
+        assert "`St = {a: Int}`" in said, said
+        assert "`St = {a: Int, b: Int}`" in said, said
+
+        # the predecessor still serves its own code, its state untouched
+        assert session.call("cache", "version", [])["result"] == 1
+        assert session.call("cache", "get", ["bob"])["result"] == "99"
+
+        # the same record under the same declaration still swaps, warm
+        same = _cache_over("{ a: Int }", version=2)
+        ok = compile_source(same, "cache.rvl", manifest=session.ir,
+                            replacing=("Cache",))
+        session.swap(ok, origin={"source": same}, agent_authored=False)
+        assert session.call("cache", "version", [])["result"] == 2
+        assert session.call("cache", "get", ["bob"])["result"] == "99"
+    finally:
+        session.unload()

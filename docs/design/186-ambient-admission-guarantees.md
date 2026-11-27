@@ -82,6 +82,8 @@ C<*k         requirement: the same, multi-realm bound (item 162)               (
 C>k/r,r      route: the realms C binds k across, in declaration order          (#1036)
 -C           replacing: component C is withdrawn by this admission             (wave 1)
 C=k:T        handoff: C exports state of type T at key k                       (wave 2)
+~T~record~f:Ty~g:Ty  declaration: a running record a handoff spelling reaches   (handoff decls)
+~T[P]~variant~A~B:Ty declaration: a running variant, cases in order, `[P]` its params
 !halted      header: the composition is halted; every admission refuses       (slice 3)
 !services    header: the `:S` rows are the WHOLE running service set          (item 346)
 :S           service: the running composition declares service S              (item 346)
@@ -362,6 +364,43 @@ route row on both surfaces, because the type field is the one place on the wire
 carrying an arbitrary type spelling and a function type spells `->`. The type
 itself is not validated against the wire-name rule: it is a spelling, and the
 only thing that may judge it is the relation that compares it.
+
+**Declaration rows, the declared shape behind a hand-off name.** A hand-off
+spelling is only a NAME for a record or variant, and the reference compares the
+declarations behind it (`admission._handoff_compatible`): the running
+version's from the running manifest's `types`, the replacement's from its own
+compile, so `handoff db: St` over a `St` whose fields changed is refused
+(`state-handoff-drift`, both declarations appended to the message). The wire
+therefore carries each running declaration a hand-off spelling reaches, and
+only those:
+
+```
+~Name~record~f:Ty~g:Ty        a record, fields in written order
+~Name[P,Q]~variant~A~B:Ty     a variant, cases in written order, `[..]` its params
+```
+
+`manifest._decl_rows(types, roots)` renders them off the running IR's `types`,
+following each root spelling's names and each declaration's own references
+(nested, generic and recursive types included, each declaration once, sorted by
+name). It takes a set of ROOT spellings, so another check that compares a
+declared shape across versions asks for its own roots. The rows follow the
+composition rows and precede the service block; a composition with no hand-off
+over a declared type renders none, so every other wire is byte-identical. The
+provided council types (`Answer`, `Aggregate`) are left out, since every
+version seeds them alike. A declaration the wire cannot spell (a name that is
+not an identifier, a type spelling carrying `~` or `;`) is withheld, which reads
+as undeclared on the running side and refuses a successor that declares it.
+
+`~` leads no earlier row kind, so a reader from before this row refuses the
+whole wire as an unknown row, which fails closed. `parse_row` builds the running
+table (a garbled row, a duplicate name, a record with no field refuses the wire
+by name), the incoming table is read off the text by the reader that renders the
+IR `types` section, and `hd_compatible` / `hd_detail` are `_handoff_compatible`
+and `_handoff_detail` one for one, so the gate agrees with the reference on the
+verdict and the message. A running document that carries no declarations (an
+older or hand-built one) cannot prove a name the candidate declares unchanged
+and is refused on both sides. The admission surface reads the row and counts it
+as nothing, like the handoff row beside it.
 
 `tests/test_selfhost_lower.py` carries oracle B over the row (a 13-case corpus
 of `(M, X, R)` triples, the ordering corpus, and the controls);
