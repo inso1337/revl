@@ -1,0 +1,1 @@
+{"case": "oracle-reject:record destructuring of a nominal record naming a missing field", "buckets": ["agree-refuse/TYPE"]}

@@ -21717,6 +21717,20 @@ fn tk_is_fn_ty(t: &str) -> bool {
     return ((t.revl_length() > 0i64) && ({ t.chars().nth((0i64) as usize).unwrap().to_string() } == "("));
 }
 
+fn tk_pat_shape(vt: String, env: &[Bind]) -> String {
+    if tk_is_struct(&vt) {
+        return vt;
+    }
+    if tk_generic_record(&vt, env) {
+        return grec_shape(&vt, env);
+    }
+    return tk_nominal_shape_at(&parse_head(vt), env, 0i64);
+}
+
+fn tk_shape_has(shape: &str, name: &str) -> bool {
+    return (tk_struct_field(shape, name) != "");
+}
+
 fn tk_builtin_head(h: &str) -> bool {
     return (((((((((((((((h == "Int") || (h == "Int32")) || (h == "Float")) || (h == "Str")) || (h == "Bool")) || (h == "Bytes")) || (h == "Unit")) || (h == "List")) || (h == "Map")) || (h == "Opt")) || (h == "Result")) || (h == "Async")) || (h == "Value")) || (h == "Any")) || (h == "Never"));
 }
@@ -24618,6 +24632,16 @@ fn fb_walk(steps: &[FbStep], i: i64, scope: Vec<Bind>, tys: Vec<Bind>, ret: Stri
         let vt = infer(s.value.clone(), tys.clone());
         if tk_nonrecord_value(vt.clone(), &tys) {
             return fb_type_refuse(tagged("TYPE", &tk_destructure_msg(vt)), s.line, scope, tys);
+        }
+        let fshape = tk_pat_shape(vt.clone(), &tys);
+        if (fshape != "") {
+            let mut k = 0i64;
+            while (k < names.revl_length()) {
+                if (!tk_shape_has(&fshape, &(names)[(k) as usize])) {
+                    return fb_type_refuse(tagged("TYPE", &((((String::from("record destructuring names `").revl_concat(&(names)[(k) as usize])).revl_concat("`, which is not a field of `")).revl_concat(&tk_render(vt))).revl_concat("`"))), s.line, scope, tys);
+                }
+                k = (k).checked_add(1i64).expect("revl: Int overflow");
+            }
         }
         return fb_clean(scope, tys);
     }

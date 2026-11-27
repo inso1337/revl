@@ -15698,6 +15698,22 @@ fn tk_struct_field(t: Str, name: Str) -> Str {
 
 fn tk_is_fn_ty(t: Str) -> Bool { return t.length() > 0 && t.charAt(0) == "(" }
 
+// The field shape a destructuring pattern is checked against: the structural
+// spelling itself, an applied generic instantiated through `grec_shape`
+// (`Box[Int]` against `type Box[T] = { v: T }` is `{v: Int}`, issue #3592), or
+// the nominal record's `field` rows (`tk_nominal_shape_at`). "" when the
+// value's type is not a record this walk can read — the silent direction,
+// matching the reference's `fields is None`.
+fn tk_pat_shape(vt: Str, env: List[Bind]) -> Str {
+  if (tk_is_struct(vt)) { return vt }
+  if (tk_generic_record(vt, env)) { return grec_shape(vt, env) }
+  return tk_nominal_shape_at(parse_head(vt), env, 0)
+}
+
+fn tk_shape_has(shape: Str, name: Str) -> Bool {
+  return tk_struct_field(shape, name) != ""
+}
+
 // The built-in type heads: nothing spelled with one is ever a declared record.
 fn tk_builtin_head(h: Str) -> Bool {
   return h == "Int" || h == "Int32" || h == "Float" || h == "Str"
@@ -18935,12 +18951,14 @@ fn fb_walk(steps: List[FbStep], i: Int, scope: List[Bind], tys: List[Bind],
   let s = steps[i]
   if (s.kind == "bail") { return fb_clean(scope, tys) }
   // docs/design/457 T3b: `_lower_let_pattern_stmt`'s RECORD branch, in its own
-  // order — the per-name scope guard first, then the value's type. Only the two
-  // arms that spell "requires a record" are ported: a DECLARED type whose
-  // `types` entry is not a record (the variant rows `adt_case_row` builds), and
-  // a builtin non-record head (`_BUILTIN_NONRECORD`). The unknown-field and
-  // element-type arms need the field table at a precision this walk does not
-  // hold, so they stay silent. The block ends here either way: the binder is not
+  // order — the per-name scope guard first, then the value's type. The two
+  // arms that spell "requires a record" are ported (a DECLARED type whose
+  // `types` entry is not a record — the variant rows `adt_case_row` builds —
+  // and a builtin non-record head, `_BUILTIN_NONRECORD`), and so is the
+  // unknown-field arm (issue #3592): every pattern name must be a field of the
+  // value's record shape, structural, nominal or applied generic alike. A type
+  // whose field table this walk cannot read stays silent (the reference's
+  // `fields is None`). The block ends here either way: the binder is not
   // threaded on, so no statement after it is judged.
   if (s.kind == "letpat") {
     let names = split_top_commas(s.name)
@@ -18952,6 +18970,18 @@ fn fb_walk(steps: List[FbStep], i: Int, scope: List[Bind], tys: List[Bind],
     if (tk_nonrecord_value(vt, tys)) {
       return fb_type_refuse(tagged("TYPE", tk_destructure_msg(vt)), s.line,
                             scope, tys)
+    }
+    let fshape = tk_pat_shape(vt, tys)
+    if (fshape != "") {
+      var k = 0
+      while (k < names.length()) {
+        if (!tk_shape_has(fshape, names[k])) {
+          return fb_type_refuse(tagged("TYPE", "record destructuring names `"
+            .concat(names[k]).concat("`, which is not a field of `")
+            .concat(tk_render(vt)).concat("`")), s.line, scope, tys)
+        }
+        k += 1
+      }
     }
     return fb_clean(scope, tys)
   }
