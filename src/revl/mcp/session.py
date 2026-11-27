@@ -1876,6 +1876,18 @@ class Session:
     def loaded(self) -> bool:
         return self._driver is not None
 
+    @property
+    def module(self):
+        """The emitted module of the composition currently loaded (issue #3614).
+
+        None before `load`, after a failed load, and after `unload`; after a
+        live `swap` it is the module of the composition now running. A
+        read-only handle: callers use its pure functions and do not mutate it.
+        This reads the same object the private `_module` holds, so existing
+        in-repo readers keep working.
+        """
+        return self._module
+
     def _require(self):
         if self._frozen:
             # item 250, Decision 4: a forked parent is retired at k and
@@ -2756,7 +2768,11 @@ class Session:
         # aborted (it was made permanent — the swap-owner-scoping data-loss bug).
         self._install_session_owner(ir)
         try:
-            self._run(driver._load(ir, self._prepare_module(ir, plan.rendered)))
+            # issue #3614: the accessor follows the live generation — after the
+            # cut-over it is the successor's module, not the boot-time one.
+            module = self._prepare_module(ir, plan.rendered)
+            self._module = module
+            self._run(driver._load(ir, module))
             # item 334 (EDGE 1): the POST-ACTIVATION HEALTH GATE. `driver._load`
             # returns WITHOUT raising for the two most likely candidate faults —
             # item 372 makes a mid-body FAILED activation "honest and observable"
@@ -3074,8 +3090,11 @@ class Session:
         self._install_session_owner(old_ir)
         try:
             rendered = self._render_cached(driver, old_ir)
-            self._run(driver._load(old_ir,
-                                   self._prepare_module(old_ir, rendered)))
+            # issue #3614: the aborted swap reloads the predecessor, so the
+            # accessor goes back to the module that is running again.
+            module = self._prepare_module(old_ir, rendered)
+            self._module = module
+            self._run(driver._load(old_ir, module))
         finally:
             driver.runtime.clear_session_owner()
         for name, info in pre.items():
@@ -6152,6 +6171,7 @@ class Session:
         self._act_approvals = {}
         self._act_grants = 0
         self.ir = None
+        self._module = None   # issue #3614: nothing is loaded after a reset
         self.previous = None
         self.origin = None
         self.previous_origin = None

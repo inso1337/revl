@@ -1378,7 +1378,7 @@ def _live_decoder(session):
     Lazy import: the backend decoder is only reachable on the live path (Session
     already pulled cordis), keeping the pure wire layer decoupled; the escape
     hatch degrades to identity when it cannot be built."""
-    module = getattr(session, "_module", None)
+    module = getattr(session, "module", None)  # the public accessor, #3614
     if module is None:
         return None
     try:
