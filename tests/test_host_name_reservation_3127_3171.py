@@ -103,6 +103,29 @@ def test_3127_ts_host_visible_names_are_refused_and_externs_rename():
     assert "export function fetch_(" in emitted
     assert "export function fetch(" not in emitted
 
+# issue #3392: the declared inverse is a CALLABLE reference, so it must not be
+# pre-mangled as if it were a local. `Map` reaches every emitter verbatim and is
+# escaped there (once) to `Map_`; pre-mangling it here asked the author for
+# `Map_`, which is not a declared name, while the emitter would have renamed it
+# a second time.
+_UNDO_JS_GLOBAL = """\
+extern pure fn Map(h: RHandle) = @ts { return }
+extern acquire fn zqOpen(n: Int) -> RHandle undo Map(result) = @ts { return "h" }
+component Job {
+  let h = effect zqOpen(0) undo Map(h)
+}
+"""
+
+
+def test_3392_a_pure_extern_named_like_a_js_global_can_be_the_declared_undo():
+    ir = compile_source(_UNDO_JS_GLOBAL, "undo_js_global.rvl")
+    assert ir["externs"][1]["undo"]["callee"]["name"] == "Map"
+    assert ir["components"][0]["body"][0]["undo"]["name"] == "Map"
+    emitted = _emit("typescript", _UNDO_JS_GLOBAL)
+    assert "export function Map_(" in emitted
+    assert "Map__(h)" not in emitted
+    assert "() => Map_(h)" in emitted
+
 
 # --------------------------------------------------------------- #3129 (py)
 #

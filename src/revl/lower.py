@@ -3176,15 +3176,24 @@ class _LaxScope(dict):
 
     Host blocks are verbatim text; their undo/compensate expressions are
     host-level names (e.g. `close(socket)`) and are not checked against revl
-    function scope.
+    function scope. A name this program DOES declare as a callable is not a
+    host-level local, though: excluding it keeps the callable reference
+    verbatim, so a predeclared spelling such as `Map` stays `Map` instead of
+    being renamed to `Map_` here and then renamed AGAIN by the emitter (issue
+    #3392).
     """
 
+    def __init__(self, callables=frozenset()):
+        super().__init__()
+        self._callables = frozenset(callables)
+
     def __contains__(self, key) -> bool:
-        return True
+        return key not in self._callables
 
 
-def _lower_extern_expr(expr, filename: str) -> dict:
-    return _lower_pure_expr(expr, _LaxScope(), set(), {}, filename)
+def _lower_extern_expr(expr, filename: str, callables=None) -> dict:
+    return _lower_pure_expr(expr, _LaxScope(callables or ()),
+                            set(callables or ()), {}, filename)
 
 
 _SITE_INVERSE_GUIDANCE = (
@@ -5125,7 +5134,8 @@ def _check_argument_bound_scopes(where: str, source: str, line: int,
 
 
 def _lower_externs(program: Program, filename: str, types: dict,
-                   fns: list | None = None) -> list:
+                   fns: list | None = None,
+                   callables: set | None = None) -> list:
     externs: list[dict] = []
     # name -> first declaring file, so a cross-module duplicate names BOTH files
     # (roadmap 394), same as `_lower_fns`. Externs carry provenance in
@@ -5825,11 +5835,12 @@ def _lower_externs(program: Program, filename: str, types: dict,
                                          reach_witness, filename)
             _check_extern_undo(decl.undo, decl.name, "undo", types, filename,
                                result_type=undo_result_type)
-            entry["undo"] = _lower_extern_expr(decl.undo, filename)
+            entry["undo"] = _lower_extern_expr(decl.undo, filename, callables)
         if decl.compensate is not None:
             _check_extern_undo(decl.compensate, decl.name, "compensate",
                                types, filename)
-            entry["compensate"] = _lower_extern_expr(decl.compensate, filename)
+            entry["compensate"] = _lower_extern_expr(
+                decl.compensate, filename, callables)
         externs.append(entry)
     return externs
 
@@ -9457,7 +9468,8 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
         types[EVENTS_KEY] = events
     _refuse_callable_shadowing(program, program.filename)
     fns = _lower_fns(program, program.filename, types)
-    externs = _lower_externs(program, program.filename, types, fns)
+    externs = _lower_externs(program, program.filename, types, fns,
+                             component_callables)
     # item 256 Slice 1: cross-index the bound secrets against the extern emission
     # capabilities - refuse a wasm-only or nowhere-bound secret and a name/param
     # collision, annotate each bound extern with the secret names it receives, and
