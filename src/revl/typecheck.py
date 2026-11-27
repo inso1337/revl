@@ -1336,7 +1336,7 @@ def record_repair(filename: str, line: int, expected: str,
 
 def mismatch(filename: str, line: int, where: str,
              expected: str | None, actual: str | None,
-             *, why: str | None = None) -> RevlError:
+             *, why: str | None = None, extra_hint: str | None = None) -> RevlError:
     """The `T1` "these types disagree" refusal.
 
     `why` is the exception: it reports a case the checker could not decide
@@ -1383,6 +1383,8 @@ def mismatch(filename: str, line: int, where: str,
             "reason": "T1: a `Principal` is the only key to user-scoped data, "
                       "and `Auth.validate` is its sole producer",
         }
+    if extra_hint is not None:
+        hint = f"{hint} — {extra_hint}" if hint else extra_hint
     expected, actual = render_type(expected), render_type(actual)
     if why is not None:
         return RevlError(filename, line,
@@ -3803,8 +3805,31 @@ def check_ast(expr, expected: str | None, tenv: dict, types: dict,
         return
     if actual and not compatible(expected, actual, types):
         raise mismatch(filename, line, where, expected, actual,
-                       why=unresolved_nominal_reason(expected, actual, types))
+                       why=unresolved_nominal_reason(expected, actual, types),
+                       extra_hint=_int_division_hint(expr, expected, actual,
+                                                     tenv, types))
     refuse_nested_widening(expr, expected, actual, tenv, types, filename, where)
+
+
+def _int_division_hint(expr, expected: str | None, actual: str | None,
+                       tenv: dict, types: dict) -> str | None:
+    """Issue #3496: `/` on two `Int` operands is a `Float` (docs/arithmetic.md),
+    so a position expecting `Int` refuses it — and the refusal used to stop
+    there, leaving the author to discover `div_floor` by reading the stdlib.
+    When the mismatching expression is exactly that division, the refusal names
+    the integer-quotient forms."""
+    from .parser import ExprBin
+    if parse_type(expected)[0] != "Int" or parse_type(actual)[0] != "Float":
+        return None
+    if not isinstance(expr, ExprBin) or expr.op != "/":
+        return None
+    lt = infer_ast(expr.left, tenv, types, None)
+    rt = infer_ast(expr.right, tenv, types, None)
+    if lt and rt and parse_type(lt)[0] == "Int" and parse_type(rt)[0] == "Int":
+        return ("`/` on two `Int`s gives a `Float`; the integer quotient is "
+                "`a.div_floor(b)` (also `div_trunc`, `div_euclid`) "
+                "(docs/arithmetic.md)")
+    return None
 
 
 # ------------------------------------------------------- IR inference (components)
