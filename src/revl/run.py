@@ -228,6 +228,19 @@ def component_config(ir: dict, config: dict, name: str) -> dict:
     return {**seeded, **supplied}
 
 
+def _decode_wire_config(config: dict, module) -> dict:
+    """Issue #3595: a variant config value arrives from the host config in the
+    wire form `{"$kind": "<case>"}` and is rebuilt into the emitted module's
+    case instance here, at load, so `config.c == Green` compares like with
+    like. A config with no wire tags is returned unchanged (byte-identical
+    path); an unknown `$kind` refuses fail-closed (bridge.SeamTagError)."""
+    if not any(isinstance(v, dict) and "$kind" in v for v in config.values()):
+        return config
+    import bridge  # noqa: PLC0415 — the backend dir is on sys.path at load
+    return {key: bridge._decode_value(value, module)
+            for key, value in config.items()}
+
+
 # ── item 350: the environment contract (`boot component`) ───────────────────
 #
 # The host must know the port, the auth token, the data dir and the model
@@ -2083,7 +2096,8 @@ class _Driver:
             # a bare ctx.plugin.
             fiber = self.runtime.plug(
                 self.root, getattr(module, name),
-                component_config(ir, self.config, name))
+                _decode_wire_config(component_config(ir, self.config, name),
+                                    module))
             self.fibers[name] = fiber
             await self._flush()
             # roadmap item 372: DRIVE the deferred activation to completion and
