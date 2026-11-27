@@ -3706,18 +3706,26 @@ def _with_writer(record: dict, writer: str | None) -> dict:
     return record if writer is None else {**record, "writer": writer}
 
 
-def read_decision(path: str) -> tuple[str | None, dict | None]:
+def read_decision(path: str, *, federation_id: "str | None" = None,
+                  generation: "int | None" = None) -> tuple[str | None, dict | None]:
     """Read the durable federation decision: `(FEDERATION_APPROVED |
     FEDERATION_ABORTED | None, record)`.
 
-    The LAST decision-shaped record wins. A `federation-decision-pending`
-    record is decision-shaped too: it says a newer run started and decided
-    nothing yet, so it clears an earlier run's approval (the returned decision
-    is `None`, which is the roll-back answer). A file that does not exist is
-    also `None` — the decision was never made, which is a definite answer
-    (roll back). A file that exists but cannot be parsed raises: that is NOT a
-    definite answer, and guessing between roll-forward and roll-back is exactly
-    the split-brain the record exists to prevent.
+    The LAST decision-shaped record wins — but only among records of the run
+    being settled. Issue #3571: a record naming another federation, or a
+    generation other than the expected one, belongs to a different run and
+    must not decide this one (a stranded participant of an earlier run cannot
+    be settled by a later run's record). `federation_id`/`generation` given as
+    None leave that field unconstrained (the pre-#3571 behaviour).
+
+    A `federation-decision-pending` record is decision-shaped too: it says a
+    newer run started and decided nothing yet, so it clears an earlier run's
+    approval (the returned decision is `None`, which is the roll-back answer).
+    A file that does not exist is also `None` — the decision was never made,
+    which is a definite answer (roll back). A file that exists but cannot be
+    parsed raises: that is NOT a definite answer, and guessing between
+    roll-forward and roll-back is exactly the split-brain the record exists to
+    prevent.
     """
     if not os.path.exists(path):
         return None, None
@@ -3730,10 +3738,19 @@ def read_decision(path: str) -> tuple[str | None, dict | None]:
                 continue
             entry = json.loads(line)   # a torn decision record fails closed
             kind = entry.get("record")
-            if kind in (FEDERATION_APPROVED, FEDERATION_ABORTED,
-                        FEDERATION_PENDING):
-                decision = None if kind == FEDERATION_PENDING else kind
-                record = entry
+            if kind not in (FEDERATION_APPROVED, FEDERATION_ABORTED,
+                            FEDERATION_PENDING):
+                continue
+            if federation_id is not None and entry.get("federation") != federation_id:
+                continue
+            if generation is not None:
+                try:
+                    if int(entry.get("generation", -1)) != int(generation):
+                        continue
+                except (TypeError, ValueError):
+                    continue
+            decision = None if kind == FEDERATION_PENDING else kind
+            record = entry
     return decision, record
 
 
@@ -3847,11 +3864,47 @@ def settle_stranded(wal_path: str, decision_path: str, *, world=None) -> dict:
         return _settle_stranded(wal_path, decision_path, world=world)
 
 
+def _wal_latest_generation(wal_path: str) -> "int | None":
+    """The generation of the WAL's LATEST opening (issue #3571).
+
+    A reused WAL (`--wal PATH`, #641/#642) starts each later opening with a
+    `generation` record (the py writer) or a repeated `header` (a compiled
+    tier); the LAST opening-boundary record carries that opening's
+    generation, and a single-opening WAL carries it in its header. None when
+    the WAL cannot be read or carries no integer generation: the decision
+    then stays unconstrained and `recover` fails closed on the WAL itself.
+    """
+    from .wal import OPENING_BOUNDARIES, read_wal  # noqa: PLC0415
+    try:
+        loaded = read_wal(wal_path)
+    except Exception:  # noqa: BLE001 — an unreadable WAL must not decide here
+        return None
+    generation = None
+    boundary = False
+    for record in reversed(loaded.get("records") or []):
+        if isinstance(record, dict) and record.get("record") in OPENING_BOUNDARIES:
+            generation = record.get("generation")
+            boundary = True
+            break
+    if not boundary:
+        header = loaded.get("header")
+        if isinstance(header, dict):
+            generation = header.get("generation")
+    if isinstance(generation, bool) or not isinstance(generation, int):
+        return None
+    return generation
+
+
 def _settle_stranded(wal_path: str, decision_path: str, *, world) -> dict:
     from .recovery import recover  # noqa: PLC0415 (lazy, keeps import cheap)
 
     try:
-        decision, record = read_decision(decision_path)
+        # Issue #3571: only a record of THIS run decides. The run is the
+        # WAL's latest opening, so its generation is the constraint; a record
+        # a later run appended must not settle an earlier run's stranded
+        # participant.
+        decision, record = read_decision(
+            decision_path, generation=_wal_latest_generation(wal_path))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError) as error:
         return {
             "verdict": UNRESOLVED,
@@ -5001,6 +5054,15 @@ def deploy_command(args) -> int:
                     print(f"  chain REFUSED [{chain.get('link')}]: "
                           f"{chain.get('reason')}")
         return 0 if (verdict.ok and chain_ok) else 1
+
+    # Issue #3571: without --bundle there is no IR, so the #2725 participant
+    # order refusal cannot run — yet this COMMIT path still writes the
+    # decision record. Warn loudly rather than refuse: a no-bundle deploy is
+    # the base flow, and the decision record keeps crash settlement working.
+    if ir is None:
+        print("warning: deploying without --bundle: no bundle IR was read, so "
+              "the participant order refusal (issue #2725) is skipped; this run "
+              "still writes its decision record", file=sys.stderr)
 
     # COMMIT: drive the coordinated protocol. A map that admits a `via = ssh`
     # target opens the cross-machine leg (stage + ssh transport); an all-local
