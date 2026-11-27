@@ -18,8 +18,8 @@ _STATUS = """## What the layer covers, and what it does not
 
 _CURRENT = """| Code | Guarantee (one line) | Enforced at | Origin |
 | ---- | -------------------- | ----------- | ------ |
-| [G1](rejections.md#g1) | declared access | lower | Cordis |
-| [G2](rejections.md#g2) | disjointness | linker | Cordis |
+| [G1](docs/rejections.md#g1-declared-access) | declared access | lower | Cordis |
+| [G2](docs/rejections.md#g2-provision-disjointness) | disjointness | linker | Cordis |
 """
 
 
@@ -34,8 +34,8 @@ def test_formal_status_is_generated_and_human_columns_are_carried(tmp_path):
     root = _root(tmp_path)
     generated = docgen.block_formal_guarantees(_CURRENT, root=root)
 
-    assert "| [G1](rejections.md#g1) | declared access | lower | Cordis | partial |" in generated
-    assert "| [G2](rejections.md#g2) | disjointness | linker | Cordis | full |" in generated
+    assert "| [G1](docs/rejections.md#g1-declared-access) | declared access | lower | Cordis | partial |" in generated
+    assert "| [G2](docs/rejections.md#g2-provision-disjointness) | disjointness | linker | Cordis | full |" in generated
     assert docgen.block_formal_guarantees(generated, root=root) == generated
 
 
@@ -53,7 +53,7 @@ def test_a_ledger_status_change_moves_the_generated_column(tmp_path):
 
     after = docgen.block_formal_guarantees(before, root=root)
     assert before != after
-    assert "| [G2](rejections.md#g2) | disjointness | linker | Cordis | partial |" in after
+    assert "| [G2](docs/rejections.md#g2-provision-disjointness) | disjointness | linker | Cordis | partial |" in after
 
 
 def test_a_new_ledger_guarantee_arrives_with_curatorial_placeholders(tmp_path):
