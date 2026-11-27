@@ -283,6 +283,44 @@ def _reject_foreign_name(name, filename, line):
 # compile error — never a verbatim pass-through to whatever the host object
 # happens to have. Names are chosen to be collision-free with the v1 host
 # stub objects (open/close/query/execute/new/get/insert/remove/drop).
+#: issue #3500: the stdlib free functions a refused method call can use
+#: instead, keyed by module. `xs.contains(x)` on a list points at
+#: `list_contains(xs, x)` from stdlib/list.rvl; `s.contains(part)` on a string
+#: at `contains(s, part)` from stdlib/str.rvl. tests/test_3500_* pins this
+#: table against the modules' actual `pub fn` exports.
+_STDLIB_FREE_FNS = {
+    "stdlib/list.rvl": frozenset({
+        "list_contains", "list_sort", "list_dedup", "list_reverse",
+        "list_map", "list_filter", "list_reduce",
+    }),
+    "stdlib/str.rvl": frozenset({
+        "contains", "index_of", "last_index_of", "trim", "lstrip", "rstrip",
+    }),
+}
+
+
+def _stdlib_fn_pointer(method: str, recv_t: str | None) -> str | None:
+    """The hint text naming the stdlib free function for a refused method, or
+    None. A `List` receiver maps `m` to `list_m` in stdlib/list.rvl, a `Str`
+    receiver to `m` (camelCase to snake_case) in stdlib/str.rvl; any other
+    receiver family has no such module."""
+    head, _args = parse_type(recv_t or "")
+    snake = re.sub(r"(?<!^)(?=[A-Z])", "_", method).lower()
+    if head == "List":
+        cand, mod, arg = f"list_{snake}", "stdlib/list.rvl", "xs"
+    elif head == "Str":
+        cand, mod, arg = snake, "stdlib/str.rvl", "s"
+    else:
+        return None
+    if cand not in _STDLIB_FREE_FNS.get(mod, ()):
+        return None
+    if method == "contains":
+        call = f"{cand}({arg}, {'x' if head == 'List' else 'part'})"
+    else:
+        call = f"{cand}({arg})"
+    return f"use `{call}` from {mod}"
+
+
 _BUILTIN_METHODS = {
     "length": 0, "push": 1, "slice": 2, "charAt": 1,
     "charCodeAt": 1, "codepoint_at": 1, "indexOf": 1, "concat": 1,
@@ -7942,14 +7980,23 @@ def _lower_pure_expr_node(expr, scope: dict, callables: set, alias_fns: dict,
                 return _lower_pure_expr(desugar_list_transform(expr), scope,
                                         callables, alias_fns, filename,
                                         type_env, types)
+            recv_t = _expr_static_type(expr.callee.target, type_env, types)
             arity = _BUILTIN_METHODS.get(method)
             if arity is None:
+                hint = ("records carry data, not methods; call functions as `f(x)`, "
+                        "and call arrows through a `let` binding")
+                # issue #3500: the refusal is right that there is no such
+                # method; name the stdlib FUNCTION that does the work when one
+                # exists, so the answer is in the refusal instead of behind the
+                # thirty-eight-name surface list.
+                pointer = _stdlib_fn_pointer(method, recv_t)
+                if pointer is not None:
+                    hint = f"{pointer}; {hint}"
                 raise RevlError(
                     filename, expr.line,
                     f"no builtin method `{method}` on values — the stdlib surface is "
                     f"{', '.join(sorted(_BUILTIN_METHODS))} (docs/stdlib-2.0.md)",
-                    hint="records carry data, not methods; call functions as `f(x)`, "
-                         "and call arrows through a `let` binding",
+                    hint=hint,
                 )
             # The stdlib-named-method sliver (roadmap 75(b)): only a receiver
             # the checker can *prove* is a stdlib value (Str/List/Int/Int32/
@@ -7960,7 +8007,6 @@ def _lower_pure_expr_node(expr, scope: dict, callables: set, alias_fns: dict,
             # Refuse it like any other host-boundary method (HOST-METHOD); the
             # fence then closes to exactly "host-object results are on the
             # audit surface" (G8).
-            recv_t = _expr_static_type(expr.callee.target, type_env, types)
             if _is_wildcard(recv_t):
                 _refuse_unpinned_stdlib_method(method, recv_t, filename,
                                                expr.line)
