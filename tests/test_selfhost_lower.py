@@ -9058,6 +9058,19 @@ component D provides r: R {
 # neither form, because the parse stopped before every later stage, the match
 # totality check included. Both are read now, and the verdict comes from the
 # stage the reference reaches.
+# ---- issue #3342: a `handoff <key>: Map[K, V]` types the component's one Map --
+def _handoff_map_3342(put_ty: str = "Str", state: str | None = "Map[Str, Int]",
+                      get_ret: str = "Int", get_body: str = 'm.get("k") ?? 0',
+                      extra: str = "") -> str:
+    handoff = f"  handoff k: {state}\n" if state else ""
+    return (f"service K {{ emission fn put(v: {put_ty})\n"
+            f"  fn get() -> {get_ret}\n  fn plus() -> Int }}\n"
+            f"component C provides k: K {{\n{handoff}"
+            "  let m = effect Map.new() undo m.drop()\n"
+            f"{extra}  provide k {{\n"
+            '    fn put(v) { effect m.insert("k", v) undo m.remove("k") }\n'
+            f"    fn get() = {get_body}\n"
+            '    fn plus() = (m.get("k") ?? 0) + 1\n  }\n}\n')
 
 GATE_3107_ADMITTED = [
     ("shorthand", "fn twice(x: Int) -> Int = x * 2\n"),
@@ -9070,6 +9083,23 @@ GATE_3107_ADMITTED = [
     ("verified_before_an_ordinary_fn",
      "verified fn one() -> Int { return 1 }\n"
      "fn two() -> Int { return 2 }\n"),
+]
+
+_HANDOFF_MAP_3342 = [
+    ("wrong_value", _handoff_map_3342(), "T1"),
+    ("wrong_read", _handoff_map_3342(put_ty="Int", get_ret="Str",
+                                     get_body='m.get("k") ?? "none"'), "T1"),
+    ("wrong_key", _handoff_map_3342(put_ty="Int", state="Map[Int, Int]",
+                                    get_body="m.get(1) ?? 0"), "T1"),
+    ("wrong_get_key", _handoff_map_3342(put_ty="Int",
+                                        get_body="m.get(1) ?? 0"), "T1"),
+    ("activation_insert", _handoff_map_3342(
+        put_ty="Int",
+        extra='  effect m.insert("seed", "x") undo m.remove("seed")\n'), "T1"),
+    ("declared", _handoff_map_3342(put_ty="Int"), ""),
+    ("no_handoff", _handoff_map_3342(state=None), ""),
+    ("two_maps", _handoff_map_3342(
+        extra="  let n = effect Map.new() undo n.drop()\n"), ""),
 ]
 
 
@@ -9384,4 +9414,10 @@ def test_an_annotated_provide_method_let_is_checked_as_the_reference_checks_it(
         "    }\n"
         "  }\n"
         "}\n")
+    _agree(admit, src)
+@pytest.mark.parametrize("case", _HANDOFF_MAP_3342,
+                         ids=[n for n, _, _ in _HANDOFF_MAP_3342])
+def test_handoff_typed_map_agrees_3342(admit, case):
+    name, src, tag = case
+    assert _ref(src)[0] == tag, f"corpus bug: {name}"
     _agree(admit, src)

@@ -43,6 +43,32 @@ resource vector; it therefore declares **at most one** hand-off, whose type
 describes that whole vector (thread several pieces of state through one record
 or `Map`).
 
+### The declaration types the Map it names (issue #3342)
+
+When the declared type is `Map[K, V]` and the component acquires exactly one
+host Map (`let m = effect Map.new() undo m.drop()`), the declaration also
+types that Map for the checker. `m.insert(k, v)` and
+`m.insert_if_absent(k, v)` are checked against `K` and `V`, `m.get(k)` and
+`m.remove(k)` against `K`, and `m.get(k)` has type `Opt[V]`. So if the
+`Cache` above served a `Store` whose `put` took `v: Int`, its `put` would be
+refused at the `insert` line:
+
+```
+cache.rvl:10: `insert` value of the Map typed by `handoff cache: Map[Str, Str]` expects `Str`, got `Int`
+```
+
+and a method declared `-> Int` that returns `m.get(k) ?? 0` off that Map is
+refused at its own line, as any other method whose body disagrees with its
+declared result. Without this, the wrong value was stored, carried across the
+swap, and failed at run time in a later expression.
+
+The result of `m.remove(k)` is not typed in this slice: it stays opaque, as
+before.
+
+A Map with no `handoff` declaration, and a component that acquires more than
+one Map (the declaration does not say which one it names), are not typed: their
+values stay on the host frontier, as before.
+
 The field is **additive**: a component with no `handoff` lowers byte-identically
 to before, and `ir_version` stays **3**. In the IR it is
 `component["handoff"] = {"key": <key>, "type": <type>}`.
