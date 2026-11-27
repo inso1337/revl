@@ -7932,12 +7932,20 @@ def _lower_pure_expr_node(expr, scope: dict, callables: set, alias_fns: dict,
                                         type_env, types)
             arity = _BUILTIN_METHODS.get(method)
             if arity is None:
+                # issue #3500: name the stdlib function that does the job when
+                # the refused name maps to one (`xs.contains(x)` on a List ->
+                # `list_contains` from stdlib/list.rvl). It goes in the hint,
+                # not the message: the census compares messages byte-for-byte.
+                pointer = _stdlib_fn_hint(
+                    method,
+                    _expr_static_type(expr.callee.target, type_env, types))
                 raise RevlError(
                     filename, expr.line,
                     f"no builtin method `{method}` on values — the stdlib surface is "
                     f"{', '.join(sorted(_BUILTIN_METHODS))} (docs/stdlib-2.0.md)",
                     hint="records carry data, not methods; call functions as `f(x)`, "
-                         "and call arrows through a `let` binding",
+                         "and call arrows through a `let` binding"
+                         + pointer,
                 )
             # The stdlib-named-method sliver (roadmap 75(b)): only a receiver
             # the checker can *prove* is a stdlib value (Str/List/Int/Int32/
@@ -17872,6 +17880,56 @@ _VALUE_METHOD_HEADS = frozenset(
     {"List", "Str", "Bytes", "Int", "Int32", "Float", "Bool", "Map"})
 
 
+_STDLIB_FN_INDEX: "dict[str, str] | None" = None
+
+
+def _stdlib_fn_index() -> dict[str, str]:
+    """`pub fn` name -> stdlib module file, scanned once from the shipped
+    stdlib (issue #3500). Empty when the stdlib is unreadable: the refusal
+    then just omits the pointer."""
+    global _STDLIB_FN_INDEX
+    if _STDLIB_FN_INDEX is None:
+        index: dict[str, str] = {}
+        try:
+            for path in sorted(stdlib_root().glob("*.rvl")):
+                for match in re.finditer(r"pub (?:extern )?fn ([A-Za-z_]\w*)",
+                                         path.read_text(encoding="utf-8")):
+                    index.setdefault(match.group(1), path.name)
+        except OSError:
+            pass
+        _STDLIB_FN_INDEX = index
+    return _STDLIB_FN_INDEX
+
+
+def _stdlib_fn_pointer(method, recv_t) -> "tuple[str, str] | None":
+    """The stdlib function a refused method name maps to (issue #3500): the
+    name with the receiver's type head as a prefix first (`contains` on
+    `List[Str]` -> `list_contains`), then the bare name (`contains` on `Str`
+    -> `contains`). Returns `(fn name, module file)` or None."""
+    if not method:
+        return None
+    index = _stdlib_fn_index()
+    head = parse_type(recv_t)[0].lower() if recv_t else ""
+    candidates = ([f"{head}_{method}"] if head else []) + [method]
+    for candidate in candidates:
+        module = index.get(candidate)
+        if module is not None:
+            return candidate, module
+    return None
+
+
+def _stdlib_fn_hint(method, recv_t) -> str:
+    """The "; use `list_contains` from stdlib/list.rvl instead" tail for a
+    refused method that a stdlib function does (issue #3500); empty when no
+    stdlib function matches the name. It rides the refusal's HINT, not its
+    message: the hint is what the CLI prints to the author, while the message
+    is what the gate/reference census compares byte-for-byte."""
+    pointer = _stdlib_fn_pointer(method, recv_t)
+    if pointer is None:
+        return ""
+    return f"; use `{pointer[0]}` from stdlib/{pointer[1]} instead"
+
+
 def _refuse_value_method(method, recv_t, filename: str, line: int,
                          host_handle: bool = False) -> None:
     """A non-builtin method on a receiver whose static type is a stdlib value,
@@ -17893,7 +17951,8 @@ def _refuse_value_method(method, recv_t, filename: str, line: int,
         filename, line,
         f"no builtin method `{method}` on `{recv_t}` — the stdlib surface is "
         f"{', '.join(sorted(_BUILTIN_METHODS))} (docs/stdlib-2.0.md)",
-        hint="records carry data, not methods; call functions as `f(x)` (G6)",
+        hint="records carry data, not methods; call functions as `f(x)` (G6)"
+             + _stdlib_fn_hint(method, recv_t),
         # a type-checker refusal, coded so: the `(G6)` in the hint is the
         # purity pointer the named receiver always carried, not the verdict.
         # Uncoded, `classify` read the hint's tag and filed it as a G6
