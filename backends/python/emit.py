@@ -687,6 +687,27 @@ def _inverse_lambda(step: dict, slot: str, params: str = "") -> str:
     return f"lambda {bound}" if bound else "lambda"
 
 
+def _py_class_body_mangles(name: str) -> bool:
+    """True for a module-level `def` name Python REWRITES when it is referenced
+    inside a class body: `__h` becomes `_Class__h` at every reference in a
+    class body, while the module-level def keeps its spelling, so a
+    provided-method call to it raises NameError at run time (issue #3582).
+    Dunders (`__init__`) are refused earlier (#319) and never reach here."""
+    return name.startswith("__") and not name.endswith("__")
+
+
+def _check_module_def_name(name: str, role: str) -> str:
+    """Refuse a module-level def name the py tier cannot call from a provided
+    method (a class body), naming the symbol, by name, at emit (issue #3582)."""
+    if _py_class_body_mangles(name):
+        raise EmitError(
+            f"{role} `{name}` starts with `__` but does not end with `__`: Python "
+            "name-mangles the reference inside a class body, so a provided method "
+            "calling it would not reach the module-level def — rename it "
+            "(issue #3582)")
+    return name
+
+
 def _ident(name: Any, what: str, *, attr: bool = False, temps: bool = True) -> str:
     """Validate and rename one user identifier. `attr=True` marks a name emitted
     as an attribute the runtime dispatches by its contract spelling (a provide-
@@ -5876,7 +5897,8 @@ def _emit_functions(functions: list, function_ceilings: dict | None = None,
     # globals, which the next `emit` on the same (now shared) module inherited.
     try:
         for fn in functions:
-            public_name = _ident(fn["name"], "function name")
+            public_name = _check_module_def_name(
+                _ident(fn["name"], "function name"), "function")
             name = public_name
             params = ", ".join(_ident(p["name"], "parameter name") for p in fn["params"])
             # item 92: a phase-2 async-colored fn emits `async def`; its body renders
@@ -6068,7 +6090,7 @@ def _emit_externs(externs: list, crossings: dict | None = None,
         out.add(1, "return {**_defaults, **_cfg}")
         out.add(0)
     for ext in externs:
-        name = _ident(ext["name"], "extern name")
+        name = _check_module_def_name(_ident(ext["name"], "extern name"), "extern")
         # An inline host body names its parameters itself, so they keep their
         # spelling; only the `@py ref` thunk, which binds `_f`/`_r` beside them,
         # lifts one off an emitter temporary (issue #2913).
