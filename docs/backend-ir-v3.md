@@ -51,6 +51,16 @@ components may provide the same key in different realms. See
 - **`class` on an extern is load-bearing**: `pure` is trusted, `acquire`
   carries an inverse, `emission` is irreversible. A backend with no body for
   its own tag must refuse, that refusal is deliberate, not a gap.
+- **`reach` on an extern states what its host body may reach** (issue #2971,
+  docs/design/1729-extern-reach-declaration.md). It is additive and present
+  ONLY when the author wrote `reaches [...]` after the return type:
+  `{"caps": ["fs"], "basis": "declared"}`. The item-373 confinement half shares
+  the object (`{"kind": "confined", "target": "cwd"}`), so both halves may
+  appear together. An ABSENT key means the reach is undeclared, which is
+  UNKNOWN and never an empty reach; a written `reaches []` is
+  `{"caps": [], "basis": "declared"}`. `basis` is `declared`: a consumer may
+  narrow on `caps` only if it already trusts the declaring author's host body,
+  and #2708 reserves a future `verified` value for the enforced form.
 - **`"async": true`** (additive; absent means sync) marks a suspension color
   (docs/design/async-extern.md). On an extern it is legal only for `class:
   emission`; on a `function` entry it is *derived*, the frontend colors a fn
