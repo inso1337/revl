@@ -1409,6 +1409,10 @@ class _Driver:
             # see the host provision before the first component loads.
             self._ambient_disposers.append(self.root.reflect.provide(key, service))
         self._compensation_residue: list[dict] = []
+        # issue #3436: component fibers that settled FAILED during this run
+        # (at boot or at teardown), in transition order, so the run's exit
+        # code can say the composition failed and name them.
+        self._failed_fibers: list[str] = []
 
     # -- backwards replay (docs/replay.md) ---------------------------------
 
@@ -1437,6 +1441,10 @@ class _Driver:
     def _on_fiber(self, _this, fiber, old) -> None:
         new = self.FiberState(fiber.state).name
         self._log("fiber", fiber.name, f"{self.FiberState(old).name} -> {new}")
+        # issue #3436: remember every FAILED settle so the run's exit code can
+        # fail the composition, not only the log line.
+        if new == "FAILED" and fiber.name not in self._failed_fibers:
+            self._failed_fibers.append(fiber.name)
         # observation window (open during a `--withdraw`): capture each fiber
         # the moment it comes to rest in a down state. `from` is the fiber's
         # state at the START of the window, so a UNLOADING waypoint collapses
@@ -2736,6 +2744,26 @@ class _Driver:
         except replay.ReplayError as exc:
             self._log("refused", type(exc).__name__, str(exc))
 
+    def _run_exit_code(self) -> int:
+        """Issue #3436: a run whose composition has a component that ended
+        FAILED (at boot or at teardown) or an inverse that failed to replay is
+        not a success -- the caller reads the exit code as exactly that, so
+        return nonzero and name what failed on stderr (the `cause` line above
+        already carries the error itself)."""
+        if not self._failed_fibers and not self._compensation_residue:
+            return 0
+        problems = []
+        if self._failed_fibers:
+            problems.append("component(s) FAILED: " + ", ".join(self._failed_fibers))
+        if self._compensation_residue:
+            names = sorted({r.get("component") for r in self._compensation_residue
+                            if isinstance(r, dict) and r.get("component")})
+            where = f" on {', '.join(names)}" if names else ""
+            problems.append(
+                f"{len(self._compensation_residue)} inverse(s) failed to replay{where}")
+        print("error: " + "; ".join(problems), file=sys.stderr, flush=True)
+        return 1
+
     async def hold_repl(self, once: bool = False) -> int:
         module = self._emit_module(self.ir)
         print("== load composition ==")
@@ -2744,7 +2772,7 @@ class _Driver:
         if once:
             print("\n== once — boot complete, tearing down ==")
             await self._teardown()
-            return 0
+            return self._run_exit_code()
         print("\n== live — call provided services (`:keys` to list, `:q` or Ctrl-D to quit) ==")
         if self.recorder is not None:
             print("   recording — `:timeline`, `:inspect k`, `:back k [!]`, "
@@ -2776,7 +2804,7 @@ class _Driver:
                 await self._eval(line)
         finally:
             await self._teardown()
-        return 0
+        return self._run_exit_code()
 
     # -- one-shot withdrawal (records the causal trace + runs the oracle) --
 
@@ -2793,7 +2821,7 @@ class _Driver:
         if report is not None:
             print("\n" + why_runtime.render_oracle(report))
         await self._teardown()
-        return 0
+        return self._run_exit_code()
 
     # -- watch -------------------------------------------------------------
 
@@ -2823,7 +2851,7 @@ class _Driver:
                     await self._reload(files)
         finally:
             await self._teardown()
-        return 0
+        return self._run_exit_code()
 
     async def _reload(self, files: list[str]) -> None:
         print("\n== change detected — recompile ==")
