@@ -1351,6 +1351,69 @@ def close_handle(handle: WriteHandle) -> None:
         handle.fd = -1
 
 
+def open_confined_read(path: str) -> int:
+    """Open `path` for READING, inside the root, with the same check-to-syscall
+    discipline as `open_confined_write` (issue #3587) — the read counterpart a
+    host extern needs so it never has to call the private `_split`/
+    `_open_dirfd` itself.
+
+    Same walk, read flavour: resolve (family 1), walk to the parent through
+    directory fds with `O_NOFOLLOW` (no intermediate directory can be swapped
+    for a symlink after the check), then open the leaf with
+    `O_RDONLY | O_NOFOLLOW | O_NONBLOCK` (the leaf itself cannot be swapped in
+    the remaining window), and only THEN `fstat` the fd. A symlink at any
+    component is refused, never followed; nothing is written, so a refusal
+    leaves the target byte-identical.
+
+    Returns the open read fd; the caller `fstat`s it if it needs a regular
+    file and closes it when done. Refusals mirror the write path:
+    `EOUTSIDE` (outside the root, or a component changed under the check),
+    `ENOENT` (missing parent, or missing leaf), `ENOTFILE` (not a regular
+    file)."""
+    real = resolve_within(path)
+    parent, leaf = _split(real)
+    try:
+        dirfd = _open_dirfd(parent)
+    except (FileNotFoundError, NotADirectoryError):
+        raise FsOpError("ENOENT", "parent directory does not exist", real) from None
+    except ConfinementError:
+        raise
+    except OSError as exc:
+        raise ConfinementError(
+            "EOUTSIDE",
+            f"the path to the read target changed under the confinement check "
+            f"({exc.strerror})",
+            real,
+        ) from None
+    try:
+        fd = os.open(leaf, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK, dir_fd=dirfd)
+    except FileNotFoundError:
+        raise FsOpError("ENOENT", "read target does not exist", real) from None
+    except IsADirectoryError:
+        raise FsOpError(
+            "ENOTFILE", "read target exists and is not a regular file", real) from None
+    except OSError as exc:
+        # ELOOP: the leaf is a symlink now, though `resolve_within` saw a real
+        # file — the swapped-leaf race, refused, never followed.
+        raise ConfinementError(
+            "EOUTSIDE",
+            f"the read target changed under the confinement check "
+            f"({exc.strerror})",
+            real,
+        ) from None
+    finally:
+        os.close(dirfd)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise FsOpError(
+                "ENOTFILE", "read target exists and is not a regular file", real)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def _leaf_is_handle(handle: WriteHandle) -> bool:
     """Does `handle.real` still name the very inode `handle.fd` holds?
 
