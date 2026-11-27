@@ -6700,7 +6700,7 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
 fn emit_component(comp: Any, services: Any, ir: Any) -> List[Str] {
   let name = value_str(value_field(comp, "name"))
   let cname = mangle(name)
-  let snk = snake(name)
+  let snk = mangle(snake(name))
   let tables = build_type_tables(value_field(ir, "types"))
   let fr = fr_map(ir)
   let provs = value_field(comp, "provides")
@@ -6775,7 +6775,7 @@ fn emit_component(comp: Any, services: Any, ir: Any) -> List[Str] {
 fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
   let name = value_str(value_field(comp, "name"))
   let cname = mangle(name)
-  let snk = snake(name)
+  let snk = mangle(snake(name))
   let tables = build_type_tables(value_field(ir, "types"))
   let fr = fr_map(ir)
   let provs = value_field(comp, "provides")
@@ -7268,7 +7268,7 @@ fn emit_bridge(ir: Any) -> List[Str] {
   out = out.push("    match name {")
   for (comp of components) {
     let snk = snake(value_str(value_field(comp, "name")))
-    out = out.push(`        "${snk}" => Some(${snk}()),`)
+    out = out.push(`        "${snk}" => Some(${mangle(snk)}()),`)
   }
   out = out.push("        _ => None,")
   out = out.push("    }")
@@ -7312,7 +7312,7 @@ fn emit_bridge(ir: Any) -> List[Str] {
       // Typed `<Comp>Config` construction from the placement spec, each field
       // read out of the JSON with the right scalar accessor and defaulted.
       out = out.push(`            let _c = config.get("${pascal}").cloned().unwrap_or(serde_json::Value::Null);`)
-      out = out.push(`            Some(ctx.plugin(${snk}(), ${pascal}Config {`)
+      out = out.push(`            Some(ctx.plugin(${mangle(snk)}(), ${pascal}Config {`)
       for (field of fields) {
         let fname = mangle(value_str(value_field(field, "name")))
         let ftype = rust_type(value_field(field, "type"))
@@ -7337,7 +7337,7 @@ fn emit_bridge(ir: Any) -> List[Str] {
       }
       out = out.push("            }))")
     } else {
-      out = out.push(`            Some(ctx.plugin(${snk}(), ()))`)
+      out = out.push(`            Some(ctx.plugin(${mangle(snk)}(), ()))`)
     }
     out = out.push("        },")
   }

@@ -1,0 +1,4 @@
+// issue #3404: an ADT case named like a JS global. The case FACTORY is a
+// module-level binding, so `Promise` must emit as `Promise_` while the tag
+// string stays "Promise".
+type F = Promise | Other
