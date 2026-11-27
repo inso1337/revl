@@ -1785,6 +1785,36 @@ def test_the_host_acquisition_oracle_is_not_vacuous(lower_to_ir):
     assert native != corrupted
 
 
+# Issue #3350: a component `let-effect` binder goes through the reference's
+# `_safe_name` (`Env.bind_local`), so a provider capture spelled like a host
+# name (`ctx`) is declared as `ctx_` and every later read, in the `undo` and in
+# the provide methods, is `ctx_`. The producer wrote the source spelling.
+_CAPTURE_SOURCE = """service Store {{ fn get(key: Str) -> Opt[Int] }}
+component Ledger provides store: Store {{
+  let {name} = effect Map.new() undo {name}.drop()
+  provide store {{
+    fn get(key) = {name}.get(key)
+  }}
+}}
+"""
+
+
+@pytest.mark.parametrize("name,want", [("ctx", "ctx_"), ("self", "self_"),
+                                       ("frame", "frame_"), ("store", "store")])
+def test_native_ir_escapes_a_component_let_effect_binder_as_the_reference(
+        lower_to_ir, name, want):
+    source = _CAPTURE_SOURCE.format(name=name)
+    reference = compile_source(source)["components"][0]
+    native = json.loads(lower_to_ir(source))["components"][0]
+    step = reference["body"][0]
+    assert step["bind"] == want
+    assert step["undo"]["target"] == {"kind": "name", "id": want}
+    read = reference["body"][1]["methods"][0]["body"][0]["expr"]
+    assert read["target"] == {"kind": "name", "id": want}
+    assert "body" in native, "the component body is dropped"
+    assert native == reference
+
+
 _REALM_SOURCE = """service Store { fn put(key: Str, val: Str) }
 service Reader { fn read(key: Str) -> Str }
 component AuditReader requires store: Store provides reader: Reader {
