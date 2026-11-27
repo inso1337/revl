@@ -63,16 +63,18 @@ things because their readers are different.
    nothing. `_schema_ref` raises instead, and the same holds for `Bytes` and
    for an untagged `Result[T, E]`.
 
-4. **Closedness.** The OpenAPI mapping writes `additionalProperties: false` on
-   every record and every variant arm. The fragment mapping closes variant arms
-   (the `const` tag needs the arms mutually exclusive) but leaves records open.
+4. **Closedness, repaired.** Both mappings write `additionalProperties: false`
+   on every record and every variant arm. The fragment mapping did not always:
+   it closed variant arms (the `const` tag needs the arms mutually exclusive)
+   but left records open. Issue #3196 closed the record branch, because a
+   validated model response or tool argument could otherwise carry a member its
+   record type does not declare, so the divergence is gone.
 
-Points 1 to 3 are reasons the two renderings differ. Point 4 and the tag-key
-spelling below are not reasons; they are differences with no argument behind
-them, which is what an undifferentiated second mapping produces. They are
-recorded as divergences rather than repaired here, because changing either one
-changes a shipped document shape and belongs with the round-trip work noted at
-the end.
+Points 1 to 3 are reasons the two renderings differ. The tag-key spelling below
+is not a reason; it is a difference with no argument behind it, which is what an
+undifferentiated second mapping produces. It stays recorded as a divergence
+rather than repaired here, because changing it changes a shipped document shape
+and belongs with the round-trip work noted at the end.
 
 ## What holds them together
 
@@ -102,7 +104,6 @@ and therefore comparable with the document mapping's only rendering.
 | `AGREE` | `{"type": "string"}` | identical | the scalar core, `List`, `Map[Str, V]` |
 | `REF_VS_INLINE` | the record expanded in place | `{"$ref": "#/components/schemas/Note"}` | reason 1 |
 | `RECORD_OPT_FIELD_NOT_REQUIRED` | every field in `required` | a bare-`Opt` field omitted | reason 2 |
-| `RECORD_OPEN_VS_CLOSED` | no `additionalProperties` | `additionalProperties: false` | no argument, recorded |
 | `OPT_NULLABLE_VS_ONEOF` | `{**inner, "nullable": true}` | `{"oneOf": [inner, {"type": "null"}]}` | 257's own open question, unsettled |
 | `VARIANT_TAG_KEYS` | `tag` / `value` | `$kind` / `$value` | no argument, recorded |
 | `UNIT_NULL_VS_EMPTY` | `{"type": "null"}` | `{}` | `Unit` is a 204 in a document, a JSON `null` at a boundary |

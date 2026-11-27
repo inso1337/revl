@@ -234,7 +234,8 @@ taint (section 7) and shape are orthogonal at the boundary.
 
 The mapping handles primitives (`_JSON_TYPES`, `schema.py:25-32`), `List[T]`,
 `Opt[T]` (as `nullable`), `Map[K, V]` (dropping `K`), `Result[T, E]` (as an
-untagged `oneOf`), records (structural objects, all fields required), and
+untagged `oneOf`), records (structural objects, every field required and closed
+since issue #3196), and
 enum-shaped variants (all cases payload-free) as a JSON Schema `enum`
 (`schema.py:66-87`).
 

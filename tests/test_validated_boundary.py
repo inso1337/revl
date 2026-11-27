@@ -235,7 +235,38 @@ def test_non_variant_projection_is_unchanged():
     row = json_schema_for("Call", FLAGSHIP)
     assert row == {"type": "object",
                    "properties": {"tool": {"type": "string"}, "args": {"type": "string"}},
-                   "required": ["args", "tool"]}
+                   "required": ["args", "tool"],
+                   # issue #3196: a record is closed in BOTH projections
+                   "additionalProperties": False}
+
+
+def test_a_record_renders_as_a_closed_object():
+    """Issue #3196: a record declares its members and no others, so the derived
+    schema closes it. The grammar and the wire dialect already did; the
+    validated schema left it open, which is what the validator then honoured."""
+    expected = {"type": "object",
+                "properties": {"tool": {"type": "string"},
+                               "args": {"type": "string"}},
+                "required": ["args", "tool"],
+                "additionalProperties": False}
+    assert json_schema_for("Call", FLAGSHIP, validated=True) == expected
+    assert json_schema_for("Call", FLAGSHIP) == expected
+
+
+def test_a_record_nested_in_a_record_is_closed():
+    types = {"Line": {"kind": "record", "fields": {"item": "Str", "qty": "Int"}},
+             "Order": {"kind": "record",
+                       "fields": {"id": "Str", "line": "Line"}}}
+    schema = json_schema_for("Order", types, validated=True)
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["line"]["additionalProperties"] is False
+
+
+def test_a_variant_payload_record_is_closed():
+    schema = json_schema_for("AgentTurn", FLAGSHIP, validated=True)
+    calls = next(arm for arm in schema["oneOf"]
+                 if arm["properties"]["tag"] == {"const": "ToolCalls"})
+    assert calls["properties"]["value"]["items"]["additionalProperties"] is False
 
 
 # -------------------------------------------------------- compile-time refusal
@@ -344,6 +375,9 @@ def test_malformed_response_raises_the_typed_fault():
         {"tag": "ToolCalls", "value": "not-an-array"},    # wrong payload type
         {"tag": "Final", "value": "x", "extra": 1},       # additionalProperties
         {"tag": "ToolCalls", "value": [{"tool": "grep"}]},  # missing record field
+        # issue #3196: an undeclared member INSIDE the payload record
+        {"tag": "ToolCalls", "value": [{"tool": "grep", "args": "x",
+                                        "approved": True}]},
     ):
         with pytest.raises(ResponseValidationError):
             validate_response(bad, FLAGSHIP_SCHEMA, "Agent.run", CTORS)
@@ -364,6 +398,41 @@ def test_fault_is_classified_retryable():
     # the retry BUDGET is Slice 2, but the classification rides the fault now.
     exc = ResponseValidationError("x")
     assert exc.retryable is True
+
+
+def test_an_undeclared_member_inside_a_record_return_is_refused():
+    """Issue #3196: the extra member used to survive validation inside the
+    returned record, so anything that serialized or forwarded the record
+    carried it out of the validated boundary."""
+    record_schema = json_schema_for("Call", FLAGSHIP, validated=True)
+    good = {"tool": "grep", "args": "x"}
+    assert validate_response(good, record_schema, "w") == good
+    with pytest.raises(ResponseValidationError,
+                       match="unexpected property 'approved'"):
+        validate_response({**good, "approved": True, "discount": 99},
+                          record_schema, "w")
+
+
+def test_an_undeclared_member_inside_a_variant_payload_record_is_refused():
+    turn = {"tag": "ToolCalls",
+            "value": [{"tool": "grep", "args": "x", "discount": 99}]}
+    # the closed payload record means the ToolCalls arm no longer matches the
+    # value, so the union names no constructor rather than accepting it
+    with pytest.raises(ResponseValidationError,
+                       match="value matches no arm of the union"):
+        validate_response(turn, FLAGSHIP_SCHEMA, "Agent.run", CTORS)
+
+
+def test_the_http_wire_validator_refuses_an_undeclared_member_of_a_record():
+    """Issue #3196: a routed request body is a record validated by the wire
+    layer's own mirror of the runtime check. It reads the same derived schema,
+    so the closed record reaches it too."""
+    from revl.mcp import http_face  # noqa: PLC0415
+    schema = json_schema_for("Call", FLAGSHIP, validated=True)
+    good = {"tool": "grep", "args": "x"}
+    assert http_face._schema_error(good, schema) is None
+    assert "unexpected property 'approved'" in \
+        http_face._schema_error({**good, "approved": True}, schema)
 
 
 # --------------------------------------------------------------- the emit seam

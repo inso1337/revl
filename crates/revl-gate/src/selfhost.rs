@@ -31432,7 +31432,7 @@ fn sc_json_spec(sp: ScTy, env: std::collections::HashMap<String, ScTy>, seen: &[
             names.push((sp.fields)[(i) as usize].name.clone());
             i = (i).checked_add(1i64).expect("revl: Int overflow");
         }
-        return (((String::from("{\"type\": \"object\", \"properties\": {").revl_concat(&props)).revl_concat("}, \"required\": [")).revl_concat(&str_list_json(&sort_strs(&names)))).revl_concat("]}");
+        return (((String::from("{\"type\": \"object\", \"properties\": {").revl_concat(&props)).revl_concat("}, \"required\": [")).revl_concat(&str_list_json(&sort_strs(&names)))).revl_concat("], \"additionalProperties\": false}");
     }
     if (sp.kind == "variant") {
         let mut arms = String::from("");
@@ -45164,6 +45164,12 @@ fn a_typed_hole_in_a_host_acquisition_s_undo_is_not_refused() {
 fn a_typed_hole_in_an_extern_acquire_s_undo_is_not_refused() {
     let v = admit_src(String::from("type H = Opaque\nextern pure fn close_h(h: H) -> Unit = @py { return None }\nextern acquire fn open_h() -> H undo close_h(result) = @py { return 1 }\nservice S { fn go(k: Str) -> Int }\ncomponent C provides s: S {\n  let h = effect open_h() undo hole[Unit] \"release\"\n  provide s { fn go(k) = 1 }\n}"));
     assert!((v == ""));
+}
+
+#[test]
+fn a_validated_record_response_schema_is_closed__issue__3196_() {
+    let ir = lower_to_ir(String::from("type Row = { name: Str } service S { emission validated fn get(p: Str) -> Row }"));
+    assert!(str_has(&ir, "\"response_schema\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\"}}, \"required\": [\"name\"], \"additionalProperties\": false}"));
 }
 
 #[test]
