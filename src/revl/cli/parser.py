@@ -201,6 +201,19 @@ class _Parser(argparse.ArgumentParser):
         return [found for found in super()._get_option_tuples(option_string)
                 if TRUST_EXPORTED not in found[0].option_strings]
 
+    def error(self, message):
+        # issue #3505: `check` is the first verb an author tries for "does this
+        # parse and admit, run nothing" — the MCP verb is `revl_check`, and the
+        # CLI forms that do the job are named here instead of only listing all
+        # 57 verbs.
+        if "invalid choice" in message and "'check'" in message:
+            message = (message + "\nrevl: hint: there is no CLI verb `check`; "
+                       "`revl compile FILE` compiles and admits a composition "
+                       "without running anything, and `revl test FILE --list` "
+                       "collects a test file's tests — reporting a parse error "
+                       "with file and line — without executing anything")
+        super().error(message)
+
 
 def build_parser() -> argparse.ArgumentParser:
     """Assemble the full `revl` subcommand parser."""
