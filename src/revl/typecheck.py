@@ -3651,8 +3651,8 @@ def _check_generic_case(expr, ehead: str | None, eargs: list[str], tenv: dict,
 def check_ast(expr, expected: str | None, tenv: dict, types: dict,
               filename: str, where: str) -> None:
     """Bidirectional check of a parser-AST expression against `expected`."""
-    from .parser import ExprArrow, ExprBlockArm, ExprCall, ExprIf, ExprList, \
-        ExprMatch, ExprRecord, ExprRecordUpdate
+    from .parser import ExprArrow, ExprBin, ExprBlockArm, ExprCall, ExprIf, \
+        ExprList, ExprMatch, ExprRecord, ExprRecordUpdate
 
     line = getattr(expr, "line", 0)
     # a hole in check position takes the expectation as its type and is done:
@@ -3788,9 +3788,19 @@ def check_ast(expr, expected: str | None, tenv: dict, types: dict,
                                declared.get(name), ftype)
         return
     if actual and not compatible(expected, actual, types):
-        raise mismatch(filename, line, where, expected, actual,
+        err = mismatch(filename, line, where, expected, actual,
                        why=unresolved_nominal_reason(expected, actual, types))
-    refuse_nested_widening(expr, expected, actual, tenv, types, filename, where)
+        refuse_nested_widening(expr, expected, actual, tenv, types, filename, where)
+        if (parse_type(expected)[0] == "Int" and parse_type(actual)[0] == "Float"
+                and isinstance(expr, ExprBin) and expr.op == "/"
+                and parse_type(infer_ast(expr.left, tenv, types))[0] == "Int"
+                and parse_type(infer_ast(expr.right, tenv, types))[0] == "Int"):
+            # issue #3496: `/` is true division, so `Int / Int` is a `Float`;
+            # name the integer-quotient spellings in the hint (message stays
+            # byte-stable for the census, the hint is what the CLI prints).
+            err.hint = ("`/` on two `Int`s gives a `Float` — the integer quotient is "
+                        "`a.div_floor(b)` (also `div_trunc`, `div_euclid`)")
+        raise err
 
 
 # ------------------------------------------------------- IR inference (components)
