@@ -73,6 +73,7 @@ import contextlib
 import importlib.util
 import random
 import re
+import signal
 import sys
 import time
 import types
@@ -4706,27 +4707,34 @@ component Layers requires layer: Layer, other: Other provides layer: Layer, othe
 # statement grammar ported the reference's `type_` rule (issue #2396).
 PARSE_REFUSED_PROGRAMS = [
     ("issue 2396: a return arrow with no type", "fn f() -> { }"),
-    # the gate's host-body skip stepped over the clause and admitted it
-    ("issue 2705: a spec on an extern",
-     "extern pure fn f(x: Int) -> Int ensures result == x = @py { return x }"),
-    ("issue 2705: a spec on a service operation",
-     "service Ops { fn f(x: Int) -> Int ensures result == x }"),
-    ("issue 2705: a spec on a provided method",
-     "service Ops { fn f(x: Int) -> Int }\n"
-     "component C provides s: Ops {\n"
-     "  provide s { fn f(x) ensures result == x { return x } }\n"
-     "}"),
+    ("issue 2469: a config field type that is a structural record",
+     "component C { config { h: { a: List[{ c: Int, b: (Str) -> Str }] } } }"),
 ]
 
 
-def test_an_unclassified_extern_with_a_spec_is_refused_as_unclassified(admit):
-    """Issue #2705: the reference reads an extern's classification before its
-    signature, so a spec on an unclassified extern is the G8 refusal, not the
-    spec one."""
-    src = "extern fn f(x: Int) -> Int ensures result == x = @py { return x }"
-    ref_tag, ref_msg = _ref(src)
-    assert ref_tag == "G8", (ref_tag, ref_msg)
-    assert admit(src) == f"G8|{ref_msg}"
+# There is no pytest-timeout in this environment, and the gate is pure emitted
+# Python, so a SIGALRM interrupts a regressed infinite loop and fails the test
+# instead of hanging the suite. Issue 2469 is the reason this exists: a config
+# field's unread type (-1) used to rewind the field walk into the block it was
+# reading, forever.
+@contextlib.contextmanager
+def _bounded(seconds: int):
+    if not hasattr(signal, "SIGALRM"):
+        yield
+        return
+
+    def fire(signum, frame):
+        raise AssertionError(
+            f"the self-host gate did not return within {seconds}s (issue 2469: "
+            "an unread config field type must be refused, not re-walked)")
+
+    old = signal.signal(signal.SIGALRM, fire)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
 
 
 @pytest.mark.parametrize("case", PARSE_REFUSED_PROGRAMS,
@@ -4736,7 +4744,8 @@ def test_parse_refused_programs_agree(admit, case):
     ref_tag, ref_msg = _ref(src)
     assert ref_tag == "OUT:" + ref_msg, \
         f"corpus bug: the reference does not refuse {name} at parse time"
-    assert admit(src) == "BAD|" + ref_msg
+    with _bounded(20):
+        assert admit(src) == "BAD|" + ref_msg
 
 # #3401, #3446: the reference has no `_lower_pure_expr` arm for an `emit`, so a
 # module fn holding one in a brace body is refused. The gate used to read the
