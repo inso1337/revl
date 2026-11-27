@@ -147,6 +147,10 @@ self-consistency):
 - **Key order** is record-declaration / insertion order (py dict, ts object).
 - **Booleans/null** spelled `true`/`false`/`null`; **ints** exact, incl. beyond
   2^53 (py int, ts bigint replacer, go int64 — see the two Int/bigint notes).
+- **An absent `Opt` member keeps its key as `null`** on every tier (#3642):
+  py's `None` is already JSON null; the ts replacer answers `null` for the
+  `undefined` a `None` member lowers to, where bare `JSON.stringify` would
+  drop the key.
 - **Floats**: values that share a decimal form across Python and JS (`1.5`,
   `-0.25`) are byte-identical. A **whole-number float** (`1.0` vs `1`), `-0.0`,
   or an extreme-exponent float can still format differently between the two
