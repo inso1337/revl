@@ -434,7 +434,20 @@ fn collides_with_module_name(name: Str) -> Bool {
 // local keeps the keyword ladder.
 fn local_ident(name: Str, module: Map[Str, Str]) -> Str {
   if (module.has(name)) { return mangle_module(name) }
-  return ident(name)
+  // issue #3573: a local also takes the SCAFFOLDING ladder
+  // (`EMITTER_RESERVED`: `ctx`, `config`, `rawConfig`, `host`, `Context`),
+  // exactly as the reference's `_mangle_local` folds it for the binding and
+  // capture roles: a capture named `ctx` is bound by the frontend as `ctx_`
+  // and must ladder once more to `ctx__`, not stay one rung short at `ctx_`.
+  // (The rest of the reference's local family — the globals and helpers a
+  // local would shadow — stays unported, issue #3179.)
+  var root = name
+  while (root.length() > 0) {
+    if (is_js_reserved(root) || is_emitter_reserved(root)) { return name.concat("_") }
+    if (root.charAt(root.length() - 1) != "_") { return name }
+    root = root.slice(0, root.length() - 1)
+  }
+  return name
 }
 
 // The document's module-level value names (`_module_value_names`): fns,
