@@ -92,12 +92,17 @@ TOOL_VERB = {
     # questions, their blast radius and their history is the same authority as
     # answering them - a bystander who could enumerate what an irreversible
     # crossing would reach and who is being asked is inside the approval
-    # boundary. So it gates under `approve`, never ungated like `revl_quorum`
-    # (which reads one hash the caller already holds). `_approvals_targets`
+    # boundary. So it gates under `approve`. `_approvals_targets`
     # resolves a `show` hash to its crossing component; `list`/`stats` name no
     # one component, so they scope to the whole composition and need the
     # literal `may approve on *`, whatever target keys the arguments add.
     "revl_approvals": "approve",
+    # issue #3397: `revl_quorum` read one hash ungated, so a scoped operator
+    # could read another component's decision graph (who is being asked, the
+    # votes, the receipt). It reads ONE hash the caller holds, exactly like a
+    # `show`, so it gates the same way: under `approve`, scoped to the
+    # ticket's crossing component by `_approve_targets`.
+    "revl_quorum": "approve",
     # item 379: revoking a standing grant early is the mirror of granting it —
     # withdrawing consent is the SAME authority as saying yes, so `revl_revoke`
     # gates under the same `approve` verb. Its `_approve_targets` branch resolves
@@ -209,6 +214,15 @@ COMPOSED_TOOL_VERB = {
     "revl_ship": "swap",
     "revl_repair": "swap",
 }
+
+#: The mutating verbs whose argument names ONE ticket by `hash`. Their refusal
+#: must be the same whether the hash resolves to another component's ticket or
+#: to nothing at all (issue #3397), so `decide` answers all of them with the
+#: one non-revealing `_ticket_refusal`.
+_TICKET_HASH_TOOLS = frozenset({
+    "revl_approve", "revl_escalate", "revl_revoke", "revl_override",
+    "revl_quorum",
+})
 
 
 def composed_applies(tool_name: str, arguments: dict) -> bool:
@@ -1486,6 +1500,29 @@ def _approvals_refusal(operator: Operator, verb: str, arguments: dict,
     return why, message
 
 
+def _ticket_refusal(operator: Operator, verb: str) -> tuple[WhyTrace, str]:
+    """The ONE refusal a ticket-hash mutating verb gets (issue #3397). It names
+    the operator and the verb and NOTHING about the hash — not the component it
+    resolved to, not whether it resolved at all, not the hash value — so a
+    scoped operator cannot tell another component's ticket apart from a hash
+    that does not exist. This is the #2991 rule (`_approvals_refusal`) carried
+    to the mutating side: the refusal for another component's ticket is
+    byte-identical (message, trace, decision fields) to the one for an unknown
+    hash."""
+    message = (f"operator `{operator.token}` may not `{verb}` this ticket: it "
+               f"needs `may {verb} on *` or a grant over the ticket's crossing "
+               f"component (operator capabilities, item 55; issue #3397)")
+    why = WhyTrace(
+        kind="operator-authority", subject=operator.token, shape=CHAIN,
+        steps=[
+            TraceStep(operator.token, "operator", None, None,
+                      f"attempts `{verb}`"),
+            TraceStep("the ticket", "component", None, None,
+                      f"target of `{verb}`", ("*",)),
+        ])
+    return why, message
+
+
 def _refusal(operator: Operator, verb: str,
              offender: tuple[str, frozenset[str]], grant: Grant | None,
              ) -> tuple[WhyTrace, str]:
@@ -1727,9 +1764,16 @@ def decide(session, tool_name: str, arguments: dict, *,
         allowed, grant = operator.allows(verb, labels, deny_labels_of(labels),
                                          was_labels_of(labels))
         if not allowed:
-            why, message = (_approvals_refusal(operator, verb, arguments)
-                            if approvals
-                            else _refusal(operator, verb, offender, grant))
+            if approvals:
+                why, message = _approvals_refusal(operator, verb, arguments)
+            elif tool_name in _TICKET_HASH_TOOLS \
+                    and isinstance(arguments.get("hash"), str):
+                # issue #3397: a ticket-hash verb's refusal says nothing about
+                # the hash — not the component it resolved to, not whether it
+                # resolved — so it is no oracle for which tickets exist.
+                why, message = _ticket_refusal(operator, verb)
+            else:
+                why, message = _refusal(operator, verb, offender, grant)
             return Decision(gated=True, allowed=False, operator=operator.token,
                             verb=verb, why=why, message=message)
 

@@ -7324,8 +7324,10 @@ TOOLS = [
                        "re-derived from the durable `quorum-*` WAL rows and the "
                        "ledger entry and the verdict is reported, so a receipt "
                        "that disagrees with the record is refused rather than "
-                       "reported as fact. Read-only and ungated: it decides "
-                       "nothing and mints nothing.",
+                       "reported as fact. Read-only, but gated under `approve` "
+                       "like the `show` of `revl_approvals`: the graph names who "
+                       "is being asked and who voted, so it is inside the "
+                       "approval boundary (issue #3397).",
         "inputSchema": {
             "type": "object",
             "properties": {

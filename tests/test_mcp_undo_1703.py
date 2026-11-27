@@ -95,7 +95,10 @@ def _fresh_server_session():
 # the approval tickets, their blast radius and history. Neither has an undo
 # field at all. A new entry here is a decision, checked below against the
 # advertised read-only annotation.
-GATED_READ_ONLY = {"revl_snapshot", "revl_approvals"}
+# `revl_quorum` reads one decision graph and is annotated read-only, but since
+# issue #3397 it gates under `approve` (the graph names who is being asked), so
+# it joins the gated read-only set.
+GATED_READ_ONLY = {"revl_snapshot", "revl_approvals", "revl_quorum"}
 
 
 def test_every_mutating_verb_is_classified():

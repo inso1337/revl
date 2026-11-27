@@ -578,3 +578,59 @@ def test_recover_reports_a_revoked_ticket_distinct_from_an_expired_one(tmp_path)
     rendered = recovery.render(report)
     assert "REVOKED" in rendered and "revoked-hash" in rendered
     assert "expired" in rendered and "expired-hash" in rendered
+
+
+# ---------------------------------------------------------------------------
+# Issue #3397: the mutating ticket verbs are no oracle for ticket existence
+# ---------------------------------------------------------------------------
+
+_TICKET_HASH_TOOLS_3397 = ["revl_approve", "revl_escalate", "revl_revoke",
+                           "revl_override", "revl_quorum"]
+
+
+@pytest.mark.parametrize("tool", _TICKET_HASH_TOOLS_3397)
+def test_a_mutating_ticket_verb_refuses_another_components_ticket_like_an_unknown_hash_3397(
+        tmp_path, tool):
+    """For every ticket-hash verb, the refusal for another component's ticket
+    is byte-identical (message, trace) to the one for a hash that does not
+    exist, and names neither the component nor the hash — so a scoped operator
+    cannot tell which hashes are real tickets or whose they are."""
+    session, tickets = _two_component_harness(tmp_path)
+    session.operator = op.parse_profile(_SCOPED).get("bob")  # may approve on Agent
+
+    other = op.decide(session, tool, {"hash": tickets["Bank"]})
+    unknown = op.decide(session, tool, {"hash": "sha256:" + "0" * 64})
+    assert other.gated is True and other.allowed is False
+    assert unknown.gated is True and unknown.allowed is False
+    assert other.message == unknown.message
+    assert other.why.to_json() == unknown.why.to_json()
+    assert "Bank" not in other.message
+    assert "Bank" not in repr(other.why.to_json())
+    assert tickets["Bank"] not in other.message
+
+
+@pytest.mark.parametrize("tool", ["revl_approve", "revl_escalate", "revl_revoke",
+                                  "revl_quorum"])
+def test_a_scoped_operator_may_still_act_on_its_own_components_ticket_3397(
+        tmp_path, tool):
+    """The uniform refusal does not widen the grant: bob may approve on Agent,
+    so his own component's ticket is admitted (override excepted — it needs
+    its own `may override` grant)."""
+    session, tickets = _two_component_harness(tmp_path)
+    session.operator = op.parse_profile(_SCOPED).get("bob")
+    own = op.decide(session, tool, {"hash": tickets["Agent"]})
+    assert own.gated is True and own.allowed is True
+
+
+def test_revl_quorum_goes_through_the_same_scope_gate_3397(tmp_path):
+    """`revl_quorum` was ungated entirely; now it gates under `approve` scoped
+    to the ticket's crossing component, and its refusal is the uniform one."""
+    session, tickets = _two_component_harness(tmp_path)
+    session.operator = op.parse_profile(_SCOPED).get("bob")
+
+    assert op.decide(session, "revl_quorum", {"hash": tickets["Agent"]}).allowed
+    other = op.decide(session, "revl_quorum", {"hash": tickets["Bank"]})
+    unknown = op.decide(session, "revl_quorum", {"hash": "sha256:" + "0" * 64})
+    assert other.allowed is False and unknown.allowed is False
+    assert other.message == unknown.message
+    assert "Bank" not in other.message

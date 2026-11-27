@@ -621,7 +621,14 @@ def test_approve_on_one_realm_does_not_reach_a_component_serving_two(tool, args)
     sess = _ApproveSession(compile_source(MULTI_REALM), alice)
     d = decide(sess, tool, args)
     assert d.gated and not d.allowed
-    assert "TenantBCache" in d.message
+    if "hash" in args:
+        # issue #3397: a ticket-hash refusal names NO component — it is
+        # byte-identical to the refusal for a hash that does not exist, so it
+        # is no oracle for which tickets exist or whose they are
+        assert "TenantBCache" not in d.message
+        assert d.message == op._ticket_refusal(alice, op.TOOL_VERB[tool])[1]
+    else:
+        assert "TenantBCache" in d.message
 
 
 @pytest.mark.parametrize("tool,args", APPROVE_CALLS)
