@@ -190,6 +190,16 @@ where three tiers returned a decode error. The @py body now passes a
 `parse_constant` that raises, so `json_parse` and `json_try_parse` agree
 across tiers (`json_try_parse("NaN")` is `Err` everywhere).
 
+A **number past the Float range** (`1e400`, or an integer literal so large
+its float conversion overflows) is refused the same way on every tier
+(issue #3465): `serde_json` errors on it, and the @py body's `parse_float`/
+`parse_int` hooks and the @ts parser's `num()` both fail the parse, so
+`json_try_parse("1e400")` is `Err` on py, ts and rust alike. Before, py and
+ts decoded it to the signed infinity while rust refused the document, so the
+same input read on two tiers gave two different program states. Numbers
+inside the Float range still parse (py/ts keep an integer literal exact,
+matching item 311's bigint rule); only the unrepresentable ones are refused.
+
 A **string** escape has the mirror hazard, and there three of the four tiers
 were wrong. RFC 8259 §7 lets a string spell a code point as `\uXXXX`, and a
 *paired* escape (`\uD83D\uDE00`) denotes one astral scalar — but an **unpaired**

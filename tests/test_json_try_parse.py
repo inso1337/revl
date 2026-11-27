@@ -249,6 +249,42 @@ def test_ts_ok_err_channels_match_py(pair_ir):
     assert _run_ts(pair_ir, 'console.log(JSON.stringify(is_ok("not json")));') is False
 
 
+# ------------------------- issue #3465: numbers past the Float range
+
+# Every tier refuses the document (serde_json errors on rust): a float
+# literal that decodes to an infinity and an integer literal whose float
+# conversion overflows. Both shapes below are refused on py AND ts.
+_OUT_OF_RANGE = (
+    "1e400",           # float literal past the range
+    "-1e400",
+    "1" + "0" * 400,   # integer literal past the range
+    '{"x": [1e400]}',   # nested
+)
+
+# In range: still accepted on every tier (py keeps the integer exact).
+_IN_RANGE = ("1e308", "1" + "0" * 30, "-1.5e-300", "123456789012345678901234567890")
+
+
+def test_py_refuses_numbers_past_the_float_range(pair_ir):
+    ns = _exec_py(pair_ir)
+    for doc in _OUT_OF_RANGE:
+        assert ns["is_ok"](doc) is False, doc
+        with pytest.raises(Exception):
+            ns["raising"](doc)
+    for doc in _IN_RANGE:
+        assert ns["is_ok"](doc) is True, doc
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_ts_refuses_numbers_past_the_float_range_like_py(pair_ir):
+    for doc in _OUT_OF_RANGE:
+        assert _run_ts(pair_ir,
+                       f"console.log(JSON.stringify(is_ok({json.dumps(doc)})));") is False, doc
+    for doc in _IN_RANGE:
+        assert _run_ts(pair_ir,
+                       f"console.log(JSON.stringify(is_ok({json.dumps(doc)})));") is True, doc
+
+
 # --------------------------------------- the Ok/Err import (issue #1932)
 
 def test_result_returning_extern_imports_ok_err_cases():
