@@ -5094,7 +5094,11 @@ fn lifecycle_harness() -> List[Str] {
     "    # purpose still loads quietly (issues #1895, #1859).",
     "    err = getattr(fiber, \"_error\", None)",
     "    if getattr(err, \"_revl_activation_fail\", False):",
-    "        raise AssertionError(\"{}: load {}: {}\".format(where, name, err)) from err",
+    "        # issue #3348: the error text goes through the same redaction funnel as",
+    "        # `emission-failed`, so an activation error quoting a `Secret[T]` value",
+    "        # cannot leak into the test failure text.",
+    "        raise AssertionError(\"{}: load {}: {}\".format(",
+    "            where, name, _revl_redact_text(str(err)))) from err",
     "",
     "",
     "async def _revl_call(root, key, method, args, where):",
@@ -5106,9 +5110,11 @@ fn lifecycle_harness() -> List[Str] {
     "        for name in _REVL_PROVIDERS.get(key, ()):",
     "            err = getattr(_REVL_LIVE.get(name), \"_error\", None)",
     "            if err is not None:",
+    "                # issue #3348: redacted like every other host error text.",
     "                raise AssertionError(",
     "                    \"{}: no provider for key {!r}: its provider {} failed to activate: \"",
-    "                    \"{}: {}\".format(where, key, name, type(err).__name__, err)) from err",
+    "                    \"{}: {}\".format(where, key, name, type(err).__name__,",
+    "                                   _revl_redact_text(str(err)))) from err",
     "        raise AssertionError(",
     "            \"{}: no provider for key {!r} — its component is loaded but not ACTIVE; \"",
     "            \"a component with an unmet `requires` stays PENDING (R2)\".format(where, key))",
@@ -5523,6 +5529,10 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   if (has_lifecycle_test(ir)) {
     imports = imports.concat(["plug as _revl_plug", "set_trace as _revl_set_trace",
       "retry_idempotent as _revl_retry_idempotent", "_frame_for_ctx as _revl_frame_for_ctx"])
+    // issue #3348: the harness wraps a host activation error into an
+    // `AssertionError` through `redact_text`, so the import is needed only when
+    // a lifecycle test exists.
+    imports = imports.push("redact_text as _revl_redact_text")
     if (lifecycle_uses_step(ir, "advance")) { imports = imports.push("Clock as _revl_Clock") }
     if (lifecycle_uses_step(ir, "abort")) {
       imports = imports.concat(["SessionOwner as _revl_SessionOwner", "set_session_owner as _revl_set_session_owner",

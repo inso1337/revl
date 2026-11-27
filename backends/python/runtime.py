@@ -1846,6 +1846,24 @@ def _revl_hop_text(value):
     return confidential.redact_text(value) if isinstance(value, str) else value
 
 
+def redact_text(value):
+    """The text funnel for error text a residue record carries (issue #3348):
+    the same `confidential.redact_text` scrub `fail_error` (#3141) and the
+    `emission-failed` rows (#3279) apply, so a host inverse or flush that
+    raises quoting a registered `Secret[T]` value cannot write the secret into
+    a compensation/flush residue row or the teardown report. Exact-valued: an
+    error that quotes no registered secret is byte-identical."""
+    return confidential.redact_text(value) if isinstance(value, str) else value
+
+
+def _error_record(error) -> dict:
+    """`{"type", "message"}` for one recorded error, the message scrubbed
+    through `redact_text` (issue #3348). Every residue/WAL site that records a
+    host error's text routes through this, so none of them can leak a
+    `Secret[T]` the error quoted."""
+    return {"type": type(error).__name__, "message": redact_text(str(error))}
+
+
 def revl_model_hop(*, model, tokens_in, tokens_out, cost, latency_seconds,
                    attempts, attempt_ceiling, verified_by,
                    produced_seq=None, prompt_digest=None,
@@ -4232,8 +4250,7 @@ class Frame:
                 self.compensation_residue.append(_residue_record(
                     entry, outcome="failed", attempted_flag=True,
                     attempted={"phase": 2},
-                    error={"type": type(entry.error).__name__,
-                           "message": str(entry.error)}))
+                    error=_error_record(entry.error)))
 
     def _record_phase1_residue(self, disposer: Any, error: BaseException) -> None:
         """Record ONE Phase-1 inverse that raised, into the merged residue
@@ -4252,7 +4269,7 @@ class Frame:
             method=_inverse_label(disposer),
             outcome="failed", attempted_flag=True,
             attempted={"phase": 1},
-            error={"type": type(error).__name__, "message": str(error)}))
+            error=_error_record(error)))
 
     def _strand_registered(self, reason: str) -> list:
         """Enumerate every entry this frame can NAME at halt time, as
@@ -4874,7 +4891,7 @@ class Frame:
             "unit": unit.name,
             "failedStep": unit.failed_step,
             "crossed": list(unit.crossed),
-            "error": {"type": type(error).__name__, "message": str(error)},
+            "error": _error_record(error),
         }
         if self._halted:
             run.update(ran=[], replayed=[], residue=[], halted=True)
@@ -6358,7 +6375,7 @@ class SessionOwner:
                     wal.record_flushed(d.seq)
             except BaseException as error:  # noqa: BLE001 — best-effort, recorded
                 d.error = error
-                info = {"type": type(error).__name__, "message": str(error)}
+                info = _error_record(error)
                 residue.append({"seq": d.seq, **info})
                 self.flush_residue.append({"seq": d.seq, "error": info})
                 self.prompts["residue"] += 1
@@ -6436,8 +6453,7 @@ class SessionOwner:
                 self.compensation_residue.append(_residue_record(
                     entry, kind=_RESTORE_RESIDUE, outcome="failed",
                     attempted_flag=True, attempted={"phase": 1},
-                    error={"type": type(error).__name__,
-                           "message": str(error)}))
+                    error=_error_record(error)))
             # a restore that raised did not run to completion, so the `aborted`
             # record does not name it as replayed
             if entry.replayed and entry.seq is not None \
@@ -6452,8 +6468,7 @@ class SessionOwner:
                 self.compensation_residue.append(_residue_record(
                     entry, outcome="failed", attempted_flag=True,
                     attempted={"phase": 2},
-                    error={"type": type(entry.error).__name__,
-                           "message": str(entry.error)}))
+                    error=_error_record(entry.error)))
         self._escrow = []
         # collect the seqs the live frames replayed too (their inverses ran
         # during the driver's unload)
