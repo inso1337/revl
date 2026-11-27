@@ -324,10 +324,11 @@ def test_support_table_rows_and_cells_follow_the_check_registries(monkeypatch):
     assert data["tiers"] == [tg._short(tier) for tier in conformance.TIERS]
     assert {row["tier"] for row in data["rows"]} == set(data["tiers"])
     for row in data["rows"]:
-        statuses = {row[key]["status"] for key in
-                    ("emits", "executes", "durable_recovery", "selfhost_agreement")}
+        keys = ("emits", "executes", "durable_recovery",
+                "selfhost_agreement", "selfhost_emits")
+        statuses = {row[key]["status"] for key in keys}
         assert statuses <= {tg.PROVED, tg.DIVERGENCE, tg.UNMEASURED}
-        for key in ("emits", "executes", "durable_recovery", "selfhost_agreement"):
+        for key in keys:
             if row[key]["status"] != tg.UNMEASURED:
                 assert row[key]["evidence"], (row["tier"], key)
 
@@ -344,6 +345,42 @@ def test_support_table_rows_and_cells_follow_the_check_registries(monkeypatch):
                        f"byte-identical; {frontier} frontier limits; {gaps} gaps")
     assert tiers["py"]["selfhost_agreement"]["detail"] == expected_shared
     assert len({row["selfhost_agreement"]["detail"] for row in data["rows"]}) == 1
+
+    # The issue #2899 column is per tier and comes from the measured ledger,
+    # not a literal typed here or repeated from the shared pipeline above.
+    import selfhost_matrix
+    ledger = selfhost_matrix.load()
+    for tier in data["tiers"]:
+        counts = selfhost_matrix.tier_counts(ledger, conformance.TIERS[
+            data["tiers"].index(tier)])
+        cell = tiers[tier]["selfhost_emits"]
+        if counts is None:
+            assert cell["status"] == tg.UNMEASURED
+        else:
+            emitted, total = counts
+            noun = "file" if total == 1 else "files"
+            assert cell["detail"] == f"{emitted}/{total} self-host {noun} emit"
+            assert cell["status"] == (tg.PROVED if emitted == total
+                                      else tg.DIVERGENCE)
+    assert len({row["selfhost_emits"]["detail"] for row in data["rows"]}) > 1
+
+    # A ledger with an unmeasured (frontend-refused) cell makes the tier
+    # `unmeasured`, not a partial count. This is the branch a green ledger
+    # never reaches on its own.
+    import copy as _copy
+    unmeasured_ledger = _copy.deepcopy(ledger)
+    tier = conformance.TIERS[0]
+    short = tg._short(tier)
+    unmeasured_ledger["cells"][unmeasured_ledger["files"][0]][tier] = {
+        "kind": selfhost_matrix.FRONTEND, "message": "planted"}
+    monkeypatch.setattr(selfhost_matrix, "load",
+                        lambda: unmeasured_ledger)
+    unmeasured = tg.support_matrix(report=report, selfhost=selfhost,
+                                   tests_root=tests_root, ci_text=ci_text)
+    cell = next(row for row in unmeasured["rows"] if row["tier"] == short)[
+        "selfhost_emits"]
+    assert cell["status"] == tg.UNMEASURED
+    assert "does not measure this tier" in cell["detail"]
 
     # A measured emitter gap changes the cell, rather than leaving an authored
     # success status behind.

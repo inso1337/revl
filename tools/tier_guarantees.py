@@ -884,13 +884,19 @@ def support_matrix(*, report: dict | None = None,
     """Derive the adopter-facing evidence table from the checks that run it.
 
     Emit counts and the self-host agreement come from `tools/conformance.py`.
-    Compile/execution coverage comes from its validator registries and CI steps.
+    The per-tier self-host emit column comes from the measured ledger in
+    `tools/selfhost_matrix.py`. Compile/execution coverage comes from its
+    validator registries and CI steps.
     Durable recovery is discovered from crash-test modules and the CI test
     collection. Missing evidence is always `unmeasured`, never a positive cell.
     """
     import conformance  # noqa: PLC0415, tools/ is already on sys.path
+    import selfhost_matrix  # noqa: PLC0415, tools/ is already on sys.path
     from validate import EXECUTORS, VALIDATORS  # noqa: PLC0415
 
+    emit_ledger = selfhost_matrix.load()
+    emit_evidence = [selfhost_matrix.LEDGER.relative_to(ROOT).as_posix(),
+                     "tools/selfhost_matrix.py"]
     tests_root = tests_root or ROOT / "tests"
     if report is None:
         report = conformance.run()
@@ -990,6 +996,24 @@ def support_matrix(*, report: dict | None = None,
             selfhost_detail = (f"shared revl measure: {exact}/{total} byte-identical; "
                                f"{frontier} frontier limits; {selfhost_gaps} gaps")
 
+        # The issue #2899 column: does this tier's own emitter emit the
+        # self-host sources? It is per tier, unlike the one shared `revl`
+        # pipeline above, which is why the two columns exist. It records the
+        # emitter run only; a tier toolchain build is not part of this measure.
+        emit_counts = selfhost_matrix.tier_counts(emit_ledger, tier)
+        if emit_counts is None:
+            selfhost_emit_status = UNMEASURED
+            selfhost_emit_detail = ("the self-host emit ledger does not measure "
+                                    "this tier")
+            selfhost_emit_evidence = []
+        else:
+            emitted, emit_total = emit_counts
+            selfhost_emit_status = (PROVED if emitted == emit_total
+                                    else DIVERGENCE)
+            noun = "file" if emit_total == 1 else "files"
+            selfhost_emit_detail = (f"{emitted}/{emit_total} self-host {noun} emit")
+            selfhost_emit_evidence = emit_evidence
+
         rows.append({
             "tier": short,
             "emits": {"status": emit_status, "detail": emit_detail,
@@ -1003,6 +1027,9 @@ def support_matrix(*, report: dict | None = None,
                                    "detail": selfhost_detail,
                                    "evidence": ["tools/conformance.py"]
                                    if selfhost_row else []},
+            "selfhost_emits": {"status": selfhost_emit_status,
+                               "detail": selfhost_emit_detail,
+                               "evidence": selfhost_emit_evidence},
         })
 
     return {"tiers": [_short(tier) for tier in conformance.TIERS], "rows": rows}
@@ -1016,10 +1043,15 @@ def support_markdown(data: dict | None = None) -> str:
            "A `proved` cell names the check wired for that tier; `divergence` names a "
            "known gap; `unmeasured` means no matching check runs. The self-host "
            "agreement is one shared `revl` pipeline, so its measured count repeats "
-           "across the host-tier rows.",
+           "across the host-tier rows. The self-host emit column is per tier: it "
+           "counts the `selfhost/*.rvl` files that tier's own reference emitter "
+           "emits, measured by `tools/selfhost_matrix.py` and committed in its "
+           "ledger; it is the emitter run only, not a tier toolchain build, and every "
+           "non-emitting file is acknowledged there with an issue or a recorded scope "
+           "decision.",
            "",
-           "| tier | emits and compiles | executes | durable recovery | self-host agreement |",
-           "|---|---|---|---|---|"]
+           "| tier | emits and compiles | executes | durable recovery | self-host agreement | self-host emit |",
+           "|---|---|---|---|---|---|"]
 
     def cell(value: dict) -> str:
         details = value["detail"]
@@ -1030,7 +1062,8 @@ def support_markdown(data: dict | None = None) -> str:
     for row in data["rows"]:
         out.append("| " + row["tier"] + " | " + " | ".join(
             cell(row[key]) for key in
-            ("emits", "executes", "durable_recovery", "selfhost_agreement")) + " |")
+            ("emits", "executes", "durable_recovery", "selfhost_agreement",
+             "selfhost_emits")) + " |")
     return "\n".join(out)
 
 
