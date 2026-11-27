@@ -1082,6 +1082,23 @@ def test_no_native_ir_document_carries_a_manifest(lower_to_ir):
         assert "manifest" not in native, rel
 
 
+def _without_assert_sites(value):
+    """Strip the reference-only `assert` source metadata (issue #3499).
+
+    The reference emitter reads `file`/`line`/`source` off an assert step to
+    name the author's line. The native/selfhost producer has no source spans,
+    so the parity claim below is over the lowered semantics both sides share.
+    """
+    if isinstance(value, dict):
+        if value.get("step") == "assert":
+            return {k: _without_assert_sites(v) for k, v in value.items()
+                    if k not in ("file", "line", "source")}
+        return {k: _without_assert_sites(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_without_assert_sites(v) for v in value]
+    return value
+
+
 @pytest.mark.parametrize("rel", CORPUS)
 def test_native_ir_matches_reference_bodies_where_covered(lower_to_ir, rel):
     """Where the native producer emits a component `body` (item 242: the FULL
@@ -1095,7 +1112,8 @@ def test_native_ir_matches_reference_bodies_where_covered(lower_to_ir, rel):
     for comp in native["components"]:
         if "body" in comp:
             covered += 1
-            assert comp["body"] == ref_by_name[comp["name"]]["body"], comp["name"]
+            assert (_without_assert_sites(comp["body"])
+                    == _without_assert_sites(ref_by_name[comp["name"]]["body"])), comp["name"]
     if rel == "services_basic.rvl":
         # the capstone-intersection document: both its components carry a body
         assert covered == 2
@@ -1162,7 +1180,8 @@ def test_native_ir_matches_reference_functions(lower_to_ir, rel):
     src = (CORPUS_DIR / rel).read_text(encoding="utf-8")
     native = json.loads(lower_to_ir(src))
     reference = compile_source(src)
-    assert native.get("functions") == reference.get("functions")
+    assert (_without_assert_sites(native.get("functions"))
+            == _without_assert_sites(reference.get("functions")))
 
 
 @pytest.mark.parametrize("rel", CORPUS)

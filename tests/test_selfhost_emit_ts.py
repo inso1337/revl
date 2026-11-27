@@ -98,6 +98,7 @@ section), temporal expressions and the canonical ABI. These remain explicit
 source-backed boundaries rather than implied full compiler parity.
 """
 
+import copy
 import importlib.util
 import shutil
 import subprocess
@@ -399,6 +400,44 @@ def test_selfhosted_ts_emitter_is_byte_identical(emitted, reference, rel):
         f"self-hosted TS emitter diverged from the reference on {rel}\n"
         f"--- lengths ref={len(want)} got={len(got)} ---"
     )
+
+
+def _legacy_assert_ir(ir, *, keep_file, keep_line):
+    """A pre-#3499 IR: assert steps carry no `source`, and maybe no position."""
+    variant = copy.deepcopy(ir)
+
+    def walk(node):
+        if isinstance(node, dict):
+            if node.get("step") == "assert":
+                node.pop("source", None)
+                if not keep_file:
+                    node.pop("file", None)
+                if not keep_line:
+                    node.pop("line", None)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(variant)
+    return variant
+
+
+@pytest.mark.parametrize("keep_file,keep_line", [
+    (True, False), (False, True), (False, False),
+])
+def test_pre_3499_ir_keeps_the_old_assert_message(emitted, reference, keep_file, keep_line):
+    """A document built before the provenance keys still emits its old text.
+
+    The reference supports it, and the port mirrors the fallback; the corpus
+    cannot produce such an IR because current lowering always stamps the keys.
+    """
+    ir = compile_files([str(CORPUS_DIR / "branch_edges.rvl")])
+    legacy = _legacy_assert_ir(ir, keep_file=keep_file, keep_line=keep_line)
+    want = reference.emit(legacy)
+    got = emitted["emit_ts_src"](legacy)
+    assert got == want
 
 
 # Issue #2384: a namespaced provision key with no collision. The reference

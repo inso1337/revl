@@ -26,18 +26,22 @@ pub fn add(a: Int, b: Int) -> Int { return a + b }
 test "comparison" { assert add(2, 2) == 5 }
 test "ordering" { assert add(2, 2) < 3 }
 test "plain" { assert add(1, 0) > 0 }
+test "bare" {
+  let ok = add(1, 1) == 3
+  assert ok
+}
 """
 
 
-def _emit(backend: str) -> str:
+def _emit(backend: str, source: str = SOURCE) -> str:
     spec = importlib.util.spec_from_file_location(
         f"emit_{backend}_assertdiag", ROOT / "backends" / backend / "emit.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.emit(compile_source(SOURCE, "assertdiag.rvl"))
+    return module.emit(compile_source(source, "assertdiag.rvl"))
 
 
-def _run_python_tests():
+def _run_python_tests(source: str = SOURCE):
     stub = types.ModuleType("runtime")
     stub.__getattr__ = lambda name: (lambda *a, **k: None)  # PEP 562
     had = "runtime" in sys.modules
@@ -45,7 +49,7 @@ def _run_python_tests():
     sys.modules["runtime"] = stub
     try:
         namespace: dict = {}
-        exec(compile(_emit("python"), "assertdiag.py", "exec"), namespace)
+        exec(compile(_emit("python", source), "assertdiag.py", "exec"), namespace)
     finally:
         if had:
             sys.modules["runtime"] = previous
@@ -59,6 +63,7 @@ def test_python_failing_comparison_reports_both_operands():
     with pytest.raises(AssertionError) as failure:
         tests["comparison"]()
     message = str(failure.value)
+    assert message.startswith("assertdiag.rvl:4: assert add(2, 2) == 5"), message
     assert "add(2, 2) == 5" in message, message
     assert "left  = 4" in message, message
     assert "right = 5" in message, message
@@ -91,6 +96,35 @@ def test_python_passing_test_still_passes():
     _run_python_tests()["plain"]()
 
 
+HELPER_SOURCE = """
+
+type R = { status: Int }
+fn check(r: R) {
+  assert r.status == 303
+}
+test "via helper" {
+  let r: R = { status: 200 }
+  check(r)
+}
+"""
+
+def test_python_helper_assert_names_the_helpers_line():
+    """Issue #3499: the same assert inside a helper fn names the helper."""
+    tests = _run_python_tests(HELPER_SOURCE)
+    with pytest.raises(AssertionError) as failure:
+        tests["via helper"]()
+    message = str(failure.value)
+    assert message.startswith("assertdiag.rvl:5: assert r.status == 303"), message
+
+def test_python_bare_assert_names_its_source_line():
+    """Issue #3499: even an assert with no comparison says where it failed."""
+    tests = _run_python_tests()
+    with pytest.raises(AssertionError) as failure:
+        tests["bare"]()
+    message = str(failure.value)
+    assert message.startswith("assertdiag.rvl:9: assert ok"), message
+
+
 def test_typescript_equality_asserts_through_revl_equality():
     """Assertions must use the *language's* equality, not vitest's.
 
@@ -106,6 +140,8 @@ def test_typescript_equality_asserts_through_revl_equality():
     # with a user binding named `l`/`r` (a `let r = …` then `assert r == …`).
     assert "expect(revlEq($revl_l, $revl_r)" in emitted, emitted
     assert "function revlEq" in emitted
+    # issue #3499: the message names the source position, not only the host code
+    assert "assertdiag.rvl:4: assert add(2, 2) == 5" in emitted, emitted
     # a non-equality comparison keeps the truthy form rather than guessing a
     # matcher for every operator
     assert "toBeTruthy()" in emitted

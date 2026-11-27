@@ -1636,7 +1636,13 @@ def _dict_read_strings(node: Any, counts: dict) -> None:
     IR does not otherwise show. Any other string that happens to contain the
     name (a string literal, a test title) only costs the fast path."""
     if isinstance(node, dict):
+        # `assert` carries the author-facing `source` text (issue #3499). It is
+        # presentation, not a reference: the call it shows is already in `expr`,
+        # and counting the raw spelling again would open the fast path (#3407).
+        skip = {"source", "file"} if node.get("step") == "assert" else ()
         for k, v in node.items():
+            if k in skip:
+                continue
             _dict_read_tally(k, counts, 1)
             _dict_read_strings(v, counts)
     elif isinstance(node, list):
@@ -5762,7 +5768,7 @@ def _fn_stmt(node: dict, out: "_Lines", indent: int) -> None:
     elif step == "expr":
         out.add(indent, _expr(node["expr"]))
     elif step == "assert":
-        _emit_assert(node["expr"], out, indent)
+        _emit_assert(node, out, indent)
     else:
         raise EmitError(f"unsupported fn statement step {step!r}")
 
@@ -5770,7 +5776,21 @@ def _fn_stmt(node: dict, out: "_Lines", indent: int) -> None:
 _ASSERT_COMPARISONS = ("==", "===", "!=", "!==", "<", ">", "<=", ">=")
 
 
-def _emit_assert(expr: dict, out: "_Lines", indent: int) -> None:
+def _assert_head(node: dict, expression: str) -> str:
+    """`<file>:<line>: assert <source>` — where the author wrote it (issue #3499).
+
+    The runner prefixes its own `FAIL <name>:`, so the head keeps the source
+    position first; the lowered host expression stays out of the message. A
+    document built before these keys existed has no `source`, and the caller
+    passes its rendered expression so the message is unchanged.
+    """
+    file = node.get("file") or ""
+    line = node.get("line") or 0
+    where = f"{file}:{line}" if file and line else (file or (f"line {line}" if line else ""))
+    return f"{where}: assert {expression}" if where else f"assert {expression}"
+
+
+def _emit_assert(node: dict, out: "_Lines", indent: int) -> None:
     """`assert a == b`, with both operand values in the failure message.
 
     A bare `assert` carries no message, so the runner has nothing to print but
@@ -5782,6 +5802,7 @@ def _emit_assert(expr: dict, out: "_Lines", indent: int) -> None:
     reports both values alongside the expression as emitted. Anything else
     keeps the plain form.
     """
+    expr = node["expr"]
     if expr.get("kind") == "bin" and expr.get("op") in _ASSERT_COMPARISONS:
         op = _PY_BIN_OPS[expr["op"]]
         left = _expr(expr["left"])
@@ -5790,12 +5811,14 @@ def _emit_assert(expr: dict, out: "_Lines", indent: int) -> None:
         out.add(indent, f"_revl_rhs = {right}")
         # the shown text is a repr, never an f-string, so quotes and braces in
         # the rendered source cannot break out of the literal
-        shown = repr(f"{left} {op} {right}")
+        source = node.get("source") or f"{left} {op} {right}"
+        shown = repr(_assert_head(node, source))
         out.add(indent, f"assert _revl_lhs {op} _revl_rhs, {shown}"
                         " + '\\n  left  = ' + repr(_revl_lhs)"
                         " + '\\n  right = ' + repr(_revl_rhs)")
         return
-    out.add(indent, f"assert {_expr(expr)}")
+    rendered = _expr(expr)
+    out.add(indent, f"assert {rendered}, {_assert_head(node, node.get('source') or rendered)!r}")
 
 
 def _is_cache_pure(decl: dict) -> bool:

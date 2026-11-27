@@ -13,8 +13,29 @@
 // 36 dollar, 96 backtick. Lookahead uses slice (clamping), never a
 // bare charAt past the end.
 
-pub type Token = { kind: Str, text: Str, line: Int }
-type Step = { i: Int, line: Int, tok: Token }
+// `Token` carries the token stream's view (`kind`/`text`/`line`) plus the
+// source provenance the lowering needs for diagnostics (issue #3499): the
+// exact `raw` spelling, the `before` gap that preceded it, and the `file` the
+// stream was lexed from. `step` builds the view-only `Tok`; `lex_src_at`
+// stamps the provenance in one place, so every token constructor stays small.
+pub type Token = { kind: Str, text: Str, line: Int,
+                   before: Str, raw: Str, file: Str }
+type Tok = { kind: Str, text: Str, line: Int }
+type Step = { i: Int, line: Int, tok: Tok }
+
+pub fn mk_tok(kind: Str, text: Str, line: Int) -> Token {
+  return { kind: kind, text: text, line: line, before: "", raw: "", file: "" }
+}
+
+pub fn tok_copy(t: Token) -> Token {
+  return { kind: t.kind, text: t.text, line: t.line,
+           before: t.before, raw: t.raw, file: t.file }
+}
+
+pub fn tok_reline(t: Token, line: Int) -> Token {
+  return { kind: t.kind, text: t.text, line: line,
+           before: t.before, raw: t.raw, file: t.file }
+}
 type Scan = { j: Int, out: Str, nl: Int }
 
 service TokenStream {
@@ -768,18 +789,35 @@ fn step(source: Str, i: Int, line: Int) -> Step {
 }
 
 pub fn lex_src(source: Str) -> List[Token] {
+  return lex_src_at(source, "")
+}
+
+// The filename-aware entry: `file` is stamped on every token so a lowering
+// path that no longer has the original string can still name the document in
+// a diagnostic (issue #3499). `before` is the exact text between the previous
+// token and this one (whitespace and dropped comments included), and `raw` is
+// this token's exact spelling; together they recover a source span from the
+// token stream alone.
+pub fn lex_src_at(source: Str, fname: Str) -> List[Token] {
   var out = []
   var i = 0
   var line = 1
+  var prev = 0
   let n = source.length()
   while (i < n) {
     let s = step(source, i, line)
-    if (s.tok.kind != "") { out = out.push(s.tok) }
+    if (s.tok.kind != "") {
+      out = out.push({ kind: s.tok.kind, text: s.tok.text, line: s.tok.line,
+                       before: source.slice(prev, i),
+                       raw: source.slice(i, s.i), file: fname })
+      prev = s.i
+    }
     i = s.i
     line = s.line
   }
   let ll = line
-  out = out.push({ kind: "eof", text: "", line: ll })
+  out = out.push({ kind: "eof", text: "", line: ll,
+                   before: source.slice(prev, n), raw: "", file: fname })
   return out
 }
 

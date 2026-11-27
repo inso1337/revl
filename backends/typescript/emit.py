@@ -4349,6 +4349,19 @@ def _v3_empty_list_types(body: object, params: object, returns: object) -> dict:
     return resolved
 
 
+def _assert_head(node: dict, expression: str) -> str:
+    """`<file>:<line>: assert <source>` — where the author wrote it (issue #3499).
+
+    Mirrors the python backend's helper: the runner prefixes `FAIL <name>:`, so
+    a failing assertion names its source line before its operands. A document
+    with no `source` key falls back to the caller's rendered expression.
+    """
+    file = node.get("file") or ""
+    line = node.get("line") or 0
+    where = f"{file}:{line}" if file and line else (file or (f"line {line}" if line else ""))
+    return f"{where}: assert {expression}" if where else f"assert {expression}"
+
+
 def _v3_stmt(node: dict, ctx: _Ctx, out: list[str], indent: int, *, test_mode: bool) -> None:
     step = node.get("step")
     if step in ("let", "assign"):
@@ -4434,7 +4447,8 @@ def _v3_stmt(node: dict, ctx: _Ctx, out: list[str], indent: int, *, test_mode: b
             left = _expr(expr["left"], ctx)
             right = _expr(expr["right"], ctx)
             want = "false" if expr["op"] in ("!=", "!==") else "true"
-            shown = json.dumps(f"{left} {expr['op']} {right}")
+            source = node.get("source") or f"{left} {expr['op']} {right}"
+            shown = json.dumps(_assert_head(node, source))
             # item 143: the assert temporaries carry a `$` sigil — not in revl's
             # identifier alphabet — so `const $revl_l = <left>` can never read a
             # user binding named `l`/`r` before its own TDZ ends (the same
@@ -4452,7 +4466,8 @@ def _v3_stmt(node: dict, ctx: _Ctx, out: list[str], indent: int, *, test_mode: b
             op = _TS_V3_BIN_OPS[expr["op"]]
             left = _expr(expr["left"], ctx)
             right = _expr(expr["right"], ctx)
-            shown = json.dumps(f"{left} {op} {right}")
+            source = node.get("source") or f"{left} {op} {right}"
+            shown = json.dumps(_assert_head(node, source))
             condition = f"$revl_l {op} $revl_r"
             if expr.get("operands") == "Str" and op in ("<", ">", "<=", ">="):
                 # the same code-point order `_expr` gives a `Str` comparison
@@ -4469,9 +4484,11 @@ def _v3_stmt(node: dict, ctx: _Ctx, out: list[str], indent: int, *, test_mode: b
                        f'"\\n  left  = " + revlShow($revl_l) + '
                        f'"\\n  right = " + revlShow($revl_r)) }}')
         else:
+            rendered = _expr(expr, ctx)
+            source = node.get("source") or rendered
             out.append(
-                f"{pad}if (!({_expr(expr, ctx)})) "
-                f'throw new Error("assertion failed")'
+                f"{pad}if (!({rendered})) "
+                f"throw new Error({json.dumps(_assert_head(node, source))})"
             )
     else:
         raise EmitError(f"unsupported fn statement step {step!r}")

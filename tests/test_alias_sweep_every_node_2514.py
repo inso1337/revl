@@ -144,7 +144,7 @@ def _mentions(node, seen=None) -> int:
     # `FnDecl.idents` is the fn's token spellings (issue #1900), not a type
     return sum(_mentions(getattr(node, f.name), seen)
                for f in dataclasses.fields(node)
-               if f.name not in ("type_decls", "idents"))
+               if f.name not in ("type_decls", "idents", "source"))
 
 
 @pytest.mark.parametrize("slot", sorted(SLOTS))

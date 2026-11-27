@@ -6688,9 +6688,11 @@ def _lower_lifecycle_body(decl: TestDecl, program: Program, services: dict, file
                          "after `assert` is a Bool expression over this test's `let` bindings",
                 )
             _bool_cond(expr, type_env, types, filename, "assert")
-            body.append({"step": "assert",
-                         "expr": _lower_pure_expr(expr, scope, callables, {}, filename,
-                                                  type_env, types)})
+            body.append(_assert_step(
+                stmt,
+                _lower_pure_expr(expr, scope, callables, {}, filename,
+                                 type_env, types),
+                filename))
         else:  # pragma: no cover — the lifecycle grammar produces nothing else
             raise RevlError(filename, getattr(stmt, "line", decl.line),
                             "unexpected statement in a lifecycle test body")
@@ -7106,6 +7108,18 @@ def _lower_try_return(stmt, scope: dict, callables: set, alias_fns: dict,
     body.append({"step": "return", "expr": value})
 
 
+def _assert_step(stmt, lowered: dict, filename: str) -> dict:
+    """The `assert` step, carrying where and what the author wrote.
+
+    `file`/`line`/`source` are additive: the emitters that predate them fall
+    back to the expression they render, and no checker reads them. `source`
+    is the parser's exact span (issue #3499), empty for a synthetic node.
+    """
+    return {"step": "assert", "expr": lowered, "file": filename or "",
+            "line": getattr(stmt, "line", 0) or 0,
+            "source": getattr(stmt, "source", "")}
+
+
 def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: list, filename: str,
                      type_env: dict | None = None, types: dict | None = None,
                      expected_return: str | None = None) -> None:
@@ -7294,7 +7308,11 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         body.append({"step": "expr", "expr": _lower_pure_expr(stmt.expr, scope, callables, alias_fns, filename, type_env, types)})
     elif isinstance(stmt, AssertStmt):
         _bool_cond(stmt.expr, type_env, types, filename, "assert")
-        body.append({"step": "assert", "expr": _lower_pure_expr(stmt.expr, scope, callables, alias_fns, filename, type_env, types)})
+        body.append(_assert_step(
+            stmt,
+            _lower_pure_expr(stmt.expr, scope, callables, alias_fns, filename,
+                             type_env, types),
+            filename))
     elif isinstance(stmt, BreakStmt):
         # item 379: additive step kind, no payload. The parser already refused a
         # `break` outside a loop, so lowering only records it; teardown is
@@ -11370,7 +11388,7 @@ def _lower_component_setup_stmt(stmt, env: Env, scope: dict[str, str], callables
         assert_t = _sweep(expr, stmt.line)
         if assert_t is not None and assert_t != "Bool":
             raise mismatch(filename, stmt.line, "`assert`", "Bool", assert_t)
-        out.append({"step": "assert", "expr": expr})
+        out.append(_assert_step(stmt, expr, filename))
     else:
         raise RevlError(filename, getattr(stmt, "line", 0),
                         "unsupported statement in effect block setup",

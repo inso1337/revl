@@ -1482,21 +1482,41 @@ fn inplace_stmts(name: Str, value: Any) -> List[Str] {
   return [`_revl_key = ${key}`, `${recv}[_revl_key] = ${expr(args[1])}`]
 }
 
+// `assert_head`: `<file>:<line>: assert <source>`, the site #3499 asks a
+// failing assert to name. Documents that predate the keys fall back exactly as
+// the reference emitter does.
+fn assert_head(node: Any, text: Str) -> Str {
+  let file = value_str(value_field(node, "file"))
+  let line = value_int(value_field(node, "line"))
+  var where = ""
+  if (file != "" && line != 0) { where = `${file}:${line}` }
+  else if (file != "") { where = file }
+  else if (line != 0) { where = `line ${line}` }
+  if (where == "") { return `assert ${text}` }
+  return `${where}: assert ${text}`
+}
+
 // -------------------------------------------------------------- statements
 // `_emit_assert`: bind each side of a comparison once and report both values.
-fn emit_assert(e: Any, indent: Int) -> List[Str] {
+fn emit_assert(node: Any, indent: Int) -> List[Str] {
   var out = []
+  let e = value_field(node, "expr")
   if (node_kind(e) == "bin" && is_cmp_op(node_op(e))) {
     let pop = py_bin_op(node_op(e))
     let left = expr(value_field(e, "left"))
     let right = expr(value_field(e, "right"))
     out = out.push(line(indent, `_revl_lhs = ${left}`))
     out = out.push(line(indent, `_revl_rhs = ${right}`))
-    let shown = py_repr(`${left} ${pop} ${right}`)
+    var source = value_str(value_field(node, "source"))
+    if (source == "") { source = `${left} ${pop} ${right}` }
+    let shown = py_repr(assert_head(node, source))
     out = out.push(line(indent, `assert _revl_lhs ${pop} _revl_rhs, ${shown} + '\n  left  = ' + repr(_revl_lhs) + '\n  right = ' + repr(_revl_rhs)`))
     return out
   }
-  out = out.push(line(indent, `assert ${expr(e)}`))
+  let rendered = expr(e)
+  var source = value_str(value_field(node, "source"))
+  if (source == "") { source = rendered }
+  out = out.push(line(indent, `assert ${rendered}, ${py_repr(assert_head(node, source))}`))
   return out
 }
 
@@ -1618,7 +1638,7 @@ fn fn_stmt(node: Any, indent: Int) -> List[Str] {
     return out
   }
   if (step == "assert") {
-    return emit_assert(value_field(node, "expr"), indent)
+    return emit_assert(node, indent)
   }
   // item 379 / 391: bare loop control -> the host keyword (frame-neutral).
   if (step == "break") {
@@ -1704,12 +1724,16 @@ fn dr_scan(node: Any, name: Str) -> DrScan {
   }
   if (!value_is_object(node)) { return { ok: true, lets: lets } }
   let keys = value_keys(node)
+  let nk = node_kind(node)
+  let st = value_str(value_field(node, "step"))
   for (k of keys) {
     if (k == name) { return { ok: false, lets: [] } }
+    // An assert's diagnostic provenance is presentation text, not a value the
+    // body reads: the author's `f['x']` spelling must not make every `f` field
+    // read look direct (issue #3499, matching the reference's skip).
+    if (st == "assert" && (k == "source" || k == "file")) { continue }
     let v = value_field(node, k)
     if (value_kind(v) == "str" && value_str(v) == name) {
-      let nk = node_kind(node)
-      let st = value_str(value_field(node, "step"))
       if (k == "name" && (nk == "var" || nk == "field")) { continue }
       if (k == "name" && (st == "let" || st == "assign") && list_contains(keys, "value") && !list_contains(keys, "op")) {
         lets = lets.push(node)
@@ -1789,7 +1813,11 @@ fn dr_tally(text: Str, counts: Map[Str, Any], delta: Int) -> Map[Str, Any] {
 fn dr_count(node: Any, counts: Map[Str, Any]) -> Map[Str, Any] {
   var out = counts
   if (value_is_object(node)) {
+    let st = value_str(value_field(node, "step"))
     for (k of value_keys(node)) {
+      // The assert provenance is presentation, not a reference the body makes
+      // (issue #3499; the reference skips the same keys).
+      if (st == "assert" && (k == "source" || k == "file")) { continue }
       out = dr_tally(k, out, 1)
       out = dr_count(value_field(node, k), out)
     }

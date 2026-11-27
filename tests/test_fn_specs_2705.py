@@ -416,8 +416,12 @@ def test_the_ts_tier_compiles_a_spec_fn_and_ignores_the_clause(tmp_path):
     plain = CLAMP.replace(" ensures result <= 0", "")
     assert plain != CLAMP
     outputs = []
-    for name, source in (("spec.rvl", CLAMP), ("plain.rvl", plain)):
-        src = tmp_path / name
+    # Both sources are written to the SAME path: since issue #3499 a failing
+    # assert names its source file, so two differently-named files would make
+    # the emitted modules differ for a reason the spec clause has nothing to do
+    # with.
+    src = tmp_path / "input.rvl"
+    for name, source in (("spec", CLAMP), ("plain", plain)):
         src.write_text(source + 'test "t" { assert clamp(-1) == -1 }\n',
                        encoding="utf-8")
         out = tmp_path / (name + ".ts")

@@ -264,6 +264,9 @@ def test_test_block_lowers_and_emits_runnable_python():
                         },
                         "right": {"kind": "lit", "value": 3},
                     },
+                    "file": "<string>",
+                    "line": 5,
+                    "source": "add(1, 2) == 3",
                 }
             ],
         }

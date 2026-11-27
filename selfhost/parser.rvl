@@ -17,7 +17,7 @@
 // `${...}` body containing a literal `|` cannot be recovered from the
 // serialized parts. See docs/selfhost-findings.md.
 
-use "./lexer.rvl" { Token, lex_src }
+use "./lexer.rvl" { Token, lex_src, mk_tok }
 
 // ---------------------------------------------------------------- AST
 
@@ -99,7 +99,7 @@ type BlkR = { i: Int, blk: List[ArmLetN], tail: Expr, ok: Bool }
 
 // ---------------------------------------------------------------- tokens
 
-fn eof_tok() -> Token { return { kind: "eof", text: "", line: 0 } }
+fn eof_tok() -> Token { return mk_tok("eof", "", 0) }
 
 fn tk(ts: List[Token], i: Int) -> Token {
   if (i < ts.length()) { return ts[i] }
