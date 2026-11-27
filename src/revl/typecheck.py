@@ -1733,9 +1733,23 @@ def _binop_type(op: str, lt: str | None, rt: str | None,
             return "Str" if (lt == "Str" and rt == "Str") else None
         # fall through to numeric
     if op in ("+", "-", "*", "/", "%"):
-        for t in (lt, rt):
+        for t, side in ((lt, "left"), (rt, "right")):
             if filename and t and t not in _NUMERIC:
-                raise mismatch(filename, line, f"operand of `{op}`", "Int", t)
+                # issue #3491: `+` is not arithmetic-only — `Str + Str`
+                # concatenates (the branch above) — and a List operand has a
+                # working form the refusal should name.
+                if op == "+" and parse_type(t)[0] == "List":
+                    raise RevlError(
+                        filename, line,
+                        f"`+` does not join lists (got `{render_type(t)}` as the "
+                        f"{side} operand)",
+                        hint="join two lists with `xs.concat(ys)`; add one element "
+                             "with `xs = xs.push(x)`",
+                        code="T1", category="type-mismatch",
+                        expected="Int, Float, Int32 or Str", actual=render_type(t),
+                    )
+                want = ("Int, Float, Int32 or Str" if op == "+" else "Int")
+                raise mismatch(filename, line, f"operand of `{op}`", want, t)
         if op == "/":
             # `/` is TRUE division and yields Float even on two Ints, because
             # §0 governs: `/` is spelled exactly as TypeScript spells it, and
