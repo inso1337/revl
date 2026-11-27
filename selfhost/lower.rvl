@@ -18887,6 +18887,45 @@ fn tk_destructure_msg(ty: Str) -> Str {
     .concat("` is not a record")
 }
 
+// `_lower_let_pattern_stmt`'s unknown-field refusal (issues #3536, #3592): the
+// first pattern name that is not a field of the value's type.
+fn tk_letpat_field_msg(name: Str, ty: Str) -> Str {
+  return "record destructuring names `".concat(name)
+    .concat("`, which is not a field of `").concat(tk_render(ty)).concat("`")
+}
+
+// Does this walk hold the FIELD TABLE of the destructured value's type? A
+// structural spelling carries its own; a declared record has its
+// `field <T>.<f>` rows; an applied generic record (`Box[Int]`) has the
+// `gfld <Box>.<f>` rows, once `gpar` says its parameters were read. The
+// reference refuses an unknown field on every one of these; on any other
+// spelling (a type this walk could not infer, an empty declared record, a
+// generic whose header it did not read) this walk stays silent, as before.
+fn fb_letpat_table(vt: Str, env: List[Bind]) -> Bool {
+  if (vt == "") { return false }
+  if (tk_is_struct(vt)) { return true }
+  if (tk_generic_record(vt, env)) {
+    return tenv_get(env, "gpar ".concat(vt.slice(0, vt.indexOf("[")))) != ""
+  }
+  return tk_record_base(vt, env)
+}
+
+fn fb_letpat_has(vt: Str, name: Str, env: List[Bind]) -> Bool {
+  if (tk_is_struct(vt)) { return tk_struct_field(vt, name) != "" }
+  if (tk_generic_record(vt, env)) {
+    let head = vt.slice(0, vt.indexOf("["))
+    return tenv_get(env, "gfld ".concat(head).concat(".").concat(name)) != ""
+  }
+  return tenv_get(env, "field ".concat(vt).concat(".").concat(name)) != ""
+}
+
+// The first name, in pattern order, that `fb_letpat_has` does not find; "".
+fn fb_letpat_missing(names: List[Str], i: Int, vt: Str, env: List[Bind]) -> Str {
+  if (i >= names.length()) { return "" }
+  if (!fb_letpat_has(vt, names[i], env)) { return names[i] }
+  return fb_letpat_missing(names, i + 1, vt, env)
+}
+
 // `_BUILTIN_NONRECORD`: the builtin heads a record pattern can never destructure.
 fn tk_nonrecord_head(h: Str) -> Bool {
   return h == "Str" || h == "Int" || h == "Int32" || h == "Bool" || h == "Float"
@@ -18895,12 +18934,14 @@ fn tk_nonrecord_head(h: Str) -> Bool {
 }
 
 // Is this value's type one the reference PROVES is not a record? A declared
-// VARIANT is (`types[value_type]["kind"] != "record"`); a builtin non-record
-// head is. Everything else — a structural spelling, a nominal record, a type
-// this walk could not infer — answers no, which is the silent direction.
+// VARIANT is (`types[value_type]["kind"] != "record"`), bare or applied
+// (`M[Int]` against `type M[T] = Just(T) | Nothing`, issue #3592: the `cases`
+// rows are keyed by the bare head); a builtin non-record head is. Everything
+// else — a structural spelling, a nominal record, a type this walk could not
+// infer — answers no, which is the silent direction.
 fn tk_nonrecord_value(ty: Str, env: List[Bind]) -> Bool {
   if (ty == "") { return false }
-  if (tenv_get(env, "cases ".concat(ty)) != "") { return true }
+  if (tenv_get(env, "cases ".concat(parse_head(ty))) != "") { return true }
   return tk_nonrecord_head(parse_head(ty))
 }
 
@@ -18937,11 +18978,13 @@ fn fb_walk(steps: List[FbStep], i: Int, scope: List[Bind], tys: List[Bind],
   // docs/design/457 T3b: `_lower_let_pattern_stmt`'s RECORD branch, in its own
   // order — the per-name scope guard first, then the value's type. Only the two
   // arms that spell "requires a record" are ported: a DECLARED type whose
-  // `types` entry is not a record (the variant rows `adt_case_row` builds), and
-  // a builtin non-record head (`_BUILTIN_NONRECORD`). The unknown-field and
-  // element-type arms need the field table at a precision this walk does not
-  // hold, so they stay silent. The block ends here either way: the binder is not
-  // threaded on, so no statement after it is judged.
+  // `types` entry is not a record (the variant rows `adt_case_row` builds,
+  // applied or bare), and a builtin non-record head (`_BUILTIN_NONRECORD`).
+  // The unknown-field arm is ported for the shapes this walk holds a field
+  // table for (issue #3592, `fb_letpat_table`); the element-type arm needs the
+  // field types at a precision this walk does not hold, so it stays silent. The
+  // block ends here either way: the binder is not threaded on, so no statement
+  // after it is judged.
   if (s.kind == "letpat") {
     let names = split_top_commas(s.name)
     let g = fb_pat_scope(names, 0, scope)
@@ -18952,6 +18995,15 @@ fn fb_walk(steps: List[FbStep], i: Int, scope: List[Bind], tys: List[Bind],
     if (tk_nonrecord_value(vt, tys)) {
       return fb_type_refuse(tagged("TYPE", tk_destructure_msg(vt)), s.line,
                             scope, tys)
+    }
+    // Issue #3592: the unknown-field arm, for the shapes this walk holds a
+    // field table for (`fb_letpat_table`). Everything else stays silent.
+    if (fb_letpat_table(vt, tys)) {
+      let miss = fb_letpat_missing(names, 0, vt, tys)
+      if (miss != "") {
+        return fb_type_refuse(tagged("TYPE", tk_letpat_field_msg(miss, vt)),
+                              s.line, scope, tys)
+      }
     }
     return fb_clean(scope, tys)
   }

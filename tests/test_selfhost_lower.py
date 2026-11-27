@@ -565,6 +565,7 @@ def _classify(e: RevlError) -> str:
     if ("is not a case of" in m
             or "record update names" in m
             or "record destructuring requires a record" in m
+            or "record destructuring names" in m
             or "type alias cycle" in m
             # all four of `_DIVIDES_BY`, not only `mod`: `div_trunc`,
             # `div_floor` and `div_euclid` draw the identical sentence and were
@@ -1862,6 +1863,16 @@ fn f() -> Int {
   let pt = { x: 1, y: 2 }
   let { x, y } = pt
   return x
+}
+"""),
+    # issue #3592: an applied generic record is a record with the declared
+    # field names, and its field types are the instantiated ones.
+    ("record destructuring of a generic record", """
+type Box[T] = { v: T }
+
+fn f(b: Box[Int]) -> Int {
+  let { v } = b
+  return v
 }
 """),
     # ---- a scoped extern crossing a provide-method boundary (issue #1240) --
@@ -3605,6 +3616,43 @@ type Status = Active | Retired
 fn f(s: Status) -> Int {
   let { a } = s
   return 1
+}
+""", "TYPE"),
+    # issues #3536 and #3592: a pattern naming a field the record does not
+    # have, against a declared record, an applied generic record (`Box[Int]`
+    # is not a declared name, so the reference used to admit it) and a
+    # structural one. The first missing name in pattern order is the one named.
+    # issue #3592: an APPLIED generic variant is as little a record as a bare
+    # one; the reference used to admit it (`M[Int]` is not a declared name).
+    ("record destructuring of an applied generic variant", """
+type M[T] = Just(T) | Nothing
+
+fn f(m: M[Int]) -> Int {
+  let { z } = m
+  return 0
+}
+""", "TYPE"),
+    ("record destructuring naming a missing field of a declared record", """
+type P = { x: Int }
+
+fn f(p: P) -> Int {
+  let { zz } = p
+  return 0
+}
+""", "TYPE"),
+    ("record destructuring naming a missing field of a generic record", """
+type Box[T] = { v: T }
+
+fn f(b: Box[Int]) -> Int {
+  let { v, z } = b
+  return v
+}
+""", "TYPE"),
+    ("record destructuring naming a missing field of a structural record", """
+fn f() -> Int {
+  let r = { y: 2, x: 1 }
+  let { x, zz } = r
+  return x
 }
 """, "TYPE"),
     # ---- the `a host emission` reach label (issue #1254) -------------------

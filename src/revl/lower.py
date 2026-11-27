@@ -68,7 +68,9 @@ from .typecheck import (
     infer_ir_memo,
     infer_ir_memo_active,
     infer_ir,
+    fields_hint,
     mismatch,
+    nominal_record_fields,
     pin_hole,
     null_error,
     parse_type,
@@ -7293,6 +7295,27 @@ def _lower_let_pattern_stmt(stmt: LetPatternStmt, scope: dict, callables: set, a
                     f"record destructuring requires a record, but `{render_type(value_type)}` is not a record",
                 )
             fields = spec.get("fields", {})
+        elif value_type is not None:
+            # An APPLIED generic record (issue #3592): `Box[Int]` is not a
+            # declared name, so the lookup above misses it and neither the
+            # field check nor the field types applied. It resolves at its
+            # instantiation, `type Box[T] = { v: T }` giving `{v: Int}`; a
+            # wrong arity keeps the declared field names, so a missing field
+            # is still refused by name.
+            head_spec = types.get(parse_type(value_type)[0] or "")
+            if isinstance(head_spec, dict) and head_spec.get("kind") != "record":
+                # An applied generic of another kind (`M[Int]` against
+                # `type M[T] = Just(T) | Nothing`) is as little a record as
+                # the bare variant is.
+                raise RevlError(
+                    filename, stmt.line,
+                    f"record destructuring requires a record, but `{render_type(value_type)}` is not a record",
+                )
+            if isinstance(head_spec, dict) and head_spec.get("params"):
+                spec = head_spec
+                fields = nominal_record_fields(value_type, types)
+                if fields is None:
+                    fields = spec.get("fields", {})
         if fields is not None:
             for name in names:
                 if name not in fields:
@@ -7300,7 +7323,7 @@ def _lower_let_pattern_stmt(stmt: LetPatternStmt, scope: dict, callables: set, a
                         filename, pattern.line,
                         f"record destructuring names `{name}`, which is not a field of "
                         f"`{render_type(value_type)}`",
-                        hint=f"fields: {', '.join(f'`{f}`' for f in sorted(fields))}",
+                        hint=fields_hint(fields, value_type),
                     )
         elif value_type is not None and parse_type(value_type)[0] in _BUILTIN_NONRECORD:
             raise RevlError(
