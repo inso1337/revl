@@ -11378,6 +11378,9 @@ fn p_fn_v(ts: Vec<Token>, i: i64, pg: Prog, ver: bool) -> PStep {
         return PStep { pg: bad_prog(pg, String::from("unbalanced braces in fn body")), i: ts.revl_length() };
     }
     let body = p_stmts(ts.clone(), (rti).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"), vec![]);
+    if stmts_have_emit(&body, 0i64) {
+        return mk_step(bad_prog(pg, String::from("unexpected expression in fn body")), bend);
+    }
     let tot = tot_block(ts.clone(), rti, vec![]);
     return mk_step(push_fn(pg, FnD { name: nm, isEmExtern: false, isAsyncExtern: false, callees: body_callees(&body, 0i64, vec![]), asyncSlots: async_slots_of(&ps.ps), asyncParams: async_params_of(&ps.ps), params: ps.ps.clone(), body: body.clone(), cachePure: cachePure.clone(), line: tkc(&ts, i).line, caps: vec![], inv: String::from(""), isVerified: ver, totCalls: tot.calls.clone(), totOpaque: (!tot.ok) }), bend);
 }
@@ -11489,6 +11492,17 @@ fn parts_have_emit(xs: &[PartN], i: i64) -> bool {
         return false;
     }
     return (expr_has_emit((xs)[(i) as usize].e.clone()) || parts_have_emit(xs, (i).checked_add(1i64).expect("revl: Int overflow")));
+}
+
+fn stmts_have_emit(ss: &[Stmt], i: i64) -> bool {
+    if (i >= ss.revl_length()) {
+        return false;
+    }
+    let s = (ss)[(i) as usize].clone();
+    if (s.kind == "emit") {
+        return true;
+    }
+    return (expr_has_emit(s.e.clone()) || stmts_have_emit(ss, (i).checked_add(1i64).expect("revl: Int overflow")));
 }
 
 fn tot_no(acc: Vec<String>) -> TotR {
