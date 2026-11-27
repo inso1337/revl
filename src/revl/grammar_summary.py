@@ -25,6 +25,8 @@ the reviewable artifact, this constant is what ships in the wheel.
 
 from __future__ import annotations
 
+from .lexer import KEYWORDS
+
 #: The code half of `PROSE_GRAMMAR`: one complete program that compiles as
 #: written (tests/test_served_examples_compile_1846.py), so no example an
 #: agent copies from `revl_grammar` can be a form the compiler refuses.
@@ -75,6 +77,8 @@ Rules that reject code: mutation needs `undo` or `emit` (G4); reads must be
 declared (G1); no cycles or duplicate providers (G2/G3); teardown cannot
 register effects (G5); expressions are pure (G6); `null` has no type —
 absence is Opt[T]; declared types are checked at every boundary.
+Reserved words cannot name a field, variable, parameter or method — the
+full list is the last section of `revl grammar --prompt` (#3493).
 `grant` is not a program declaration: a composition writes it to name the
 keys a row may reach. Its forms, and every other declaration, are in
 `revl grammar --prompt`.
@@ -256,5 +260,27 @@ acquisition after `provide` · A3 host-name collision is renamed, not
 silently shadowed · A8 `fail`/an effect fault reverts accumulated undos and
 lands FAILED, newest-first.
 """
+
+
+def _wrap_words(words: list[str], width: int = 76) -> str:
+    lines: list[str] = []
+    line = ""
+    for word in words:
+        token = word + " "
+        if line and len(line) + len(token) > width:
+            lines.append(line.rstrip())
+            line = token
+        else:
+            line += token
+    if line:
+        lines.append(line.rstrip())
+    return "\n".join(lines)
+
+
+# issue #3493: the reserved words are listed here, generated from the lexer's
+# own KEYWORDS set, so the list cannot drift from what the compiler refuses.
+PROMPT_GRAMMAR += """
+--- reserved words (cannot name a field, variable, parameter or method) ---
+""" + _wrap_words(sorted(KEYWORDS)) + "\n"
 
 __all__ = ["PROSE_GRAMMAR", "PROMPT_GRAMMAR"]

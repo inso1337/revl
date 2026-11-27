@@ -172,3 +172,10 @@ A1 `await` as a divert point exists only in an activation body · A2 no
 acquisition after `provide` · A3 host-name collision is renamed, not
 silently shadowed · A8 `fail`/an effect fault reverts accumulated undos and
 lands FAILED, newest-first.
+
+--- reserved words (cannot name a field, variable, parameter or method) ---
+acquire after as assert async await break commutative compensate component
+config continue effect else emission emit every extern fail false fn for
+handoff hole idempotent if in intercept isolate let match null of provide
+provides pub pure realm requires return service spawn subscribe test true
+try type undo use var verified while with
