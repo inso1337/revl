@@ -2779,6 +2779,13 @@ class _Driver:
                   "`:forward k`, `:bisect <expr>` (see docs/replay.md)")
         self._print_keys()
         loop = asyncio.get_running_loop()
+        # issue #3440: while the composition is held live, drive the timer
+        # clock from the wall so `every` timers fire at run time. The pump is
+        # a task on this loop, so a firing runs here exactly as a test-driven
+        # `advance` does; tests keep the virtual clock because nothing starts
+        # this task but a live `revl run`.
+        pump_stop = asyncio.Event()
+        pump = asyncio.ensure_future(self.runtime.pump_clock_from_wall(pump_stop))
         try:
             while True:
                 try:
@@ -2803,6 +2810,12 @@ class _Driver:
                     continue
                 await self._eval(line)
         finally:
+            pump_stop.set()
+            pump.cancel()
+            try:
+                await pump
+            except asyncio.CancelledError:
+                pass
             await self._teardown()
         return self._run_exit_code()
 
@@ -2838,6 +2851,11 @@ class _Driver:
             loop.add_signal_handler(signal.SIGINT, stop.set)
         except (NotImplementedError, RuntimeError):  # pragma: no cover — non-unix
             pass
+        # issue #3440: the watched composition is held live, so the timer
+        # clock is driven from the wall for the whole watch (same pump as
+        # `hold_repl`; stopped before teardown so no firing outlives it)
+        pump_stop = asyncio.Event()
+        pump = asyncio.ensure_future(self.runtime.pump_clock_from_wall(pump_stop))
         try:
             while not stop.is_set():
                 try:
@@ -2850,6 +2868,12 @@ class _Driver:
                     seen = current
                     await self._reload(files)
         finally:
+            pump_stop.set()
+            pump.cancel()
+            try:
+                await pump
+            except asyncio.CancelledError:
+                pass
             await self._teardown()
         return self._run_exit_code()
 

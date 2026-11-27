@@ -1440,7 +1440,8 @@ def serve_http(ir: dict, config: dict | None = None, *,
                approval_policy: str | None = None,
                operator: dict | None = None,
                origin: dict | None = None,
-               refuse_ungated_emissions: bool = False) -> int:
+               refuse_ungated_emissions: bool = False,
+               wall_clock: bool = False) -> int:
     """Boot `ir` into a live session and serve its operations over HTTP.
 
     Booting is admission, so this loads through the same `Session.load` the MCP
@@ -1485,6 +1486,13 @@ def serve_http(ir: dict, config: dict | None = None, *,
     # an approval policy needs its spend durable (item 246, Decision 2)
     session.load(ir, config or {}, record=approval_policy is not None,
                  origin=origin)
+    # issue #3440: while the composition is served live, drive the timer
+    # clock from the wall so `every` timers fire (stopped in the finally).
+    # getattr: a test double session may not carry the pump methods.
+    if wall_clock:
+        _start = getattr(session, "start_wall_clock", None)
+        if _start is not None:
+            _start()
     # item 457: wire the live module's decoder so a routed handler binding a typed
     # `Request` (whose `method`/`body` are variants) sees native case instances.
     decode = _live_decoder(session)
@@ -1531,6 +1539,9 @@ def serve_http(ir: dict, config: dict | None = None, *,
     except KeyboardInterrupt:
         pass
     finally:
+        _stop = getattr(session, "stop_wall_clock", None)
+        if _stop is not None:
+            _stop()
         if listener is not None:
             listener.stop()
         httpd.server_close()

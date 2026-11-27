@@ -4237,9 +4237,10 @@ class _ComponentEmitter:
         handle, and the yielded `handle.cancel()` is the derived inverse — so
         unloading the component drains this like any other effect and provably
         cancels the timer (no orphaned interval; residue-free teardown).  The
-        clock does not advance on its own: `revl test`/replay drives it, which
-        is what makes a firing a deterministic timeline step rather than a
-        wall-clock race (docs/time-coeffect.md).
+        clock does not advance on its own under `revl test`/replay (the
+        harness drives it, which is what makes a firing a deterministic
+        timeline step rather than a wall-clock race); `revl run`/`revl serve`
+        pump it from the wall (issue #3440, docs/time-coeffect.md).
 
         item 170: a timer body the checker coloured `async` (it reaches an
         async op — a req-target async service operation, an async extern, or a

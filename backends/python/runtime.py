@@ -8101,8 +8101,10 @@ class Stream:
 # `Clock.advance(ms)` — `revl test`/replay drives it — so a firing is a
 # deterministic step in the timeline (`fires on the 3rd tick`), never a race,
 # and the fault sweep (item 30) can inject "fail at the third firing". A
-# production driver would pump `advance` from a real monotonic source; the
-# reference tier keeps it explicit so tests are reproducible.
+# production driver pumps `advance` from a real monotonic source (issue #3440:
+# `pump_clock_from_wall` under `revl run`, `WallClockPump` under `revl serve`);
+# `revl test`/replay keeps the explicit harness-driven clock so tests are
+# reproducible.
 
 
 class TimerHandle:
@@ -8258,6 +8260,71 @@ def schedule_every(interval_ms: int, body: Callable[[], Any]) -> TimerHandle:
 def schedule_after(interval_ms: int, body: Callable[[], Any]) -> TimerHandle:
     """Arm a one-shot delayed timer against the clock coeffect (`after`)."""
     return TimerHandle("after", interval_ms, body)
+
+
+def _wall_elapsed_ms(anchor: float) -> int:
+    """Wall-clock milliseconds since `anchor`, mapped onto the logical clock's
+    unit (issue #3440)."""
+    return int((time.monotonic() - anchor) * 1000)
+
+
+async def pump_clock_from_wall(stop: "asyncio.Event", poll_s: float = 0.02) -> None:
+    """Drive :meth:`Clock.advance` from a real monotonic source (issue #3440).
+
+    Runs as a task on the composition's OWN event loop (`revl run`), so a
+    firing — sync inline, async spawned — happens on that loop exactly as a
+    test-driven `advance` does; the virtual clock of `revl test`/replay is
+    untouched because nothing here runs unless a host starts this task. Wall
+    time is mapped onto the logical clock by an anchor: each pass advances by
+    the wall-ms elapsed since the anchor minus what the clock already holds,
+    so a timer fires on its tick (`next_due`), not on a fixed slice.
+    """
+    anchor = time.monotonic()
+    while not stop.is_set():
+        elapsed_ms = _wall_elapsed_ms(anchor)
+        now = Clock.now()
+        if elapsed_ms > now:
+            Clock.advance(elapsed_ms - now)
+        due = Clock.next_due()
+        wait = poll_s if due is None else min(due / 1000.0, poll_s)
+        try:
+            await asyncio.wait_for(stop.wait(), wait)
+        except asyncio.TimeoutError:
+            pass
+
+
+class WallClockPump:
+    """Thread-based wall-clock driver for hosts whose event loop does not run
+    continuously (issue #3440, `revl serve`): a daemon thread maps
+    `time.monotonic()` onto :meth:`Clock.advance` until :meth:`stop`."""
+
+    def __init__(self, poll_s: float = 0.02) -> None:
+        self._poll_s = poll_s
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._anchor = 0.0
+
+    def start(self) -> "WallClockPump":
+        if self._thread is not None:
+            return self
+        self._anchor = time.monotonic()
+        self._thread = threading.Thread(target=self._run, name="revl-wall-clock",
+                                        daemon=True)
+        self._thread.start()
+        return self
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._poll_s):
+            elapsed_ms = _wall_elapsed_ms(self._anchor)
+            now = Clock.now()
+            if elapsed_ms > now:
+                Clock.advance(elapsed_ms - now)
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
 
 
 # ---------------------------------------------------------------------------

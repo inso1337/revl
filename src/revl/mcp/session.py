@@ -1768,6 +1768,9 @@ class Session:
         # `unload` and `estop_report` still work, and the way back is
         # `revl recover`, never a resume.
         self._halted = False
+        # issue #3440: the wall-clock timer pump a served session runs while
+        # loaded (None unless `start_wall_clock` armed it; stopped by `unload`)
+        self._wall_pump = None
         # item 524 (awaitable teardown): the single retained close attempt. An
         # async host that closes from its own running loop cannot drive the
         # session's synchronous `_run` (`run_until_complete` refuses to nest a
@@ -1875,6 +1878,27 @@ class Session:
     @property
     def loaded(self) -> bool:
         return self._driver is not None
+
+    def start_wall_clock(self) -> bool:
+        """Issue #3440: drive the timer clock from the wall while this session
+        is held served (`revl serve`). The pump is a daemon thread because a
+        served session's loop runs only per request; a sync timer body fires
+        on the pump thread, the same envelope a host thread already uses.
+        Tests keep the virtual clock: nothing calls this but a serve entry
+        point. Returns True when a pump was armed."""
+        driver = self._driver
+        pump_cls = getattr(getattr(driver, "runtime", None), "WallClockPump", None)
+        if pump_cls is None:
+            return False
+        self.stop_wall_clock()
+        self._wall_pump = pump_cls().start()
+        return True
+
+    def stop_wall_clock(self) -> None:
+        pump = self._wall_pump
+        if pump is not None:
+            self._wall_pump = None
+            pump.stop()
 
     def _require(self):
         if self._frozen:
@@ -6113,6 +6137,7 @@ class Session:
 
     @_one_turn
     def _reset(self) -> None:
+        self.stop_wall_clock()
         if self._driver is not None:
             self._driver.runtime.clear_session_owner()
         # item 330: drop the admit-crossing binding so a torn-down session is
