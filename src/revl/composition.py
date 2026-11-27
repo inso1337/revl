@@ -2722,6 +2722,31 @@ def configure_rows_from_host(document: dict, config: dict | None,
     return out
 
 
+def check_resulting_rows(document: dict, where: str = "<apply>") -> None:
+    """Re-check every row of an ALREADY-ASSEMBLED composition against the
+    declared config of the component it places in the SAME document (issue
+    #3534).
+
+    At admit time each row is checked against the document's own headers as
+    they are built. At apply the planner carries rows forward, so a
+    replacement component whose schema dropped or retyped a field would
+    otherwise start with the old row value and nothing would re-check it.
+    Each row's values are typed by the same `_check_config` a fresh row gets;
+    a value that no longer fits refuses naming the row, the field and the
+    declared type — before anything is torn down."""
+    rows = ((document or {}).get("rows") or {}).get("rows") or []
+    by_name = {c["name"]: c for c in (document or {}).get("components") or []}
+    for row in rows:
+        component = by_name.get(row.get("component"))
+        values = row.get("config") or {}
+        if component is None or not values:
+            continue
+        decl = RowDecl(label=row.get("label", "?"), path="", claims=[], line=1,
+                       component=row.get("component"),
+                       config=[(n, v, 1) for n, v in values.items()])
+        _check_config(decl, _IRHeader(component), where, row.get("source", "?"))
+
+
 def sole_composition(program: Program, path: str) -> CompositionDecl:
     """The one composition a document declares, or a refusal naming what it
     found instead."""
