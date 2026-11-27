@@ -425,9 +425,10 @@ before→after.
 **Tier status.** **py, typescript, rust, go and java** lower all four native
 (`char::is_ascii_*` on rust, a chained range compare or equality set on ts, go
 and java; go and java bind the receiver once in a func literal or lambda, so a
-side-effecting receiver is evaluated a single time). **wasm** still refuses
-them (`unsupported builtin method 'is_digit'`). A tier that later adopts them
-lowers to its own ASCII test.
+side-effecting receiver is evaluated a single time). **wasm** lowers all four
+through the demand-gated `$str_char_class` helper (one byte-length check plus
+the ASCII range/equality test, so an empty or multi-byte receiver is `false`,
+never a fault). A tier that later adopts them lowers to its own ASCII test.
 
 ### `Str.codepoint_at(i)`: codepoint-at-index scan (item 276)
 

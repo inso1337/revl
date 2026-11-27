@@ -3008,6 +3008,8 @@ class _ComponentEmitter:
                 lines.append(self.v3._helper_str_join())
             if "$str_of_code_point" in rendered:
                 lines.append(self.v3._helper_str_of_code_point())
+            if "$str_char_class" in rendered:
+                lines.append(self.v3._helper_str_char_class())
             # item 432(d): one `$str_concat<k>` per template arity actually
             # rendered, on the same demand-driven rule.
             for k in _concat_arities(rendered):
@@ -4230,6 +4232,40 @@ class _V3Emitter:
         (br $loop)))
     (i32.const 1))"""
 
+    def _helper_str_char_class(self) -> str:
+        # Single-character ASCII classification (item 233, docs/stdlib-2.0.md
+        # §Str.is_alnum): `$class` 0 = digit, 1 = alpha, 2 = alnum, 3 = space. The receiver
+        # must be exactly one ASCII byte (a multi-byte code point is in no
+        # class), so an empty or longer receiver answers 0 — false, never a
+        # fault, same as the hosted tiers' inline forms. Str and Bytes share
+        # the layout (u32 byte length at offset 0, payload at offset 4), so one
+        # helper serves both.
+        return """  (func $str_char_class (param $s i32) (param $class i32) (result i32)
+    (local $len i32) (local $b i32)
+    (local.set $len (i32.load (local.get $s)))
+    (if (i32.ne (local.get $len) (i32.const 1))
+      (then (return (i32.const 0))))
+    (local.set $b (i32.load8_u (i32.add (local.get $s) (i32.const 4))))
+    (if (i32.eq (local.get $class) (i32.const 0))
+      (then (return (i32.and (i32.ge_u (local.get $b) (i32.const 48))
+                             (i32.le_u (local.get $b) (i32.const 57))))))
+    (if (i32.eq (local.get $class) (i32.const 1))
+      (then (return (i32.or (i32.and (i32.ge_u (local.get $b) (i32.const 97))
+                                     (i32.le_u (local.get $b) (i32.const 122)))
+                            (i32.and (i32.ge_u (local.get $b) (i32.const 65))
+                                     (i32.le_u (local.get $b) (i32.const 90)))))))
+    (if (i32.eq (local.get $class) (i32.const 3))
+      (then (return (i32.or (i32.or (i32.eq (local.get $b) (i32.const 9))
+                                    (i32.eq (local.get $b) (i32.const 10)))
+                            (i32.or (i32.eq (local.get $b) (i32.const 13))
+                                    (i32.eq (local.get $b) (i32.const 32)))))))
+    (i32.or (i32.and (i32.ge_u (local.get $b) (i32.const 48))
+                     (i32.le_u (local.get $b) (i32.const 57)))
+            (i32.or (i32.and (i32.ge_u (local.get $b) (i32.const 97))
+                             (i32.le_u (local.get $b) (i32.const 122)))
+                    (i32.and (i32.ge_u (local.get $b) (i32.const 65))
+                             (i32.le_u (local.get $b) (i32.const 90))))))"""
+
 
     # -- checked arithmetic ---------------------------------------------------
     #
@@ -5331,6 +5367,12 @@ class _V3Emitter:
             raise EmitError(
                 f"`{method}` is not lowerable on this tier yet — the Map value "
                 f"type has no representation here; use a hosted backend")
+        # Single-character ASCII classifiers (item 233): Bool on Str/Bytes.
+        if method in ("is_digit", "is_alpha", "is_alnum", "is_space"):
+            if target_ty not in ("Str", "Bytes"):
+                raise EmitError(
+                    f"{method} is only lowerable on Str/Bytes values")
+            return "Bool"
         raise EmitError(f"unsupported builtin method {method!r}")
 
     def _record_type(self, node: dict, scope: _Scope, expected: str | None) -> str:
@@ -5972,6 +6014,18 @@ class _V3Emitter:
             arg = self._expr(args[0], scope, where, "Int")
             helper = "$str_cp_char_code_at" if target_ty == "Str" else "$str_char_code_at"
             return _E(f"{target.wat}\n      {arg.wat}\n      (call {helper})", "Int")
+        # Single-character ASCII classifiers (item 233, docs/stdlib-2.0.md
+        # §Str.is_alnum), the same per-character contract the py/ts/go/java
+        # tiers lower inline: exactly one ASCII code point in the class; an
+        # empty or multi-code-point receiver is false, never a fault.
+        if method in ("is_digit", "is_alpha", "is_alnum", "is_space"):
+            if target_ty not in ("Str", "Bytes"):
+                raise EmitError(
+                    f"{where}: {method} is only lowerable on Str/Bytes values")
+            target = self._expr(target_node, scope, where, target_ty)
+            cls = {"is_digit": 0, "is_alpha": 1, "is_alnum": 2, "is_space": 3}[method]
+            return _E(f"{target.wat}\n      (i32.const {cls})\n      "
+                      f"(call $str_char_class)", "Bool")
         if method in ("div_trunc", "div_floor", "div_euclid", "mod"):
             # Integer division and modulo (docs/arithmetic.md). i64.div_s
             # already truncates; the other three go through helpers so every
@@ -7006,6 +7060,8 @@ class _V3Emitter:
         uses_join = any("$str_join" in block for block in all_blocks)
         uses_code_point = any("$str_of_code_point" in block
                               for block in all_blocks)
+        uses_char_class = any("$str_char_class" in block
+                              for block in all_blocks)
 
         # tests call the same helpers their functions do ($str_eq, $alloc_str,
         # …), so a document whose bodies are all `test` blocks still needs them
@@ -7029,6 +7085,8 @@ class _V3Emitter:
                 lines.append(self._helper_str_join())
             if uses_code_point:
                 lines.append(self._helper_str_of_code_point())
+            if uses_char_class:
+                lines.append(self._helper_str_char_class())
             # item 432(d): one `$str_concat<k>` per template arity actually
             # rendered, on the same demand-driven rule as the readers above.
             for k in _concat_arities("\n".join(all_blocks)):
