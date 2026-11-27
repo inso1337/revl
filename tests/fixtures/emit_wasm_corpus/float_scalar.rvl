@@ -1,0 +1,27 @@
+// Native f64 values and mixed-width numeric operations (issue #3425).
+fn ratio(a: Int, b: Int) -> Float {
+  let quotient = a / b
+  return quotient
+}
+fn narrow_ratio(a: Int32, b: Int32) -> Float { return a / b }
+fn arithmetic(x: Float, y: Int) -> Float {
+  var r = x + y
+  r = r * x
+  let negated = -(r - y)
+  return negated / x
+}
+fn modulus(x: Float, y: Float) -> Float { return x % y }
+fn widen_int(x: Int) -> Float {
+  let widened: Float = x
+  return widened
+}
+fn widen_narrow(x: Int32) -> Float { return x }
+fn literals(b: Bool) -> Float { return b ? 0.1 : -0.0 }
+fn compare(x: Float, y: Int) -> Bool {
+  return x > y && x >= y && x != y && x !== y
+}
+fn compare_other(x: Float, y: Float) -> Bool {
+  return x < y || x <= y || x == y || x === y
+}
+fn called(x: Int) -> Float { return arithmetic(widen_int(x), x) }
+fn signed_remainder(a: Int, b: Int) -> Int { return a % b }

@@ -1,0 +1,21 @@
+// Preserve a Float's IEEE-754 bit pattern through the existing 8-byte slots.
+type Sample = { value: Float }
+fn record_roundtrip(x: Float) -> Float {
+  let sample: Sample = { value: x }
+  return sample.value
+}
+fn list_roundtrip(x: Float) -> Float {
+  let xs: List[Float] = [x]
+  return xs[0]
+}
+fn push_roundtrip(x: Float) -> Float {
+  let xs: List[Float] = [1.0]
+  let ys = xs.push(x)
+  return ys[1]
+}
+fn sum_samples(x: Float, y: Float) -> Float {
+  let xs = [x, y]
+  var total = 0.0
+  for (v of xs) { total = total + v }
+  return total
+}

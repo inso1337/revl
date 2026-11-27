@@ -1,0 +1,18 @@
+// Float formatting shares one native helper with interpolation.
+fn render(x: Float) -> Str { return x.to_str() }
+fn single(x: Float) -> Str { return `${x}` }
+fn prefixed(x: Float) -> Str { return `x=${x}` }
+fn mixed(x: Float, n: Int) -> Str {
+  let s = "sample"
+  let message = `${s}:${x}/${n}`
+  return message
+}
+fn long(x: Float) -> Str { return `a${x}b${x}c${x}d${x}e${x}f` }
+fn utf8(x: Float) -> Str { return `θ=${x} µs 🌡` }
+fn nested(x: Float) -> Str { return `v=${[[x]][0][0]}` }
+fn blank() -> Str { return "" }
+fn empty_template() -> Str { return `` }
+fn text_only() -> Str { return `sample` }
+fn mod_format(x: Float, y: Float) -> Str { return `r=${x % y}!` }
+fn same_arity(x: Float) -> Str { return `[${x}]` }
+fn unicode_literal() -> Str { return "é" }

@@ -14,7 +14,7 @@ wasm is the HARDEST tier — WAT is S-expressions, ``Int`` is i64 while every
 address is i32, and even a one-line function drags in the whole ~430-line
 linear-memory + checked-arithmetic helper preamble (``_helper_funcs``). The
 byte-reproducible corner this slice mirrors is a FUNCTION-ONLY v3 document over
-the SCALAR value ABI (Int / Int32 / Bool), which is the corner of the
+the SCALAR value ABI (Int / Int32 / Bool / Float), which is the corner of the
 reference's ``_V3Emitter.emit`` -> ``_emit_function`` -> ``_emit_stmts`` /
 ``_expr`` that needs NO data segments (``heap_start`` stays 0) and NONE of the
 demand-driven helpers ($f64_to_str / $str_index_of / $str_split / $str_join):
@@ -32,19 +32,15 @@ Covered subset (what emits byte-identical):
     local), return, if/else, while, the bare-expr ``(drop)``, and assert;
   * ``_expr`` — lit (Int ``i64.const`` / Bool ``i32.const``), var (the
     param/local slot), bin (the checked ``$int_add``/``$int_sub``/``$int_mul``
-    and their ``$int32_*`` twins, ``%`` as ``i64.rem_s``, ``/`` REFUSED by name
-    because it yields ``Float`` (issue #2201), the i64/i32 comparisons,
+    and their ``$int32_*`` twins, integer remainder, native f64 true division,
+    arithmetic and comparisons, the i64/i32 comparisons,
     ``&&``/``||`` as ``i32.and``/``i32.or``), un (``!`` as ``i32.eqz``, ``-`` as
     a checked subtract-from-zero).
 
-Deliberately OUT (excluded from the corpus, deferred to wasm Path B slice 2+):
+Initially OUT (excluded from the first corpus, deferred to later Path B slices):
 any value that touches linear memory (Str, List, records, tagged Opt/Result/user
 variants — string literals pool into ``data`` and move ``heap_start``, and each
-value threads ``$alloc``/``_str_ptr``/the nested scratch-pointer stack); Float
-end to end (the REFERENCE lowers it as a native f64 since issue #3295, but this
-port's scalar slice still names ``/`` as ``<<UNSUPPORTED-TRUE-DIVISION:Float>>``
-and carries no ``f64`` lowerings: a named port gap, not a reference refusal; a
-``${aFloat}`` part also pulls in ``$f64_to_str``); every
+value threads ``$alloc``/``_str_ptr``/the nested scratch-pointer stack); every
 ``builtin``/``len`` node
 (``.to_int()`` widening is a ``builtin``, not a bare ``widen`` marker) and the
 ``for`` loop (a memory walk); components/services entirely; ``match``/``adt`` over
@@ -57,7 +53,7 @@ and record VALUES in linear memory — ``$alloc``, the ``[u32 count][slot…]`` 
 declared-order-field-slot layouts, ``_slot_store`` widening, the nesting-depth
 scratch pointer (``_acquire_tmp`` -> ``__revl_tmp`` / ``__revl_tmp_n1`` …, with
 ``_tmp_extra`` reconstructed from the max allocation depth), and the
-``_type_comments`` layout block. Elements/fields are scalars or ASCII ``Str``
+``_type_comments`` layout block. Elements/fields are scalars or ``Str``
 literals.
 
 Slice 4 adds the READ and tagged-CONSTRUCTION surface: ``reads.rvl`` the field
@@ -73,12 +69,14 @@ whose helpers all live in the always-emitted preamble (``length``, the
 ``Str.to_int``, and ``push``/``concat``/``slice``/``charAt``/``charCodeAt``/
 ``startsWith``/``endsWith`` over Str and List).
 
-Still OUT after slice 4: non-ASCII ``Str`` content (needs item 221's
-``str_utf8_bytes``); READING a tagged cell — ``match`` and ``??`` (their
-scrutinee/arm-bind locals and payload branches carry their own header ordering);
-the demand-pulled reader helpers ``indexOf``/``split``/``join`` and Float
-interpolation (``$str_index_of``/``$str_split``/``$str_join``/``$f64_to_str`` are
-not in the fixed preamble); the checked-division total forms (their per-node
+Issue #3425 adds native Float values (float_scalar.rvl and float_slots.rvl),
+Float.to_str and interpolation with demand-pulled helpers (float_format.rvl
+and wasm_true_division_port_gap.rvl), and UTF-8 literal pooling. This mirrors
+the reference's formatting fence rather than implementing a new converter.
+
+Still OUT: READING a tagged cell — ``match`` and ``??`` (their scrutinee/arm-bind
+locals and payload branches carry their own header ordering); the demand-pulled
+reader helpers ``indexOf``/``split``/``join``; the checked-division total forms (their per-node
 ``cdiv_*`` Int scratch locals); the ``Map`` value type (a named refusal);
 components/services; arrow values; ``@wasm`` externs; anonymous records reached
 with no expected type (the ``_anon`` counter path); and in-file ``test``/
@@ -108,6 +106,10 @@ CORPUS = [
                              # `str_concat` beside the helpers of those names
     "scratch_names.rvl",
     "widening.rvl",
+    "float_scalar.rvl",  # native f64 scalar values (issue #3425)
+    "float_slots.rvl",   # lossless Float record/list slots
+    "float_format.rvl",  # conversion and interpolation (including UTF-8)
+    "../wasm_true_division_port_gap.rvl",  # original #3425 witness
     "../emit_py_corpus/checked_arith.rvl",  # total checked_add/sub/mul (docs/arithmetic.md)
     "residuals.rvl",
     "folding.rvl",
@@ -245,7 +247,8 @@ def test_selfhosted_emitter_output_scaffold(emitted):
 
 @pytest.mark.parametrize("rel", [
     "widening.rvl", "folding.rvl", "variants.rvl", "scratch_names.rvl", "residuals.rvl",
-    "shortcircuit.rvl", "helper_named_fns.rvl",
+    "shortcircuit.rvl", "helper_named_fns.rvl", "float_scalar.rvl", "float_slots.rvl",
+    "float_format.rvl", "../wasm_true_division_port_gap.rvl",
 ])
 def test_supported_corpus_compiles_as_wasm(emitted, reference, tmp_path, rel):
     compiler = shutil.which("wat2wasm")
@@ -261,6 +264,48 @@ def test_supported_corpus_compiles_as_wasm(emitted, reference, tmp_path, rel):
             capture_output=True, text=True, timeout=30,
         )
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("rel", ["float_scalar.rvl", "float_slots.rvl"])
+def test_native_float_executes_on_wasmtime(emitted, reference, rel):
+    """Execute both byte-oracle sides, including IEEE special values."""
+    import math
+    import struct
+
+    wasmtime = pytest.importorskip("wasmtime")
+    ir = compile_files([str(CORPUS_DIR / rel)])
+    for wat in (reference.emit(ir)["functions"], emitted["emit_wasm_src"](ir)):
+        engine = wasmtime.Engine()
+        store = wasmtime.Store(engine)
+        instance = wasmtime.Instance(store, wasmtime.Module(engine, wat), [])
+        exports = instance.exports(store)
+
+        def call(name, *args):
+            return exports[name](store, *args)
+
+        if rel == "float_scalar.rvl":
+            assert call("ratio", 7, 2) == 3.5
+            assert call("ratio", -7, 2) == -3.5
+            assert call("ratio", 1, 4) == 0.25
+            assert call("ratio", 7, 0) == math.inf
+            assert math.isnan(call("ratio", 0, 0))
+            assert call("narrow_ratio", -7, 2) == -3.5
+            assert call("arithmetic", 2.5, 3) == -4.3
+            assert call("modulus", -7.5, 2.0) == -1.5
+            assert math.isnan(call("modulus", 1.0, 0.0))
+            assert call("widen_int", 9007199254740993) == 9007199254740992.0
+            assert call("widen_narrow", -2147483648) == -2147483648.0
+            assert call("literals", 1) == 0.1
+            assert math.copysign(1.0, call("literals", 0)) == -1.0
+            assert call("compare", 2.0, 1) == 1
+            assert call("compare", math.nan, 1) == 0
+            assert call("compare_other", -0.0, 0.0) == 1
+            assert call("signed_remainder", -7, 2) == -1
+        else:
+            for name in ("record_roundtrip", "list_roundtrip", "push_roundtrip"):
+                for value in (-0.0, 0.1, math.inf, -math.inf, 5e-324):
+                    assert struct.pack(">d", call(name, value)) == struct.pack(">d", value)
+            assert call("sum_samples", 1.25, 3.5) == 4.75
 
 
 def test_nested_scratch_names_sort_lexically(emitted, reference, tmp_path):
@@ -331,17 +376,10 @@ def test_an_untyped_empty_list_is_named(emitted, reference):
                  "(func $str_join", "<<UNSUPPORTED-BUILTIN:join>>", id="demand-join"),
     pytest.param("fn f(n: Int) -> Str { return n.to_char() }",
                  "(func $str_of_code_point", "<<UNSUPPORTED-BUILTIN:to_char>>", id="demand-to-char"),
-    pytest.param("fn f(x: Int) -> Str { return `n=${x}` }",
-                 "(call $str_concat)", "<<UNSUPPORTED-EXPR:interp>>", id="interpolation"),
     pytest.param("fn f(a: Int, b: Int) -> Result[Int, Str] { return a.checked_div_trunc(b) }",
                  "cdiv_", "<<UNSUPPORTED-BUILTIN:checked_div_trunc>>", id="checked-division"),
     pytest.param("fn f(n: Int) -> Int { let add = (x: Int) => x + 1; return add(n) }",
                  "$f", "<<UNSUPPORTED-EXPR:arrow>>", id="inline-arrow"),
-    # `(data` opens the segment on BOTH sides -- what diverges is its bytes:
-    # the reference pools the UTF-8 encoding of `\u00e9` (2 bytes, length 2),
-    # the port pools the code point as one byte. Pin the port's segment.
-    pytest.param('fn f() -> Str { return "\u00e9" }',
-                 "\\c3\\a9", '"\\01\\00\\00\\00\\e9"', id="utf8-string-pool"),
     # `;; Generated` is the banner both sides write. The port-only text is at
     # the CALL: an `@wasm`-bodied extern is never registered as a function by
     # the port, so `render_direct_call` refuses the call by name while the
@@ -498,37 +536,101 @@ def test_a_ui_transaction_unit_is_refused_by_name_on_both_sides(emitted, referen
 TRUE_DIVISION = ROOT / "tests" / "fixtures" / "wasm_true_division_port_gap.rvl"
 
 
-def test_true_division_lowers_on_the_reference_but_is_a_named_port_gap(
-        emitted, reference):
-    """`/` yields `Float`; the reference lowers it, the port has not caught up.
-
-    The language types `Int / Int` as `Float` -- `7 / 2` is 3.5, not 3. The
-    REFERENCE emitter lowers `/` to `f64.div` over converted operands since
-    Float became a native f64 value (issue #3295, docs/wasm-capabilities.md).
-    The revl port in `selfhost/emit_wasm.rvl` still carries only the scalar
-    Int/Bool subset and names `/` as `<<UNSUPPORTED-TRUE-DIVISION:Float>>`, so
-    this document is a named PORT gap (issue #3425), not a reference refusal; it is not a
-    byte-agreement case and stays out of CORPUS.
-
-    The pinned reference facts are the ones that keep the fix honest: `/` is
-    `f64.div`, never `i64.div_s` (the pre-#2201 silent `3`), and an integer
-    `%` still lowers to `i64.rem_s`.
-    """
+def test_true_division_and_float_interpolation_are_byte_identical(emitted, reference):
+    """The original #3425 witness now belongs to the byte oracle."""
     ir = compile_files([str(TRUE_DIVISION)])
-    modules = reference.emit(ir)
-    joined = "\n".join(v for v in modules.values() if isinstance(v, str))
-    assert "(f64.div)" in joined, joined
-    assert "(i64.div_s" not in joined, (
-        "`/` went back to the silent integer quotient: it must be f64 division")
-    remainder = reference.emit(compile_source(
-        "fn rem(a: Int, b: Int) -> Int { return a % b }"))["functions"]
-    assert "(i64.rem_s)" in remainder, (
-        "integer `%` must stay the trapping i64.rem_s, not move to f64 with `/`")
+    want = reference.emit(ir)["functions"]
     got = emitted["emit_wasm_src"](ir)
-    assert [line.strip() for line in got.splitlines() if "<<" in line] == [
-        "<<UNSUPPORTED-TRUE-DIVISION:Float>>",
-        "<<UNSUPPORTED-EXPR:interp>>",
-    ], "the port names the gap rather than answering with a wrong module"
+    assert got == want
+    assert "(f64.div)" in got
+    assert "(i64.div_s" not in got
+    assert "(call $f64_to_str)" in got
+    assert "<<" not in got
+    remainder = compile_source("fn rem(a: Int, b: Int) -> Int { return a % b }")
+    assert "(i64.rem_s)" in emitted["emit_wasm_src"](remainder)
+
+
+def test_int_only_template_does_not_pull_float_helpers(emitted, reference):
+    ir = compile_source('fn f(x: Int) -> Str { return `n=${x}!` }')
+    got = emitted["emit_wasm_src"](ir)
+    assert got == reference.emit(ir)["functions"]
+    assert "(func $str_concat3" in got
+    assert "$f64_to_str" not in got
+    assert "$f64_mod" not in got
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+def test_nonfinite_float_literal_is_named(emitted, reference, value):
+    # The source checker excludes these values, but callers can hand IR
+    # directly to either emitter. Keep the reference's rejection explicit.
+    ir = compile_source("fn f() -> Float { return 1.0 }")
+    ir["functions"][0]["body"][0]["expr"]["value"] = value
+    with pytest.raises(reference.EmitError, match="non-finite Float literal"):
+        reference.emit(ir)
+    assert "<<UNSUPPORTED-FLOAT-LITERAL>>" in emitted["emit_wasm_src"](ir)
+
+
+def test_bool_interpolation_remains_a_named_refusal(emitted, reference):
+    ir = compile_files([str(ROOT / "tests" / "fixtures" / "emit_wasm_refusals" / "bool_interpolation.rvl")])
+    with pytest.raises(reference.EmitError, match="template interpolates"):
+        reference.emit(ir)
+    assert "<<UNSUPPORTED-INTERP:Bool>>" in emitted["emit_wasm_src"](ir)
+
+
+def test_empty_template_without_a_pooled_empty_string_is_named(emitted, reference):
+    ir = compile_files([str(ROOT / "tests" / "fixtures" / "emit_wasm_refusals" / "empty_template.rvl")])
+    with pytest.raises(reference.EmitError, match="was not pooled"):
+        reference.emit(ir)
+    assert "<<UNSUPPORTED-INTERP:unpooled-empty>>" in emitted["emit_wasm_src"](ir)
+
+
+@pytest.mark.parametrize("rel", ["float_format.rvl", "../wasm_true_division_port_gap.rvl"])
+def test_float_formatting_executes_on_wasmtime(emitted, reference, rel):
+    """Check actual string bytes and the reference's documented trap fence."""
+    import math
+
+    wasmtime = pytest.importorskip("wasmtime")
+    ir = compile_files([str(CORPUS_DIR / rel)])
+    for wat in (reference.emit(ir)["functions"], emitted["emit_wasm_src"](ir)):
+        engine = wasmtime.Engine()
+        store = wasmtime.Store(engine)
+        instance = wasmtime.Instance(store, wasmtime.Module(engine, wat), [])
+        exports = instance.exports(store)
+        memory = exports["memory"]
+
+        def call(name, *args):
+            ptr = exports[name](store, *args)
+            size = int.from_bytes(memory.read(store, ptr, ptr + 4), "little")
+            return memory.read(store, ptr + 4, ptr + 4 + size).decode("utf-8")
+
+        if rel == "float_format.rvl":
+            for value, expected in [
+                (0.0, "0"), (-0.0, "0"), (42.0, "42"), (-42.0, "-42"),
+                (float(2**62), str(2**62)), (math.nan, "NaN"),
+                (math.inf, "Infinity"), (-math.inf, "-Infinity"),
+            ]:
+                assert call("render", value) == expected
+                assert call("single", value) == expected
+                assert call("prefixed", value) == "x=" + expected
+            assert call("mixed", 3.0, -4) == "sample:3/-4"
+            assert call("long", 2.0) == "a2b2c2d2e2f"
+            assert call("utf8", 42.0) == "θ=42 µs 🌡"
+            assert call("nested", 8.0) == "v=8"
+            assert call("mod_format", 7.0, 2.0) == "r=1!"
+            assert call("same_arity", 5.0) == "[5]"
+            assert call("blank") == call("empty_template") == ""
+            assert call("text_only") == "sample"
+            assert call("unicode_literal") == "é"
+            for value in (3.5, -0.125, float(2**63), -float(2**63)):
+                for name in ("render", "single", "prefixed"):
+                    with pytest.raises(wasmtime.Trap):
+                        call(name, value)
+        else:
+            assert call("half", 8, 2) == "4"
+            assert call("half", 7, 0) == "Infinity"
+            assert call("half", 0, 0) == "NaN"
+            with pytest.raises(wasmtime.Trap):
+                call("half", 7, 2)
 
 
 @pytest.mark.parametrize("source, reason", [

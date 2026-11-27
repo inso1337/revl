@@ -287,14 +287,8 @@
   },
   "wasm": {
     "blind": {
-      "Issue #3295: the WASM reference lowers `/` as f64.div, since Float is a native f64 and `/` yields Float even over two Ints. selfhost/emit_wasm.rvl has no f64 lowering and names `/` as <<UNSUPPORTED-TRUE-DIVISION:Float>> in `render_bin`, a named port gap tracked by issue #3425. No CORPUS document can reach either arm, because a corpus document is a byte-agreement case and the port cannot agree on f64 output: `ratio` in tests/fixtures/wasm_true_division_port_gap.rvl is the one document in the tree that reaches both, and tests/test_selfhost_emit_wasm.py::test_true_division_lowers_on_the_reference_but_is_a_named_port_gap pins f64.div on the reference and the named gap on the port. `%` stays covered by arith.rvl.": [
-        "op=/"
-      ],
       "Tagged reads are explicitly deferred: coalescing and match require tag/payload loads and arm binding. WASM tagged construction is covered; it does not implement the match wildcard/Any-payload inference paths.": [
         "op=??"
-      ],
-      "The WASM reference lowers Float operands as native f64 instructions since issue #3295, but selfhost/emit_wasm.rvl has no f64 lowering at all (issue #3425), so a Float-operand document is a named port gap rather than a byte-agreement case and no CORPUS document can reach this marker until the port learns f64. Named integer division builtins are a separate covered family.": [
-        "operands=Float"
       ],
       "parser._CANONICAL_OPS rewrites source ===/!== to ==/!= before typed IR. Compatibility aliases remain in cmp_suffix, but canonical source equality already exercises ==/!=.": [
         "op=!==",
@@ -308,14 +302,6 @@
       ],
       "Internal pre-lowered WAT node injected by _ComponentEmitter._to_v3/_delegate, not a frontend source construct. Pure modules render source expressions directly and never enter this component bridge.": [
         "kind=__wat"
-      ],
-      "Interpolation and indexOf/join/split/to_char demand helper bodies absent from the selfhost preamble and are explicit oracle deferrals. Component format is the older $0-template encoding rewritten to interp; ordinary binary Str concatenation is covered.": [
-        "kind=format",
-        "kind=interp",
-        "method=indexOf",
-        "method=join",
-        "method=split",
-        "method=to_char"
       ],
       "Issue #1979 (with #1369 item 522 slice 3): `_refuse_ui_transaction_units` reads the computer-use transaction units the frontend computes and refuses the whole document by name \u2014 this tier's method-time compensation is component-instance state drained by `deactivate` (session granularity), never at the unit boundary the frontend computes \u2014 while skipping the activation-scoped plan (`key=<activation>`, which the activation frame settles itself). No wasm corpus document can carry it: a computer-use document is REFUSED rather than emitted, which is exactly what tests/fixtures/emit_wasm_refusals/ui_transaction_unit.rvl records. The runtime proof is tests/test_selfhost_emit_wasm.py::test_a_ui_transaction_unit_is_refused_by_name_on_both_sides.": [
         "key=<activation>"
@@ -359,9 +345,6 @@
         "method=set",
         "method=size"
       ],
-      "Float is a native f64 on the WASM reference since issue #3295, which lowers an Int or Int32 to Float widening as f64.convert_i64_s or f64.convert_i32_s. selfhost/emit_wasm.rvl still carries only the scalar Int/Bool slice with no f64 lowering at all (issue #3425; it names `/` as <<UNSUPPORTED-TRUE-DIVISION:Float>>), so a Float document is a named port gap rather than a byte-agreement case and no CORPUS document can reach this marker until the port learns f64.": [
-        "widen=Float"
-      ],
       "Tagged reads are explicitly deferred: coalescing and match require tag/payload loads and arm binding. WASM tagged construction is covered; it does not implement the match wildcard/Any-payload inference paths.": [
         "kind=match",
         "pattern=_",
@@ -371,6 +354,13 @@
         "kind=optcall",
         "kind=optfield",
         "kind=record_update"
+      ],
+      "The indexOf/join/split/to_char demand helper bodies remain explicitly deferred. Component format is the older $0-template encoding; pure v3 interpolation is now covered.": [
+        "kind=format",
+        "method=indexOf",
+        "method=join",
+        "method=split",
+        "method=to_char"
       ],
       "The reference's pre-emission _refuse_holes pass rejects unresolved holes; accepted source corpus documents contain no hole emission.": [
         "kind=hole"
