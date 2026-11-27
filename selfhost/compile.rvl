@@ -89,6 +89,7 @@
 // One line: the self-host program grammar reads a `use` by its first line.
 use "./lower.rvl" { admit_src, admit_ambient, lower_to_ir, lower_to_ir_refs, lower_to_ir_refs_at, parse_prog, parse_refusal }
 use "./lexer.rvl" { Token, lex_src, mk_tok }
+use "./lower.rvl" { admit_src, admit_ambient, lower_to_ir, lower_to_ir_refs, lower_to_ir_refs_at, parse_prog, parse_refusal }
 use "./emit_py.rvl" { emit_py_src }
 use "./emit_rust.rvl" { emit_rust_src }
 use "./emit_ts.rvl" { emit_ts_src }
@@ -3142,6 +3143,9 @@ pub fn compile_to_at(source: Str, tier: Str, path: Str) -> Str {
   // `path` is empty only because there is no module set to resolve.
   let doc = path == "" ? "<string>" : display_path(path)
   let alone = lower_to_ir_refs_at(source, doc, rf_ref_rows(source, path))
+  // issue #3499: the producer takes the document's path, so an assert step's
+  // `file` key is the same name the reference's `compile_files` stamps.
+  let alone = lower_to_ir_refs_at(source, path, rf_ref_rows(source, path))
   let named = ul_rename_apart(source, path, alone)
   // Issue #2450: the carried declarations are not only an ADMISSION input. A
   // document the gate admits on its own read can still BUILD a carried variant
@@ -3171,7 +3175,7 @@ pub fn compile_to_at(source: Str, tier: Str, path: Str) -> Str {
   if (carried.refusal != "") { return "REFUSED|".concat(ad_priv_rewrite(carried.refusal, priv)) }
   let pre = carried.names.length() > 0 ? carried.names : full.names
   let lowered = carried.names.length() > 0 ? full.text : named
-  let own = lowered == source ? alone : lower_to_ir_refs_at(lowered, doc, rf_ref_rows(lowered, path))
+  let own = lowered == source ? alone : lower_to_ir_refs_at_at(lowered, doc, path, rf_ref_rows(lowered, path))
   let linked = ul_link_externs(ul_link_uses(own, source, path), source, path)
   if (linked.refusal != "") { return "REFUSED|".concat(linked.refusal) }
   // Issue #2308: then the types every imported service carries.

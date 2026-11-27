@@ -31,6 +31,7 @@ each tier whose covered slice takes it.
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import sys
 import types
@@ -173,7 +174,14 @@ def reference():
 
 @pytest.fixture(scope="module")
 def native():
-    return _exec_stage("selfhost/compile.rvl")
+    ns = _exec_stage("selfhost/compile.rvl")
+    # The reference's parse_file stamps a file's CWD-relative spelling
+    # (src/revl/parser.py's `relpath_or_abs`), and an assert step's `file` key
+    # (issue #3499) reaches the py output verbatim, so the native driver's
+    # `path` argument is handed the same spelling here.
+    native_at = ns["compile_to_at"]
+    ns["compile_to_at"] = lambda s, t, p: native_at(s, t, os.path.relpath(p) if p else p)
+    return ns
 
 
 def _source_ir(source: str):
