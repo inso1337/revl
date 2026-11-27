@@ -31013,22 +31013,134 @@ fn ir_caps_json(cs: &[String]) -> String {
     return out;
 }
 
-fn src_text(src: &str, src_revl_cs: &[char]) -> SrcText {
+fn src_text(src: &str) -> SrcText {
     let mut lines: Vec<String> = vec![];
     let mut start = 0i64;
     let mut i = 0i64;
     let mut nl = String::from("");
-    while (i < (src_revl_cs.len() as i64)) {
-        if ({ ({ src_revl_cs[(i) as usize].to_string() }).chars().nth((0i64) as usize).unwrap() as u32 as i64 } == 10i64) {
+    while (i < src.revl_length()) {
+        if ({ ({ src.chars().nth((i) as usize).unwrap().to_string() }).chars().nth((0i64) as usize).unwrap() as u32 as i64 } == 10i64) {
             if (nl == "") {
-                nl = { src_revl_cs[(i) as usize].to_string() };
+                nl = { src.chars().nth((i) as usize).unwrap().to_string() };
             }
-            lines.push({ let _rsn = src_revl_cs.len() as i64; let _rsa = { let x = (start) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = (i) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; src_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() });
+            lines.push(src.revl_slice(start, i));
             start = (i).checked_add(1i64).expect("revl: Int overflow");
         }
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
-    return SrcText { lines: lines.revl_push({ let _rsn = src_revl_cs.len() as i64; let _rsa = { let x = (start) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = ((src_revl_cs.len() as i64)) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; src_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() }), nl: nl };
+    return SrcText { lines: lines.revl_push(src.revl_slice(start, src.revl_length())), nl: nl };
+}
+
+fn asrc_ws_cc(cc: i64) -> bool {
+    return ((((((cc == 32i64) || (cc == 9i64)) || (cc == 10i64)) || (cc == 13i64)) || (cc == 11i64)) || (cc == 12i64));
+}
+
+fn asrc_word_cc(cc: i64) -> bool {
+    return (((((cc >= 65i64) && (cc <= 90i64)) || ((cc >= 97i64) && (cc <= 122i64))) || ((cc >= 48i64) && (cc <= 57i64))) || (cc == 95i64));
+}
+
+fn asrc_word_at(line: &str) -> i64 {
+    let mut i = 0i64;
+    while ((i).checked_add(6i64).expect("revl: Int overflow") <= line.revl_length()) {
+        if (line.revl_slice(i, (i).checked_add(6i64).expect("revl: Int overflow")) == "assert") {
+            let b = if (i == 0i64) { 32i64 } else { { ({ line.chars().nth(((i).checked_sub(1i64).expect("revl: Int overflow")) as usize).unwrap().to_string() }).chars().nth((0i64) as usize).unwrap() as u32 as i64 } };
+            let a = if ((i).checked_add(6i64).expect("revl: Int overflow") >= line.revl_length()) { 32i64 } else { { ({ line.chars().nth(((i).checked_add(6i64).expect("revl: Int overflow")) as usize).unwrap().to_string() }).chars().nth((0i64) as usize).unwrap() as u32 as i64 } };
+            if ((!asrc_word_cc(b)) && (!asrc_word_cc(a))) {
+                return i;
+            }
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return (0i64).checked_sub(1i64).expect("revl: Int overflow");
+}
+
+fn asrc_collapse(s: &str) -> String {
+    let mut out = String::from("");
+    let mut word = String::from("");
+    let mut i = 0i64;
+    while (i < s.revl_length()) {
+        let cc = { ({ s.chars().nth((i) as usize).unwrap().to_string() }).chars().nth((0i64) as usize).unwrap() as u32 as i64 };
+        if asrc_ws_cc(cc) {
+            if (word != "") {
+                out = if (out == "") { word.clone() } else { (out.revl_concat(" ")).revl_concat(&word) };
+                word = String::from("");
+            }
+        } else {
+            word.push_str(&({ s.chars().nth((i) as usize).unwrap().to_string() }));
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    if (word != "") {
+        out = if (out == "") { word.clone() } else { (out.revl_concat(" ")).revl_concat(&word) };
+    }
+    return out;
+}
+
+fn asrc_rstrip_ch(s: &str, ch: &str) -> String {
+    let mut e = s.revl_length();
+    while ((e > 0i64) && ({ s.chars().nth(((e).checked_sub(1i64).expect("revl: Int overflow")) as usize).unwrap().to_string() } == ch)) {
+        e = (e).checked_sub(1i64).expect("revl: Int overflow");
+    }
+    return s.revl_slice(0i64, e);
+}
+
+fn asrc_rstrip_ws(s: &str) -> String {
+    let mut e = s.revl_length();
+    while ((e > 0i64) && asrc_ws_cc({ ({ s.chars().nth(((e).checked_sub(1i64).expect("revl: Int overflow")) as usize).unwrap().to_string() }).chars().nth((0i64) as usize).unwrap() as u32 as i64 })) {
+        e = (e).checked_sub(1i64).expect("revl: Int overflow");
+    }
+    return s.revl_slice(0i64, e);
+}
+
+fn asrc_count(s: &str, ch: &str) -> i64 {
+    let mut n = 0i64;
+    let mut i = 0i64;
+    while (i < s.revl_length()) {
+        if ({ s.chars().nth((i) as usize).unwrap().to_string() } == ch) {
+            n = (n).checked_add(1i64).expect("revl: Int overflow");
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return n;
+}
+
+fn asrc_end_line(ts: &[Token], i: i64, dflt: i64) -> i64 {
+    let ln = tkc(ts, (i).checked_sub(1i64).expect("revl: Int overflow")).line;
+    return if (ln > 0i64) { ln } else { dflt };
+}
+
+fn asrc_of(al: std::collections::HashMap<String, String>, start_line: i64, end_line: i64) -> String {
+    if ((!al.contains_key(&String::from("@srclines"))) || (start_line < 1i64)) {
+        return String::from("");
+    }
+    let lines = src_text(&mget_str(al.clone(), String::from("@srclines"))).lines;
+    if ((start_line).checked_sub(1i64).expect("revl: Int overflow") >= lines.revl_length()) {
+        return String::from("");
+    }
+    let mut end = end_line;
+    if (end < start_line) {
+        end = start_line;
+    }
+    if (end > lines.revl_length()) {
+        end = lines.revl_length();
+    }
+    let mut first = (lines)[((start_line).checked_sub(1i64).expect("revl: Int overflow")) as usize].clone();
+    let at = asrc_word_at(&first);
+    if (at != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+        first = first.revl_slice(at, first.revl_length());
+    }
+    let mut raw = first.clone();
+    let mut ln = start_line;
+    while (ln < end) {
+        raw = (raw.revl_concat(" ")).revl_concat(&(lines)[(ln) as usize]);
+        ln = (ln).checked_add(1i64).expect("revl: Int overflow");
+    }
+    let mut text = asrc_collapse(&raw);
+    text = asrc_rstrip_ws(&asrc_rstrip_ch(&text, ";"));
+    if (text.revl_ends_with("}") && (asrc_count(&text, "}") > asrc_count(&text, "{"))) {
+        text = asrc_rstrip_ws(&(text.revl_slice(0i64, (text.revl_length()).checked_sub(1i64).expect("revl: Int overflow"))));
+    }
+    return text;
 }
 
 fn ltrim_ws(s: &str) -> String {
@@ -38677,6 +38789,23 @@ fn lir_try_return(ts: Vec<Token>, at: i64, env: Vec<Bind>, muts: Vec<String>, re
     return mk_one(js, env, muts, r.i);
 }
 
+fn cat_exprs(xs: Vec<Expr>, ys: &[Expr]) -> Vec<Expr> {
+    let mut out = xs;
+    let mut i = 0i64;
+    while (i < ys.revl_length()) {
+        out.push((ys)[(i) as usize].clone());
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn split_and_chain(e: Expr) -> Vec<Expr> {
+    return match e.clone() {
+    Expr::Bin(b) => { let b = *b; if (b.op == "&&") { cat_exprs(split_and_chain(b.l.clone()), &split_and_chain(b.r.clone())) } else { vec![e.clone()] } },
+    _ => vec![e.clone()],
+};
+}
+
 fn lir_one_stmt(ts: Vec<Token>, i: i64, hi: i64, env: Vec<Bind>, muts: Vec<String>, ret: String, marks: std::collections::HashMap<String, i64>, births: std::collections::HashMap<String, String>, al: std::collections::HashMap<String, String>) -> StmtOne {
     if (lift_on(marks.clone()) && (!ba_block_head(&ts, i))) {
         let se = ba_extent(&ts, i, hi);
@@ -38775,6 +38904,20 @@ fn lir_one_stmt(ts: Vec<Token>, i: i64, hi: i64, env: Vec<Bind>, muts: Vec<Strin
             return mk_one(String::from(""), env, muts, hi);
         }
         let js = (((((((String::from("{\"step\":\"assert\",\"expr\":").revl_concat(&lir_expr(r.e.clone(), env.clone(), al.clone()))).revl_concat(",\"file\":")).revl_concat(&jstr(&t.file))).revl_concat(",\"line\":")).revl_concat(&(t.line).to_string())).revl_concat(",\"source\":")).revl_concat(&jstr(&span_text(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), r.i)))).revl_concat("}");
+        return mk_one(js, env, muts, r.i);
+        let ops = split_and_chain(r.e.clone());
+        let asrc = asrc_of(al.clone(), t.line, asrc_end_line(&ts, r.i, t.line));
+        let mut js = String::from("");
+        let mut k = 0i64;
+        while (k < ops.revl_length()) {
+            let mut one = String::from("{\"step\":\"assert\",\"expr\":").revl_concat(&lir_expr((ops)[(k) as usize].clone(), env.clone(), al.clone()));
+            if (asrc != "") {
+                one = (((((one.revl_concat(",\"line\":")).revl_concat(&(t.line).to_string())).revl_concat(",\"src\":")).revl_concat(&jstr(&asrc))).revl_concat(",\"file\":")).revl_concat(&jstr(&mget_str(al.clone(), String::from("@srcfile"))));
+            }
+            one.push_str("}");
+            js = if (js == "") { one.clone() } else { (js.revl_concat(",")).revl_concat(&one) };
+            k = (k).checked_add(1i64).expect("revl: Int overflow");
+        }
         return mk_one(js, env, muts, r.i);
     }
     if ((t.kind == "kw") && ((t.text == "break") || (t.text == "continue"))) {
@@ -40845,17 +40988,17 @@ pub fn lower_to_ir_at(src: String, fname: String) -> String {
 }
 
 pub fn lower_to_ir_refs_at(src: String, fname: String, rows: Vec<String>) -> String {
-    let src_revl_cs: std::vec::Vec<char> = src.chars().collect();
     let ts = lex_src_at(src.clone(), fname.clone());
     let al = alias_map(ts.clone());
     let pg = parse_prog_ts(ts.clone());
     let slots = async_slots_map(&pg.fns);
     let colored = async_colored(&pg.fns, slots.clone());
     let plan = mono_plan(&pg.fns, colored.clone(), slots.clone(), al.clone());
+    let alx = { let mut c = ({ let mut c = plan.al.clone(); c.insert(String::from("@srcfile"), fname.clone()); c }).clone(); c.insert(String::from("@srclines"), src.clone()); c };
     let fnty = extern_callable_binds(ts.clone(), plan.al.clone(), if (plan.origins.revl_length() == 0i64) { vec![] } else { module_callable_fnty(ts.clone(), plan.al.clone()) });
-    let a = ir_walk(ts.clone(), 0i64, mk_iracc(String::from(""), String::from(""), false, false, plan.colored.clone(), slots.clone()), &fname, al.clone(), src_text(&src, &src_revl_cs));
+    let a = ir_walk(ts.clone(), 0i64, mk_iracc(String::from(""), String::from(""), false, false, plan.colored.clone(), slots.clone()), &fname, al.clone(), src_text(&src));
     let ver = if a.v3 { String::from("3") } else { if a.v2 { String::from("2") } else { String::from("1") } };
-    let fo = fns_walk(ts.clone(), 0i64, String::from(""), return_only_rows(ts.clone(), case_binds(ts.clone(), plan.al.clone()), plan.al.clone()), &plan.colored, own_program_summary(ts.clone()), plan.al.clone(), plan.monos.clone(), &plan.origins, &fnty, std::collections::HashMap::new());
+    let fo = fns_walk(ts.clone(), 0i64, String::from(""), return_only_rows(ts.clone(), case_binds(ts.clone(), plan.al.clone()), plan.al.clone()), &plan.colored, own_program_summary(ts.clone()), alx.clone(), plan.monos.clone(), &plan.origins, &fnty, std::collections::HashMap::new());
     let taken = lift_taken(&ts);
     let lx = lift_expand(fo.js.clone(), 0i64, String::from(""), std::collections::HashMap::new(), &taken, std::collections::HashMap::new());
     let mut fnsjs = if lx.ok { lx.js.clone() } else { lift_unexpanded_fn() };
@@ -40888,7 +41031,7 @@ pub fn lower_to_ir_refs_at(src: String, fname: String, rows: Vec<String>) -> Str
     if (bnd.rows.revl_length() > 0i64) {
         out = ((out.revl_concat(", \"secrets\": [")).revl_concat(&sec_rows_json(&bnd.rows))).revl_concat("]");
     }
-    let secs = test_secs_walk(ts.clone(), 0i64, TestSecs { tests: String::from(""), faults: String::from("") }, return_only_rows(ts.clone(), case_binds(ts.clone(), al.clone()), al.clone()), own_program_summary(ts.clone()), al.clone());
+    let secs = test_secs_walk(ts.clone(), 0i64, TestSecs { tests: String::from(""), faults: String::from("") }, return_only_rows(ts.clone(), case_binds(ts.clone(), al.clone()), al.clone()), own_program_summary(ts.clone()), alx.clone());
     if (secs.tests != "") {
         out = ((out.revl_concat(", \"tests\": [")).revl_concat(&secs.tests)).revl_concat("]");
     }
@@ -45891,7 +46034,7 @@ fn lower_to_ir_emits_the_services_table_for_a_simple_provider() {
 
 #[test]
 fn lower_to_ir_keeps_both_fns_around_a_one_line_named_test_block() {
-    assert!((lower_to_ir(String::from("fn one() -> Int { return 1 } test \"t\" { assert one() == 1 } fn two() -> Int { return 2 }")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"one\",\"params\":[],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"lit\",\"value\":1}}]},{\"name\":\"two\",\"params\":[],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"lit\",\"value\":2}}]}], \"tests\": [{\"name\": \"t\", \"body\": [{\"step\":\"assert\",\"expr\":{\"kind\":\"bin\",\"op\":\"==\",\"left\":{\"kind\":\"call\",\"callee\":{\"kind\":\"var\",\"name\":\"one\"},\"args\":[]},\"right\":{\"kind\":\"lit\",\"value\":1}},\"file\":\"<string>\",\"line\":1,\"source\":\"one() == 1\"}]}]}"));
+    assert!((lower_to_ir(String::from("fn one() -> Int { return 1 } test \"t\" { assert one() == 1 } fn two() -> Int { return 2 }")) == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"one\",\"params\":[],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"lit\",\"value\":1}}]},{\"name\":\"two\",\"params\":[],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"lit\",\"value\":2}}]}], \"tests\": [{\"name\": \"t\", \"body\": [{\"step\":\"assert\",\"expr\":{\"kind\":\"bin\",\"op\":\"==\",\"left\":{\"kind\":\"call\",\"callee\":{\"kind\":\"var\",\"name\":\"one\"},\"args\":[]},\"right\":{\"kind\":\"lit\",\"value\":1}},\"file\":\"<string>\",\"line\":1,\"source\":\"one() == 1\",\"line\":1,\"src\":\"assert one() == 1 } fn two() -> Int { return 2\",\"file\":\"<string>\"}]}]}"));
 }
 
 #[test]

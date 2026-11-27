@@ -2265,6 +2265,10 @@ class AssertStmt:
     #: The revl text between `assert` and the expression's last token (issue
     #: #3499), empty when the statement was synthesised rather than parsed.
     source: str = ""
+    # issue #3499: the raw source text of the whole `assert ...` statement, so
+    # a failed test prints the revl source, not the lowered host expression.
+    # Captured at parse; None when the text is unavailable.
+    src: str | None = None
 
 
 @dataclass
@@ -2756,6 +2760,35 @@ class Parser:
     def err(self, line: int, message: str, hint: str | None = None,
             **fields) -> RevlError:
         return RevlError(self.filename, line, message, hint, **fields)
+
+    def _assert_source(self, start_line: int) -> str | None:
+        """The raw source text of an `assert` statement (issue #3499): from the
+        `assert` keyword's line through the line the parsed expression ended on
+        (the token just consumed), whitespace-collapsed. Read off `self._src_lines`
+        the same way `_doc_above` reads comment blocks. `None` only if the token
+        stream is empty."""
+        if self.pos <= 0:
+            return None
+        end = self.toks[self.pos - 1].line
+        if end < start_line:
+            end = start_line
+        if start_line - 1 >= len(self._src_lines):
+            return None
+        lines = list(self._src_lines[start_line - 1:end])
+        # start at the `assert` keyword itself, not the line start: the line may
+        # carry the enclosing `test "..." {` opener
+        m = re.search(r"\bassert\b", lines[0])
+        if m is not None:
+            lines[0] = lines[0][m.start():]
+        raw = "\n".join(lines)
+        text = " ".join(raw.split())
+        text = text.rstrip(";").rstrip()
+        # a one-liner `test "x" { assert ... }` captures the closing brace too;
+        # drop exactly one unbalanced trailing `}` (a record literal in the
+        # expression keeps its own balanced braces)
+        if text.endswith("}") and text.count("}") > text.count("{"):
+            text = text[:-1].rstrip()
+        return text
 
     def _doc_above(self, line: int, floor: int | None = None) -> str | None:
         """The comment block directly above `line` (issue #1952).
@@ -8536,6 +8569,8 @@ class Parser:
             expr = self.pure_expr()
             return AssertStmt(expr, tok.line,
                               _span_text(self._source, self.toks, start, self.pos))
+            expr = self.pure_expr()
+            return AssertStmt(expr, tok.line, self._assert_source(tok.line))
         if tok.kind == "ident" and tok.value == "swap":
             # `swap C -> C2` cannot exist: G2 forbids two components in one
             # document from providing the same key, so a replacement provider
@@ -8863,6 +8898,8 @@ class Parser:
             expr = self.pure_expr()
             return AssertStmt(expr, tok.line,
                               _span_text(self._source, self.toks, start, self.pos))
+            expr = self.pure_expr()
+            return AssertStmt(expr, tok.line, self._assert_source(tok.line))
         if tok.kind == "kw" and tok.value in ("break", "continue"):
             return self._loop_control_stmt(tok)
         if tok.kind == "ident" and self._assign_ahead():

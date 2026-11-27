@@ -101,7 +101,7 @@
 // Python's `repr()` to render literals, so bridging it is faithful), `newline`
 // (the one genuine U+000A), and `mangle` (the Python-keyword rename).
 use "../stdlib/value.rvl" {
-  value_kind, value_is_null, value_field, value_opt,
+  value_kind, value_is_null, value_field, value_field_or, value_opt,
   value_list, value_at, value_str, value_int, value_bool, value_children,
   value_keys, value_is_list, value_is_object
 }
@@ -1915,15 +1915,29 @@ fn assert_head(node: Any, text: Str) -> Str {
 fn emit_assert(node: Any, indent: Int) -> List[Str] {
   var out = []
   let e = value_field(node, "expr")
-  if (node_kind(e) == "bin" && is_cmp_op(node_op(e))) {
-    let pop = py_bin_op(node_op(e))
-    let left = expr(value_field(e, "left"))
-    let right = expr(value_field(e, "right"))
+  // `e` is the assert STEP: the expression lives under `expr`, and the source
+  // position/text under `src`/`line`/`file` (issue #3499: when present, the
+  // failure shows `file:line: assert <revl source>`, not the host code).
+  let ex = value_field(e, "expr")
+  let srcv = value_str(value_field_or(e, "src", ""))
+  let linev = value_int(value_field_or(e, "line", 0))
+  let filev = value_str(value_field_or(e, "file", ""))
+  var where = ""
+  if (srcv != "" && linev > 0 && filev != "") {
+    where = filev.concat(":").concat(linev.to_str()).concat(": ").concat(srcv)
+  }
+  if (node_kind(ex) == "bin" && is_cmp_op(node_op(ex))) {
+    let pop = py_bin_op(node_op(ex))
+    let left = expr(value_field(ex, "left"))
+    let right = expr(value_field(ex, "right"))
     out = out.push(line(indent, `_revl_lhs = ${left}`))
     out = out.push(line(indent, `_revl_rhs = ${right}`))
     var source = value_str(value_field(node, "source"))
     if (source == "") { source = `${left} ${pop} ${right}` }
     let shown = py_repr(assert_head(node, source))
+    var shown_text = `${left} ${pop} ${right}`
+    if (where != "") { shown_text = where }
+    let shown = py_repr(shown_text)
     out = out.push(line(indent, `assert _revl_lhs ${pop} _revl_rhs, ${shown} + '\n  left  = ' + repr(_revl_lhs) + '\n  right = ' + repr(_revl_rhs)`))
     return out
   }
@@ -1931,6 +1945,11 @@ fn emit_assert(node: Any, indent: Int) -> List[Str] {
   var source = value_str(value_field(node, "source"))
   if (source == "") { source = rendered }
   out = out.push(line(indent, `assert ${rendered}, ${py_repr(assert_head(node, source))}`))
+  if (where != "") {
+    out = out.push(line(indent, `assert ${expr(ex)}, ${py_repr(where)}`))
+    return out
+  }
+  out = out.push(line(indent, `assert ${expr(ex)}`))
   return out
 }
 

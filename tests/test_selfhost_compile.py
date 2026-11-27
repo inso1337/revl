@@ -125,7 +125,14 @@ def compile_rvl() -> dict:
     """selfhost/compile.rvl — the ONE co-compiled artifact holding the whole
     native pipeline (lower + emit_py + emit_rust `use`d together). That this even
     compiles and execs is the SEAM-2-is-closed / 3-way-co-compilation proof."""
-    return _exec_selfhost("selfhost/compile.rvl")
+    ns = _exec_selfhost("selfhost/compile.rvl")
+    # The reference's parse_file stamps a file's CWD-relative spelling
+    # (src/revl/parser.py's `relpath_or_abs`), and an assert step's `file` key
+    # (issue #3499) reaches the py output verbatim, so the native driver's
+    # `path` argument is handed the same spelling here.
+    native_at = ns["compile_to_at"]
+    ns["compile_to_at"] = lambda s, t, p: native_at(s, t, os.path.relpath(p) if p else p)
+    return ns
 
 
 @pytest.fixture(scope="module")
