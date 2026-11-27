@@ -170,6 +170,18 @@ RevL.A8.commit_run_discharges_deferred	instance	RevL.A8.deferred_commit_run_from
 RevL.A8.deferred_abort_run	concrete	-	the abort step on a non-empty deferral queue, and the whole run that reaches it
 RevL.A8.deferred_commit_run	concrete	-	the commit step fires the queue in program order and the whole run that reaches it
 RevL.A8.deferred_commit_run_from_queued	concrete	-	the same commit reached from a frame with seq 2 already queued, the run enqueueing seq 4
+RevL.A8.commit_flush_is_discharged_or_owed	instance	RevL.A8.flush_residue_run,RevL.A8.flush_crash_cut_witness,RevL.A8.flush_hypotheses_are_inhabited	a real raising flush settles on commit with seq 2 raising and seq 4 returning, so both the owed and the flushed halves are inhabited, and a cut inside the flush reads the unflushed entry as owed
+RevL.A8.flush_residue_run	concrete	-	the raising commit step, the crossing list without the raised entry, and the recovery reading of both entries
+RevL.A8.flush_crash_cut_witness	concrete	-	a cut inside the flush reads the unflushed entry owed, and an unapproved queue reads dropped
+RevL.A8.flush_hypotheses_are_inhabited	concrete	-	the frame the raising step starts from has a queue with no recorded outcome and no retired fork
+RevL.A8.split_complete_is_sem	instance	RevL.A8.crash_window_witness	a split run between two configurations with no pending mutation, so the collapse is not about a run that never completes
+RevL.A8.crash_window_recovery	instance	RevL.A8.window_hypotheses_are_inhabited,RevL.A8.crash_window_witness	the hypotheses hold at a cut inside the window with a pending mutation, and the conclusion there leaves the orphan
+RevL.A8.orphan_is_invisible_to_recovery	instance	RevL.A8.window_hypotheses_are_inhabited	the cut inside the window has a pending referent that no record names
+RevL.A8.window_breaks_exact_residue	instance	RevL.A8.window_hypotheses_are_inhabited,RevL.A8.crash_window_witness	the exact-residue equation is false at a real cut inside the window and true one step later
+RevL.A8.crash_window_witness	concrete	-	the split relation takes the run, the two cuts one step apart recover differently
+RevL.A8.window_hypotheses_are_inhabited	concrete	-	the cut is reached from an empty log, every logged referent is fresh, no emission, and the pending referent is in no record
+RevL.A8.window_log_is_the_log_before_the_mutation	instance	RevL.A8.mutate_witness	a real mutate step from no pending mutation to one, whose log is unchanged and whose live world gains the referent
+RevL.A8.mutate_witness	concrete	-	the extern of a one-step body returns: a pending mutation, the same log, one more referent in the world a crash finds
 RevL.A8.revert_witness	concrete	-	the step relation genuinely takes the run
 RevL.A8.revert_witness_restores	concrete	-	replaying that trace empties the world again
 RevL.Lemmas.reach_mono_fuel	instance	RevL.G5Classified.fold_must_run_to_stability	fuel 0 and fuel 1 give different verdicts on the wrapped program, so monotonicity is not over a constant fold

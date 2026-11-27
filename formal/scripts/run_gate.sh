@@ -182,6 +182,18 @@ python3 scripts/axioms_gate.py \
   RevL.A8.deferred_abort_run \
   RevL.A8.deferred_commit_run \
   RevL.A8.deferred_commit_run_from_queued \
+  RevL.A8.commit_flush_is_discharged_or_owed \
+  RevL.A8.flush_residue_run \
+  RevL.A8.flush_crash_cut_witness \
+  RevL.A8.flush_hypotheses_are_inhabited \
+  RevL.A8.split_complete_is_sem \
+  RevL.A8.crash_window_recovery \
+  RevL.A8.orphan_is_invisible_to_recovery \
+  RevL.A8.window_breaks_exact_residue \
+  RevL.A8.crash_window_witness \
+  RevL.A8.window_hypotheses_are_inhabited \
+  RevL.A8.window_log_is_the_log_before_the_mutation \
+  RevL.A8.mutate_witness \
   RevL.A8.revert_witness \
   RevL.A8.revert_witness_restores \
   RevL.CapCeilings.derived_held_tokens_are_declared_keys \
@@ -512,6 +524,11 @@ python3 scripts/axioms_gate.py \
   RevLOracle.fenced_not_reissued \
   RevLOracle.declared_idempotent_reissued \
   RevLOracle.reportedSeqLabels_nil_iff_clean \
+  RevLOracle.mem_owedOf_iff \
+  RevLOracle.owedSeqLabels_nil_of_unapproved \
+  RevLOracle.mem_flushedOf_iff \
+  RevLOracle.skCut_is_a_run \
+  RevLOracle.pending_survives_recovery \
   RevLOracle.a9RowB_iff \
   RevLOracle.parseStep_stepName \
   RevLOracle.a2OKB_iff \

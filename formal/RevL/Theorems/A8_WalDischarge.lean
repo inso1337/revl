@@ -49,6 +49,27 @@ algebra and the small-step semantics live in the L1 farm
    result function. This is issue #2740's
    first slice: the recovery view already dropped a deferred emission
    with no `commit-approved`; the in-process rule was the unstated half.
+6. **A fire that raises is owed, and the flush goes on**
+   (`commit_flush_is_discharged_or_owed`). The roll-forward window's
+   `flush-residue` surface: in a commit flush where some emissions' host
+   bodies raise, every other queued entry still flushes and the commit
+   still completes, each raised entry is written as `flush-residue` and
+   not as crossed, and a recovery run reads exactly those entries as owed
+   and the rest as flushed (`deferClass`). A cut inside the flush reads
+   the unflushed entries as owed, not attempted.
+7. **The crash window of a witnessed mutation**
+   (`window_log_is_the_log_before_the_mutation`, `crash_window_recovery`,
+   `orphan_is_invisible_to_recovery`, `window_breaks_exact_residue`,
+   `split_complete_is_sem`). `SplitStep` splits the witnessed step into the
+   mutation and its record. A split run that is not cut inside the window
+   collapses to a `SemSteps` run (`split_complete_is_sem`), and every
+   `SemSteps` run is one split run (`semSteps_has_split`), so every theorem
+   above stands. The step `mutate` changes the world and leaves the log
+   alone, so the log at a cut inside the window is the log at the cut
+   before it: recovery cannot tell that the extern ran. It reverts
+   everything the log names and leaves exactly the pending referent, which
+   it neither replays nor reports. With no emission in the log, that is
+   where R4's exact-residue equation stops holding.
 
 ## What each theorem is worth, honestly
 
@@ -92,17 +113,28 @@ record is discarded, and a torn fence line "implies the apply never ran"
 * a crash **inside the approved-to-discharged window** —
   `approved_decides_the_crash_window`.
 
-**Not covered, and not claimed.** A *witnessed* mutation logs its
-descriptor AFTER the forward extern returns `Ok`
+**The two windows the first version left open.** A *witnessed* mutation
+logs its descriptor AFTER the forward extern returns `Ok`
 (`backends/python/emit.py`), so a crash between the mutation and its
-record leaves a mutation with no record at all. Every theorem here is
-relative to the durable log; a mutation that never reached the log is
-outside all of them. The `SemStep.witnessed` rule collapses that window
-into one step, so this model cannot express it. Nor does
-`commit_discharges_deferred` model the roll-forward `flush-residue`
-window: it fires every queued entry, while the reference's flush is
-fallible and writes `flush-residue` for an entry that raised. Both
-windows are named as open in `formal/STATUS.md`'s A8 row. Durability
+record leaves a mutation with no record at all. The theorems over `SemStep`
+are relative to the durable log, and `SemStep.witnessed` collapses that
+window into one step. `SplitStep` states it (claim 7). What recovery can
+conclude from a log that lacks the record is nothing about that referent:
+it is outside `rollbackReplay` and outside `reported`.
+`commit_discharges_deferred` fires every queued entry, while the
+reference's flush is fallible and writes `flush-residue` for an entry that
+raised. `FrameStepR.commitRaising` states that flush (claim 6).
+
+**Still not covered.** Cascading abort, escrow, a flush that raises more
+than once on the same entry, a `flushed` record that itself fails to write
+after a successful fire (the runtime then lists the entry as crossed and
+also records `flush-residue`, where `commitRaising` excludes a raising
+entry from the crossings), positional drop (an emission queued after the
+last `commit-approved` of a WAL that carries several runs), an E-Stop
+between the extern returning and the registration (the emitted call site
+checks the halt inside the registration, so the window can also be closed by
+a halt rather than a crash), and the split of an emission's own crossing and
+record, which `SplitStep.emit` keeps atomic. Durability
 itself is also a floor rather than a theorem: `WAFrom` orders the fence
 append before the apply, and that `fsync` reaches the platter is a host
 obligation.
@@ -495,7 +527,8 @@ crossing list in FIFO order, and written `commit-approved` BEFORE the
 fires, one `flushed` record per entry, and the terminal marker after them.
 So "moved to discharged" is durable: each queued seq is in the crossing
 list and names its own `flushed` record. A fire that raised is the
-roll-forward `flush-residue` window this model still does not have. -/
+roll-forward `flush-residue` window, which `FrameStepR.commitRaising` and
+`commit_flush_is_discharged_or_owed` state. -/
 theorem commit_discharges_deferred {f f' : Frame} (h : FrameStep f f')
     (hv : f'.verdict = some .commit) :
     f'.queue = [] ∧
@@ -720,6 +753,348 @@ theorem deferred_commit_run_from_queued :
   refine ⟨?_, rfl, rfl, rfl, rfl, by decide, rfl, by decide⟩
   exact FrameSteps.step FrameStep.defer
     (FrameSteps.step FrameStep.commit FrameSteps.refl)
+
+/-! ## The roll-forward window: a fire that raises (issue #2740)
+
+`commit_discharges_deferred` fires every queued entry. The runtime's flush
+(`SessionOwner._flush`) is continue-and-record: a host body that raises is
+caught, written as `flush-residue`, and the remaining queue still flushes,
+so the commit still completes. A recovery run then reads each emission
+against the `flushed` and `flush-residue` records (`deferClass`). -/
+
+/-- Every conclusion about a commit flush that follows from the shape of
+the frame it leaves, for a raising set `bad`. -/
+theorem flush_shape_props (f f' : Frame) (bad : List Seq)
+    (hq : f'.queue = [])
+    (hfired : f'.fired = f.fired ++ f.queue.filter (fun s => !memSeq s bad))
+    (hlog : f'.config.log =
+      f.config.log ++ [.commitApproved] ++ f.queue.map (flushRec bad)
+        ++ [.activationComplete])
+    (hnf : ∀ s ∈ f.queue, s ∉ flushedSeqs f.config.log ∧
+      s ∉ flushFailedSeqs f.config.log)
+    (hfork : hasForkFrozen f.config.log = false) :
+    f'.queue = [] ∧
+    f'.fired = f.fired ++ f.queue.filter (fun s => !memSeq s bad) ∧
+    outcome f'.config.log = .rolledForward ∧
+    (∀ s ∈ f.queue, memSeq s bad = false →
+      s ∈ f'.fired ∧ deferClass f'.config.log s = .flushed) ∧
+    (∀ s ∈ f.queue, memSeq s bad = true →
+      Rec.flushResidue s ∈ f'.config.log ∧
+      deferClass f'.config.log s = .owedFailed) := by
+  have hfork' : Rec.forkFrozen ∉ f.config.log := hasRec_absent.mp hfork
+  have hnofork : hasForkFrozen f'.config.log = false := by
+    apply hasRec_absent.mpr
+    intro hmem
+    rw [hlog] at hmem
+    simp only [List.mem_append, List.mem_map, List.mem_cons,
+      List.not_mem_nil, or_false] at hmem
+    rcases hmem with ((hm | hm) | ⟨t, _, ht⟩) | hm
+    · exact hfork' hm
+    · cases hm
+    · simp only [flushRec] at ht
+      split at ht <;> cases ht
+    · cases hm
+  refine ⟨hq, hfired, ?_, ?_, ?_⟩
+  · exact (outcome_forward_iff hnofork).mpr
+      (Or.inl (hasRec_iff.mpr (by rw [hlog]; simp)))
+  · intro s hs hb
+    refine ⟨?_, ?_⟩
+    · rw [hfired]
+      exact List.mem_append.mpr (Or.inr (List.mem_filter.mpr ⟨hs, by simp [hb]⟩))
+    · rw [hlog, deferClass_after_flush _ _ _ hs (hnf s hs).1 (hnf s hs).2]
+      simp [hb]
+  · intro s hs hb
+    refine ⟨?_, ?_⟩
+    · rw [hlog]
+      have hm : Rec.flushResidue s ∈ f.queue.map (flushRec bad) :=
+        List.mem_map.mpr ⟨s, hs, by simp [flushRec, hb]⟩
+      simp [hm]
+    · rw [hlog, deferClass_after_flush _ _ _ hs (hnf s hs).1 (hnf s hs).2]
+      simp [hb]
+
+/-- **A commit flush discharges or owes every queued entry, and does not
+stop at the first that raises.** Any step that settles on commit, in the
+relation that lets a fire raise, empties the queue and leaves the log in
+which each entry whose body returned reads FLUSHED to a recovery run and
+each entry whose body raised reads OWED, with a `flush-residue` record.
+The crossing list gains the first set and not the second. The run is read
+as rolled forward, so the owed entries are the roll-forward residue.
+`hnf` says the flush found no earlier outcome for the entries it flushes,
+and `hfork` that the session was not a retired fork. -/
+theorem commit_flush_is_discharged_or_owed {f f' : Frame} (h : FrameStepR f f')
+    (hv : f'.verdict = some .commit)
+    (hnf : ∀ s ∈ f.queue, s ∉ flushedSeqs f.config.log ∧
+      s ∉ flushFailedSeqs f.config.log)
+    (hfork : hasForkFrozen f.config.log = false) :
+    ∃ bad : List Seq,
+      f'.queue = [] ∧
+      f'.fired = f.fired ++ f.queue.filter (fun s => !memSeq s bad) ∧
+      outcome f'.config.log = .rolledForward ∧
+      (∀ s ∈ f.queue, memSeq s bad = false →
+        s ∈ f'.fired ∧ deferClass f'.config.log s = .flushed) ∧
+      (∀ s ∈ f.queue, memSeq s bad = true →
+        Rec.flushResidue s ∈ f'.config.log ∧
+        deferClass f'.config.log s = .owedFailed) := by
+  cases h with
+  | base hs =>
+    cases hs with
+    | body _ => simp at hv
+    | defer => simp at hv
+    | abort => simp at hv
+    | @commit w L q fs =>
+      refine ⟨[], flush_shape_props _ _ [] rfl ?_ ?_ hnf hfork⟩
+      · simp only [memSeq]
+        exact congrArg (fs ++ ·) (List.filter_eq_self.mpr fun _ _ => rfl).symm
+      · have hm : q.map (flushRec []) = q.map Rec.flushed :=
+          List.map_congr_left fun s _ => flushRec_nil s
+        simp [hm]
+  | @commitRaising bad w L q fs =>
+    exact ⟨bad, flush_shape_props _ _ bad rfl rfl rfl hnf hfork⟩
+
+/-- The queue of the whole-run commit witnesses, caught before the commit
+with seqs 2 and 4 queued. -/
+def deferredRaisingEnd : Frame :=
+  ⟨⟨.done, [],
+     deferredCommitLog ++ [.commitApproved, .flushResidue 2, .flushed 4,
+                           .activationComplete]⟩,
+   [], [4], some .commit⟩
+
+/-- A WAL cut inside the flush: seq 2 flushed, then the process died before
+seq 4 fired. -/
+def flushCrashLog : Log :=
+  deferredCommitLog ++ [.commitApproved, .flushed 2]
+
+/-- The same enqueues with no approval at all. -/
+def unapprovedLog : Log := deferredCommitLog
+
+/-- **The flush-residue witness.** A real step of the relation that lets a
+fire raise settles on commit with seq 2 raising and seq 4 returning. The
+crossing list gains seq 4 and not seq 2, the log carries `flush-residue`
+for seq 2 and `flushed` for seq 4, and a recovery run reads exactly seq 2
+as owed and seq 4 as flushed, in a rolled-forward verdict. The raise of
+seq 2 did not stop seq 4 from flushing. -/
+theorem flush_residue_run :
+    FrameStepR deferredCommitMid deferredRaisingEnd ∧
+    deferredRaisingEnd.fired = [4] ∧
+    deferralView deferredRaisingEnd.config.log =
+      [(2, .owedFailed), (4, .flushed)] ∧
+    owedOf deferredRaisingEnd.config.log = [2] ∧
+    flushedOf deferredRaisingEnd.config.log = [4] ∧
+    outcome deferredRaisingEnd.config.log = .rolledForward := by
+  refine ⟨?_, rfl, by decide, by decide, by decide, by decide⟩
+  exact FrameStepR.commitRaising [2]
+
+/-- **A cut inside the flush, and a log with no approval.** After one fire
+a crash leaves seq 2 flushed and seq 4 owed, not attempted: the body may
+not have fired, which is the honest state. The same enqueues with no
+`commit-approved` read as dropped, never owed: nothing crossed. -/
+theorem flush_crash_cut_witness :
+    deferralView flushCrashLog = [(2, .flushed), (4, .owedUnattempted)] ∧
+    owedOf flushCrashLog = [4] ∧
+    outcome flushCrashLog = .rolledForward ∧
+    deferralView unapprovedLog = [(2, .dropped), (4, .dropped)] ∧
+    owedOf unapprovedLog = [] ∧
+    outcome unapprovedLog = .rolledBack := by
+  decide
+
+/-- **Non-vacuity for the flush theorem's side conditions.** The frame the
+raising step starts from has a queue whose entries the log has no outcome
+for, and the log carries no retired fork. -/
+theorem flush_hypotheses_are_inhabited :
+    deferredCommitMid.verdict = none ∧
+    (∀ s ∈ deferredCommitMid.queue,
+      s ∉ flushedSeqs deferredCommitMid.config.log ∧
+      s ∉ flushFailedSeqs deferredCommitMid.config.log) ∧
+    hasForkFrozen deferredCommitMid.config.log = false := by
+  refine ⟨rfl, ?_, by decide⟩
+  intro s hs
+  simp only [deferredCommitMid, List.mem_cons, List.not_mem_nil, or_false] at hs
+  rcases hs with rfl | rfl <;> decide
+
+/-! ## The crash window of a witnessed mutation (issue #2740)
+
+`SplitStep` splits `SemStep.witnessed` into the forward extern returning
+(`mutate`) and the descriptor being written (`record`). A crash is a prefix
+of the run, so every configuration a `SplitSteps` run passes through is a
+crash cut, and the ones with a pending mutation are the cuts inside the
+window: the referent is in the world and no record names it. -/
+
+/-- **A split run that is not cut inside the window collapses to a
+`SemSteps` run.** This is the forward direction; the converse, that every
+`SemSteps` run is a split run, is `semSteps_has_split`. So every theorem
+over `SemSteps` holds of the split relation at the cuts outside the window,
+and the window is the only thing the split adds. -/
+theorem split_complete_is_sem {a b : SplitConfig} (h : SplitSteps a b)
+    (ha : a.pend = none) (hb : b.pend = none) :
+    SemSteps ⟨a.body, a.world, a.log⟩ ⟨b.body, b.world, b.log⟩ := by
+  have := splitSteps_collapse h
+  simpa [SplitConfig.proj, ha, hb] using this
+
+/-- **A recovery run cannot tell that the extern ran.** The step `mutate`
+puts the referent in the world and writes nothing: the log after it is the
+log before it, and the world a crash finds gains exactly the pending
+referent. Everything a recovery run reads (`outcome`, `rollbackReplay`,
+`reported`) is a function of the log, so it reads the cut inside the window
+exactly as it reads the cut before the mutation. -/
+theorem window_log_is_the_log_before_the_mutation {a b : SplitConfig}
+    (h : SplitStep a b) (ha : a.pend = none) (hb : b.pend ≠ none) :
+    ∃ s i, b.pend = some (s, i) ∧ b.log = a.log ∧ b.live = s :: a.live := by
+  cases h with
+  | pure => exact absurd rfl hb
+  | mutate => exact ⟨_, _, rfl, rfl, rfl⟩
+  | record => simp at ha
+  | emit => exact absurd rfl hb
+
+/-- **What recovery leaves of a run cut at any step.** Take any
+configuration a split run from an empty log reaches, with every referent
+fresh and no emission. A recovery run replays the log's witnessed
+inverses, and what is left of the world a crash found is the world the run
+inherited, plus the pending mutation if the cut is inside the window and
+nothing otherwise. The pending referent is not undone because no record
+names it. `hnew` is the seq-space invariant for the pending referent. -/
+theorem crash_window_recovery {b : Body} {w₀ : World} {c : SplitConfig}
+    (hs : SplitSteps ⟨b, w₀, [], none⟩ c)
+    (hfresh : ∀ s ∈ logSeqs c.log, s ∉ w₀)
+    (hno : emittedSeqs c.log = [])
+    (hnew : ∀ s i, c.pend = some (s, i) → s ∉ logSeqs c.log) :
+    replay c.live (rollbackReplay c.log) =
+      (match c.pend with
+       | none => w₀
+       | some (s, _) => s :: w₀) := by
+  obtain ⟨M, hL, hM, hw⟩ := splitSteps_trace hs
+  have hM' : SemLog c.log := hL ▸ hM
+  have hw' : c.world = (logSeqs c.log).reverse ++ w₀ := by rw [hL]; exact hw
+  have hdisj : ∀ s ∈ emittedSeqs c.log, s ∉ witnessedSeqs c.log := by
+    intro s hsm; rw [hno] at hsm; cases hsm
+  have hhead : (logSeqs c.log).reverse.filter
+      (fun t => !(memSeq t (witnessedSeqs c.log))) = [] := by
+    rw [List.filter_reverse, logSeqs_filter_gen hM' (fun _ h => h) hdisj, hno]
+    rfl
+  have htail : w₀.filter (fun t => !(memSeq t (witnessedSeqs c.log))) = w₀ :=
+    filter_none_out fun t ht hin => hfresh t (witnessedSeqs_sub hin) ht
+  rw [rollbackReplay_sem hM', replay_eq_filter]
+  cases hp : c.pend with
+  | none =>
+    simp only [SplitConfig.live, hp]
+    rw [hw', List.filter_append, hhead, htail]
+    rfl
+  | some p =>
+    obtain ⟨s, i⟩ := p
+    have hsW : memSeq s (witnessedSeqs c.log) = false :=
+      memSeq_false.mpr fun hm => hnew s i hp (witnessedSeqs_sub hm)
+    simp only [SplitConfig.live, hp]
+    rw [List.filter_cons, hw', List.filter_append, hhead, htail]
+    simp [hsW]
+
+/-- **The pending referent is invisible to recovery.** At a cut inside the
+window the referent is in the world a crash finds, and a recovery run does
+not replay it and does not report it, because the replay set and the
+residue surface of a trace are read off the log's records and no record
+names it (`hnew`). That the referent is in the world is the definition of
+the pending mutation; the content is the two exclusions, and
+`window_log_is_the_log_before_the_mutation` is why the log cannot say
+more. -/
+theorem orphan_is_invisible_to_recovery {b : Body} {w₀ : World} {c : SplitConfig}
+    (hs : SplitSteps ⟨b, w₀, [], none⟩ c) {s : Seq} {i : Bool}
+    (hp : c.pend = some (s, i)) (hnew : s ∉ logSeqs c.log) :
+    s ∈ c.live ∧ s ∉ rollbackReplay c.log ∧
+    s ∉ reported c.log (fun _ => true) := by
+  obtain ⟨M, hL, hM, _⟩ := splitSteps_trace hs
+  have hM' : SemLog c.log := hL ▸ hM
+  refine ⟨?_, ?_, ?_⟩
+  · simp [SplitConfig.live, hp]
+  · rw [rollbackReplay_sem hM']
+    exact fun hm => hnew (witnessedSeqs_sub hm)
+  · rw [reported_sem hM']
+    exact fun hm => hnew (emittedSeqs_sub hm)
+
+/-- **At the window, R4's exact-residue equation does not hold.** For an
+abort that reports everything it can see, the world after replay is the
+inherited world plus the reported residue (`residue_is_exactly_what_remains`).
+At a cut inside the window of a body with no emission (`hno`), the left side
+has the pending referent and the right side, which is the inherited world,
+does not, because nothing reports the referent. So the exact-residue claim
+is a claim about cuts outside the window, which is where `split_complete_is_sem`
+puts it. -/
+theorem window_breaks_exact_residue {b : Body} {w₀ : World} {c : SplitConfig}
+    (hs : SplitSteps ⟨b, w₀, [], none⟩ c)
+    (hfresh : ∀ s ∈ logSeqs c.log, s ∉ w₀)
+    (hno : emittedSeqs c.log = [])
+    {s : Seq} {i : Bool} (hp : c.pend = some (s, i))
+    (hnew : s ∉ logSeqs c.log) :
+    replay c.live (rollbackReplay c.log) ≠
+      (reported c.log (fun _ => true)).reverse ++ w₀ := by
+  have hrec := crash_window_recovery hs hfresh hno
+    (fun s' i' hp' => by
+      rw [hp] at hp'
+      obtain ⟨rfl, _⟩ := Prod.mk.inj (Option.some.inj hp')
+      exact hnew)
+  obtain ⟨M, hL, hM, _⟩ := splitSteps_trace hs
+  have hM' : SemLog c.log := hL ▸ hM
+  rw [hp] at hrec
+  simp only at hrec
+  rw [hrec, reported_sem hM', hno]
+  intro h
+  have := congrArg List.length h
+  simp at this
+
+/-- **The `mutate` witness.** The extern of a one-step body returns: the
+step is `SplitStep.mutate`, the log is the empty log before and after, and
+the world a crash finds gains seq 1. -/
+theorem mutate_witness :
+    SplitStep ⟨.witnessed 1 true .fail, [], [], none⟩
+              ⟨.fail, [], [], some (1, true)⟩ ∧
+    (⟨.fail, [], [], some (1, true)⟩ : SplitConfig).log =
+      (⟨.witnessed 1 true .fail, [], [], none⟩ : SplitConfig).log ∧
+    (⟨.fail, [], [], some (1, true)⟩ : SplitConfig).live = [1] ∧
+    (⟨.witnessed 1 true .fail, [], [], none⟩ : SplitConfig).live = [] :=
+  ⟨.mutate, rfl, rfl, rfl⟩
+
+/-- A body of two witnessed mutations that hits the failing step, as the
+split relation runs it. -/
+def windowBody : Body := .witnessed 1 true (.witnessed 2 true .fail)
+
+/-- The cut right after the second extern returned: seq 1 is mutated and
+recorded, seq 2 is mutated and its record is not yet written. -/
+def windowCut : SplitConfig :=
+  ⟨.fail, [1], [.descriptor 1 .transactional true], some (2, true)⟩
+
+/-- The same run one step later: seq 2 is recorded too. -/
+def windowDone : SplitConfig :=
+  ⟨.fail, [2, 1], [.descriptor 1 .transactional true,
+                   .descriptor 2 .transactional true], none⟩
+
+/-- **The crash-window witness.** The split relation really takes this run,
+and the two cuts one step apart give opposite recovery results: at the cut
+inside the window the world holds seq 2 and no record names it, so recovery
+replays seq 1 only, reports nothing, and leaves seq 2 in the world; one
+step later the record exists and recovery restores the world exactly. -/
+theorem crash_window_witness :
+    SplitSteps ⟨windowBody, [], [], none⟩ windowCut ∧
+    SplitSteps ⟨windowBody, [], [], none⟩ windowDone ∧
+    windowCut.live = [2, 1] ∧
+    logSeqs windowCut.log = [1] ∧
+    rollbackReplay windowCut.log = [1] ∧
+    reported windowCut.log okAll = [] ∧
+    replay windowCut.live (rollbackReplay windowCut.log) = [2] ∧
+    replay windowDone.live (rollbackReplay windowDone.log) = [] := by
+  refine ⟨?_, ?_, rfl, rfl, by decide, by decide, by decide, by decide⟩
+  · exact .step .mutate (.step .record (.step .mutate .refl))
+  · exact .step .mutate (.step .record (.step .mutate (.step .record .refl)))
+
+/-- **Non-vacuity for the window theorems' side conditions.** The cut is
+reached from an empty log by the split relation, every logged referent is
+fresh against the inherited world, the log carries no emission, and the
+pending referent is in no record. -/
+theorem window_hypotheses_are_inhabited :
+    SplitSteps ⟨windowBody, [], [], none⟩ windowCut ∧
+    (∀ s ∈ logSeqs windowCut.log, s ∉ ([] : World)) ∧
+    emittedSeqs windowCut.log = [] ∧
+    windowCut.pend = some (2, true) ∧
+    (2 : Seq) ∉ logSeqs windowCut.log := by
+  refine ⟨crash_window_witness.1, ?_, rfl, rfl, by decide⟩
+  intro s hs
+  exact List.not_mem_nil
 
 /-- A body of two witnessed mutations that hits the failing step. -/
 def revertBody : Body := .witnessed 1 true (.witnessed 2 true .fail)

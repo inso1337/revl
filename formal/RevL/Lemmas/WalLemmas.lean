@@ -26,6 +26,7 @@ that carry no decision content:
 | `replay-fence` | `Rec.replayFence` | item 309 §3a's durable at-most-once fence |
 | `deferred-emission` | `Rec.deferredEmission` | a class-(b) emission queued but not fired |
 | `flushed` | `Rec.flushed` | a queued emission whose host body crossed at the commit flush |
+| `flush-residue` | `Rec.flushResidue` | a queued emission whose host body raised at the commit flush: owed, with the flush going on |
 | `commit-approved` | `Rec.commitApproved` | the session-commit decision point (item 245) |
 | `aborted` | `Rec.aborted` | the in-process abort's COMPLETION record |
 | `fork-frozen` | `Rec.forkFrozen` | item 250's retired-at-k parent |
@@ -95,10 +96,17 @@ crash *between* the durable write and the effect can be expressed.
   is a host obligation, and no theorem here claims otherwise.
 * The success of a re-issued inverse against the outside world is an
   oracle parameter (`ok : Seq → Bool`), matching 243 rule 6.
-* `reported` models the ROLL-BACK path's residue surface. The
-  roll-forward window's `flush-residue` (a deferred emission fired with
-  no idempotency key) is a different surface and is not modelled; R4
-  below is stated under `outcome L = .rolledBack`.
+* `reported` models the ROLL-BACK path's residue surface; R4 below is
+  stated under `outcome L = .rolledBack`. The roll-forward window's
+  `flush-residue` (a deferred emission whose host body raised at the
+  flush) is a different surface, modelled separately by `deferClass`,
+  `deferralView` and `owedOf` below: they read which queued emissions a
+  roll-forward owes, not which inverses a roll-back leaves.
+* Positional drop is not modelled. The reference reads approval by
+  position, so a `deferred-emission` record AFTER the last
+  `commit-approved` is dropped, which only arises when one WAL file
+  carries several runs. `deferClass` reads whether the log carries an
+  approval at all, and the corpus never places an emission after one.
 * Compensation and transactional referents are keyed by seq here; the
   reference keys off `World.key(call)`. Two descriptors sharing a
   referent are therefore two seqs in the model, which is the reference's
@@ -167,8 +175,13 @@ inductive Rec where
   /-- `flushed`: a deferred emission's host body crossed at the session
   commit's flush (issue #2740). It is the durable half of "the commit
   moved this queue entry to discharged"; a fire that RAISED writes the
-  `flush-residue` record instead, which this model does not have. -/
+  `flush-residue` record instead. -/
   | flushed (seq : Seq)
+  /-- `flush-residue`: a deferred emission whose host body RAISED at the
+  flush (continue-and-record, issue #2740). The crossing did not land, so
+  the emission is owed with the recorded error, and the flush goes on to
+  the rest of the queue. -/
+  | flushResidue (seq : Seq)
   /-- `commit-approved`: the session-commit decision point (item 245). -/
   | commitApproved
   /-- `aborted`: the in-process abort's completion record. -/
@@ -424,6 +437,7 @@ theorem reissued_recSeq {L : Log} {rc : Rec} {s : Seq} :
   | replayFence _ => simp [reissued] at h
   | deferredEmission _ => simp [reissued] at h
   | flushed _ => simp [reissued] at h
+  | flushResidue _ => simp [reissued] at h
   | commitApproved => simp [reissued] at h
   | aborted => simp [reissued] at h
   | forkFrozen => simp [reissued] at h
@@ -707,9 +721,13 @@ step and the two session verdicts; its body steps are these same
 * A `witnessed` step appends its descriptor and creates its referent in
   ONE step. The reference logs the descriptor after the forward extern
   returns `Ok` (`backends/python/emit.py`), so the real runtime has a
-  window between the mutation and its record that this model collapses. A
-  mutation that never reached the log is outside every theorem here, and
-  that is named rather than papered over.
+  window between the mutation and its record, and `SemStep` is the view
+  that collapses it. The window is stated by `SplitStep`, at the end of
+  this file: it splits the same step into a mutation and a record, proves
+  that a run which is not cut inside the window is exactly a `SemSteps`
+  run, and gives the cut inside it a name (`SplitConfig.pend`). Every
+  `SemStep` theorem therefore stands, and the crash window is a theorem
+  about the split step rather than an exception to them.
 * An `emit` step creates a referent whose inverse is NOT reconstructible:
   "an emission is a one-way crossing; it has no inverse"
   (`backends/python/replay.py`). That is why the abort cannot restore it
@@ -717,9 +735,8 @@ step and the two session verdicts; its body steps are these same
 * A `deferred` step only ENQUEUES: it fires nothing and creates no
   referent. The queue is not part of `Config`, so the `deferred` form has
   no `SemStep` rule; `FrameStep` below is where it and the verdicts move.
-  A fire that RAISES at the flush (the roll-forward `flush-residue`
-  surface) is not modelled: every queued entry in `FrameStep.commit`
-  fires.
+  `FrameStep.commit` is the flush in which every queued entry fires; the
+  flush in which one RAISES is `FrameStepR.commitRaising`, below.
 * The semantics is sequential and single-activation: no cascading abort,
   no compensation drain, no escrow. -/
 
@@ -812,9 +829,8 @@ inductive FrameStep : Frame → Frame → Prop where
                 ⟨⟨b, w, L ++ [.deferredEmission s]⟩, q ++ [s], fs, none⟩
   /-- The session commit (item 245): `commit-approved` is durable BEFORE
   the first fire, the queue is fired FIFO, each fire leaves its `flushed`
-  record, and the terminal marker closes the log. A fire that RAISED is
-  the `flush-residue` surface this model does not have; here every entry
-  fires. -/
+  record, and the terminal marker closes the log. Here every entry
+  fires; the flush in which a fire RAISES is `FrameStepR.commitRaising`. -/
   | commit : ∀ {w L q fs},
       FrameStep ⟨⟨.done, w, L⟩, q, fs, none⟩
                 ⟨⟨.done, w,
@@ -1038,5 +1054,358 @@ theorem logSeqs_filter_gen {W : List Seq} : ∀ {M : Log}, SemLog M →
     have hsW : memSeq s W = false := memSeq_false.mpr hs
     simp only [logSeqs, List.filter_cons, hsW, Bool.not_false, if_true, emittedSeqs]
     exact congrArg _ (ih hw (fun t ht => he t (List.mem_cons_of_mem _ ht)))
+
+
+/-! ## The deferral queue as a recovery run reads it (issue #2740)
+
+`dispose` classifies a `deferred-emission` record as dropped without
+reading the log, so it cannot say what a roll-forward owes. The reference
+does: `recover` reads each queued emission against the `flushed` and
+`flush-residue` records the commit flush wrote (`_deferral_crosscheck` on
+the terminal-marker route, `_roll_forward_window` on the approved route).
+`deferClass` is that reading, per emission:
+
+* no `commit-approved` in the log: DROPPED, never fired, nothing crossed;
+* approved, and a `flushed` record names it: FLUSHED, confirmed crossed;
+* approved, and a `flush-residue` record names it: OWED, the host body
+  raised and the crossing did not land;
+* approved, and neither record names it: OWED, not attempted. The body may
+  not have fired before the crash, which is the honest state.
+
+A `flushed` record is read before a `flush-residue` one, as the reference
+does. -/
+
+/-- The seqs a log enqueued as class-(b) deferred emissions, in log order. -/
+def deferredSeqs : Log → List Seq
+  | [] => []
+  | .deferredEmission s :: rest => s :: deferredSeqs rest
+  | _ :: rest => deferredSeqs rest
+
+/-- Every seq named by a durable `flushed` record. -/
+def flushedSeqs : Log → List Seq
+  | [] => []
+  | .flushed s :: rest => s :: flushedSeqs rest
+  | _ :: rest => flushedSeqs rest
+
+/-- Every seq named by a durable `flush-residue` record. -/
+def flushFailedSeqs : Log → List Seq
+  | [] => []
+  | .flushResidue s :: rest => s :: flushFailedSeqs rest
+  | _ :: rest => flushFailedSeqs rest
+
+/-- What a recovery run concludes about one queued emission. -/
+inductive DeferClass where
+  /-- Approved and confirmed crossed. -/
+  | flushed
+  /-- Approved, and its host body raised at the flush. -/
+  | owedFailed
+  /-- Approved, with no record of the flush: outcome unknown. -/
+  | owedUnattempted
+  /-- Never approved: never fired, nothing crossed. -/
+  | dropped
+  deriving DecidableEq, Repr
+
+/-- The reference's reading of one queued emission. -/
+def deferClass (L : Log) (s : Seq) : DeferClass :=
+  if hasApproved L = false then .dropped
+  else if memSeq s (flushedSeqs L) = true then .flushed
+  else if memSeq s (flushFailedSeqs L) = true then .owedFailed
+  else .owedUnattempted
+
+/-- Whether a class is a roll-forward residue. -/
+def DeferClass.isOwed : DeferClass → Bool
+  | .owedFailed => true
+  | .owedUnattempted => true
+  | _ => false
+
+/-- Every queued emission with the class a recovery run reads for it. -/
+def deferralView (L : Log) : List (Seq × DeferClass) :=
+  (deferredSeqs L).map fun s => (s, deferClass L s)
+
+/-- The emissions a recovery run reads as confirmed crossed, in log order. -/
+def flushedOf (L : Log) : List Seq :=
+  ((deferralView L).filter fun p => decide (p.2 = .flushed)).map Prod.fst
+
+/-- The emissions a recovery run reads as owed, in log order. -/
+def owedOf (L : Log) : List Seq :=
+  ((deferralView L).filter fun p => p.2.isOwed).map Prod.fst
+
+/-- The record one fire leaves: `flush-residue` when its host body raises
+(`bad` is the set that raises), `flushed` otherwise. -/
+def flushRec (bad : List Seq) (s : Seq) : Rec :=
+  if memSeq s bad = true then .flushResidue s else .flushed s
+
+theorem flushRec_nil (s : Seq) : flushRec [] s = .flushed s := by
+  simp [flushRec, memSeq]
+
+theorem flushedSeqs_append (L M : Log) :
+    flushedSeqs (L ++ M) = flushedSeqs L ++ flushedSeqs M := by
+  induction L with
+  | nil => rfl
+  | cons r rest ih => cases r <;> simp [flushedSeqs, ih]
+
+theorem flushFailedSeqs_append (L M : Log) :
+    flushFailedSeqs (L ++ M) = flushFailedSeqs L ++ flushFailedSeqs M := by
+  induction L with
+  | nil => rfl
+  | cons r rest ih => cases r <;> simp [flushFailedSeqs, ih]
+
+theorem flushedSeqs_map_flushRec (bad q : List Seq) :
+    flushedSeqs (q.map (flushRec bad)) = q.filter (fun s => !memSeq s bad) := by
+  induction q with
+  | nil => rfl
+  | cons t rest ih =>
+    by_cases h : memSeq t bad = true
+    · simp [flushRec, flushedSeqs, List.filter_cons, h, ih]
+    · have h' : memSeq t bad = false := by simpa using h
+      simp [flushRec, flushedSeqs, List.filter_cons, h', ih]
+
+theorem flushFailedSeqs_map_flushRec (bad q : List Seq) :
+    flushFailedSeqs (q.map (flushRec bad)) = q.filter (fun s => memSeq s bad) := by
+  induction q with
+  | nil => rfl
+  | cons t rest ih =>
+    by_cases h : memSeq t bad = true
+    · simp [flushRec, flushFailedSeqs, List.filter_cons, h, ih]
+    · have h' : memSeq t bad = false := by simpa using h
+      simp [flushRec, flushFailedSeqs, List.filter_cons, h', ih]
+
+/-- **What a commit flush leaves for a recovery run to read.** After a
+flush whose raising set is `bad`, an emission queued before it and not yet
+flushed reads FLUSHED when its body returned and OWED, failed, when it
+raised. The two classes are decided by the record the flush wrote for that
+emission and nothing else, so an emission that raised does not hide the
+ones behind it. -/
+theorem deferClass_after_flush (L : Log) (q bad : List Seq) {s : Seq}
+    (hs : s ∈ q) (h1 : s ∉ flushedSeqs L) (h2 : s ∉ flushFailedSeqs L) :
+    deferClass (L ++ [.commitApproved] ++ q.map (flushRec bad)
+      ++ [.activationComplete]) s
+      = if memSeq s bad = true then .owedFailed else .flushed := by
+  have happ : hasApproved (L ++ [.commitApproved] ++ q.map (flushRec bad)
+      ++ [.activationComplete]) = true :=
+    hasRec_iff.mpr (by simp)
+  have hF : flushedSeqs (L ++ [.commitApproved] ++ q.map (flushRec bad)
+      ++ [.activationComplete])
+      = flushedSeqs L ++ q.filter (fun t => !memSeq t bad) := by
+    simp [flushedSeqs_append, flushedSeqs, flushedSeqs_map_flushRec]
+  have hR : flushFailedSeqs (L ++ [.commitApproved] ++ q.map (flushRec bad)
+      ++ [.activationComplete])
+      = flushFailedSeqs L ++ q.filter (fun t => memSeq t bad) := by
+    simp [flushFailedSeqs_append, flushFailedSeqs, flushFailedSeqs_map_flushRec]
+  unfold deferClass
+  rw [if_neg (by rw [happ]; simp), hF, hR]
+  by_cases hb : memSeq s bad = true
+  · have h3 : memSeq s (flushFailedSeqs L ++ q.filter (fun t => memSeq t bad))
+        = true :=
+      memSeq_iff.mpr (by simp [List.mem_append, List.mem_filter, hs, hb])
+    have h4 : ¬ (memSeq s (flushedSeqs L ++ q.filter (fun t => !memSeq t bad))
+        = true) := by
+      intro h
+      have := memSeq_iff.mp h
+      simp [List.mem_append, List.mem_filter, h1, hb] at this
+    simp [h4, h3, hb]
+  · have hb' : memSeq s bad = false := by simpa using hb
+    have h3 : memSeq s (flushedSeqs L ++ q.filter (fun t => !memSeq t bad))
+        = true :=
+      memSeq_iff.mpr (by simp [List.mem_append, List.mem_filter, hs, hb'])
+    simp [h3, hb']
+
+/-! ### The commit flush in which a fire raises
+
+`FrameStep.commit` is the flush in which every queued entry fires.
+`FrameStepR` extends the in-process relation by the flush in which the
+entries in `bad` raise. The runtime's `_flush` is continue-and-record: a
+raise is caught, written as `flush-residue`, and the remaining queue still
+flushes, so the commit still completes. -/
+
+/-- The in-process step relation with the raising flush. -/
+inductive FrameStepR : Frame → Frame → Prop where
+  /-- Any step of the all-fires-succeed relation. -/
+  | base : ∀ {a b}, FrameStep a b → FrameStepR a b
+  /-- The session commit in which the emissions in `bad` raise at their
+  fire: each leaves `flush-residue` instead of `flushed`, does not cross,
+  and the rest of the queue flushes. -/
+  | commitRaising : ∀ (bad : List Seq) {w L q fs},
+      FrameStepR ⟨⟨.done, w, L⟩, q, fs, none⟩
+                 ⟨⟨.done, w,
+                    L ++ [.commitApproved] ++ q.map (flushRec bad)
+                      ++ [.activationComplete]⟩,
+                  [], fs ++ q.filter (fun s => !memSeq s bad), some .commit⟩
+
+/-! ## The witnessed step, split: mutation, then record (issue #2740)
+
+`SemStep.witnessed` appends the descriptor and creates the referent in one
+step. The runtime does not: the emitted call site runs the forward extern,
+and only on its `Ok` branch registers the inverse and writes the
+discharge-descriptor (`backends/python/emit.py`, `_witnessed_step`;
+`Frame.transactional`). Between the two lies a window in which the
+mutation is in the world and no record names it.
+
+`SplitStep` writes that window. `mutate` runs the extern: the referent
+exists, the log does not name it, and `pend` holds what the record is
+still to say. `record` writes the descriptor. `SplitConfig.world` holds the
+referents that are logged or emitted, and `SplitConfig.live` adds the
+pending one, which is the world a crash finds.
+
+`SemStep` is not replaced. `SplitConfig.proj` reads a split configuration
+as the `Config` it collapses to, and `splitSteps_collapse` shows that every
+split run collapses to a `SemSteps` run, so each theorem over `SemSteps`
+holds of every split run that is not cut inside the window. -/
+
+/-- A split configuration: what is left to run, the referents the log or an
+emission accounts for (newest first), the log, and the witnessed mutation
+whose extern has returned and whose record is still to be written. -/
+structure SplitConfig where
+  body : Body
+  world : World
+  log : Log
+  pend : Option (Seq × Bool)
+  deriving DecidableEq, Repr
+
+/-- The world a crash finds: the accounted referents and the pending
+mutation, which is in the world though no record names it. -/
+def SplitConfig.live (c : SplitConfig) : World :=
+  match c.pend with
+  | none => c.world
+  | some (s, _) => s :: c.world
+
+/-- The `Config` a split configuration collapses to: a pending mutation is
+read as the witnessed step that has not run yet. -/
+def SplitConfig.proj (c : SplitConfig) : Config :=
+  match c.pend with
+  | none => ⟨c.body, c.world, c.log⟩
+  | some (s, i) => ⟨.witnessed s i c.body, c.world, c.log⟩
+
+/-- The split step relation. `mutate` and `record` are the two halves of
+`SemStep.witnessed`; the other forms are the ones `SemStep` has. -/
+inductive SplitStep : SplitConfig → SplitConfig → Prop where
+  | pure : ∀ {b w L}, SplitStep ⟨.pure b, w, L, none⟩ ⟨b, w, L, none⟩
+  /-- The forward extern returned `Ok`: the referent exists, the log does
+  not name it. -/
+  | mutate : ∀ {s i b w L},
+      SplitStep ⟨.witnessed s i b, w, L, none⟩ ⟨b, w, L, some (s, i)⟩
+  /-- The inverse is registered and the descriptor is written. -/
+  | record : ∀ {s i b w L},
+      SplitStep ⟨b, w, L, some (s, i)⟩
+                ⟨b, s :: w, L ++ [.descriptor s .transactional i], none⟩
+  | emit : ∀ {s b w L},
+      SplitStep ⟨.emit s b, w, L, none⟩
+                ⟨b, s :: w, L ++ [.effect s true false false], none⟩
+
+/-- A run of the split relation. Every prefix of a run is a crash cut. -/
+inductive SplitSteps : SplitConfig → SplitConfig → Prop where
+  | refl : ∀ {c}, SplitSteps c c
+  | step : ∀ {a b c}, SplitStep a b → SplitSteps b c → SplitSteps a c
+
+theorem semSteps_trans {a b c : Config} (h1 : SemSteps a b) (h2 : SemSteps b c) :
+    SemSteps a c := by
+  induction h1 with
+  | refl => exact h2
+  | step hs _ ih => exact .step hs (ih h2)
+
+/-- Each split step collapses to zero or one `SemStep`: `mutate` collapses
+to nothing (the pending mutation reads as the step that has not run) and
+`record` to the witnessed step. -/
+theorem splitStep_collapse {a b : SplitConfig} (h : SplitStep a b) :
+    SemSteps a.proj b.proj := by
+  cases h with
+  | pure => exact .step .pure .refl
+  | mutate => exact .refl
+  | record => exact .step .witnessed .refl
+  | emit => exact .step .emit .refl
+
+/-- **A split run collapses to a `SemSteps` run.** -/
+theorem splitSteps_collapse {a b : SplitConfig} (h : SplitSteps a b) :
+    SemSteps a.proj b.proj := by
+  induction h with
+  | refl => exact .refl
+  | step hs _ ih => exact semSteps_trans (splitStep_collapse hs) ih
+
+/-- Every `SemStep` is a split run: `witnessed` is `mutate` then `record`. -/
+theorem semStep_has_split {c c' : Config} (h : SemStep c c') :
+    SplitSteps ⟨c.body, c.world, c.log, none⟩ ⟨c'.body, c'.world, c'.log, none⟩ := by
+  cases h with
+  | pure => exact .step .pure .refl
+  | witnessed => exact .step .mutate (.step .record .refl)
+  | emit => exact .step .emit .refl
+
+theorem splitSteps_trans {a b c : SplitConfig} (h1 : SplitSteps a b)
+    (h2 : SplitSteps b c) : SplitSteps a c := by
+  induction h1 with
+  | refl => exact h2
+  | step hs _ ih => exact .step hs (ih h2)
+
+/-- **A `SemSteps` run is a split run.** The split relation loses no run
+the collapsed one has. -/
+theorem semSteps_has_split {c c' : Config} (h : SemSteps c c') :
+    SplitSteps ⟨c.body, c.world, c.log, none⟩ ⟨c'.body, c'.world, c'.log, none⟩ := by
+  induction h with
+  | refl => exact .refl
+  | step hs _ ih => exact splitSteps_trans (semStep_has_split hs) ih
+
+theorem splitConfig_proj_log (c : SplitConfig) : c.proj.log = c.log := by
+  cases hp : c.pend <;> simp [SplitConfig.proj, hp]
+
+theorem splitConfig_proj_world (c : SplitConfig) : c.proj.world = c.world := by
+  cases hp : c.pend <;> simp [SplitConfig.proj, hp]
+
+/-- **The log of a split run is still the trace.** A split run from an empty
+log ends with a log the semantics can produce, and with the accounted
+referents it created on top of the world it started in. The pending
+mutation is NOT among them: it is in the world a crash finds and in no
+record. -/
+theorem splitSteps_trace {b : Body} {w₀ : World} {c : SplitConfig}
+    (hs : SplitSteps ⟨b, w₀, [], none⟩ c) :
+    ∃ M, c.log = M ∧ SemLog M ∧ c.world = (logSeqs M).reverse ++ w₀ := by
+  obtain ⟨M, hL, hw, hM⟩ := steps_trace (splitSteps_collapse hs)
+  rw [splitConfig_proj_log] at hL
+  rw [splitConfig_proj_world] at hw
+  exact ⟨M, by simpa [SplitConfig.proj] using hL, hM, by simpa [SplitConfig.proj] using hw⟩
+
+/-- The next split step, as a function: the step relation is deterministic,
+and this is how the oracle runs it. A stuck configuration has none. -/
+def splitNext (c : SplitConfig) : Option SplitConfig :=
+  match c.pend with
+  | some (s, i) =>
+      some ⟨c.body, s :: c.world, c.log ++ [.descriptor s .transactional i], none⟩
+  | none =>
+    match c.body with
+    | .pure b => some ⟨b, c.world, c.log, none⟩
+    | .witnessed s i b => some ⟨b, c.world, c.log, some (s, i)⟩
+    | .emit s b => some ⟨b, s :: c.world, c.log ++ [.effect s true false false], none⟩
+    | _ => none
+
+theorem splitNext_sound {c c' : SplitConfig} (h : splitNext c = some c') :
+    SplitStep c c' := by
+  obtain ⟨body, w, L, pend⟩ := c
+  cases pend with
+  | some p =>
+    obtain ⟨s, i⟩ := p
+    simp only [splitNext, Option.some.injEq] at h
+    subst h
+    exact .record
+  | none =>
+    cases body <;> simp [splitNext] at h <;> (subst h; first | exact .pure | exact .mutate | exact .emit)
+
+/-- The split run cut after `n` steps, or where it is stuck. A crash is a
+prefix, so this is every crash cut of the run. -/
+def splitRun (c : SplitConfig) : Nat → SplitConfig
+  | 0 => c
+  | n + 1 =>
+    match splitNext c with
+    | some c' => splitRun c' n
+    | none => c
+
+/-- **The oracle's cut is a run of the relation.** Every configuration
+`splitRun` computes is reached from its start by `SplitSteps`. -/
+theorem splitRun_steps (n : Nat) : ∀ (c : SplitConfig), SplitSteps c (splitRun c n) := by
+  induction n with
+  | zero => intro c; exact .refl
+  | succ n ih =>
+    intro c
+    simp only [splitRun]
+    cases h : splitNext c with
+    | none => exact .refl
+    | some c' => exact .step (splitNext_sound h) (ih c')
 
 end RevL.Lemmas
