@@ -1382,6 +1382,8 @@
    "stdlib/net.rvl",
    "stdlib/socket.rvl",
    "stdlib/wire.rvl",
+   "tests/fixtures/authority_mesh.rvl",
+   "tests/fixtures/authority_mesh_updated.rvl",
    "tests/fixtures/emission_value/g4_arrow_in_fn_body.rvl",
    "tests/fixtures/emission_value/g4_value_in_component.rvl",
    "tests/fixtures/emission_value/g4_value_in_fn_body.rvl",

@@ -267,7 +267,7 @@ def test_initialize_and_tools_list(all_mcp_tools):
                           # composition queries (docs/queries.md)
                           "revl_query_emitters", "revl_query_withdraw",
                           "revl_query_dependents", "revl_query_reach",
-                          "revl_query_drift",
+                          "revl_query_drift", "revl_query_authority",
                           # live + historical query modes (docs/queries.md §9)
                           "revl_live_query", "revl_history_emitted_between",
                           "revl_history_lifetime",
