@@ -15,7 +15,7 @@
 //
 // ------------------------------------------------------------------- totality
 // Every accessor is TOTAL: a shape mismatch never crashes. It returns a typed
-// default (`""`, `0`, `false`, `[]`, a null `Value`) or an `Opt` `None`, so a
+// default (`""`, `0`, `0.0`, `false`, `[]`, a null `Value`) or an `Opt` `None`, so a
 // walk over an untrusted / partially-shaped document cannot fault. This is the
 // property that makes the type safe to hand a checker-opaque value: the erased
 // value flowed in without proof of shape, and the accessors read it back
@@ -420,8 +420,11 @@ pub extern pure fn value_len(v: Value) -> Int =
   }
 
 // ---------------------------------------------------------------- scalar exits
-// The checked exits back to concrete types. Each coerces its own shape and
-// returns a typed default on any mismatch — never a crash.
+// The checked exits back to concrete types, one per scalar kind: `value_str`
+// (Str, default `""`), `value_int` (Int, default `0`), `value_float` (Float,
+// default `0.0`; an integer reads back as its Float) and `value_bool` (Bool,
+// default `false`). Each coerces its own shape and returns a typed default on
+// any mismatch, never a crash.
 pub extern pure fn value_str(v: Value) -> Str =
   @py { return v if isinstance(v, str) else "" }
   = @ts { return typeof v === "string" ? v : ""; }
@@ -452,6 +455,50 @@ pub extern pure fn value_int(v: Value) -> Int =
             _ => 0,
         },
         Err(_) => 0,
+    }
+  }
+// A Float out of a number (issue #3343). A float reads back as itself and an
+// integer as the Float of the same value, rounded to the nearest Float the way
+// every host converts (an integer past 2**53 may round; one past the Float
+// range is the signed infinity on py and ts, where `Number` of a `bigint`
+// gives it, while rust refuses the document); anything else, a bool
+// included, is `0.0`.
+//
+// NaN and infinity in a parsed `Value`: `json_parse` refuses the `NaN` and
+// `Infinity` tokens on every tier (RFC 8259 section 6), so no NaN comes out of
+// a parsed document. An out-of-range number such as `1e400` is a different
+// case: py `json.loads` and the ts parser read it as an infinity, while rust's
+// `serde_json` refuses the document, so on py and ts an infinity can come out
+// and `value_float` hands it back unchanged. A `Value` built in revl from a
+// NaN or infinite Float reads back as that Float.
+pub extern pure fn value_float(v: Value) -> Float =
+  @py {
+    if isinstance(v, bool): return 0.0
+    if isinstance(v, float): return v
+    if isinstance(v, int):
+        try:
+            return float(v)
+        except OverflowError:
+            return float("inf") if v > 0 else float("-inf")
+    return 0.0
+  }
+  = @ts {
+    // a revl Float is a JS number and an Int a bigint (json.rvl); `Number` of
+    // a bigint rounds to the nearest double, as python's float(int) does
+    if (typeof v === "number") return v;
+    if (typeof v === "bigint") return Number(v);
+    return 0.0;
+  }
+  = @rs {
+    // a JSON number of either kind reads back through `as_f64` (an i64 or u64
+    // is converted with `as f64`, round-to-nearest); every other variant, a
+    // bool included, and a box that is not a serde_json::Value yield 0.0
+    match v.downcast::<serde_json::Value>() {
+        Ok(j) => match &*j {
+            serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0),
+            _ => 0.0,
+        },
+        Err(_) => 0.0,
     }
   }
 pub extern pure fn value_bool(v: Value) -> Bool =

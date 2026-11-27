@@ -41,3 +41,8 @@ fn skip_space(source: Str, from: Int) -> Int {
   while (i < source.length() && source.slice(i, i + 1).is_space()) { i += 1 }
   return i
 }
+
+// issue #3361: `Str.trim()` strips both ends over exactly the is_space set,
+// on a bare local and on a non-trivial receiver.
+fn trim_line(s: Str) -> Str { return s.trim() }
+fn trim_reason(line: Str) -> Str { return line.slice(7, line.length()).trim() }

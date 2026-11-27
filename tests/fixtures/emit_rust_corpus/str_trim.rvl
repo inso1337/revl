@@ -1,0 +1,4 @@
+// issue #3361: `Str.trim()` strips both ends over exactly the is_space set,
+// on a bare local and on a non-trivial (parenthesised) receiver.
+fn trim_line(s: Str) -> Str { return s.trim() }
+fn trim_joined(a: Str, b: Str) -> Str { return a.concat(b).trim() }
