@@ -1,0 +1,12 @@
+// Issue #3620: a bodied extern's parameters keep their source spelling on the
+// go tier. The `@go` body is verbatim host text and reads its parameters by
+// name, so a predeclared builtin (`max`, `len`) must NOT be renamed in the
+// `func` signature — renaming left the body reading the builtin. The reference
+// (backends/go/emit.py) and this port (selfhost/emit_go_module.rvl, with
+// `extern_param_unkept` from emit_go_core.rvl) must emit both verbatim, byte
+// for byte.
+extern pure fn bump(max: Int) -> Int = @go { return max + 1 }
+
+extern pure fn bump_len(len: Int) -> Int = @go { return len + 1 }
+
+extern pure fn add2(max: Int, max_: Int) -> Int = @go { return max + max_ }

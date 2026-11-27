@@ -1,0 +1,5 @@
+// Issue #3620: a bodied extern parameter that CANNOT keep its spelling — a Go
+// keyword is illegal as a parameter at all — is refused at emit by the
+// reference, naming the extern, the parameter and the tier. The port answers
+// with the named `<<UNSUPPORTED-EXTERN-PARAM:..>>` marker instead.
+extern pure fn bump(func: Int) -> Int = @go { return func + 1 }

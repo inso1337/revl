@@ -999,6 +999,35 @@ _JAVA_SCAFFOLDING_RENAMABLE_ROLES = frozenset({
 })
 
 
+def _extern_param(name: object, ext_name: str) -> str:
+    """A bodied extern's parameter keeps its SOURCE spelling on this tier
+    (issue #3620): the `@java` body is host text copied verbatim, so the method
+    signature must bind the name the body reads. Renaming off a prelude class
+    name (`String`, `Math`, `Object`, `Integer`) left the body naming the
+    class instead of the argument — the #3604 python case in Java clothes.
+
+    A name that CANNOT be kept is refused here, naming the extern, the
+    parameter and the tier: a Java keyword (illegal as a parameter at all) or a
+    name in the emitter's `revl*` helper namespace (the wrapper around the
+    body spells those bare, e.g. the `_revl_config` bind). Prelude class names
+    CAN be kept: a parameter shadows them only inside this one method, which
+    is exactly what the host body wants."""
+    if not isinstance(name, str) or not _IDENT_RE.match(name):
+        raise EmitError(
+            f"extern `{ext_name}`: invalid parameter identifier {name!r} (java tier)")
+    root = name
+    while root:
+        if root in _JAVA_RESERVED or _REVL_NAMESPACE_RE.match(root) is not None:
+            raise EmitError(
+                f"extern `{ext_name}` parameter {name!r} cannot keep its spelling on "
+                f"the java tier (a Java keyword or emitter helper-namespace name), "
+                f"and a verbatim @java body cannot be renamed — refusing at emit")
+        if not root.endswith("_"):
+            break
+        root = root[:-1]
+    return name
+
+
 def _ident(name: object, role: str) -> str:
     if not isinstance(name, str) or not _IDENT_RE.match(name):
         raise EmitError(f"invalid {role} identifier: {name!r}")
@@ -4379,7 +4408,7 @@ def _emit_v3_externs(externs: list, journal: bool = False) -> list[str]:
     for ext in externs:
         name = _fn_name(ext.get("name"))
         params = ", ".join(
-            f"{_java_v3_type(p.get('type'))} {_ident(p.get('name'), 'extern parameter name')}"
+            f"{_java_v3_type(p.get('type'))} {_extern_param(p.get('name'), ext.get('name'))}"
             for p in ext.get("params") or []
         )
         ret = _java_v3_type(ext.get("returns"))
@@ -4398,13 +4427,13 @@ def _emit_v3_externs(externs: list, journal: bool = False) -> list[str]:
         if journal and ext.get("class") == "emission":
             wrapper, name = _journalled_emission(
                 name, params,
-                ", ".join(_ident(p.get("name"), "extern parameter name")
+                ", ".join(_extern_param(p.get("name"), ext.get("name"))
                           for p in ext.get("params") or []),
                 ret)
             lines.extend(wrapper)
         if secret_return:
             impl = f"_revl_secret_{name}"
-            forward = ", ".join(_ident(p.get("name"), "extern parameter name")
+            forward = ", ".join(_extern_param(p.get("name"), ext.get("name"))
                                 for p in ext.get("params") or [])
             lines.append(f"public static {ret} {name}({params}) {{")
             lines.append(f"    return revlSecretResult({impl}({forward}));")

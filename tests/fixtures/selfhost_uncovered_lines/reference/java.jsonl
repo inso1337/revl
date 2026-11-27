@@ -486,6 +486,10 @@
 
 ["function", "issue-2345-record-mode-emission-journal", "_service_emission", 7, 7]
 
+["reason", "issue-3620-java-extern-param-arms", "Issue #3620: java `_extern_param` — the invalid-identifier raise is unreachable (the parser guarantees identifiers), and the keyword/helper-namespace refusal plus the trailing-underscore loop need a bodied-extern parameter shape no java corpus document carries (the java port defers extern emission, so there are no reference bytes to agree with). The behavior is pinned by tests/test_3620_extern_param_go_java.py instead."]
+
+["function", "issue-3620-java-extern-param-arms", "_extern_param", 3, 3]
+
 ["reason", "item-458-java-s-div-floor-div-euclid", "Item 458: java's `div_floor`/`div_euclid`/`mod` move from inline `Math.*` expressions to static helpers, because `Math.floorDiv` wraps at Int.MIN / -1 and `Math.abs(Long.MIN_VALUE)` is negative. `_emit_int_arith_helpers` is the block and `_uses_int_arith.walk` the demand scan; no java corpus document calls a named division, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_java.rvl ports none of this family (item-429(d)). The reference half is executed on all six tiers by tests/test_int_min_edges_cross_tier.py."]
 
 ["function", "item-458-java-s-div-floor-div-euclid", "_emit_int_arith_helpers", 1, 1]

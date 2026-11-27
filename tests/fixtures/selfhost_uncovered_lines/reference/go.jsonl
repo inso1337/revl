@@ -188,6 +188,10 @@
 
 ["function", "issue-3168-the-revlstrings-alias-loop-is-unreachable", "_go_v3_fresh_ident", 2, 2]
 
+["reason", "issue-3620-extern-param-invalid-identifier-guard", "Issue #3620: `_extern_param`'s invalid-identifier raise is a defensive guard: the parser only produces valid identifiers for parameter names, so no corpus or refusal document can hand it a non-identifier name. The keyword/scaffold/namespace refusal and the trailing-underscore loop ARE reached, by emit_go_corpus/extern_param_names.rvl and emit_go_refusals/extern_param_keyword.rvl."]
+
+["function", "issue-3620-extern-param-invalid-identifier-guard", "_extern_param", 1, 1]
+
 ["reason", "issue-721-issue-1321-component-is-observable-decides", "issue #721 / issue #1321: `_component_is_observable` decides whether a document that declares a top-level `fn`/`type`/`extern`/plain `test` beside a component takes the pure typed-core path (which routes PAST the component) or `_emit_v3_combined` (which renders both). A corpus document cannot reach it: an emit_go_corpus document declares no component, and one that did would take the combined path, which selfhost/emit_go.rvl has none of, so it would flip the byte-agreement oracle RED rather than cover the line. `_refuse_pure_path_component_drop` is gone from this bucket because issue #1321 removed it: the refusal PR #1317 added is unreachable once the combined path carries the document. The predicate is pinned by tests/test_548_control_flow_in_provide_methods.py::test_go_carries_a_component_the_pure_path_would_drop and by tests/test_selfhost_emit_go.py::test_an_observable_component_on_the_pure_path_is_named_by_the_port, with both boundaries (the live path still carries the same component, and a component with nothing to drop is still routed past silently) pinned beside them."]
 
 ["function", "issue-721-issue-1321-component-is-observable-decides", "_component_is_observable", 4, 4]
