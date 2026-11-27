@@ -66,6 +66,7 @@
 //     @go body uses an Encoder with `SetEscapeHTML(false)`).
 //   * KEY ORDER is record-declaration / insertion order (py dict, ts object).
 //   * booleans/null spelled `true`/`false`/`null`; ints exact incl. > 2^53.
+//   * Absent Opt members stay in the object as null on Python and TypeScript.
 //   * FLOATS: values that share a decimal form across Python and JS (e.g. 1.5,
 //     -0.25) are byte-identical; a WHOLE-NUMBER float (1.0 vs 1), -0.0, or an
 //     extreme-exponent float can still format differently between the two
@@ -411,6 +412,8 @@ pub extern pure fn json_stringify(v: Any) -> Str
       const prefix = "@@revlBigInt" + "0".repeat(zeros) + ":";
       const marks: string[] = [];
       const wire = JSON.stringify(v, (_k, x) => {
+        // Opt.None is undefined on TS. Keep its key, matching Python's null.
+        if (x === undefined) return null;
         // JSON.stringify maps a non-finite number to `null`: a SILENT
         // substitution of a different value, not a refusal. A non-finite Float
         // is reachable (`/` is IEEE true division: `1.0/0.0` is `inf` on every

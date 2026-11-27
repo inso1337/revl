@@ -133,6 +133,34 @@ def test_py_and_ts_emit_the_canonical_bytes(tier, name, decl, expected):
     assert status == "pass", f"{tier} drifted on {name!r}: {message}"
 
 
+@pytest.mark.parametrize("tier", ["py", "ts"])
+@pytest.mark.parametrize(
+    "decl,expected",
+    [
+        pytest.param(
+            "type R = { a: Opt[Str], c: Str }\n"
+            'fn v() -> R { return { a: None, c: "y" } }',
+            '{"a":null,"c":"y"}',
+            id="record",
+        ),
+        pytest.param(
+            "type Inner = { absent: Opt[Str], present: Opt[Bool] }\n"
+            "type R = { inner: Inner, n: Int }\n"
+            "fn v() -> R {\n"
+            "  return { inner: { absent: None, present: Some(false) }, n: 9007199254740993 }\n"
+            "}",
+            '{"inner":{"absent":null,"present":false},"n":9007199254740993}',
+            id="nested-record-with-bigint",
+        ),
+    ],
+)
+def test_py_and_ts_keep_absent_optional_record_members_as_null(tier, decl, expected):
+    status, message = _run(tier, decl, expected)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier} did not preserve the optional member: {message}"
+
+
 @pytest.mark.parametrize("name,decl,expected", GO_CORPUS,
                          ids=[c[0] for c in GO_CORPUS])
 def test_go_emits_the_canonical_bytes_on_supported_shapes(name, decl, expected):
