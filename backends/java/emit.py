@@ -4367,6 +4367,32 @@ def _has_emission_externs(externs: list) -> bool:
     return any(ext.get("class") == "emission" for ext in externs)
 
 
+def _java_extern_param(ext_name: object, pname: object) -> str:
+    """The Java spelling of a parameter of an extern with an inline `@java`
+    body (issue #3620). The body is host text copied verbatim and names its
+    parameters itself, so they keep their spelling: no `java.lang`/scaffolding
+    rung (a parameter `String` was emitted `String_` while its body read the
+    class `String`). A spelling Java cannot bind as a parameter (a keyword,
+    including the single `_`), or one in the emitter's helper namespace
+    (`_REVL_NAMESPACE_RE`, which the config/secret/journal seams bind inside
+    the same body), cannot keep it, so it is refused at emit naming the
+    extern, the parameter and the tier rather than renamed away from the
+    body's spelling. `java.lang` type names (`String`, `Math`, ...) bind fine
+    as Java parameters and are kept verbatim."""
+    if not isinstance(pname, str) or not _IDENT_RE.match(pname):
+        raise EmitError(
+            f"extern `{ext_name}`: invalid extern parameter identifier: {pname!r}")
+    if pname in _JAVA_RESERVED or pname in ("null", "true", "false") or pname == "_":
+        why = "is a Java keyword or literal"
+    elif _REVL_NAMESPACE_RE.match(pname) is not None:
+        why = "is in the emitter's helper namespace"
+    else:
+        return pname
+    raise EmitError(
+        f"extern `{ext_name}` parameter {pname!r} {why}, so the java tier cannot "
+        "keep the spelling its inline @java body uses: rename the parameter")
+
+
 def _emit_v3_externs(externs: list, journal: bool = False) -> list[str]:
     """`journal` (record mode with components, issue #2345) wraps each
     `extern emission fn` so its durable start record is written first."""
@@ -4378,10 +4404,6 @@ def _emit_v3_externs(externs: list, journal: bool = False) -> list[str]:
         lines.extend(_java_extern_config_constants(externs))
     for ext in externs:
         name = _fn_name(ext.get("name"))
-        params = ", ".join(
-            f"{_java_v3_type(p.get('type'))} {_ident(p.get('name'), 'extern parameter name')}"
-            for p in ext.get("params") or []
-        )
         ret = _java_v3_type(ext.get("returns"))
         bodies = ext.get("bodies") or {}
         if "java" not in bodies:
@@ -4389,6 +4411,13 @@ def _emit_v3_externs(externs: list, journal: bool = False) -> list[str]:
                 f"extern `{name}` has no @java body — not portable to this backend "
                 f"(available: {', '.join(sorted(bodies)) or 'none'})"
             )
+        # issue #3620: an inline @java body spells its parameters by their
+        # source names, so the signature keeps that spelling
+        # (`_java_extern_param` refuses a name Java cannot bind, by name).
+        params = ", ".join(
+            f"{_java_v3_type(p.get('type'))} {_java_extern_param(ext.get('name'), p.get('name'))}"
+            for p in ext.get("params") or []
+        )
         # item 421 F6, the origin end: `taint.py` strips the qualifier before
         # lowering, so `secret_return` is the only surviving record that this
         # extern's declared return was `Secret[T]`. The verbatim @java body
@@ -4398,13 +4427,13 @@ def _emit_v3_externs(externs: list, journal: bool = False) -> list[str]:
         if journal and ext.get("class") == "emission":
             wrapper, name = _journalled_emission(
                 name, params,
-                ", ".join(_ident(p.get("name"), "extern parameter name")
+                ", ".join(_java_extern_param(ext.get("name"), p.get("name"))
                           for p in ext.get("params") or []),
                 ret)
             lines.extend(wrapper)
         if secret_return:
             impl = f"_revl_secret_{name}"
-            forward = ", ".join(_ident(p.get("name"), "extern parameter name")
+            forward = ", ".join(_java_extern_param(ext.get("name"), p.get("name"))
                                 for p in ext.get("params") or [])
             lines.append(f"public static {ret} {name}({params}) {{")
             lines.append(f"    return revlSecretResult({impl}({forward}));")
