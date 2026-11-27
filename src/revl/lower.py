@@ -4350,8 +4350,11 @@ def _refuse_effect_position_bound_externs_in_fn_body(
         if isinstance(node, ExprArrow):
             in_arrow = True
         if isinstance(node, ExprVar) and node.name in deferred \
-                and first_teardown is None:
-            # a value, not a call: the callee position is skipped below
+                and node.name not in bound and first_teardown is None:
+            # a value, not a call: the callee position is skipped below. A name
+            # the body binds in scope at the read (a parameter, a `let`, a
+            # `for` or arrow binder, a match payload) is that binding, not the
+            # extern (issue #3479, same rule as the emission/acquire checks).
             first_teardown = _deferred_value_refusal(node.name, where,
                                                      filename, node.line)
         if check_emission_values and isinstance(node, ExprVar) \

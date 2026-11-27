@@ -1944,6 +1944,22 @@ component Supervisor requires net: Kv provides sup: Sup {
     ("item 309: the checked-in deferred idempotent fixture",
      (ROOT / "tests" / "fixtures" /
       "extern_idempotent_deferred.rvl").read_text(encoding="utf-8")),
+    # issue #3479: a parameter / `let` / arrow parameter named like a `deferred`
+    # extern is that binding, not a read of the extern — admitted on both
+    # engines (the reference's `bound` test, now ported to the gate's dfr walk).
+    ("a parameter named like a deferred extern shadows it", """
+extern emission deferred fn deliver(sink: Str, msg: Str) = @py { return }
+
+fn f(deliver: Int) -> Int { return deliver }
+"""),
+    ("a let binding named like a deferred extern shadows it", """
+extern emission deferred fn deliver(sink: Str, msg: Str) = @py { return }
+
+fn f() -> Int {
+  let deliver = 2
+  return deliver
+}
+"""),
     ("item 309: a bare idempotent emission", _IDEM.format(mods="idempotent")),
     ("item 309: a keyed idempotent emission",
      _IDEM.format(mods="idempotent(key: id)")),
@@ -1994,6 +2010,16 @@ component Supervisor requires net: Kv provides sup: Sup {
 # reference's own text is the ground truth. Several are the documented
 # `expected error` of a checked-in rejection fixture.
 REJECTED_PROGRAMS = [
+    # issue #3479: a bare deferred-extern value read in a fn body is still G4 —
+    # the shadowing fix only excuses a name the body BINDS at the read.
+    ("a bare deferred value read in a fn body", """
+extern emission deferred fn deliver(sink: Str, msg: Str) = @py { return }
+
+fn k() -> Int {
+  let g = deliver
+  return 0
+}
+""", "G4"),
     # ---- issue #1728: an unbound realm placeholder ---------------------------
     # The reference binds `realm(?<name>)` before lowering and refuses an
     # unbound one by name; the gate takes no bindings, so it refuses every one,
