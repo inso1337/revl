@@ -38,7 +38,8 @@ review's own words for the rung it produces. See
 docs/design/533-evolution-curriculum.md for the argument, the measured
 populations, and the cases the signal gets wrong.
 
-SOURCES. The review names eight. This module reads seven of them; the rest are
+SOURCES. The review names eight. This module reads eight of them; the rest are
+SOURCES. The review names eight. This module reads six of them; the rest are
 staged in the design doc's slice plan. Each adapter below states the artifact
 it reads, and every task it emits carries that artifact by path, so a reader
 can go and look.
@@ -811,6 +812,100 @@ def adapter_tracker(snapshot=None) -> Derivation:
     return Derivation("tracker", tuple(dict.fromkeys(signals)), tuple(tasks))
 
 
+# --------------------------------------------------------------------------- #
+# Adapter 6 -- generated adversarial programs: fuzz seeds that still diverge     #
+# --------------------------------------------------------------------------- #
+# tools/fuzz_frontend.py mutates the tree's own programs and runs each stage's
+# oracle over the result: the reference frontend must refuse and never crash,
+# the self-host lexer must agree with the reference lexer, and the self-host
+# gate must not admit what the reference refuses. A campaign that finds a
+# divergence shrinks it to a minimal reproducer. A reproducer nobody has fixed
+# is a task, and it is a task ONLY WHILE IT STILL DIVERGES, so the curriculum
+# replays it instead of trusting that it was recorded.
+#
+# The recorded reproducers are `tests/fixtures/fuzz_seeds.json`. The source
+# reads that ledger and replays each entry through the fuzzer's own
+# `replay_seeds`, which is the same function `python3 tools/fuzz_frontend.py
+# --replay` runs, so the task's verifier and the generator cannot drift.
+#
+# What each stage makes agree is read off the stage classes themselves, by AST:
+# a stage that builds a self-host module compares it with the reference, one
+# that does not checks the reference alone. Nothing here says which stage is
+# hard. The corpus a stage mutates is the fuzzer's own `CORPUS_DIRS`.
+FUZZ_FRONTEND = "tools/fuzz_frontend.py"
+FUZZ_SEEDS = "tests/fixtures/fuzz_seeds.json"
+_FUZZ_SUBJECT = {"reference": "src/revl (the reference frontend)",
+                 "lexer": "selfhost/lexer.rvl",
+                 "gate": "selfhost/lower.rvl"}
+
+
+def _fuzz_stage_impls() -> dict[str, tuple[str, ...]]:
+    """`stage name -> implementations it makes agree`, read from the fuzzer."""
+    tree = ast.parse((ROOT / FUZZ_FRONTEND).read_text(encoding="utf-8"))
+    classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
+    registry = next(
+        (n.value for n in tree.body if isinstance(n, ast.Assign)
+         and any(isinstance(t, ast.Name) and t.id == "STAGES" for t in n.targets)),
+        None)
+    if not isinstance(registry, ast.DictComp):
+        raise ValueError(f"{FUZZ_FRONTEND}: STAGES is no longer a comprehension "
+                         "over a tuple of stage classes; teach "
+                         "_fuzz_stage_impls its shape")
+    out: dict[str, tuple[str, ...]] = {}
+    for generator in registry.generators:
+        for element in generator.iter.elts:
+            node = classes[element.id]
+            name = next(
+                stmt.value.value for stmt in node.body
+                if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Constant)
+                and any(isinstance(t, ast.Name) and t.id == "name"
+                        for t in stmt.targets))
+            builds_selfhost = any(isinstance(n, ast.Attribute) and n.attr == "selfhost"
+                                  for n in ast.walk(node))
+            out[name] = (REFERENCE, SELFHOST) if builds_selfhost else (REFERENCE,)
+    if not out:
+        raise ValueError(f"{FUZZ_FRONTEND}: STAGES names no stage")
+    return out
+
+
+def adapter_fuzz_seeds(ledger=None, stages=None) -> Derivation:
+    path = Path(ledger) if ledger else ROOT / FUZZ_SEEDS
+    if not path.is_file():
+        # No ledger to read is not "nothing diverges". It is the source failing
+        # to read its artifact, and an empty derivation makes `check` say so.
+        return Derivation("fuzz-seeds", (), ())
+    fuzz = _load("_ec_fuzz", FUZZ_FRONTEND)
+    # Measured before any seed is replayed: each stage's signal is a property of
+    # the fuzzer and its corpus, so an empty ledger still reaches every rung its
+    # stages land on.
+    breadth = breadth_of(fuzz.CORPUS_DIRS)
+    signals = {name: Signal(impls=impls, breadth=breadth)
+               for name, impls in _fuzz_stage_impls().items()}
+    try:
+        artifact = str(path.relative_to(ROOT))
+    except ValueError:
+        artifact = str(path)             # a staged ledger the test owns
+    tasks: list[Task] = []
+    for seed, detail in fuzz.replay_seeds(path, stages=stages):
+        stage = seed["stage"]
+        tasks.append(_task(
+            task_id=f"fuzz/{seed['id']}",
+            source="generated adversarial programs",
+            artifact=artifact,
+            locator=f"seeds[{seed['id']!r}]",
+            gap=(f"the {stage} stage of {FUZZ_FRONTEND} still reports "
+                 f"{seed['kind']} on a recorded {len(seed['source'])}-character "
+                 f"reproducer: {detail}"),
+            subject=_FUZZ_SUBJECT.get(stage, stage),
+            mechanism=f"{FUZZ_FRONTEND} --replay",
+            verify=(f"python3 {FUZZ_FRONTEND} --replay  # {seed['id']} is no "
+                    f"longer listed; then delete its entry from {FUZZ_SEEDS}"),
+            signal=signals[stage],
+        ))
+    return Derivation("fuzz-seeds", tuple(dict.fromkeys(signals.values())),
+                      tuple(tasks))
+
+
 ADAPTERS = {
     "construct-reach": adapter_construct_reach,
     "census-bypass": adapter_census_bypass,
@@ -819,6 +914,7 @@ ADAPTERS = {
     "cross-tier-probes": adapter_cross_tier_probe,
     "design-docs": adapter_design_docs,
     "tracker": adapter_tracker,
+    "fuzz-seeds": adapter_fuzz_seeds,
 }
 
 

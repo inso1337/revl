@@ -62,6 +62,25 @@ def curriculum(derived):
     return tool, tool.tasks_of(derivations)
 
 
+def _without_rung(derivations, rung):
+    """The same sources with every signal and task on `rung` removed.
+
+    A staged `hard` test needs `hard` to be exactly what it stages. A source
+    that stamps `hard` besides the ones under test (the fuzz-seed source does,
+    through its self-host stages) must not leak into the count, and must keep
+    feeding its other rungs or the gate would red for the wrong reason, so it
+    is trimmed rather than dropped.
+    """
+    import dataclasses
+
+    tool = _tool()
+    return [dataclasses.replace(
+        d,
+        signals=tuple(s for s in d.signals if tool.tier(s) != rung),
+        tasks=tuple(t for t in d.tasks if t.tier != rung))
+        for d in derivations]
+
+
 # --------------------------------------------------------------------------- #
 # 1. Derived, not invented.                                                     #
 # --------------------------------------------------------------------------- #
@@ -312,8 +331,9 @@ def test_a_staged_probe_fills_the_hard_rung_and_removing_it_empties_it(
     and this test does not depend on a recorded bypass being absent at HEAD.
     """
     tool, live = derived
-    others = [d for d in live if d.source not in
-              ("census-bypass", "cross-tier-probes")]
+    others = _without_rung(
+        [d for d in live
+         if d.source not in ("census-bypass", "cross-tier-probes")], "hard")
     reachable = [tool.adapter_census_bypass(_staged_baseline(tmp_path, ()))]
 
     program = "examples/rejections/t13_unknown_match_case.rvl"
@@ -419,8 +439,9 @@ def test_a_recorded_bypass_fills_the_hard_rung_and_removing_it_empties_it(
     assert {t.tier for t in filled.tasks} == {"hard"}
     assert _refuses_every_named_program(filled.tasks) == len(_STAGED_BYPASSES)
 
-    others = [d for d in live
-              if d.source not in ("census-bypass", "cross-tier-probes")]
+    others = _without_rung(
+        [d for d in live
+         if d.source not in ("census-bypass", "cross-tier-probes")], "hard")
     with_entries = others + [filled]
     assert tool.populations(tool.tasks_of(with_entries))["hard"] == \
         len(_STAGED_BYPASSES)
@@ -657,6 +678,120 @@ def test_the_tier_of_a_missing_oracle_is_read_off_its_named_path(derived):
 
 
 # --------------------------------------------------------------------------- #
+# Fuzz seeds (slice 5): a recorded reproducer is a task only while it diverges. #
+# --------------------------------------------------------------------------- #
+def _fuzz(tool):
+    return tool._load("_ec_fuzz_test", "tools/fuzz_frontend.py")
+
+
+def test_the_fuzz_stage_signals_are_what_the_stage_classes_build(derived):
+    """Re-derived from the fuzzer's classes at runtime, not from the generator's
+    AST scan: a stage that builds a self-host module compares it with the
+    reference, one that does not checks the reference alone."""
+    import inspect
+
+    tool, derivations = derived
+    fuzz = _fuzz(tool)
+    impls = tool._fuzz_stage_impls()
+    assert set(impls) == set(fuzz.STAGES)
+    for name, stage in fuzz.STAGES.items():
+        builds = "selfhost(" in inspect.getsource(stage)
+        assert impls[name] == (("reference", "selfhost") if builds
+                               else ("reference",)), name
+    declared = next(d for d in derivations if d.source == "fuzz-seeds")
+    assert {tool.tier(s) for s in declared.signals} == {"easy", "hard"}
+
+
+def test_every_fuzz_task_is_a_recorded_seed_that_really_still_diverges(
+        derived):
+    """Holds over whatever the ledger holds, which is nothing at HEAD (a
+    campaign of 2534 inputs on the gate stage found no divergence). The set of
+    tasks must equal the fuzzer's own replay, so a task for a fixed seed, or a
+    live seed with no task, fails here. Its teeth are shown on a staged ledger
+    below, not by requiring the tree to still have an open fuzz finding."""
+    tool, derivations = derived
+    fuzz = _fuzz(tool)
+    ids = {f"fuzz/{seed['id']}" for seed, _ in fuzz.replay_seeds()}
+    mine = {t.task_id for d in derivations if d.source == "fuzz-seeds"
+            for t in d.tasks}
+    assert mine == ids
+
+
+def _staged_seeds(tmp_path, seeds):
+    import json
+
+    path = tmp_path / "fuzz_seeds.json"
+    path.write_text(json.dumps({"seeds": seeds}), encoding="utf-8")
+    return path
+
+
+class _BoomStage:
+    """A stage whose oracle trips on one marker, standing in for a real bug."""
+
+    name = "reference"
+
+    def __init__(self, _cache):
+        pass
+
+    def check(self, src):
+        class Signature:
+            kind = "boom"
+
+        return (Signature, "marker found") if "BOOM" in src else None
+
+
+def test_a_seed_is_a_task_only_while_it_still_diverges(derived, tmp_path):
+    """The source's vacuity oracle, in both directions, on a ledger this test
+    owns and a stage whose bug is a marker: a seed that trips it is a task; a
+    seed whose bug was fixed (the stage returns nothing), and a seed that now
+    trips a DIFFERENT fault, are not."""
+    tool, derivations = derived
+    live = _staged_seeds(tmp_path, [
+        {"id": "live", "stage": "reference", "kind": "boom",
+         "source": "fn BOOM() {}"},
+        {"id": "fixed", "stage": "reference", "kind": "boom",
+         "source": "fn ok() {}"},
+        {"id": "other", "stage": "reference", "kind": "different",
+         "source": "fn BOOM() {}"},
+    ])
+    found = tool.adapter_fuzz_seeds(live, stages={"reference": _BoomStage})
+    assert [t.task_id for t in found.tasks] == ["fuzz/live"]
+    task = found.tasks[0]
+    assert task.tier == "easy" and task.artifact == str(live)
+    assert "marker found" in task.gap
+    assert "--replay" in task.verify
+
+    quiet_dir = tmp_path / "quiet"
+    quiet_dir.mkdir()
+    quiet = tool.adapter_fuzz_seeds(
+        _staged_seeds(quiet_dir, [
+            {"id": "fixed", "stage": "reference", "kind": "boom",
+             "source": "fn ok() {}"}]),
+        stages={"reference": _BoomStage})
+    assert quiet.tasks == ()
+    assert quiet.signals == found.signals          # the same measurement
+    others = [d for d in derivations if d.source != "fuzz-seeds"]
+    assert tool.check(others + [found]) == []
+    assert tool.check(others + [quiet]) == [], \
+        "an empty but reachable rung is a measurement, not a failure"
+
+
+def test_a_missing_fuzz_ledger_reds_and_an_unknown_stage_is_refused(
+        derived, tmp_path):
+    tool, derivations = derived
+    missing = tool.adapter_fuzz_seeds(tmp_path / "does-not-exist.json")
+    assert missing.signals == () and missing.tasks == ()
+    live = [d for d in derivations if d.source != "fuzz-seeds"]
+    assert any("'fuzz-seeds' ran and measured no signal" in p
+               for p in tool.check(live + [missing]))
+
+    bad = _staged_seeds(tmp_path, [
+        {"id": "x", "stage": "nope", "kind": "k", "source": "s"}])
+    with pytest.raises(KeyError, match="unknown stage"):
+        tool.adapter_fuzz_seeds(bad)
+
+
+# --------------------------------------------------------------------------- #
 # 4. The gate fires.                                                            #
 # --------------------------------------------------------------------------- #
 def test_check_is_green_on_the_whole_curriculum(derived):
@@ -695,11 +830,15 @@ def test_check_reds_on_a_source_that_ran_and_measured_nothing(derived):
     """
     tool, derivations = derived
     import dataclasses
+    # Every source that stamps `hard` at HEAD, read off the measurement rather
+    # than named, so a source added later that also lands on `hard` cannot make
+    # this test pass for the wrong reason (the rung staying reachable).
+    feeders = [d.source for d in derivations if "hard" in d.rungs()]
+    assert {"census-bypass", "cross-tier-probes"} <= set(feeders), feeders
     blinded = [dataclasses.replace(d, signals=(), tasks=())
-               if d.source in ("census-bypass", "cross-tier-probes") else d
-               for d in derivations]
+               if d.source in feeders else d for d in derivations]
     problems = tool.check(blinded)
-    for source in ("census-bypass", "cross-tier-probes"):
+    for source in feeders:
         assert any(f"'{source}' ran and measured no signal" in p
                    for p in problems), problems
     assert any("tier 'hard' is unreachable" in p for p in problems), problems

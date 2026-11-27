@@ -517,3 +517,55 @@ def test_campaign_smoke_runs_every_stage(cache):
     campaign = F.Campaign(stages, corpus)
     campaign.run(random.Random(1234), time.monotonic() + 20.0, 150, quiet=True)
     assert campaign.iterations > 0
+
+
+# ----------------------------------------------------- recorded seeds (replay)
+
+class _Marker:
+    """A stage whose oracle trips on one marker, standing in for a real bug."""
+
+    name = "reference"
+
+    def __init__(self, _cache):
+        pass
+
+    def check(self, src):
+        if "BOOM" in src:
+            return (F.Signature("reference", "boom", ""), "marker found")
+        return None
+
+
+def test_replay_reports_a_seed_only_while_it_still_diverges(tmp_path):
+    import json
+
+    ledger = tmp_path / "seeds.json"
+    ledger.write_text(json.dumps({"seeds": [
+        {"id": "live", "stage": "reference", "kind": "boom", "source": "BOOM"},
+        {"id": "fixed", "stage": "reference", "kind": "boom", "source": "ok"},
+        {"id": "other", "stage": "reference", "kind": "x", "source": "BOOM"},
+    ]}), encoding="utf-8")
+    still = F.replay_seeds(ledger, stages={"reference": _Marker})
+    assert [(s["id"], detail) for s, detail in still] == [("live", "marker found")]
+
+
+def test_replay_refuses_an_unknown_stage(tmp_path):
+    import json
+
+    ledger = tmp_path / "seeds.json"
+    ledger.write_text(json.dumps({"seeds": [
+        {"id": "x", "stage": "nope", "kind": "k", "source": "s"}]}),
+        encoding="utf-8")
+    with pytest.raises(KeyError, match="unknown stage"):
+        F.replay_seeds(ledger)
+
+
+def test_replay_cli_is_green_on_the_committed_ledger():
+    """The ledger is empty at the slice-5 commit, so the CLI exits 0 and builds
+    no self-host. It goes red the day a recorded seed diverges again."""
+    import subprocess
+
+    done = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "fuzz_frontend.py"), "--replay"],
+        capture_output=True, text=True, cwd=ROOT)
+    assert done.returncode == 0, done.stdout[-1000:] + done.stderr[-1000:]
+    assert "0 recorded seed(s) still diverge" in done.stdout
