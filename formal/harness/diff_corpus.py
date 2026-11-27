@@ -3449,15 +3449,36 @@ def checker_message(rel: str) -> str:
         return e.message
 
 
-# ---------------------------------------- declared access (issue #1807)
+# ---------------------------------------- declared access (issues #1807, #2744)
 #
 # The checker refuses a call head whose root names no declared requirement
 # (G1, "`db` is not a declared requirement of C"). The model states the rule
-# over a component's ACCESS roots (`RevL.G1Access.AccessOK`); the exporter
-# carries them, one `GA <file> <comp> <root>` row each: every call head's
-# root, at every nesting depth, less the roots the checker resolves without a
-# requirement. The requirements themselves are NOT dropped here, so the
-# model is what checks a root against the declared ones.
+# PER SCOPE (`RevL.G1Access.ScopeAccessOK`, issue #2744): a scope is the
+# activation, or one provide method `<key>.<method>`, and a root it uses is
+# `bound` (a binding of THAT scope), `callable`, `imported`, `host` or `ctor`
+# (what the FILE alone resolves it to), `declared` (a requirement) or
+# `undeclared`. The CLASSIFICATION belongs to the model: the exporter ships
+# facts, the oracle and the reference each classify, and the class of every
+# root is compared.
+#
+#   GAS  <file> <comp> <scope>                a scope of the component
+#   GAU  <file> <comp> <scope> <root> <kind>  a root the scope uses, with what
+#                                             the file alone resolves it to
+#                                             (none | callable | imported |
+#                                             host | ctor | key)
+#   GAL  <file> <comp> <scope> <name>         a name the scope itself binds
+#
+# `key` is an `intercept` target, which only a requirement can resolve.
+# Verdicts (the oracle's output, not export rows):
+#
+#   G1R  <file> <comp> <scope> <root> class=<class>   the class of each root
+#   G1S  <file> <comp> <scope> access=ok|fail         no root is undeclared
+#   G1   <file> <comp> access=ok|fail                 every scope is `ok`
+#
+# Binding is read per SCOPE and not per statement (see `G1_KeyAccess.lean`):
+# a name bound anywhere in a scope, in a nested block included, counts for the
+# whole scope, and an activation binding made before a `provide` block counts
+# for that block's methods.
 
 #: The builtin constructors every program can name.
 _BUILTIN_CTORS = frozenset({"Ok", "Err", "Some", "None"})
@@ -3467,11 +3488,11 @@ _BINDING_NODES = ("LetStmt", "LetEffect", "ForStmt", "LetApprovalStmt",
                   "StreamIterStmt", "CallStmt")
 
 
-def _component_locals(comp) -> set[str]:
-    """Every name a binding puts in view anywhere in the component: `let`,
-    `var`, `let ... = effect`, a loop or stream binder, an approval, a
-    provide method's parameters, an arrow's parameters and a `match` arm's
-    binder. Read component-wide, not per scope (see `G1_KeyAccess.lean`)."""
+def _bound_names(nodes) -> set[str]:
+    """Every name a binding puts in view anywhere in `nodes`, a statement or
+    a list of statements: `let`, `var`, `let ... = effect`, a loop or stream
+    binder, an approval, an arrow's parameters and a `match` arm's binder.
+    Read per SCOPE, not per statement (see `G1_KeyAccess.lean`)."""
     out: set[str] = set()
 
     def walk(node) -> None:
@@ -3491,9 +3512,6 @@ def _component_locals(comp) -> set[str]:
             for arm in node.arms:
                 if len(arm) > 1 and isinstance(arm[1], str):
                     out.add(arm[1])
-        if isinstance(node, ProvideStmt):
-            for pm in node.methods:
-                out.update(pm.params)
         if dataclasses.is_dataclass(node) and not isinstance(node, type):
             for f in dataclasses.fields(node):
                 walk(getattr(node, f.name))
@@ -3501,7 +3519,7 @@ def _component_locals(comp) -> set[str]:
             for x in node:
                 walk(x)
 
-    walk(comp.body)
+    walk(nodes)
     return out
 
 
@@ -3517,29 +3535,42 @@ def _pattern_names(pattern, out: set[str]) -> None:
             _pattern_names(x, out)
 
 
-def _file_resolved_names(prog) -> set[str]:
-    """The roots a call head may name without a requirement, file-wide: a
-    module `fn` or `extern`, a name or namespace a `use` imports, a host
-    family, and a type or variant constructor."""
-    names = {f.name for f in prog.fn_decls} | {e.name for e in prog.externs}
-    for use in prog.uses:
-        names.update(use.names or ())
-        if use.alias:
-            names.add(use.alias)
+def _file_root_kinds(prog) -> dict[str, str]:
+    """What the FILE alone resolves a root to, without a requirement and
+    whatever a scope binds: a module `fn` or `extern` (`callable`), a host
+    family (`host`), a name or namespace a `use` imports (`imported`), and a
+    type or variant constructor (`ctor`). The exporter reads the file; a name a
+    file gives two readings takes the last of constructor, imported, host and
+    callable, which the corpus checks only through admit versus refuse."""
+    kinds: dict[str, str] = {}
+    for name in _BUILTIN_CTORS:
+        kinds[name] = "ctor"
     for td in prog.type_decls:
-        names.add(td.name)
-        names.update(case.name for case in td.cases or ())
-    return names | set(_HOST_CALLABLES) | _BUILTIN_CTORS
+        kinds[td.name] = "ctor"
+        for case in td.cases or ():
+            kinds[case.name] = "ctor"
+    for use in prog.uses:
+        for name in use.names or ():
+            kinds[name] = "imported"
+        if use.alias:
+            kinds[use.alias] = "imported"
+    for name in _HOST_CALLABLES:
+        kinds[name] = "host"
+    for name in {f.name for f in prog.fn_decls} | {e.name for e in prog.externs}:
+        kinds[name] = "callable"
+    return kinds
 
 
-#: Per component, which kinds of root the export dropped: `(file, comp) ->
-#: set of "local" / "callable" / "host"`. Read by `access_coverage`.
-_ACCESS_DROPPED: dict = {}
+#: What the REFERENCE classified for each scope, as `(file, comp, scope) ->
+#: {root: class}`. Filled by `reference_from_tsv`, read by `access_coverage`,
+#: so the ratchet reads the reference's own classification and not the
+#: exporter's.
+_ACCESS_CLASSES: dict = {}
 
 
 def _value_names(node) -> set[str]:
-    """The root of every name the component reads (`ExprVar`), dotted names
-    by their first segment."""
+    """The root of every name read in `node` (`ExprVar`), dotted names by
+    their first segment."""
     out: set[str] = set()
 
     def walk(n) -> None:
@@ -3559,39 +3590,59 @@ def _value_names(node) -> set[str]:
     return out
 
 
-def access_rows(rel: str, comp, roots: set[str], resolved: set[str],
-                callables: set[str]) -> list[str]:
-    """The `GA` rows of one component from the call-head roots it makes and
-    the names it reads in value position (`nope + v` in a provide body is
-    refused as `nope` is not a declared requirement, issue #1699's block-arm
-    fixture), less the roots the checker resolves without a requirement."""
-    local = _component_locals(comp)
+def access_rows(rel: str, comp, scope_heads: dict[str, set[str]],
+                file_kinds: dict[str, str]) -> list[str]:
+    """The `GAS`/`GAU`/`GAL` rows of one component, one group per scope.
+
+    A scope uses the roots of its call heads and the names it reads in value
+    position (`nope + v` in a provide body is refused as `nope` is not a
+    declared requirement, issue #1699's block-arm fixture), and binds the
+    names `_bound_names` finds in its own statements. A provide method also
+    sees its parameters and the activation bindings made before its `provide`
+    block; it does NOT see a name another method binds. An `intercept` target
+    that is not a provision is a `key` use of the activation scope: a
+    dependency key (Def. 30), which no binding shadows. One on a provision is
+    a different refusal (issue #1809)."""
     provided = {key for key, _svc, _line in comp.provides}
-    access: set[str] = set()
-    dropped: set[str] = set()
-    for root in set(roots) | (_value_names(comp.body) - {"config"}):
-        if not root or root.startswith("@"):
-            continue  # a receiver written in place: its own heads are walked
-        if root in local:
-            dropped.add("local")
-        elif root in callables:
-            dropped.add("callable")
-        elif root in _HOST_CALLABLES:
-            dropped.add("host")
-        elif root not in resolved:
-            access.add(root)
+    activation = [s for s in comp.body if not isinstance(s, ProvideStmt)]
+    scopes: list[tuple[str, list, set[str]]] = []
+    seen: list = []   # the activation statements before the current provide
     for stmt in comp.body:
-        if type(stmt).__name__ == "InterceptStmt" and stmt.key not in provided:
-            # an `intercept` target is a dependency key (Def. 30); one on a
-            # provision is a different refusal (issue #1809)
-            access.add(stmt.key)
-    _ACCESS_DROPPED[(rel, comp.name)] = dropped
-    return ["\t".join(["GA", rel, comp.name, root]) for root in sorted(access)]
+        if isinstance(stmt, ProvideStmt):
+            before = _bound_names(seen)
+            for pm in stmt.methods:
+                label = f"{stmt.key}.{pm.name}"
+                bound = _bound_names(pm.body) | set(pm.params or []) | before
+                scopes.append((label, pm.body or [], bound))
+        else:
+            seen.append(stmt)
+    rows: list[str] = []
+    if activation:
+        scopes.insert(0, ("activation", activation, _bound_names(activation)))
+    for label, stmts, bound in scopes:
+        roots = set(scope_heads.get(label, set())) | (_value_names(stmts)
+                                                       - {"config"})
+        uses: dict[str, str] = {}
+        for root in sorted(roots):
+            if not root or root.startswith("@"):
+                continue  # a receiver written in place: its own heads are walked
+            uses[root] = file_kinds.get(root, "none")
+        if label == "activation":
+            for stmt in activation:
+                if type(stmt).__name__ == "InterceptStmt" \
+                        and stmt.key not in provided:
+                    uses[stmt.key] = "key"
+        rows.append("\t".join(["GAS", rel, comp.name, label]))
+        for root, kind in sorted(uses.items()):
+            rows.append("\t".join(["GAU", rel, comp.name, label, root, kind]))
+        for name in sorted(bound):
+            rows.append("\t".join(["GAL", rel, comp.name, label, name]))
+    return rows
 
 
 # ----------------------------- declared-access COVERAGE (issue #2744)
 #
-# THE VISITING HALF OF G1, which the `GA`/`G1` row above cannot state. G1 is
+# THE VISITING HALF OF G1, which the `G1` row above cannot state. G1 is
 # enforced by name resolution DURING lowering (`lower.py`'s own guarantee map:
 # "G1 undeclared access -> `_lower_postfix` name resolution"), so the walk that
 # resolves roots is the lowering walk itself. `RevL.G1Coverage.coversAccessBodyB`
@@ -5025,7 +5076,7 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                     for name, vals in fn_values.items()}
         tsv.append("\t".join(["PG", rel, str(len(prog.fn_decls))]))
         extern_class_of = {e.name: e.classification for e in prog.externs}
-        resolved_names = _file_resolved_names(prog)
+        file_root_kinds = _file_root_kinds(prog)
         # model roles and councils (issue #1811), file-wide
         model_roles, model_councils = _model_tables(prog, str(path))
         file_has_mp = False
@@ -5040,8 +5091,6 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
         # async names (AN, issue #1808), file-wide
         for name in async_names(prog):
             tsv.append("\t".join(["AN", rel, name]))
-        file_callables = {f.name for f in prog.fn_decls} \
-            | {e.name for e in prog.externs}
         # The service operations a bracket inverse READS as a value
         # (`undo dispatch1(w.task.run)`, issue #1792), each declared in the
         # `Prog` below as an `emission` boundary named `<Service>.<op>`. No
@@ -5253,6 +5302,10 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             terms: list[tuple[int, str, list[str], list[str]]] = []
             head_roots: set[str] = set()
             head_calls: list[tuple[str, str]] = []
+            # the call-head roots of each SCOPE (issue #2744): the activation,
+            # or one provide method `<key>.<method>`
+            scope_heads: dict[str, set[str]] = {}
+            cur_scope = ["activation"]
 
             def _term_heads(node: object, ctx: str = "plain") -> list[str]:
                 found: list[tuple[str, str, str]] = []
@@ -5316,6 +5369,8 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             def _record(local_calls: list[tuple[str, str, str]]) -> bool:
                 saw_raw = False
                 head_roots.update(root for root, _chain, _ctx in local_calls)
+                scope_heads.setdefault(cur_scope[0], set()).update(
+                    root for root, _chain, _ctx in local_calls)
                 head_calls.extend((root, chain) for root, chain, _c in local_calls)
                 for root, chain, ctx in local_calls:
                     res = _resolve_emission(root, chain, require_map, handles,
@@ -5361,6 +5416,7 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             # dispatches a bound value. A method sees the activation's lets
             # and its own, its parameters shadowing both.
             inv_lets: dict[str, object] = {}
+            cur_scope[0] = "activation"
             for stmt in c.body:
                 if not isinstance(stmt, ProvideStmt):
                     classify_stmt(stmt)
@@ -5368,6 +5424,7 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             for stmt in c.body:
                 if isinstance(stmt, ProvideStmt):
                     for pm in stmt.methods:
+                        cur_scope[0] = f"{stmt.key}.{pm.name}"
                         inv_lets = {k: v for k, v in act_lets.items()
                                     if k not in pm.params}
                         for inner in pm.body:
@@ -5396,9 +5453,9 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             # async-colour facts (AS/AG, issue #1808)
             tsv.extend(async_rows(rel, c, _AsyncCtx(
                 require_map, handles, psvc, aliases), svc_objs, psvc))
-            # declared-access facts (GA, issue #1807)
-            tsv.extend(access_rows(rel, c, head_roots, resolved_names,
-                                   file_callables))
+            # declared-access facts (GAS/GAU/GAL, issues #1807 and #2744),
+            # per scope
+            tsv.extend(access_rows(rel, c, scope_heads, file_root_kinds))
             for idx, kind, heads, inverse in terms:
                 tsv.append("\t".join(["I", rel, c.name, str(idx), kind,
                                        ",".join(heads), ",".join(inverse)]))
@@ -7066,37 +7123,89 @@ def async_coverage() -> list[str]:
     return findings
 
 
-#: What the REFERENCE decided for each component's access: (admitted, access
-#: roots). Filled by `reference_from_tsv`, read by `access_coverage`.
+#: What the REFERENCE decided for each component's access: (admitted, the
+#: classes its roots fell in). Filled by `reference_from_tsv`, read by
+#: `access_coverage`.
 _ACCESS_ROWS: dict = {}
+
+#: The facts each component's classification was made from, as
+#: `(file, comp) -> (declared, [(scope, bound names, {root: file kind})])`.
+#: Filled by `reference_from_tsv`, read by `access_coverage`, which re-decides
+#: the component with its bindings POOLED to show the per-scope reading bites.
+_ACCESS_FACTS: dict = {}
+
+
+def _g1_classify(declared: set, bound: set, kind: str, root: str) -> str:
+    """`RevL.G1Access.classify` respelled in Python, so the reference's
+    classification is an INDEPENDENT recomputation of the model's: a binding of
+    the scope shadows what the file resolves, an `intercept` target (`key`) is
+    never shadowed, and a root nothing else resolves is a declared requirement
+    or is undeclared."""
+    if kind == "key":
+        return "declared" if root in declared else "undeclared"
+    if root in bound:
+        return "bound"
+    if kind in ("callable", "imported", "host", "ctor"):
+        return kind
+    return "declared" if root in declared else "undeclared"
 
 
 def access_coverage() -> list[str]:
-    """The non-vacuity ratchet for the `G1` row (issue #1807).
+    """The non-vacuity ratchet for the `G1` row (issues #1807 and #2744).
 
     A row that only ever saw requirement roots could not tell the rule from
-    "every head is a requirement". The corpus must carry:
+    "every head is a requirement", and a classification that was never moved
+    off the component could not tell a per-scope reading from a pooled one.
+    The corpus must carry:
 
       * a component REFUSED for an undeclared access root
         (`examples/rejections/g1_undeclared_access.rvl`);
       * an ADMITTED component with an access root that is declared;
-      * an ADMITTED component whose dropped roots include a local, a module
-        callable and a host family, so each exclusion is exercised where the
-        checker admits.
+      * an ADMITTED component whose roots include a binding of the scope, a
+        module callable and a host family, so each exclusion is exercised
+        where the checker admits;
+      * a component REFUSED only because a name is bound in ANOTHER scope:
+        re-deciding it with every scope's bindings pooled (the component-wide
+        reading the first slice carried) ADMITS it, so the per-scope
+        classification is shown to change a verdict, and
+      * an ADMITTED component in which one name is `bound` in one scope and
+        classifies differently in another, so the scopes' bindings are
+        shown not to leak into each other where the checker admits.
 
     Returns findings, treated as gate failures."""
-    witnesses = {"refused": None, "declared": None, "excluded": None}
-    for key, (ok, roots) in sorted(_ACCESS_ROWS.items()):
+    witnesses = {"refused": None, "declared": None, "excluded": None,
+                 "pooled": None, "separate": None}
+    for key, (ok, classes) in sorted(_ACCESS_ROWS.items()):
         if not ok:
             witnesses["refused"] = witnesses["refused"] or key
-        if ok and roots:
+        if ok and "declared" in classes:
             witnesses["declared"] = witnesses["declared"] or key
-        if ok and {"local", "callable", "host"} <= _ACCESS_DROPPED.get(key, set()):
+        if ok and {"bound", "callable", "host"} <= classes:
             witnesses["excluded"] = witnesses["excluded"] or key
+        declared, scopes = _ACCESS_FACTS.get(key, (set(), []))
+        pooled: set = set()
+        for _scope, bound, _uses in scopes:
+            pooled |= bound
+        pooled_ok = all(_g1_classify(declared, pooled, kind, root) != "undeclared"
+                        for _scope, _bound, uses in scopes
+                        for root, kind in uses.items())
+        if not ok and pooled_ok:
+            witnesses["pooled"] = witnesses["pooled"] or key
+        classes_of: dict[str, set] = {}
+        for _s, bound, uses in scopes:
+            for root, kind in uses.items():
+                classes_of.setdefault(root, set()).add(
+                    _g1_classify(declared, bound, kind, root))
+        if ok and any("bound" in c and len(c) > 1 for c in classes_of.values()):
+            witnesses["separate"] = witnesses["separate"] or key
     labels = {"refused": "a component refused for an undeclared access root",
               "declared": "an admitted component with a declared access root",
-              "excluded": "an admitted component dropping a local, a callable "
-                          "and a host family"}
+              "excluded": "an admitted component using a binding of its scope, "
+                          "a callable and a host family",
+              "pooled": "a component refused only because a name is bound in "
+                        "another scope, which pooled bindings would admit",
+              "separate": "an admitted component in which one name is bound "
+                          "in one scope and classifies differently in another"}
     findings = [f"access coverage: NO witness of {labels[k]} — the G1 row "
                 "would agree vacuously" for k, w in witnesses.items() if w is None]
     if not findings:
@@ -7236,6 +7345,8 @@ class Verdicts(NamedTuple):
     a5: dict[tuple[str, str, str], str]
     gc: dict[tuple[str, str, str], str]
     g1cov: dict[tuple[str, str, str], str]
+    g1scope: dict[tuple[str, str, str], str]
+    g1class: dict[tuple[str, str, str, str], str]
     ev: dict[str, str]
     ir_disjoint: dict[str, str]
     ir_kept: dict[str, str]
@@ -7257,7 +7368,8 @@ class Verdicts(NamedTuple):
                 + len(self.councils) + len(self.g9) + len(self.retain)
                 + len(self.inv)
                 + len(self.sw) + len(self.a5) + len(self.gc)
-                + len(self.g1cov)
+                + len(self.g1cov) + len(self.g1scope)
+                + len(self.g1class)
                 + len(self.ev) + len(self.ir_disjoint) + len(self.ir_kept) + len(self.splits))
 
 
@@ -7304,6 +7416,8 @@ def parse_verdicts(text: str) -> Verdicts:
     a5: dict[tuple[str, str, str], str] = {}
     gc: dict[tuple[str, str, str], str] = {}
     g1cov: dict[tuple[str, str, str], str] = {}
+    g1scope: dict[tuple[str, str, str], str] = {}
+    g1class: dict[tuple[str, str, str, str], str] = {}
     ev: dict[str, str] = {}
     ir_disjoint: dict[str, str] = {}
     ir_kept: dict[str, str] = {}
@@ -7501,6 +7615,16 @@ def parse_verdicts(text: str) -> Verdicts:
             # as many statements as a scope the body declares, or seeded a
             # different parameter set than that scope declares.
             g1cov[(parts[1], parts[2], parts[3])] = parts[4].split("=", 1)[1]
+        elif parts[0] == "G1S" and len(parts) == 5:
+            # G1 per scope (issue #2744): (file, component, scope) -> ok|fail,
+            # no root the scope uses is undeclared.
+            g1scope[(parts[1], parts[2], parts[3])] = parts[4].split("=", 1)[1]
+        elif parts[0] == "G1R" and len(parts) == 6:
+            # G1 per root (issue #2744): (file, component, scope, root) -> the
+            # CLASS the model gave it, so the classification is compared and
+            # not only the verdict it feeds.
+            g1class[(parts[1], parts[2], parts[3], parts[4])] = \
+                parts[5].split("=", 1)[1]
         elif parts[0] == "G1CM" and len(parts) == 5:
             # G1 coverage under a shortening (issue #2744): not a corpus
             # verdict, the Lean half of `g1coverage_coverage`'s ratchet, which
@@ -7513,7 +7637,7 @@ def parse_verdicts(text: str) -> Verdicts:
                     a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
             places, model_reach, councils, g9, retain, inv, sw, a5, gc, g1cov,
-            ev, ir_disjoint, ir_kept, splits)
+            g1scope, g1class, ev, ir_disjoint, ir_kept, splits)
 
 
 
@@ -8020,6 +8144,8 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     # longer of the two lists, so a walk that opened FEWER scopes still yields
     # a named `fail` for the missing one.
     g1cov: dict[tuple[str, str, str], str] = {}
+    g1scope: dict[tuple[str, str, str], str] = {}
+    g1class: dict[tuple[str, str, str, str], str] = {}
     g1_bodies: dict[tuple[str, str], list] = {}
     g1_walks: dict[tuple[str, str], list] = {}
     g1_order: list[tuple[str, str]] = []
@@ -8338,20 +8464,48 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
         _BINDING_ROWS[key] = (ok, sum(1 for k, _n in events if k == "bind"),
                               any(k == "enter" for k, _n in events))
 
-    # G1 verdicts (declared access, issue #1807), recomputed from the M and
-    # GA rows: every access root of a component is one of its requires.
-    access_roots: dict[tuple[str, str], set[str]] = {}
+    # G1 verdicts (declared access, issues #1807 and #2744), recomputed from
+    # the M, GAS, GAU and GAL rows. The CLASSIFICATION is recomputed here in
+    # Python (`_g1_classify`), per scope: a root is `bound` where THAT scope
+    # binds it, resolves to what the file says it is, or is a declared
+    # requirement or undeclared. A scope is admitted when no root is
+    # undeclared, and a component when every scope is.
+    g1_scopes: dict[tuple[str, str], list[str]] = {}
+    g1_uses: dict[tuple[str, str, str], dict[str, str]] = {}
+    g1_bound: dict[tuple[str, str, str], set[str]] = {}
     for r in rows:
-        if r and r[0] == "GA" and len(r) == 4:
-            access_roots.setdefault((r[1], r[2]), set()).add(r[3])
+        if not r:
+            continue
+        if r[0] == "GAS" and len(r) == 4:
+            g1_scopes.setdefault((r[1], r[2]), []).append(r[3])
+        elif r[0] == "GAU" and len(r) == 6:
+            g1_uses.setdefault((r[1], r[2], r[3]), {})[r[4]] = r[5]
+        elif r[0] == "GAL" and len(r) == 5:
+            g1_bound.setdefault((r[1], r[2], r[3]), set()).add(r[4])
     _ACCESS_ROWS.clear()
+    _ACCESS_FACTS.clear()
     for r in mrows:
         key = (r[1], r[2])
         declared = {x for x in r[3].split(",") if x}
-        roots = access_roots.get(key, set())
-        ok = roots <= declared
+        ok = True
+        seen_classes: set[str] = set()
+        facts = []
+        for label in g1_scopes.get(key, []):
+            skey = (r[1], r[2], label)
+            bound = g1_bound.get(skey, set())
+            uses = g1_uses.get(skey, {})
+            scope_ok = True
+            for root, kind in sorted(uses.items()):
+                cls = _g1_classify(declared, bound, kind, root)
+                g1class[(r[1], r[2], label, root)] = cls
+                seen_classes.add(cls)
+                scope_ok = scope_ok and cls != "undeclared"
+            g1scope[skey] = "ok" if scope_ok else "fail"
+            ok = ok and scope_ok
+            facts.append((label, bound, uses))
         access[key] = "ok" if ok else "fail"
-        _ACCESS_ROWS[key] = (ok, len(roots))
+        _ACCESS_ROWS[key] = (ok, seen_classes)
+        _ACCESS_FACTS[key] = (declared, facts)
 
     # A1 verdicts (async colour, issue #1808), recomputed from the AN, FN and
     # AS rows with a true fixed point, and the AG signature rows.
@@ -8411,7 +8565,7 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
                     configs, a2, deferred, approvals, bindings, access,
                     async_sites, async_sigs, preludes, intercepts, methods,
                     places, model_reach, councils, g9, retain, inv, sw, a5,
-                    gc, g1cov, ev, ir_disjoint, ir_kept, splits)
+                    gc, g1cov, g1scope, g1class, ev, ir_disjoint, ir_kept, splits)
 
 
 #: What the REFERENCE decided for each config field, for the CD row's
@@ -9607,7 +9761,8 @@ def write_status(ledger: bool = False) -> int:
 #: label). The label names the row and its guarantee for the job summary.
 #: `refused` (parse refusals, refusals by definition), `dispositions` and
 #: `recoveries` (execution outcomes), `g8surface` and `g5reg` (a surface and a
-#: count) carry no accept/refuse verdict and are not graded (issue #2745).
+#: count) and `g1class` (the class the model gave a root, issue #2744) carry no
+#: accept/refuse verdict and are not graded (issue #2745).
 ROW_KINDS = (
     ("files", "V link (G2, G3)"),
     ("comps", "G marker (G4)"),
@@ -9636,6 +9791,7 @@ ROW_KINDS = (
     ("a5", "A5 compensation"),
     ("gc", "GC walk coverage (G9)"),
     ("g1cov", "G1C access coverage (G1)"),
+    ("g1scope", "G1S access per scope (G1)"),
     ("ev", "EV emission value (G4)"),
     ("ir_disjoint", "IRD provision disjointness over the IR (G2)"),
     ("ir_kept", "IRS IR keeps the composition's slots (G2)"),
@@ -9961,6 +10117,8 @@ def main() -> int:
             ("retain", ref.retain, formal.retain),
             ("g9_coverage", ref.gc, formal.gc),
             ("g1_coverage", ref.g1cov, formal.g1cov),
+            ("g1_scope", ref.g1scope, formal.g1scope),
+            ("g1_class", ref.g1class, formal.g1class),
             ("inv", ref.inv, formal.inv),
             ("sw", ref.sw, formal.sw),
             ("a5", ref.a5, formal.a5),
@@ -10003,6 +10161,8 @@ def main() -> int:
         f"{len(ref.g9)} taint walks + "
         f"{len(ref.gc)} coverage scopes + "
         f"{len(ref.g1cov)} access-coverage scopes + "
+        f"{len(ref.g1scope)} access scopes + "
+        f"{len(ref.g1class)} access root classes + "
         f"{len(ref.retain)} retention refusals + "
         f"{len(ref.inv)} inverse refusals + "
         f"{len(ref.sw)} witnessed-site refusals + "

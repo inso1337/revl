@@ -1,0 +1,19 @@
+// ADMITTED: a requirement's name bound as a local in ONE provide method.
+// `net` is a binding of `first` and the declared requirement of `second`, so
+// the same root is `bound` in one scope and `declared` in the other.
+
+service Net { fn ping() -> Int }
+service Pair { fn first() -> Int
+               fn second() -> Int }
+
+component Holder requires net: Net provides pair: Pair {
+  provide pair {
+    fn first() {
+      let net = 1
+      return net
+    }
+    fn second() {
+      return net.ping()
+    }
+  }
+}

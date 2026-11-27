@@ -3,7 +3,7 @@
 `formal/STATUS.md` carried G1 as `partial`: `RevL.G1.declared_only_access`
 says an undeclared access cannot be *written*, and since issue #1807 the
 `G1` row decides `RevL.G1Access.AccessOK` over each component's access roots
-(`GA` rows, 21 `agree-G1` documents). Neither says the checker's name
+(the `G1` verdict, `agree-G1` documents). Neither says the checker's name
 resolution VISITS every statement of a real component body. G1 is enforced
 during lowering, so the walk that resolves roots is the lowering walk.
 

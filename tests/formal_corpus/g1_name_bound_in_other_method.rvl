@@ -1,0 +1,21 @@
+// REJECTED, G1: a name one provide method binds does not resolve in another.
+// `tmp` is a local of `first` only, so `second` reads an undeclared name. A
+// classification that pooled every scope's bindings component-wide would read
+// `tmp` as local here and admit the component. This file lives in
+// `tests/formal_corpus/` and not in the gate/reference census because the
+// self-host gate does not decide binding per scope and admits it.
+
+service Pair { fn first() -> Int
+               fn second() -> Int }
+
+component Holder provides pair: Pair {
+  provide pair {
+    fn first() {
+      let tmp = 1
+      return tmp
+    }
+    fn second() {
+      return tmp
+    }
+  }
+}
