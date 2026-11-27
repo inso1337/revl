@@ -1127,8 +1127,21 @@ def _run_emit(args) -> int:
               f"backend in this release (item 253)", file=sys.stderr)
         return 2
 
+    # issue #3531: the browser target loads a flat ./runtime.js beside the
+    # module, so a build outside this checkout names its own runtime copy.
+    runtime_import = getattr(args, "runtime_import", None)
+    if runtime_import is not None and args.backend != "typescript":
+        print("error: --runtime-import is only available for the typescript "
+              "backend in this release", file=sys.stderr)
+        return 2
+
     try:
-        rendered = module.emit(ir, target=target) if target is not None else module.emit(ir)
+        kwargs = {}
+        if target is not None:
+            kwargs["target"] = target
+        if runtime_import is not None:
+            kwargs["runtime_import"] = runtime_import
+        rendered = module.emit(ir, **kwargs)
     except (RevlError, ValueError) as error:
         # ValueError covers the emitter's own EmitError channel (a closed-
         # allowlist refusal travels here with its why-trace).
