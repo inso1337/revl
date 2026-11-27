@@ -1864,6 +1864,25 @@ fn f() -> Int {
   return x
 }
 """),
+    # issue #3657, positive: each method sees its OWN binders, so the same
+    # name bound in both methods is two legal locals.
+    ("a name bound in both provide methods", """
+service Pair { fn first() -> Int
+               fn second() -> Int }
+
+component Holder provides pair: Pair {
+  provide pair {
+    fn first() {
+      let tmp = 1
+      return tmp
+    }
+    fn second() {
+      let tmp = 2
+      return tmp
+    }
+  }
+}
+"""),
     # ---- a scoped extern crossing a provide-method boundary (issue #1240) --
     # The documents this corpus did NOT have. `emit_caps_reach` seeded a
     # boundary-crossing extern with its own NAME, so `emission[db]` implemented
@@ -3607,6 +3626,40 @@ fn f(s: Status) -> Int {
   return 1
 }
 """, "TYPE"),
+    # issue #3657: a name bound in ONE provide method and read in ANOTHER is G1
+    # on the reference; the gate merged every method's binders into one scope
+    # and admitted it. A sibling method's parameter read the same way too.
+    ("a provide-method local read in a sibling method", """
+service Pair { fn first() -> Int
+               fn second() -> Int }
+
+component Holder provides pair: Pair {
+  provide pair {
+    fn first() {
+      let tmp = 1
+      return tmp
+    }
+    fn second() {
+      return tmp
+    }
+  }
+}
+""", "G1"),
+    ("a sibling provide method's parameter read by name", """
+service Pair { fn first(a: Int) -> Int
+               fn second(b: Int) -> Int }
+
+component Holder provides pair: Pair {
+  provide pair {
+    fn first(a: Int) -> Int {
+      return a
+    }
+    fn second(b: Int) -> Int {
+      return a
+    }
+  }
+}
+""", "G1"),
     # ---- the `a host emission` reach label (issue #1254) -------------------
     # A G4 excess refusal THROUGH A HOST EXTERN. No document in the corpus had
     # this shape, so nothing measured the reach list on it, and the two engines
