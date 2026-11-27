@@ -374,7 +374,7 @@ lands; section 9 lists it.
 ## 7. The failure direction, and the named refusals
 
 Fail-closed everywhere, with no third value, because a third value is where a
-fail-open default hides. Twenty-six named codes:
+fail-open default hides. Twenty-seven named codes:
 
 | code | fires when |
 |---|---|
@@ -401,6 +401,7 @@ fail-open default hides. Twenty-six named codes:
 | `OUTSIDE_ALLOW` | the measured diff leaves the operator allow set |
 | `FENCE_TOUCHED` | the diff reaches the lifecycle's own rules |
 | `KERNEL_INTERSECTION` | the diff reaches the admission kernel |
+| `APPROVAL_WEAKENED` | a changed policy document drops or weakens an approval requirement |
 | `AUTHORITY_WIDENED` | a non-empty or absent authority axis |
 | `DOMAIN_ESCAPE` | a domain-scoped diff leaves its declared domain |
 | `JUDGE_RAISED` | a judge raised, or answered for the wrong stage |
@@ -416,6 +417,17 @@ for an empty evidence list.
 name** on a non-empty diff, and a single generic code would satisfy the letter
 of that while losing what a reader needs: which authority moved.
 
+`APPROVAL_WEAKENED` is issue #2752's addition (item 540). The authority stage
+classifies every changed document that parses as a boundary policy and refuses
+one whose `requires approval` rules are dropped or weakened, rather than leaving
+that surface to the deploy chain's `policy` digest. The design note's finding was
+that `src/revl/policy.py` and an operator's policy file were in neither
+`KERNEL_PATHS` nor `RULESET_MODULES`; the classifier reads the changed documents
+instead of relying on a path convention, and refuses a change to
+`src/revl/policy.py` because the parser is the vocabulary the classifier uses.
+A pattern change this classifier cannot prove at least as strong is fenced, not
+passed.
+
 `DOMAIN_ESCAPE` and `DOMAIN_PROMOTED` are separate codes for the two ways a
 domain-scoped change can become global (issue #2807): the measured diff leaving
 the declared domain, and the promotion target being the shared realm or the
@@ -429,7 +441,7 @@ it meant, which is a fail-open default by another route.
 
 ## 8. Non-vacuity
 
-Four demonstrations, all in `tests/test_evolution_controller.py`: 138 tests,
+Four demonstrations, all in `tests/test_evolution_controller.py`: 165 tests,
 all passing.
 
 1. **It refuses on missing evidence.** Parametrized over all four
