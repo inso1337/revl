@@ -20,6 +20,7 @@ import RevL.Theorems.G7_LifoComplete
 import RevL.Theorems.G8_Boundary
 import RevL.Theorems.CrossTier
 import RevL.Theorems.CapCeilings
+import RevL.Theorems.Cardinality
 import RevL.Theorems.G9_NoAuthorityFromUntrusted
 import RevL.Theorems.R4_NoResidue
 import RevL.Theorems.A8_WalDischarge

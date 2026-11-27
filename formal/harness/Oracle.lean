@@ -28,6 +28,7 @@ import RevL.Theorems.G4_WitnessedSiteUndo
 import RevL.Theorems.A5_CompensationAccompaniesEmission
 import RevL.Theorems.G9Coverage
 import RevL.Theorems.G1Coverage
+import RevL.Theorems.Cardinality
 
 /-!
 Formal oracle — the differential harness's Lean side (formal/STATUS.md,
@@ -329,6 +330,18 @@ Fact rows in (tab-separated, one fact per line):
                                              `every … in` iteration — the four
                                              forms `lower._dispatch_action`
                                              refuses after a provision
+  CT <file> <comp> <token> <node> <nil|cross|seq|branch|loop> <a> <b>
+                                             one node of one capability's
+                                             crossing command. `seq`/`branch`
+                                             name their two children, `loop`
+                                             carries its iteration ceiling in
+                                             `a` and its body in `b`, and
+                                             `nil`/`cross` carry `-` in both
+                                             (item 260, issue #2743)
+  CR <file> <comp> <token> <root> <bound>    a crossing command's root node
+                                             and the FINITE number
+                                             `src/revl/cardinality.py`
+                                             reports for that capability
 
 Capabilities arrive DECOMPOSED (Z/Y), from `src/revl/cap_order.parse_cap`
 — the checker's own parser. Nothing here re-reads the capability grammar.
@@ -3215,6 +3228,7 @@ def gcVerdicts (p : String) (rs : G9CoverageRows) : String := Id.run do
 end G9Coverage
 
 /-! ### The `G1C` row: G1 declared-access coverage (issue #2744)
+/-! ## Deciding the emission cardinality bound (item 260, issue #2743)
 
 `STATUS.md` carried G1 as `partial` because `RevL.G1.declared_only_access`
 proves the RULE, an undeclared access cannot be written, and the `G1` row
@@ -3224,9 +3238,20 @@ enforced by name resolution during lowering, so the walk that resolves roots
 is the lowering walk itself; `RevL.G1Coverage` states the coverage
 obligation over `RevL.Syntax.Body`, and this section is the oracle bridge
 that makes the differential row bite.
+The `CARD` row compares the number `RevL.Cardinality.bound` gives for a
+crossing command against the number `src/revl/cardinality.py` reports. The
+command arrives as `CT` nodes (one per node of the shape: a sequence, a
+branch, a bounded loop, a crossing, or nothing) and a `CR` claim (the root
+node and the checker's finite bound). `buildCardCmd` rebuilds the command,
+`cardRowB` decides `bound cmd = reported`, and `cardRowB_iff` proves the
+printed Bool is exactly that statement — not a private restatement of it.
+The reference side (`diff_corpus._card_fold`) folds the same nodes
+independently, so a drift in either the model or the shipped analysis shows
+up as a `CARD … fail` or as a reference/formal mismatch. -/
 
 Three kinds of row, deliberately **not** folded into one, because the two
 sides are independent observations:
+section CardinalityBound
 
 * `G1B`, a component body's ACTIVATION, as the **parse** sees it: how many
   statements the activation declares. `0` means the body has no activation
@@ -3263,30 +3288,50 @@ def parseNames (s : String) : Option (List String) :=
 
 /-- One `G1B` row: a component body's activation, as the parse sees it. -/
 structure G1BRow where
+/-- One `CT` row: one node of one capability's exported crossing command. -/
+structure CTRow where
   path : String
   comp : String
   stmts : Nat
+  token : String
+  id : Nat
+  kind : String
+  a : String
+  b : String
 
 def parseG1B (f : List String) : Option G1BRow :=
+def parseCT (f : List String) : Option CTRow :=
   match f with
   | ["G1B", path, comp, stmts] => stmts.toNat?.map fun n => ⟨path, comp, n⟩
+  | ["CT", path, comp, token, id, kind, a, b] =>
+      id.toNat?.map fun n => ⟨path, comp, token, n, kind, a, b⟩
   | _ => none
 
 /-- One `G1P` row: one provide method of a component body, as the parse sees
 it. -/
 structure G1PRow where
+/-- One `CR` row: a command's root node and the finite number the checker
+reported for that capability. -/
+structure CRRow where
   path : String
   comp : String
   key : String
   method : String
   stmts : Nat
   params : List String
+  token : String
+  root : Nat
+  bound : Nat
 
 def parseG1P (f : List String) : Option G1PRow :=
+def parseCR (f : List String) : Option CRRow :=
   match f with
   | ["G1P", path, comp, key, method, stmts, params] =>
       (stmts.toNat?).bind fun n => (parseNames params).map fun ps =>
         ⟨path, comp, key, method, n, ps⟩
+  | ["CR", path, comp, token, root, bound] =>
+      (root.toNat?).bind fun r => (bound.toNat?).map fun b =>
+        ⟨path, comp, token, r, b⟩
   | _ => none
 
 /-- One `G1W` row: one scope the checker's lowering walk actually visited. -/
@@ -3296,6 +3341,44 @@ structure G1WRow where
   label : String
   stmts : Nat
   params : List String
+/-- Rebuild the crossing command from its nodes. The fuel is the node count
+plus one, so a duplicated or cyclic table is a `none` (and therefore a
+`fail`) rather than a hang. -/
+def buildCardCmd (nodes : List CTRow) (root : Nat) :
+    Option RevL.Cardinality.Cmd :=
+  let rec go (fuel : Nat) (id : Nat) : Option RevL.Cardinality.Cmd :=
+    match fuel with
+    | 0 => none
+    | fuel + 1 =>
+      match nodes.find? (fun r => r.id == id) with
+      | none => none
+      | some r =>
+        match r.kind with
+        | "nil" => some .nil
+        | "cross" => some .cross
+        | "seq" =>
+          match r.a.toNat?, r.b.toNat? with
+          | some la, some rb =>
+            match go fuel la, go fuel rb with
+            | some left, some right => some (.seq left right)
+            | _, _ => none
+          | _, _ => none
+        | "branch" =>
+          match r.a.toNat?, r.b.toNat? with
+          | some la, some rb =>
+            match go fuel la, go fuel rb with
+            | some left, some right => some (.branch left right)
+            | _, _ => none
+          | _, _ => none
+        | "loop" =>
+          match r.a.toNat?, r.b.toNat? with
+          | some count, some bodyId =>
+            match go fuel bodyId with
+            | some body => some (.loop count body)
+            | none => none
+          | _, _ => none
+        | _ => none
+  go (nodes.length + 1) root
 
 def parseG1W (f : List String) : Option G1WRow :=
   match f with
@@ -3303,6 +3386,12 @@ def parseG1W (f : List String) : Option G1WRow :=
       (stmts.toNat?).bind fun n => (parseNames params).map fun ps =>
         ⟨path, comp, label, n, ps⟩
   | _ => none
+/-- **The cardinality row's decider**: does the model's `bound` over the
+rebuilt command equal the number the checker reported? -/
+def cardRowB (nodes : List CTRow) (root bound : Nat) : Bool :=
+  match buildCardCmd nodes root with
+  | none => false
+  | some cmd => decide (RevL.Cardinality.bound cmd = bound)
 
 /-- The body a `G1B` row and its `G1P` rows describe, as `RevL.Syntax.Body`.
 The statements are placeholders and the parameter QUALIFIERS are `plain`:
@@ -3321,16 +3410,34 @@ def bodyOfAccess (r : G1BRow) (ps : List G1PRow) : RevL.Syntax.Body where
                  params := p.params.map
                    fun n => (⟨n, .plain⟩ : RevL.Syntax.Param)
                  body := List.replicate p.stmts (.pure (.lit "")) }] })
+/-- **`cardRowB` is exactly the model's statement**: the Bool is `true`
+exactly when some rebuilt command has `bound` equal to the reported number.
+A decider that returned a constant would fail one side of this. -/
+theorem cardRowB_iff (nodes : List CTRow) (root bound : Nat) :
+    cardRowB nodes root bound = true ↔
+      ∃ cmd, buildCardCmd nodes root = some cmd ∧
+        RevL.Cardinality.bound cmd = bound := by
+  unfold cardRowB
+  cases buildCardCmd nodes root with
+  | none => simp
+  | some cmd => simp [decide_eq_true_eq]
 
 /-- The walk a `G1W` row's columns describe, as `RevL.G1Coverage.Walked`. -/
 def walkOfAccessRows (ws : List G1WRow) : List RevL.G1Coverage.Walked :=
   ws.map fun w => { scope := w.label, stmts := w.stmts, params := w.params }
+/-- The `CT` nodes and `CR` claims of one export. -/
+structure CardRows where
+  nodes : List CTRow
+  claims : List CRRow
 
 /-- The row's verdict: does the walk the `G1W` rows record cover the body the
 `G1B`/`G1P` rows describe? -/
 def accessCoverageRowB (r : G1BRow) (ps : List G1PRow)
     (ws : List G1WRow) : Bool :=
   RevL.G1Coverage.coversAccessBodyB (walkOfAccessRows ws) (bodyOfAccess r ps)
+def parseCardRows (fields : List (List String)) : CardRows :=
+  { nodes := fields.filterMap parseCT
+    claims := fields.filterMap parseCR }
 
 /-- `accessCoverageRowB` is exactly the theorem's three conjuncts at the
 carried columns, so the procedure the oracle runs and the judgment
@@ -3365,6 +3472,9 @@ missing one, with `fail`, and the missing scope is *named* rather than
 silently absent. The per-scope verdict is `Walked.matches`, the same
 conjunction `accessCoverageRowB` makes over the whole list. -/
 def g1covVerdicts (p : String) (rs : G1CoverageRows) : String := Id.run do
+/-- One `CARD` row per `CR` claim in the file, so a failed capability is
+NAMED rather than hidden in a file-level verdict. -/
+def cardVerdicts (p : String) (rs : CardRows) : String := Id.run do
   let mut out := ""
   for b in rs.g1b.filter (fun r => r.path == p) do
     let ps := rs.g1p.filter (fun r => r.path == p && r.comp == b.comp)
@@ -3383,6 +3493,11 @@ def g1covVerdicts (p : String) (rs : G1CoverageRows) : String := Id.run do
         | some s, some x => if x.matches s then "ok" else "fail"
         | _, _ => "fail"
       out := out ++ s!"G1C\t{p}\t{b.comp}\t{label}\tcoverage={v}\n"
+  for c in rs.claims.filter (fun r => r.path == p) do
+    let nodes := rs.nodes.filter (fun r => r.path == p
+                              && r.comp == c.comp && r.token == c.token)
+    let v := if cardRowB nodes c.root c.bound then "ok" else "fail"
+    out := out ++ s!"CARD\t{p}\t{c.comp}\t{c.token}\tcard={v}\n"
   return out
 
 /-- One `G1M` row: a component's recorded walk, as recorded (`as-walked`) or
@@ -3435,6 +3550,7 @@ def g1covMutantVerdicts (rs : G1CoverageRows) (ms : List G1MRow) :
   return out
 
 end G1Coverage
+end CardinalityBound
 
 def main (args : List String) : IO UInt32 := do
   match args with
@@ -3484,6 +3600,7 @@ def main (args : List String) : IO UInt32 := do
     let gcrow := parseG9CoverageRows fields
     let g1covrows := parseG1CoverageRows fields
     let g1mrows := fields.filterMap parseG1M
+    let cardrows := parseCardRows fields
     let retainrows := parseGRetainRows fields
     let invrows := parseG4InvRows fields
     let swrows := parseSWRows fields
@@ -3727,6 +3844,8 @@ def main (args : List String) : IO UInt32 := do
       out := out ++ gcVerdicts p gcrow
       -- G1C verdicts (G1 declared-access coverage, issue #2744)
       out := out ++ g1covVerdicts p g1covrows
+      -- CARD verdicts (emission cardinality bound, item 260, issue #2743)
+      out := out ++ cardVerdicts p cardrows
       -- RETAIN verdicts (G-RETAIN on the corpus, issue #1811 group 3)
       out := out ++ gretainVerdicts p retainrows
       -- INV verdicts (the G4 inverse rule on the corpus, issue #2097)
@@ -3924,3 +4043,4 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.a5RowBAll_iff
 #print axioms RevLOracle.gcRowB_iff
 #print axioms RevLOracle.accessCoverageRowB_iff
+#print axioms RevLOracle.cardRowB_iff
