@@ -207,6 +207,7 @@ fn from_extracted_dir(dir: &Path) -> Result<Runtime, String> {
 /// Extract `archive` into the pin's versioned cache directory, atomically.
 fn ensure_extracted(archive: &Path) -> Result<Runtime, String> {
     ensure_extracted_into(archive, &runtime_dir()?)
+    ensure_extracted_into(archive, &runtime_dir())
 }
 
 /// Extract the runtime archive baked into the binary into ITS pin's versioned
@@ -215,6 +216,7 @@ fn ensure_extracted(archive: &Path) -> Result<Runtime, String> {
 /// the archive rides inside the executable, so there is no sibling file to ship.
 fn ensure_extracted_bytes(bytes: &[u8]) -> Result<Runtime, String> {
     ensure_extracted_bytes_into(bytes, &runtime_dir_for(&embedded_pin())?)
+    ensure_extracted_bytes_into(bytes, &runtime_dir_for(&embedded_pin()))
 }
 
 /// Extract in-memory archive `bytes` into `dest` atomically. The bytes are
@@ -227,10 +229,16 @@ fn ensure_extracted_bytes_into(bytes: &[u8], dest: &Path) -> Result<Runtime, Str
     // value in production), and a direct unit-test caller sees the honest source.
     let pin = pin_of(dest);
     if let Some(python) = trusted_interpreter(dest)? {
+    if let Some(python) = interpreter_in(dest) {
         // already populated by an earlier launch — no need to re-stage the bytes
         return Ok(resolved(python).tagged(Source::Embedded, pin));
     }
     let parent = private_parent(dest)?;
+    let parent = dest
+        .parent()
+        .ok_or_else(|| "the runtime cache has no parent directory".to_string())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|err| format!("cannot create the runtime cache {}: {err}", parent.display()))?;
     let staged_archive = parent.join(format!(
         ".embedded-runtime-{}-{}.tar",
         std::process::id(),
@@ -255,6 +263,7 @@ fn ensure_extracted_bytes_into(bytes: &[u8], dest: &Path) -> Result<Runtime, Str
 /// won.
 fn ensure_extracted_into(archive: &Path, dest: &Path) -> Result<Runtime, String> {
     if let Some(python) = trusted_interpreter(dest)? {
+    if let Some(python) = interpreter_in(dest) {
         // already populated by an earlier launch (or a peer that just won)
         return Ok(resolved(python));
     }
@@ -265,6 +274,11 @@ fn ensure_extracted_into(archive: &Path, dest: &Path) -> Result<Runtime, String>
         ));
     }
     let parent = private_parent(dest)?;
+    let parent = dest
+        .parent()
+        .ok_or_else(|| "the runtime cache has no parent directory".to_string())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|err| format!("cannot create the runtime cache {}: {err}", parent.display()))?;
 
     let staging = parent.join(format!(
         ".tmp-extract-{}-{}",
@@ -279,6 +293,7 @@ fn ensure_extracted_into(archive: &Path, dest: &Path) -> Result<Runtime, String>
 
     let extracted = extract_into(archive, &staging).and_then(|()| runtime_root(&staging));
     let root = match extracted.and_then(|root| harden(&root).map(|()| root)) {
+    let root = match extracted {
         Ok(root) => root,
         Err(err) => {
             let _ = std::fs::remove_dir_all(&staging);
@@ -294,6 +309,7 @@ fn ensure_extracted_into(archive: &Path, dest: &Path) -> Result<Runtime, String>
             // is real and surfaced.
             let _ = std::fs::remove_dir_all(&staging);
             if trusted_interpreter(dest)?.is_none() {
+            if interpreter_in(dest).is_none() {
                 return Err(format!(
                     "cannot move the extracted runtime into {}: {err}",
                     dest.display()
@@ -304,6 +320,7 @@ fn ensure_extracted_into(archive: &Path, dest: &Path) -> Result<Runtime, String>
     let _ = std::fs::remove_dir_all(&staging);
 
     match trusted_interpreter(dest)? {
+    match interpreter_in(dest) {
         Some(python) => Ok(resolved(python)),
         None => Err(format!(
             "the runtime archive {} unpacked without a bin/python3",
@@ -371,6 +388,7 @@ fn interpreter_in(dir: &Path) -> Option<PathBuf> {
 }
 
 fn runtime_dir() -> Result<PathBuf, String> {
+fn runtime_dir() -> PathBuf {
     runtime_dir_for(&pin())
 }
 
@@ -380,6 +398,8 @@ fn runtime_dir() -> Result<PathBuf, String> {
 /// disk with a differently-pinned one resolved another way (design A3).
 fn runtime_dir_for(pin: &str) -> Result<PathBuf, String> {
     Ok(cache_root()?.join("revl-lsp").join("runtime").join(pin))
+fn runtime_dir_for(pin: &str) -> PathBuf {
+    cache_root().join("revl-lsp").join("runtime").join(pin)
 }
 
 /// The per-user cache root the versioned runtime lives under. It is never the
@@ -404,12 +424,19 @@ fn cache_root_from(get: impl Fn(&str) -> Option<PathBuf>) -> Result<PathBuf, Str
             ));
         }
         return Ok(explicit);
+fn cache_root() -> PathBuf {
+    if let Some(explicit) = env_path(CACHE_ENV) {
+        return explicit;
     }
     if let Some(xdg) = get("XDG_CACHE_HOME").filter(|path| path.is_absolute()) {
         return Ok(xdg);
+    if let Some(xdg) = env_path("XDG_CACHE_HOME") {
+        return xdg;
     }
     if let Some(home) = get("HOME").filter(|path| path.is_absolute()) {
         return Ok(home.join(".cache"));
+    if let Some(home) = env_path("HOME") {
+        return home.join(".cache");
     }
     Err(format!(
         "no per-user cache directory for the private runtime: {CACHE_ENV}, an absolute \
@@ -540,6 +567,7 @@ fn require_file(_path: &Path) -> Result<(), String> {
 #[cfg(not(unix))]
 fn harden(_root: &Path) -> Result<(), String> {
     Ok(())
+    std::env::temp_dir()
 }
 
 fn pin() -> String {
@@ -711,6 +739,7 @@ mod tests {
         if let Ok(dir) = runtime_dir() {
             assert!(dir.ends_with(pin()));
         }
+        assert!(runtime_dir().ends_with(pin()));
     }
 
     #[test]
@@ -720,6 +749,8 @@ mod tests {
             return;
         };
         assert!(dir.starts_with(root));
+        let dir = runtime_dir();
+        assert!(dir.starts_with(cache_root()));
         assert!(dir.ends_with(pin()));
         assert!(dir.to_string_lossy().contains("revl-lsp"));
     }

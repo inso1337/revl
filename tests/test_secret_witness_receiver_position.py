@@ -309,6 +309,8 @@ def _selfhost_lower_to_ir():
     without the stamp, and the gate's IR is what `crates/revl-gate` consumes."""
     from _compiled_ir import compiled_ir
     ir = compiled_ir(ROOT / "selfhost" / "lower.rvl")
+    from revl import compile_files
+    ir = compile_files([str(ROOT / "selfhost" / "lower.rvl")])
     spec = importlib.util.spec_from_file_location(
         "pyemit_selfhost_receiver", ROOT / "backends" / "python" / "emit.py")
     module = importlib.util.module_from_spec(spec)

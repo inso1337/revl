@@ -29,6 +29,9 @@ fails here by name instead of being read wrongly.
 The `swap-template-cordis` selection rule has its own section at the end
 (dogfood adoption item 2): which changed paths select that job, and that the
 job runs the changed MCP/swap suite which selected it.
+ci.yml use only `github.event_name`, `needs.changes.outputs.frontend`, string
+equality and `||`, and the evaluator refuses anything else, so a new condition
+shape fails here by name instead of being read wrongly.
 """
 
 from __future__ import annotations
@@ -50,6 +53,8 @@ HEAVY = frozenset({
 })
 BACKENDS = frozenset({
     "backend-python", "backend-typescript", "backend-wasm",
+REQUIRED = frozenset({
+    "lint", "backend-python", "backend-typescript", "backend-wasm",
     "backend-rust", "backend-java", "backend-go",
 })
 REQUIRED = frozenset({"lint"}) | BACKENDS
@@ -66,6 +71,7 @@ NON_PR_EVENTS = ("merge_group", "push", "schedule", "workflow_dispatch",
 
 _TOKEN = re.compile(
     r"\s*(?:(?P<call>cancelled\(\))|(?P<op>\|\||&&|==|!=|!|\(|\))|'(?P<str>[^']*)'"
+    r"\s*(?:(?P<op>\|\||&&|==|!=|\(|\))|'(?P<str>[^']*)'"
     r"|(?P<name>[A-Za-z_][A-Za-z0-9_.\-]*))")
 
 
@@ -81,9 +87,11 @@ def _needs(spec: dict) -> list:
 
 def _evaluate(cond, event: str, frontend: str, backends: str = "true",
               swap: str = "true", swap_tests: str = "") -> bool:
+def _evaluate(cond, event: str, frontend: str) -> bool:
     """Evaluate a job-level `if:` for one event. Only the vocabulary ci.yml
     uses is understood; anything else raises. The run is never cancelled and
     a job's needs all succeeded (`_runs` only asks once they ran)."""
+    uses is understood; anything else raises."""
     if cond is None:
         return True
     text = str(cond).strip()
@@ -99,6 +107,7 @@ def _evaluate(cond, event: str, frontend: str, backends: str = "true",
               # empty answer (the selector step failed) fails open.
               "needs.changes.outputs.swap_tests": swap_tests,
               "needs.lint.result": "success"}
+              "needs.changes.outputs.frontend": frontend}
     out: list[str] = []
     pos = 0
     while pos < len(text):
@@ -113,6 +122,8 @@ def _evaluate(cond, event: str, frontend: str, backends: str = "true",
         elif m.group("op"):
             out.append({"||": " or ", "&&": " and ", "!": " not "}.get(
                 m.group("op"), m.group("op")))
+        if m.group("op"):
+            out.append({"||": " or ", "&&": " and "}.get(m.group("op"), m.group("op")))
         elif m.group("str") is not None:
             out.append(repr(m.group("str")))
         else:
@@ -126,6 +137,7 @@ def _evaluate(cond, event: str, frontend: str, backends: str = "true",
 def _runs(jobs: dict, event: str, frontend: str = "true",
           backends: str = "true", swap: str = "true",
           swap_tests: str = "") -> set:
+def _runs(jobs: dict, event: str, frontend: str = "true") -> set:
     """The jobs that run for *event*: `if:` true and every `needs:` ran."""
     ran: set = set()
     changed = True
@@ -138,6 +150,7 @@ def _runs(jobs: dict, event: str, frontend: str = "true",
                 continue
             if _evaluate(spec.get("if"), event, frontend, backends, swap,
                          swap_tests):
+            if _evaluate(spec.get("if"), event, frontend):
                 ran.add(name)
                 changed = True
     return ran
@@ -147,6 +160,8 @@ def _on_some_pull_request(jobs: dict) -> set:
     """A pull request can report either value of either `changes` output."""
     return set().union(*(_runs(jobs, "pull_request", f, b)
                          for f in ("true", "false") for b in ("true", "false")))
+    """A pull request can report either `changes` output."""
+    return _runs(jobs, "pull_request", "true") | _runs(jobs, "pull_request", "false")
 
 
 def test_the_evaluator_reads_every_condition_in_ci_yml():
@@ -154,6 +169,7 @@ def test_the_evaluator_reads_every_condition_in_ci_yml():
     for name, spec in jobs.items():
         for event in ("pull_request",) + NON_PR_EVENTS:
             _evaluate(spec.get("if"), event, "true", "false")  # raises on a new shape
+            _evaluate(spec.get("if"), event, "true")  # raises on a new shape
     with pytest.raises(ValueError):
         _evaluate("${{ github.ref == 'refs/heads/main' }}", "push", "true")
 
@@ -179,6 +195,8 @@ def test_the_required_checks_report_on_pull_request_and_merge_group(event, front
     """Either `frontend` output: a required job must not hang on that filter.
     (`backends == 'false'` is the one deliberate skip, pinned below.)"""
     missing = sorted(REQUIRED - _runs(_jobs(), event, frontend, "true"))
+    """Both `changes` outputs: a required job must not hang on that filter."""
+    missing = sorted(REQUIRED - _runs(_jobs(), event, frontend))
     assert not missing, (
         f"required check(s) {missing} do not run on {event}; branch protection "
         "would wait forever for them")
@@ -213,6 +231,7 @@ def test_every_job_runs_on_some_non_pull_request_event():
     """An env-gated test runs only where its job runs (see
     tests/test_env_gated_skips_run_somewhere.py), so no job may be PR-only
     unless another job covers it on every other event (`PR_ONLY`)."""
+    tests/test_env_gated_skips_run_somewhere.py), so no job may be PR-only."""
     jobs = _jobs()
     ran = set().union(*(_runs(jobs, e) for e in NON_PR_EVENTS))
     assert ran == set(jobs) - set(PR_ONLY), sorted(set(jobs) - set(PR_ONLY) - ran)
@@ -224,6 +243,7 @@ def test_every_job_runs_on_some_non_pull_request_event():
                 f"it elsewhere, does not run on {event}")
         assert job in _runs(jobs, "pull_request", "false", "false"), (
             f"{job} must run on every pull request")
+    assert ran == set(jobs), sorted(set(jobs) - ran)
 
 
 def test_the_pin_fails_on_the_shape_it_replaced():

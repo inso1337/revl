@@ -3,14 +3,17 @@
 revl gets two kinds of contributor, and this guide is written for both:
 
 - **Humans**: reading the design, fixing the checker, adding a tier, writing
+- **Humans** — reading the design, fixing the checker, adding a tier, writing
   docs.
 - **AI agents**: the language's primary *author* is increasingly an agent, and
+- **AI agents** — the language's primary *author* is increasingly an agent, and
   agents also *contribute to the compiler itself*, in parallel, in isolated
   worktrees. The workflow below was built for that and is described literally,
   because an agent cannot infer it from repo vibes.
 
 If you only want to *write* revl (not change the compiler), you are in the wrong
 file: read [docs/guide-humans.md](docs/guide-humans.md) or
+file — read [docs/guide-humans.md](docs/guide-humans.md) or
 [docs/guide-ai-agents.md](docs/guide-ai-agents.md) instead. This file is about
 changing revl.
 
@@ -20,17 +23,22 @@ the same checks, and a change that skips them will be caught at the gate.
 ## The one rule that shapes everything
 
 > **The checker is the product.** revl sells exactly one promise: a component
+> **The checker is the product.** revl sells exactly one promise — a component
 > that would corrupt a running system cannot compile. Every contribution is
 > measured against whether it keeps that promise provable. That is why the
 > rejection suite is an executable spec, why emitted output never changes
 > unreviewed, and why emitted code is handed to real compilers instead of
 > trusted.
+> rejection suite is an executable spec, why v1 output is byte-frozen, and why
+> emitted code is handed to real compilers instead of trusted.
 
 Read [DESIGN.md](DESIGN.md) §4 for the guarantee table (generated from
 `revl.diagnostics.GUARANTEES`, so it cannot drift), and
 [docs/rejections.md](docs/rejections.md) for the full set (the lifecycle rules
+[docs/rejections.md](docs/rejections.md) for the full set — the lifecycle rules
 A1, A2, A3, A5, A6, A8 and A9, the confidentiality rules `G-SECRET` and
 `G-SECRET-FLOW`, and the typing rules T1–T3) before changing the frontend. Read
+`G-SECRET-FLOW`, and the typing rules T1–T3 — before changing the frontend. Read
 [docs/backend-ir-v1.md](docs/backend-ir-v1.md) and
 [docs/backend-ir-v3.md](docs/backend-ir-v3.md) before changing an emitter.
 
@@ -41,6 +49,8 @@ git clone https://github.com/inso1337/revl && cd revl
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[test]"
 pytest tests/                      # the frontend suite: should be green
+uv venv && uv pip install -e ".[test]"
+.venv/bin/pytest tests/            # the frontend suite — should be green
 ```
 
 (`uv venv && source .venv/bin/activate && uv pip install -e ".[test]"` is the
@@ -60,6 +70,9 @@ on a loaded machine (253 test-minutes when issue #2217 measured it), so
 frontend-only work (parser, checker, lowering, docs,
 frontend-facing tests) does not pay for it every iteration. The same two files
 cover most of it:
+**The fast frontend loop.** The full suite is 1500+ tests (~60s); frontend-only
+work (parser, checker, lowering, docs, frontend-facing tests) does not need to
+pay for it every iteration. The same two files cover most of it:
 
 ```bash
 .venv/bin/pytest tests/test_frontend.py tests/test_doc_examples.py -q   # ~0.5s
@@ -83,14 +96,19 @@ selection, run `make pre-merge-affected`; it prints the selector receipt and
 stops before the full gate when the selector reports `FULL` or is unavailable.
 Read the receipt, then run `make pre-merge` only when you deliberately want the
 full gate.
+the affected tests with `tools/affected_tests.py` and only falls back to the
+whole suite when the selector is unavailable or reports FULL. For the fast
+inner-loop gate over the same selection, `make pre-merge-affected`.
 
 **Where the code lives (a two-minute map).** The compiler is `src/revl/`
 (`parser.py` → `typecheck.py` → `lower.py` → `apply.py`). The **emitters are
 NOT under `src/`**: each backend is its own directory with its own `emit.py`,
+NOT under `src/`** — each backend is its own directory with its own `emit.py`,
 and most have two or more *expression dispatchers* inside that file (component
 vs fn-body renderers; wasm has three). When a change touches an IR expression
 kind, you must patch every relevant dispatcher in
 `backends/{python,typescript,rust,go,java,wasm}/emit.py`; each file declares
+`backends/{python,typescript,rust,go,java,wasm}/emit.py` — each file declares
 its dispatcher coverage in `EXPR_DISPATCHERS`/`EXPR_REFUSED`, checked by
 `tests/test_expr_dispatcher_conformance.py`, so "did you patch both paths" is
 a red test rather than a 15-minute grep. Tier runtimes and scenario harnesses
@@ -103,12 +121,14 @@ git config core.hooksPath tools/hooks
 ```
 
 The hook (`tools/hooks/pre-commit`) is deliberately kept under ~20s: a hook
+The hook (`tools/hooks/pre-commit`) is deliberately kept under ~20s — a hook
 people wait a minute for is a hook people turn off. It runs the checks that have
 actually broken CI (see [The pre-commit contract](#the-pre-commit-contract)).
 Skip it for a single commit with `git commit --no-verify`; do not make that a
 habit.
 
 Per-tier toolchains are only needed if you touch that tier: the frontend suite
+Per-tier toolchains are only needed if you touch that tier — the frontend suite
 runs the pure-Python halves of every backend and skips the runtime-integration
 tests cleanly when a toolchain is absent. To work on a tier you will want its
 runtime:
@@ -124,6 +144,8 @@ runtime:
 
 revl is developed in **waves**. A wave is one focused unit of work (a roadmap
 item, a bug, a tier fix) done on its own branch, in its own git worktree, so
+revl is developed in **waves**. A wave is one focused unit of work — a roadmap
+item, a bug, a tier fix — done on its own branch, in its own git worktree, so
 that many waves (human and agent) run in parallel without treading on each
 other. The pattern, visible throughout the commit history:
 
@@ -147,6 +169,7 @@ other. The pattern, visible throughout the commit history:
 2. **Do the work, commit on the wave branch.** Small, well-described commits.
    Commit messages are prose, present-tense, scoped
    (`fix(stdlib): …`, `docs(roadmap): …`, `test(swap): …`; match the existing
+   (`fix(stdlib): …`, `docs(roadmap): …`, `test(swap): …` — match the existing
    log style).
 
 3. **Integrate by merging `origin/main` into your branch, not by rebasing main
@@ -156,6 +179,7 @@ other. The pattern, visible throughout the commit history:
    git fetch -q origin
    git merge --no-edit origin/main          # take origin's moves onto your branch
    # re-run the suite; a clean merge can still be a semantic conflict
+   # re-run the suite — a clean merge can still be a semantic conflict
    ```
 
    These integration merges are the `Merge remote-tracking branch 'origin/main'
@@ -187,31 +211,39 @@ before merge. The command checks the branch and a temporary merge with current
 `origin/main`, including the tree-wide encoding guards, strict census
 reproduction, and selector mapping pins; see [docs/process.md](docs/process.md)
 for the output and failure handling.
+against, so run it before you push.
 
 ## The pre-commit contract
 
 Every change must pass these before it merges: the hook runs them locally and
 CI (`.github/workflows/ci.yml`) runs the ones it covers again. A green local hook is the
+Every change must pass these before it merges — the hook runs them locally and
+CI (`.github/workflows/ci.yml`) runs them again. A green local hook is the
 minimum bar, not a substitute for CI, because the hook skips what your machine
 cannot run.
 
 1. **Frontend suite + emitted-code validation**: `pytest tests/ -q`. This is
+1. **Frontend suite + emitted-code validation** — `pytest tests/ -q`. This is
    the core gate. It includes `tests/test_conformance_validate.py`, which hands
    each tier's emitted output to that tier's *real* compiler (`tsc`,
    `cargo check`, `javac`, `wasmtime`, a scope walk for python), because "the
+   `cargo check`, `javac`, `wasmtime`, a scope walk for python) — because "the
    emitter did not raise" never meant "the code compiles." Runtime-integration
    tests skip cleanly when a toolchain is absent; **read the skips** (`-rs`), a
    skip is not a pass.
 
 2. **The conformance matrix (emit)**: `python3 tools/conformance.py`. Pure
+2. **The conformance matrix (emit)** — `python3 tools/conformance.py`. Pure
    Python, no toolchain, always runs: it catches a backend that stops emitting a
    construct entirely. See [docs/conformance.md](docs/conformance.md).
 
 3. **The TypeScript backend suite**: `cd backends/typescript && npx vitest run`
+3. **The TypeScript backend suite** — `cd backends/typescript && npx vitest run`
    (and `npx tsc --noEmit`). Runs `tsc` over emitted code; the hook runs it only
    where `node_modules` exists.
 
 4. **The backend golden tests**: each tier's emitter has a checked-in golden
+4. **The backend golden tests** — each tier's emitter has a checked-in golden
    and a test asserting it reproduces it **byte-identically**:
 
    | tier | command |
@@ -225,6 +257,7 @@ cannot run.
 
    CI runs each tier in its own job with the toolchain pinned. If you touch an
    emitter, run its tier's goldens; the frontend suite alone does **not** cover
+   emitter, run its tier's goldens — the frontend suite alone does **not** cover
    every per-backend golden.
 
 A change that adds or edits a test also carries its red-before / green-after
@@ -244,6 +277,7 @@ branch-and-PR flow and it says the opposite of what this section assumes.**
 Under that process the PR jobs run in CI on the PR (the heavy jobs listed under
 "Pull request descriptions" run after merge, or on the merge queue when it is
 enabled), agents run only the
+Under that process the full matrix runs in CI on the PR, agents run only the
 tests covering what they changed plus `./tools/pre_pr.sh`, and the orchestrator
 merges on green. `make pre-merge` stays the local gate for anyone landing
 without that CI round-trip, and `make pre-merge-affected` is the narrow
@@ -253,11 +287,14 @@ The pre-commit contract above is necessary but not sufficient, and the gap is
 load-bearing: **the per-backend suites run OUTSIDE `pytest tests/`** (they are
 their own CI jobs: `backend-python`, `backend-typescript`,
 `backend-{go,rust,wasm,java}`, because each needs its own toolchain). So a
+their own CI jobs — `backend-python`, `backend-typescript`,
+`backend-{go,rust,wasm,java}` — because each needs its own toolchain). So a
 change that is green under `pytest tests/`, which is what a wave agent
 self-verifies against, can still red CI on a per-backend suite and go unnoticed.
 That is not hypothetical: on 2026-08-26 `main` stayed **red for ~2h across ~19
 pushes** because item 247's A5 respec left a stale `backends/python`
 semantics test and a ts fixture went uncommitted, both green under `tests/`,
+semantics test and a ts fixture went uncommitted — both green under `tests/`,
 both red on the per-backend CI jobs (roadmap item 327; see the
 `revl-wave-backend-golden-gap` note).
 
@@ -271,6 +308,9 @@ checkout) and `frontend-cordis` runs the same suite under
 where the guarded tests actually execute. `make pre-merge` (and `--affected`)
 runs that half locally too, in its `frontend-cordis` step (issue #2207, below).
 Roadmap item 430 tracks what is excluded there and why.
+where the guarded tests actually execute. To run that half locally, set the venv
+up once and then run the root suite under it. Roadmap item 430 tracks what is
+excluded there and why.
 
 `make pre-merge` (script: [`tools/pre_merge.sh`](tools/pre_merge.sh)) closes that
 gap by mirroring the **fast half** of every per-backend CI job in one local
@@ -281,6 +321,7 @@ command, in order, reporting each step:
 | frontend | `pytest tests/ -q` (includes `test_conformance_validate.py`) |
 | frontend-cordis | the files of every test that skipped naming cordis in the frontend step (tests/conftest.py logs them to `REVL_CORDIS_SKIP_LOG`), re-run by `tools/cordis_half.py` under the cordis-py venv: `$REVL_CORDIS_PYTHON`, else `backends/python/.venv/bin/python` of this tree, else of the primary checkout, whichever can import the suite's deps, `cordis` and `watchdog` and has its cordis-py checkout at `CORDIS_PY_PIN`. An empty log means nothing to re-run. With no such venv the step prints `MISSING, NOT OK` and the gate exits non-zero: a runtime half that did not run is never `ok` (issue #2207) |
 | backend-python | `cd backends/python && .venv/bin/pytest -q`: the suite item 247 left stale |
+| backend-python | `cd backends/python && .venv/bin/pytest -q` — the suite item 247 left stale |
 | backend-go | `pytest backends/go/test_emit_go.py -q` |
 | backend-rust | `pytest backends/rust/test_emit_rust.py` (emit/golden tests) |
 | backend-wasm | `pytest backends/wasm/test_v3_emit.py backends/wasm/test_canonical_abi.py` |
@@ -289,6 +330,7 @@ command, in order, reporting each step:
 | golden drift (all targets) | `tools/regen_goldens.py --check` (CI adds `--strict`: `lint` for the toolchain-free targets, `backend-go` for `go`) |
 | conformance matrix + emit sweep | `tools/conformance.py --check-readme` |
 | site wheel | `tools/check_site_wheel.py`: the playground wheel is NOT committed; `.github/workflows/pages.yml` builds it into the published site, and this checks that contract (also runs post-merge on main: `.github/workflows/site-wheel.yml`) |
+| site wheel | `tools/check_site_wheel.py` — the playground wheel is NOT committed; `.github/workflows/pages.yml` builds it into the published site, and this checks that contract (also runs post-merge on main: `.github/workflows/site-wheel.yml`) |
 | docs drift | `tools/docgen.py --check` (the source-derived doc blocks; `make docs-gen` regenerates) |
 | lint | `ruff check` (pinned `ruff==0.16.4` via `uvx` if not on `PATH`) |
 | census artifact | `tools/census_artifact.py --verify --strict`: CI's `census-artifact` job, run locally on the artifact's own input filter, so a diff that stales `docs/census-artifact/` reds here instead of on the PR. Adding a corpus document is enough to stale it (`corpus_dirs` includes `tests/fixtures`), and the test the selector used to pick for these paths skips the half that reds. The slowest step in this gate: a full census re-run, ~85 s on a shared dev box (issue #2103) |
@@ -300,9 +342,11 @@ Two properties make it trustworthy rather than theatre:
 - **It is the fast half on purpose, not a full CI replica.** The
   toolchain-*executing* tests (cargo build, javac + a cordis4j clone, wasmtime,
   `tsc`/`vitest`) stay CI's job; they are slow, networked, and SIGKILL on the
+  `tsc`/`vitest`) stay CI's job — they are slow, networked, and SIGKILL on the
   shared dev box. The rust/wasm/java emit suites are run with the heavy compilers
   hidden from `PATH`, so their `which(<tool>)`-gated tests **skip loudly** and
   only the emit/golden half runs, which is the half that catches a stale golden
+  only the emit/golden half runs — which is the half that catches a stale golden
   or a respec'd emitter, the exact item-327 drift class. The typescript
   `vitest`/`tsc` suite needs `node_modules` and is not in the fast gate; its
   pure-Python goldens are (the `backend-ts (golden drift)` step). The
@@ -311,17 +355,23 @@ Two properties make it trustworthy rather than theatre:
   `--with=all`, or `REVL_PREMERGE_WITH=all make pre-merge`.
   `sh tools/pre_merge.sh --plan` prints what each step would run and runs
   nothing.
+  pure-Python goldens are (the `backend-ts (golden drift)` step). Run the
+  runtime half yourself when you touch that tier
+  (`cd backends/typescript && npm ci && npx vitest run`).
 - **Nothing is a silent skip.** Every step is either *ran* (and must pass) or
   *skipped* with the reason printed (`SKIPPED (no backends/python/.venv; run sh
+  *skipped* with the reason printed (`SKIPPED (no backends/python/.venv — run sh
   backends/python/setup.sh)`), because a silent gap is precisely what let CI stay
   red. The target exits non-zero if any step that ran failed; a skip does not
   make it pass green quietly: it tells you what CI will still check that you did
+  make it pass green quietly — it tells you what CI will still check that you did
   not. On a fully-provisioned checkout nothing skips.
 
 If you touched an emitter or a per-backend suite, `make pre-merge` is the
 difference between "green on my machine" and "green on `main`". Run it before you
 fast-forward `main` (step 4 of the branch model above). It is not a substitute
 for the orchestrator's post-merge `gh run list --branch main` check; it shrinks
+for the orchestrator's post-merge `gh run list --branch main` check — it shrinks
 the window that check has to catch, it does not remove the check.
 
 ### Two invariants that will fail your change if you break them
@@ -336,10 +386,18 @@ never changes (see "Golden policy" in
 [docs/stability.md](docs/stability.md)). Do not "fix" a failing golden by
 regenerating it to match your change; understand why it moved first. New IR
 capability goes under a new `ir_version`, not into an existing one.
+**Byte-identical v1 goldens.** The v1 IR is frozen and emitted v1 output is
+byte-for-byte fixed (`backends/<tier>/golden/user_cache.<ext>`). A change that
+alters emitted v1 bytes fails the suite and does not land. If you *intend* to
+change output, you are changing a frozen contract — that is a design decision,
+not a golden regen. Do not "fix" a failing golden by regenerating it to match
+your change; understand why it moved first. (New IR capability goes under a new
+`ir_version`, not into v1 — see [docs/stability.md](docs/stability.md).)
 
 **Every rejection joins the executable spec.** This is the rule that keeps the
 soundness promise self-proving. When you make the checker refuse something it
 used to accept (closing a hole, adding a guarantee), you must:
+used to accept — closing a hole, adding a guarantee — you must:
 
 1. add a minimal fixture under **`examples/rejections/`** (e.g.
    `g4_my_new_hole.rvl`) that triggers the rejection;
@@ -349,10 +407,12 @@ used to accept (closing a hole, adding a guarantee), you must:
 
 `tests/test_frontend.py::test_every_rejection_file_is_covered` asserts the set
 of files on disk **equals** the set of keys in `REJECTIONS`, so you cannot add a
+of files on disk **equals** the set of keys in `REJECTIONS` — so you cannot add a
 fixture without a spec entry, or an entry without a fixture. The rejection suite
 is therefore the checker's *definition* of sound, exhaustive by test, not a
 sample. (The handful of guarantees that no source program can violate at compile
 time (G5, G7, A3, A4, A5, A7) are documented in the block after the
+time — G5, G7, A3, A4, A5, A7 — are documented in the block after the
 `REJECTIONS` table, with where each is actually enforced. If you believe you
 have a new such case, extend that block; do not leave it implicit.)
 
@@ -445,6 +505,7 @@ ran before merge. A skipped job is not evidence of a pass.
 
 - Read [docs/backend-ir-v3.md](docs/backend-ir-v3.md) (and
   [docs/backend-ir-v1.md](docs/backend-ir-v1.md) for the v1 core). The
+  [docs/backend-ir-v1.md](docs/backend-ir-v1.md) for the frozen core). The
   frontend is the single IR producer; a backend consumes IR and must gate on
   `ir_version`, refusing a version it does not implement rather than
   misemitting.
@@ -463,6 +524,7 @@ ran before merge. A skipped job is not evidence of a pass.
   a comma-separated list of tiers (or `all`); on those tiers an *absent
   toolchain* stops being a skip and becomes a failure, while a tier's by-design
   refusal of a document still skips. Unset (a laptop, a fresh worktree) keeps
+  refusal of a document still skips. Unset — a laptop, a fresh worktree — keeps
   the old behaviour, so nothing about local development changes.
 
   The `conformance` job is where both halves exist (`sh
@@ -472,10 +534,12 @@ ran before merge. A skipped job is not evidence of a pass.
   `tests/test_env_gated_skips_run_somewhere.py::test_every_tier_test_is_required_to_actually_run_in_some_ci_job`
   fails if you do not. Without it, `test_..._executes[ts]` executes nothing and
   reports green everywhere the toolchain is absent, which is how a live
+  reports green everywhere the toolchain is absent — which is how a live
   `TypeError: Cannot mix BigInt and other types` sat under a green ts test.
 
 Some Cordis runtime targets are upstream projects (cordis-py, cordis, cordis-rs,
 cordis4j, stc-go): a genuine *runtime* defect there is fixed upstream
+cordis4j, stc-go) — a genuine *runtime* defect there is fixed upstream
 (fork + PR to that repo), while an *emitter* defect is fixed here in
 `backends/<tier>/emit.py`. Fix the emitter for an emitter bug; do not fork a
 runtime to paper over a lowering mistake.
@@ -483,6 +547,7 @@ runtime to paper over a lowering mistake.
 ## Documentation changes
 
 Docs are load-bearing and public-facing: accuracy matters more than polish.
+Docs are load-bearing and public-facing — accuracy matters more than polish.
 Match the existing tone: precise, honest about what is tested vs. demonstrated
 vs. claimed, and specific about the command that backs a claim (a number with no
 command behind it is the failure mode this project keeps hitting). The roadmap
@@ -578,6 +643,7 @@ out. At zero entries the file is deleted.
      which then has to be retriggered by hand. Four occurrences on 2026-09-02.
      Cite the PR instead (`PR #175`), or once it has landed, the merge sha.
      `--head-branch` checks this: CI passes `github.head_ref`, which is empty
+     `--head-branch` checks this — CI passes `github.head_ref`, which is empty
      on a push to main, and `tools/pre_pr.sh` passes your current branch
      before the PR is even opened. Naming your own branch in the PAST tense is
      fine and does not trip it: ``LANDED SO FAR (`fix/391-selfhost-parity`)``
@@ -631,9 +697,12 @@ Use the issue templates (bug report / feature request). A bug report that
 arrives with the `.rvl` source, the target tier, and the emitted/expected output
 is triageable in minutes; one that arrives as prose is a day of archaeology. The
 templates ask for exactly what a maintainer needs; please fill them in.
+templates ask for exactly what a maintainer needs — please fill them in.
 
 For a **security or soundness escape** (a program the checker *accepts* that
 violates a guarantee), do **not** open a public issue. Follow
+For a **security or soundness escape** — a program the checker *accepts* that
+violates a guarantee — do **not** open a public issue. Follow
 [SECURITY.md](SECURITY.md).
 
 ## License

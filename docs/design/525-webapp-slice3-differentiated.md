@@ -1,4 +1,5 @@
 # 525 exemplary web app: slice 3 (the differentiated half), findings
+# 525 exemplary web app — slice 3 (the differentiated half): findings
 
 **Roadmap:** item 462 · **Issue:** #725 · **Slice:** 3 of N (the differentiated,
 hot-swap half) · **Status:** FINDINGS, 2026-09-08
@@ -7,6 +8,7 @@ Slice 1 built the boring CRUD half (`docs/design/525-webapp-slice1-gaps.md`).
 This slice adds 525's second claim: the complexity is reserved for the guarantee
 revl uniquely provides. `examples/app/notes.rvl` grows ONE hot-swappable,
 effect-governed service (a pluggable ranking/scoring component) and
+effect-governed service — a pluggable ranking/scoring component — and
 `tests/test_app_hotswap_725.py` proves the full lifecycle walk on the real
 cordis-py runtime through `Session.swap`, the same admission/swap machinery an
 agent drives over the MCP bridge. Nothing about admission, swap or recovery was
@@ -21,10 +23,12 @@ scoring strategy is the hot-swap axis:
 
 - a `recency` build (each signal weighs 1) is proposed, admitted and swapped for a
   `weighted` build (each weighs 3) **without losing the recorded signals**; the
+  `weighted` build (each weighs 3) **without losing the recorded signals** — the
   state crosses the swap because `TrendingRanker` declares `handoff ranking:
   Map[Str, Str]` (item 53), and `strategy()`/`score()` prove the new code is live;
 - a successor whose declared `handoff` shape cannot hold the running one, or whose
   activation is not healthy, is **refused with the running build left serving**,
+  activation is not healthy, is **refused with the running build left serving** —
   a documented refusal with retained ownership, never a silent state drop.
 
 ## The observable lifecycle states (acceptance bar 4)
@@ -49,6 +53,7 @@ cancellation / recovery observable. Every named state is asserted on the runtime
 
 The differentiated source needed **no** routing sentinel (`""`/`"::empty::"`) and
 **no** emitter workaround (`maybe_run`/`maybe_ship`): the whole-file scan in
+**no** emitter workaround (`maybe_run`/`maybe_ship`) — the whole-file scan in
 `tests/test_app_notes_725.py::test_zero_sentinels_and_no_emitter_workarounds`
 covers the added lines. No new gap is filed against 456-461 for this slice; the
 admission, hand-off and recovery primitives were expressible directly.
@@ -60,6 +65,8 @@ admission, hand-off and recovery primitives were expressible directly.
   `log.size().to_str()` is refused (G8). Routed idiomatically through a template
   literal (`` `sig-${log.size()}` ``) for the row key, following the same shape
   used by `examples/live_counter.rvl`, with no sentinel or workaround. This is the
+  literal (`` `sig-${log.size()}` ``) for the row key — the same shape
+  `examples/live_counter.rvl` uses — no sentinel, no workaround. This is the
   documented host boundary already noted in the slice-1 gaps doc, not a new gap.
 - **A `lifecycle test` cannot drive a swap.** Swap is a `Session`/MCP verb, not a
   lifecycle-test statement, so the in-`.rvl` lifecycle test proves only serving +

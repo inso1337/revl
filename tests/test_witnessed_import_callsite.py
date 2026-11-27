@@ -169,6 +169,7 @@ def test_plain_imported_extern_with_site_undo_compiles():
         # site spells that inverse, so the bracket records `declared` — the
         # declared-extern branch, not the `_method_effect_inverse` fallthrough.
         {"step": "let-effect", "bind": "h", "inverse": "declared",
+        {"step": "let-effect", "bind": "h",
          "acquire": {"kind": "fn", "name": "open_conn", "args": []},
          "undo": {"kind": "fn", "name": "close_conn", "args": [{"kind": "name", "id": "h"}]}},
     ]
@@ -212,6 +213,7 @@ def test_h1_persists_on_clean_commit_from_imported_source(workspace):
     session.load(_compile(_IMPORT_SRC))
 
     assert art.read_text(encoding="utf-8") == "v2"
+    assert art.read_text() == "v2"
     assert not stale.exists()
     frame = _sole_frame(session)
     assert len(frame._transactional) == 2
@@ -219,6 +221,7 @@ def test_h1_persists_on_clean_commit_from_imported_source(workspace):
     session.unload()  # clean unload == implicit commit
 
     assert art.read_text(encoding="utf-8") == "v2", "commit wrongly reverted the imported write"
+    assert art.read_text() == "v2", "commit wrongly reverted the imported write"
     assert not stale.exists(), "commit wrongly restored the imported rm"
     for entry in frame._transactional:
         assert entry.discharged is True and entry.replayed is False
@@ -234,9 +237,12 @@ def test_h1_reverts_residue_free_on_abort_from_imported_source(workspace):
     report = session.load(_compile(_IMPORT_ABORT_SRC))
     assert report["components"] == [{"name": "Agent", "state": "FAILED",
         "error": {"type": "RuntimeError", "message": "boom"}}]
+    assert report["components"] == [{"name": "Agent", "state": "FAILED"}]
 
     assert art.read_text(encoding="utf-8") == "v1", "abort did not restore the imported write's preimage"
     assert stale.read_text(encoding="utf-8") == "junk", "abort did not un-remove the imported rm"
+    assert art.read_text() == "v1", "abort did not restore the imported write's preimage"
+    assert stale.read_text() == "junk", "abort did not un-remove the imported rm"
     garbage = workspace / ws.GARBAGE_DIRNAME
     preimage = workspace / ws.PREIMAGE_DIRNAME
     assert not any(garbage.iterdir()) if garbage.exists() else True

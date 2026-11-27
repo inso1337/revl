@@ -56,6 +56,7 @@ def test_private_helpers_are_emitted_but_not_callable_cross_module(tmp_path):
     # issue #3004: the bare reference earns the named import's G1 wording
     with pytest.raises(RevlError,
                        match="`helper` is module-private in .* and cannot be imported"):
+    with pytest.raises(RevlError, match="`helper` is not declared"):
         compile_files([str(tmp_path / "main.rvl")])
 
 

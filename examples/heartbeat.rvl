@@ -17,6 +17,7 @@
 // disjoint from the kernel (issue #2105, docs/design/561-undeclared-emission-
 // boundary.md).
 service Log { emission[log] fn write(msg: Str) }
+service Log { emission fn write(msg: Str) }
 
 component Heartbeat requires log: Log {
   // a periodic timer: fires every 30 seconds for as long as the component lives

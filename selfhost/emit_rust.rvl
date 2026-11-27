@@ -25,6 +25,7 @@
 //     a recursive case payload or record field at a containment cycle is
 //     `Box`-indirected, and an unbuilt same-shape record twin lowers to
 //     `pub type Twin = Canonical;`);
+//     `PartialEq`-deriving `pub struct`, a variant as a serde-tagged `pub enum`);
 //     record literals (`Struct { f: v, .. }`, with the by-value field clone);
 //     ADT construction (`Enum::Case` / `Enum::Case(arg)`, and the built-in
 //     Result/Option constructors); `match` over user variants (with the
@@ -58,9 +59,12 @@
 //     `effect`/`undo`/`emit` through `self.ctx.effect`, plus the component-dialect
 //     `req`/`config`/`fn` expression kinds and the `target`/`method` call form).
 //     Still DEFERRED and REPORTED (each fires a `<<UNSUPPORTED-*>>` marker): timers /
+//     Still DEFERRED and REPORTED (each fires a `<<DEFER-*>>` marker): timers /
 //     routers (`routes`), `await`/`spawn`, `isolate`/`intercept`/realms, host
 //     `let-effect` binds (`Pool`/`Map`/`Job`), body-level
 //     `effect`/`timer`/`fail`/`if` steps, the `host`/
+//     `let-effect` binds (`Pool`/`Map`/`Job`) and the item-114 host-Map
+//     undo-reclone, body-level `effect`/`timer`/`fail`/`if` steps, the `host`/
 //     `format` component-dialect kinds, and the non-scalar bridge marshalling
 //     (Result/serde/`Vec<Value>`/opaque-`Value`). These stay ENTANGLED with the
 //     erasure surface below;
@@ -70,6 +74,7 @@
 //   * `let_pattern` (record/list destructuring) — see the structural note below;
 //   * the STDLIB surface beyond length, the checked arithmetic and division
 //     forms, `to_str`, and the six
+//   * the STDLIB surface beyond length, checked division, `to_str`, and the six
 //     read-only string-argument builtins (including List `indexOf` conversion).
 //     The shared `_stdlib_helper_traits` block is emitted for these builtins;
 //   * the Value/serde ERASURE surface — `_emit_bridge` (the interop RPC proxy),
@@ -132,6 +137,7 @@ use "../stdlib/value.rvl" {
 // `record_by_fields` key; `str_lt` is its comparator, reused by the in-file
 // tests. Both are byte-fuzz-pinned against Python `sorted()` — no re-hand-roll.
 use "../stdlib/list.rvl" { list_sort, str_lt, list_contains }
+use "../stdlib/list.rvl" { list_sort, str_lt }
 // `trim` is Python `str.strip()` for ASCII — the reference `.strip()`s an
 // extern's `@rs` body before splicing it. No re-hand-roll (item 194).
 use "../stdlib/str.rvl" { trim }
@@ -584,10 +590,13 @@ type Ctx = { vt: Map[Str, Str], fr: Map[Str, Str], ca: Map[Str, Str], cp: Map[St
 // the type a `return` hands its expression (issue #2545). `rm` holds, while a
 // `return` expression renders, the names it reads once outside any arrow
 // (`ctx.return_moves`, issue #2905); empty everywhere else.
+// (the list analog of `bp`).
+type Ctx = { vt: Map[Str, Str], fr: Map[Str, Str], ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], tn: Map[Str, Str], rn: Map[Str, Str], fb: Map[Str, List[Int]], bp: Map[Str, Str], flb: Map[Str, List[Int]], lp: Map[Str, Str] }
 // The user-type tables, built once from the document's `types` and shared by
 // every function's ctx (the reference builds `_V3Ctx` per function-list, reusing
 // the same type tables); paired with the type-NAME set for `rust_type`.
 type TypeTables = { ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], tn: Map[Str, Str], ft: Map[Str, Str] }
+type TypeTables = { ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], tn: Map[Str, Str] }
 // A statement-emission result: the lines produced AND the threaded ctx, since
 // revl has no shared mutable state and a `let` inside an `if`/`while`/`for` block
 // is visible to every later statement (the reference mutates one `ctx` in place).
@@ -598,10 +607,12 @@ fn map_get(m: Map[Str, Str], k: Str) -> Str {
 }
 fn set_vt(ctx: Ctx, k: Str, v: Str) -> Ctx {
   return { vt: ctx.vt.set(k, v), fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp, ft: ctx.ft, mu: ctx.mu, mf: ctx.mf, fo: ctx.fo, fp: ctx.fp, tp: ctx.tp, dz: ctx.dz, cr: ctx.cr, rm: ctx.rm }
+  return { vt: ctx.vt.set(k, v), fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp }
 }
 // Swap in a fresh rename map (the component-capture scope for one render).
 fn set_rn(ctx: Ctx, rn: Map[Str, Str]) -> Ctx {
   return { vt: ctx.vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp, ft: ctx.ft, mu: ctx.mu, mf: ctx.mf, fo: ctx.fo, fp: ctx.fp, tp: ctx.tp, dz: ctx.dz, cr: ctx.cr, rm: ctx.rm }
+  return { vt: ctx.vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp }
 }
 // Swap in a fresh var_types map (a provide-method seeds params/map-bindings).
 fn set_vts(ctx: Ctx, vt: Map[Str, Str]) -> Ctx {
@@ -610,6 +621,7 @@ fn set_vts(ctx: Ctx, vt: Map[Str, Str]) -> Ctx {
 // Advance the `for` ordinal (the next rendered `for` takes `fo`).
 fn set_fo(ctx: Ctx, fo: Int) -> Ctx {
   return { vt: ctx.vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp, ft: ctx.ft, mu: ctx.mu, mf: ctx.mf, fo: fo, fp: ctx.fp, tp: ctx.tp, dz: ctx.dz, cr: ctx.cr, rm: ctx.rm }
+  return { vt: vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp }
 }
 // Whether a `ca`/`rbf` entry names a usable (unique) type; the `<<AMBIG>>`
 // sentinel and a missing key both mean "not a byte-exact target here".
@@ -631,6 +643,7 @@ fn build_type_tables(types: Any) -> TypeTables {
   var tn: Map[Str, Str] = Map.empty()
   var ft: Map[Str, Str] = Map.empty()
   for (name of value_keys(types)) {
+    tn = tn.set(name, "1")
     let spec = value_field(types, name)
     let kind = value_str(value_field(spec, "kind"))
     // `rust_type_t` renders an APPLIED generic variant (`Mb[Int]` -> `Mb<i64>`)
@@ -648,6 +661,7 @@ fn build_type_tables(types: Any) -> TypeTables {
       let fields = value_field(spec, "fields")
       for (f of value_keys(fields)) { ft = ft.set(`${name}.${f}`, value_str(value_field(fields, f))) }
       let key = sorted_key(value_keys(fields))
+      let key = sorted_key(value_keys(value_field(spec, "fields")))
       if (rbf.has(key)) { rbf = rbf.set(key, "<<AMBIG>>") } else { rbf = rbf.set(key, name) }
     }
     if (kind == "variant") {
@@ -661,6 +675,7 @@ fn build_type_tables(types: Any) -> TypeTables {
     }
   }
   return { ca: ca, cp: cp, rbf: rbf, tn: tn, ft: ft }
+  return { ca: ca, cp: cp, rbf: rbf, tn: tn }
 }
 
 // `_V3Ctx.record_type_for_fields`: a record literal's nominal struct type, from
@@ -670,6 +685,8 @@ fn record_type_for_fields(ctx: Ctx, names: List[Str]) -> Str {
   let name = map_get(ctx.rbf, sorted_key(names))
   if (!resolved(name)) { return `<<UNSUPPORTED-record>>` }
   return type_ident(name)
+  if (!resolved(name)) { return `<<DEFER-record>>` }
+  return mangle(name)
 }
 
 // -------------------------------------------------------------------- types
@@ -765,9 +782,11 @@ fn rust_type_t(tv: Any, tnames: Map[Str, Str]) -> Str {
   let name = value_str(tv)
   if (name == "") { return "Value" }
   if (is_fn_type(name)) { return "<<UNSUPPORTED-fn-type>>" }
+  if (is_fn_type(name)) { return "<<DEFER-fn-type>>" }
   let tm = type_map(name)
   if (tm != "") { return tm }
   if (tnames.has(name)) { return type_ident(name) }
+  if (tnames.has(name)) { return mangle(name) }
   if (name.endsWith("]")) {
     let lb = name.indexOf("[")
     if (lb > 0) {
@@ -809,6 +828,7 @@ fn rust_type(tv: Any) -> Str { return rust_type_t(tv, Map.empty()) }
 // positions are monomorphisable, so ESCAPING function types (a struct field, an
 // `ADT`/`List`/`Opt`/`Map` element, a service-method signature) still have no
 // constructible lowering and stay the out-of-subset `<<UNSUPPORTED-fn-type>>` marker
+// constructible lowering and stay the out-of-subset `<<DEFER-fn-type>>` marker
 // `rust_type_t` returns. `.map`/`.filter`/`.reduce` reach this through their
 // `list_map`/`list_filter`/`list_reduce` free-function parameters.
 //
@@ -978,6 +998,7 @@ fn v3_infer_type(node: Any, ctx: Ctx) -> Str {
     if (nb.keys().length() > 0) { return v3_subst(declared, nb) }
     if (ctx.fr.has(fnm)) { return declared }
   }
+  if (k == "fn") { return map_get(ctx.fr, value_str(value_field(node, "name"))) }
   if (k == "call" && !value_is_null(value_field(node, "callee"))) {
     let callee = value_field(node, "callee")
     if (node_kind(callee) == "var") {
@@ -985,6 +1006,7 @@ fn v3_infer_type(node: Any, ctx: Ctx) -> Str {
       if (ctx.ca.has(cn)) { return map_get(ctx.ca, cn) }
       // issue #2495: `id(p)` answers the instantiation, not `T`
       if (ctx.fr.has(cn)) { return v3_subst(map_get(ctx.fr, cn), v3_generic_call(cn, value_list(value_field(node, "args")), ctx, value_str(value_field(node, "expected")))) }
+      if (ctx.fr.has(cn)) { return map_get(ctx.fr, cn) }
     }
   }
   if (k == "list") { return "List" }
@@ -1218,6 +1240,7 @@ fn by_value_field_clone(arg_node: Any, rendered: Str, ctx: Ctx) -> Str {
 // temporaries pass through. A name whose type is unknown clones only when the
 // body reuses it. Inside a `return`, a known non-Copy name the expression reads
 // once moves (`ctx.rm`, issue #2905).
+// temporaries pass through.
 fn by_value_arg(arg_node: Any, rendered: Str, ctx: Ctx) -> Str {
   let fc = by_value_field_clone(arg_node, rendered, ctx)
   if (fc != "") { return fc }
@@ -1233,6 +1256,11 @@ fn by_value_arg(arg_node: Any, rendered: Str, ctx: Ctx) -> Str {
   }
   if (ctx.mu.has(name)) { return rendered.concat(".clone()") }
   return rendered
+  if (ty == "") { return rendered }
+  if (is_fn_type(ty)) { return "&".concat(rendered) }
+  let head = strip_spaces(ty.split("[")[0])
+  if (head == "Int" || head == "Bool" || head == "Float") { return rendered }
+  return rendered.concat(".clone()")
 }
 
 // `_by_value_tail`: a bare name in a position that moves only on reuse (an
@@ -1240,11 +1268,21 @@ fn by_value_arg(arg_node: Any, rendered: Str, ctx: Ctx) -> Str {
 // reads it again and it is not known to be Copy.
 fn by_value_tail(node: Any, rendered: Str, ctx: Ctx) -> Str {
   let name = ref_name(node)
+// `_by_value_reuse`: the clone for a position that moves ONLY on reuse — a
+// host/builtin method argument. The reference clones a binding the body READS
+// AGAIN (`ctx.multi_use`), and `multi_use` is populated in exactly one place:
+// the free-function pass. A component's `_V3Ctx` is a fresh object, so at the
+// component surface — the only surface this port calls it from — `multi_use` is
+// empty, the Copy test is unreachable, and the only live arm is the borrowed
+// `&str` param safety net.
+fn by_value_reuse(arg_node: Any, rendered: Str, ctx: Ctx) -> Str {
+  let name = ref_name(arg_node)
   if (name == "") { return rendered }
   if (ctx.bp.has(name)) { return `${rendered}.to_string()` }
   let ty = map_get(ctx.vt, name)
   if (ty != "" && is_copy_type(ty)) { return rendered }
   if (ctx.mu.has(name)) { return rendered.concat(".clone()") }
+  if (ctx.bp.has(name)) { return rendered.concat(".to_string()") }
   return rendered
 }
 
@@ -1604,31 +1642,47 @@ fn compute_str_param_borrows(functions: List[Any]) -> Map[Str, List[Int]] {
 // free-function call reads a slot the callee itself lends; every other slot
 // moves the value. Mirrors the reference's nested `escapes`.
 fn list_param_escapes(node: Any, candidates: Map[Str, Str], safe: Bool, borrow: Map[Str, List[Int]], names: Map[Str, Str], acc: Map[Str, Str]) -> Map[Str, Str] {
+// `_compute_list_param_borrows`'s `escapes`: does any candidate LIST parameter
+// reach a position that consumes (rather than reads) it? Indexing, `len`, and
+// the read-only `length`/`at` builtins only read; a free-function call reads a
+// slot the callee itself lends; every other slot moves the value. Mirrors the
+// reference's nested `escapes`.
+fn list_param_escapes(node: Any, candidates: Map[Str, Str], safe: Bool, borrow: Map[Str, List[Int]], names: Map[Str, Str]) -> Bool {
   let vk = value_kind(node)
   var out = acc
   if (vk == "list") {
     for (item of value_list(node)) { out = list_param_escapes(item, candidates, safe, borrow, names, out) }
     return out
+    for (item of value_list(node)) {
+      if (list_param_escapes(item, candidates, safe, borrow, names)) { return true }
+    }
+    return false
   }
   if (vk != "record") { return out }
+  if (vk != "record") { return false }
   let k = node_kind(node)
   if (k == "var" || k == "name" || k == "req") {
     var ident = value_str(value_field(node, "id"))
     if (ident == "") { ident = value_str(value_field(node, "name")) }
     if (candidates.has(ident) && !safe) { out = out.set(ident, "1") }
     return out
+    return candidates.has(ident) && !safe
   }
   if (k == "len" || k == "index") {
     return list_param_escapes(value_field(node, "target"), candidates, true, borrow, names, out)
+    return list_param_escapes(value_field(node, "target"), candidates, true, borrow, names)
   }
   if (k == "builtin") {
     let method = value_str(value_field(node, "method"))
     let read = method == "length" || method == "at"
     out = list_param_escapes(value_field(node, "target"), candidates, true, borrow, names, out)
+    if (list_param_escapes(value_field(node, "target"), candidates, true, borrow, names)) { return true }
     for (a of value_list(value_field(node, "args"))) {
       out = list_param_escapes(a, candidates, read, borrow, names, out)
+      if (list_param_escapes(a, candidates, read, borrow, names)) { return true }
     }
     return out
+    return false
   }
   var callee_name = ""
   if (k == "fn") { callee_name = value_str(value_field(node, "name")) }
@@ -1641,14 +1695,18 @@ fn list_param_escapes(node: Any, candidates: Map[Str, Str], safe: Bool, borrow: 
     var i = 0
     while (i < args.length()) {
       out = list_param_escapes(args[i], candidates, borrow_slot(borrow, callee_name, i), borrow, names, out)
+      if (list_param_escapes(args[i], candidates, borrow_slot(borrow, callee_name, i), borrow, names)) { return true }
       i = i + 1
     }
     return out
+    return false
   }
   for (key of value_keys(node)) {
     out = list_param_escapes(value_field(node, key), candidates, false, borrow, names, out)
+    if (list_param_escapes(value_field(node, key), candidates, false, borrow, names)) { return true }
   }
   return out
+  return false
 }
 
 // `_compute_list_param_borrows`: internal `List` parameters used only by
@@ -1657,6 +1715,8 @@ fn list_param_escapes(node: Any, candidates: Map[Str, Str], safe: Bool, borrow: 
 // at every call. Start with every non-`pub` `List` parameter a candidate and
 // drop only the candidates that escape (issue #2906), so one `return acc` does
 // not make a read-only sibling owned; it settles because the set only shrinks.
+// drop a whole function's set the moment one candidate escapes (the reference's
+// all-or-nothing per-function fixpoint), settling because the set only shrinks.
 fn compute_list_param_borrows(functions: List[Any]) -> Map[Str, List[Int]] {
   var names: Map[Str, Str] = Map.empty()
   for (f of functions) { names = names.set(value_str(value_field(f, "name")), "1") }
@@ -1692,6 +1752,9 @@ fn compute_list_param_borrows(functions: List[Any]) -> Map[Str, List[Int]] {
           borrow = borrow.set(fname, kept)
           changed = true
         }
+      if (slots.length() > 0 && list_param_escapes(value_field(f, "body"), candidates, false, borrow, names)) {
+        borrow = borrow.set(fname, [])
+        changed = true
       }
     }
   }
@@ -1718,6 +1781,12 @@ fn call_arg(callee: Str, index: Int, node: Any, rendered: Str, ctx: Ctx) -> Str 
   return by_value_arg(node, rendered, ctx)
 }
 
+fn owned_borrowed_tail(node: Any, ctx: Ctx) -> Str {
+  let rendered = render_expr(node, ctx)
+  if (ctx.bp.has(ref_name(node))) { return `${rendered}.to_string()` }
+  return rendered
+}
+
 // -------------------------------------------------------------- expressions
 // `_V3Ctx.constructor`: a user variant case -> `Enum::Case` / `Enum::Case(arg)`
 // (the case name is used RAW, as the reference does — not mangled), else the
@@ -1728,12 +1797,15 @@ fn constructor(ctx: Ctx, name: Str, args: List[Str]) -> Str {
   if (resolved(adt)) {
     if (map_get(ctx.cp, name) == "n") { return `${type_ident(adt)}::${name}` }
     return `${type_ident(adt)}::${name}(${args[0]})`
+    if (map_get(ctx.cp, name) == "n") { return `${adt}::${name}` }
+    return `${adt}::${name}(${args[0]})`
   }
   if (name == "None") { return "None" }
   if (name == "Some" || name == "Ok" || name == "Err") {
     return `${name}(${args[0]})`
   }
   return `<<UNSUPPORTED-ctor:${name}>>`
+  return `<<DEFER-ctor:${name}>>`
 }
 
 // `_V3Ctx.match_pattern`: a match arm's pattern. `_` is the wildcard; a user
@@ -1746,19 +1818,24 @@ fn match_pattern(ctx: Ctx, arm: Any) -> Str {
   let adt = map_get(ctx.ca, pattern)
   var prefix = ""
   if (resolved(adt)) { prefix = `${type_ident(adt)}::${pattern}` }
+  if (resolved(adt)) { prefix = `${adt}::${pattern}` }
   else {
     if (is_builtin_ctor(pattern)) { prefix = pattern }
     else { return `<<UNSUPPORTED-match:${pattern}>>` }
+    else { return `<<DEFER-match:${pattern}>>` }
   }
   if (bind != "") { return `${prefix}(${value_ident(bind)})` }
+  if (bind != "") { return `${prefix}(${mangle(bind)})` }
   return prefix
 }
 
 fn render_var(node: Any, ctx: Ctx) -> Str {
   let name = value_str(value_field(node, "name"))
   let mangled = value_ident(name)
+  let mangled = mangle(name)
   let adt = map_get(ctx.ca, name)
   if (resolved(adt)) { return `${type_ident(adt)}::${mangled}` }
+  if (resolved(adt)) { return `${adt}::${mangled}` }
   if (is_builtin_ctor(name)) { return name }
   return mangled
 }
@@ -1903,10 +1980,14 @@ fn render_call(node: Any, ctx: Ctx) -> Str { return render_call_to(node, ctx, ""
 // A call rendered for the type its result flows into (issue #2545): the
 // `expected` a return or an argument slot hands it, else its own pin.
 fn render_call_to(node: Any, ctx: Ctx, expected: Str) -> Str {
+fn render_call(node: Any, ctx: Ctx) -> Str {
   let callee_node = value_field(node, "callee")
   if (value_is_null(callee_node)) { return render_component_call(node, ctx) }
   let arg_nodes = value_list(value_field(node, "args"))
+  var arg_exprs = []
+  for (a of arg_nodes) { arg_exprs = arg_exprs.push(render_expr(a, ctx)) }
   let ckind = node_kind(callee_node)
+  if (ckind == "field") { return "<<DEFER-method-call>>" }
   var callee_name = ""
   if (ckind == "var") { callee_name = value_str(value_field(callee_node, "name")) }
   let pinned = value_str(value_field(node, "expected"))
@@ -1927,6 +2008,7 @@ fn render_call_to(node: Any, ctx: Ctx, expected: Str) -> Str {
       ci = ci + 1
     }
     return constructor(ctx, callee_name, cargs)
+    return constructor(ctx, callee_name, arg_exprs)
   }
   var callee = render_expr(callee_node, ctx)
   if (!is_atomic(ckind)) { callee = `(${callee})` }
@@ -1951,6 +2033,7 @@ fn render_index(node: Any, ctx: Ctx) -> Str {
 fn render_list(node: Any, ctx: Ctx) -> Str {
   var parts = []
   for (it of value_list(value_field(node, "items"))) { parts = parts.push(by_value_reuse(it, render_expr(it, ctx), ctx)) }
+  for (it of value_list(value_field(node, "items"))) { parts = parts.push(owned_borrowed_tail(it, ctx)) }
   return "vec![".concat(parts.join(", ")).concat("]")
 }
 
@@ -1971,6 +2054,7 @@ fn render_arrow(node: Any, ctx: Ctx) -> Str {
     bp = bp.remove(name)
     lp = lp.remove(name)
     var param = value_ident(name)
+    var param = mangle(name)
     if (ptype != "" && !is_fn_type(ptype)) {
       param = `${param}: ${rust_type_t(ptype, ctx.tn)}`
     }
@@ -1978,6 +2062,7 @@ fn render_arrow(node: Any, ctx: Ctx) -> Str {
     i = i + 1
   }
   let inner = { vt: vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: rn, fb: ctx.fb, bp: bp, flb: ctx.flb, lp: lp, ft: ctx.ft, mu: ctx.mu, mf: ctx.mf, fo: ctx.fo, fp: ctx.fp, tp: ctx.tp, dz: ctx.dz, cr: ctx.cr, rm: ctx.rm }
+  let inner = { vt: vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: rn, fb: ctx.fb, bp: bp, flb: ctx.flb, lp: lp }
   return `move |${ps.join(", ")}| { ${render_expr(value_field(node, "body"), inner)} }`
 }
 
@@ -1997,9 +2082,11 @@ fn render_field(node: Any, ctx: Ctx) -> Str {
   if (node_kind(tn) == "index" && target.endsWith(".clone()")) {
     let place = target.slice(0, target.length() - 8)
     return sized ? `${place}.revl_length()` : `${place}.${mangle(value_str(value_field(node, "name")))}.clone()`
+    return `${place}.${mangle(value_str(value_field(node, "name")))}.clone()`
   }
   if (!is_atomic(node_kind(tn))) { target = `(${target})` }
   return sized ? `${target}.revl_length()` : `${target}.${mangle(value_str(value_field(node, "name")))}`
+  return `${target}.${mangle(value_str(value_field(node, "name")))}`
 }
 
 // `record`: a nominal `Struct { f: v, .. }` literal. Each field value moves into
@@ -2028,6 +2115,7 @@ fn render_record(node: Any, ctx: Ctx) -> Str {
 fn render_match(node: Any, ctx: Ctx) -> Str {
   let snode = value_field(node, "scrutinee")
   let scrut = by_value_reuse(snode, render_expr(snode, ctx), ctx)
+  let scrut = render_expr(value_field(node, "scrutinee"), ctx)
   let arms = value_list(value_field(node, "arms"))
   var lines = [`match ${scrut} {`]
   var hasWild = false
@@ -2096,6 +2184,7 @@ fn render_inner(node: Any, ctx: Ctx) -> Str {
     let idv = value_str(value_field(node, "id"))
     if (ctx.rn.has(idv)) { return map_get(ctx.rn, idv) }
     return value_ident(idv)
+    return mangle(idv)
   }
   if (kind == "var") { return render_var(node, ctx) }
   if (kind == "req") {
@@ -2116,6 +2205,7 @@ fn render_inner(node: Any, ctx: Ctx) -> Str {
     // Component dialect: the same borrowed slots as a v3 `call`.
     let raw = value_str(value_field(node, "name"))
     let fname = value_ident(raw)
+    let fname = mangle(raw)
     let anodes = value_list(value_field(node, "args"))
     var parts = []
     var i = 0
@@ -2128,6 +2218,7 @@ fn render_inner(node: Any, ctx: Ctx) -> Str {
   if (kind == "adt") {
     var aa = []
     for (a of value_list(value_field(node, "args"))) { aa = aa.push(by_value_arg(a, render_expr(a, ctx), ctx)) }
+    for (a of value_list(value_field(node, "args"))) { aa = aa.push(render_expr(a, ctx)) }
     return constructor(ctx, value_str(value_field(node, "case")), aa)
   }
   if (kind == "bin") { return render_bin(node, ctx) }
@@ -2141,6 +2232,7 @@ fn render_inner(node: Any, ctx: Ctx) -> Str {
     let tn = value_field(node, "then")
     let en = value_field(node, "else")
     return `if ${render_expr(value_field(node, "cond"), ctx)} { ${by_value_tail(tn, render_expr(tn, ctx), ctx)} } else { ${by_value_tail(en, render_expr(en, ctx), ctx)} }`
+    return `if ${render_expr(value_field(node, "cond"), ctx)} { ${owned_borrowed_tail(value_field(node, "then"), ctx)} } else { ${owned_borrowed_tail(value_field(node, "else"), ctx)} }`
   }
   if (kind == "list") { return render_list(node, ctx) }
   if (kind == "maplit") { return "std::collections::HashMap::new()" }
@@ -2222,6 +2314,9 @@ fn render_builtin(node: Any, ctx: Ctx) -> Str {
   for (a of args) {
     var r = render_expr(a, ctx)
     if (method != "lookup" && method != "has" && method != "remove") { r = by_value_reuse(a, r, ctx) }
+    if (method != "lookup" && method != "has" && method != "remove" && ctx.bp.has(ref_name(a))) {
+      r = `${r}.to_string()`
+    }
     rendered = rendered.push(r)
   }
   if (method == "checked_add" || method == "checked_sub" || method == "checked_mul") {
@@ -2262,6 +2357,7 @@ fn render_builtin(node: Any, ctx: Ctx) -> Str {
 // all, which is the exact silence issue #81's exit forbids.
 fn render_host(node: Any, ctx: Ctx) -> Str {
   if (!value_is_null(value_field(node, "replay"))) { return "<<UNSUPPORTED-host-replay>>" }
+  if (!value_is_null(value_field(node, "replay"))) { return "<<DEFER-host-replay>>" }
   let fname = value_str(value_field(node, "fn"))
   // `partition(".")`: the root is everything before the FIRST dot, the method
   // everything after it.
@@ -2374,6 +2470,7 @@ fn json_dumps(v: Any) -> Str {
   // a Float would need python `repr(float)`, which `num_str` supplies but which
   // no derived schema carries; REPORT rather than emit an unverified numeral.
   return `<<UNSUPPORTED-json-kind:${k}>>`
+  return `<<DEFER-json-kind:${k}>>`
 }
 
 // `_stream_head`: the stream a `subscribe` acquires — a plain source, or a
@@ -2404,9 +2501,11 @@ fn stream_stage_arrow(stage: Any, ctx: Ctx) -> Str {
   let params = value_list(value_field(fnode, "params"))
   if (node_kind(fnode) != "arrow" || params.length() != 1) {
     return `<<UNSUPPORTED-stream-stage-arrow:${value_str(value_field(stage, "stage"))}>>`
+    return `<<DEFER-stream-stage-arrow:${value_str(value_field(stage, "stage"))}>>`
   }
   let raw = value_str(params[0])
   let pname = value_ident(raw)
+  let pname = mangle(raw)
   var ret = "String"
   if (value_str(value_field(stage, "stage")) == "filter") { ret = "bool" }
   let body = render_expr(value_field(fnode, "body"), set_rn(ctx, ctx.rn.set(raw, pname)))
@@ -2429,6 +2528,7 @@ fn stream_chain(head: Any, stages: List[Any], ctx: Ctx) -> Str {
         out = `Stream::${kind}(&${out}, ${stream_stage_arrow(stage, ctx)})`
       } else {
         out = `<<UNSUPPORTED-stream-combinator:${kind}>>`
+        out = `<<DEFER-stream-combinator:${kind}>>`
       }
     }
   }
@@ -2453,6 +2553,8 @@ fn stream_chain(head: Any, stages: List[Any], ctx: Ctx) -> Str {
 fn render_subscribe(node: Any, ctx: Ctx) -> Str {
   if (!value_is_null(value_field(node, "replay"))) { return "<<UNSUPPORTED-stream-replay>>" }
   if (!value_is_null(value_field(node, "drain"))) { return "<<UNSUPPORTED-stream-drain>>" }
+  if (!value_is_null(value_field(node, "replay"))) { return "<<DEFER-stream-replay>>" }
+  if (!value_is_null(value_field(node, "drain"))) { return "<<DEFER-stream-drain>>" }
   var policy = value_str(value_field(node, "policy"))
   if (policy == "") { policy = "error" }
   let capacity = value_int(value_opt(node, "buffer") ?? 0)
@@ -2515,11 +2617,13 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
   if (step == "let" || step == "assign") {
     let raw = value_str(value_field(node, "name"))
     let nm = value_ident(raw)
+    let nm = mangle(raw)
     let valnode = value_field(node, "value")
     let inferred = v3_infer_type(valnode, ctx)
     // the binding's type so far is the type a call on the right flows into
     // (the reference's `expected = ctx.var_types.get(name)`, issue #2545)
     let value = by_value_tail(valnode, render_expr_to(valnode, ctx, map_get(ctx.vt, raw)), ctx)
+    let value = render_expr(valnode, ctx)
     var nctx = ctx
     if (inferred != "") { nctx = set_vt(ctx, raw, inferred) }
     var out = []
@@ -2555,12 +2659,14 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
         if (ctx.dz.has(raw) && node_kind(valnode) == "var" && ref_name(valnode) == "None") { annot = ": Option<Value>" }
         out = out.push(line(indent, `${kw} ${nm}${annot} = ${value};`))
       }
+      out = out.push(line(indent, `${kw} ${nm} = ${value};`))
     } else {
       // item 437(a): a self-appending `assign` (`s = s + p`) becomes an
       // in-place `push_str`. Only an `assign` qualifies -- a `let` introduces a
       // NEW binding, so its RHS receiver is a different value that stays live.
       var ip = self_append_plus(raw, nm, valnode, ctx)
       if (ip == "") { ip = self_append_concat(raw, nm, valnode, ctx) }
+      let ip = self_append_plus(raw, nm, valnode, ctx)
       if (ip != "") { out = out.push(line(indent, ip)) }
       else { out = out.push(line(indent, `${nm} = ${value};`)) }
     }
@@ -2574,6 +2680,7 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
       let rctx = { vt: ctx.vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp, ft: ctx.ft, mu: ctx.mu, mf: ctx.mf, fo: ctx.fo, fp: ctx.fp, tp: ctx.tp, dz: ctx.dz, cr: ctx.cr, rm: return_move_names(e) }
       out = out.push(line(indent, `return ${render_expr_to(e, rctx, ctx.cr)};`))
     }
+    else { out = out.push(line(indent, `return ${render_expr(e, ctx)};`)) }
     return { lines: out, ctx: ctx }
   }
   if (step == "if") {
@@ -2600,6 +2707,7 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
   }
   if (step == "for") {
     let bind = value_ident(value_str(value_field(node, "bind")))
+    let bind = mangle(value_str(value_field(node, "bind")))
     let iterable_node = value_field(node, "iterable")
     let iterable_type = v3_infer_type(iterable_node, ctx)
     let element_type = list_element_type(iterable_type)
@@ -2608,6 +2716,9 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
     var loop_ctx = set_fo(ctx, ctx.fo + 1)
     if (element_type != "") { loop_ctx = set_vt(loop_ctx, value_str(value_field(node, "bind")), element_type) }
     var out = [line(indent, `for ${bind} in ${iterable} {`)]
+    var loop_ctx = ctx
+    if (element_type != "") { loop_ctx = set_vt(ctx, value_str(value_field(node, "bind")), element_type) }
+    var out = [line(indent, `for ${bind} in ${render_expr(iterable_node, ctx)} {`)]
     let bodyR = emit_stmts(value_list(value_field(node, "body")), loop_ctx, indent + 1)
     out = out.concat(bodyR.lines)
     out = out.push(line(indent, "}"))
@@ -2911,6 +3022,7 @@ fn emit_v3_functions(functions: List[Any], fr: Map[Str, Str], tables: TypeTables
   for (fnode of functions) {
     let raw = value_str(value_field(fnode, "name"))
     let name = fn_ident(raw)
+    let name = mangle(raw)
     let params = value_list(value_field(fnode, "params"))
     var vt: Map[Str, Str] = Map.empty()
     for (p of params) { vt = vt.set(value_str(value_field(p, "name")), value_str(value_field(p, "type"))) }
@@ -2931,27 +3043,33 @@ fn emit_v3_functions(functions: List[Any], fr: Map[Str, Str], tables: TypeTables
       let pname = value_str(value_field(p, "name"))
       let raw_type = value_str(value_field(p, "type"))
       var ptype = rust_type_pos(value_field(p, "type"), tn)
+      var ptype = rust_type_pos(value_field(p, "type"), tables.tn)
       if (borrow_slot(borrow, raw, i)) {
         ptype = "&str"
         bp = bp.set(pname, "1")
       } else {
         if (borrow_slot(list_borrow, raw, i)) {
           ptype = `&[${rust_type_pos(strip_spaces(list_element_type(raw_type)), tn)}]`
+          ptype = `&[${rust_type_pos(strip_spaces(list_element_type(raw_type)), tables.tn)}]`
           lp = lp.set(pname, "1")
         }
       }
       ps = ps.push(`${value_ident(pname)}: ${ptype}`)
+      ps = ps.push(`${mangle(pname)}: ${ptype}`)
       i = i + 1
     }
     let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tn, rn: Map.empty(), fb: borrow, bp: bp, flb: list_borrow, lp: lp, ft: tables.ft, mu: reused_names(body), mf: movable_for_iterables(body, reused_names(body)), fo: 0, fp: fp, tp: tparams, dz: dead_lets(body), cr: value_str(value_field(fnode, "returns")), rm: Map.empty() }
+    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: bp, flb: list_borrow, lp: lp }
     var returns = "()"
     if (!value_is_null(value_field(fnode, "returns"))) {
       returns = rust_type_pos(value_field(fnode, "returns"), tn)
+      returns = rust_type_pos(value_field(fnode, "returns"), tables.tn)
     }
     var vis = ""
     if (value_bool(value_field(fnode, "public"))) { vis = "pub " }
     let generics = fn_generics(body, tparams, ctx)
     out = out.push(`${vis}fn ${name}${generics}(${ps.join(", ")}) -> ${returns} {`)
+    out = out.push(`${vis}fn ${name}(${ps.join(", ")}) -> ${returns} {`)
     if (body.length() == 0) {
       out = out.push(line(1, "todo!()"))
     } else {
@@ -3177,6 +3295,7 @@ fn emit_v3_types(types: Any, tnames: Map[Str, Str]) -> List[Str] {
     let spec = value_field(types, name)
     let kind = value_str(value_field(spec, "kind"))
     let nm = type_ident(name)
+    let nm = mangle(name)
     if (kind == "record") {
       let twin = match canonicals.lookup(name) { Some(v) => v, None => "" }
       if (twin != "" && twin != name) {
@@ -3202,6 +3321,7 @@ fn emit_v3_types(types: Any, tnames: Map[Str, Str]) -> List[Str] {
           rendered = `Box<${rendered}>`
         }
         out = out.push(`    ${fname}: ${rendered},`)
+        out = out.push(`    ${fname}: ${rust_type_t(value_field(fields, field), tnames)},`)
       }
       out = out.push("}")
     } else {
@@ -3227,6 +3347,7 @@ fn emit_v3_types(types: Any, tnames: Map[Str, Str]) -> List[Str] {
         if (pnames.length() > 0) { generics = `<${pnames.join(", ")}>` }
         out = out.push(`pub enum ${nm}${generics} {`)
         let scope = with_tparams(tnames, raw_params)
+        out = out.push(`pub enum ${nm} {`)
         for (case of value_list(value_field(spec, "cases"))) {
           let cname = mangle(value_str(value_field(case, "name")))
           let payload = value_field(case, "payload")
@@ -3252,6 +3373,7 @@ fn emit_v3_types(types: Any, tnames: Map[Str, Str]) -> List[Str] {
           out = out.push("    #[doc(hidden)]")
           out = out.push("    #[serde(skip)]")
           out = out.push(`    __RevlPhantom(std::marker::PhantomData<fn() -> (${markers.join(", ")},)>),`)
+          else { out = out.push(`    ${cname}(${rust_type_t(payload, tnames)}),`) }
         }
         out = out.push("}")
       } else {
@@ -3313,6 +3435,7 @@ fn emit_v3_externs(externs: List[Any], tnames: Map[Str, Str]) -> List[Str] {
   var out = []
   for (ext of externs) {
     let name = fn_ident(value_str(value_field(ext, "name")))
+    let name = mangle(value_str(value_field(ext, "name")))
     var ps = []
     for (p of value_list(value_field(ext, "params"))) {
       ps = ps.push(`${mangle(value_str(value_field(p, "name")))}: ${rust_type_pos(value_field(p, "type"), tnames)}`)
@@ -3326,12 +3449,14 @@ fn emit_v3_externs(externs: List[Any], tnames: Map[Str, Str]) -> List[Str] {
       // The reference RAISES here (`extern ... has no @rs body`). This slice has
       // no refusal channel, so the marker stands in — loud, never silent.
       out = out.push(`<<UNSUPPORTED-EXTERN-NO-RS-BODY:${name}>>`)
+      out = out.push(`<<EXTERN-NO-RS-BODY:${name}>>`)
       out = out.push("")
     } else {
       let body = trim(value_str(rs_body))
       let defer = extern_body_defer(ext, body)
       if (defer != "") {
         out = out.push(`<<UNSUPPORTED-EXTERN-${defer}:${name}>>`)
+        out = out.push(`<<DEFER-EXTERN-${defer}:${name}>>`)
         out = out.push("")
       } else {
         out = out.push(`fn ${name}(${ps.join(", ")}) -> ${returns} {`)
@@ -3356,6 +3481,7 @@ fn emit_v3_externs(externs: List[Any], tnames: Map[Str, Str]) -> List[Str] {
 // forces the whole bridge — so traits + provider + bridge port as ONE unit.
 //
 // DEFERRED here (each REPORTED, and each fires a `<<UNSUPPORTED-*>>` marker that keeps
+// DEFERRED here (each REPORTED, and each fires a `<<DEFER-*>>` marker that keeps
 // a byte diff loud rather than silently wrong): the host-object stubs
 // (`Map`/`Pool`/`Job`) and every preamble helper (timer/stdlib/float/realm/
 // spawn) — none appear in the covered subset, so `_emit_host_stubs` and the
@@ -3377,12 +3503,14 @@ fn emit_service_traits(services: Any, tnames: Map[Str, Str]) -> List[Str] {
   for (sname of value_keys(services)) {
     let srv = value_field(services, sname)
     out = out.push(`pub trait ${svc_ident(sname)}: Send + Sync {`)
+    out = out.push(`pub trait ${sname}: Send + Sync {`)
     let methods = value_field(srv, "methods")
     for (mn of value_keys(methods)) {
       let method = value_field(methods, mn)
       var ps = []
       for (p of value_list(value_field(method, "params"))) {
         ps = ps.push(`${value_ident(value_str(value_field(p, "name")))}: ${rust_type_t(value_field(p, "type"), tnames)}`)
+        ps = ps.push(`${mangle(value_str(value_field(p, "name")))}: ${rust_type_t(value_field(p, "type"), tnames)}`)
       }
       var ret = "()"
       let r = value_field(method, "returns")
@@ -3413,6 +3541,7 @@ fn emit_service_traits(services: Any, tnames: Map[Str, Str]) -> List[Str] {
 // object, so the byte oracle agreed VACUOUSLY on the whole surface. The stream
 // host runtime is the one block still DEFERRED, and it is REPORTED: a document
 // that reaches it fires a `<<UNSUPPORTED-stream-host>>` marker rather than silently
+// that reaches it fires a `<<DEFER-stream-host>>` marker rather than silently
 // emitting a crate with no stream runtime in it.
 //
 // Each block below is a verbatim transcription of the reference's literal line
@@ -5182,12 +5311,25 @@ fn pure_stmts(steps: List[Any], ctx: Ctx, params: List[Str]) -> List[Str] {
     if (kind == "let") {
       let nm = value_str(value_field(step, "name"))
       let cshadow = set_rn(c, c.rn.set(nm, value_ident(nm)))
+      let cshadow = set_rn(c, c.rn.set(nm, mangle(nm)))
       var mut = ""
       if (value_bool(value_field(step, "mutable"))) { mut = "mut " }
       parts = parts.push(`let ${mut}${value_ident(nm)} = ${render_expr(value_field(step, "value"), cshadow)};`)
+      parts = parts.push(`let ${mut}${mangle(nm)} = ${render_expr(value_field(step, "value"), cshadow)};`)
       c = cshadow
     } else {
       parts = parts.push(pure_stmt(step, kind, c, params))
+      if (kind == "assign") {
+        parts = parts.push(`${mangle(value_str(value_field(step, "name")))} = ${render_expr(value_field(step, "value"), c)};`)
+      } else {
+        if (kind == "return") {
+          let e = value_field(step, "expr")
+          if (value_is_null(e)) { parts = parts.push("return;") }
+          else { parts = parts.push(`return ${render_expr(e, c)};`) }
+        } else {
+          parts = parts.push(`<<DEFER-method-step:${kind}>>`)
+        }
+      }
     }
   }
   return parts
@@ -5241,6 +5383,7 @@ fn pure_stmt(step: Any, kind: Str, c: Ctx, params: List[Str]) -> Str {
   if (kind == "break") { return "break;" }
   if (kind == "continue") { return "continue;" }
   return `<<UNSUPPORTED-method-step:${kind}>>`
+  return parts.join(" ")
 }
 
 // ------------------------------------------------------------ config (item 218)
@@ -5271,6 +5414,8 @@ fn binds(comp: Any) -> List[Str] {
 // rather than left to the order the reference happens to run in.
 fn activation_ctx(tables: TypeTables, fr: Map[Str, Str], map_values: Map[Str, Str], functions: List[Any]) -> Ctx {
   var c = plain_ctx(tables, fr, functions)
+fn activation_ctx(tables: TypeTables, fr: Map[Str, Str], map_values: Map[Str, Str]) -> Ctx {
+  var c = plain_ctx(tables, fr)
   for (b of map_values.keys()) { c = set_vt(c, b, `Map[${map_get(map_values, b)}]`) }
   return c
 }
@@ -5285,6 +5430,8 @@ fn activation_ctx(tables: TypeTables, fr: Map[Str, Str], map_values: Map[Str, St
 // renders expressions (emit.py `_V3Ctx.fn_param_types`), so it is threaded in.
 fn plain_ctx(tables: TypeTables, fr: Map[Str, Str], functions: List[Any]) -> Ctx {
   return { vt: Map.empty(), fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: Map.empty(), bp: Map.empty(), flb: Map.empty(), lp: Map.empty(), ft: tables.ft, mu: Map.empty(), mf: [], fo: 0, fp: fn_params_map(functions), tp: [], dz: Map.empty(), cr: "", rm: Map.empty() }
+fn plain_ctx(tables: TypeTables, fr: Map[Str, Str]) -> Ctx {
+  return { vt: Map.empty(), fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: Map.empty(), bp: Map.empty(), flb: Map.empty(), lp: Map.empty() }
 }
 
 // `_map_value_expr_type`: best-effort SURFACE type of an expression. "" is the
@@ -5327,6 +5474,7 @@ fn map_value_expr_type(node: Any, var_types: Map[Str, Str], comp: Any, services:
         || method == "indexOf" || method == "to_int") { return "Int" }
     if (method == "charAt" || method == "join" || method == "repeat"
         || method == "to_str" || method == "to_char" || method == "slice") { return "Str" }
+        || method == "to_str" || method == "slice") { return "Str" }
     if (method == "split") { return "List[Str]" }
     if (method == "concat") {
       return map_value_expr_type(value_field(node, "target"), var_types, comp, services, functions, ctx)
@@ -5720,6 +5868,8 @@ fn type_ident(name: Str) -> Str {
 fn require_ty(svc: Str) -> Str {
   if (svc.startsWith("Stream[")) { return "<<UNSUPPORTED-REQUIRED-STREAM>>" }
   return svc_ident(svc)
+  if (svc.startsWith("Stream[")) { return `<<DEFER-required-stream:${svc}>>` }
+  return svc
 }
 
 // `_emit_req_bindings`: bind each required service through the Inject gate
@@ -5731,6 +5881,9 @@ fn emit_req_bindings(reqs: Any, indent: Int) -> List[Str] {
     let local = key_binding(key)
     let svc = require_ty(value_str(value_field(reqs, key)))
     out = out.push(`${pad}let ${mangle(host_key(key))} = ctx.require::<Box<dyn ${svc}>>(${string_lit(key)})?;`)
+  for (local of value_keys(reqs)) {
+    let svc = require_ty(value_str(value_field(reqs, local)))
+    out = out.push(`${pad}let ${local} = ctx.require::<Box<dyn ${svc}>>(${string_lit(local)})?;`)
   }
   return out
 }
@@ -5758,6 +5911,10 @@ fn component_has_effectful_methods(comp: Any) -> Bool {
     if (value_str(value_field(step, "step")) == "provide") {
       for (method of value_list(value_field(step, "methods"))) {
         if (method_has_effectful_steps(method)) { return true }
+        for (bs of value_list(value_field(method, "body"))) {
+          let k = value_str(value_field(bs, "step"))
+          if (k == "effect" || k == "emit") { return true }
+        }
       }
     }
   }
@@ -5767,8 +5924,10 @@ fn component_has_effectful_methods(comp: Any) -> Bool {
 // `let-effect` (item 397).
 fn method_has_effectful_steps(method: Any) -> Bool {
   for (bs of iter_method_steps(value_list(value_field(method, "body")))) {
+  for (bs of value_list(value_field(method, "body"))) {
     let k = value_str(value_field(bs, "step"))
     if (k == "effect" || k == "emit" || k == "let-effect") { return true }
+    if (k == "effect" || k == "emit") { return true }
   }
   return false
 }
@@ -5806,6 +5965,7 @@ fn is_stream_next(comp: Any, expr: Any) -> Bool {
 // `_method_scope_rename`. A provide method has only `&self`, so a read of a
 // value-held bind (issues #1920, #1931) is a clone.
 fn method_scope_rename(comp: Any, services: Any, ctx: Ctx) -> Map[Str, Str] {
+fn method_scope_rename(comp: Any) -> Map[Str, Str] {
   var rn: Map[Str, Str] = Map.empty()
   // a key or bind that is a Rust keyword is captured under its mangled name,
   // the one its field and its local carry (issue #1927)
@@ -5816,6 +5976,8 @@ fn method_scope_rename(comp: Any, services: Any, ctx: Ctx) -> Map[Str, Str] {
   for (raw of value_keys(value_field(comp, "requires"))) {
     rn = rn.set(key_binding(raw), `self.${mangle(host_key(raw))}`)
   }
+  for (b of binds(comp)) { rn = rn.set(b, `self.${b}`) }
+  for (req of value_keys(value_field(comp, "requires"))) { rn = rn.set(req, `self.${req}`) }
   if (has_config(comp)) { rn = rn.set("config", "self.config") }
   return rn
 }
@@ -5823,6 +5985,7 @@ fn method_undo_rename(comp: Any, method: Any) -> Map[Str, Str] {
   var rn: Map[Str, Str] = Map.empty()
   for (b of binds(comp)) { rn = rn.set(b, `${b}_undo`) }
   for (raw of value_keys(value_field(comp, "requires"))) { let req = key_binding(raw) rn = rn.set(req, `${req}_undo`) }
+  for (req of value_keys(value_field(comp, "requires"))) { rn = rn.set(req, `${req}_undo`) }
   for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) rn = rn.set(pn, `${pn}_undo`) }
   return rn
 }
@@ -5835,6 +5998,9 @@ fn method_undo_clones(comp: Any, method: Any, indent: Int) -> List[Str] {
     out = out.push(`${pad}let ${req}_undo = self.${mangle(host_key(raw))}.clone();`)
   }
   for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) out = out.push(`${pad}let ${pn}_undo = ${value_ident(pn)}.clone();`) }
+  for (b of binds(comp)) { out = out.push(`${pad}let ${b}_undo = self.${b}.clone();`) }
+  for (req of value_keys(value_field(comp, "requires"))) { out = out.push(`${pad}let ${req}_undo = self.${req}.clone();`) }
+  for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) out = out.push(`${pad}let ${pn}_undo = ${pn}.clone();`) }
   return out
 }
 // `_bare_param`: the parameter a bare `var`/`name` node names, else ""
@@ -5942,10 +6108,12 @@ fn provide_let_type(value: Any, ctx: Ctx, comp: Any, services: Any) -> Str {
 }
 // The `requires` map keyed by the BINDING a `req` node carries (issue #2394;
 // the raw wiring key is only the runtime string).
+// The `requires` map as Str->Str (key -> service name).
 fn reqs_map(comp: Any) -> Map[Str, Str] {
   var m: Map[Str, Str] = Map.empty()
   let rq = value_field(comp, "requires")
   for (k of value_keys(rq)) { m = m.set(key_binding(k), value_str(value_field(rq, k))) }
+  for (k of value_keys(rq)) { m = m.set(k, value_str(value_field(rq, k))) }
   return m
 }
 
@@ -5954,12 +6122,15 @@ fn reqs_map(comp: Any) -> Map[Str, Str] {
 // `self.ctx.effect(..)`. Ahead of each undo, a method-body local the undo reads
 // and a host-Map acquire moves (`insert(key, ..)`) is pre-cloned into
 // `<local>_undo` (item 114, `_undo_reclone_locals`).
+// `self.ctx.effect(..)`. The host-Map reclone (item 114) is DEFERRED — the
+// subset declares no host `Map`, so `_undo_reclone_locals` is always empty.
 // Returns the lines AND the threaded ctx (its `vt` carries let-inferred types).
 fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: Int) -> Sout {
   let pad = ind(indent)
   let name = value_str(value_field(comp, "name"))
   let mnm = value_str(value_field(method, "name"))
   let scope = method_scope_rename(comp, services, ctx)
+  let scope = method_scope_rename(comp)
   var c = set_rn(ctx, scope)
   var out = []
   var index = 0
@@ -5973,8 +6144,13 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
     } else {
       if (kind == "effect" || kind == "emit") {
         var undoR = method_undo_rename(comp, method)
+        let undoR = method_undo_rename(comp, method)
         var acqR = scope
         for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) acqR = acqR.set(pn, `${value_ident(pn)}.clone()`) }
+        for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) acqR = acqR.set(pn, `${pn}.clone()`) }
+        let label = string_lit(`${name}.${mnm}.${kind}.${num_str(index)}`)
+        var registers_undo = kind == "effect"
+        var undonode: Any = value_field(step, "undo")
         if (kind == "emit") {
           // the emission fires, then its `compensate` (item 247, the
           // teardown-contract two-phase abort) is registered on the
@@ -5995,6 +6171,12 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
           let label = string_lit(`${name}.${mnm}.${kind}.${num_str(index)}`)
           var acqnode = value_field(step, "acquire")
           if (value_is_null(acqnode)) { acqnode = value_field(step, "expr") }
+          undonode = value_field(step, "compensate")
+          if (!value_is_null(undonode)) { registers_undo = true }
+        }
+        var acqnode = value_field(step, "acquire")
+        if (value_is_null(acqnode)) { acqnode = value_field(step, "expr") }
+        if (registers_undo) {
           out = out.concat(method_undo_clones(comp, method, indent))
           let undonode = value_field(step, "undo")
           for (local of undo_reclone_locals(acqnode, undonode, body_locals, c.vt)) {
@@ -6003,6 +6185,11 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
           }
           let acq = render_expr(acqnode, set_rn(c, acqR))
           out = out.push(`${pad}let _ = ${acq};`)
+          // host-Map reclone (item 114): DEFERRED — no host Map in subset.
+        }
+        let acq = render_expr(acqnode, set_rn(c, acqR))
+        out = out.push(`${pad}let _ = ${acq};`)
+        if (registers_undo) {
           let undox = render_expr(undonode, set_rn(c, undoR))
           out = out.push(`${pad}let _ = self.ctx.effect(${label}, move || { ${undox}; Ok(()) });`)
         }
@@ -6018,14 +6205,17 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
             let cshadow = set_rn(c, c.rn.set(nm, value_ident(nm)))
             var cvalue = cshadow
             if (param != "") { cvalue = set_rn(cshadow, cshadow.rn.set(param, `${value_ident(param)}.clone()`)) }
+            let cshadow = set_rn(c, c.rn.set(nm, mangle(nm)))
             var mut = ""
             if (value_bool(value_field(step, "mutable"))) { mut = "mut " }
             out = out.push(`${pad}let ${mut}${value_ident(nm)} = ${render_expr(value_field(step, "value"), cvalue)};`)
+            out = out.push(`${pad}let ${mut}${mangle(nm)} = ${render_expr(value_field(step, "value"), cshadow)};`)
             c = cshadow
           } else {
             var cvalue = c
             if (param != "") { cvalue = set_rn(c, c.rn.set(param, `${value_ident(param)}.clone()`)) }
             out = out.push(`${pad}${value_ident(nm)} = ${render_expr(value_field(step, "value"), cvalue)};`)
+            out = out.push(`${pad}${mangle(nm)} = ${render_expr(value_field(step, "value"), c)};`)
           }
           if (inferred != "") { c = set_vt(c, nm, inferred) }
           if (kind == "let" && nm != "") { body_locals = body_locals.set(nm, "1") }
@@ -6037,6 +6227,7 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
           } else {
             out = out.push(`${pad}<<UNSUPPORTED-method-step:${kind}>>`)
           }
+          out = out.push(`${pad}<<DEFER-method-step:${kind}>>`)
         }
       }
     }
@@ -6070,6 +6261,7 @@ fn fr_map(ir: Any) -> Map[Str, Str] {
 // reference sites exactly). `effectful` gives the effectful body renderer +
 // the `self.ctx` field capture.
 fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: TypeTables, fr: Map[Str, Str], borrow: Map[Str, List[Int]], list_borrow: Map[Str, List[Int]], effectful: Bool, use_mname: Bool, map_values: Map[Str, Str], functions: List[Any]) -> List[Str] {
+fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: TypeTables, fr: Map[Str, Str], borrow: Map[Str, List[Int]], list_borrow: Map[Str, List[Int]], effectful: Bool, use_mname: Bool, map_values: Map[Str, Str]) -> List[Str] {
   let body = value_list(value_field(comp, "body"))
   let svc_methods = value_field(value_field(services, srv), "methods")
   var out = []
@@ -6080,6 +6272,8 @@ fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: Ty
     // path used to skip `_mname`, so a method named `drop` emitted `fn drop`
     // (the destructor) where the reference emits `drop_` (issue #2391).
     let mn = mangle(mname(orig))
+    var mn = mangle(orig)
+    if (use_mname) { mn = mangle(mname(orig)) }
     let svc_method = value_field(svc_methods, orig)
     var ps = []
     var vt: Map[Str, Str] = Map.empty()
@@ -6092,6 +6286,7 @@ fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: Ty
       let pname = value_str(pn)
       let ptype = service_param_type(svc_method, pname)
       ps = ps.push(`${value_ident(pname)}: ${rust_type_t(ptype, tables.tn)}`)
+      ps = ps.push(`${pname}: ${rust_type_t(ptype, tables.tn)}`)
       vt = vt.set(pname, value_str(ptype))
     }
     var ret = "()"
@@ -6101,6 +6296,7 @@ fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: Ty
     // same declared parameter types the reference gives every expression
     // context (emit.py `_V3Ctx.fn_param_types`); see `plain_ctx`.
     let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: Map.empty(), flb: list_borrow, lp: Map.empty(), ft: tables.ft, mu: Map.empty(), mf: [], fo: 0, fp: fn_params_map(functions), tp: [], dz: Map.empty(), cr: "", rm: Map.empty() }
+    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: Map.empty(), flb: list_borrow, lp: Map.empty() }
     if (effectful && method_has_effectful_steps(method)) {
       out = out.push(`    fn ${mn}(&self, ${ps.join(", ")}) -> ${ret} {`)
       let bl = method_body_lines(comp, method, services, ctx, 2)
@@ -6108,6 +6304,7 @@ fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: Ty
       out = out.push("    }")
     } else {
       let ctxr = set_rn(ctx, method_scope_rename(comp, services, ctx))
+      let ctxr = set_rn(ctx, method_scope_rename(comp))
       out = out.push(`    fn ${mn}(&self, ${ps.join(", ")}) -> ${ret} { ${pure_method_statements(method, ctxr)} }`)
     }
   }
@@ -6123,14 +6320,19 @@ fn emit_provide_construction(comp: Any, step: Any, effectful: Bool, indent: Int)
   let svc = value_str(value_field(step, "service"))
   let struct = `${name}${camel(host_key(key))}`
   let plocal = key.indexOf("::") < 0 ? key : host_key(key)
+  let struct = `${name}${camel(key)}`
   var fields = []
   for (b of binds(comp)) { fields = fields.push(`${value_ident(b)}: ${value_ident(b)}.clone()`) }
   for (local of value_keys(value_field(comp, "requires"))) { fields = fields.push(`${mangle(host_key(local))}: ${mangle(host_key(local))}.clone()`) }
+  for (b of binds(comp)) { fields = fields.push(`${mangle(b)}: ${b}.clone()`) }
+  for (local of value_keys(value_field(comp, "requires"))) { fields = fields.push(`${local}: ${local}.clone()`) }
   fields = fields.concat(config_ctor_field(comp, key))
   if (effectful) { fields = fields.push("ctx: Arc::new(ctx.clone())") }
   var out = []
   out = out.push(`${pad}let ${plocal}_box: Box<dyn ${svc_ident(svc)}> = Box::new(${struct} { ${fields.join(", ")} });`)
   out = out.push(`${pad}ctx.provide(${string_lit(key)}, ${plocal}_box)?;`)
+  out = out.push(`${pad}let ${key}_box: Box<dyn ${svc}> = Box::new(${struct} { ${fields.join(", ")} });`)
+  out = out.push(`${pad}ctx.provide(${string_lit(key)}, ${key}_box)?;`)
   return out
 }
 
@@ -6149,6 +6351,13 @@ fn emit_provide_construction(comp: Any, step: Any, effectful: Bool, indent: Int)
 // has a provider and is therefore already collected, but the reference
 // registers them explicitly and so does this.
 fn collect_realm_labels(components: List[Any]) -> Map[Str, Str] {
+// `_collect_realm_labels`: every distinct realm-label string the program
+// isolates on, sorted. Sorting makes index assignment a pure function of the
+// label SET, so the same source lowers to the same Isolation values on every
+// build. A router resolves its worker realms by label too (item 167); every
+// such realm normally has a provider and is therefore already collected, but
+// the reference registers them explicitly and so does this.
+fn collect_realm_labels(components: List[Any]) -> List[Str] {
   var seen: Map[Str, Str] = Map.empty()
   for (comp of components) {
     let iso = value_field(comp, "isolate")
@@ -6156,14 +6365,17 @@ fn collect_realm_labels(components: List[Any]) -> Map[Str, Str] {
       let rm = value_str(value_field(iso, key))
       seen = seen.set(`${rm}/${key}`, `${string_lit(rm)}, ${string_lit(key)}`)
     }
+    for (key of value_keys(iso)) { seen = seen.set(value_str(value_field(iso, key)), "1") }
     let routes = value_field(comp, "routes")
     for (key of value_keys(routes)) {
       for (r of value_list(value_field(value_field(routes, key), "realms"))) {
         seen = seen.set(`${value_str(r)}/${key}`, `${string_lit(value_str(r))}, ${string_lit(key)}`)
+        seen = seen.set(value_str(r), "1")
       }
     }
   }
   return seen
+  return list_sort(seen.keys())
 }
 
 // `_needs_realm_helper`: the preamble rides along only for a document that
@@ -6176,23 +6388,30 @@ fn needs_realm_helper(components: List[Any]) -> Bool {
 }
 
 // `_revl_realm_helper`: lower each distinct `(realm, key)` pair to a STABLE,
+// `_revl_realm_helper`: lower each distinct realm label to a STABLE,
 // DETERMINISTIC Isolation from a reserved high region of the u64 scope space.
 // cordis-rs mints framework scope labels from a monotonic counter starting at
 // 1, so every framework label lands in [1, 2^63); tagging realm labels with the
 // top bit puts them provably out of that counter's reach. Distinct pairs get
 // distinct indices, so an equal pair shares a slot and no two pairs collide.
+// top bit puts them provably out of that counter's reach. Distinct labels get
+// distinct indices, so equal strings share a realm and no two realms collide.
 fn revl_realm_helper(components: List[Any]) -> List[Str] {
   let seen = collect_realm_labels(components)
   let labels = list_sort(seen.keys())
+  let labels = collect_realm_labels(components)
   var out = []
   out = out.push("pub fn _revl_realm(realm: &str, key: &str) -> cordis::Isolation {")
+  out = out.push("pub fn _revl_realm(label: &str) -> cordis::Isolation {")
   out = out.push("    // Top bit reserved for realm labels: disjoint from cordis-rs's")
   out = out.push("    // monotonic scope counter (starts at 1, +1 each isolate()).")
   out = out.push("    const REVL_REALM_TAG: u64 = 0x8000_0000_0000_0000;")
   out = out.push("    let index: u64 = match (realm, key) {")
+  out = out.push("    let index: u64 = match label {")
   var i = 0
   while (i < labels.length()) {
     out = out.push(`        (${map_get(seen, labels[i])}) => ${num_str(i)},`)
+    out = out.push(`        ${string_lit(labels[i])} => ${num_str(i)},`)
     i = i + 1
   }
   out = out.push("        other => panic!(\"revl: realm label {other:?} missing from compile-time registry\"),")
@@ -6353,16 +6572,20 @@ fn emit_let_effect_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
   var out = []
   let raw_bind = value_str(value_field(step, "bind"))
   let bind = value_ident(raw_bind)
+  let bind = mangle(raw_bind)
   let acq_node = value_field(step, "acquire")
   if (value_list(value_field(step, "setup")).length() > 0) {
     out = out.push(`${pad}<<UNSUPPORTED-let-effect-setup:${raw_bind}>>`)
+    out = out.push(`${pad}<<DEFER-let-effect-setup:${raw_bind}>>`)
   }
   if (witnessed_acquire(ir, acq_node)) {
     out = out.push(`${pad}<<UNSUPPORTED-let-effect-witnessed:${raw_bind}>>`)
+    out = out.push(`${pad}<<DEFER-let-effect-witnessed:${raw_bind}>>`)
     return out
   }
   if (is_map_cas(acq_node)) {
     out = out.push(`${pad}<<UNSUPPORTED-let-effect-cas:${raw_bind}>>`)
+    out = out.push(`${pad}<<DEFER-let-effect-cas:${raw_bind}>>`)
     return out
   }
   var acq_src = render_expr(acq_node, ctx)
@@ -6373,6 +6596,7 @@ fn emit_let_effect_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
   }
   if (held_bind_type(comp, raw_bind, value_field(ir, "services"), ctx) != "") { out = out.push(`${pad}let ${bind} = ${acq_src};`) }
   else { out = out.push(`${pad}let ${bind} = Arc::new(${acq_src});`) }
+  out = out.push(`${pad}let ${bind} = Arc::new(${acq_src});`)
   let undo_name = `${bind}_undo`
   out = out.push(`${pad}let ${undo_name} = ${bind}.clone();`)
   var undoR: Map[Str, Str] = Map.empty()
@@ -6380,6 +6604,8 @@ fn emit_let_effect_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
   for (raw of value_keys(value_field(comp, "requires"))) {
     let req = key_binding(raw)
     out = out.push(`${pad}let ${req}_undo = ${mangle(host_key(raw))}.clone();`)
+  for (req of value_keys(value_field(comp, "requires"))) {
+    out = out.push(`${pad}let ${req}_undo = ${req}.clone();`)
     undoR = undoR.set(req, `${req}_undo`)
   }
   let undox = render_expr(value_field(step, "undo"), set_rn(ctx, undoR))
@@ -6443,6 +6669,7 @@ fn count_timers(steps: List[Any]) -> Int {
 fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
                   map_values: Map[Str, Str], indent: Int, tbase: Int,
                   sbase: Int, abinds: List[Str]) -> List[Str] {
+                  sbase: Int) -> List[Str] {
   let pad = ind(indent)
   let kind = value_str(value_field(step, "step"))
   let name = value_str(value_field(comp, "name"))
@@ -6451,9 +6678,11 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
   if (kind == "effect") {
     if (value_list(value_field(step, "setup")).length() > 0) {
       out = out.push(`${pad}<<UNSUPPORTED-effect-setup:${name}>>`)
+      out = out.push(`${pad}<<DEFER-effect-setup:${name}>>`)
     }
     if (witnessed_acquire(ir, value_field(step, "acquire"))) {
       out = out.push(`${pad}<<UNSUPPORTED-effect-witnessed:${name}>>`)
+      out = out.push(`${pad}<<DEFER-effect-witnessed:${name}>>`)
       return out
     }
     let acq_src = render_expr(value_field(step, "acquire"), ctx)
@@ -6461,6 +6690,8 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
     for (raw of value_keys(value_field(comp, "requires"))) {
       let req = key_binding(raw)
       out = out.push(`${pad}let ${req}_undo = ${mangle(host_key(raw))}.clone();`)
+    for (req of value_keys(value_field(comp, "requires"))) {
+      out = out.push(`${pad}let ${req}_undo = ${req}.clone();`)
       undoR = undoR.set(req, `${req}_undo`)
     }
     let undox = render_expr(value_field(step, "undo"), set_rn(ctx, undoR))
@@ -6514,6 +6745,8 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
     for (raw of value_keys(value_field(comp, "requires"))) {
       let req = key_binding(raw)
       out = out.push(`${pad}let ${req}_t${n} = ${mangle(host_key(raw))}.clone();`)
+    for (req of value_keys(value_field(comp, "requires"))) {
+      out = out.push(`${pad}let ${req}_t${n} = ${req}.clone();`)
       tR = tR.set(req, `${req}_t${n}`)
     }
     out = out.push(`${pad}let _revl_timer_${n} = ${schedule}(${interval}, move || {`)
@@ -6524,6 +6757,7 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
       // REPORTS — the document diverges loudly rather than dropping a step.
       if (value_str(value_field(em, "step")) != "emit") {
         out = out.push(`${pad}    <<UNSUPPORTED-timer-body:${value_str(value_field(em, "step"))}>>`)
+        out = out.push(`${pad}    <<DEFER-timer-body:${value_str(value_field(em, "step"))}>>`)
       } else {
         out = out.push(`${pad}    let _ = ${render_expr(value_field(em, "expr"), tctx)};`)
       }
@@ -6559,8 +6793,10 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
     let subject = render_expr(value_field(step, "subject"), ctx)
     let raw_bind = value_str(value_field(step, "bind"))
     let bind = value_ident(raw_bind)
+    let bind = mangle(raw_bind)
     let body = value_list(value_field(step, "body"))
     if (body.length() == 0) { return [`${pad}<<UNSUPPORTED-stream-iter-empty:${name}>>`] }
+    if (body.length() == 0) { return [`${pad}<<DEFER-stream-iter-empty:${name}>>`] }
     let contract = value_field(step, "event")
     var bodyctx = ctx
     var gate = ""
@@ -6583,11 +6819,14 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
       // the derived schema's `properties` are keyed the same way, so mangling
       // either would break the lookup. The event NAME is the emitted record type
       // the item decodes into, so it goes through `type_ident` in the type-name
+      // the item decodes into, so it goes through `mangle` in the type-name
       // position, exactly as the types section spells the struct.
       ename = type_ident(evname)
+      ename = mangle(evname)
       let key = value_str(value_field(contract, "key"))
       let window = value_int(value_field(contract, "window"))
       if (window < 1) { return [`${pad}<<UNSUPPORTED-stream-event-window:${evname}>>`] }
+      if (window < 1) { return [`${pad}<<DEFER-stream-event-window:${evname}>>`] }
       gate = `_revl_event${sbase + 1}`
       where_ = string_lit(`${name}: on ${evname}`)
       out = out.push(`${pad}let mut ${gate} = Stream::contract(${string_lit(evname)}, ${string_lit(json_dumps(value_field(contract, "schema")))}, ${string_lit(key)}, ${window});`)
@@ -6631,6 +6870,7 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
     out = out.push(`${pad}            let _ = &${bind};`)
     for (nested of body) {
       out = out.concat(emit_comp_step(comp, nested, ir, bodyctx, map_values, indent + 3, tbase, sbase, abinds))
+      out = out.concat(emit_comp_step(comp, nested, ir, bodyctx, map_values, indent + 3, tbase, sbase))
     }
     out = out.push(`${pad}        }`)
     out = out.push(`${pad}    }`)
@@ -6655,6 +6895,8 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
         cR = cR.set(local, `${local}_comp`)
       }
       out = out.concat(compensation_registration(cnode, ctx, cR, `${name}.compensate`, "ctx", true, indent))
+    if (!value_is_null(value_field(step, "compensate"))) {
+      out = out.push(`${pad}<<DEFER-emit-compensate:${name}>>`)
     }
     return out
   }
@@ -6670,6 +6912,7 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
     var ab = abinds
     for (nested of value_list(value_field(step, "then"))) {
       out = out.concat(emit_comp_step(comp, nested, ir, ctx, map_values, indent + 1, tb, sb, ab))
+      out = out.concat(emit_comp_step(comp, nested, ir, ctx, map_values, indent + 1, tb, sb))
       tb = tb + count_timers([nested])
       sb = sb + count_stream_events([nested])
       ab = ab.concat(step_let_binds([nested]))
@@ -6679,6 +6922,7 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
       out = out.push(`${pad}} else {`)
       for (nested of alt) {
         out = out.concat(emit_comp_step(comp, nested, ir, ctx, map_values, indent + 1, tb, sb, ab))
+        out = out.concat(emit_comp_step(comp, nested, ir, ctx, map_values, indent + 1, tb, sb))
         tb = tb + count_timers([nested])
         sb = sb + count_stream_events([nested])
         ab = ab.concat(step_let_binds([nested]))
@@ -6688,6 +6932,7 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
     return out
   }
   return [`<<UNSUPPORTED-comp-step:${kind}>>`]
+  return [`<<DEFER-comp-step:${kind}>>`]
 }
 
 // `_emit_component` (the SIMPLE provider path): a component with NO isolate /
@@ -6697,6 +6942,7 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
 // captures off `self`; the closure applies config, binds each require through
 // the Inject gate, and provisions each key. Host binds / routes / body-level
 // effect steps are DEFERRED (a `<<UNSUPPORTED-*>>` marker keeps them loud).
+// effect steps are DEFERRED (a `<<DEFER-*>>` marker keeps them loud).
 fn emit_component(comp: Any, services: Any, ir: Any) -> List[Str] {
   let name = value_str(value_field(comp, "name"))
   let cname = mangle(name)
@@ -6709,17 +6955,23 @@ fn emit_component(comp: Any, services: Any, ir: Any) -> List[Str] {
   let cty = config_ty(comp)
   let functions = value_list(value_field(ir, "functions"))
   let map_values = component_map_values(comp, services, functions, plain_ctx(tables, fr, functions), tables.tn)
+  let map_values = component_map_values(comp, services, functions, plain_ctx(tables, fr), tables.tn)
   var out = emit_config_struct_lines(comp)
   for (key of value_keys(provs)) {
     let srv = value_str(value_field(provs, key))
     let struct = `${cname}${camel(host_key(key))}`
+    let struct = `${cname}${camel(key)}`
     out = out.push(`struct ${struct} {`)
     for (b of binds(comp)) { out = out.push(`    ${value_ident(b)}: ${bind_field_type(comp, b, map_values, services, plain_ctx(tables, fr, functions))},`) }
     for (local of value_keys(reqs)) { out = out.push(`    ${mangle(host_key(local))}: Arc<Box<dyn ${require_ty(value_str(value_field(reqs, local)))}>>,`) }
+    for (b of binds(comp)) { out = out.push(`    ${mangle(b)}: Arc<${host_of(comp, b, map_values)}>,`) }
+    for (local of value_keys(reqs)) { out = out.push(`    ${local}: Arc<Box<dyn ${require_ty(value_str(value_field(reqs, local)))}>>,`) }
     out = out.concat(config_struct_field(comp, key))
     out = out.push("}")
     out = out.push(`impl ${svc_ident(srv)} for ${struct} {`)
     out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, compute_str_param_borrows(functions), compute_list_param_borrows(functions), false, false, map_values, functions))
+    out = out.push(`impl ${srv} for ${struct} {`)
+    out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, compute_str_param_borrows(functions), compute_list_param_borrows(functions), false, false, map_values))
     out = out.push("}")
     out = out.push("")
   }
@@ -6752,6 +7004,7 @@ fn emit_component(comp: Any, services: Any, ir: Any) -> List[Str] {
       out = out.concat(emit_provide_construction(comp, step, false, 3))
     } else {
       out = out.concat(emit_comp_step(comp, step, ir, activation_ctx(tables, fr, map_values, functions), map_values, 3, tb, sb, ab))
+      out = out.concat(emit_comp_step(comp, step, ir, activation_ctx(tables, fr, map_values), map_values, 3, tb, sb))
       tb = tb + count_timers([step])
       sb = sb + count_stream_events([step])
       ab = ab.concat(step_let_binds([step]))
@@ -6789,18 +7042,25 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
   let has_eff = component_has_effectful_methods(comp)
   let functions = value_list(value_field(ir, "functions"))
   let map_values = component_map_values(comp, services, functions, plain_ctx(tables, fr, functions), tables.tn)
+  let map_values = component_map_values(comp, services, functions, plain_ctx(tables, fr), tables.tn)
   var out = emit_config_struct_lines(comp)
+  if (value_keys(value_field(comp, "intercept")).length() > 0) { out = out.push(`<<DEFER-intercept:${name}>>`) }
   for (key of value_keys(provs)) {
     let srv = value_str(value_field(provs, key))
     let struct = `${cname}${camel(host_key(key))}`
+    let struct = `${cname}${camel(key)}`
     out = out.push(`struct ${struct} {`)
     for (b of binds(comp)) { out = out.push(`    ${value_ident(b)}: ${bind_field_type(comp, b, map_values, services, plain_ctx(tables, fr, functions))},`) }
     for (local of value_keys(reqs)) { out = out.push(`    ${mangle(host_key(local))}: Arc<Box<dyn ${require_ty(value_str(value_field(reqs, local)))}>>,`) }
+    for (b of binds(comp)) { out = out.push(`    ${mangle(b)}: Arc<${host_of(comp, b, map_values)}>,`) }
+    for (local of value_keys(reqs)) { out = out.push(`    ${local}: Arc<Box<dyn ${require_ty(value_str(value_field(reqs, local)))}>>,`) }
     out = out.concat(config_struct_field(comp, key))
     if (has_eff) { out = out.push("    ctx: Arc<cordis::Context>,") }
     out = out.push("}")
     out = out.push(`impl ${svc_ident(srv)} for ${struct} {`)
     out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, compute_str_param_borrows(functions), compute_list_param_borrows(functions), true, true, map_values, functions))
+    out = out.push(`impl ${srv} for ${struct} {`)
+    out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, compute_str_param_borrows(functions), compute_list_param_borrows(functions), true, true, map_values))
     out = out.push("}")
     out = out.push("")
   }
@@ -6820,6 +7080,7 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
   out = out.push(plugin_open)
   out = out.push(`        ${string_lit(name)},`)
   out = out.push(`        cordis::${gate.inject},`)
+  out = out.push(`        cordis::${rust_inject(value_keys(reqs))},`)
   out = out.push(closure_open)
   let teardown = component_needs_teardown(comp)
   if (teardown) { out = out.push(teardown_begin(comp)) }
@@ -6835,6 +7096,7 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
       out = out.concat(emit_provide_construction(comp, step, has_eff, 3))
     } else {
       out = out.concat(emit_comp_step(comp, step, ir, activation_ctx(tables, fr, map_values, functions), map_values, 3, tb, sb, ab))
+      out = out.concat(emit_comp_step(comp, step, ir, activation_ctx(tables, fr, map_values), map_values, 3, tb, sb))
       tb = tb + count_timers([step])
       sb = sb + count_stream_events([step])
       ab = ab.concat(step_let_binds([step]))
@@ -7041,12 +7303,17 @@ fn result_to_json(call: Str) -> Str {
   return `{ match ${call} { Ok(_v) => serde_json::json!({"$kind": "Ok", "$value": serde_json::to_value(&_v).unwrap_or(serde_json::Value::Null)}), Err(_e) => serde_json::json!({"$kind": "Err", "$value": serde_json::to_value(&_e).unwrap_or(serde_json::Value::Null)}) } }`
 }
 
+// The scalar bridge marshalling helpers (`_bridge_arg_ser`/`_arg_extract`/
+// `_ret_deser`/`_ret_ser`), SUBSET: the `String`/`i64`/`f64`/`bool` scalars, the
+// scalar-`Option` return table, and `()`. Result/serde/`Vec<Value>`/opaque-Value
+// marshalling is DEFERRED — a `<<DEFER-*>>` / `<<NONE>>` marker keeps it loud.
 fn bridge_arg_ser(name: Str, rtype: Str) -> Str {
   if (rtype == "String" || rtype == "i64" || rtype == "f64" || rtype == "bool") {
     return `serde_json::json!(${name})`
   }
   if (split_result(rtype).length() == 2) { return result_to_json(name) }
   return bridge_serde_ok(rtype) ? `serde_json::to_value(&${name}).unwrap_or(serde_json::Value::Null)` : "serde_json::Value::Null"
+  return `<<DEFER-bridge-arg-ser:${rtype}>>`
 }
 fn bridge_arg_extract(index: Int, rtype: Str) -> Str {
   let i = num_str(index)
@@ -7057,6 +7324,7 @@ fn bridge_arg_extract(index: Int, rtype: Str) -> Str {
   let result = split_result(rtype)
   if (result.length() == 2) { return result_ok_err(`args[${i}]`, result[0], result[1]) }
   return bridge_serde_ok(rtype) ? `serde_json::from_value::<${rtype}>(args[${i}].clone()).expect("bridge: decode arg")` : "<<NONE>>"
+  return "<<NONE>>"
 }
 fn bridge_ret_deser(value: Str, rtype: Str) -> Str {
   if (rtype == "i64") { return `${value}.as_i64().unwrap_or(0)` }
@@ -7071,6 +7339,7 @@ fn bridge_ret_deser(value: Str, rtype: Str) -> Str {
   let result = split_result(rtype)
   if (result.length() == 2) { return result_ok_err(value, result[0], result[1]) }
   return bridge_serde_ok(rtype) ? `serde_json::from_value::<${rtype}>(${value}.clone()).expect("bridge: decode return")` : "<<NONE>>"
+  return "<<NONE>>"
 }
 fn is_scalar_option(rtype: Str) -> Bool {
   return rtype == "Option<String>" || rtype == "Option<i64>" || rtype == "Option<bool>" || rtype == "Option<f64>"
@@ -7083,6 +7352,7 @@ fn bridge_ret_ser(call: Str, rtype: Str) -> Str {
   if (rtype == "Vec<Value>") { return `{ let _r = ${call}; serde_json::json!(_r.iter().map(|v| v.downcast::<String>().map(|s| (*s).clone()).unwrap_or_default()).collect::<Vec<_>>()) }` }
   if (split_result(rtype).length() == 2) { return result_to_json(call) }
   return bridge_serde_ok(rtype) ? `{ let _r = ${call}; serde_json::to_value(&_r).unwrap_or(serde_json::Value::Null) }` : `{ let _ = ${call}; serde_json::Value::Null }`
+  return `<<DEFER-bridge-ret-ser:${rtype}>>`
 }
 
 // The fixed `_revl_rpc` preamble — the Unix-socket JSON-RPC proxy the bridge
@@ -7136,6 +7406,10 @@ fn emit_bridge(ir: Any) -> List[Str] {
   // naming the service its last provider declares (the reference's dict).
   var pkeys: List[Str] = []
   var psvcs: List[Str] = []
+  // provided: key -> service, over every comp's provisions (subset: no
+  // duplicate keys across components — that dedup is deferred).
+  var pkeys = []
+  var psvcs = []
   for (comp of components) {
     let provs = value_field(comp, "provides")
     for (key of value_keys(provs)) {
@@ -7147,6 +7421,8 @@ fn emit_bridge(ir: Any) -> List[Str] {
       } else {
         psvcs = replaced_at(psvcs, at, svc)
       }
+      pkeys = pkeys.push(key)
+      psvcs = psvcs.push(value_str(value_field(provs, key)))
     }
   }
   var out = bridge_rpc_preamble()
@@ -7157,6 +7433,7 @@ fn emit_bridge(ir: Any) -> List[Str] {
     // consumer-side proxy
     out = out.push(`pub struct ${sname}Proxy { pub socket: String, pub key: String }`)
     out = out.push(`impl ${svc_ident(sname)} for ${sname}Proxy {`)
+    out = out.push(`impl ${sname} for ${sname}Proxy {`)
     for (mn of value_keys(methods)) {
       let method = value_field(methods, mn)
       let params = value_list(value_field(method, "params"))
@@ -7164,6 +7441,7 @@ fn emit_bridge(ir: Any) -> List[Str] {
       var argv = []
       for (p of params) {
         let pname = value_ident(value_str(value_field(p, "name")))
+        let pname = value_str(value_field(p, "name"))
         let pty = rust_type_t(value_field(p, "type"), tnames)
         plist = plist.push(`${pname}: ${pty}`)
         argv = argv.push(bridge_arg_ser(pname, pty))
@@ -7173,6 +7451,7 @@ fn emit_bridge(ir: Any) -> List[Str] {
       if (!value_is_null(r)) { ret = rust_type_t(r, tnames) }
       let deser = bridge_ret_deser("_v", ret)
       out = out.push(`    fn ${mangle(mname(mn))}(&self, ${plist.join(", ")}) -> ${ret} {`)
+      out = out.push(`    fn ${mname(mn)}(&self, ${plist.join(", ")}) -> ${ret} {`)
       if (deser == "<<NONE>>") {
         out = out.push(`        panic!("bridge proxy: unsupported return type for ${sname}.${mn}");`)
       } else {
@@ -7184,6 +7463,7 @@ fn emit_bridge(ir: Any) -> List[Str] {
     out = out.push("}")
     // provider-side dispatch
     out = out.push(`fn _revl_dispatch_${snake(sname)}(svc: &dyn ${svc_ident(sname)}, method: &str, args: &[serde_json::Value]) -> Result<serde_json::Value, String> {`)
+    out = out.push(`fn _revl_dispatch_${snake(sname)}(svc: &dyn ${sname}, method: &str, args: &[serde_json::Value]) -> Result<serde_json::Value, String> {`)
     out = out.push("    match method {")
     for (mn of value_keys(methods)) {
       let method = value_field(methods, mn)
@@ -7204,6 +7484,7 @@ fn emit_bridge(ir: Any) -> List[Str] {
         out = out.push(`        "${mn}" => Err("${sname}.${mn} cannot be called across a seam: a parameter type has no wire form".to_string()),`)
       } else {
         out = out.push(`        "${mn}" => Ok(${bridge_ret_ser(`svc.${mangle(mname(mn))}(${extracts.join(", ")})`, ret)}),`)
+        out = out.push(`        "${mn}" => Ok(${bridge_ret_ser(`svc.${mname(mn)}(${extracts.join(", ")})`, ret)}),`)
       }
     }
     out = out.push(`        _ => Err(format!("method '{method}' is not exported for service ${sname}")),`)
@@ -7235,6 +7516,7 @@ fn emit_bridge(ir: Any) -> List[Str] {
     out = out.push("            cordis::Inject::none(),")
     out = out.push("            move |ctx, _config| {")
     out = out.push(`                let proxy: Box<dyn ${svc_ident(sname)}> = Box::new(${sname}Proxy { socket: socket.clone(), key: key_string.clone() });`)
+    out = out.push(`                let proxy: Box<dyn ${sname}> = Box::new(${sname}Proxy { socket: socket.clone(), key: key_string.clone() });`)
     out = out.push("                ctx.provide(key_string.as_str(), proxy)?;")
     out = out.push("                Ok(cordis::PluginOutput::none())")
     out = out.push("            },")
@@ -7253,6 +7535,7 @@ fn emit_bridge(ir: Any) -> List[Str] {
     let key = pkeys[pi]
     let srv = psvcs[pi]
     out = out.push(`        "${key}" => match ctx.require::<Box<dyn ${svc_ident(srv)}>>("${key}") {`)
+    out = out.push(`        "${key}" => match ctx.require::<Box<dyn ${srv}>>("${key}") {`)
     out = out.push(`            Ok(svc) => _revl_dispatch_${snake(srv)}(&**svc, method, args),`)
     out = out.push(`            Err(_) => Err("no provider for key '${key}' right now".to_string()),`)
     out = out.push("        },")
@@ -7289,6 +7572,7 @@ fn emit_bridge(ir: Any) -> List[Str] {
       var expr = "ctx"
       for (key of value_keys(iso)) {
         expr = `${expr}.isolate_with(${string_lit(key)}, _revl_realm(${string_lit(value_str(value_field(iso, key)))}, ${string_lit(key)}))`
+        expr = `${expr}.isolate_with(${string_lit(key)}, _revl_realm(${string_lit(value_str(value_field(iso, key)))}))`
       }
       out = out.push(`        "${snk}" => ${expr},`)
     }
@@ -7460,6 +7744,7 @@ fn deferred_test_markers(ir: Any) -> List[Str] {
     if (value_bool(value_field(t, "lifecycle"))) {
       out = out.push(`<<UNSUPPORTED-TEST:${value_str(value_field(t, "name"))}>>`)
     }
+    out = out.push(`<<UNSUPPORTED-TEST:${value_str(value_field(t, "name"))}>>`)
   }
   for (t of value_list(value_field(ir, "fault_tests"))) {
     out = out.push(`<<UNSUPPORTED-FAULT-TEST:${value_str(value_field(t, "name"))}>>`)
@@ -7506,6 +7791,7 @@ pub fn emit_rust_src(ir: Any) -> Str {
   out = out.concat(emit_v3_tests(value_list(value_field(ir, "tests")), functions, externs, fr, tables))
   // `_emit_components`, run unconditionally in `_emit_v3` (after the
   // types/externs/functions and the tests sections). Empty when the document
+  // types/externs/functions and the DEFERRED tests sections). Empty when the document
   // declares no service/comp — so a types+functions-only document is
   // unchanged — and byte-exact for the covered service/comp subset:
   // service traits, host stubs (empty here), each comp (simple path), then
@@ -7517,6 +7803,7 @@ pub fn emit_rust_src(ir: Any) -> Str {
     out = out.concat(revl_timer_preamble())
   }
   if (uses_stdlib(ir)) {
+  if (contains_stdlib(functions) || contains_stdlib(types) || contains_stdlib(externs)) {
     out = out.concat(stdlib_helpers())
     out = out.push("")
   }
@@ -7558,6 +7845,10 @@ pub fn emit_rust_src(ir: Any) -> Str {
     refusals = refusals.concat(namespaced_key_markers(ir))
   }
   out = out.concat(refusals)
+  // The deferred in-file test section: one named marker per test instead of
+  // silence (issue #1123).
+  let test_markers = deferred_test_markers(ir)
+  if (test_markers.length() > 0) { out = out.concat(test_markers) }
   return rstrip(out.join(newline())).concat(newline())
 }
 
@@ -7838,6 +8129,7 @@ test "constructor lowers user variants and built-ins" {
   ca = ca.set("Leaf", "Tree")
   cp = cp.set("Leaf", "n")
   let ctx = { vt: Map.empty(), fr: Map.empty(), ca: ca, cp: cp, rbf: Map.empty(), tn: Map.empty(), rn: Map.empty(), fb: Map.empty(), bp: Map.empty(), flb: Map.empty(), lp: Map.empty(), ft: Map.empty(), mu: Map.empty(), mf: [], fo: 0, fp: Map.empty(), tp: [], dz: Map.empty(), cr: "", rm: Map.empty() }
+  let ctx = { vt: Map.empty(), fr: Map.empty(), ca: ca, cp: cp, rbf: Map.empty(), tn: Map.empty(), rn: Map.empty(), fb: Map.empty(), bp: Map.empty(), flb: Map.empty(), lp: Map.empty() }
   assert constructor(ctx, "Node", ["x"]) == "Tree::Node(x)"
   assert constructor(ctx, "Leaf", []) == "Tree::Leaf"
   assert constructor(ctx, "Some", ["v"]) == "Some(v)"

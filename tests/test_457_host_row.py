@@ -38,6 +38,7 @@ from revl.synthesize import HOST_SHIMS, synthesize_provider  # noqa: E402
 # The shipped `Server` binding module, used verbatim so the test tracks the real
 # stdlib contract rather than a private copy of it.
 SERVER_RVL = (ROOT / "stdlib" / "server.rvl").read_text(encoding="utf-8")
+SERVER_RVL = (ROOT / "stdlib" / "server.rvl").read_text()
 
 # A consumer written with no idea that its provider is the host runtime. Not one
 # word of this changes between a host provider and a real revl one — the wiring
@@ -115,6 +116,7 @@ composition Notes {
 """)
     with pytest.raises(RevlError) as excinfo:
         Parser((tmp_path / "base.rvl").read_text(encoding="utf-8"), "base.rvl").parse()
+        Parser((tmp_path / "base.rvl").read_text(), "base.rvl").parse()
     assert "duplicate row label `@server`" in str(excinfo.value)
 
 
@@ -151,10 +153,12 @@ composition Notes {
     # own boundary token for that export (issue #2105): the two are spelled
     # differently because the row's label does not change which export of which
     # module is reached, and the scope is what the fold reads.
+    # shim — the reviewed host-reference door, not a globalThis reach.
     src = rt.sources[row.source]
     for verb in ("get", "post", "put", "patch", "delete", "head"):
         assert (f'extern emission[host.server.{verb}] '
                 f'fn host_server_{verb}(path: Str) -> Unit '
+        assert (f'extern emission fn host_server_{verb}(path: Str) -> Unit '
                 f'= @ts ref {verb} from '
                 f'"../backends/typescript/revl_server_ts.ts"') in src
     # and it is ordinary, valid revl source (re-parses cleanly)

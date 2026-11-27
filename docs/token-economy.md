@@ -3,6 +3,7 @@
 **Status:** generation and response metrics + one compound verb implemented
 (roadmap item 50); the benchmark now records provider-reported input tokens
 beside model turns.
+**Status:** metric + one compound verb implemented (roadmap item 50).
 - **Metric:** `bench/tokens.py`, committed snapshot `bench/results/tokens-to-green.md`,
   pinned by `tests/test_tokens_to_green.py`.
 - **Response metric:** `bench/mcp_response_size.py`, pinned by
@@ -34,6 +35,13 @@ is the output-side measure: the output tokens a model emits over its committed
 attempts to get **one component admitted**, scored with a deterministic
 BPE-shaped proxy (`count_tokens`) and, where a run recorded exact usage, the
 recorded figure verbatim.
+Iterations-to-green (`bench/run.py`) counts *turns* to a compiling component; it
+does not count *spend*. A two-iteration component whose attempts are twice as
+long as another's costs the same in turns and twice as much in tokens.
+**Tokens-to-green** (`bench/tokens.py`) is that missing number: the output
+tokens a model emits over its committed attempts to get **one component
+admitted**, scored with a deterministic BPE-shaped proxy (`count_tokens`) and,
+where a paid run recorded exact usage, the recorded figure verbatim.
 
 Committed snapshot (`bench/results/tokens-to-green.md`): across **136** admitted
 components, **mean 149 est. output tokens-to-green** (median 130). The costliest
@@ -41,6 +49,7 @@ cells are ranked in that file so optimization has a target. Every later
 optimization on this item has to move *this* number before it ships.
 
 ### Input-side cost and model turns
+There are two halves to the spend, and the metric names both:
 
 The committed corpora predate input-token and model-turn recording, so the
 report leaves those values unavailable for those runs. New benchmark
@@ -63,6 +72,9 @@ There are three measured halves to the spend:
 - **Generation side**: the tokens the model emits to write the component. That
   is what tokens-to-green measures directly, and it is the *small* half.
 - **Protocol side**: the tokens the agent spends *driving the MCP surface* to
+- **Generation side** — the tokens the model emits to write the component.
+  That is what tokens-to-green measures directly, and it is the *small* half.
+- **Protocol side** — the tokens the agent spends *driving the MCP surface* to
   ship that component. `bench/results/token-surface-audit.md` ranks these:
   re-sending source the session already holds, and walking chatty verb
   sequences that take three or four round-trips to express one intent. That is
@@ -76,6 +88,8 @@ There are three measured halves to the spend:
   in the same proxy tokens. `tests/test_mcp_response_size.py` pins one ceiling
   per scripted call at its measured size, so a response that grows has to raise
   the ceiling in the same diff.
+  the large, and until now unmeasured, half — and it is what the compound verb
+  below attacks.
 
 ---
 

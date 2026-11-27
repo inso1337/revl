@@ -13,6 +13,8 @@ the three pieces that make them the default reach:
   answers "does this hold?" in one call;
 * `blast_radius`, which `revl_edit`, `revl_swap` and `revl_change` fold into
   their responses so a change arrives with its cascade instead of needing a separate preflight call.
+* `blast_radius`, which `revl_edit` folds into its response so a change
+  arrives with its cascade instead of needing a separate preflight call.
 """
 
 from __future__ import annotations
@@ -36,6 +38,9 @@ LOOP = (
      "the exact blast radius of replacing or removing a component; revl_edit, "
      "revl_swap and revl_change return it for the components they touch, and "
      "revl_plan shows what a swap would do"),
+     "the exact blast radius of replacing or removing a component; revl_edit "
+     "returns it for the components it touches, and revl_plan shows what a "
+     "swap would do"),
     ("check", "revl_check",
      "`selfCheck` lists every guarantee G1-G9 as pass or fail, with the code "
      "and the fix (revl_explain <code> for more)"),
@@ -68,6 +73,7 @@ def step_label(verb: str) -> str:
 
 def self_check(diagnostics: list[dict] | None, holes: list | None = None,
                unmet: list | None = None) -> dict:
+def self_check(diagnostics: list[dict] | None, holes: list | None = None) -> dict:
     """Every guarantee G1-G9, from one compile.
 
     `diagnostics` is None when the compile succeeded: the checker enforces
@@ -307,6 +313,7 @@ def blast_radius(before: dict | None, after: dict) -> dict:
     is not in the linked ROOT manifest, so its entry names the exclusion and
     carries no ROOT cascade; any other component the withdrawal query does not
     know refuses rather than reporting zeros."""
+    adds has no dependents yet, so it gets an empty cascade."""
     from .. import query as Q  # noqa: PLC0415 - query imports the compiler
 
     touched = touched_components(before, after)
@@ -339,6 +346,9 @@ def blast_radius(before: dict | None, after: dict) -> dict:
             # Not a template: the manifest and the running IR disagree. Do not
             # turn that into a clean zero that hides a real withdrawal set.
             raise BlastRadiusRefused(name, answer)
+        radius[name] = {k: answer[k] for k in
+                        ("cascade", "withdrawalOrder", "orphanedKeys", "breaks",
+                         "precision") if k in answer}
         if name not in {c["name"] for c in after.get("components") or []}:
             radius[name]["removed"] = True
     note = ("exact, from the running composition's linked provider graph "
@@ -354,9 +364,12 @@ def blast_radius(before: dict | None, after: dict) -> dict:
         "components": radius,
         "breaks": sum(r["breaks"] for r in radius.values()),
         "note": note,
+        "note": "exact, from the running composition's linked provider graph "
+                "(the revl_query_withdraw answer for each touched component)",
     }
 
 
 __all__ = ["INSTRUCTIONS", "LOOP", "CORE", "TEMPLATE_PRECISION",
            "BlastRadiusRefused", "step_label", "self_check",
+__all__ = ["INSTRUCTIONS", "LOOP", "CORE", "step_label", "self_check",
            "touched_components", "blast_radius"]

@@ -62,6 +62,7 @@ def test_emission_stashed_in_a_record_field_is_refused():
     function is read off the field and called through a binding, the only
     spelling a component body admits (`r.f(a)` itself is refused since issue
     #1547: records carry no methods)."""
+    carries the value. First-class detection must trip on the container."""
     with pytest.raises(RevlError) as excinfo:
         compile_source(SHIP + """
 service S { fn quiet(a: Str) -> Str }
@@ -71,6 +72,7 @@ component C provides s: S {
       let r = { f: ship }
       let g = r.f
       return g(a)
+      return r.f(a)
     }
   }
 }
@@ -78,6 +80,9 @@ component C provides s: S {
     assert "emission `ship` cannot be used as a function value" \
         in str(excinfo.value)
     assert excinfo.value.category == "emission-value"
+    assert "`S.quiet` is declared plain" in str(excinfo.value)
+    assert "passed as a function value" in str(excinfo.value)
+    assert excinfo.value.category == "emission-propagation"
 
 
 def test_emission_stashed_in_a_list_literal_is_refused():
@@ -94,6 +99,8 @@ component C provides s: S {
     assert "emission `ship` cannot be used as a function value" \
         in str(excinfo.value)
     assert excinfo.value.category == "emission-value"
+    assert "passed as a function value" in str(excinfo.value)
+    assert excinfo.value.category == "emission-propagation"
 
 
 def test_an_emission_bound_but_never_called_is_still_refused():
@@ -116,6 +123,8 @@ component C provides s: S {
     assert "emission `ship` cannot be used as a function value" \
         in str(excinfo.value)
     assert excinfo.value.category == "emission-value"
+    assert "passed as a function value" in str(excinfo.value)
+    assert excinfo.value.category == "emission-propagation"
 
 
 def test_an_emission_in_value_position_is_refused():
@@ -181,6 +190,8 @@ def test_a_scoped_emission_reaching_an_unnameable_boundary_is_refused():
     host emission through a first-class value would reach the unnameable `*`,
     which no `emission[...]` bound can name. Since issue #2842 the value itself
     is refused before the bound is consulted."""
+    host emission through a first-class value reaches the unnameable `*`, which
+    no `emission[...]` bound can name — so the bound must reject it."""
     with pytest.raises(RevlError) as excinfo:
         compile_source(SHIP + """
 fn indirect(f: (Str) -> Str, x: Str) -> Str { return f(x) }
@@ -193,6 +204,9 @@ component C requires db: Database provides s: S {
     assert "emission `ship` cannot be used as a function value" \
         in str(excinfo.value)
     assert excinfo.value.category == "emission-value"
+    assert "`S.put` is declared `emission[db]`" in str(excinfo.value)
+    assert "unnameable host boundary" in str(excinfo.value)
+    assert excinfo.value.category == "emission-capability"
 
 
 def test_a_scoped_emission_that_stays_in_bounds_compiles():
@@ -543,6 +557,7 @@ def test_first_class_laundered_host_reach_is_enumerated_on_the_g8_surface():
     Previously xfail (G8 enumeration gap); now resolved. The compiler refuses
     the source since issue #2842; the surface reads IR, so it is measured on
     the IR an earlier compiler emitted (`tests/_legacy_emission_ir.py`)."""
+    Previously xfail (G8 enumeration gap); now resolved."""
     source = SHIP + """
 fn indirect(f: (Str) -> Str, x: Str) -> Str { return f(x) }
 service S { emission fn loud(a: Str) -> Str }
@@ -557,3 +572,5 @@ component C provides s: S {
     # surfaces `ship` the same way the direct call does (see the baseline above).
     assert "ship" in {e["name"] for e in audit_report(ir)["boundary"]["C"]["externs"]}
     assert "host:C:ship" in crossings(audit_report(ir))
+    assert "ship" in {e["name"] for e in _boundary(source, "C")["externs"]}
+    assert "host:C:ship" in crossings(audit_report(compile_source(source)))

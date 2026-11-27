@@ -865,6 +865,8 @@ def test_a_non_inverse_undo_fails_the_fault_test(capsys):
     """Before the R1 accounting this exact program passed. It is reached
     past the checker now (`_run_leaky`), and R1 must still charge it."""
     code, out = _run_leaky(_FAULT_ON_LEAKY, capsys)
+    """Before the R1 accounting this exact document passed."""
+    code, out = _run_src(_FAULT_ON_LEAKY, capsys)
     assert code == 1, out
     assert "FAIL mid-activation failure reverts its acquisition" in out
     assert "residue in the host" in out
@@ -928,6 +930,8 @@ def test_a_non_inverse_undo_fails_under_an_injected_fault(capsys):
     not only when a `fail` statement in the body does. The program is reached
     past the checker (`_run_leaky`), which refuses it since issue #1859."""
     code, out = _run_leaky(_LEAKY_UNDER_INJECTION, capsys)
+    not only when a `fail` statement in the body does."""
+    code, out = _run_src(_LEAKY_UNDER_INJECTION, capsys)
     assert code == 1, out
     assert "FAIL mid-activation failure with a non-inverse undo" in out
     assert "residue in the host" in out

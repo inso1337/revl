@@ -11,6 +11,8 @@ call is a POST with a JSON body, which `urllib` does without help.
 
 THE FIVE RULES THIS FILE ENFORCES
 ---------------------------------
+THE THREE RULES THIS FILE ENFORCES
+----------------------------------
 1. **No redirect is followed.** urllib follows a 301/302/303 by default and
    re-issues the POST as a GET, body dropped, at whatever host `Location`
    names. The endpoint is part of what the operator bound a model role to, and
@@ -27,6 +29,7 @@ THE FIVE RULES THIS FILE ENFORCES
    else. To route through a proxy, bind the role to the proxy's URL and
    declare its residence.
 3. **A credential never reaches a message.** The caller passes every secret it
+2. **A credential never reaches a message.** The caller passes every secret it
    put in a header as `secrets`, and every string this module raises is passed
    through `redact` first, including the provider's own error body, which is
    where a key most often comes back: several providers echo the rejected key
@@ -47,6 +50,8 @@ THE FIVE RULES THIS FILE ENFORCES
    connect, the TLS handshake) is also limited to `timeout` on its own, so a
    stall there is cut off at `timeout` per step, and a connection made after
    the deadline is shut at once.
+3. **Only a JSON object is a response.** Anything else is a named error rather
+   than a value the caller has to guess about.
 """
 
 from __future__ import annotations
@@ -217,6 +222,7 @@ def request_json(url: str, *, body: dict | None = None,
                  headers: dict | None = None, timeout: float = 120.0,
                  secrets=(), label: str = "model endpoint",
                  max_bytes: int = DEFAULT_MAX_REPLY_BYTES) -> dict:
+                 secrets=(), label: str = "model endpoint") -> dict:
     """POST `body` as JSON to `url` (GET when `body` is None) and return the
     decoded JSON object.
 
@@ -246,6 +252,7 @@ def request_json(url: str, *, body: dict | None = None,
     opener = urllib.request.build_opener(
         urllib.request.ProxyHandler({}), _NoRedirect,
         _HTTPHandler(deadline), _HTTPSHandler(deadline))
+    opener = urllib.request.build_opener(_NoRedirect)
 
     def fail(message: str, status: int | None = None) -> ProviderError:
         return ProviderError(redact(f"{label}: {message}", secrets),
@@ -259,6 +266,7 @@ def request_json(url: str, *, body: dict | None = None,
         with opener.open(request, timeout=timeout) as response:
             status = response.status
             raw = _read_capped(response, max_bytes)
+            raw = response.read()
     except _RedirectRefused as exc:
         raise fail(f"HTTP {exc.code} redirect refused: {url} is the endpoint "
                    f"this role is bound to, and a redirect would send the "
@@ -271,14 +279,17 @@ def request_json(url: str, *, body: dict | None = None,
     except urllib.error.HTTPError as exc:
         try:
             detail = exc.read(ERROR_BODY_LIMIT).decode("utf-8", "replace")
+            detail = exc.read()[:ERROR_BODY_LIMIT].decode("utf-8", "replace")
         except Exception:  # noqa: BLE001 - the body is best-effort context
             detail = ""
         raise fail(f"HTTP {exc.code} from {url}: {detail}", exc.code) from None
     except urllib.error.URLError as exc:
         raise (timed_out() if deadline.expired else
                fail(f"cannot reach {url}: {exc.reason}")) from None
+        raise fail(f"cannot reach {url}: {exc.reason}") from None
     except TimeoutError:
         raise timed_out() from None
+        raise fail(f"timed out after {timeout}s waiting for {url}") from None
     except OSError as exc:
         raise (timed_out() if deadline.expired else
                fail(f"connection to {url} failed: {exc}")) from None
@@ -293,6 +304,7 @@ def request_json(url: str, *, body: dict | None = None,
     if deadline.expired:
         # the connection was shut mid-body and the read ended early, quietly
         raise timed_out()
+        raise fail(f"connection to {url} failed: {exc}") from None
 
     if status != 200:
         raise fail(f"HTTP {status} from {url}: "
@@ -305,6 +317,8 @@ def request_json(url: str, *, body: dict | None = None,
         # ValueError and deep nesting a RecursionError
         raise fail(f"unparseable JSON from {url}: {type(exc).__name__}: "
                    f"{exc}") from None
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise fail(f"unparseable JSON from {url}: {exc}") from None
     if not isinstance(parsed, dict):
         raise fail(f"{url} answered with a JSON {type(parsed).__name__}, "
                    f"not an object")

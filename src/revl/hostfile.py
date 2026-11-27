@@ -166,6 +166,7 @@ def read_body_file_disk(module_dir: str, written: str, backend: str,
                         decl_name: str, filename: str,
                         line: int,
                         reads: set[str] | None = None) -> tuple[str, str]:
+                        line: int) -> tuple[str, str]:
     """Read a body file from disk under the jail. Returns
     `(normalized_text, sha256_of_raw_bytes)`.
 
@@ -267,6 +268,7 @@ def read_body_file_memory(sources: dict[str, str], module_dir: str,
 def resolve_body_files(program, module_dir: str, sources: dict[str, str],
                        is_virtual: bool,
                        reads: set[str] | None = None) -> None:
+                       is_virtual: bool) -> None:
     """Replace every `HostBodyFile` node in `program`'s externs with a resolved
     `HostBody` carrying the spliced (normalized) text plus provenance (the
     written path and the sha256 of the raw file bytes). A virtual module
@@ -275,6 +277,7 @@ def resolve_body_files(program, module_dir: str, sources: dict[str, str],
 
     `reads` (issue #3198) collects the disk paths a real read touched, so the
     sandbox driver can mount them for the in-boundary recompile."""
+    jail. After this runs, nothing downstream ever sees a `HostBodyFile`."""
     from .parser import HostBody, HostBodyFile
 
     for ext in program.externs:
@@ -289,6 +292,7 @@ def resolve_body_files(program, module_dir: str, sources: dict[str, str],
                 text, digest = read_body_file_disk(
                     module_dir, body.path, body.backend, ext.name,
                     program.filename, body.line, reads=reads)
+                    program.filename, body.line)
             ext.bodies[index] = HostBody(
                 body.backend, text, body.line,
                 source_path=body.path, sha256=digest)

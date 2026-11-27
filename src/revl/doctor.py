@@ -170,6 +170,7 @@ class Prober:
             stdin: str = "") -> ProbeResult:
         try:
             proc = _childproc.run(argv, capture_output=True,
+            proc = subprocess.run(argv, capture_output=True, text=True,
                                   input=stdin, timeout=timeout, check=False)
         except (OSError, ValueError):
             return ProbeResult(found=False)
@@ -253,6 +254,26 @@ def revl_version() -> str:
     with the attestation, the gate and the MCP build id (issue #2203)."""
     from revl._version import version  # noqa: PLC0415
     return version()
+    """The installed revl version, or a best-effort read from the source tree
+    when running uninstalled (no metadata)."""
+    try:
+        from importlib.metadata import version  # noqa: PLC0415
+        return version("revl")
+    except Exception:  # noqa: BLE001 — any metadata failure falls back
+        pass
+    # uninstalled src checkout: read the version out of pyproject.toml if we can
+    root = Path(__file__).resolve().parents[2]
+    pyproject = root / "pyproject.toml"
+    try:
+        for line in pyproject.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("version"):
+                match = re.search(r'"([^"]+)"', stripped)
+                if match:
+                    return match.group(1)
+    except OSError:
+        pass
+    return "unknown"
 
 
 # ------------------------------------------------------------------- checks
@@ -494,6 +515,7 @@ def check_mcp_runtime(prober: Prober, backends_dir: Path) -> Check:
     by name. The last is a WARN that names them, so a benchmark or an agent
     learns it before the first call rather than one failed verb at a time."""
     from .mcp.runtime_gate import GATE_PROBE, RUNTIME_VERBS  # noqa: PLC0415 - lazy
+    from .mcp.runtime_gate import RUNTIME_VERBS  # noqa: PLC0415 — lazy
 
     if prober.module_available("cordis"):
         return Check("mcp server runtime", OK, None,
@@ -502,6 +524,8 @@ def check_mcp_runtime(prober: Prober, backends_dir: Path) -> Check:
 
     venv = venv_python(backends_dir / "python" / ".venv")
     if prober.run([str(venv), *GATE_PROBE]).ok:
+    venv = backends_dir / "python" / ".venv" / "bin" / "python"
+    if prober.run([str(venv), "-P", "-c", "import cordis, revl"]).ok:
         return Check("mcp server runtime", OK, None,
                      f"`revl mcp serve` re-executes under {venv}, which can "
                      "import cordis")
@@ -587,6 +611,9 @@ def check_otel(prober: Prober) -> Check:
     """OpenTelemetry export is an optional extra (`pip install '.[otel]'` from a
     checkout). Its absence is the normal base install, so MISSING here reads as
     'not enabled', a WARN-level fact rather than an error."""
+    """OpenTelemetry export — an optional extra (`pip install revl[otel]`). Its
+    absence is the normal base install, so MISSING here reads as 'not enabled',
+    a WARN-level fact rather than an error."""
     if prober.module_available("opentelemetry"):
         version = None
         try:
@@ -598,6 +625,7 @@ def check_otel(prober: Prober) -> Check:
     return Check("OpenTelemetry (revl[otel])", WARN, None,
                  "optional extra not installed "
                  "(pip install '.[otel]' from a checkout)")
+                 "optional extra not installed (pip install revl[otel])")
 
 
 def check_stdlib_version(prober: Prober) -> Check:
@@ -634,6 +662,7 @@ def check_approval_wal(prober: Prober) -> Check:
     The gate's authority is recorded in the WAL, and the WAL directory resolves
     at runtime from the environment (``REVL_WAL_DIR`` / ``XDG_STATE_HOME`` /
     HOME). When no durable candidate can be created and written — a read-only or absent HOME
+    HOME). When no durable candidate can be created — a read-only or absent HOME
     — it falls back to the process tempdir, which the OS may clear at any time.
     That used to happen silently; it is a warning at the call site now, and this
     is the same fact where an operator goes to ask "is this set up correctly".
@@ -755,6 +784,7 @@ def diagnose(prober: Prober | None = None,
     ]
     return Report(version, checks,
                   checkout=checkout_pythonpath(prober, backends_dir))
+    return Report(version, checks)
 
 
 # ----------------------------------------------------------------- smoke

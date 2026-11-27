@@ -69,6 +69,7 @@ from pathlib import Path
 
 from . import _childproc
 from ._paths import backends_root, stdlib_root, venv_python
+from ._paths import backends_root, stdlib_root
 from .activation import local_prereqs
 from .attest import canonical_hash
 from .deploy import (ADMISSION_PEER_BOUND, ADMISSION_SEALED,
@@ -82,6 +83,7 @@ from .peer_offer import PlacementSlot, offer_admission, offer_eligible
 from .refusal import refusals
 from .resources import PRIMITIVE_TYPE_NAMES, _STRUCTURAL_HEADS, resource_base
 from .tee_attestation import TeeError, TeeRequirement, TdxPolicy
+from .tee_attestation import TeeError, TeeRequirement
 from .typecheck import FN_HEAD, parse_type
 from .estop import (HALTED_LINE, LATCH_ENV, TIERS_WITH_ESTOP, latch_path,
                     read_latch)
@@ -172,6 +174,7 @@ def generate_seam_certs(out_dir: Path, identities, hosts=("127.0.0.1", "localhos
 
     def _openssl(args: list[str]) -> None:
         result = _childproc.run(["openssl", *args], capture_output=True)
+        result = subprocess.run(["openssl", *args], capture_output=True, text=True)
         if result.returncode:
             raise RuntimeError(f"openssl {args[0]} failed:\n{result.stderr.strip()}")
 
@@ -191,6 +194,7 @@ def generate_seam_certs(out_dir: Path, identities, hosts=("127.0.0.1", "localhos
               "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
               "-keyout", str(ca_key), "-out", str(ca_crt),
               "-days", "1", "-config", str(ca_cnf)])
+              "-days", "1", "-subj", "/CN=revl-seam-ca"])
     ext = out_dir / "seam_leaf.ext"
     san = ",".join(_san_entry(h) for h in hosts)
     ext.write_text(
@@ -199,6 +203,8 @@ def generate_seam_certs(out_dir: Path, identities, hosts=("127.0.0.1", "localhos
         "keyUsage=critical,digitalSignature\n"
         "subjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n",
         encoding="utf-8")
+    ext.write_text(f"subjectAltName={san}\nextendedKeyUsage=serverAuth,clientAuth\n",
+                   encoding="utf-8")
     material: dict[str, dict] = {}
     for identity in sorted(set(identities)):
         key = out_dir / f"seam_{identity}.key"
@@ -334,6 +340,9 @@ def _snake(name: str) -> str:
     to move, and it now takes the emitter's function itself.
     """
     return backend_emit_module("rust")._snake(name)
+    """PascalCase component name -> snake_case cordis-rs plugin fn name
+    (matches backends/rust/emit.py: UserCache -> user_cache)."""
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
 
 
 def _process_placements(ir: dict, own: list) -> dict:
@@ -902,6 +911,7 @@ ATTEST_KEYS = ("requires", "bundle", "measurements", "region", "regions",
 #: a table carrying any of them states one.
 _ATTEST_TDX_KEYS = ("runtime_measurements", "accept_mrtd_only", "min_tee_tcb_svn",
                     "min_qe_svn", "min_pce_svn", "qe_mr_signers", "qe_mr_enclaves")
+               "outbound_network", "max_age_s", "nonce")
 #: `region` and `regions` are the singular and plural of ONE fact, so a table
 #: carrying both is ambiguous and refused rather than resolved by a rule.
 _ATTEST_REGION_KEYS = ("region", "regions")
@@ -2503,6 +2513,7 @@ def _plan_time_residency(files, processes: dict,
 
 def _model_schedules(files, processes: dict,
                      residency: dict | None = None) -> tuple[str | None, dict]:
+def _model_schedules(files, processes: dict) -> tuple[str | None, dict]:
     """Schedule the routed model actions onto each host's declared devices
     (item 515, `revl.model_schedule`). Prints the decision, one line per
     placement, and returns `(refusal, {host: spec entry})`. The entry is what
@@ -2518,10 +2529,12 @@ def _model_schedules(files, processes: dict,
     that passes it, from `_plan_time_residency()` above; `model_binding_view`
     and `_successor_model_schedule` pass none, so what they compute is
     unchanged."""
+    no routed model action has none, so its spec is unchanged."""
     from . import model_schedule  # noqa: PLC0415 - loaded only at plan time
     try:
         schedules = model_schedule.placement_schedules(files, processes,
                                                        residency)
+        schedules = model_schedule.placement_schedules(files, processes)
     except model_schedule.ScheduleRefusal as exc:
         return str(exc), {}
     for host in schedules:
@@ -2836,6 +2849,7 @@ def _rerun_hint(files, placement_path: str, once: bool) -> str:
     directory at entry. Both lines are copy-pasteable as-is.
     """
     venv = venv_python(_BACKENDS_DIR / "python" / ".venv")
+    venv = _BACKENDS_DIR / "python" / ".venv" / "bin" / "python"
     parts = ["revl", "run", *[str(f) for f in files],
              "--placement", placement_path]
     if once:
@@ -3043,6 +3057,11 @@ def reached_declarations(ir: dict, components) -> tuple[list, list]:
                 changed = changed or len(reachable) != before
     return ([f for f in functions if f.get("name") in reachable],
             [e for e in externs if e.get("name") in reachable])
+    out = dict(ir)
+    out["components"] = components
+    out["functions"] = [f for f in functions if f.get("name") in reachable]
+    out["externs"] = [e for e in externs if e.get("name") in reachable]
+    return out
 
 
 def seam_typing(ir: dict, key_services: dict) -> dict:
@@ -3116,6 +3135,7 @@ def host_ref_pins(ir: dict, own, files) -> dict:
 # dry-run. Every emitter is pure-python codegen (stdlib only), so the gate
 # needs no tier toolchain — a fn-typed component placed on java is refused at
 # plan time with the emitter's own tier-limit message, never a javac stderr.
+_EMIT_GATE_MODULES: dict[str, object] = {}
 _EMIT_GATE_PATHS = {
     "py": _BACKENDS_DIR / "python" / "emit.py",
     "node": _TS_DIR / "emit.py",
@@ -3146,6 +3166,13 @@ def _emit_gate_module(backend: str):
     tier's other callers catch (issue #2204)."""
     path = _EMIT_GATE_PATHS[backend]
     return backend_emit_module(path.parent.name, root=path.parent.parent)
+    if backend not in _EMIT_GATE_MODULES:
+        path = _EMIT_GATE_PATHS[backend]
+        spec = importlib.util.spec_from_file_location(f"revl_{backend}_emit_gate", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _EMIT_GATE_MODULES[backend] = module
+    return _EMIT_GATE_MODULES[backend]
 
 
 def _ts_unemittable_externs(ir: dict) -> set[str]:
@@ -3595,6 +3622,7 @@ def _tier_emitter(name: str, path) -> object:
     `emit()` restores its state on exit, but not from two threads at once. If a
     build step for a stateless tier is ever added, take it from
     `backend_emit_module` instead."""
+    a test can substitute a refusing or a faulting emitter for any of them."""
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -3615,6 +3643,7 @@ def _emit_ts_module(ir: dict, tmp: Path) -> str:
     vitest worker throws before boot, so a file carrying in-file tests could
     not be part of a running composition (issue #3626). `revl test --backend ts`
     does not come through here and still emits them."""
+    extern it cannot spell (roadmap item 144)."""
     gen = _TS_DIR / "_gen"
     gen.mkdir(exist_ok=True)
     ir_json = tmp / "ir.json"
@@ -3623,6 +3652,9 @@ def _emit_ts_module(ir: dict, tmp: Path) -> str:
     ir_json.write_text(json.dumps(runnable), encoding="utf-8")
     result = _childproc.run([sys.executable, str(_TS_DIR / "emit.py"), str(ir_json)],
                             capture_output=True)
+    ir_json.write_text(json.dumps(ts_safe_ir(ir)), encoding="utf-8")
+    result = subprocess.run([sys.executable, str(_TS_DIR / "emit.py"), str(ir_json)],
+                            capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"TS emit failed:\n{result.stderr.strip()}")
     module = gen / f"mod_{tmp.name}.ts"
@@ -3656,15 +3688,19 @@ def _build_java(ir: dict, tmp: Path) -> str:
     # runner (it is pure JDK, no cordis4j).
     estop = str(_JAVA_DIR / "placement" / "Estop.java")
     compile_runner = _childproc.run(
+    compile_runner = subprocess.run(
         ["javac", "--release", "17", "-d", str(out), *stubs, estop,
          str(_JAVA_DIR / "placement" / "PlacementRunner.java")],
         capture_output=True,
+        capture_output=True, text=True,
     )
     if compile_runner.returncode:
         raise RuntimeError(f"javac (runner) failed:\n{compile_runner.stderr.strip()}")
     compile_components = _childproc.run(
+    compile_components = subprocess.run(
         ["javac", "--release", "17", "-cp", str(out), "-d", str(out), str(gen / "Components.java")],
         capture_output=True,
+        capture_output=True, text=True,
     )
     if compile_components.returncode:
         raise RuntimeError(f"javac (components) failed:\n{compile_components.stderr.strip()}")
@@ -3841,6 +3877,7 @@ def _rust_key_artifacts(target_dir: Path):
 
 def _build_rust(ir: dict, tmp: Path) -> str:
     """Emit the runner's components.rs (proxies/stub/plugin table) from the
+    """Regenerate the runner's components.rs (proxies/stub/plugin table) from the
     running IR, then cargo build. Regenerating per composition is what makes the
     rust runner general; for user_cache it reproduces the committed module.
 
@@ -3853,10 +3890,22 @@ def _build_rust(ir: dict, tmp: Path) -> str:
     a content-hashed directory under the target dir and names the binary after
     the same hash, so each composition has its own binary and identical inputs
     reuse it. `--locked` holds every key to the one resolved Cargo.lock."""
+    The module is put back once cargo has read it (issue #1288). It is a
+    COMMITTED golden — tools/regen_goldens.py's rust target owns it, and owns it
+    as the same bytes as backends/rust/golden/user_cache.rs — so leaving another
+    composition's emission in the checkout is a modified golden, not scratch.
+    `revl run --backend rust` already restored it around this call
+    (src/revl/run_rust.py); the placement path reached the same write through
+    `ensure_backend` and never did, and a `swap ... --to rust` reaches it again
+    mid-run. An examples/outcome.rvl emission left here this way was swept into
+    an unrelated commit and surfaced days later as a one-file drift on someone
+    else's PR. Restoring at the one site that writes covers every caller."""
     ir_json = tmp / "rust_ir.json"
     ir_json.write_text(json.dumps(ir), encoding="utf-8")
     emitted = _childproc.run([sys.executable, str(_BACKENDS_DIR / "rust" / "emit.py"), str(ir_json)],
                              capture_output=True)
+    emitted = subprocess.run([sys.executable, str(_BACKENDS_DIR / "rust" / "emit.py"), str(ir_json)],
+                             capture_output=True, text=True)
     if emitted.returncode:
         raise RuntimeError(f"rust emit failed:\n{emitted.stderr.strip()}")
     target_dir = _rust_runner_target_dir()
@@ -3864,6 +3913,18 @@ def _build_rust(ir: dict, tmp: Path) -> str:
     build = _childproc.run(["cargo", "build", "--locked", "--manifest-path", str(crate / "Cargo.toml"),
                             "--target-dir", str(target_dir)],
                            capture_output=True)
+    components = _RUST_RUNNER / "src" / "components.rs"
+    committed = components.read_bytes() if components.exists() else None
+    try:
+        components.write_text(emitted.stdout, encoding="utf-8")
+        build = subprocess.run(["cargo", "build", "--manifest-path",
+                                str(_RUST_RUNNER / "Cargo.toml")],
+                               capture_output=True, text=True)
+    finally:
+        # cargo has compiled the module by now, so the built binary keeps this
+        # composition while the checkout keeps its golden.
+        if committed is not None:
+            components.write_bytes(committed)
     if build.returncode:
         raise RuntimeError(f"cargo build (rust runner) failed:\n{build.stderr.strip()}")
     _prune_staged(crate.parent, crate.name, _rust_key_artifacts(target_dir))
@@ -3889,6 +3950,7 @@ def _go_runner_sources() -> dict[str, bytes]:
             continue
         files[rel.as_posix()] = path.read_bytes()
     return files
+    return str(_RUST_RUNNER / "target" / "debug" / "revl_placement_runner")
 
 
 def _build_go(ir: dict, tmp: Path) -> str:
@@ -3902,6 +3964,7 @@ def _build_go(ir: dict, tmp: Path) -> str:
     the module and the emitted package are staged to a directory named by the
     hash of their content, and the binary carries the same hash, so two
     compositions never share one and identical inputs reuse it."""
+    a runtime-generic proxy (the same shape the rust runner takes)."""
     emit_module = _tier_emitter("revl_go_emit", _GO_DIR / "emit.py")
     # A go tier limit becomes the one-diagnostic `RuntimeError` every caller
     # already reports. Narrowed from `except Exception` for issue #1406: that
@@ -3936,6 +3999,15 @@ def _build_go(ir: dict, tmp: Path) -> str:
         finally:
             Path(part).unlink(missing_ok=True)
     _prune_staged(stage.parent, key)
+    emitted = _GO_RUNNER / "emitted"
+    emitted.mkdir(parents=True, exist_ok=True)
+    (emitted / "gen.go").write_text(module_src, encoding="utf-8")
+    (emitted / "bridge_gen.go").write_text(bridge_src, encoding="utf-8")
+    binary = _GO_RUNNER / "revl_placement_runner"
+    build = subprocess.run(["go", "build", "-o", str(binary), "."],
+                           cwd=str(_GO_RUNNER), capture_output=True, text=True)
+    if build.returncode:
+        raise RuntimeError(f"go build (go runner) failed:\n{build.stderr.strip()}")
     return str(binary)
 
 
@@ -3950,6 +4022,7 @@ def _find_jdk21() -> str | None:
     java = shutil.which("java")
     if java:
         version = _childproc.run([java, "-version"], capture_output=True).stderr
+        version = subprocess.run([java, "-version"], capture_output=True, text=True).stderr
         if 'version "21' in version or "version 21" in version:
             return str(Path(java).resolve().parent)
     return None
@@ -3980,10 +4053,12 @@ def _build_java_real(ir: dict, tmp: Path, jdk_bin: str, cordis_classes: str) -> 
         raise RuntimeError(f"java emit failed:\n{refusal}") from refusal
     (gen / "Components.java").write_text(components, encoding="utf-8")
     compile_result = _childproc.run(
+    compile_result = subprocess.run(
         [str(Path(jdk_bin) / "javac"), "--release", "21", "-cp", cordis_classes, "-d", str(out),
          str(_JAVA_DIR / "placement" / "Estop.java"),
          str(_JAVA_DIR / "placement" / "RealPlacementRunner.java"), str(gen / "Components.java")],
         capture_output=True,
+        capture_output=True, text=True,
     )
     if compile_result.returncode:
         raise RuntimeError(f"javac (real cordis4j) failed:\n{compile_result.stderr.strip()}")
@@ -4028,6 +4103,7 @@ def _teardown_grace() -> float:
             return _TEARDOWN_GRACE
         if value > 0:
             return min(value, _TEARDOWN_GRACE_MAX)
+            return value
     return _TEARDOWN_GRACE
 
 
@@ -4367,6 +4443,7 @@ def _estop_halt_report(record: dict, latch: str, roster: dict,
 
 def run_placement(files, placement_path: str, once: bool = False,
                   estop_latch: str | None = None, wal: str | None = None,
+                  estop_latch: str | None = None,
                   providers: str | None = None) -> int:
     # item 443: the operator E-Stop. `--estop-latch FILE` (or the ambient
     # REVL_ESTOP_LATCH) arms it; UNARMED is the default, and a placement that
@@ -4382,6 +4459,7 @@ def run_placement(files, placement_path: str, once: bool = False,
     compile_report: dict = {}
     try:
         ir = compile_files(files, report=compile_report)
+        ir = compile_files(files)
     except RevlError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -4566,6 +4644,7 @@ def run_placement(files, placement_path: str, once: bool = False,
     # prints nothing (docs/model-scheduling.md).
     model_problem, model_handoffs = _model_schedules(files, processes,
                                                      residency)
+    model_problem, model_handoffs = _model_schedules(files, processes)
     if model_problem:
         return abort(model_problem)
 
@@ -5448,6 +5527,8 @@ def run_placement(files, placement_path: str, once: bool = False,
                                         owner, backends, remote_specs,
                                         default_deadline),
             "files": sandbox_files,
+            "files": [str(f) for f in files],
+            "cwd": os.getcwd(),
             # item 411 T3: the per-process seam network and the seam-only canary
             # targets (empty for a seam-free sandbox — the ordinary net canary
             # runs then). Established above only when there is a cross-boundary
@@ -5599,8 +5680,10 @@ def run_placement(files, placement_path: str, once: bool = False,
             cmd, proc_env = sandbox_drivers[pname].wrap(
                 pname, cmd, proc_env, sandbox_achieved[pname])
         proc = _childproc.popen(
+        proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             env=proc_env,
+            env=proc_env, text=True, errors="replace",
         )
         children[pname] = (proc, stop_mode)
         thread = threading.Thread(target=pump, args=(pname, proc), daemon=True)
@@ -6055,6 +6138,9 @@ def run_placement(files, placement_path: str, once: bool = False,
                 else "did not come up"
             print(f"swap refused: successor {succ} {why}; tearing it back "
                   f"down; running composition untouched.", flush=True)
+        if not _wait_for(lambda: succ in up, 60):
+            print(f"swap refused: successor {succ} did not come up — tearing it "
+                  f"back down; running composition untouched.", flush=True)
             sproc, smode = children.pop(succ, (None, None))
             if sproc is not None:
                 stop_all({succ: (sproc, smode)})
@@ -6161,6 +6247,8 @@ def run_placement(files, placement_path: str, once: bool = False,
             if report_boot_failures():
                 rc = 1
             elif len(up) != len(children):
+            _wait_for(lambda: len(up) == len(children), 60)
+            if len(up) != len(children):
                 missing = ", ".join(p for p in children if p not in up)
                 print(f"error: processes did not come up: {missing}", file=sys.stderr)
                 rc = 1
@@ -6178,6 +6266,9 @@ def run_placement(files, placement_path: str, once: bool = False,
                 rc = 1
             else:
                 swap_repl()
+            if net_seams and _wait_for(lambda: len(up) == len(children), 60):
+                report_network_latency()
+            swap_repl()
         else:
             # stdin is not a tty: it may be carrying a swap SCRIPT (one
             # `swap <component> --to <backend>` / `:keys` / `:q` per line),
@@ -6196,6 +6287,10 @@ def run_placement(files, placement_path: str, once: bool = False,
                 if net_seams:
                     report_network_latency()
                 swap_repl()
+            _wait_for(lambda: len(up) == len(children), 60)
+            if net_seams:
+                report_network_latency()
+            swap_repl()
     except KeyboardInterrupt:
         pass
     finally:

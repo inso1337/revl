@@ -126,6 +126,7 @@ __all__ = [
     "Rollback", "PlanRefused",
     "weakest", "at_or_below", "fold", "stale_after_model_change",
     "classify", "check", "report",
+    "weakest", "at_or_below", "fold", "classify", "check", "report",
     "UI_CLASSES", "SHADOW_PARTS",
 ]
 

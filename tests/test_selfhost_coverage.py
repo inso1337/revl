@@ -149,6 +149,7 @@ def test_the_gate_reproduces_the_item_429d_secret_gap(tool, monkeypatch):
         if tier != "py":
             return keep(tier)
         return [p for p in keep(tier) if "Secret[" not in p.read_text(encoding="utf-8")]
+        return [p for p in keep(tier) if "Secret[" not in p.read_text()]
 
     monkeypatch.setattr(tool, "corpus_documents", without_secrets)
     problems = tool.check(tool.survey())

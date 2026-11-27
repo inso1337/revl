@@ -712,6 +712,7 @@ export class TimerHandle {
   readonly mode: TimerMode
   readonly intervalMs: number
   private body: (() => void) | null
+  private readonly body: () => void
   private status: TimerState = 'live'
   nextAt: number
   fired = 0
@@ -764,6 +765,7 @@ export class TimerHandle {
     if (clockFirings.length > CLOCK_FIRINGS_CAP) clockFirings.shift()
     record(`${this.label}.fire #${this.fired} at ${now}ms`)
     this.body?.()
+    this.body()
     if (this.mode === 'after') {
       // a one-shot's schedule is spent once it fires; release it through the
       // same path as cancel so `liveResources` clears and the teardown's own
@@ -826,6 +828,7 @@ export const Clock = {
   /** Live timers — a teardown that abandons one leaves this > 0. */
   pending(): number {
     return timers.length
+    return timers.filter((t) => t.state() === 'live').length
   },
   /** Milliseconds from `now()` until the earliest live timer is due, or null
    *  with no live timer. A host pumping `advance` from a real monotonic source
@@ -843,6 +846,7 @@ export const Clock = {
   },
   /** The recorded firing log: `[timerSerial, firedAtMs]` in order, the most
    *  recent `FIRINGS_CAP` firings only. */
+  /** The recorded firing log: `[timerSerial, firedAtMs]` in order. */
   firings(): Array<[number, number]> {
     return clockFirings.map((f) => [f[0], f[1]])
   },
@@ -1481,10 +1485,13 @@ export class Frame {
     } catch {
       try { return String(value) } catch { return '<unprintable>' }
     }
+    if (err instanceof Error) return { type: err.constructor.name, message: err.message }
+    return { type: 'Error', message: String(err) }
   }
 
   private static referentOf(crossing: Crossing): string {
     const args = crossing.args.map((a) => Frame.showArg(a)).join(', ')
+    const args = crossing.args.map((a) => JSON.stringify(a)).join(', ')
     return `${crossing.key}.${crossing.method}(${args})`
   }
 
@@ -1584,6 +1591,7 @@ export class Frame {
     const frame = this
     return () => {
       if (journal) journalStack.push(frame)
+      if (this.committed) return inverse()
       try {
         if (this.committed) return inverse()
         try {
@@ -1593,6 +1601,9 @@ export class Frame {
         }
       } finally {
         if (journal) journalStack.pop()
+        return inverse()
+      } catch (err) {
+        this.pushResidue('bracket-fault', crossing, { call: undoMethod, args: crossing.args, phase: 1 }, err)
       }
     }
   }
@@ -1894,6 +1905,7 @@ export class Frame {
       residue: this.residue.slice(residueBefore),
       halted: false,
     })
+    this.deferredCompensations.push({ seq, crossing, methodName: method, args, run })
   }
 
   /** A provide method crossed an extern that DECLARES its own compensation
@@ -2586,6 +2598,7 @@ export class StreamSource implements StreamDownstream {
   _backlog: unknown[] = []
 
   constructor(kind = 'source', up: StreamSource[] = [], replayCount = 0) {
+  constructor(kind = 'source', up: StreamSource[] = []) {
     this._kind = kind
     this._up = [...up]
     this._pending = this._up.length
@@ -3069,22 +3082,26 @@ function _jsonTypeOk(value: unknown, jsonType: string): boolean {
  *  `toString`, ...) would be found in a schema's `properties` though the schema
  *  never declared it, slip past `additionalProperties: false`, and a `required`
  *  property with such a name would be satisfied by inheritance. */
+ *  finite. */
 function _jsonSchemaError(value: unknown, schema: unknown, path = '$'): string | null {
   if (typeof schema !== 'object' || schema === null) return null
   const s = schema as Record<string, unknown>
 
   if (Object.hasOwn(s, 'const')) {
+  if ('const' in s) {
     return value === s.const ? null
       : `${path}: expected const ${JSON.stringify(s.const)}, got ${JSON.stringify(value)}`
   }
 
   if (Object.hasOwn(s, 'enum')) {
+  if ('enum' in s) {
     const arms = (s.enum as unknown[]) ?? []
     return arms.some((a) => a === value) ? null
       : `${path}: ${JSON.stringify(value)} is not one of ${JSON.stringify(arms)}`
   }
 
   if (Object.hasOwn(s, 'oneOf')) {
+  if ('oneOf' in s) {
     const arms = (s.oneOf as unknown[]) ?? []
     const matches = arms.filter((arm) => _jsonSchemaError(value, arm, path) === null)
     if (matches.length === 1) return null
@@ -3108,10 +3125,13 @@ function _jsonSchemaError(value: unknown, schema: unknown, path = '$'): string |
     const props = (s.properties as Record<string, unknown>) ?? {}
     for (const name of (s.required as string[]) ?? []) {
       if (!Object.hasOwn(obj, name)) return `${path}: missing required property ${JSON.stringify(name)}`
+      if (!(name in obj)) return `${path}: missing required property ${JSON.stringify(name)}`
     }
     const extra = Object.hasOwn(s, 'additionalProperties') ? s.additionalProperties : true
+    const extra = 'additionalProperties' in s ? s.additionalProperties : true
     for (const key of Object.keys(obj)) {
       if (Object.hasOwn(props, key)) {
+      if (key in props) {
         const err = _jsonSchemaError(obj[key], props[key], `${path}.${key}`)
         if (err !== null) return err
       } else if (extra === false) {
@@ -3222,6 +3242,8 @@ export const Stream = {
    *  zero-argument call. */
   source(opts: { replay?: number } = {}): StreamSource {
     return new StreamSource('source', [], opts.replay ?? 0)
+  source(): StreamSource {
+    return new StreamSource()
   },
 
   /** True for the `Closed` terminal a `next` returned (Slice 4). `Faulted` is
@@ -3267,6 +3289,7 @@ export const Stream = {
       upstream = new StreamStage(upstream, kind, arg)
     }
     const sub = new Subscription(
+    return new Subscription(
       upstream, policy, ctx,
       opts.capacity ?? STREAM_DEFAULT_CAPACITY,
       opts.drainMs ?? null,

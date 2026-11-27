@@ -349,6 +349,13 @@ chooses from these kinds and cannot mint a new one.
   grants spelled with the typo. The refusal names the legal names at
   the point of refusal: the core names always, plus the declaring
   capability's own declared names when a declaration is in scope.
+- **The registry is CLOSED.** A parameter name not in the registry is
+  refused at parse, never defaulted to the discrete order. A discrete
+  default would make security invariant 4 false as written, and it
+  opens a typo hazard: `pth="/data"` would parse, narrow nothing, and
+  partition the token's cone so that revoke-by-cone misses grants
+  spelled with the typo. Adding a parameter kind is adding a registry
+  row, and the parse refusal names the registered names.
 - **numeric ceilings (`calls`, `bytes`, and friends spelled `k<=N` or
   `k=N` meaning "at most N").** `N <=_k M` iff `N <= M` as integers: a
   smaller ceiling is narrower. `calls=10 <= calls=100`. Ceiling-kind
@@ -794,6 +801,11 @@ argument is short enough to state completely:
    surface) does not grow. Symbolic values against literals and
    malformed paths refuse at the comparison with the pair named, never
    an admit. No default-allow row exists anywhere in the design.
+4. **Incomparable means refused.** Unregistered parameter names never
+   reach a comparison at all (the registry is closed; refusal at
+   parse). Symbolic values against literals and malformed paths refuse
+   at the comparison with the pair named, never an admit. No default-
+   allow row exists anywhere in the design.
 5. **The order itself is the attack surface, so it stays tiny.** The
    registry has three orders (component-prefix, discrete, integer) plus
    symbol identity; the component-prefix canonicalizer is the one
@@ -876,6 +888,7 @@ Grammar and order:
   an unregistered parameter name (`pth="/data"`), and a name that is not
   a parameter of THAT capability's declaration (`emission[fs.write(
   host="x")]` where `fs.write` declares only `path`) all refuse with
+  and an unregistered parameter name (`pth="/data"`) all refuse with
   the documented messages.
 - `path="/tmp/"` canonicalizes to `/tmp`: the two spellings are
   cone-equal (one grant covers crossings spelled either way).
@@ -968,6 +981,7 @@ Honesty surface:
   point for a product's own DIMENSION is the `capability` declaration
   (issue #1938); the extension point for a new ORDER remains a core
   registry row plus a soundness argument.
+  registry row each, added when a consumer exists.
 - **Cross-realm prefix revocation**: refused above to keep the revoke
   predicate identical to the coverage predicate.
 

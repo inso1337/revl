@@ -416,6 +416,7 @@ def test_the_two_admission_predicates_are_one_predicate():
     either predicate says WHICH half moved rather than only that the
     containment broke. `decode_grammar._admits_null` and
     `type_schema.admits_json_null` are the same function written twice: `Unit`,
+    `mcp.schema.admits_json_null` are the same function written twice: `Unit`,
     and any `Opt[_]`, and nothing else."""
     pool = _sweep_pool()
     assert len(pool) > 1500
@@ -432,6 +433,7 @@ def test_the_grammar_gate_is_shadowed_by_257_on_every_shape_it_refuses():
     answer as drift rather than as a refusal (issue #1348).
 
     `decode_grammar._admits_null` and `type_schema.admits_json_null` are the same
+    `decode_grammar._admits_null` and `mcp.schema.admits_json_null` are the same
     predicate over the same surface positions, so on a `validated` emission the
     grammar walk cannot be reached: 257 refuses first on every shape. This sweep
     is the evidence for that claim and the alarm if it stops holding. A type that

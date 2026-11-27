@@ -346,6 +346,7 @@ def test_a_signed_bundle_is_verified_and_does_earn_rank(tmp_path):
     _publish(reg, {"signed_db": HONEST.replace("HonestDb", "SignedDb"),
                    "bare_db": HONEST.replace("HonestDb", "BareDb")})
     registry_evidence.build_evidence(reg, key=key, signer="revl-ci")
+    registry.build_evidence(reg, key=key, signer="revl-ci")
     # strip the bare entry's bundle again so it carries genuinely nothing.
     import shutil
     shutil.rmtree(os.path.join(reg, "components", "bare_db",
@@ -367,6 +368,7 @@ def test_forging_a_bound_dossier_invalidates_the_whole_attestation(tmp_path):
     reg = os.path.join(str(tmp_path), "registry")
     _publish(reg, {"signed_db": HONEST.replace("HonestDb", "SignedDb")})
     registry_evidence.build_evidence(reg, key=key, signer="revl-ci")
+    registry.build_evidence(reg, key=key, signer="revl-ci")
     _put_evidence(reg, "signed_db",
                   {registry.EVIDENCE_CAPABILITIES: {"kind": "revl.capabilities",
                                                     "boundary": {}}})

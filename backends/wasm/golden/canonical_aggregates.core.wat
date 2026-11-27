@@ -76,6 +76,7 @@
   ;; @record Person { name:Str age:Int }
 
   (func $fn.make (export "make") (param $p_nm i32) (param $p_a i64) (result i32) (local $__revl_tmp i32)
+  (func $make (export "make") (param $p_nm i32) (param $p_a i64) (result i32) (local $__revl_tmp i32)
     (call $alloc (i32.const 16))
       (local.set $__revl_tmp)
       (i64.store (local.get $__revl_tmp) (i64.extend_i32_u (local.get $p_nm)))
@@ -84,10 +85,12 @@
     return)
 
   (func $fn.age_of (export "age_of") (param $p_p i32) (result i64) (local $__revl_tmp i32)
+  (func $age_of (export "age_of") (param $p_p i32) (result i64) (local $__revl_tmp i32)
     (i64.load (i32.add (local.get $p_p) (i32.const 8)))
     return)
 
   (func $fn.rename (export "rename") (param $p_p i32) (param $p_nm i32) (result i32) (local $__revl_tmp i32)
+  (func $rename (export "rename") (param $p_p i32) (param $p_nm i32) (result i32) (local $__revl_tmp i32)
     (call $alloc (i32.const 16))
       (local.set $__revl_tmp)
       (i64.store (local.get $__revl_tmp) (i64.extend_i32_u (local.get $p_nm)))
@@ -96,17 +99,20 @@
     return)
 
   (func $fn.dbl (export "dbl") (param $p_n i64) (result i64) (local $__revl_tmp i32)
+  (func $dbl (export "dbl") (param $p_n i64) (result i64) (local $__revl_tmp i32)
     (local.get $p_n)
       (local.get $p_n)
       (call $int_add)
     return)
 
   (func $fn.flip (export "flip") (param $p_b i32) (result i32) (local $__revl_tmp i32)
+  (func $flip (export "flip") (param $p_b i32) (result i32) (local $__revl_tmp i32)
     (local.get $p_b)
       (i32.eqz)
     return)
 
   (func $fn.pair (export "pair") (param $p_a i64) (param $p_b i64) (result i32) (local $__revl_tmp i32)
+  (func $pair (export "pair") (param $p_a i64) (param $p_b i64) (result i32) (local $__revl_tmp i32)
     (call $alloc (i32.const 24))
       (local.set $__revl_tmp)
       (i32.store (local.get $__revl_tmp) (i32.const 2))
@@ -116,10 +122,12 @@
     return)
 
   (func $fn.head (export "head") (param $p_xs i32) (result i64) (local $__revl_tmp i32)
+  (func $head (export "head") (param $p_xs i32) (result i64) (local $__revl_tmp i32)
     (i64.load (call $list_slot (local.get $p_xs) (i64.const 0)))
     return)
 
   (func $fn.roster (export "roster") (param $p_nm i32) (param $p_a i64) (result i32) (local $__revl_tmp i32) (local $__revl_tmp_n1 i32)
+  (func $roster (export "roster") (param $p_nm i32) (param $p_a i64) (result i32) (local $__revl_tmp i32) (local $__revl_tmp_n1 i32)
     (call $alloc (i32.const 16))
       (local.set $__revl_tmp)
       (i32.store (local.get $__revl_tmp) (i32.const 1))
@@ -132,6 +140,7 @@
     return)
 
   (func $fn.maybe (export "maybe") (param $p_n i64) (result i32) (local $__revl_tmp i32)
+  (func $maybe (export "maybe") (param $p_n i64) (result i32) (local $__revl_tmp i32)
     (local.get $p_n)
       (i64.const 0)
       (i64.gt_s)
@@ -149,6 +158,7 @@
     return)
 
   (func $fn.or_zero (export "or_zero") (param $p_o i32) (result i64) (local $__revl_tmp i32)
+  (func $or_zero (export "or_zero") (param $p_o i32) (result i64) (local $__revl_tmp i32)
     (local.get $p_o)
       (local.set $__revl_tmp)
       (if (result i64)
@@ -158,6 +168,7 @@
     return)
 
   (func $fn.checked (export "checked") (param $p_n i64) (result i32) (local $__revl_tmp i32)
+  (func $checked (export "checked") (param $p_n i64) (result i32) (local $__revl_tmp i32)
     (local.get $p_n)
       (i64.const 0)
       (i64.gt_s)
@@ -234,9 +245,11 @@
     (i32.store (local.get $dst) (local.get $buf))
     (i32.store offset=4 (local.get $dst) (local.get $count)))
   (func $__canon_lower_var_Opt<Int> (param $r i32) (param $c i32)
+  (func $__canon_lower_var_Opt_Int_ (param $r i32) (param $c i32)
     (i32.store8 (local.get $c) (i32.load (local.get $r)))
     (if (i32.eq (i32.load (local.get $r)) (i32.const 1)) (then (i64.store (i32.add (local.get $c) (i32.const 8)) (i64.load (i32.add (local.get $r) (i32.const 8)))))))
   (func $__canon_lower_var_Result<Int|Str> (param $r i32) (param $c i32)
+  (func $__canon_lower_var_Result_Int__Str_ (param $r i32) (param $c i32)
     (i32.store8 (local.get $c) (i32.load (local.get $r)))
     (if (i32.eq (i32.load (local.get $r)) (i32.const 0)) (then (i64.store (i32.add (local.get $c) (i32.const 8)) (i64.load (i32.add (local.get $r) (i32.const 8))))))
     (if (i32.eq (i32.load (local.get $r)) (i32.const 1)) (then (call $__canon_lower_str (i32.wrap_i64 (i64.load (i32.add (local.get $r) (i32.const 8)))) (i32.add (local.get $c) (i32.const 8))))))
@@ -246,6 +259,7 @@
     (local.set $a0 (call $__canon_lift_str (local.get $c0) (local.get $c1)))
     (local.set $a1 (local.get $c2))
     (local.set $rv (call $fn.make (local.get $a0) (local.get $a1)))
+    (local.set $rv (call $make (local.get $a0) (local.get $a1)))
     (local.set $area (global.get $__canon_ret_area))
     (call $__canon_lower_rec_Person (local.get $rv) (local.get $area))
     (global.set $__hp (global.get $__canon_arena_base))
@@ -258,6 +272,7 @@
     (i64.store (i32.add (local.get $t1) (i32.const 8)) (local.get $c2))
     (local.set $a0 (local.get $t1))
     (local.set $rv (call $fn.age_of (local.get $a0)))
+    (local.set $rv (call $age_of (local.get $a0)))
     (global.set $__hp (global.get $__canon_arena_base))
     (local.get $rv))
   ;; canonical export of `rename` -> WIT `registry#rename`
@@ -269,6 +284,7 @@
     (local.set $a0 (local.get $t2))
     (local.set $a1 (call $__canon_lift_str (local.get $c3) (local.get $c4)))
     (local.set $rv (call $fn.rename (local.get $a0) (local.get $a1)))
+    (local.set $rv (call $rename (local.get $a0) (local.get $a1)))
     (local.set $area (global.get $__canon_ret_area))
     (call $__canon_lower_rec_Person (local.get $rv) (local.get $area))
     (global.set $__hp (global.get $__canon_arena_base))
@@ -278,6 +294,7 @@
     (local $a0 i64) (local $rv i64)
     (local.set $a0 (local.get $c0))
     (local.set $rv (call $fn.dbl (local.get $a0)))
+    (local.set $rv (call $dbl (local.get $a0)))
     (global.set $__hp (global.get $__canon_arena_base))
     (local.get $rv))
   ;; canonical export of `flip` -> WIT `registry#flip`
@@ -285,6 +302,7 @@
     (local $a0 i32) (local $rv i32)
     (local.set $a0 (local.get $c0))
     (local.set $rv (call $fn.flip (local.get $a0)))
+    (local.set $rv (call $flip (local.get $a0)))
     (global.set $__hp (global.get $__canon_arena_base))
     (local.get $rv))
   ;; canonical export of `pair` -> WIT `registry#pair`
@@ -293,6 +311,7 @@
     (local.set $a0 (local.get $c0))
     (local.set $a1 (local.get $c1))
     (local.set $rv (call $fn.pair (local.get $a0) (local.get $a1)))
+    (local.set $rv (call $pair (local.get $a0) (local.get $a1)))
     (local.set $area (global.get $__canon_ret_area))
     (call $__canon_lower_list_Int (local.get $rv) (local.get $area))
     (global.set $__hp (global.get $__canon_arena_base))
@@ -302,6 +321,7 @@
     (local $a0 i32) (local $rv i64)
     (local.set $a0 (call $__canon_lift_list_Int (local.get $c0) (local.get $c1)))
     (local.set $rv (call $fn.head (local.get $a0)))
+    (local.set $rv (call $head (local.get $a0)))
     (global.set $__hp (global.get $__canon_arena_base))
     (local.get $rv))
   ;; canonical export of `roster` -> WIT `registry#roster`
@@ -310,6 +330,7 @@
     (local.set $a0 (call $__canon_lift_str (local.get $c0) (local.get $c1)))
     (local.set $a1 (local.get $c2))
     (local.set $rv (call $fn.roster (local.get $a0) (local.get $a1)))
+    (local.set $rv (call $roster (local.get $a0) (local.get $a1)))
     (local.set $area (global.get $__canon_ret_area))
     (call $__canon_lower_list_Person (local.get $rv) (local.get $area))
     (global.set $__hp (global.get $__canon_arena_base))
@@ -319,8 +340,10 @@
     (local $a0 i64) (local $rv i32) (local $area i32)
     (local.set $a0 (local.get $c0))
     (local.set $rv (call $fn.maybe (local.get $a0)))
+    (local.set $rv (call $maybe (local.get $a0)))
     (local.set $area (global.get $__canon_ret_area))
     (call $__canon_lower_var_Opt<Int> (local.get $rv) (local.get $area))
+    (call $__canon_lower_var_Opt_Int_ (local.get $rv) (local.get $area))
     (global.set $__hp (global.get $__canon_arena_base))
     (local.get $area))
   ;; canonical export of `or_zero` -> WIT `registry#or-zero`
@@ -332,6 +355,7 @@
     (if (i32.eq (local.get $c0) (i32.const 1)) (then (i64.store (i32.add (local.get $t3) (i32.const 8)) (local.get $c1))))
     (local.set $a0 (local.get $t3))
     (local.set $rv (call $fn.or_zero (local.get $a0)))
+    (local.set $rv (call $or_zero (local.get $a0)))
     (global.set $__hp (global.get $__canon_arena_base))
     (local.get $rv))
   ;; canonical export of `checked` -> WIT `registry#checked`
@@ -339,8 +363,10 @@
     (local $a0 i64) (local $rv i32) (local $area i32)
     (local.set $a0 (local.get $c0))
     (local.set $rv (call $fn.checked (local.get $a0)))
+    (local.set $rv (call $checked (local.get $a0)))
     (local.set $area (global.get $__canon_ret_area))
     (call $__canon_lower_var_Result<Int|Str> (local.get $rv) (local.get $area))
+    (call $__canon_lower_var_Result_Int__Str_ (local.get $rv) (local.get $area))
     (global.set $__hp (global.get $__canon_arena_base))
     (local.get $area))
 )

@@ -1572,6 +1572,7 @@ _FN_VALUE_SPELLINGS = {
     # read off the field and called through a binding: `r.f(n)` itself is
     # refused in a component body (issue #1547, records carry no methods)
     "record-field": ("", "let r = { f: charge } let g = r.f let u = g(n) return 0"),
+    "record-field": ("", "let r = { f: charge } let u = r.f(n) return 0"),
     "list-element": ("apply0", "let u = apply0([charge], n) return 0"),
     "returned-from-fn": ("pick", "let h = emit pick() let u = h(n) return 0"),
     "arrow-captures-alias": (
@@ -1599,6 +1600,7 @@ def test_a_bare_emission_reached_as_a_function_value_is_refused(tmp_path, spelli
     """Federation admission refuses the IR on its own, for an IR built before
     the compiler refused the source (issue #2842)."""
     ir = _legacy_ir(_fn_value_source(_BARE_CHARGE, spelling), tmp_path, "v.rvl")
+    ir = _ir(_fn_value_source(_BARE_CHARGE, spelling), tmp_path, "v.rvl")
     assert deploy.reached_emissions(ir) == [
         {"component": "C", "extern": "charge", "deferrable": False,
          "idempotency_key": None, "via": None}]
@@ -1617,15 +1619,20 @@ def test_the_compiler_refuses_every_function_value_spelling(
     """Issue #2842: the compiler refuses each spelling itself, whatever the
     method declares, so no admitted program reaches `charge` except through
     an `emit`-marked call. Federation admission above is the second line."""
+def test_the_compiler_sees_every_function_value_spelling_too(tmp_path, spelling):
+    """The same body on a PLAIN method is refused by G4, so the admission
+    decision and the compiler's diagnostic agree about each spelling."""
     from revl.errors import RevlError
 
     with pytest.raises(RevlError) as excinfo:
         _ir(_fn_value_source(_BARE_CHARGE, spelling, emission=emission),
+        _ir(_fn_value_source(_BARE_CHARGE, spelling, emission=False),
             tmp_path, "p.rvl")
     assert excinfo.value.code == "G4"
     assert excinfo.value.message == (
         "emission `charge` cannot be used as a function value; call it by "
         "name under `emit` (G4)")
+    assert "`S.go` is declared plain" in str(excinfo.value)
 
 
 @pytest.mark.parametrize("spelling", sorted(_FN_VALUE_SPELLINGS))
@@ -1641,6 +1648,19 @@ def test_a_deferred_emission_reached_as_a_function_value_does_not_compile(
         _ir(_fn_value_source(_DEFERRED_CHARGE, spelling), tmp_path, "d.rvl")
     assert "`deferred` emission extern `charge` is passed as a function value" \
         in excinfo.value.message
+def test_a_deferred_emission_reached_as_a_function_value_is_not_held(tmp_path, spelling):
+    """`deferred` is honoured only at an `emit charge(..)` step: the py tier
+    enqueues that shape and nothing else. A function value is dispatched as an
+    ordinary call and fires on the spot, so it is class (c), not (b)."""
+    ir = _ir(_fn_value_source(_DEFERRED_CHARGE, spelling), tmp_path, "d.rvl")
+    assert deploy.reached_emissions(ir) == [
+        {"component": "C", "extern": "charge", "deferrable": False,
+         "idempotency_key": None, "via": None}]
+    verdict = deploy.federation_admission({"c": ir})
+    assert verdict["admitted"] is False
+    (refusal,) = verdict["refusals"]
+    assert "already `deferred`" in refusal["reason"]
+    assert "function value" in refusal["reason"]
 
 
 def test_a_deferred_emission_emitted_directly_is_still_held(tmp_path):
@@ -1667,6 +1687,10 @@ def test_a_held_emit_in_one_scope_does_not_launder_a_value_route_in_another(tmp_
 
     with pytest.raises(RevlError) as excinfo:
         _ir(_DEFERRED_CHARGE + """\
+    held step, `other` dispatches it as a value. The rows are per component, so
+    the component is deferrable only if every route is; the first-seen held
+    row used to decide it alone."""
+    ir = _ir(_DEFERRED_CHARGE + """\
 service S { emission fn go(n: Int) -> Int  emission fn other(n: Int) -> Int }
 component C provides s: S {
   provide s {
@@ -1677,6 +1701,10 @@ component C provides s: S {
 """, tmp_path, "m.rvl")
     assert "is passed as a function value in component `C`" \
         in excinfo.value.message
+    assert deploy.reached_emissions(ir) == [
+        {"component": "C", "extern": "charge", "deferrable": False,
+         "idempotency_key": None, "via": None}]
+    assert deploy.federation_admission({"c": ir})["admitted"] is False
 
 
 def test_a_pure_function_value_crosses_nothing(tmp_path):

@@ -10,6 +10,7 @@
 // disk in time.  See the timeout note in `vitest.config.ts` for the nested
 // `vitest run` that re-runs this.
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -27,6 +28,14 @@ export function describeEmitFailure(
   if (result.error) {
     const code = (result.error as NodeJS.ErrnoException).code
     return `could not run emit.py for ${fixture}: ${code ?? result.error.name}: ${result.error.message}`
+function emitFixture(fixture: string, outName: string): void {
+  const result = spawnSync(
+    'python3',
+    ['emit.py', '--runtime', '../../runtime.ts', join('tests', 'fixtures', fixture)],
+    { cwd: backend, encoding: 'utf-8' },
+  )
+  if (result.status !== 0) {
+    throw new Error(`emit.py failed for ${fixture}:\n${result.stderr}`)
   }
   const how = result.status !== null
     ? `exit status ${result.status}`
@@ -71,6 +80,7 @@ export function emitFixtureOutput(
     throw new Error(describeEmitFailure(fixture, result))
   }
   return result.stdout
+  writeFileSync(join(backend, 'tests', 'generated', outName), result.stdout)
 }
 
 export function emitFixtures(): void {

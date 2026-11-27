@@ -1,4 +1,5 @@
 # Int32: an implemented proposal
+# Int32 — a proposal
 
 **Status: implemented on all six tiers.** `Int32` shipped in 954a31eb4 ("Add
 Int32: 32-bit sized integer with trapping overflow, all six tiers"), with the
@@ -8,6 +9,9 @@ The reference for what shipped is `docs/arithmetic.md`, "Sized integers:
 rationale. Each section marks what shipped as proposed, what shipped
 differently, and what did not ship; "What shipped, and what did not" at the end
 is the summary.
+**Status: proposed, not implemented.** This document specifies what `Int32`
+requires so the work has a contract to target. Nothing here changes any
+existing type; every section is additive.
 
 ## Motivation
 
@@ -17,6 +21,7 @@ cost is concentrated exactly where a smaller integer pays:
 
 * **Density and lanes.** Measured, not assumed
   (docs/roadmap-archive/07-open-in-rough-priority-order.md §12):
+* **Density and lanes.** Measured, not assumed (docs/v2.0-roadmap.md §12):
   i32 and i64 scalar arithmetic are identical here (0.99 vs 0.98 ns/iter),
   but a *vectorisable* loop is ~34% faster in i32 because SIMD gets twice
   the lanes. A static `Int32` serves that case; a dynamically-promoting
@@ -40,6 +45,7 @@ cost is concentrated exactly where a smaller integer pays:
 * **Widening `Int32 → Int` is implicit; narrowing `Int → Int32` is explicit**
   (built as `.to_int32()`, refusing out-of-range values at runtime like any
   other bound; there is no `as` cast syntax in revl).
+  (`as Int32`, refusing out-of-range values at runtime like any other bound).
   Rationale: revl already widens `Int → Float` implicitly where lossless, and
   the recent soundness work refused *lossy* implicit coercion (out-of-range
   literals are now diagnosed at compile time). Lossless-widen /
@@ -150,15 +156,31 @@ payload on the trap.
   position as a type mismatch whether or not it would fit, and the bound is
   imposed at runtime by `.to_int32()`.
 * **DIVERGENCES convention**: no pin was needed; all six tiers trap.
+* **div_trunc family / `/` / `%`**: extend to `Int32` with the same
+  operands-annotation dispatch; zero divisor faults uniformly as today.
+* **checked_div_\*** (in flight): signatures gain `Int32` variants only if a
+  use appears; do not multiply the surface preemptively.
+* **Unary minus**: `-x` on `Int32` routes through the same bound re-imposition
+  the Int fix landed (lower.py `un` nodes carry `operands`; the emitters'
+  helpers enforce ±2^31).
+* **Literal-range checker**: the new i64 literal diagnostic generalizes — an
+  `Int32`-typed context refuses literals outside ±2^31 at the same site.
+* **DIVERGENCES convention**: any tier that ends up wrapping rather than
+  trapping gets a pinned row whose flip fails loudly, per the established
+  errata process.
 
 ## Open questions
 
 1. Does the wasm vectorisable win survive the trap checks? **Still open:** the
    type shipped on correctness and execution grounds, and no measurement of
    the win under the checks is recorded.
+1. Does the wasm vectorisable win survive the trap checks? Measure before
+   committing to trap-everywhere vs a pinned wrap divergence.
 2. Should `Int32` arrays get flat storage guarantees (the SIMD argument
    strictly requires contiguity)? **Not built:** `docs/arithmetic.md` records
    that no data-layout promise is made.
+   strictly requires contiguity)? That is a data-layout promise, larger than
+   this proposal.
 3. `Integer` (arbitrary precision) interacts with conversion rules — decide
    its relationship to `Int32`/`Int` in one place when it is designed, not now.
    **Still open:** `Integer` is fenced and not built (docs/contract-errata.md,
@@ -194,3 +216,4 @@ literal-range diagnostic; flat-storage guarantees for `Int32` arrays; the
 OpenAPI `format: int32` mapping; and the wasm measurement the proposal asks
 for. Each remains a task for a later pass, not a prerequisite of the shipped
 type.
+   behind a flag until the type stabilizes?

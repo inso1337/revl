@@ -61,6 +61,7 @@ def _body(wat: str, fn: str) -> str:
     """The `(func $fn …)` block, so an assertion about one function's lowering
     cannot be satisfied by the ~430-line helper preamble every module carries."""
     start = wat.index(f'(func $fn.{fn} (export "{fn}")')
+    start = wat.index(f'(func ${fn} (export "{fn}")')
     rest = wat.index("\n  (func ", start + 1) if "\n  (func " in wat[start + 1:] else len(wat)
     return wat[start:rest]
 
@@ -77,6 +78,7 @@ TRAPPING = [
      "f", "i64.load"),
     ("call", "fn h(n: Int) -> Int { return n.div_trunc(2) }\n"
              "fn f(ok: Bool, n: Int) -> Bool { return ok && h(n) > 0 }", "f", "call $fn.h"),
+             "fn f(ok: Bool, n: Int) -> Bool { return ok && h(n) > 0 }", "f", "call $h"),
     ("negated", "fn f(ok: Bool, n: Int) -> Bool { return ok && !(n + n > 0) }",
      "f", "call $int_add"),
 ]

@@ -292,8 +292,10 @@ emission names the extern, not a bracket scope:
     capability purge_garbage requires approval
 
 The token is the extern name. (A realm-style scoped emission token, e.g.
+The token is the extern name. (A realm-style scoped emission token — e.g.
 `emission[gateway.send]`, so emissions and `witnessed[caps]` would share one
 capability grammar, is the pending parser/emitter feature half of roadmap
+capability grammar — is the pending parser/emitter feature half of roadmap
 item 343; until it lands, an emission's capability is its name.)
 
 Declaration-owned for the same reason 243 made the inverse declaration-owned:

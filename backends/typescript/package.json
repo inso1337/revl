@@ -9,6 +9,7 @@
     "test": "vitest run",
     "demo": "node demo.ts",
     "golden": "node scripts/run-python.ts scripts/regen-golden.py",
+    "golden": "python3 scripts/regen-golden.py",
     "typecheck": "tsc --noEmit && node scripts/typecheck-generated.mjs && node scripts/typecheck-handwritten.mjs"
   },
   "dependencies": {
@@ -18,5 +19,6 @@
     "@types/node": "26.2.0",
     "typescript": "5.9.3",
     "vitest": "4.1.12"
+    "vitest": "4.1.11"
   }
 }

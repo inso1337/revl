@@ -1,6 +1,8 @@
 # Design: effect ownership modes, owned / borrowed / shared / transfer (item 308)
+# Design: effect ownership modes, owned / borrowed / shared (item 308)
 
 Status: OWNED+BORROWED v1 LANDED (2026-08-31, merged 66e2999); owned/borrowed
+Status: OWNED+BORROWED v1 LANDED (2026-08-31, merged 66e2999) — owned/borrowed
 inferred over the teardown accumulator with zero new grammar: R0 (acquire/
 witnessed returns are nominal opaque handles), O1 (no hand-call of a declared
 inverse), B1 (the seven-clause borrow-does-not-escape). F10 retention audit
@@ -15,6 +17,14 @@ swap transit ledger. TR1 is design only and decided, including OQ-T1 (the
 receiving binding is seeded from the ledger and its own acquire does not
 run); its implementation slice is next, and the acquire-head reservation in
 `src/revl/parser.py` is the placeholder it replaces. PRODUCT-VISION, 243-261 arc.
+per decision. SHARED + TRANSFER stay reserved contextual keywords (markers
+landed, slice 3a / PR #503); the SHARED SLICE 3b SPEC IS NOW COMPLETE (S1
+below, "S1 completed": the crash-path debt is paid by retiring the owned
+out-of-frame ttl executor once cross-process shared is a premise, binding
+teardown to the 294 counted-grant ledger, and re-using `revl recover` for the
+whole-process crash with a new `reclaim` residue record). Implementation of
+3b is the next slice and stays deferred, sequenced with item 294. TRANSFER
+remains reserved and unspecced. PRODUCT-VISION, 243-261 arc.
 Companion docs: [243-witnessed-externs.md](243-witnessed-externs.md),
 [teardown-contract.md](teardown-contract.md),
 [247-compensate.md](247-compensate.md),
@@ -129,17 +139,21 @@ borrow-does-not-escape are genuinely new checks, currently absent from the
 frontend entirely.
 
 ## The modes, precisely
+## The three modes, precisely
 
 Each mode is a static discipline plus a runtime teardown consequence. The
 runtime side reuses the teardown contract's entry kinds; `shared` added a
 counted-grant runtime and `transfer` adds a nameable carrier for the
 transferred bindings only (TR1).
+runtime side reuses the teardown contract's entry kinds; only `shared` would
+add one.
 
 ### `owned`
 
 - **Who:** the activation that ran the acquire effect form (or spawn). One
   owner per handle, fixed for the handle's life unless the handle is
   transferred (TR1 below); v1 shipped no transfer.
+  owner per handle, fixed for the handle's life; v1 has no transfer.
 - **Static discipline:** the final inverse is the accumulator's, full stop.
   No hand-call of a resource's declared inverse anywhere, including the
   owner's own body (rule O1 below). The owner MAY freely store its own
@@ -216,6 +230,8 @@ transferred bindings only (TR1).
     the inverse.
 - **Recommendation (S1 completed, PR #698):** build it as the 294 lease
   binding, not a bespoke refcount. The lease
+- **Recommendation: defer shared out of v1 entirely,** and when it lands,
+  build it as the 294 lease binding, not a bespoke refcount. The lease
   runtime already solved the two hard parts (durable consume-before-fire
   accounting, and a crash backstop so a SIGKILLed holder cannot pin the
   count forever). A bespoke refcount would re-derive both, which is
@@ -275,6 +291,11 @@ can only be a borrow in v1. Annotating what is forced is ceremony.
   in slice 3b. Contextual, not a lexer keyword, for the same reason
   `witnessed` is (243 Slice 1 refinement 2): the self-hosted lexer's
   keyword-set parity oracle stays untouched, and no program using
+- `shared` is a future contextual keyword at the acquire binding
+  (`let pool = effect shared Pool.open(url) undo pool.close()`), reserved
+  now, not implemented in v1. Contextual, not a lexer keyword, for the
+  same reason `witnessed` is (243 Slice 1 refinement 2): the self-hosted
+  lexer's keyword-set parity oracle stays untouched, and no program using
   `shared` as an identifier breaks.
 - explicit transfer is a source-level marker at the passing site, because
   it changes who runs the final inverse, which is author intent again.
@@ -284,6 +305,12 @@ can only be a borrow in v1. Annotating what is forced is ceremony.
   remains the later surface. The item's realm-boundary requirement is not
   relaxed: realm-crossing transfer stays refused until its later slice
   (TR1 below, "Reconciling with the seam").
+- explicit transfer (`transfer conn`), which the item text requires at a
+  realm boundary, is likewise reserved and NOT in v1: v1 has no transfer
+  at all, an owned handle stays where it was acquired, and a realm or
+  process boundary refuses it (next section). When transfer lands it is a
+  source-level marker at the passing site, because it changes who runs
+  the final inverse, which is author intent again.
 
 The recommendation in one line: ownership is contract, so it lives at the
 source level like `emission[...]` does; but the compiler infers the mode
@@ -292,6 +319,9 @@ intent genuinely diverges from the default (`shared`, `transfer`). Shared
 shipped its marker in slice 3b; transfer's marker is decided in TR1. The
 owned/borrowed v1 itself shipped zero new grammar, which also means zero
 self-host parser/lexer porting for that surface.
+intent genuinely diverges from the default (`shared`, `transfer`), neither
+of which is in v1. v1 therefore ships ZERO new grammar, which also means
+zero self-host parser/lexer porting for the surface.
 
 ## The checks, as static rules with refusal diagnostics
 
@@ -392,6 +422,11 @@ refuses. So a seam that acquires a handle has no way to name it. The shape
 that compiled before the site `undo` slot was argument-checked
 (`_check_inverse_args`) passed something ELSE to the inverse; that is a
 type error like any other.
+refuses. So a seam that acquires a handle has no way to name it, and the
+only shape that used to compile was one passing something ELSE to the
+inverse. That shape compiled solely because the site `undo` slot was never
+argument-checked; once it is (`_check_inverse_args`), it is a type error
+like any other, and O1's hint at a seam names the reachable fix instead.
 
 What a seam CAN write is the NAME-addressed release (item 2102): a site
 `undo` that calls a release with the values the acquisition was given, in
@@ -417,6 +452,18 @@ also revert on a clean unload, where a site `undo` is what runs. Making
 acquire binding (the F9 surface, DECIDED below and not built), would each
 be a second, weaker copy of one of these two; a handle-carrying form would
 be a third. The refusal names both spellings.
+That fix needs no new surface. `witnessed` (item 243, extended to
+provide-method bodies by item 318) is the one classification whose
+DECLARED inverse is actually replayed: the acquisition carries no site
+`undo` at all, and `undo <inverse>(result)` auto-registers on the
+enclosing activation's transactional accumulator, once per acquisition,
+with `result` bound to what the acquisition returned. That is precisely
+"release exactly the handle that was acquired", on the frame whose
+teardown is the right one, on the `Ok` branch only. Making `result`
+available in a site `undo`, or admitting a general method-scope acquire
+binding (the F9 surface, DECIDED below and not built), would each be a
+second, weaker copy of that mechanism; a handle-carrying form would be a
+third. The refusals point at `witnessed` rather than inventing one.
 
 ### B1: a borrow does not escape its scope
 
@@ -482,6 +529,8 @@ OWNED values, as noted inline:
    duty to close it moves", which is exactly what the `transfer` marker now
    decides (TR1 below); handoff shape-compat alone cannot express it,
    which is why a resource-typed handoff needs the marker.
+   bracket migrates", which is exactly what the deferred `transfer`
+   marker means (next section); handoff shape-compat cannot express it.
 
 Passing the borrow DOWN (as an argument to a `fn` or a further service
 call) is admitted; the callee's parameter is a borrow with the same rules.
@@ -573,6 +622,7 @@ Parsing all 873 `.rvl` files with the real front end and walking every
 `backends/java/scenarios/method_witnessed.rvl:56`), against 107
 activation-scope acquisitions. GENERAL method-scope acquires: zero. Not
 zero by accident either; `_lower_provide` refuses the form outright
+zero by accident either — `_lower_provide` refuses the form outright
 (`src/revl/lower.py`, "only `spawn` may be acquired inside a
 provide-method body"), so option B of the original decision ("v1 refuses
 method-scope acquires with a diagnostic naming the restructure") was
@@ -586,6 +636,7 @@ that is two forms:
    `insert_if_absent`), which binds a checked `Bool`. No handle, no
    lifetime, nothing for F9 to decide.
 2. `spawn`. This one yields a live instance, and it is already the one
+2. `spawn`. This one yields a live instance — and it is already the one
    acquisition in the language with an early release.
 
 **The surface exists, spelled in the grammar revl already had.** A spawn
@@ -594,6 +645,7 @@ nested teardown scope. `w.dispose()` unloads it now, mid-method, written
 `effect w.dispose() undo w.dispose()`. There is no explicit-release
 surface owed, and building the general `release conn` form would be a
 third weaker copy of a mechanism that already works, the same judgment
+third weaker copy of a mechanism that already works — the same judgment
 the provide-method seam paragraph reaches about `witnessed`.
 
 **Why that does not disturb teardown**, which is the reason a general
@@ -619,6 +671,7 @@ what it was, so LIFO-completeness needs no re-argument.
   the release already happened the stranded record names one entry whose
   replay is a no-op, so the halt OVER-reports by one. That is the R4-safe
   direction (residue is never under-reported) and it is precisely why
+  direction — residue is never under-reported — and it is precisely why
   early release must not discharge: a discharge would drop the descriptor
   the halt is required to keep, and THAT would contradict
   `RevL.G7.estop_strands_everything`. Stranding acts on ENTRIES, early
@@ -627,6 +680,8 @@ what it was, so LIFO-completeness needs no re-argument.
 **What F9 therefore ADDS**, since the release surface needed nothing. The
 nested scope's promise ("a request-scoped instance is reclaimed when the
 request ends") was UNENFORCED. An `Instance[C]` is not an `extern
+nested scope's promise — "a request-scoped instance is reclaimed when the
+request ends" — was UNENFORCED. An `Instance[C]` is not an `extern
 acquire` return, so it is not in the resource-taint base and no B1 clause
 ever bound it: a provide method could return the handle, park it in
 activation state, alias it, seat it in a carrier, or close over it, and
@@ -644,6 +699,7 @@ handle is read and not retained as the receiver of a host method call
 which are the two things the instance surface is for. Everything else is
 refused. Inside an arrow body even those two stop counting, because an
 arrow's type erases what it closes over: B1 clause 2's reasoning, applied
+arrow's type erases what it closes over — B1 clause 2's reasoning, applied
 for B1 clause 2's reason.
 
 **Additivity.** The corpus contains one method-scope spawn, in
@@ -656,8 +712,13 @@ all 258 compilable corpus files produces zero new refusals.
 decided in TR1 below and its implementation slice is next. A general
 explicit-release surface for an ACTIVATION-scope handle is still not in the
 language, and O1's hint still says so honestly. F9 does not change either.
+**What stays open.** `shared` and `transfer` remain deferred to item 294's
+leases; a general explicit-release surface for an ACTIVATION-scope handle
+is still not in the language, and O1's hint still says so honestly. F9
+does not change either.
 
 ### S1: shared teardown, exactly once at last release (completed below; landed in PR #698)
+### S1: shared teardown, exactly once at last release (deferred with shared)
 
 **Rule (direction fixed here; the shared slice finishes the spec).** A
 `shared` acquire registers, in each holder's frame, a release entry; the
@@ -1477,6 +1538,9 @@ from its undo contract. Per mode:
   does not pretend otherwise.
 - **The realm boundary ("requires explicit transfer").** An owned handle
   is realm-bound: `isolate db in realm("tenant")` partitions providers, and
+- **The realm boundary ("requires explicit transfer").** v1 has no
+  transfer, so the realm rule collapses to: an owned handle is also
+  realm-bound; `isolate db in realm("tenant")` partitions providers, and
   a handle acquired in one realm reaching a component of another realm is
   refused by the same promoted resource-type check (the checker now sees
   resource types, so it can see realm labels next to them). TR1 decides
@@ -1485,10 +1549,16 @@ from its undo contract. Per mode:
   successor is placed in another realm is refused, never cold-started. A
   move across a PROCESS seam is still refused as well, because it needs
   the WAL to move processes, so it is not an afterthought of this slice.
+  resource types, so it can see realm labels next to them). The reserved
+  `transfer` marker is the future surface that would move the bracket
+  itself; deferred, with the note that transfer across a PROCESS seam
+  additionally needs the WAL entry to move processes, which is why it is
+  not a v1 afterthought.
 
 ## What it buys, and what it formalizes
 
 | property | today | under 308 |
+| property | today | under 308 v1 |
 |---|---|---|
 | owner runs the final inverse | by construction (accumulator), unchecked elsewhere | formalized; O1 closes the out-of-band channel |
 | no double-close | writable in admitted programs | refused (O1) |
@@ -1498,6 +1568,7 @@ from its undo contract. Per mode:
 | no borrow seated in another activation | writable via spawn config and handoff | refused (B1 clauses 6, 7) |
 | shared teardown exactly once | no shared notion at all | S1 completed and landed (PR #698): 294 counted-grant ledger, orderly last-release as an ordinary bracket, whole-process crash via `revl recover` + `reclaim` residue, no wall-clock inverse |
 | a handle can move with its closing duty | not expressible: the owner and its bracket stay together | DECIDED (TR1): a resource-typed `handoff` across a same-realm swap moves the closing duty from predecessor to successor through a swap transit ledger (OQ-T1 decided: option B); implementation next |
+| shared teardown exactly once | no shared notion at all | spec COMPLETE (S1 completed): 294 counted-grant ledger, orderly last-release as an ordinary bracket, whole-process crash via `revl recover` + `reclaim` residue, no wall-clock inverse; impl deferred, sequenced with 294 |
 | owned cannot cross a seam | refused (363/F1) | unchanged, mode-named diagnostic |
 
 Relation to the arc: G5 is untouched in v1 (checker-only, no new
@@ -1540,6 +1611,7 @@ The minimal cut that pays for itself immediately:
    arguments reaching non-inverse externs and bridge services
    (report-only, the B1 limitation's mitigation).
 6. The method-scope acquire decision (F9, DECIDED; see "F9, decided"):
+6. The method-scope acquire decision (F9, DECIDED — see "F9, decided"):
    the count is zero because the general form is already refused, the one
    handle-yielding method-scope acquisition (`spawn`) already has its
    early release (`w.dispose()`, a nested teardown scope), and what F9
@@ -1551,6 +1623,12 @@ Landed since this cut: `shared` (S1 above, PR #698). Decided and next:
 the call-argument marker, realm-crossing moves and process-seam moves stay
 later slices; it is also the only honest future for handoff of
 resource-carrying state, per clause 7). Still deferred: an
+Deferred, each with its landing place named: `shared` (a 294 lease
+binding; spec S1 above is now COMPLETE per "S1 completed", crash path resolved
+by `revl recover` + the `reclaim` residue record, implementation the next
+slice), explicit `transfer`
+and realm-crossing moves (new source marker, WAL migration; also the only
+honest future for handoff of resource-carrying state, per clause 7), an
 explicit-release surface for an ACTIVATION-scope handle (F9 resolved the
 method-scope half without one; this half still interacts with 245 session
 commit and stays unbuilt), remote borrows (a service, not a proxy, is the
@@ -1577,6 +1655,7 @@ lower.rvl. Decide at slice 2, do not let it be discovered by a red oracle.
 
 **DECIDED (slice 2): port DEFERRED, gap named.** The self-host checker's
 second half is not expression-only; it walks component/provide bodies for
+second half is not expression-only — it walks component/provide bodies for
 G4 emission-declaration and call-site typing, message-for-message with the
 reference (`selfhost/checker.rvl` slice two, `tests/test_selfhost_checker.py`).
 But it carries NO O1/B1 flow walk: those live in `src/revl/lower.py` over the
@@ -1584,6 +1663,8 @@ resource-taint base, and are not ported. Measured on the reference base
 (a nominal `Sock`, its declared inverse, an `acquire`): a POSITIVE
 owner-holds-and-lends program is admitted by BOTH sides; they AGREE, so a
 positive ownership program is safe in the self-host corpus, while an O1
+owner-holds-and-lends program is admitted by BOTH sides — they AGREE, so a
+positive ownership program is safe in the self-host corpus — while an O1
 borrower-close and a B1 non-owner-return are REFUSED by the reference (with
 the item-308 message) and ACCEPTED by the self-host. So rejection parity
 holds for everything the self-host actually checks, and the ONLY divergence
@@ -1591,6 +1672,7 @@ is an O1/B1 REJECTION, which no self-host corpus fixture spells today. The
 port is deferred to the ownership-dialect self-host slice; until then no
 O1/B1 rejection fixture may enter the self-host corpus (adding one would red
 the oracle for this designed gap: the "discovered by a red oracle" outcome
+the oracle for this designed gap — the "discovered by a red oracle" outcome
 this note forbids). The gap is pinned executably in
 `tests/test_selfhost_ownership_gap_308.py`: its two divergence pins flip when
 the flow walk is ported, directing the porter to move the rejection fixtures
@@ -1601,6 +1683,7 @@ into the shared corpus and strike this deferral.
 Slices are additive and land in order; each leaves the suite green and
 per-backend goldens byte-identical (checker-only until the shared slice;
 the transfer slice adds its marker, the carrier and the transit protocol).
+per-backend goldens byte-identical (checker-only until the shared slice).
 
 - **Slice 0: R0 decision + shared resource-type module + report-only
   sweep + the method-scope count.** First, land R0 (nominal acquire
@@ -1659,6 +1742,8 @@ the transfer slice adds its marker, the carrier and the transit protocol).
     needed; the point is it never compiles).
 - **Slice 3b: shared (spec completed above at "S1 completed"; landed in
   PR #698).** Exit tests, each grounded in the completed spec:
+- **Slice 3b: shared (spec completed above at "S1 completed"; sequenced
+  with 294).** Exit tests, each grounded in the completed spec:
   - `shared` admitted only at an acquire binding: the reserved-refusal from
     slice 3a flips to admission for `let p = effect shared Pool.open(url)
     undo p.close()`; a `shared` marker anywhere but the acquire-binding

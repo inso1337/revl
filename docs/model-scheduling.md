@@ -79,6 +79,7 @@ step, in program order:
   host declares them. An arm may opt in to residency instead — see
   [One arm may opt in to residency](#one-arm-may-opt-in-to-residency) — and an
   arm that does not is ordered by the written set however the host reports.
+  host declares them.
 - A council arm is satisfied only when every member role is placed, because a
   council asks every member.
 - A role is loaded once per host. A later step that picks a role already
@@ -378,5 +379,8 @@ with it is refused as placed on a host with no devices.
   planner applies. A `model role` clause declaring a load cost is decided out of
   scope, so a declared cost stays inexpressible and item 538's measured cost is
   the answer (`docs/design/539-model-portfolio.md` §11.6).
+- **It has no load cost and no residency over time.** "The small model is
+  resident here" is a statement about a placement over time; slice S3 owns it.
+  The scheduler ranks candidates by the order the program wrote, not by cost.
 - **A single-process run is not scheduled.** `revl run app.rvl` with no
   placement file declares no host, so there is nothing to schedule against.

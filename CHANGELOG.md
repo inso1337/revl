@@ -4,12 +4,17 @@ All notable changes to revl are recorded here. Versions follow the IR contract:
 a major version is an IR-breaking cut, a minor version adds without breaking.
 
 ## 0.3.0rc1 (unreleased) - the 0.3.0 release candidate
+## 3.0.0 (unreleased) - the first working version
 
 0.3.0rc1 is the release candidate for revl 0.3.0. It is a beta: unreleased, and
 open to change before 0.3.0. It is the minimal clean, self-consistent six-tier
 cut plus the live-systems demo: self-host front end, cross-tier execution,
 six-backend conformance, and per-tool-call agent effects on all six tiers. It
 also folds in the full agent story and the standing correctness debt.
+v3.0 is the minimal clean, self-consistent six-tier cut plus the live-systems
+demo. The language is done: self-host front end, cross-tier execution,
+six-backend conformance, and per-tool-call agent effects on all six tiers. This
+release also folds in the full agent story and the standing correctness debt.
 
 ### The language
 
@@ -21,6 +26,7 @@ also folds in the full agent story and the standing correctness debt.
   conformance matrix is published and green; the compiler emits itself with no
   divergence on py, ts, and java.
 - Typing frontier narrowed: match-arm checking in check-position, generics
+- Typing frontier closed: match-arm checking in check-position, generics
   instantiation, `type X = Y` alias resolution matching TypeScript, and six
   accept-but-won't-compile holes each verified against `javac` and `cargo`
   and closed. This is not a claim that none remain; the open ones are listed
@@ -165,6 +171,7 @@ also folds in the full agent story and the standing correctness debt.
   generator, the shrinker and the minimal counterexample all apply, and
   `revl audit --spec-results` lists each spec with the result of its last
   recorded check (#2705, docs/function-specs.md).
+  accept-but-won't-compile holes each verified against `javac` and `cargo`.
 
 ### The agent story
 
@@ -412,6 +419,8 @@ but not seen. Every instance was closed. Representative fixes:
   captured and re-delivered and the provider dispatched it again. The reason
   recorded for that (a replay ledger needs the per-boot secret a
   cross-composition caller can never hold) was wrong: dedup needs an identity
+  recorded for that — a replay ledger needs the per-boot secret a
+  cross-composition caller can never hold — was wrong: dedup needs an identity
   to scope the key by, and mutual TLS has already proved one. Freshness is now
   keyed on the identity the handshake proved, read off the peer certificate and
   never off the payload a replayer controls, so it needs no shared secret, and a
@@ -421,6 +430,7 @@ but not seen. Every instance was closed. Representative fixes:
 - The node bridge seals a correlation envelope. It had no `correlation`
   parameter at all, so a placement disarmed a provider's guard entirely rather
   than refuse a caller that could not satisfy it: one node consumer left a py
+  than refuse a caller that could not satisfy it — one node consumer left a py
   provider unguarded. The ts bridge now seals the same HMAC over the same
   canonical bytes, proven against the real guard over a real seam.
 - A boundary policy rule now selects a directly emitted extern by the capability
@@ -447,6 +457,8 @@ but not seen. Every instance was closed. Representative fixes:
   A `config` field's default is rendered into a `/** default: ... */` doc line,
   and the string escaping it went through is the one a string LITERAL needs.
   A comment has no escape syntax at all, only sequences that end it. The doc
+  and the string escaping it went through is the one a string LITERAL needs —
+  a comment has no escape syntax at all, only sequences that end it. The doc
   line now goes through a comment escaper that breaks both of those (a line
   terminator, and `*/`), so a default can no longer close the comment and put
   the rest of itself in code position. Emitted string literals, identifiers and

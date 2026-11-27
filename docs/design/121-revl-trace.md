@@ -142,6 +142,7 @@ the two halves of the proof are carried:
    `producedBy` onto the hop and appends the DOWNSTREAM emission's seq to its
    `producedSeq`. A `producedBy` that resolves to no hop in the activation being
    recorded, or to a hop under a different activation id, draws no edge; this is
+   recorded, or to a hop under a different activation id, draws no edge — this is
    the driver-side activation check that replaces the token's dropped argument.
 5. **The activation id gains its per-activation discriminator.** `component#gN`
    is `component + gen`, which the NEW CRITICAL above calls insufficient. Each
@@ -313,6 +314,7 @@ crossing the walk reaches first: a run that crossed a completion and then wrote 
 file gave the model, token, cost and latency numbers to the write. Fiber-locality
 cannot repair that, for the same reason §2.2's NEW CRITICAL gives for
 `producedSeq`: it isolates concurrent ACTIVATIONS, and both crossings are in one
+`producedSeq` — it isolates concurrent ACTIVATIONS, and both crossings are in one
 fiber. So `replay.Timeline.record_emission` publishes each crossing's identity
 (`component` + step index) as it mints the step, the seam binds its observation
 to the crossing `make_call` just recorded, and the driver reads the entry for the
@@ -321,6 +323,7 @@ two entries: the same finer-than-fiber property `producedSeq` gets from the
 activation id. The bound on the pre-fix defect is worth keeping: it could not
 forge a `produced` edge, because the back-patch requires the resolved target to
 carry an `llm` payload, so a misattached payload degrades to no edge: what was
+carry an `llm` payload, so a misattached payload degrades to no edge — what was
 wrong was the hop itself.
 
 ### 2.2 The widened `emit` record
@@ -334,8 +337,10 @@ wrong was the hop itself.
 // generation are separable (gen is a process-global RELOAD counter, run.py:618,
 // NOT a per-activation id). Issue #2694 adds three more optional members under
 // `llm` and bumps the trace schema to v3.
+// NOT a per-activation id).
 {
   "v": 3, "seq": 7, "event": "emit", "component": "AgentLoop",
+  "v": 2, "seq": 7, "event": "emit", "component": "AgentLoop",
   "activationId": "AgentLoop#g3#a1",        // revl-assigned per activation
   "capability": "model", "key": "Model.complete", "ts": 1234.56,
   "cause": { ... },

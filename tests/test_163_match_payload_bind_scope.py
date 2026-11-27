@@ -188,6 +188,12 @@ def test_a_payload_bound_under_an_emitter_walrus_temp_still_compiles():
     variable. Since issue #2913 a user name spelled like a temp is renamed
     (`_bi` -> `_bi_`), binder and reads alike, so the bind never meets the
     walrus: the point here is that it EMITS AND RUNS with the right value."""
+    """The one name the comprehension cannot take: python refuses an assignment
+    expression that rebinds a comprehension's iteration variable, and `_bi` is
+    the emitter's own bounded-arithmetic walrus temp. Such a bind keeps the
+    older binder — it is already clobbered by the scaffolding that owns the
+    name, with or without a match, so the point here is that it EMITS AND RUNS
+    rather than becoming a py `SyntaxError`."""
     body = ('  let r = match wrap(n) { Some(_bi) => twice(_bi + 1), None => 0 }\n'
             '  return r\n')
     assert _run_emitted("bitmp", body, 7) == 16
@@ -336,3 +342,4 @@ def test_a_component_body_match_decides_the_binder_the_same_way():
     # the bind is still read inside it.
     assert ("(lambda n: (_bi if _REVL_I64_MIN <= (_bi := n + 1) <= _REVL_I64_MAX"
             " else _revl_i64(_bi)))(match.value)") in bump, bump
+    assert "(lambda n: (n + 1))(match.value)" in bump, bump

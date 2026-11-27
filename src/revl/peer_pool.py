@@ -1597,6 +1597,13 @@ def promote(charter_record: Mapping[str, Any], peer_id: str, tier: str, *,
     a version 1.0 receipt verifies but does not count. A promotion that raised
     a peer on a receipt naming no grant or policy would be the same fail-open
     this function closed for counts, one level down.
+    ``receipts`` is a sequence of ``(execution_receipt, attestation)`` pairs.
+    They are RECOUNTED here, by :func:`pool_receipt.count_evidence`: each
+    receipt must be signed by the member's own pinned key, be about this pool,
+    this peer and the artifact digest this member was admitted with, be no
+    older than that admission, and carry an attestation signed by a key the
+    charter names in ``attest_key_ids``. A peer cannot attest its own
+    promotion, and neither can an operator who holds only admit authority.
 
     There is no parameter through which an evidence COUNT can be supplied.
     That was the fail-open this closes: ``Membership.evidence`` was an integer
@@ -2235,6 +2242,26 @@ def pool_command(args) -> int:
         except PoolError as error:
             print(f"error: {error}", file=sys.stderr)
             return 2
+        charter = PoolCharter(
+            pool_id=args.pool_id,
+            ceiling=tuple(args.ceiling or ()),
+            tiers={ENTRY_TIER: TierGrant(caps=tuple(args.entry_caps or ()))},
+            admit_key_ids=(key_id(key),),
+            revoke_key_ids=(key_id(key),) + tuple(
+                peer_identity.load_public_identity(path).key_id
+                for path in (args.revoke_identity or ())),
+            # The shared key's fingerprint, plus any identity fingerprints the
+            # operator pinned. An execution receipt is an ASYMMETRIC record
+            # (`pool_receipt`), so without at least one `--attest-identity` no
+            # receipt can ever count and the ladder above the entry tier is
+            # unreachable. That is deliberate rather than a default: evidence
+            # the verifier could have manufactured is not evidence.
+            attest_key_ids=(key_id(key),) + tuple(
+                peer_identity.load_public_identity(path).key_id
+                for path in (getattr(args, "attest_identity", None) or ())),
+            artifact_digests=tuple(args.artifact or ()),
+            trust_floor=args.trust_floor,
+            identity_mode=args.identity)
         record = sign_charter(charter, key)
         with pool_state.locked(args.dir):
             _write_json(f"{args.dir}/{CHARTER_FILE}", record)

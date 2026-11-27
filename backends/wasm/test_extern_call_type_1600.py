@@ -74,6 +74,7 @@ def test_an_extern_calls_type_is_inferred(case):
     """Each spelling used to be refused by name of a callee that exists."""
     wat = _module(case)
     assert "(call $fn.names)" in wat
+    assert "(call $names)" in wat
 
 
 def _wasmtime():

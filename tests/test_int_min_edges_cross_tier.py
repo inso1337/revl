@@ -286,6 +286,7 @@ def test_java_routes_the_named_divisions_through_total_helpers():
     reached only through helpers now, and the quotient helpers truncate with
     `revlDivTrunc` (over `Math.divideExact`), which throws on that one input
     in revl's own `revl: Int overflow`."""
+    `Math.divideExact`, which throws on that one input."""
     doc = _PRELUDE + (
         "pub fn a() -> Int { return mfive().div_floor(imin()) }\n"
         "pub fn b() -> Int { return mfive().div_euclid(imin()) }\n"
@@ -296,6 +297,7 @@ def test_java_routes_the_named_divisions_through_total_helpers():
     assert "private static long revlMod(long a, long b) {" in emitted
     assert emitted.count("long q = revlDivTrunc(a, b);") == 2, emitted
     assert emitted.count("Math.divideExact(a, b)") == 1, emitted
+    assert emitted.count("Math.divideExact(a, b)") == 2, emitted
     assert "if (b == Long.MIN_VALUE)" in emitted
 
 

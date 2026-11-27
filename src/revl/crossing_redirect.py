@@ -83,6 +83,7 @@ CROSSING_TIMEOUT = 30
 
 
 def py_policy(tag: str, *, follow: bool, extra_handlers: str = "") -> str:
+def py_policy(tag: str, *, follow: bool) -> str:
     """The redirect-refusing opener, as python source for an emitted body.
 
     Indented four spaces: both call sites splice it into a host body that sits
@@ -144,6 +145,7 @@ def py_policy(tag: str, *, follow: bool, extra_handlers: str = "") -> str:
                                 unverifiable=True, method=_rq.get_method())
 
     _opener = _req.build_opener(_RedirectPolicy{extra_handlers})
+    _opener = _req.build_opener(_RedirectPolicy)
 '''
 
 

@@ -68,6 +68,7 @@ def _composition_document(args, *, label: str | None = None,
                           files: list[str] | None = None,
                           refuse_code: int = 1,
                           read_report: dict | None = None):
+                          refuse_code: int = 1):
     """A COMPOSITION document argument, for the commands that share the module
     compile step (item 439, issue #118).
 
@@ -128,8 +129,11 @@ def _composition_document(args, *, label: str | None = None,
     the same caller-supplied out-parameter `compile_files` takes: the compile
     records what it read there (issue #1779), so a caller that has to ask which
     module a `use` resolved to can, without changing the IR bytes.
+    refuses, or the compiled composition document.
     """
     import os  # noqa: PLC0415 — one call site
+
+    from ..composition import compile_composition  # noqa: PLC0415 — lazy
 
     command = label or args.command
     paths = list(args.files if files is None else files)
@@ -188,6 +192,7 @@ def _composition_document(args, *, label: str | None = None,
     try:
         return compile_composition(docs[0], getattr(args, "root", None),
                                    confine=True, report=read_report)
+                                   confine=True)
     except RevlError as error:
         if getattr(args, "json_diagnostics", False):
             print(json.dumps(report(error), indent=2))

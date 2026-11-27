@@ -536,6 +536,7 @@ def compose(outer: Any, inner: Any, generated: str | None = None) -> dict:
                     (gcol, outer_index[src], oline, ocol, name))
                 continue
             hit = _resolve_inner(oline, ocol)
+            hit = resolve(inner_lines, oline, ocol)
             if hit is None or hit[1] is None:
                 # No inner mapping covers it. Blanking is the fail-closed
                 # answer: the generated file is not in the composed `sources`,

@@ -266,6 +266,7 @@ def test_exit_py_executes_with_no_coroutine_leak(tmp_path):
     for _module in ("runtime.py", "confidential.py"):
         (tmp_path / _module).write_text(
             (ROOT / "backends" / "python" / _module).read_text(encoding="utf-8"))
+            (ROOT / "backends" / "python" / _module).read_text())
     (tmp_path / "app.py").write_text(_emit("python", compile_source(_EXIT, "exit.rvl")))
     (tmp_path / "driver.py").write_text(
         "import warnings\n"

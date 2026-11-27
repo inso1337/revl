@@ -21,6 +21,7 @@
 /// (`Cargo.toml`, `build.rs`, `src/**/*.rs`), so the id names the bytes that
 /// were compiled and no committed file carries it (issue #1768).
 pub const FRONTIER_ID: &str = concat!("selfhost-admit:", env!("REVL_GATE_IDENTITY"));
+pub const FRONTIER_ID: &str = "selfhost-admit:584fa3b051add6fc";
 
 /// Sources above this many bytes are refused rather than decided: the emitted
 /// parser/checker are deeply recursive and a stack exhaustion ABORTS, which no

@@ -177,6 +177,7 @@ func Counter() stc.Component {
 					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
 				}
 			}()
+		Apply: func(ctx *stc.Context) (stc.Inverse, error) {
 			var store *Map[int]
 			if err := ctx.Effect(func() stc.Inverse {
 				store = MapNew[int]()

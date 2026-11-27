@@ -30,6 +30,7 @@ revl:
     `out-of-fragment`. There is a G5 arm now, and a documented reason there
     is no `agree-G6` keyed on the `C` row (below); since issue #1812 the
     G6 binding refusal has its own row, `BU`.
+    is no `agree-G6` (below).
 
 And the promotion the first four were the precondition for: `formal-strict`
 and `formal-found-other` are in `FATAL_BUCKETS`. Informational is how the
@@ -41,6 +42,8 @@ neither can disagree with anything and neither could fail. What is
 checkable without judging their contents is MEMBERSHIP, so both are held to
 `formal/out_of_fragment_ledger/`, which shrinks only: a file joining a
 bucket without a record in it fails the gate, and a record no longer in its
+`formal/out_of_fragment_ledger.json`, which shrinks only: a file joining a
+bucket without a line in it fails the gate, and a line no longer in its
 bucket fails the gate until it is deleted. The tests at the end name the
 input that makes each direction fire.
 
@@ -54,6 +57,7 @@ bound case that F3 must not cost.
 from __future__ import annotations
 
 import io
+import json
 import re
 import shutil
 import sys
@@ -408,6 +412,9 @@ component C provides cache: Cache {
 }
 """
 G5_OUT_OF_PROG = "corpus/g5_undo_opaque_param.rvl"
+#: A G5 fixture no row sees: `undo dispatch1(ref)`, where `dispatch1` calls
+#: its own parameter, so the reach fold leaves the `Prog` at the first hop.
+G5_OUT_OF_PROG = "examples/rejections/g5_undo_handle_ref_arg.rvl"
 #: The corpus's only G6-coded file.
 G6 = "examples/rejections/g6_method_local_shadows_component.rvl"
 
@@ -439,14 +446,17 @@ def align(harness, monkeypatch, tmp_path):
     writer pointed at a scratch directory, and return
     `(non-zero bucket counts, fatal findings, the printed report)`. `repo`
     compiles the file from a synthetic corpus root instead of the tree."""
+    `(non-zero bucket counts, fatal findings, the printed report)`."""
     (tmp_path / "harness" / "out").mkdir(parents=True)
     monkeypatch.setattr(harness, "FORMAL", tmp_path)
 
     def run(rel, verdicts, rows, repo=None):
+    def run(rel, verdicts, rows):
         buf = io.StringIO()
         with redirect_stdout(buf), pytest.MonkeyPatch.context() as mp:
             if repo is not None:
                 mp.setattr(harness, "REPO", repo)
+        with redirect_stdout(buf):
             fatal = harness.checker_alignment({rel: {}}, [], verdicts, rows)
         out = buf.getvalue()
         counts = {k: int(n) for k, n in re.findall(
@@ -457,9 +467,11 @@ def align(harness, monkeypatch, tmp_path):
 
 
 def test_the_checker_refuses_each_g5_fixture_with_code_g5(harness, opaque):
+def test_the_checker_refuses_each_g5_fixture_with_code_g5(harness):
     """The premise. All three arms below are about files revl answers `G5`
     for; if one stops being a G5 the test under it is measuring nothing."""
     for rel in (G5_BY_U5, G5_BY_G_ROW):
+    for rel in (G5_BY_U5, G5_BY_G_ROW, G5_OUT_OF_PROG):
         assert harness.checker_code(rel)[0] == "G5", rel
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(harness, "REPO", opaque[0])
@@ -486,13 +498,18 @@ def test_a_handle_undo_agrees_by_the_marker_row(align, verdicts, rows):
 
 def test_an_undo_that_leaves_the_prog_is_out_of_fragment_not_missed(
         harness, align, opaque):
+        harness, align, verdicts, rows):
     """`missed-G5` would be a claim that the model went blind. Here the model
     has no fact at all: `f` is a function-typed parameter, not a declared fn
     or extern or a binding in view, so the reach fold has nothing to follow.
     Named, not counted, and not fatal."""
     root, rows, verdicts = opaque
+    has no fact at all: `dispatch1` calls its own parameter, which is not a
+    declared fn or extern, so the reach fold has nothing to follow. Named,
+    not counted, and not fatal."""
     assert G5_OUT_OF_PROG not in harness.g5_files_the_prog_resolves(rows)
     counts, fatal, out = align(G5_OUT_OF_PROG, verdicts, rows, repo=root)
+    counts, fatal, out = align(G5_OUT_OF_PROG, verdicts, rows)
     assert counts == {"out-of-fragment-G5": 1}
     assert fatal == []
     assert f"ALIGN out-of-fragment-G5: {G5_OUT_OF_PROG}" in out
@@ -534,12 +551,16 @@ def test_the_confinement_row_fails_on_a_program_the_checker_accepts(
 
 
 def test_a_g6_binding_refusal_agrees_by_the_binding_row(
+def test_a_g6_refusal_is_out_of_fragment_with_the_model_clean(
         align, verdicts, rows, harness):
     """revl's G6 is purity outside effect forms and the duplicate-binding
     refusal. The file is a binding refusal, and the `BU` row (issue #1812)
     is what agrees with it: the `G` row is `ok`, and the `C` rows that do
     `fail` are about something else."""
     assert harness.checker_code(G6) == ("G6", "binding")
+    refusal; the model states neither. Its verdicts on the file are all
+    `ok`, and the `C` rows that do `fail` are about something else."""
+    assert harness.checker_code(G6)[0] == "G6"
     assert verdicts.comps[(G6, "C")] == "ok"
     assert any(x == "fail" for k, x in verdicts.confinements.items()
                if k[0] == G6)
@@ -565,6 +586,7 @@ def test_a_g6_purity_refusal_is_out_of_fragment_with_the_model_clean(
     _as_purity_refusal(harness, monkeypatch)
     clean = verdicts._replace(bindings={k: "ok" for k in verdicts.bindings})
     counts, fatal, out = align(G6, clean, rows)
+    counts, fatal, out = align(G6, verdicts, rows)
     assert counts == {"out-of-fragment-G6": 1}
     assert fatal == []
     assert f"ALIGN out-of-fragment-G6: {G6}" in out
@@ -591,6 +613,7 @@ def test_a_model_refusal_on_an_accepted_file_fails_the_gate(
 
 def test_a_model_refusal_under_an_unmodelled_code_fails_the_gate(
         align, verdicts, rows, harness, monkeypatch):
+        align, verdicts, rows):
     """The input that still FAILS for `formal-found-other`: revl refuses the
     G6 file for a rule the model does not state (purity), and a model row
     refuses it for some other reason. `out-of-fragment-G6` is only for a
@@ -599,6 +622,9 @@ def test_a_model_refusal_under_an_unmodelled_code_fails_the_gate(
     dirty = verdicts._replace(
         comps={**verdicts.comps, (G6, "C"): "fail"},
         bindings={k: "ok" for k in verdicts.bindings})
+    G6 file for a rule the model does not state, and a model row refuses it
+    for some other reason. `out-of-fragment-G6` is only for a CLEAN model."""
+    dirty = verdicts._replace(comps={**verdicts.comps, (G6, "C"): "fail"})
     counts, fatal, _out = align(G6, dirty, rows)
     assert counts == {"formal-found-other": 1}
     assert fatal == [f"formal-found-other: {G6}"]
@@ -617,6 +643,7 @@ def status(harness, exported):
     with redirect_stdout(buf):
         fatal = harness.checker_alignment(
             facts, census["componentless"], ref, rows, census["refusals"])
+            facts, census["componentless"], ref, rows)
     block = harness.status_block(census, facts, census["componentless"],
                                  census["refusals"], ref, harness._ALIGN)
     return (block, fatal, dict(harness._ALIGN),
@@ -793,6 +820,7 @@ def ledger(harness, tmp_path, monkeypatch):
     """Point the ratchet at a scratch ledger and return
     `(write(samples), check(samples))`."""
     path = tmp_path / "out_of_fragment_ledger"
+    path = tmp_path / "out_of_fragment_ledger.json"
     monkeypatch.setattr(harness, "OOF_LEDGER_PATH", path)
 
     def write(samples):
@@ -814,6 +842,8 @@ def test_the_committed_ledger_is_this_corpus_s_membership(harness, status):
     with redirect_stdout(io.StringIO()):
         assert harness.out_of_fragment_ratchet(samples) == []
     committed = harness.load_out_of_fragment_ledger()
+    committed = json.loads(
+        harness.OOF_LEDGER_PATH.read_text(encoding="utf-8"))
     for bucket in harness.OOF_RATCHET_BUCKETS:
         assert committed[bucket] == sorted(samples.get(bucket, [])), bucket
 
@@ -834,6 +864,10 @@ def test_a_file_joining_an_out_of_fragment_bucket_fails_the_gate(
     assert check(base) == []
     joined = {**base,
               "out-of-fragment-G5": [incumbent, NEWCOMER]}
+    write(samples)
+    assert check(samples) == []
+    joined = {**samples,
+              "out-of-fragment-G5": [*samples["out-of-fragment-G5"], NEWCOMER]}
     findings = check(joined)
     assert findings == [f for f in findings if f.startswith(
         "joined out-of-fragment-G5: ")]
@@ -849,8 +883,11 @@ def test_a_file_joining_the_g6_bucket_fails_the_gate(harness, status, ledger):
     incumbent = "examples/rejections/g6_incumbent.rvl"
     base = {**samples, "out-of-fragment-G6": [incumbent]}
     write(base)
+    write(samples)
     newcomer = "examples/rejections/g6_new_shape.rvl"
     findings = check({**base, "out-of-fragment-G6": [incumbent, newcomer]})
+    findings = check({**samples, "out-of-fragment-G6": [
+        *samples["out-of-fragment-G6"], newcomer]})
     assert len(findings) == 1
     assert findings[0].startswith(f"joined out-of-fragment-G6: {newcomer}")
 
@@ -867,10 +904,18 @@ def test_a_stale_ledger_line_fails_the_gate_and_must_be_deleted(
         *samples.get("out-of-fragment-G5", []), NEWCOMER]}
     write(held)
     findings = check(samples)
+    write(samples)
+    shrunk = {**samples,
+              "out-of-fragment-G5": samples["out-of-fragment-G5"][1:]}
+    findings = check(shrunk)
     assert len(findings) == 1
     assert findings[0].startswith(f"left out-of-fragment-G5: {NEWCOMER}")
     write(samples)
     assert check(samples) == []
+    assert findings[0].startswith(
+        f"left out-of-fragment-G5: {samples['out-of-fragment-G5'][0]}")
+    write(shrunk)
+    assert check(shrunk) == []
 
 
 def test_a_missing_ledger_is_a_failure_not_a_pass(harness, status, ledger):
@@ -883,6 +928,7 @@ def test_a_missing_ledger_is_a_failure_not_a_pass(harness, status, ledger):
     # this name needs — a member and no directory — is stated here.
     held = {**samples, "out-of-fragment-G5": [NEWCOMER]}
     findings = check(held)
+    findings = check(samples)
     assert len(findings) == 1 and "is missing" in findings[0]
     # The boundary, which is why the precondition above is not optional.
     assert check(samples) == []
@@ -893,6 +939,9 @@ def test_a_ledger_with_an_unreadable_record_is_a_failure(harness, status, ledger
     path is not an empty expectation; it is an unreadable ratchet. That
     covers a malformed record, a bucket the ratchet does not hold, a record
     filed at another name's path, non-canonical bytes, and a stray file."""
+def test_a_ledger_without_a_name_list_is_a_failure(harness, status, ledger):
+    """A bucket key replaced by something that is not a list of names is not
+    an empty expectation; it is an unreadable ratchet."""
     _block, _fatal, _align, samples = status
     write, check = ledger
     inverse = "out-of-fragment-inverse"
@@ -1033,6 +1082,12 @@ def test_show_ledger_is_a_read_only_flag(harness):
     after = sorted(p.as_posix() for p in (ROOT / "formal").rglob("*")
                    if "out_of_fragment_ledger" in p.as_posix())
     assert before == after
+    path = write(samples)
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["out-of-fragment-G6"] = 1
+    path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    findings = check(samples)
+    assert len(findings) == 1 and "no list of names" in findings[0]
 
 
 def test_the_ledger_records_names_only(harness):
@@ -1041,6 +1096,8 @@ def test_the_ledger_records_names_only(harness):
     PR #1214's construct-reach ledger settled on)."""
     doc = harness.load_out_of_fragment_ledger()
     assert set(doc) == set(harness.OOF_RATCHET_BUCKETS)
+    doc = json.loads(harness.OOF_LEDGER_PATH.read_text(encoding="utf-8"))
+    assert set(doc) == {"_about", *harness.OOF_RATCHET_BUCKETS}
     for bucket in harness.OOF_RATCHET_BUCKETS:
         assert doc[bucket] == sorted(doc[bucket])
         for rel in doc[bucket]:
@@ -1060,6 +1117,9 @@ def test_the_write_is_byte_stable(harness, status, ledger):
     first = tree(write(samples))
     assert tree(write(samples)) == first
     assert tree(harness.OOF_LEDGER_PATH) == first
+    first = write(samples).read_bytes()
+    assert write(samples).read_bytes() == first
+    assert harness.OOF_LEDGER_PATH.read_bytes() == first
 
 
 def test_the_census_writer_does_not_widen_the_ratchet(harness):
@@ -1080,6 +1140,7 @@ def test_the_alignment_arms_do_not_run_the_ratchet(align, verdicts, rows):
     `main()`. Run over one file it would read every other name in the
     ledger as stale, which is why `checker_alignment` does not call it."""
     _counts, fatal, _out = align(G5_BY_U5, verdicts, rows)
+    _counts, fatal, _out = align(G5_OUT_OF_PROG, verdicts, rows)
     assert fatal == []
 
 
@@ -1094,6 +1155,7 @@ def test_the_gate_reports_the_ratchet_as_a_gate_failure(harness):
 
 
 def test_status_md_calls_the_two_buckets_ratcheted(harness, status):
+def test_status_md_calls_the_two_buckets_ratcheted(status):
     """The document stops saying `out-of-fragment*` is informational for the
     two that are now held to a ledger.
 
@@ -1126,3 +1188,11 @@ def test_status_md_calls_the_two_buckets_ratcheted(harness, status):
         r"^\| `out-of-fragment` \| printed by the gate \| informational \|$",
         block, re.M), block
     assert "`formal/out_of_fragment_ledger/<bucket>/`" in block
+    ledger = json.loads(
+        (ROOT / "formal" / "out_of_fragment_ledger.json").read_text(
+            encoding="utf-8"))
+    for bucket in ("out-of-fragment-G5", "out-of-fragment-G6"):
+        assert f"| `{bucket}` | {len(ledger[bucket])} | ratcheted |" in block
+    assert re.search(r"^\| `out-of-fragment` \| \d+ \| informational \|$",
+                     block, re.M), block
+    assert "out_of_fragment_ledger.json" in block

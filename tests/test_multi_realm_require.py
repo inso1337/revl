@@ -284,6 +284,7 @@ def test_every_tier_router_scenario_compiles_to_the_sanctioned_shape():
     assert len(scenarios) >= 4, scenarios
     for path in scenarios:
         ir = compile_source(path.read_text(encoding="utf-8"), str(path))
+        ir = compile_source(path.read_text(), str(path))
         routed = [c for c in ir["components"] if c.get("routes")]
         assert len(routed) == 1, path
         router = routed[0]
@@ -309,6 +310,7 @@ def test_wasm_emitter_provides_the_routed_key_through_the_route():
     runs wherever the frontend does and fails on the pre-fix emitter."""
     scenario = ROOT / "backends" / "wasm" / "scenarios" / "router.rvl"
     ir = compile_source(scenario.read_text(encoding="utf-8"), str(scenario))
+    ir = compile_source(scenario.read_text(), str(scenario))
     router = next(c for c in ir["components"] if c.get("routes"))
     key = next(iter(router["routes"]))
     methods = sorted(ir["services"][router["requires"][key]]["methods"])
@@ -326,6 +328,7 @@ def test_wasm_emitter_provides_the_routed_key_through_the_route():
         assert f'(export "provide:{key}.{op}")' in module
         # the provision IS the route: one call, no realm chosen by the host
         assert f"(call $route.{key}.{op}" in module   # issue #1756 spelling
+        assert f"(call $route_{key}_{op}" in module
     # and the body routes through the substrate's liveness + dispatch ops
     assert f'(import "route:{key}" "live"' in module
     assert f'(import "route:{key}" "call"' in module

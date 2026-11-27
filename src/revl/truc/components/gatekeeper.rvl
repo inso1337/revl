@@ -13,10 +13,14 @@ pub service Gate {
   // keys their `grant` carries; `lockJson` and `trustHostCode` are the two
   // things that may lift the untrusted profile for a host body.
   emission[host_admit_all] fn admit_all(orderedJson: Str, lockJson: Str, trustHostCode: Bool) -> Str
+  // Admit an ordered list of {path, source, name} incrementally through the
+  // gate; the verdict names the first candidate that would not join.
+  emission[host_admit_all] fn admit_all(orderedJson: Str) -> Str
 }
 
 component GateKeeper provides gate: Gate {
   provide gate {
     fn admit_all(orderedJson, lockJson, trustHostCode) = emit host_admit_all(orderedJson, lockJson, trustHostCode)
+    fn admit_all(orderedJson) = emit host_admit_all(orderedJson)
   }
 }

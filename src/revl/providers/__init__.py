@@ -39,6 +39,7 @@ from .placement import (Placement, Refusal, check_bindings, model_keys,
                         placement_of_program)
 from .provision import (ProvisionRefused, Provisions, RoleProvision,
                         gpu_share)
+from .provision import ProvisionRefused, Provisions, RoleProvision
 from .transport import ProviderError, redact, request_json
 
 __all__ = [
@@ -81,6 +82,8 @@ def bind_for_run(ir, files, config_path, environ=None) -> dict:
             "not set: " + ", ".join(
                 f"the one named in `api_key_env` (role `{role}`)"
                 for role, _ in missing))
+            "not set: " + ", ".join(f"`{env}` (role `{role}`)"
+                                    for role, env in missing))
     return hosts
 
 
@@ -227,6 +230,8 @@ def describe_hosts(hosts) -> list:
                 cred = (f", credential from ${b.api_key_env}"
                         if adapter._lookup(b.api_key_env)
                         else ", credential variable not set")
+            cred = (f", credential from ${b.api_key_env}" if b.api_key_env
+                    else "")
             load = (f", loaded by revl on the scheduled device of "
                     f"{', '.join(b.device_names())}" if b.managed else "")
             lines.append(f"  {key}.{method} -> role {op.role}: {b.provider} "

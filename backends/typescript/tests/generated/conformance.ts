@@ -7,6 +7,7 @@ const REVL_I64_MIN = -(2n ** 63n)
 const REVL_I64_MAX = 2n ** 63n - 1n
 function revlI64(v: bigint): bigint {
   if (BigInt.asIntN(64, v) !== v) throw new RangeError('revl: Int overflow')
+  if (v < REVL_I64_MIN || v > REVL_I64_MAX) throw new RangeError('revl: Int overflow')
   return v
 }
 
@@ -82,6 +83,7 @@ export function shout(s: string): string {
 export function double(n: bigint): bigint {
     let $revl_i64 = 0n
     return (BigInt.asIntN(64, $revl_i64 = n * 2n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
+    return revlI64(n * 2n)
 }
 
 export function pick(n: bigint): Outcome {

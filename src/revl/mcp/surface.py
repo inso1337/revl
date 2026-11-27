@@ -164,3 +164,11 @@ def declared_param_types(paths: list[str]) -> DeclaredTypes:
             services.extend(used.services[name] for name in use.names
                             if name in used.services)
     return _service_params(services)
+
+
+def declared_param_types_from_source(source: str,
+                                     filename: str = "<string>") -> DeclaredTypes:
+    """`declared_param_types` for a single in-memory source with no `use`."""
+    from ..parser import Parser  # noqa: PLC0415
+
+    return _service_params(Parser(source, filename).parse().services)

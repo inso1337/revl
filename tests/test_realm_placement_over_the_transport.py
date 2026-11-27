@@ -344,6 +344,7 @@ _DIRECT_CONSTRUCTION = {
         "after `propose`'s `self_extension` decision compile passed, carrying "
         "only that decision's operator realm bindings so the same placeholder "
         "binds the same way in both.",
+        "belongs on it (`AdmissionProfile.untrusted` is False for it).",
 }
 
 

@@ -1,4 +1,5 @@
 # agent-prefilter-js: a browser/edge consumer of the revl wasm gate
+# agent-prefilter-js — a browser/edge consumer of the revl wasm gate
 
 This directory is a standalone project, not part of revl. It is what a browser
 page, an edge worker or a serverless function looks like once it pulls revl's
@@ -20,6 +21,7 @@ toolchain. The gate never confines its host.**
 
 The py gate (installed from source or a git tag, for example
 `pip install "git+https://github.com/inso1337/revl@<tag>"`, then `revl.gate.admit`) is the full reference
+The py gate (`pip install revl`, `revl.gate.admit`) is the full reference
 compiler, so it can both refuse and admit. This one cannot. It is
 `crates/revl-gate` compiled to wasm: the composition and guarantee layer
 (`G1`..`G4`, `A1`, `PRELUDE`, and parse failures as `BAD`) and **not** the
@@ -54,6 +56,9 @@ at every point where it could slip:
    `admitted: boolean`. This widens the one field that must not widen, letting
    a TypeScript consumer write `if (v.admitted) run(x)` with the type checker's
    blessing. `tools/build_gate_js.py` narrows the emitted
+   `admitted: boolean` — a widening on the one field that must not widen, and
+   one that would let a TypeScript consumer write `if (v.admitted) run(x)` with
+   the type checker's blessing. `tools/build_gate_js.py` narrows the emitted
    declaration back to the literal `false` as part of packaging, so
    `v.admitted === true` is a compile error (`TS2367: types 'false' and 'true'
    have no overlap`), and `--check-surface` fails the build if the narrowing

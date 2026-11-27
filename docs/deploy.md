@@ -14,6 +14,10 @@ machine target is refused rather than best-efforted. A committed ssh host cannot
 yet be unwound, because the runner protocol carries PREPARE and COMMIT but no
 ABORT, so a failed deploy reports that host `unresolved`, never `rolled-back`.
 There is no replicated WAL and no quorum coordinator.
+Neither slice builds the cross-machine half. There is no replicated WAL and no
+quorum coordinator, and a **machine boundary is refused** rather than
+best-efforted (§5). What is built is the part that is honest on today's tree and
+that the cross-machine half will reuse whole.
 
 ## What it guarantees, and what it does not
 
@@ -497,6 +501,8 @@ the direction and has `recovery.recover` perform it. The verdict is computed
 against a model world unless a composition binds the real one
 (`revl recover --composition`), so a `rolled-back` verdict does not rewrite
 the participant's own boundary state.
+`settle_stranded(wal_path, decision_path)` applies `recovery.py`'s rule
+verbatim; it decides nothing on its own.
 
 * durable `federation-commit-approved` present: the federation committed. The
   participant's WAL is given the `commit-approved` marker recovery already keys
@@ -514,6 +520,8 @@ the participant's own boundary state.
   runs, where the marker may be an earlier approved run's, so its
   completed-participant case keeps recovery's rule and is tracked in issue
   #3147.
+* absent, or an explicit abort decision: `recovery.recover` reads the WAL
+  unchanged and rolls back LIFO, reporting residue exactly as today.
 * unreadable: **fails closed** with `unresolved` and settles nothing. Guessing
   between roll-forward and roll-back is precisely the split-brain the durable
   record exists to prevent.
@@ -605,6 +613,7 @@ rest) and every rule refuses rather than downgrades:
 | `machine-boundary` | a machine target is opened only as `via = ssh` with both a `host` and a pinned `known_hosts`; host-key checking is never trust-on-first-use (R4), see below |
 | `peer-pool-unavailable` | `via = peer` is a machine boundary whose network seam has not landed (design `docs/design/461-verifiable-private-peer-pool.md`); it is refused by name, never run as a local child |
 | `remote-shape` | an ssh `host`, `remote_bundle`, `runner`, `port`, `known_hosts` or `extra_args` that is not one plain word could be read as an ssh or scp option |
+| `machine-boundary` | `via = ssh` is not opened here at all; see below |
 | `container-seam` | the seam is a Unix socket and a Unix socket does not cross a container bind mount portably (measured non-functional in both directions; `sandbox_runtime` refuses the same shape) |
 | `seam-set-unknown` | a container target must be *proven* seam-free; "not told" is not "none" |
 | `network-provider` | the address it binds is a contract other machines already hold, so moving it across a boundary is the re-tier `revl swap` already refuses |
@@ -659,6 +668,24 @@ guarantees.
   design R2). The runner protocol has no ABORT leg, so when a later participant
   fails COMMIT, an ssh host that already committed is reported `unresolved`,
   never `rolled-back`.
+* **`machine`** (`via = ssh`) promises **nothing**, which is why it is refused.
+  A machine that goes away takes the accumulator, the closures *and* the WAL
+  with it. There is no set on this side for G7 to be complete over and the
+  conductor holds no inverse it could run, so the only honest verdict is
+  `unresolved` naming the
+  target for a human. A deploy that cannot promise teardown must not be the thing
+  that quietly discovers it. The refusal also names the control plane that is
+  absent: no bundle staging and no pinned SSH host key (design R4/R5). The
+  far-side runner itself now exists as a real process, `revl deploy-admit`, and
+  is driven over its stdin/stdout by `deploy.StdioRunnerTransport` — locally as
+  a child (`python -m revl deploy-admit ...`), and across a machine boundary as
+  the same command behind `ssh <host>`, which is what is still absent. Over that
+  runner the PREPARE chain verify (`serve_admit_request`) and the load-measured
+  signed COMMIT receipt with the conductor's hard comparison of it
+  (`serve_commit_request` / `request_commit`, design R2) both cross the process
+  seam today; what does not yet cross is the SSH seam, together with the staging
+  and the host-key pin. Without the host-key pin, impersonating the target costs
+  sitting on the network path rather than owning the machine.
 
 ### A participant behind a container boundary
 
@@ -750,6 +777,15 @@ separate step from the deploy verdict.
   reports that host `unresolved`, never `rolled-back`;
 * the **mTLS staging identity** (design R5); staging today rides the pinned ssh
   host key;
+* **cross-machine orchestration**: the `machine` boundary above. The far-side
+  runner (`revl deploy-admit`) and the transport that speaks to it
+  (`StdioRunnerTransport`) are landed, so PREPARE and the load-measured COMMIT
+  both cross a real process seam today; what is not landed is the SSH seam
+  itself — the same runner command behind `ssh <host>`, the bundle staging over
+  scp/rsync, and the pinned SSH host key (design R4/R5). Until the conductor's
+  coordinated protocol (`run_deploy`) drives that runner instead of a local
+  `ProcessParticipant`, a `via = ssh` target stays refused
+  (`network-placement.md` still lists orchestration as a non-goal);
 * a **replicated WAL** and a quorum-durable federation decision;
 * a **partition-safe distributed commit coordinator**;
 * a **seam-carrying container target**, blocked on the per-rung seam transport

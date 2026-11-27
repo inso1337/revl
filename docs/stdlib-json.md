@@ -55,6 +55,7 @@ each emitter refuses an extern that has no body for its tier):
 | java | — | — | the tier refuses with `extern `json_parse` has no @java body — not portable to this backend`; a provider's Jackson/Gson plugs in here when one is on the `javac` classpath |
 | go | `json.Unmarshal([]byte(s), &v)` | `json.NewEncoder` with `SetEscapeHTML(false)` | **runs** (item 140): `Any` erases to Go's `any`; the @go body reaches `encoding/json` through `//revl:import` directives the emitter hoists into the module's import block. Encodes compact with `<`/`>`/`&` raw for the canonical form (item 385). `go test` runs the round-trip (backends/go/scenarios/emitted/jsonwire/). Record caveat: unexported struct fields marshal to `{}` — see the canonical-form section. |
 | wasm | — | — | the tier has no dynamic `Any`/`Value` representation (it carries Int/Int32/Float/Bool/Str/List/record values natively, and Map is a stated limit), so a JSON value cannot be erased there |
+| wasm | — | — | the substrate value model (Int/Bool/Str/List) cannot hold Float/Map/records, so a JSON value has no representation there |
 
 The refusal message is the built-in honesty gate, the same shape the
 conformance corpus's three bodyless externs already ride (docs/conformance.md):
@@ -115,6 +116,9 @@ strings or object keys spell it (the count exceeds the bigints parked), it
 serializes once more under a prefix whose run of `0`s has a length no spelling
 in the first output has. That is at most two passes whatever the data holds, and
 user text is never rewritten. Regression: `backends/typescript/tests/
+(`"@@revlBigInt:<n>@@"`) and the enclosing body then strips those quotes, which
+is how the digits land unquoted; with no bigint in the value the body returns
+the builtin result unchanged. Regression: `backends/typescript/tests/
 fr3_json_int.test.ts` (runtime, under vitest) cross-checked against the py tier
 in `tests/test_json_stdlib.py::test_ts_int_serialization_matches_py_tier`,
 covering a small, a negative, and a beyond-2^53 `Int`.

@@ -57,6 +57,8 @@ nothing if the caller is allowed to write a match that only mentions `Agreed`.
 
 So a `match` on an `Aggregate[T]` must NAME `Split` and `Inquorate`. Two
 things make that rule bite:
+things make that rule bite, and both of them are gaps in the general
+exhaustiveness check rather than new opinions about matching:
 
 1. **A `_` catch-all does not discharge them.** For an ordinary ADT a
    wildcard is a fine way to say "everything else", and `revl.lower`'s
@@ -74,6 +76,15 @@ things make that rule bite:
    scoped to the provided types (see `ANSWER_TYPES`) rather than being
    imposed on every user variant, because a `_` over an ordinary ADT is a
    fine way to say "everything else".
+2. **A parameterised scrutinee is checked.** The general check reads
+   `types[<scrutinee type>]`, which misses `Aggregate[Str]` because the table
+   is keyed by the bare head. `Aggregate[T]` is never written without an
+   argument, so without this the rule would be vacuous on every real program.
+   The fix here is deliberately scoped to the provided types (see
+   `ANSWER_TYPES`) rather than applied to every generic ADT: widening the
+   general check is a change to what the compiler admits for programs that
+   have nothing to do with councils, and it belongs to whoever owns that
+   check.
 
 NOT ITEM 471, AND NOT BY CONVENTION
 -----------------------------------
@@ -269,6 +280,12 @@ def applied_spec(type_name: str | None) -> dict | None:
     head for exhaustiveness. This helper remains specific to the two provided
     model-answer types: it supplies their generic payload types for inference,
     without broadening this council-specific rule to user ADTs.
+    Both the checker's match inference and the lowering's exhaustiveness pass
+    look a scrutinee's spec up by its WHOLE spelling, which finds nothing for
+    any applied generic. That is a general gap and this is not a general fix:
+    it resolves the two provided types and leaves every user ADT exactly as it
+    was, because widening the lookup for user ADTs changes what the compiler
+    admits for programs that have nothing to do with councils.
     """
     head, args = _applied(type_name)
     spec = ANSWER_TYPES.get(head or "")

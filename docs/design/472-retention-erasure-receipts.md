@@ -312,12 +312,14 @@ correction 3 above, which is the reason it is recorded here at length.
 
 The third review asked what happens to the persistence refusal when the sink is
 not in the unit that holds the value, and found that the guarantee stopped at
+not in the unit that holds the value — and found that the guarantee stopped at
 the seam. It is recorded here because the doc above claimed the opposite.
 
 1. **The persistence refusal was argument-blind across a service seam.** The
    `### What is still open` list asserted that an operation persisting through a
    provider's extern "is refused at that extern, which is where the capability is
    declared." That is true of the DECLARATION half: the provider's own body is
+   declared." That is true of the DECLARATION half — the provider's own body is
    checked against the extern's declared capability, and a `Retained[T, P]`
    parameter declared on the operation is refused by name. It was not true of the
    FLOW half. The refusal that follows a value (`_refuse_retention`, the
@@ -338,6 +340,7 @@ the seam. It is recorded here because the doc above claimed the opposite.
 
    was ADMITTED. The caller held a value past its deadline, handed it across the
    boundary, and the provider wrote it to durable storage, with no diagnostic,
+   boundary, and the provider wrote it to durable storage, with no diagnostic —
    which is the whole of what G-RETAIN says cannot happen. The interface
    parameter cannot carry the qualifier that would have caught it (nothing else
    can cross a unit boundary, so a qualifier there is a promise the caller could
@@ -351,6 +354,7 @@ the seam. It is recorded here because the doc above claimed the opposite.
    `reaches_sink`; `_on_persistence` populates it from the same inference walk
    that already computes the return taint, so the reach is INTERPROCEDURAL for
    free: a provider that reaches the sink through a helper fn carries the reach
+   free — a provider that reaches the sink through a helper fn carries the reach
    out too. The caller then refuses with the same `_refuse_retention`, gaining a
    `via` chain that names the seam rather than only the sink:
    `load() -> Store.stash -> db_put`.
@@ -368,6 +372,8 @@ the seam. It is recorded here because the doc above claimed the opposite.
    This correction is scoped to G-RETAIN. The same body-walk blindness affects
    the G-SECRET-FLOW argument direction: a `Secret[T]` handed to an operation
    whose provider discloses it; but that is a different guarantee with a
+   the G-SECRET-FLOW argument direction — a `Secret[T]` handed to an operation
+   whose provider discloses it — but that is a different guarantee with a
    different rule (a crossing refuses where the receiver does not DECLARE
    `Secret[T]`, not where a policy's deadline has passed), so it is sequenced
    separately rather than folded in here.
@@ -397,6 +403,14 @@ vocabulary now exists for the RETENTION receipt (`derives <class> of <param>`,
 folded into the erase report's rows: a measurement of crossings and a
 declaration of derivations are two different enumerations, and the erase report
 keeps reporting only what it measured.
+On derivatives: the report has no derivative concept, and the receipt does not
+invent one. What it can say is the closest honest thing, which is that an index
+write or a summary write that crossed the boundary is a row like any other.
+`emit:<component>:<key>.<method>` rows are where a derivative would appear if a
+component wrote one through a service, and `host:` rows are where it would
+appear through a host extern. Naming a derivative the way the item asks would
+need a way to declare that a crossing *is* derived from a named value, which is
+the same missing vocabulary as residence and legal hold.
 
 ## The retention half: the prerequisites as they were measured
 
@@ -518,6 +532,16 @@ walk as before, so a derivative made there needs the clause on the `fn` or
 `extern` that actually makes it. The vocabulary stays closed for the reason the
 last paragraph gives: an open one would let a policy "cover" a class no erasure
 path can enumerate, which reads as a guarantee without being one.
+**Prerequisite 4, the derivative relation: NOT supplied, and reported as
+declared rather than inferred.** The note is still correct that the taint
+machinery tracks where a value came from and not what was made from it. A policy
+therefore declares which CLASSES of derivative it covers, out of a CLOSED
+vocabulary (`summary`, `index`, `embedding`, `backup`, `export`, `cache`), and
+the receipt reports each derivative a caller enumerates against that
+declaration. Nothing proves that a particular crossing wrote a summary of a
+particular retained value. The vocabulary is closed on purpose: an open one would
+let a policy "cover" a class no erasure path can enumerate, which reads as a
+guarantee without being one.
 
 ### The two refusals, and why there are two
 
@@ -570,9 +594,11 @@ member, so an over-claim is refused even with an intact MAC.
     `extern` (`derives <class> of <param>`, issue #2695), so a derivative made
     inside a host body without a declaration, or outside a declared crossing,
     is invisible (prerequisite 4, supplied in the declared form).
+  * No inferred derivative relation (prerequisite 4).
   * No derived residence: a replica's region is what the caller says it is.
   * The persistence refusal covers a crossing declared through an `extern` with
     a durable-storage capability, and, after the seam-reach correction above,
+    a durable-storage capability, and — since the seam-reach correction above —
     a crossing reached through a service operation whose PROVIDER's body holds
     that extern. An operation carries no capability of its own, so the refusal
     names the extern, which is where the capability is declared, and reports the

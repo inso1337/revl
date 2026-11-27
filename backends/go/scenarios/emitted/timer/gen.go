@@ -349,6 +349,7 @@ func Heartbeat() stc.Component {
 					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
 				}
 			}()
+		Apply: func(ctx *stc.Context) (stc.Inverse, error) {
 			log, err := stc.Service[Log](ctx, _keyLog)
 			if err != nil {
 				return nil, err

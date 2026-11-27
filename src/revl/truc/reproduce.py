@@ -199,11 +199,13 @@ def _resolve_registry(project_dir: str, registry_flag: str | None) -> str:
             "no truc.toml in this directory and no --registry given: cannot "
             "tell which registry to reproduce against")
     from ._host import TrucNameRefusal, toml_manifest  # noqa: PLC0415, reuse truc's TOML reader
+    from ._host import toml_manifest  # noqa: PLC0415, reuse truc's TOML reader
 
     try:
         manifest = json.loads(toml_manifest(project_dir))
     except TrucNameRefusal as error:
         raise RevlError(str(toml), 0, str(error)) from error
+    manifest = json.loads(toml_manifest(project_dir))
     reg = manifest.get("registry") or ""
     if not reg or not os.path.isdir(reg):
         raise RevlError(
@@ -521,6 +523,7 @@ def _normalized_ir(ir: dict) -> dict:
     re-implemented. It used to be a near-copy that normalized only
     `manifest.components[].file` and missed `components[].source`, so a
     reproduce could never match an attestation `registry_evidence.build_evidence` had
+    reproduce could never match an attestation `registry.build_evidence` had
     signed. Nothing caught it because the attestation tier was reading a path
     the publisher never writes: a dead check cannot fail, and it cannot notice
     two definitions drifting apart either. One definition, one hash.
@@ -534,6 +537,7 @@ def _attestation_path(entry_dir: Path) -> Path | None:
     """Where the entry's attestation actually lives, or None.
 
     `registry_evidence.build_evidence` publishes it at `<entry>/evidence/attestation.json`
+    `registry.build_evidence` publishes it at `<entry>/evidence/attestation.json`
     - the item-293 bundle path. This tier used to read `<entry>/attestation.json`,
     a path nothing writes, so for every entry the publish path produces the tier
     was structurally DEAD: it could only ever report "no recorded attestation",
@@ -660,6 +664,7 @@ def _emit_backend_source(backend: str, ir: dict) -> tuple[str | None, str | None
     unshipped = _unshipped_backend(backend)
     if unshipped is not None:
         raise RevlError("<reproduce>", 0, unshipped)
+    bug with a tidy sentence about the artifact."""
     try:
         module = importlib.import_module(f"backends.{backend}.emit")
     except ImportError:
@@ -757,6 +762,17 @@ def _toolchain_version() -> str:
     from .._version import version  # noqa: PLC0415
 
     return version()
+    """The current revl toolchain version, the pyproject version, read through
+    the installed metadata when available, else a stable fallback. Used only to
+    compare against a recorded `toolVersion`, never to pin one."""
+    try:
+        from importlib.metadata import PackageNotFoundError, version  # noqa: PLC0415
+        try:
+            return version("revl")
+        except PackageNotFoundError:
+            return "2.0.0"
+    except ImportError:
+        return "2.0.0"
 
 
 # --------------------------------------------------------------- driver

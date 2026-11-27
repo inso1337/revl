@@ -67,6 +67,7 @@ the hardware's own fields:
   MRTD is only a TD's INITIAL build, so a TDX quote presented to a requirement
   that states no :class:`TdxPolicy` is REFUSED rather than admitted on MRTD
   alone; ``TdxPolicy(accept_mrtd_only=True)`` is the explicit narrower choice.
+  anything at all could bind a body naming a permitted measurement.
 
 One honest limit, stated rather than papered over: ``bundle`` is a LABEL, and no
 hardware format measures it. What the hardware proves is the MEASUREMENT, and the
@@ -585,6 +586,10 @@ def _sign(body: Mapping, key: bytes, domain: bytes) -> str:
                     hashlib.sha256).hexdigest()
 
 
+def _public_members(record: Mapping) -> dict:
+    return {k: v for k, v in record.items() if k != SIGNATURE_FIELD}
+
+
 @dataclass(frozen=True)
 class EnclaveEvidence:
     """The attester's answer to one challenge: what is running, where, and with
@@ -930,12 +935,15 @@ def _verify_evidence(record: Mapping, attester_key: Optional[bytes] = None, *,
     so a caller comparing hardware facts can only compare an ACCEPTED quote's."""
     if not isinstance(record, Mapping):
         return False, "enclave evidence is not an object", None
+        return False, "enclave evidence is not an object"
     try:
         resolved, problem = _resolve_root(root, attester_key)
     except RootError as error:
         return False, f"the attestation root is unusable: {error}", None
+        return False, f"the attestation root is unusable: {error}"
     if resolved is None:
         return False, problem, None
+        return False, problem
     declared = record.get("sign_alg")
     if isinstance(resolved, HardwareRoot):
         if declared not in QUOTE_SIGN_ALGS:
@@ -944,34 +952,43 @@ def _verify_evidence(record: Mapping, attester_key: Optional[bytes] = None, *,
                 f"evidence declares sign_alg {declared!r}; a symmetric-MAC record "
                 f"is not evidence against a hostile peer and is refused here "
                 f"rather than verified with the wrong primitive"), None
+                f"rather than verified with the wrong primitive")
         return _verify_quote_evidence(record, resolved, declared, now)
     if declared not in (SIGN_ALG, None):
         return False, (
             f"this evidence declares sign_alg {declared!r}, which needs a hardware "
             f"attestation root; the development symmetric-MAC verifier cannot "
             f"decide a quote {DEV_ROOT_NOTE}"), None
+            f"decide a quote {DEV_ROOT_NOTE}")
     key = resolved.key  # type: ignore[union-attr]
     given = record.get(SIGNATURE_FIELD)
     if not isinstance(given, str):
         return False, "enclave evidence carries no attestation signature", None
+        return False, "enclave evidence carries no attestation signature"
     try:
         expected = _sign(record, key, EVIDENCE_SIGN_DOMAIN)
     except NotCanonicalizable as error:
         return False, f"enclave evidence cannot be verified: {error}", None
+        return False, f"enclave evidence cannot be verified: {error}"
     if not hmac.compare_digest(expected, given):
         return False, ("attestation signature mismatch: wrong attester key, or the "
                        "evidence was tampered with after it was issued"), None
+                       "evidence was tampered with after it was issued")
     envelope = _validate_evidence(record, SIGN_ALG)
     if envelope:
         return False, envelope, None
     return (True, f"valid: enclave evidence is authentic and well formed "
                   f"{DEV_ROOT_NOTE}", None)
+        return False, envelope
+    return True, f"valid: enclave evidence is authentic and well formed {DEV_ROOT_NOTE}"
 
 
 def _verify_quote_evidence(record: Mapping, root: HardwareRoot, sign_alg: str,
                            now: Optional[datetime]
                            ) -> tuple[bool, str, Optional[QuoteVerdict]]:
     """The hardware half of :func:`verify_evidence`, with the verdict.
+                           now: Optional[datetime]) -> tuple[bool, str]:
+    """The hardware half of :func:`verify_evidence`.
 
     Every step refuses rather than raises. The order matters: the quote's own
     chain to the pinned root is proven before anything the record says is read as
@@ -983,35 +1000,43 @@ def _verify_quote_evidence(record: Mapping, root: HardwareRoot, sign_alg: str,
             f"the evidence declares the hardware format {sign_alg!r} but carries "
             f"no {QUOTE_FIELD!r}, so there is nothing for the attestation root to "
             f"verify"), None
+            f"verify")
     try:
         blob = bytes.fromhex(raw)
     except ValueError:
         return False, f"the evidence's {QUOTE_FIELD!r} member is not hex", None
+        return False, f"the evidence's {QUOTE_FIELD!r} member is not hex"
     try:
         expect = evidence_report_data(record)
     except TeeError as error:
         return False, f"enclave evidence cannot be verified: {error}", None
+        return False, f"enclave evidence cannot be verified: {error}"
     endorsement = record.get(ENDORSEMENT_FIELD)
     if endorsement is not None and not isinstance(endorsement, Mapping):
         return False, (f"the evidence's {ENDORSEMENT_FIELD!r} member is not an "
                        f"object"), None
+                       f"object")
     try:
         verdict = verify_quote(
             blob, sign_alg=sign_alg, root=root, expect_report_data=expect,
             platform_key_id=record.get("key_id"), endorsement=endorsement, now=now)
     except QuoteFormatError as error:
         return False, f"the attestation root refused the quote: {error}", None
+        return False, f"the attestation root refused the quote: {error}"
     if not verdict.ok:
         return False, f"the attestation root refused the quote: {verdict.reason}", None
+        return False, f"the attestation root refused the quote: {verdict.reason}"
     envelope = _validate_evidence(record, sign_alg)
     if envelope:
         return False, envelope, None
+        return False, envelope
     if record["measurement"] != verdict.measurement:
         return False, (
             f"the evidence states measurement {record['measurement']}, but the "
             f"quote's own measurement register reads {verdict.measurement}: the "
             f"enclave that signed this quote is not the enclave the evidence "
             f"describes"), None
+            f"describes")
     return True, (f"valid: {verdict.reason}, and the evidence's claims are the "
                   f"claims that quote binds"), verdict
 
@@ -1157,6 +1182,7 @@ def _hardware_policy_refusal(verdict: Optional[QuoteVerdict],
             "the requirement states a SEV-SNP TCB floor, but the evidence is a "
             "TDX quote, which carries no SEV-SNP TCB")
     return ""
+                  f"claims that quote binds")
 
 
 def tee_admits(record: Mapping, requirement: TeeRequirement, *,
@@ -1196,6 +1222,12 @@ def tee_admits(record: Mapping, requirement: TeeRequirement, *,
     10. **freshness** — not issued beyond the clock skew, not expired, and not
         older than ``max_age_s``;
     11. **replay** — the challenge must not have been consumed for this peer.
+    6. **the region**, which must be in the permitted set;
+    7. **the network posture**, which must equal the requirement's;
+    8. **the challenge**, which the evidence must answer;
+    9. **freshness** — not issued beyond the clock skew, not expired, and not
+       older than ``max_age_s``;
+    10. **replay** — the challenge must not have been consumed for this peer.
 
     ``replay_ledger`` is the caller's ledger of ``(nonce, peer_id)`` pairs. It is
     required (a proof with no ledger cannot be checked for replay, so it is
@@ -1240,6 +1272,7 @@ def tee_admits(record: Mapping, requirement: TeeRequirement, *,
             "signed its quote, so the chain terminates inside the peer: an "
             "attestation root is a key the peer does not hold")
     ok, reason, verdict = _verify_evidence(record, attester_key, root=root, now=now)
+    ok, reason = verify_evidence(record, attester_key, root=root, now=now)
     if not ok:
         return False, reason
 

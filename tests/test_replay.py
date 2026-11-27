@@ -760,6 +760,7 @@ def fresh_server_session(monkeypatch):
 
 
 def test_the_replay_tools_are_advertised_with_honest_annotations(all_mcp_tools):
+def test_the_replay_tools_are_advertised_with_honest_annotations():
     listed = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     tools = {t["name"]: t for t in listed["result"]["tools"]}
     for name in ("revl_timeline", "revl_inspect_step", "revl_step_back",
@@ -798,6 +799,7 @@ def test_replay_tools_validate_their_arguments():
     # (issue #1703); naming a component without `to` still requires it
     assert _call("revl_step_back", {"component": "C"})["diagnostics"][0][
         "message"].startswith("`to`")
+    assert _call("revl_step_back", {})["diagnostics"][0]["message"].startswith("`to`")
     assert _call("revl_inspect_step", {})["diagnostics"][0]["message"].startswith("`at`")
     assert _call("revl_replay_forward", {})["diagnostics"][0]["message"].startswith("`from`")
     assert _call("revl_replay_bisect", {})["diagnostics"][0]["message"].startswith("`assert`")
@@ -940,6 +942,7 @@ def test_real_cordis_step_back_then_unload_still_leaves_no_residue(session):
     assert report["checks"] == {"registry": True, "provisions": True,
                                 "effects": True, "listeners": True,
                                 "hostResources": True}
+                                "effects": True, "listeners": True}
 
 
 @needs_cordis

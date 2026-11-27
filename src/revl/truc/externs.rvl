@@ -111,6 +111,8 @@ pub extern emission fn host_print(text: Str)
 // (issue #2552). Rows with no name are the project's own entry.
 pub extern emission fn host_admit_all(ordered_json: Str, lock_json: Str, trust_host_code: Bool) -> Str
   = @py { from revl.truc._host import admit_all; return admit_all(ordered_json, lock_json, trust_host_code) }
+pub extern emission fn host_admit_all(ordered_json: Str) -> Str
+  = @py { from revl.truc._host import admit_all; return admit_all(ordered_json) }
 
 // ---- ship / publish (emission; slice S4) ----
 
@@ -129,6 +131,8 @@ pub extern emission fn host_ship_context(project_dir: Str) -> Str
 // (issue #2563). The empty string is text with no file behind it.
 pub extern emission fn host_gauntlet(source: Str, sourcePath: Str) -> Str
   = @py { from revl.truc._host import gauntlet_evidence; return gauntlet_evidence(source, sourcePath) }
+pub extern emission fn host_gauntlet(source: Str) -> Str
+  = @py { from revl.truc._host import gauntlet_evidence; return gauntlet_evidence(source) }
 
 // The REGISTRY's verdict on publishing this name from this project, in the same
 // {ok, diagnostic} shape as the gate: may an already-published name be

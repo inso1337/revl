@@ -50,6 +50,7 @@ def extern_backends(ext: dict) -> list[str]:
 
 
 def audit_report(ir: dict, spec_results: dict | None = None) -> dict:
+def audit_report(ir: dict) -> dict:
     """Build the same dict `revl audit --json` emits, from a compiled ir.
 
     Reuses the one authoritative boundary computation (`_boundary`) rather
@@ -71,6 +72,7 @@ def audit_report(ir: dict, spec_results: dict | None = None) -> dict:
          # `__main__`'s entry key-for-key.
          "inverse": inverse_class(ext),
          "backends": extern_backends(ext),
+         "backends": sorted((ext.get("bodies") or {}).keys()),
          # item 373: carry the reach so the drift gate can read it. Absent unless
          # declared — a bare emission's audit entry is byte-identical to today's.
          **({"reach": ext["reach"]} if ext.get("reach") else {}),
@@ -558,6 +560,7 @@ def _bound_token(bound) -> str:
     values = "|".join(
         str(v).replace("\\", "\\\\").replace("|", "\\|")
         for v in (bound.get("values") or []))
+    values = "|".join(str(v) for v in (bound.get("values") or []))
     return f"in={values}"
 
 
@@ -809,6 +812,7 @@ def diff_recovery(prev: dict, new: dict) -> dict:
     strengthens the class but loses its idempotency floor does not pass as a
     plain strengthening; that entry is reported weakened, not gained.
     Buckets are sorted, so the diff is deterministic over the unhashable
+    (safe). Buckets are sorted, so the diff is deterministic over the unhashable
     `list[dict]` surface without ever hashing a dict.
     """
     from .lower import _REGISTER_RANK  # noqa: PLC0415 - the register partial order
@@ -831,12 +835,14 @@ def diff_recovery(prev: dict, new: dict) -> dict:
             lost_rank[name] = max(rank, lost_rank.get(name, -1))
         else:
             dropped.append(f"recovery:{name}:{kind}")
+        dropped.append(f"recovery:{name}:{kind}")
     for name, kind in new_r.keys() - prev_r.keys():
         if (name in lost_rank and
                 _REGISTER_RANK.get(new_r[(name, kind)], -1) < lost_rank[name]):
             weakened.append(f"recovery:{name}:{kind}")
         else:
             added.append(f"recovery:{name}:{kind}")
+        added.append(f"recovery:{name}:{kind}")
     for key in prev_r.keys() & new_r.keys():
         before = _REGISTER_RANK.get(prev_r[key], -1)
         after = _REGISTER_RANK.get(new_r[key], -1)
@@ -990,6 +996,7 @@ def evaluate(prev: dict, new: dict, accepted: set[str] | None = None,
     """The gate decision. `unacknowledged` are the gated tokens (every
     `GATED_BUCKETS` bucket: an added crossing or a weakened or widened
     authority fact) that no `--accept` covers.
+    """The gate decision. `unacknowledged` are the additions that fail.
 
     exit-code contract: 0 iff `unacknowledged` is empty (a clean or fully
     acknowledged diff); nonzero otherwise.
@@ -1003,12 +1010,23 @@ def evaluate(prev: dict, new: dict, accepted: set[str] | None = None,
     buckets = drift(prev, new)
     widening = widening_from_audits(prev, new, buckets)
     gated = [token for key, _bucket in GATED_BUCKETS for token in widening[key]]
+    delta = diff_crossings(prev, new)
+    # item 373: a reach WEAKENING fails the gate the same way a new crossing
+    # does — it is the authority axis loosening without a new token appearing.
+    # Its `reach-weakened:<name>` token is acknowledged through the same
+    # `--accept`/`--accept-all` path as an added crossing.
+    gated = delta["added"] + delta["reach_weakened"]
     if accept_all:
         unacknowledged: list[str] = []
     else:
         unacknowledged = [c for c in gated if c not in accepted]
     return {
         **{bucket: buckets[bucket] for bucket in _REPORTED_BUCKETS},
+        "added": delta["added"],
+        "removed": delta["removed"],
+        "unchanged": delta["unchanged"],
+        "reach_weakened": delta["reach_weakened"],
+        "reach_tightened": delta["reach_tightened"],
         "acknowledged": sorted(c for c in gated
                                if accept_all or c in accepted),
         "unacknowledged": unacknowledged,
@@ -1040,6 +1058,7 @@ def render(result: dict, prev_label: str) -> str:
     inverse_strengthened = result.get("inverse_strengthened") or []
     if not any(result.get(bucket) for bucket in _REPORTED_BUCKETS
                if bucket != "unchanged"):
+    if not added and not result["removed"] and not weakened and not tightened:
         return (f"authority-drift: clean — the G8 boundary surface is "
                 f"unchanged from {prev_label}.")
 

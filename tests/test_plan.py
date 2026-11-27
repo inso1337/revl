@@ -272,6 +272,7 @@ def test_realms_scope_the_cascade():
     """Replacing tenant A's store must not disturb tenant B (G2 is
     per-(key, realm), and so is the plan)."""
     running = compile_source(Path(EXAMPLES / "tenants.rvl").read_text(encoding="utf-8"))
+    running = compile_source(Path(EXAMPLES / "tenants.rvl").read_text())
     result = plan(source="""
 component TenantAStore provides kv: Kv {
   isolate kv in realm("tenant_a")
@@ -279,6 +280,7 @@ component TenantAStore provides kv: Kv {
   provide kv { fn get(k) = store.get(k)
                fn set(k, v) { effect store.insert(k, v) undo store.remove(k) }
                fn unset(k) = store.remove(k) }
+               fn set(k, v) { effect store.insert(k, v) undo store.remove(k) } }
 }
 """, manifest=running)
 
@@ -719,6 +721,7 @@ def _call(name: str, arguments: dict) -> dict:
 
 
 def test_mcp_advertises_revl_plan_as_read_only(all_mcp_tools):
+def test_mcp_advertises_revl_plan_as_read_only():
     tools = {t["name"]: t
              for t in handle({"jsonrpc": "2.0", "id": 1,
                               "method": "tools/list"})["result"]["tools"]}

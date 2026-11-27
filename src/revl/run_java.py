@@ -81,6 +81,7 @@ def _responds(exe: str) -> bool:
     that errors when no JDK is installed, so being on PATH is not enough)."""
     try:
         probe = _childproc.run([exe, "-version"], capture_output=True, timeout=30)
+        probe = subprocess.run([exe, "-version"], capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         return False
     return probe.returncode == 0
@@ -105,6 +106,7 @@ def _working_jdk_bin() -> str | None:
     # macOS java_home knows about installed JDKs the shim hides
     try:
         found = _childproc.run(["/usr/libexec/java_home"], capture_output=True, timeout=30)
+        found = subprocess.run(["/usr/libexec/java_home"], capture_output=True, text=True, timeout=30)
         if found.returncode == 0 and found.stdout.strip():
             candidates.append(Path(found.stdout.strip()) / "bin")
     except (OSError, subprocess.TimeoutExpired):
@@ -148,8 +150,10 @@ def _accepts_release21(javac: Path) -> bool:
     """``True`` when this javac accepts ``--release 21`` (a JDK >= 21)."""
     try:
         probe = _childproc.run(
+        probe = subprocess.run(
             [str(javac), "--release", "21", "-version"],
             capture_output=True, timeout=30)
+            capture_output=True, text=True, timeout=30)
         return probe.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -181,6 +185,8 @@ def _java_emitter():
     exit, so the shared module is safe to reuse one emit after another (the
     gate does), but two emissions on two threads would race on it, and a fresh
     module here means they never do. The
+    Loaded, never cached: the emitter carries module-global render state, so a
+    fresh module per emission is the contract this file has always had. The
     CALLER keeps the module it was handed, because `EmitError` is a class on the
     module OBJECT -- a second `exec_module` produces a DIFFERENT class, and an
     `except` against it would not match the instance the first module raised
@@ -222,15 +228,19 @@ def _build(ir: dict, tmp: Path, jdk_bin: str, record: bool = False,
     # alongside the runner, exactly as placement._build_java does.
     estop = str(_PLACEMENT_DIR / "Estop.java")
     compile_runner = _childproc.run(
+    compile_runner = subprocess.run(
         [javac, "--release", JAVAC_RELEASE, "-d", str(out), *stubs, estop,
          str(_PLACEMENT_DIR / "PlacementRunner.java"), str(_PLACEMENT_DIR / "RunOnce.java")],
         capture_output=True,
+        capture_output=True, text=True,
     )
     if compile_runner.returncode:
         raise RuntimeError(f"javac (runner) failed:\n{compile_runner.stderr.strip()}")
     compile_components = _childproc.run(
+    compile_components = subprocess.run(
         [javac, "--release", JAVAC_RELEASE, "-cp", str(out), "-d", str(out), str(gen / "Components.java")],
         capture_output=True,
+        capture_output=True, text=True,
     )
     if compile_components.returncode:
         raise RuntimeError(f"javac (components) failed:\n{compile_components.stderr.strip()}")
@@ -331,9 +341,11 @@ def run_java(ir: dict, config: dict, files, once: bool = False,
 
         print("== load composition (java tier) ==", flush=True)
         proc = _childproc.popen(
+        proc = subprocess.Popen(
             [str(Path(jdk_bin) / "java"), "-cp", classpath, "RunOnce", str(spec_file)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, env=child_env,
+            stderr=subprocess.STDOUT, text=True, env=child_env,
         )
         # the proof token is stdin's only line; then stdin closes, as before,
         # so the runner never blocks on it (issue #1621)

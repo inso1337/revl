@@ -192,11 +192,13 @@ fourth corner of that fixture family: one key, two services, no declaration.
   the row does not name. The token is read from the shim, not from the row
   label, so the two rows are no longer conflated; they were already distinct
   boundaries, and now they are named as such.
+  the synthesizer spells, which is its own item.
 * **The kernel-boundary arm is still open.** Issue #1265's exit asks for one
   more step after this one, and it is still not taken. The cost this note
   quoted for it was wrong in both directions, which is the subject of the
   section below. **Taken** by the follow-up item, see §"The kernel arm,
   taken" below for what landed and what deliberately did not.
+  section below.
 * **The G4 upper bound on a bare method is still absent.** A provider of a
   service whose method declares no token may emit through anything, and nothing
   in this note changes that: `_method_emissions`'s subset check runs only when

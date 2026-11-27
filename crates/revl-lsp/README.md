@@ -1,10 +1,12 @@
 # `revl-lsp`: the revl language server as a native binary
+# `revl-lsp` — the revl language server as a native binary
 
 Roadmap item 336, **slices 1 and 2**
 (`docs/design/336-native-single-binary-tooling.md`). An editor launches this
 binary and speaks LSP on its stdin/stdout, exactly as it would launch
 `python -P -m revl.lsp` (the `-P` is the PYTHONSAFEPATH safety bit, issue
 #317), and gets the same answers, byte for byte.
+#317), and gets the same answers — byte for byte.
 
 ```
 cargo build --release
@@ -18,11 +20,13 @@ Native rust, and the part item 336 is about:
 
 - the `Content-Length` framed JSON-RPC loop over stdio (`protocol.rs`);
 - the document lifecycle: `didOpen` / `didChange` / `didClose` over a per-URI
+- the document lifecycle — `didOpen` / `didChange` / `didClose` over a per-URI
   full-text store, full-document sync (`server.rs`);
 - capability negotiation: `initialize` advertises exactly what
   `src/revl/lsp/server.py` advertises, in the same wire shape;
 - the dispatch table, the `publishDiagnostics` cadence, and an encoder that
   reproduces CPython's `json.dumps` bytes: separators, `ensure_ascii`
+  reproduces CPython's `json.dumps` bytes — separators, `ensure_ascii`
   escaping, key order (`pyjson.rs`);
 - **slice 2:** `definition` and the signature half of `hover`, answered from
   the self-host front end through `revl_gate::symbols` with no interpreter on
@@ -37,11 +41,17 @@ that frontier it has no check to run and reports admission. In an editor, this
 creates a MISSING squiggle: code the reference refuses appears green, with the
 authority of "the actual compiler". A native checker that matches the
 reference everywhere is roadmap item 391, and slice 3 is gated on it.
+that frontier it has no check to run and reports admission, which in an editor
+is a MISSING squiggle — green on code the reference refuses, with the authority
+of "the actual compiler". A native checker that matches the reference
+everywhere is roadmap item 391, and slice 3 is gated on it.
 
 The rule this binary keeps: **show every diagnostic the reference shows; you
 may show more, never fewer.** An engine that cannot answer publishes a visible
 `REVL-LSP-ENGINE` error diagnostic on the document, never an empty list.
 Silence is the editor's false-admit.
+`REVL-LSP-ENGINE` error diagnostic on the document, never an empty list —
+silence is the editor's false-admit.
 
 ### Why slice 2 did not make diagnostics an accelerator
 
@@ -53,6 +63,7 @@ admissions": its non-refusing arm is `NoObjection`, meaning *this gate found
 nothing it is able to refuse*, because it decides the composition and guarantee
 layer and does **not** run the reference type layer. So no document is ever
 proven fully covered: a clean native result does not show the document is
+proven fully covered — a clean native result does not show the document is
 clean, and even a native REFUSAL does not show the reference would raise only
 that one diagnostic (a multi-refusal compile carries several). Short-circuiting
 the reference on either is the missing-squiggle direction, which the design
@@ -62,6 +73,7 @@ What IS sound is the other half of the same rule, and it is what shipped: a
 native refusal the reference did not report is ADDED to the publish, tagged
 `source: "revl-native"`, never replacing anything. On the covered corpus the
 two agree and the add path stays silent. `the_binary_never_shows_fewer_
+two agree and the add path stays silent — `the_binary_never_shows_fewer_
 squiggles_than_the_reference` asserts both halves. A native `BAD` (the
 self-host's own parse failure) is never shown: it is a frontier gap wearing a
 refusal's clothes, and `verified fn` draws one on a document the reference
@@ -94,6 +106,7 @@ The engine picks an interpreter to run `reference/worker.py` (embedded in the
 binary with `include_str!`) in a fixed order (`runtime.rs`, `engine.rs`):
 
 1. **`REVL_LSP_PYTHON`**, if set, wins. This is the explicit override CI and the
+1. **`REVL_LSP_PYTHON`**, if set, wins — the explicit override CI and the
    oracle use to pin the reference.
 2. otherwise a **bundled PRIVATE RUNTIME**, if one is resolvable: a pinned
    `python-build-standalone` tree with the `revl` wheel frozen into its own
@@ -105,6 +118,7 @@ binary with `include_str!`) in a fixed order (`runtime.rs`, `engine.rs`):
    fails closed (a visible `REVL-LSP-ENGINE` diagnostic), never a silent
    degrade to PATH.
 3. otherwise **`python3` on PATH**, the honest fallback design A2 records, "a
+3. otherwise **`python3` on PATH** — the honest fallback design A2 records, "a
    native binary PLUS a reference `revl` alongside", so a bare `cargo` build and
    every machine that already has `revl` keep working unchanged. The fallback is
    not `-I` (it has to see the installed `revl`), so it is launched with `-P`
@@ -112,6 +126,7 @@ binary with `include_str!`) in a fixed order (`runtime.rs`, `engine.rs`):
    project as its working directory, and without `-P` the `-c` worker would put
    that directory at `sys.path[0]`, where it shadows the worker's own imports
    (issue #3158, the regression of #317 for this binary).
+   every machine that already has `revl` keep working unchanged.
 
 A runtime is resolved from one of five sources, in order: `REVL_LSP_RUNTIME` (an
 already-extracted directory), `REVL_LSP_RUNTIME_ARCHIVE` (a pinned `tar`,
@@ -136,6 +151,7 @@ FILE: a build that sets `REVL_LSP_EMBED_RUNTIME` to a pinned runtime archive
 (and, optionally, `REVL_LSP_EMBED_RUNTIME_PIN` to its pin) compiles the archive
 into the binary with `include_bytes!` (`build.rs`), and `runtime.rs` extracts it
 through the very same atomic, versioned, isolated-mode cache path. The child
+through the very same atomic, versioned, isolated-mode cache path — the child
 process just reads its bytes from the binary instead of a sibling file. It is
 the baked-in DEFAULT, overridden by any of the four sources above, so a
 distributor can still drop a newer runtime beside the binary. When
@@ -152,6 +168,8 @@ resolver expects, computes the archive's sha256, derives a content-addressed pin
 (`pbs-<sha256[:12]>`, or an explicit `--pin`), records `{pin, sha256, bytes,
 source}` in a `runtime.lock.json` (the documented pin, so a rebuild bakes the
 SAME bytes under the SAME key), and prints the two build-environment values:
+source}` in a `runtime.lock.json` — the documented pin, so a rebuild bakes the
+SAME bytes under the SAME key — and prints the two build-environment values:
 
 ```
 eval "$(python tools/embed_runtime.py --runtime <pbs-tree> --out dist/)"
@@ -163,10 +181,14 @@ and freezing the wheel into it is the distribution step (roadmap 338), so this
 helper pins and packs bytes the distributor already has and stays offline and
 reproducible. This also lets `tests/embedded_runtime.rs` drive it and a real
 embed build on every CI run.
+reproducible — which is also what lets `tests/embedded_runtime.rs` drive it, and
+a real embed build, on every CI run.
 
 The `embedding` (`private-runtime` / `system-python`) says WHETHER the runtime
 is private; `revl/gateVersion` also reports a `runtime` block (`{source, pin}`)
 that says HOW it was shipped: `embedded` (the genuinely
+is private; `revl/gateVersion` also reports a `runtime` block —
+`{source, pin}` — that says HOW it was shipped: `embedded` (the genuinely
 single distributed FILE, baked into the binary), `beside-exe` (a self-contained
 pair of files), `env` (pointed at by `REVL_LSP_RUNTIME`/`_ARCHIVE`), or
 `system-python` (no private runtime, pin `null`). The one-file bundling item is
@@ -174,10 +196,14 @@ precisely about the `embedded` shape, which `embedding` alone cannot tell from
 `beside-exe`, so a fleet or install audit reads `runtime.source` to confirm an
 artifact really is one file, and `runtime.pin`, the runtime's own skew
 comparand (A3), to confirm it is the expected pairing.
+artifact really is one file, and `runtime.pin` — the runtime's own skew
+comparand (A3) — to confirm it is the expected pairing.
 
 **What this slice landed, and what it defers.** The runtime-management contract
 is here: the pin, the atomic versioned cache, the isolated-mode launch, and
 the fail-closed rule. `revl/gateVersion` reports the `embedding` and the
+is here — the pin, the atomic versioned cache, the isolated-mode launch, and
+the fail-closed rule — and `revl/gateVersion` reports the `embedding` and the
 `runtime` `{source, pin}` above so a client can tell a self-contained one-file
 artifact from a pair or from one leaning on an installed `revl`. The build knob that bakes a
 runtime archive INTO the binary is here too (`build.rs` + `include_bytes!`), so a
@@ -188,6 +214,7 @@ shipping the pinned `python-build-standalone` archive bytes a build points that
 knob at, nor the in-process pyo3 link (`libpython`, `PyConfig.isolated`); those
 are the distribution/build step (338) and the design's slice-0 in-process embed,
 which layer on this contract without changing it. A child process or a linked
+which layer on this contract without changing it — a child process or a linked
 interpreter reads the same pin, cache and isolation. What was explicitly NOT
 done to avoid the dependency: substituting a native checker for the reference,
 the exact move A1 forbids.
@@ -200,10 +227,12 @@ embedding, runtime, native, server}` so a client, a CI check or a fleet audit
 can detect a stale binary/reference pairing before trusting its greens (design
 A3: skew is made detectable, not solved). `frontier` reads `reference` because
 DIAGNOSTICS, the answers a green depends on, still cover the whole language
+DIAGNOSTICS — the answers a green depends on — still cover the whole language
 rather than the self-host frontier; the native engine's own pin (`api`,
 `language`, `frontier`, `layer`, and the verbs it answers) sits beside it under
 `native`, and that is the id a stale-binary audit compares. `embedding` and the
 `runtime` `{source, pin}` block make the DISTRIBUTION shape legible: whether
+`runtime` `{source, pin}` block make the DISTRIBUTION shape legible — whether
 the runtime is private, and whether it ships as one file (`embedded`), a pair
 (`beside-exe`), an env-named tree (`env`), or the system fallback
 (`system-python`). The reference answers
@@ -222,11 +251,16 @@ REVL_LSP_PYTHON=/path/to/python cargo test   # plus the reference oracle
 - `binary_matches_the_reference_byte_for_byte` drives this binary and
   `python -P -m revl.lsp` (the `-P` is the PYTHONSAFEPATH safety bit,
   issue #317) with the identical framed byte stream. It covers initialize,
+  issue #317) with the identical framed byte stream — initialize,
   didOpen/didChange/didClose, hover and definition probes, code actions, an
   unknown method, and shutdown/exit. The test compares the two reply streams
   byte for byte, then asserts the compared stream is thick enough to prove
   something (hover, definition and diagnostic payloads all present, non-ASCII
   escaping exercised).
+  unknown method, shutdown/exit — and compares the two reply streams byte for
+  byte, then asserts the compared stream is thick enough to prove something
+  (hover, definition and diagnostic payloads all present, non-ASCII escaping
+  exercised).
 - `off_frontier_documents_still_get_their_squiggles` asserts the binary reports
   the reference's refusal code on every rejection document in the corpus. A
   binary that quietly ran a native-only checker would fail here on exactly the
@@ -241,6 +275,7 @@ REVL_LSP_PYTHON=/path/to/python cargo test   # plus the reference oracle
   test. It runs the binary a second time with `REVL_LSP_NATIVE_ONLY=1`, which
   turns off the reference fallback so the NATIVE answers are observable on
   their own, and asserts each is either the reference's answer or null, never
+  their own, and asserts each is either the reference's answer or null — never
   a third thing. It then asserts the native path actually answered, including
   one hover of every declaration kind with its full signature, so agreement
   cannot be bought by answering nothing.
@@ -266,6 +301,7 @@ REVL_LSP_PYTHON=/path/to/python cargo test   # plus the reference oracle
   binary that bakes that archive in under that pin (`REVL_LSP_EMBED_RUNTIME` +
   `_PIN`, into an isolated target dir), then drives that binary with no
   `REVL_LSP_PYTHON`, no runtime env archive and no pin override, so the ONLY
+  `REVL_LSP_PYTHON`, no runtime env archive and no pin override — so the ONLY
   way it reaches `revl` is the bytes inside the executable. It asserts the baked
   pin governed the versioned cache, `revl/gateVersion` reports the `embedded`
   source, the published diagnostics equal the reference server's byte for byte,
@@ -286,6 +322,11 @@ That includes component activation bodies, `provide` methods, `effect`/`undo`
 acquisition, and service linking, which `docs/conformance.md` records as the
 `lim` rows of the self-host frontier. Clean compositions and protocol edges (an
 empty document, a syntax error, an in-frontier `fn` body) are in the corpus too.
+against an undeclared key, and T1 return-path and match-exhaustiveness typing —
+component activation bodies, `provide` methods, `effect`/`undo` acquisition and
+service linking, which `docs/conformance.md` records as the `lim` rows of the
+self-host frontier. Clean compositions and protocol edges (an empty document, a
+syntax error, an in-frontier `fn` body) are in the corpus too.
 
 The reference is both this crate's engine and its oracle, so a machine that
 cannot `import revl` cannot verify anything: the oracle tests FAIL with that
@@ -315,9 +356,22 @@ oracle executes for real rather than skipping.
   binary actually built that way, landed here too (`build.rs`,
   `tools/embed_runtime.py`, `tests/embedded_runtime.rs`). What remains is
   supplying the real archive bytes, not wiring them in.
+- Outstanding from the one-file bundling slice: fetching and shipping the pinned
+  `python-build-standalone` release BYTES a build points the embed knob at (with
+  the `revl` wheel frozen into the runtime's own site) — the distribution step
+  (338) `tools/embed_runtime.py` deliberately does not perform — and the
+  in-process pyo3 link that replaces the child process with a linked
+  `libpython`. The runtime-management contract they build on — pin, atomic
+  versioned cache, isolated launch — landed earlier (`runtime.rs`,
+  `tests/private_runtime.rs`); the BUILD glue that pins, packs and bakes a
+  runtime into the binary, and an end-to-end test of a binary actually built
+  that way, landed here too (`build.rs`, `tools/embed_runtime.py`,
+  `tests/embedded_runtime.rs`). What remains is supplying the real archive bytes,
+  not wiring them in.
 - Outstanding from slice 2: `hover`, `codeAction` and everything about
   diagnostics remain reference-served, and native navigation is confined to
   documents with no diagnostics and to declarations the self-host parser
   models. Widening either needs the self-host front end to carry `pub`,
   `verified`, `type` declarations, scopes and parameters, all part of item 391,
+  `verified`, `type` declarations, scopes and parameters — which is item 391,
   the same gate slice 3 waits on.

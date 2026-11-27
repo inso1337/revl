@@ -159,6 +159,7 @@ def test_may_widen_turns_the_ack_off():
 
 
 def test_the_verb_is_advertised(all_mcp_tools):
+def test_the_verb_is_advertised():
     listed = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     names = {t["name"] for t in listed["result"]["tools"]}
     assert "revl_repair" in names

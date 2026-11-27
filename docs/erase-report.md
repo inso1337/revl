@@ -66,6 +66,9 @@ NOT registered (issue #1707) is not revertible at all, so it lands in
 and any relay of it — is counted at (c), not listed under `relayed`. A forward
 the class map keeps at (c) is counted as an emission exactly as before.
 `relayed` is absent from a report that has no relay.
+deferred emission in `externs`. A forward the class map keeps at (c) is
+counted as an emission exactly as before. `relayed` is absent from a report
+that has no relay.
 
 **[3] Other realms provably untouched — the `survivors` set.**
 Withdrawing the realm's components (`revl.query.withdrawal`, EXACT precision)

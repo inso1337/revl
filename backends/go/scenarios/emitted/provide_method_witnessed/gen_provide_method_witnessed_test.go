@@ -435,6 +435,7 @@ func (m *Map[V]) Drop() {
 	m.mu.Unlock()
 	revlHostRelease()
 }
+func (m *Map[V]) Drop() { hostRecord("map.drop"); revlHostRelease() }
 func (m *Map[V]) Insert(k string, v V) {
 	m.journalNote(k, "insert")
 	m.mu.Lock()
@@ -1019,6 +1020,7 @@ func TestCleanUnloadOfAnUnCalledAgentLeavesNoResidue(revlT *testing.T) {
 		if err := _f.Ready(stdctx.Background()); err != nil {
 			revlT.Fatalf("%s: %v", "lifecycle test \"clean unload of an un-called agent leaves no residue\": load Agent", err)
 		}
+		_fibers["Agent"] = _f
 	}
 	_revlAt = "unload Agent"
 	if _f, _ok := _fibers["Agent"]; _ok {

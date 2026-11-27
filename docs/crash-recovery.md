@@ -209,6 +209,8 @@ the write-ahead discipline). Three record shapes:
 //     run reusing it, #641/#642) records its own composition and the first
 //     seq it owns, when it was opened with an IR
 {"record": "generation", "generation": 8, "fromSeq": 42, "composition": "sha256:…"}
+// 1. header (first line)
+{"record": "header", "walVersion": 1, "generation": 7, "guarantee": "…"}
 
 // 2. one per committed effect, written as it commits
 {"record": "effect", "seq": 3, "component": "UserCache", "stepIndex": 4,
@@ -242,6 +244,9 @@ the write-ahead discipline). Three record shapes:
 //    cleanly (a later opening's `generation` record starts the next opening's
 //    marker, issue #3147). NOT the end of the log: the WAL stays open for the
 //    whole run, so steady-state effects (below) are appended AFTER this line.
+// 3. activation marker — present iff activation finished cleanly. NOT the end
+//    of the log: the WAL stays open for the whole run, so steady-state effects
+//    (below) are appended AFTER this line.
 {"record": "activation-complete", "generation": 7, "components": ["PgDatabase","UserCache"]}
 
 // 3b. shutdown marker — written at ORDERLY teardown, so its ABSENCE tells a
@@ -544,6 +549,9 @@ to their own opening:
 So the reported crash of a later run mid-activation is `ROLLED-BACK` even
 though the file still carries the prior run's marker, and its uncommitted
 writes are re-issued their inverses instead of being declared finished.
+`revl recover` has no way to bind a real one yet, so today every CLI run is a
+model run, and the proof is a proof about the model. Section 5b says what that
+means for the output and the exit status.
 
 ### 5b. The model is not the world (issue #1477)
 
@@ -555,6 +563,10 @@ outside world. The default is `"model"`, and `DictWorld` is one.
 Without `--composition` (section 5c), the CLI runs against `DictWorld`.
 Nothing it reports as ran, rolled back, re-attempted, re-issued or reclaimed
 happened to a file, a row or a remote service. The output says so:
+`revl recover` has no way to supply a real adapter yet, so the CLI always runs
+against `DictWorld`. Nothing it reports as ran, rolled back, re-attempted,
+re-issued or reclaimed happened to a file, a row or a remote service. The
+output says so:
 
 - the verdict JSON carries `"world": "model"` (or `"real"` for an adapter that
   declares it), on every verdict, including roll-forward and fork-retired,
@@ -845,6 +857,9 @@ This is a settlement of one participant's recorded effects, not global
 atomicity. A participant the conductor could not reach is still reported
 `unresolved` by the deploy verdict, and recovering its WAL is a separate step
 that the deploy never claims to have performed.
+A real world path, where `revl recover` binds the composition's own externs and
+host bodies and replays the WAL's discharge descriptors against them, is the
+rest of issue #1477.
 
 ### Recovering a session that was forked (item 250)
 

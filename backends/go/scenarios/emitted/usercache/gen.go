@@ -194,6 +194,7 @@ func PgDatabase(cfg PgDatabaseConfig) stc.Component {
 					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
 				}
 			}()
+		Apply: func(ctx *stc.Context) (stc.Inverse, error) {
 			var pool *Pool
 			if err := ctx.Effect(func() stc.Inverse {
 				pool = PoolOpen(cfg.Url, cfg.PoolSize)
@@ -237,6 +238,7 @@ func UserCache() stc.Component {
 					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
 				}
 			}()
+		Apply: func(ctx *stc.Context) (stc.Inverse, error) {
 			db, err := stc.Service[Database](ctx, _keyDb)
 			if err != nil {
 				return nil, err

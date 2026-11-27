@@ -5,6 +5,7 @@
 with no network, that every external `uses:` is `owner/repo(/path)@<40 hex>` and
 carries a comment. What it cannot see is whether the sha is the right sha, and
 there are exactly three ways to get that wrong:
+there are exactly two ways to get that wrong:
 
   * **The annotated-tag trap.** `refs/tags/v4` for github/codeql-action is a TAG
     object, not a commit, so the sha the API returns for the ref is not the sha
@@ -27,6 +28,7 @@ Usage:
                                                     # that is not its tag's commit,
                                                     # 2 if the API cannot be read;
                                                     # no staleness report (cheap)
+    python tools/pin_workflow_actions.py --check    # exit 1 on a bad pin
     python tools/pin_workflow_actions.py --write    # rewrite pins in place
     python tools/pin_workflow_actions.py --strict   # a newer release is a failure
 
@@ -94,6 +96,13 @@ def _get(path: str) -> object | None:
         if attempt + 1 < ATTEMPTS:
             time.sleep(BACKOFF_SECONDS * (2**attempt))
     raise ApiUnavailable(f"{path}: {failure}")
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return None
+        raise
 
 
 def _is_commit(repo: str, sha: str) -> bool:
@@ -251,6 +260,7 @@ def _main(argv: list[str] | None = None) -> int:
             # so the `/commits/{sha}` lookup would only repeat the answer.
             verified += 1
         elif not _is_commit_cached(repo, ref, commit_cache):
+        if not _is_commit(repo, ref):
             problems.append(
                 f"{path.name}: `{repo}@{ref}` is not a commit in {repo} -- an "
                 "annotated tag's object sha resolves to nothing at checkout; use "
@@ -281,6 +291,7 @@ def _main(argv: list[str] | None = None) -> int:
         if repo not in release_tags:
             release_tags[repo] = _releases(repo)
         newest = _newest_on_line(release_tags[repo], line)
+        newest = _newest_on_line(_releases(repo), line)
         if newest and newest[1] != ref:
             note = f"{path.name}: {repo}@{ref} ({comment}) -- {newest[0]} exists"
             (stale if not args.strict else problems).append(note)
@@ -307,6 +318,7 @@ def _main(argv: list[str] | None = None) -> int:
         f"every pin is a commit; {verified} pin(s) match the commit of the tag "
         f"their comment names, {len(set(unchecked))} unchecked"
     )
+    print("every pin is a commit on its recorded release")
     return 0
 
 

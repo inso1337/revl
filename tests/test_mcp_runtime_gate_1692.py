@@ -88,6 +88,7 @@ def test_each_runtime_verb_answers_with_the_named_refusal(no_runtime, verb):
     # one `next` schema across refusals (issue #1691): an operator step
     assert payload["next"]["ready"] is False
     assert "setup.sh" in payload["next"]["operator"]
+    assert "setup.sh" in payload["next"]
     diagnostic = payload["diagnostics"][0]
     assert diagnostic["category"] == "runtime"
     assert f"`{verb}` needs the cordis-py runtime" in diagnostic["message"]
@@ -131,6 +132,7 @@ def test_a_real_cordis_less_server_announces_and_refuses():
     assert "revl_load" in responses[0]["result"]["instructions"]
     load = responses[1]["result"]["structuredContent"]
     assert load["refused"] is True and "setup.sh" in load["next"]["operator"]
+    assert load["refused"] is True and "setup.sh" in load["next"]
 
 
 # ------------------------------------------------------------ the re-exec

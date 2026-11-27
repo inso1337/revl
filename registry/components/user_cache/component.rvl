@@ -12,6 +12,7 @@
 service Database {
   fn query(sql: Str) -> List[Row]
   emission[db] fn execute(sql: Str) -> Int
+  emission fn execute(sql: Str) -> Int
 }
 
 service Cache {
@@ -19,6 +20,7 @@ service Cache {
   // `put` writes the cache log through `db` — a service declaration is an
   // upper bound on what its providers may do.
   emission[db] fn put(key: Str, value: Str)
+  emission fn put(key: Str, value: Str)
 }
 
 component UserCache requires db: Database provides cache: Cache {

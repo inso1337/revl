@@ -100,6 +100,7 @@ import re
 # same class of value an importer's server URL is, so these are reused rather
 # than re-derived.
 from . import a2a_boundary, a2a_task, tls_pin
+from . import a2a_boundary, a2a_task
 from .crossing_redirect import CROSSING_TIMEOUT, py_policy
 from .errors import RevlError
 from .import_openapi import _authority_host, _comment_safe
@@ -142,6 +143,7 @@ KINDS = ("remote", "seam", "host")
 #: hostable` holds the two halves together: a service declaration that does not
 #: name exactly these tokens is refused rather than silently believed.
 HOST_SHIMS: dict[str, dict] = {
+HOST_SHIMS: dict[str, dict[str, str]] = {
     "Server": {
         "module": "../backends/typescript/revl_server_ts.ts",
         "package": "@cordisjs/server",
@@ -396,6 +398,7 @@ def _transport_fault_class(label: str, op: str, indent: int = 4) -> str:
 def _py_body(host: str, key: str, op: str, in_band: bool,
              follow_redirects: bool = False, *,
              label: str = "", pin: str | None = None) -> str:
+             follow_redirects: bool = False, *, label: str = "") -> str:
     """One crossing, Python tier. The canonical envelope
     (`{"key","method","args"}` -> `{"ok","value"|"error"}`,
     `backends/python/bridge.py:19`) over HTTPS.
@@ -425,6 +428,7 @@ def _py_body(host: str, key: str, op: str, in_band: bool,
     # than letting the generic arm replace it with "transport failure".
     fault_class = ("" if in_band and pin is None
                    else _transport_fault_class(label, op))
+    fault_class = "" if in_band else _transport_fault_class(label, op)
     fail = (
         '        return Err("remote: transport failure")\n'
         if in_band else
@@ -448,9 +452,12 @@ def _py_body(host: str, key: str, op: str, in_band: bool,
     policy = py_policy(
         "remote", follow=follow_redirects,
         extra_handlers=", _PinnedHTTPSHandler()" if pin else "")
+    policy = py_policy("remote", follow=follow_redirects)
     return f"""
 {pin_imports}    import json as _json, urllib.request as _req, urllib.parse as _urlp
 {fault_class}{pin_src}    _payload = _json.dumps({{"key": {kj}, "method": {oj},
+    import json as _json, urllib.request as _req, urllib.parse as _urlp
+{fault_class}    _payload = _json.dumps({{"key": {kj}, "method": {oj},
                             "args": list(_args)}}).encode()
     _r = _req.Request({url}, data=_payload,
                       headers={{"content-type": "application/json"}})
@@ -466,6 +473,7 @@ def _py_body(host: str, key: str, op: str, in_band: bool,
         # says the peer address was contradicted.
         raise
 {pin_catch}    except Exception as _exc:
+    except Exception as _exc:
 {fail}    if not _reply.get("ok"):
 {err}{ok}    """
 
@@ -636,6 +644,7 @@ def _py_body_a2a(host: str, op: str, in_band: bool,
                  follow_redirects: bool = False, *, rest: bool = False,
                  in_modality: str = "text", out_modality: str = "text",
                  label: str = "", pin: str | None = None) -> str:
+                 label: str = "") -> str:
     """One crossing, Python tier, over A2A 1.0.0 `message/send`.
 
     This is the `through a2a` / `through a2a_rest` wire (item 439). It maps the
@@ -691,6 +700,7 @@ def _py_body_a2a(host: str, op: str, in_band: bool,
     policy = py_policy(
         _A2A, follow=follow_redirects,
         extra_handlers=", _PinnedHTTPSHandler()" if pin else "")
+    policy = py_policy(_A2A, follow=follow_redirects)
     wire = ("HTTP+JSON/REST `POST /v1/message:send`" if rest
             else "JSON-RPC 2.0 `message/send`")
 
@@ -779,6 +789,7 @@ def _py_body_a2a(host: str, op: str, in_band: bool,
     ok = "    return Ok(_value)\n" if in_band else "    return _value\n"
     fault_class = ("" if in_band and pin is None
                    else _transport_fault_class(label, op))
+    fault_class = "" if in_band else _transport_fault_class(label, op)
     # Item 439 (question (2), the fourth layer) and the correlation identity:
     # both are `a2a_boundary`'s, shared with the four-op wire and the importer
     # so an external peer cannot be read differently per entry point.
@@ -786,8 +797,10 @@ def _py_body_a2a(host: str, op: str, in_band: bool,
     correlation = a2a_boundary.py_correlation()
     return f"""
 {pin_imports}    import json as _json, urllib.request as _req, urllib.parse as _urlp
+    import json as _json, urllib.request as _req, urllib.parse as _urlp
     import uuid as _uuid
 {fault_class}{pin_src}{funnel}{correlation}    # A2A {A2A_VERSION}, {wire}. ONE crossing. The one canonical arg is the
+{fault_class}{funnel}{correlation}    # A2A {A2A_VERSION}, {wire}. ONE crossing. The one canonical arg is the
     # message `Part`; the method name rides as `revl.skill`.
     _message = _args[0]
 {send_prep}    _payload = _json.dumps({payload}).encode()
@@ -800,6 +813,7 @@ def _py_body_a2a(host: str, op: str, in_band: bool,
         # redirect is the peer declining to be the declared endpoint at all.
         raise
 {pin_catch}    except Exception as _exc:
+    except Exception as _exc:
 {transport_fail}{fault(8, '"a2a: transport failure"', cause="_exc")}{error_branch}{a2a_boundary.py_result_gate(fault)}    _kind = _result.get("kind")
     if _kind == "task":
 {a2a_boundary.py_task_status_gate(fault, indent=8)}        if _state not in {terminal}:
@@ -850,6 +864,7 @@ def _check_long_running(is_a2a: bool, is_rest: bool, in_band: bool, *,
 def _task_ops(service, host: str, capability: str, redirect: str, *,
               doc: str, line: int, label: str,
               rest: bool = False, pin: str | None = None) -> tuple[list[str], list[str]]:
+              rest: bool = False) -> tuple[list[str], list[str]]:
     """The four-op projection's externs and provide methods (item 439 T1).
 
     Each op is ONE emission crossing exactly as the terminal wire is; the only
@@ -878,6 +893,7 @@ def _task_ops(service, host: str, capability: str, redirect: str, *,
             body_src = a2a_task.task_body(suffix, f"https://{host}", base,
                                           follow_redirects=follow, label=label,
                                           rest=rest, pin=pin)
+                                          rest=rest)
             # The `tasks/cancel` COMPENSATION of `_start` (item 247) is the
             # consumer's to register, keyed by the `TaskRef` `_start` returns —
             # `_cancel` below is exactly that compensation as a first-class op
@@ -979,6 +995,7 @@ def _remote_source(service, params: dict) -> tuple[str, str]:
         externs, provides = _task_ops(service, host, capability, redirect,
                                       doc=doc, line=line, label=label,
                                       rest=is_rest, pin=pin)
+                                      rest=is_rest)
     for op, method in ([] if long_running else service.methods.items()):
         if method.async_ and not method.emission:
             raise RevlError(
@@ -1058,9 +1075,11 @@ def _remote_source(service, params: dict) -> tuple[str, str]:
                                  rest=is_rest, in_modality=in_modality,
                                  out_modality=out_modality, label=label,
                                  pin=pin)
+                                 out_modality=out_modality, label=label)
                     if is_a2a else
                     _py_body(host, key, op, in_band, redirect == 'same_origin',
                              label=label, pin=pin))
+                             label=label))
         externs.append(
             f"extern emission[{capability}] fn {extern}({sig}){arrow}\n"
             f"  = @py {{\n    _args = [{', '.join(names)}]\n"
@@ -1074,6 +1093,7 @@ def _remote_source(service, params: dict) -> tuple[str, str]:
     header = _remote_header(service, label, key, host, capability, on_failure,
                             transport, realm, redirect,
                             long_running=long_running, pin=pin)
+                            long_running=long_running)
     body = (f"component {component} provides {key}: {service.name} {{\n"
             f"{isolate}  provide {key} {{\n" + "\n".join(provides) + "\n  }\n}")
     parts = [header, *externs, body]
@@ -1084,6 +1104,7 @@ def _remote_source(service, params: dict) -> tuple[str, str]:
             header, *externs, _a2a_push_receiver_source(label), body,
         ]
     return component, "\n\n".join(parts) + "\n"
+    return component, "\n\n".join([header, *externs, body]) + "\n"
 
 
 def _a2a_task_scope_lines(rest: bool = False) -> list[str]:
@@ -1213,6 +1234,7 @@ def _a2a_header_lines(rest: bool = False, long_running: bool = False) -> list[st
 def _remote_header(service, label, key, host, capability, on_failure,
                    transport, realm, redirect="refuse", *,
                    long_running: bool = False, pin: str | None = None) -> str:
+                   long_running: bool = False) -> str:
     safe_host = _comment_safe(host)
     lines = [
         f"// SYNTHESIZED for remote row `@{label}` — this file is not on disk.",
@@ -1739,6 +1761,7 @@ def _host_source(service, params: dict) -> tuple[str, str]:
         # 410), so the binding is auditable rather than an opaque ambient reach.
         externs.append(
             f"extern emission{scope} fn {extern}({sig}){arrow} "
+            f"extern emission fn {extern}({sig}){arrow} "
             f"= @ts ref {op} from \"{module}\"")
         call_args = ", ".join(names)
         # every host extern here is an emission, so the call carries its

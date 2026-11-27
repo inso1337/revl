@@ -353,6 +353,7 @@ SHARED_LOADERS = {
 #: and every such module must reference the shared discrimination below.
 #:
 #: The non-`reports` row is measured, not assumed:
+#: The two non-`reports` rows are measured, not assumed:
 #:
 #: * `_process_runner.py` is a placement CHILD process. Its `main()` catch-all
 #:   prints one redacted `[<name>] FATAL <type>: <sentence>` line on stderr and
@@ -367,11 +368,22 @@ SHARED_LOADERS = {
 #: loads an emitter itself: `backends/wasm/canonical.py` binds the wasm emitter
 #: under the shared name `revl_wasm_emit` and re-exports its `EmitError`, which
 #: is the class quarantine catches. The test below keeps that class pinned.
+#: * `mcp/quarantine.py` was measured CORRECT before this issue and is left
+#:   alone. It reads `EmitError` off `backends/wasm/canonical.py`, which
+#:   re-exports the wasm emitter's own class, catches that and nothing wider,
+#:   and answers a refusal with a `status: "deferred"` record carrying the
+#:   emitter's sentence (measured: a `Float`-only boundary gives `{"kind":
+#:   "confined", "status": "deferred", "ran": False}` plus "presents no
+#:   canonical-ABI-emittable method"). It is `by-hand` rather than `reports`
+#:   only because the class it needs is the one `canonical` already re-exports,
+#:   and rewriting the wasm quarantine path to reach the same class a second way
+#:   would be change without a defect behind it.
 ENTRY_POINTS = {
     "revl/_process_runner.py": "funnelled",
     "revl/bundle.py": "reports",
     "revl/fault.py": "reports",
     "revl/gate.py": "reports",
+    "revl/mcp/quarantine.py": "by-hand",
     "revl/mcp/session.py": "reports",
     "revl/placement.py": "reports",
     "revl/recover_binding.py": "reports",
@@ -489,12 +501,19 @@ def test_the_census_disciplines_are_the_ones_still_in_use():
     """The audit found three; the third (`by-hand`, quarantine) went with
     issue #2204, when quarantine stopped loading an emitter itself."""
     assert set(ENTRY_POINTS.values()) == {"reports", "funnelled"}
+def test_the_census_disciplines_are_the_three_the_audit_found():
+    assert set(ENTRY_POINTS.values()) == {"reports", "funnelled", "by-hand"}
 
 
 def test_quarantine_still_catches_the_wasm_emitters_own_class():
     """Quarantine catches `canonical.EmitError` rather than asking the shared
     helper, so that class must stay the wasm emitter's own refusal class, which
     is precisely what the shared helper would have answered."""
+def test_the_by_hand_entry_point_still_discriminates_correctly():
+    """The one entry point exempted from the shared helper has to keep earning
+    it, or the exemption is a hole. `canonical.EmitError` must stay the wasm
+    emitter's own refusal class, which is precisely what the shared helper would
+    have answered."""
     from revl.mcp import quarantine
 
     canonical = quarantine._load_canonical()
@@ -861,6 +880,7 @@ def test_the_transport_calls_the_refusal_a_session_answer_not_an_internal_fault(
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": {"name": "revl_load",
                        "arguments": {"source": PROGRAM}},
+                       "arguments": {"source": PROGRAM, "filename": "agent.rvl"}},
         })
     finally:
         server.AUTHORING = saved

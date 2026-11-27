@@ -69,6 +69,10 @@ operations, the await-seed), destructuring ``let``, the activation-body
 ``await`` step and the in-file ``test`` / ``lifecycle test`` / ``fault test``
 sections are ported since item 391. Realm placements (``isolate``/``intercept``/``routes``)
 are ported since item 391's placement slice. Method-body ``let-effect`` is emitted (the
+in-file ``test``/``fault_test`` and ``lifecycle test`` emission, async coloring
+(async methods / async externs' await-seed / ``await`` bodies), realm placements
+(``isolate``/``intercept``/``routes``), spawn/instances, and
+the canonical ABI. Method-body ``let-effect`` is emitted (the
 ``_revl_frame.acquire`` form) but NOT cross-checked this slice: the surface admits
 ``spawn`` or result-declared host acquisitions there, whose ``cexpr`` lands in
 slice 5; it rejects bound witnessed acquisitions. ``let_pattern``
@@ -612,6 +616,10 @@ def test_inline_templates_preserve_argument_evaluation(emitted):
     assert "b = twice_inline(next_())" in source
     assert "c = ignores(next_())" in source
     assert "d = conditional_only(next_())" in source
+    assert "a = next()" in source
+    assert "b = twice_inline(next())" in source
+    assert "c = ignores(next())" in source
+    assert "d = conditional_only(next())" in source
     assert "return recursive_inline(x)" in source
     assert ns["guarded"](-1) == 0
     assert ns["guarded"](99) == 10
@@ -723,6 +731,7 @@ def test_witnessed_effects_register_each_success_once(emitted, monkeypatch):
                     # against the `Ok` witness, for the WAL descriptor.
                     "call": {"receiver": None, "method": "unstash",
                              "args": [witness]}}
+            want = {"scope": {"caps": ["fs"]}}
             if mode == "activation":
                 want.update(undo_idempotent=True, register="declared")
             assert kwargs == want
@@ -744,6 +753,7 @@ def test_witnessed_source_boundaries_are_frontend_rejections(tmp_path, body, mes
     from revl.lower import RevlError
 
     source = (CORPUS_DIR / "witnessed.rvl").read_text(encoding="utf-8").split("component Stasher")[0]
+    source = (CORPUS_DIR / "witnessed.rvl").read_text().split("component Stasher")[0]
     path = tmp_path / "witnessed_boundary.rvl"
     path.write_text(source + body)
     with pytest.raises(RevlError, match=message):
@@ -864,6 +874,48 @@ def test_a_py_ref_extern_is_named_not_emitted_empty(emitted, reference, tmp_path
     assert "<<UNSUPPORTED-EXTERN:py-ref engine>>" in got
     assert "def engine(" not in got
     reason = shared_witness_token_reason(want, "<<UNSUPPORTED-EXTERN:py-ref engine>>")
+@pytest.mark.parametrize(("path", "reference_text", "port_marker"), [
+    ("tests/fixtures/emit_ts_corpus/async_module_local.rvl", "async def run(", None),
+    ("tests/fixtures/emit_ts_corpus/services_async.rvl", "'async': True", None),
+    ("tests/fixtures/emit_ts_corpus/realm_intercept.rvl", "'inject': {'db':", None),
+    ("tests/fixtures/emit_ts_corpus/realm_isolate.rvl", "'isolate':", None),
+    ("stdlib/fs.rvl", "_REVL_REFS = {}", None),
+    ("examples/lifecycle_wasm.rvl", "REVL_TESTS = []", None),
+    ("examples/regressions/fuzz_go_6be27824.rvl", "REVL_TESTS = []", None),
+    ("backends/go/scenarios/accessor.rvl", "spawn as _revl_spawn",
+     "<<UNSUPPORTED-CEXPR:spawn>>"),
+    # advance.rvl's component-body `${…}` (`format`) and its `host` builtin
+    # `Map.new()` are both ported now (`services_interp.rvl` and
+    # `services_host.rvl` in the CORPUS above), so this document is pinned on
+    # its REMAINING deferred boundary: the lifecycle tests that drive the
+    # clock coeffect with `advance`, which the port names instead of emitting.
+    ("backends/go/scenarios/advance.rvl", "_revl_Clock.advance(",
+     "<<UNSUPPORTED-TEST:an every-timer fires on each advanced tick>>"),
+    # item 130 (issue #81): a stream document reaches this port at TWO
+    # boundaries, and the row below covered only the first. The `subscribe`
+    # acquisition is one; the `every … in` loop the reference lowers as a
+    # `while True` around `Stream.is_closed(…)` is the other, and it answers
+    # with a body-step marker of its own. Both are pinned because a ledger
+    # entry is satisfied by a port that emits the acquisition's marker and
+    # then drops the loop with nothing in its place — the section-level
+    # silence issue #1123 found, and the worst answer item 130 admits for a
+    # stream. The acquisition row reads the reference's subscribe CALL: the
+    # `Pool, Stream` import it used to read is emitted by the port too now that
+    # a component-body `Stream.source()` is ported (`services_host_stream.rvl`).
+    ("backends/go/testdata/stream_130.rvl", "Stream.subscribe(",
+     "<<UNSUPPORTED-CEXPR:subscribe>>"),
+    ("backends/go/testdata/stream_130.rvl", "Stream.is_closed(",
+     "<<UNSUPPORTED-BODYSTEP:stream-iter>>"),
+])
+def test_named_runtime_and_harness_boundaries(emitted, reference, path, reference_text, port_marker):
+    """Pin specific deferred paths, not a blanket allowance for different bytes."""
+    ir = compile_files([str(ROOT / path)])
+    expected = reference.emit(ir)
+    actual = emitted["emit_py_src"](ir)
+    assert reference_text in expected
+    assert reference_text not in actual
+    # A port marker the reference emits too witnesses nothing (item 1136).
+    reason = shared_witness_token_reason(expected, port_marker)
     assert reason is None, reason
 
 
@@ -880,6 +932,8 @@ def test_an_inline_extern_parameter_the_reference_refuses_is_marked_by_the_port(
     got = emitted["emit_py_src"](ir)
     assert marker in got
     assert "def f(" not in got and "def g(" not in got
+    if port_marker is not None:
+        assert port_marker in actual
 
 
 # A `Stream.source()` that DECLARES its replay backlog (item 130 §4.5) is the
@@ -984,11 +1038,22 @@ def test_a_validated_retry_budget_is_named_not_dropped(emitted, reference, tmp_p
 
 # ---------------------------------------------------------------------------
 # The in-file test sections (issue #1123, then item 391).
+# The deferred in-file test section stays LOUD (issue #1123).
 #
 # The ports used to emit NOTHING for in-file `test` / `lifecycle test` /
 # `fault test` sections, then one named marker per test. The py port now emits
 # all three sections byte-for-byte; these minimal sources keep each section's
 # smallest shape pinned beside the CORPUS documents that carry the larger ones.
+# The self-host emitters' safety argument is that an unported construct answers
+# with a named `<<UNSUPPORTED-...>>` marker rather than with silence: a marker is
+# visible in the emitted bytes and is pinned here, while a section the port
+# simply skips is invisible to the byte oracle (no corpus document on any tier
+# carries a test section) and is counted as mirrored by
+# tools/selfhost_coverage.py.
+#
+# In-file `test` / `fault test` / `lifecycle test` emission is deferred out of
+# every self-host slice, and all six ports used to emit NOTHING for it. Each now
+# emits one named marker per test, per section.
 IN_FILE_TEST_SRC = 'fn f() -> Bool { return true }\ntest "probe" { assert f() }'
 
 LIFECYCLE_TEST_SRC = """service Ping { fn ping() -> Int }
@@ -1033,9 +1098,20 @@ def test_comment_only_blocks_agree(emitted, reference, tmp_path, name):
     pytest.param(IN_FILE_TEST_SRC, "REVL_TESTS.append(('probe', test_0))", id="in-file-tests"),
     pytest.param(LIFECYCLE_TEST_SRC, "lifecycle test 'probe': assertion failed", id="lifecycle-tests"),
     pytest.param(FAULT_TEST_SRC, "REVL_FAULT_TESTS = [", id="fault-tests"),
+@pytest.mark.parametrize("source, reference_token, port_token", [
+    pytest.param(IN_FILE_TEST_SRC, "REVL_TESTS.append(('probe', test_0))",
+                 "<<UNSUPPORTED-TEST:probe>>", id="in-file-tests"),
+    pytest.param(LIFECYCLE_TEST_SRC, "lifecycle test 'probe': assertion failed",
+                 "<<UNSUPPORTED-TEST:probe>>", id="lifecycle-tests"),
+    pytest.param(FAULT_TEST_SRC, "REVL_FAULT_TESTS = [",
+                 "<<UNSUPPORTED-FAULT-TEST:probe>>", id="fault-tests"),
 ])
 def test_in_file_test_sections_agree(emitted, reference, tmp_path, source, reference_token):
     path = tmp_path / "sections.rvl"
+def test_deferred_test_sections_are_named(emitted, reference, tmp_path, source,
+                                          reference_token, port_token):
+    """These witnesses are not byte-agreement CORPUS; a port closes the reason."""
+    path = tmp_path / "boundary.rvl"
     path.write_text(source)
     ir = compile_files([str(path)])
     want, got = reference.emit(ir), emitted["emit_py_src"](ir)
@@ -1108,3 +1184,5 @@ def test_a_value_position_ceiling_wrapper_is_refused_by_name(reference):
                        match=r"declared ceiling on `net\(calls=1\)`[^`]*"
                              r"value-position emission"):
         reference.emit(ir)
+    assert port_token in got
+    assert got != want, "boundary is stale: move its witness into CORPUS"

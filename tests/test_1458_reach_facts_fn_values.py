@@ -50,6 +50,7 @@ SPELLINGS = sorted(_T118._FN_VALUE_SPELLINGS)
 # over the bare extern only; `tests/test_deploy_118.py` pins the refusal for
 # every spelling.
 EXTERNS = {"bare": _T118._BARE_CHARGE}
+EXTERNS = {"bare": _T118._BARE_CHARGE, "deferred": _T118._DEFERRED_CHARGE}
 SCOPE = "C:s.go"
 
 
@@ -64,6 +65,7 @@ def _ir(tmp_path, spelling: str, extern: str = "bare", *, realm: bool = False):
     # read off IR, so they must still see the value channel in one
     with value_rule_off():
         return compile_source(source, str(tmp_path / f"{extern}-{spelling}.rvl"))
+    return compile_source(source, str(tmp_path / f"{extern}-{spelling}.rvl"))
 
 
 def _charge_fact(facts: dict) -> dict:
@@ -177,6 +179,8 @@ def test_a_value_route_beside_a_direct_call_is_not_resource_scoped(tmp_path):
         compile_source(_MIXED, str(tmp_path / "mixed.rvl"))
     with value_rule_off():
         cmap = ClassMap(compile_source(_MIXED, str(tmp_path / "mixed.rvl")))
+    destination the call does not control (item 427 F2)."""
+    cmap = ClassMap(compile_source(_MIXED, str(tmp_path / "mixed.rvl")))
     spelling, refusal, _from_caller = cmap.bind_resource_scope(
         "net.post", ["api.example", "payload"], "Agent:api.send")
     assert spelling is None

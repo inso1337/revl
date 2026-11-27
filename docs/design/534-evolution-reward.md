@@ -21,8 +21,11 @@ The reward is a **conjunction, not a scalar**, and retention is that same
 conjunction. Thirteen components each answer `verified` or `failed` (item 536's
 eight, the three more that its negative promotion bar needs and slice 4 below
 adds, the `held-out` component design doc 535 owns and the `progress`
+conjunction. Ten components each answer `verified` or `failed` (item 536's
+eight, plus the `held-out` component design doc 535 owns and the `progress`
 component design doc 546 owns), every answer is read off an artifact the
 repository owns, and a trajectory is retained only when all thirteen say `verified`.
+repository owns, and a trajectory is retained only when all ten say `verified`.
 `progress` is the one that requires an IMPROVEMENT, so the empty diff is not
 retained. No weight, no threshold, no partial credit, and no
 number exported anywhere a threshold could later be attached to it. The scorer is
@@ -63,6 +66,7 @@ reported success.
 | `artifact-stability` | every generated artifact | `tools/regen_goldens.py --all --check` exit status, which contains the crate and wasm digest checks | **1** |
 | `formal` | the `formal/` ledger | the two pure-python ledger gates, plus a coverage read against `base` | **3** |
 | `scope` | the changed-file set | a fresh-index diff against the operator's base commit (`--base` / `REVL_EDIT_BASE`) plus untracked files, against the declared globs AND the operator allow set (`--allow` / `REVL_EDIT_ALLOW`); no grant and no operator base fail the component | **1, 6** |
+| `scope` | the changed-file set | `git diff --name-only <base>` plus untracked files, against the declared globs | **1** |
 | `documentation` | the citation gate and the generated blocks | `tools/docgen.py --check` and `tools/check_roadmap_claims.py --check` exit status | **1** |
 | `held-out` | a draw the candidate could not read | `tools/heldout_scoring.py --diff-base`, where a REFUSAL is a fail | **1b** |
 | `progress` | the census allowance, the native-chain residual, the reach ledger | `tools/evolution_progress.py`, against the merge base of the candidate's `HEAD` and `base`: none regressed and at least one improved | **5** |
@@ -351,10 +355,14 @@ candidate never read the set, which is a property of the task, not of the score.
 
 **Shared vocabulary.** `Candidate` holds `tree`, `base`, `scope`, and the
 operator's `allow` grant (the last one is not a record key). `Verdict` holds
+**Shared vocabulary.** `Candidate` holds `tree`, `base`, `scope`. `Verdict` holds
 `component`, `verified`, `reason`, `evidence`. `Scorecard` holds `retained`,
 `blockers`, `components`, `prose_ignored`, and the `scope`/`allow` it was judged
 against. If a sibling lane needs a different name, this document is the one that
 moves, because the reward is downstream of both.
+`blockers`, `components`, `prose_ignored`. If a sibling lane needs a different
+name, this document is the one that moves, because the reward is downstream of
+both.
 
 ## 7. Non-goals
 
@@ -510,6 +518,15 @@ the attack the base's corpus closes. The direction is held by
 `test_an_unbounded_path_made_bounded_passes_resource`, and
 `test_the_real_emitters_report_their_refusals` is the positive control that the
 instrument sees a refusal on the real emitters.
+**Slice 4: the negative promotion bar.** Item 536 states seven entries that green
+tests alone must not carry: no new false admits, no widened capability reach at
+the G8 boundary, no weakened refusal, no reduced formal coverage, no unexplained
+golden change, no unbounded resource path, no hidden host fallback. Slices 1 to 3
+cover the first, the third (a weakened refusal now shows as a weakened
+`(guarantee, tier)` cell), the fourth and the fifth. The other three -- widened
+capability reach at the G8 boundary, an unbounded resource path, a hidden host
+fallback -- need their own reads and are not folded into an existing component,
+because a component that fails for two unrelated reasons cannot be acted on.
 
 **Slice 5: the progress conjunct (issue #1224, item 545).** All eight of item
 536's components are PRESERVATION checks, so a reward made of them alone is
@@ -595,5 +612,6 @@ of `tests/test_evolution_controller.py`, and `tools/evolution_reward.py`'s
   That is the price of a reward whose maximum is not the empty diff, and design
   doc 546 section 6 lists what the counters cannot see.
 * Only `progress` resolves the merge base. The other twelve components read
+* Only `progress` resolves the merge base. The other nine components read
   `candidate.base` verbatim, which against a moving ref errs toward failing
   (`scope` would count the trunk's own changes), never toward crediting.

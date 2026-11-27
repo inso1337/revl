@@ -75,6 +75,8 @@ def _node_version() -> "tuple[int, int] | None":
     try:
         probe = _childproc.run(["node", "--version"], capture_output=True,
                                timeout=30)
+        probe = subprocess.run(["node", "--version"], capture_output=True,
+                               text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         return None
     match = re.match(r"^v(\d+)\.(\d+)\.", probe.stdout.strip())
@@ -203,9 +205,11 @@ def run_ts(ir: dict, config: dict, files, once: bool = False,
 
         print("== load composition (ts tier) ==", flush=True)
         proc = _childproc.popen(
+        proc = subprocess.Popen(
             ["node", str(_RUNNER), str(spec_file)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            stderr=subprocess.STDOUT, text=True,
         )
         # the proof token is stdin's only line; then stdin closes, as before,
         # so the runner never blocks on it (issue #1621)

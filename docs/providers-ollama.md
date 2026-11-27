@@ -77,6 +77,12 @@ component activates:
 2. The server is then asked again what it holds (`GET /api/ps`). A model it
    does not report loaded, or one on the wrong class of device, is unloaded and
    the boot refused. The class is the share of the model in GPU memory
+1. The first consumer's acquire loads the member: `POST /api/generate` with no
+   prompt, `keep_alive: -1` and the load options for the device
+   `revl.model_placement.device_for(role)` answers.
+2. The server is then asked what it holds (`GET /api/ps`). A model it does not
+   report loaded, or one on the wrong class of device, is unloaded and the boot
+   refused. The class is the share of the model in GPU memory
    (`size_vram / size`), rounded the way `ollama ps` prints it: a `cpu` device
    must read 0% and a `gpu` device 100%, so a model that only partly fits the
    GPU is refused too. A CPU load still holds a little GPU memory for its
@@ -95,11 +101,14 @@ last release unloads the member (`keep_alive: 0`). What the provision recorded
 over time is read back and printed at boot and at teardown, so the two lines
 say what the load cost, whether it was cold, what the unload cost and how long
 the member was held; the per-process residue proof then asks the server again:
+last release unloads the member (`keep_alive: 0`). The per-process residue
+proof then asks the server again:
 
 ```
 [edge] model | provision       | model role `small`: 2 consumer(s) (llm, tagger), 1 load(s) on cpu0 in 0.42s (loaded cold), 0 unload(s)
 ...
 [edge] model | provision       | model role `small`: 2 consumer(s) (llm, tagger), 1 load(s) on cpu0 in 0.42s (loaded cold), 1 unload(s) in 0.03s, held 12.4s
+[edge] model | provision       | model role `small`: 2 consumer(s) (llm, tagger), 1 load(s) on cpu0, 1 unload(s)
 [edge] residue no residue | registry=0 provisions=[] disposables=1/1 models=unloaded
 ```
 

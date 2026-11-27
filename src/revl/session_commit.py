@@ -48,6 +48,9 @@ def _reached_deferred_calls(ir: dict, deferred: set) -> list:
     deferred extern by name in ANY position (an `emit` step, or a value form
     the marker covers, issue #1457), the exact shape the py emitter's enqueue
     lowering keys off. Reachability, not declaration: a declared but
+    Walks the component bodies and provide-method bodies for an `emit` step whose
+    expression calls a deferred extern by name — the exact shape the py emitter's
+    enqueue lowering keys off. Reachability, not declaration: a declared but
     never-called deferred extern is not flagged."""
     reached: list = []
     seen: set = set()
@@ -64,6 +67,13 @@ def _reached_deferred_calls(ir: dict, deferred: set) -> list:
                 if mark not in seen:
                     seen.add(mark)
                     reached.append(mark)
+            if node.get("step") == "emit":
+                expr = node.get("expr") or {}
+                if expr.get("kind") == "fn" and expr.get("name") in deferred:
+                    mark = (component, expr["name"])
+                    if mark not in seen:
+                        seen.add(mark)
+                        reached.append(mark)
             for value in node.values():
                 _walk(value, component)
         elif isinstance(node, list):

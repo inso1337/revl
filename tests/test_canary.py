@@ -129,6 +129,18 @@ def test_a_wrong_inverse_of_a_host_write_never_reaches_the_canary(baseline_ir):
     `(kind, label)` once recommended promoting it. Since issue #1945 a
     provide-method host write admits only its table inverse, so admission
     refuses this candidate, naming the inverse, before anything is canaried."""
+def test_inverse_divergence_reverts_an_identical_acquisition(baseline_ir):
+    """The candidate acquires EXACTLY what the baseline acquires — the same
+    `store.insert(k, v)` with the same args, the same activation, the same
+    provision — and differs only in the INVERSE it records: the baseline takes
+    the entry back with `store.remove(k)`, the candidate removes a key it never
+    wrote.
+
+    That is a divergence. The inverse is behaviour, it is already in the
+    recorded world, and it is the half a promote hands to teardown — so a
+    generation whose rollback takes back different state must be reverted, not
+    promoted. Comparing only `(kind, label)` reported this candidate as an
+    identical generation and recommended the promote."""
     report = canary.run_canary(baseline_ir, candidate_files=[CANDIDATE_INVERSE],
                                realm="tenant_a", prove_residue=False)
     assert report["ok"] is False
@@ -146,12 +158,19 @@ def test_inverse_divergence_reverts_an_identical_acquisition():
     baseline = canary.slice_timeline(ir, "InverseBaseline")
     candidate = canary.slice_timeline(ir, "InverseCandidate")
     div = canary.compare_timelines(baseline, candidate)
+    assert report["ok"] and report["admitted"]
+    div = report["divergence"]
     assert div["diverged"] is True
     assert div["field"] == "undo"
+    # the acquisition is untouched: only the inverse differs
     assert div["baseline"]["kind"] == div["candidate"]["kind"] == "effect"
     assert div["baseline"]["label"] == div["candidate"]["label"]
     assert div["baseline"]["undo"] == "ledger.refund(k)"
     assert div["candidate"]["undo"] == "ledger.refund('some-other-key')"
+    assert div["baseline"]["undo"] == "store.remove(k)"
+    assert div["candidate"]["undo"] == "store.remove('some-other-key')"
+    assert div["attribution"] == {"component": "TenantAStore", "realm": "tenant_a"}
+    assert report["recommendation"] == "revert"
 
 
 @pytest.mark.parametrize("provider", [

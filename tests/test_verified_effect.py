@@ -132,6 +132,7 @@ def test_verified_in_a_method_body_is_refused():
     }
     '''
     with pytest.raises(RevlError, match="only allowed on a witnessed effect"):
+    with pytest.raises(RevlError, match="only allowed in a component activation body"):
         compile_source(src, "t.rvl")
 
 
@@ -272,6 +273,15 @@ def test_a_no_op_inverse_is_refused_before_it_can_run():
     assert excinfo.value.message == (
         "the `undo` of `let store = effect Map.new(...)` must release THAT "
         "handle: write `undo store.drop()`")
+@needs_cordis
+def test_a_no_op_inverse_is_caught(capsys):
+    ir = compile_source(_WRONG_NOOP, "t.rvl")
+    failures, dossier = fault_mod.run_roundtrip_units(ir, fault_mod.roundtrip_units(ir))
+    out = capsys.readouterr().out
+    assert failures == 1
+    assert dossier["status"] == "failed"
+    assert "never released" in out
+    assert dossier["components"][0]["counterexample"]["reason"]
 
 
 @needs_cordis
@@ -302,6 +312,7 @@ def test_the_report_states_its_honesty_bound(capsys):
 @needs_cordis
 def test_the_example_program_round_trips(capsys):
     ir = compile_source((ROOT / "examples" / "verified_effect.rvl").read_text(encoding="utf-8"), "ex.rvl")
+    ir = compile_source((ROOT / "examples" / "verified_effect.rvl").read_text(), "ex.rvl")
     failures, dossier = fault_mod.run_roundtrip_units(ir, fault_mod.roundtrip_units(ir))
     assert failures == 0
     assert dossier["counts"]["effects"] == 1

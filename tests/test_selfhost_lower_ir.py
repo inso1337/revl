@@ -249,6 +249,7 @@ CORPUS_EXTERN_AWARE = _corpus_params(EXTERN_DECL_GAP)
 
 def _exec_emitted() -> dict:
     ir = compiled_ir(ROOT / "selfhost" / "lower.rvl")
+    ir = compile_files([str(ROOT / "selfhost" / "lower.rvl")])
     assert ir["ir_version"] == 3
     spec = importlib.util.spec_from_file_location(
         "pyemit_selfhost_lower_ir", ROOT / "backends" / "python" / "emit.py")
@@ -942,6 +943,7 @@ def test_native_ir_matches_reference_services(lower_to_ir, rel):
     """The SERVICES table is byte-identical to the reference IR on every corpus
     document (the empty `{}` on function/type/extern-only documents included)."""
     src = (CORPUS_DIR / rel).read_text(encoding="utf-8")
+    src = (CORPUS_DIR / rel).read_text()
     native = json.loads(lower_to_ir(src))
     reference = compile_source(src)
     assert native["services"] == reference["services"]
@@ -982,6 +984,7 @@ def test_native_ir_stamps_a_nested_return_qualifier_like_the_reference(
 def test_native_ir_matches_reference_component_headers(lower_to_ir, rel):
     """Each component's source/config/requires/provides header is byte-identical."""
     src = (CORPUS_DIR / rel).read_text(encoding="utf-8")
+    src = (CORPUS_DIR / rel).read_text()
     native = json.loads(lower_to_ir(src))
     reference = compile_source(src)
     assert _headers(native["components"]) == _headers(reference["components"])
@@ -1003,6 +1006,7 @@ def test_native_ir_stamps_the_component_source(lower_to_ir_at, rel):
     source text, and the key is then byte-identical to the reference for the
     same filename — over the whole corpus, not a chosen document."""
     src = (CORPUS_DIR / rel).read_text(encoding="utf-8")
+    src = (CORPUS_DIR / rel).read_text()
     native = json.loads(lower_to_ir_at(src, rel))
     reference = compile_source(src, rel)
     assert [c.get("source") for c in native["components"]] == \
@@ -1079,6 +1083,7 @@ def test_no_native_ir_document_carries_a_manifest(lower_to_ir):
     that produces it has to come here and say what it produces."""
     for rel in COMPONENT_DOCS:
         native = json.loads(lower_to_ir((CORPUS_DIR / rel).read_text(encoding="utf-8")))
+        native = json.loads(lower_to_ir((CORPUS_DIR / rel).read_text()))
         assert "manifest" not in native, rel
 
 
@@ -1088,6 +1093,7 @@ def test_native_ir_matches_reference_bodies_where_covered(lower_to_ir, rel):
     typed component/method expression spine), it is byte-identical to the
     reference body."""
     src = (CORPUS_DIR / rel).read_text(encoding="utf-8")
+    src = (CORPUS_DIR / rel).read_text()
     native = json.loads(lower_to_ir(src))
     reference = compile_source(src)
     ref_by_name = {c["name"]: c for c in reference["components"]}
@@ -1108,6 +1114,7 @@ def test_component_docs_emit_full_body(lower_to_ir, rel):
     activation/method spine (let-effect, effect, emit/compensate sagas, if+fail
     guards, timers, provide-method bodies) is complete."""
     src = (CORPUS_DIR / rel).read_text(encoding="utf-8")
+    src = (CORPUS_DIR / rel).read_text()
     native = json.loads(lower_to_ir(src))
     reference = compile_source(src)
     ref_by_name = {c["name"]: c for c in reference["components"]}
@@ -1124,6 +1131,7 @@ def test_native_ir_matches_reference_externs(lower_to_ir, rel):
     identical to the reference IR on every corpus document (absent together on
     the extern-free documents)."""
     src = (CORPUS_DIR / rel).read_text(encoding="utf-8")
+    src = (CORPUS_DIR / rel).read_text()
     native = json.loads(lower_to_ir(src))
     reference = compile_source(src)
     assert native.get("externs") == reference.get("externs")
@@ -1143,6 +1151,7 @@ def test_native_component_and_extern_ir_is_emitter_ready(lower_to_ir):
     try:
         for rel in COMPONENT_DOCS + EXTERN_DOCS:
             src = (CORPUS_DIR / rel).read_text(encoding="utf-8")
+            src = (CORPUS_DIR / rel).read_text()
             reference_ir = compile_source(src)
             native_ir = json.loads(lower_to_ir(src))
             assert refemit.emit(native_ir) == refemit.emit(reference_ir), rel
@@ -1160,6 +1169,7 @@ def test_native_ir_matches_reference_functions(lower_to_ir, rel):
     reference IR on every corpus document (absent together on the component-only
     documents)."""
     src = (CORPUS_DIR / rel).read_text(encoding="utf-8")
+    src = (CORPUS_DIR / rel).read_text()
     native = json.loads(lower_to_ir(src))
     reference = compile_source(src)
     assert native.get("functions") == reference.get("functions")
@@ -1170,6 +1180,7 @@ def test_native_ir_matches_reference_types(lower_to_ir, rel):
     """The `types` section — user record/variant declarations — is byte-
     identical to the reference IR on every corpus document."""
     src = (CORPUS_DIR / rel).read_text(encoding="utf-8")
+    src = (CORPUS_DIR / rel).read_text()
     native = json.loads(lower_to_ir(src))
     reference = compile_source(src)
     assert native.get("types") == reference.get("types")
@@ -1188,6 +1199,7 @@ def test_native_function_ir_is_emitter_ready(lower_to_ir):
     try:
         for rel in FUNCTION_EMIT_READY_DOCS:
             src = (CORPUS_DIR / rel).read_text(encoding="utf-8")
+            src = (CORPUS_DIR / rel).read_text()
             reference_ir = compile_source(src)
             native_ir = json.loads(lower_to_ir(src))
             assert refemit.emit(native_ir) == refemit.emit(reference_ir), rel
@@ -1203,6 +1215,7 @@ def test_native_ir_version(lower_to_ir, rel):
     """`ir_version` matches the reference, except the one body-builtin document
     the header producer cannot see (it under-approximates to 1)."""
     src = (CORPUS_DIR / rel).read_text(encoding="utf-8")
+    src = (CORPUS_DIR / rel).read_text()
     native = json.loads(lower_to_ir(src))
     reference = compile_source(src)
     if rel in VERSION_BODY_DEPENDENT:
@@ -1223,6 +1236,7 @@ def test_native_ir_is_emitter_ready(lower_to_ir):
     sys.modules["runtime"] = stub
     try:
         src = (CORPUS_DIR / "services_basic.rvl").read_text(encoding="utf-8")
+        src = (CORPUS_DIR / "services_basic.rvl").read_text()
         reference_ir = compile_source(src)
         native_ir = json.loads(lower_to_ir(src))
         from_reference = refemit.emit(reference_ir)

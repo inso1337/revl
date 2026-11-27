@@ -93,6 +93,7 @@ echo "== roadmap markers =="
 # all reddens main plus every open PR whose merge-ref carries the new text.
 # A detached HEAD reports "HEAD", which names no branch and leaves it off.
 branch="${PRE_PR_HEAD_BRANCH:-$(git rev-parse --abbrev-ref HEAD 2>/dev/null)}"
+branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
 [ "$branch" = "HEAD" ] && branch=""
 python3 tools/check_roadmap_markers.py --check-contradiction --check-delegation --check-duplicate-headers --check-orphan --head-branch "$branch" || fail=1
 

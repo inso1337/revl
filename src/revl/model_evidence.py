@@ -33,6 +33,7 @@ Every member of :data:`BODY_MEMBERS` is REQUIRED and covered by the MAC.
 * ``model_digest`` and ``model_digest_basis``: the identity of the weights that
   answered, and whether that digest was checked against the bytes actually
   loaded or is only the provider's declaration.
+* ``model_digest`` — the identity of the weights that answered.
 * ``placement_digest`` — the provider's own digest over its profile (see
   "Reproducibility" below). Opaque here on purpose.
 * ``prompt_binding`` — the binding to the input, as a MODE and a value, never
@@ -59,6 +60,7 @@ Every member of :data:`BODY_MEMBERS` is REQUIRED and covered by the MAC.
   unavailable, which a record that omits it cannot distinguish from a clean
   first hit. ``fallback_reason`` names which of the ladder's three reasons it
   was.
+  first hit.
 * ``retained`` — ``None``, or the explicit, taint-carrying retention decision.
 
 The prompt binding, and why it is a mode rather than a digest
@@ -297,6 +299,7 @@ EVIDENCE_VERSION = "3.0"
 #: The same rule keeps a 2.0 record from passing as 3.0 without a reasoning
 #: member, and a 3.0 record from shedding it as an older one.
 EVIDENCE_VERSIONS = ("3.0", "2.0", "1.0")
+EVIDENCE_VERSION = "1.0"
 
 #: One value today. It is VALIDATED and not merely recorded: :func:`_sign` is
 #: unconditionally HMAC-SHA256, so a record claiming another algorithm is a
@@ -327,6 +330,12 @@ SIGN_DOMAINS = {
 #: is the CURRENT version's tag, not a stable 1.0 tag: out-of-tree code that
 #: MACs a 1.0 record must use :data:`SIGN_DOMAINS` rather than this constant.
 SIGN_DOMAIN = SIGN_DOMAINS[EVIDENCE_VERSION]
+#: The domain-separation prefix. `revl.attest`, `revl.deploy` and this module
+#: MAC canonical JSON with the same construction and may share key material, so
+#: without a per-protocol tag an attestation verifies as a decision record and
+#: back. The tag carries the version, so a v1 record cannot be replayed as a
+#: later one even by a key holder.
+SIGN_DOMAIN = b"revl.model-decision/v1\x00"
 
 #: The one member of a sealed record that the MAC does not cover: itself.
 SIGNATURE_FIELD = "signature"
@@ -418,6 +427,8 @@ SAMPLING_MEMBERS = ("max_tokens", "seed", "stop_digest", "temperature",
 #: body it was sealed with. This is a frozen list: a member added to a later
 #: version goes into that version's tuple, never into this one.
 BODY_MEMBERS_V1 = (
+#: The signed body, in full. Every one of these is required and covered.
+BODY_MEMBERS = (
     # envelope
     "kind", "version", "sign_alg", "hash_alg", "key_id", "recorded_at",
     # the crossing (revl.wal.model_decisions' key)
@@ -660,6 +671,8 @@ def reasoning_span(*, tokens: Optional[int] = None,
 def _sign(body: Mapping[str, Any], key: bytes) -> str:
     """HMAC-SHA256 over the body's version domain ++ the canonical bytes of
     every member of ``body`` EXCEPT ``signature``.
+    """HMAC-SHA256 over :data:`SIGN_DOMAIN` ++ the canonical bytes of every
+    member of ``body`` EXCEPT ``signature``.
 
     The set of covered members is DERIVED FROM THE RECORD. That is the whole
     defence against the failure this module was written not to repeat: a signed
@@ -674,11 +687,13 @@ def _sign(body: Mapping[str, Any], key: bytes) -> str:
     holder who re-MACs the unknown version is refused by :func:`_check_body`.
     The version is covered by the MAC either way, so it cannot be rewritten
     without changing the tag."""
+    here to fall out of date with the body."""
     covered = {k: v for k, v in body.items() if k != SIGNATURE_FIELD}
     version = body.get("version")
     domain = SIGN_DOMAINS.get(version, SIGN_DOMAIN) \
         if isinstance(version, str) else SIGN_DOMAIN
     return hmac.new(bytes(key), domain + _canonical_bytes(covered),
+    return hmac.new(bytes(key), SIGN_DOMAIN + _canonical_bytes(covered),
                     hashlib.sha256).hexdigest()
 
 
@@ -701,14 +716,18 @@ def _check_body(body: Mapping[str, Any]) -> Optional[Verdict]:
     members = BODY_MEMBERS_BY_VERSION.get(version, BODY_MEMBERS) \
         if isinstance(version, str) else BODY_MEMBERS
     missing = [m for m in members if m not in body]
+    missing = [m for m in BODY_MEMBERS if m not in body]
     if missing:
         return Verdict(False, EVIDENCE_INCOMPLETE,
                        "required members absent from the body: "
                        + ", ".join(missing))
     extra = [m for m in body if m not in members and m != SIGNATURE_FIELD]
+    extra = [m for m in body if m not in BODY_MEMBERS
+             and m != SIGNATURE_FIELD]
     if extra:
         return Verdict(False, EVIDENCE_VOCABULARY,
                        f"members this version ({version!r}) does not define: "
+                       "members this envelope does not define: "
                        + ", ".join(sorted(extra)))
 
     # -- envelope -----------------------------------------------------------
@@ -721,6 +740,7 @@ def _check_body(body: Mapping[str, Any]) -> Optional[Verdict]:
                        f"version is {version!r}, not one of "
                        f"{list(EVIDENCE_VERSIONS)}")
     for member, expected in (("kind", EVIDENCE_KIND),
+                             ("version", EVIDENCE_VERSION),
                              ("sign_alg", SIGN_ALG),
                              ("hash_alg", HASH_ALG)):
         if body[member] != expected:
@@ -1186,9 +1206,13 @@ def seal(key: bytes, *, component: str, step_index: int, role: str,
          origins: Sequence[str], reasoning: Mapping[str, Any],
          candidates: Sequence[str],
          chosen: Optional[int], outcome: str,
+         residence: str, model_digest: str, placement_digest: Optional[str],
+         prompt_binding: Mapping[str, Any], origins: Sequence[str],
+         candidates: Sequence[str], chosen: Optional[int], outcome: str,
          sampling: Mapping[str, Any], policy_digest: str,
          fallback_depth: int, fallback_reason: Optional[str] = None,
          retained: Optional[Mapping[str, Any]] = None,
+         fallback_depth: int, retained: Optional[Mapping[str, Any]] = None,
          retain_content: bool = False,
          recorded_at: Optional[str] = None) -> dict:
     """Build and sign one model-decision evidence record.
@@ -1294,6 +1318,10 @@ def verify(record: Any, key: bytes) -> Verdict:
        tampered record is refused as tampered rather than as malformed, and
        because the covered set is read off the record an ADDED, REMOVED or
        EDITED member all land here;
+    2. **the MAC**, recomputed over every member except ``signature``. This
+       runs before any member is interpreted, so a tampered record is refused
+       as tampered rather than as malformed, and — because the covered set is
+       read off the record — an ADDED, REMOVED or EDITED member all land here;
     3. the key identity: a record whose ``key_id`` is not this key's
        fingerprint is about a different signer even when its MAC is right
        (the reading `revl.cert.affirm_key_id` already ships);
@@ -1335,6 +1363,15 @@ def verify(record: Any, key: bytes) -> Verdict:
     if refusal is not None:
         return refusal
     return Verdict(True)
+
+
+def verify_or_raise(record: Any, key: bytes) -> dict:
+    """:func:`verify`, raising :class:`EvidenceRefused` instead of returning a
+    refusal. For a caller whose next line would be the record's contents."""
+    verdict = verify(record, key)
+    if not verdict.ok:
+        raise EvidenceRefused(verdict.link, verdict.reason)
+    return dict(record)
 
 
 # ---------------------------------------------------------------------------
@@ -1718,6 +1755,7 @@ def reconstruct(record: Any, key: bytes, *, roles: Any = None,
             "role": record["role"],
             "residence": record["residence"],
             # what answered, on what host profile, and what the digest claims
+            # what answered, and on what host profile
             "modelDigest": record["model_digest"],
             "modelDigestBasis": record.get("model_digest_basis"),
             "placementDigest": record["placement_digest"],
@@ -1740,11 +1778,13 @@ def reconstruct(record: Any, key: bytes, *, roles: Any = None,
             # how it was asked
             "sampling": sampling,
             # under what rule, how far down the ladder, and why it descended
+            # under what rule, and how far down the ladder
             "policyDigest": record["policy_digest"],
             "fallbackDepth": record["fallback_depth"],
             "fallbackReason": record.get("fallback_reason"),
             # what it kept, and whether the ANSWER itself was kept (the one
             # thing a replay can serve without calling the model)
+            # what it kept
             "retained": record["retained"] is not None,
             "retainedCompletion": bool(
                 isinstance(record["retained"], Mapping)

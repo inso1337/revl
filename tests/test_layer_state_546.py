@@ -248,6 +248,7 @@ def test_the_module_never_defaults_a_class_to_revertible():
     The whole bug is the fail-open default, so it is worth holding at the
     place a later edit would reintroduce it."""
     tree = ast.parse((ROOT / "src" / "revl" / "layer_state.py").read_text(encoding="utf-8"))
+    tree = ast.parse((ROOT / "src" / "revl" / "layer_state.py").read_text())
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
                 and node.func.attr == "get" and len(node.args) == 2:
@@ -434,6 +435,7 @@ def test_every_link_is_reachable_and_distinct():
 def test_the_module_registers_no_guarantee_code_in_the_checker():
     from revl import diagnostics
     text = (ROOT / "src" / "revl" / "layer_state.py").read_text(encoding="utf-8")
+    text = (ROOT / "src" / "revl" / "layer_state.py").read_text()
     for code in list(getattr(diagnostics, "GUARANTEES", {}) or ()):
         assert f'"{code}"' not in text, code
 
@@ -634,3 +636,4 @@ def test_the_module_is_python_3_11_parseable():
     """CI runs 3.11 and the development venv is 3.14."""
     for name in ("src/revl/layer_state.py", "tests/test_layer_state_546.py"):
         ast.parse((ROOT / name).read_text(encoding="utf-8"), feature_version=(3, 11))
+        ast.parse((ROOT / name).read_text(), feature_version=(3, 11))

@@ -107,12 +107,16 @@ def sides(incumbent_ir, candidate_ir, route, *, disagree_at=None):
         served_value = runtime.validate_retry(make_call, budget=0,
                                               schema={"type": "object"},
                                               where=live.COMPONENT)
+        runtime.validate_retry(make_call, budget=0,
+                               schema={"type": "object"},
+                               where=live.COMPONENT)
         said = f"said-{step}" if step != disagree_at else f"other-{step}"
         return srt.answered(candidate_ir, live.COMPONENT, live.seal(
             step_index=step, role=route.candidate_role,
             placement=PLACEMENT[route.candidate_role],
             answer=live.answer_digest(said), prompt=f"asked-{step}",
             recorded_at=RECORDED_AT), value=served_value)
+            recorded_at=RECORDED_AT))
 
     return incumbent, candidate, calls
 

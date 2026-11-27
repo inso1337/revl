@@ -52,6 +52,10 @@
 # `site-wheel.yml` still runs it post-merge on main and weekly), and
 # `tests/test_publish_census_artifact.py` reads it for the census step, so
 # deleting a build step below is a red, not a 404.
+# The one new way to be wrong is this job silently ceasing to build the wheel,
+# or building one under a name the page does not fetch. `tools/check_site_wheel.py`
+# reads this file for exactly that (and `site-wheel.yml` still runs it post-merge
+# on main and weekly), so deleting the build step below is a red, not a 404.
 name: pages
 
 on:

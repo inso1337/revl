@@ -86,6 +86,7 @@ import sys
 from pathlib import Path
 
 from . import _childproc, attest
+from . import attest
 from .attest import NotCanonicalizable
 from .errors import RevlError
 
@@ -461,6 +462,11 @@ def gate_theorems(text: str) -> tuple[list[str], list[str]]:
 # --- reading the oracle's evidence ----------------------------------------- #
 #: The harness whose run IS the oracle census, relative to the formal package.
 ORACLE_HARNESS = Path("harness") / "diff_corpus.py"
+_CENSUS_SHAPE = re.compile(
+    r"(\d+)\s*\.rvl files?[^0-9]*?(\d+)\s*components?[^0-9]*?(\d+)\s*statements?")
+_CENSUS_VERDICTS = re.compile(
+    r"(\d+)\s*verdicts? compared.*?(\d+)\s*agree[,\s]+(\d+)\s*mismatches?",
+    re.DOTALL)
 _INJECTION_HEADER = ("injection", "caught by", "result")
 _SWEEP_SENTENCE = re.compile(
     r"Perturbing\s+the shipped side one invariant at a time")
@@ -501,6 +507,7 @@ def _run_census(harness: Path) -> dict | None:
 
 
 def oracle_census(root: Path, *, source: str) -> dict:
+def oracle_census(text: str, *, source: str) -> dict:
     """The differential oracle's census: what the row compares, and how many
     of those comparisons agree. Numbers a reader can check against the
     harness's own output rather than a claim that something was checked.
@@ -522,6 +529,10 @@ def oracle_census(root: Path, *, source: str) -> dict:
     beside it, is a refusal rather than a zero."""
     harness = Path(root) / ORACLE_HARNESS
     if not harness.is_file():
+    harness's own output rather than a claim that something was checked."""
+    shape = _CENSUS_SHAPE.search(text)
+    verdicts = _CENSUS_VERDICTS.search(text)
+    if shape is None or verdicts is None:
         raise CertError(
             f"{source} carries no readable oracle census, so the certificate "
             "cannot report what the proved model was compared against "
@@ -540,11 +551,17 @@ def oracle_census(root: Path, *, source: str) -> dict:
             "cannot report what the proved model was compared against "
             f"({_relative(root, harness)} --census-json produced none)")
     compared = census["verdicts_compared"]
+            "cannot report what the proved model was compared against")
+    files, components, statements = (int(value) for value in shape.groups())
+    compared, agree, mismatches = (int(value) for value in verdicts.groups())
     return {
         "files": census["files"], "components": census["components"],
         "statements": census["statements"],
         "verdicts_compared": compared, "verdicts_agree": compared,
         "mismatches": 0,
+        "files": files, "components": components, "statements": statements,
+        "verdicts_compared": compared, "verdicts_agree": agree,
+        "mismatches": mismatches,
     }
 
 
@@ -658,8 +675,10 @@ def tree_commit(root: Path) -> str | None:
     convenience on top of that."""
     try:
         done = _childproc.run(
+        done = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "HEAD"],
             capture_output=True, timeout=10)
+            capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
         return None
     if done.returncode != 0:
@@ -681,8 +700,10 @@ def commit_in_history(root: Path, commit: str) -> tuple[bool | None, str]:
         return None, "the formal package on this machine is not a git work tree"
     try:
         done = _childproc.run(
+        done = subprocess.run(
             ["git", "-C", str(root), "merge-base", "--is-ancestor", commit, "HEAD"],
             capture_output=True, timeout=10)
+            capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError) as error:
         return None, f"git could not answer ({error})"
     if done.returncode == 0:
@@ -792,6 +813,7 @@ def formal_state(root: Path, *, guarantees: list[str] | None = None) -> dict:
 
     unstatable = unstatable_gap(status_text)
     census = oracle_census(root, source=_relative(root, root / ORACLE_HARNESS))
+    census = oracle_census(status_text, source=status_source)
     injections = injection_proofs(status_text, source=status_source)
     sweep = injection_sweep(status_text)
     model = proof_model(root)
@@ -862,12 +884,14 @@ def formal_state(root: Path, *, guarantees: list[str] | None = None) -> dict:
     requirements.append(_requirement(
         REQ_ORACLE, "formal/harness/diff_corpus.py",
         _relative(root, root / ORACLE_HARNESS),
+        REQ_ORACLE, "formal/harness/diff_corpus.py", status_source,
         f"{census['files']} files, {census['components']} components, "
         f"{census['statements']} statements; {census['verdicts_compared']} "
         f"verdicts compared, {census['verdicts_agree']} agree, "
         f"{census['mismatches']} mismatches",
         "computed by `formal/harness/diff_corpus.py --census-json`; the "
         "agreement is the formal gate's, which fails on any mismatch"))
+        "the census paragraph in " + status_source))
     for row in injections:
         requirements.append(_requirement(
             REQ_INJECTION, row["injection"], status_source,

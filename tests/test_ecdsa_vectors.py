@@ -258,6 +258,7 @@ def test_rfc6979_deterministic_nonce_and_signature(curve_name: str,
     # Both signers, by name: `ecdsa_sign` goes through `cryptography` when it
     # is installed (issue #1460), so on a machine that has it the pure path
     # would otherwise meet these vectors nowhere.
+    signature = ecdsa_sign(curve, private_key, message)
     width = curve.order_len
     for signer in (ecdsa_sign_pure, ecdsa_sign):
         signature = signer(curve, private_key, message)
@@ -266,6 +267,9 @@ def test_rfc6979_deterministic_nonce_and_signature(curve_name: str,
             signer.__name__
         assert int.from_bytes(signature[width:], "big") == int(case["s"], 16), \
             signer.__name__
+    assert len(signature) == 2 * width
+    assert int.from_bytes(signature[:width], "big") == int(case["r"], 16)
+    assert int.from_bytes(signature[width:], "big") == int(case["s"], 16)
 
     public_key = bytes.fromhex(group["ux"] + group["uy"])
     assert ecdsa_verify(curve, public_key, message, signature) is True

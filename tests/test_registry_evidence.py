@@ -167,6 +167,7 @@ def test_published_component_carries_the_evidence_bundle(tmp_path):
     _write(os.path.join(comps, "db_x"), "db_x", _DB_BODY % "DbX")
     registry.build_index(reg)
     registry_evidence.build_evidence(reg, key=KEY, now=NOW, signer="revl-ci",
+    registry.build_evidence(reg, key=KEY, now=NOW, signer="revl-ci",
                             publisher="revl-ci")
     ev = os.path.join(comps, "db_x", registry.EVIDENCE_DIRNAME)
     # capabilities + provenance + attestation are reproducible with no runtime.
@@ -175,12 +176,14 @@ def test_published_component_carries_the_evidence_bundle(tmp_path):
         assert os.path.exists(os.path.join(ev, facet)), facet
     # the committed attestation is the producer's real output and verifies.
     att = json.loads(open(os.path.join(ev, registry.EVIDENCE_ATTESTATION), encoding="utf-8").read())
+    att = json.loads(open(os.path.join(ev, registry.EVIDENCE_ATTESTATION)).read())
     ir = registry._normalize_ir_for_attest(
         compile_files([os.path.join(comps, "db_x", "component.rvl")]))
     ok, _ = attest.verify_attestation(att, KEY, ir)
     assert ok
     # provenance is assembled from the reproducible index/interchange facts.
     prov = json.loads(open(os.path.join(ev, registry.EVIDENCE_PROVENANCE), encoding="utf-8").read())
+    prov = json.loads(open(os.path.join(ev, registry.EVIDENCE_PROVENANCE)).read())
     assert prov["sourceSha256"] and prov["publisher"] == "revl-ci"
 
 

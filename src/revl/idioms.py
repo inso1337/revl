@@ -21,10 +21,13 @@ the example, so it carries the example's own free names (`store.drop()` names
 #2115). Every door therefore serves it under the honest name
 **`exampleExpression`** (`served`), never under `fill`. `type` is the type a
 hole there has. Every construct a fillSpec names
+`fill` is the text that stands at the construct's position in the example, and
+`type` the type a hole there has. Every construct a fillSpec names
 (`mcp.fillspec.CONSTRUCTS`) has an idiom with a `type`; a few more (`spawn`,
 `subscribe`, `match`, `timer`, `try`, `secret`, `capability`, `grant`, `retention`,
 `secret-value`, `str-concat`, `str-format`) are served by
 name only and carry none. The files are revl source like any other, so
+`subscribe`, `match`, `timer`) are served by name only and carry none. The files are revl source like any other, so
 the corpus sweeps compile and parse them with the rest of the tree, and
 tests/test_idioms_1701.py checks each one three ways:
 it compiles and admits; with its `fill` replaced by `hole[<type>]` the fillSpec
@@ -111,6 +114,8 @@ def served(entry: dict) -> dict:
         SERVED_EXPRESSION_KEY: entry["fill"],
         "example": entry["example"],
     }
+    idiom --json`): one shape, so the doors cannot disagree about it."""
+    return {key: entry[key] for key in ("name", "summary", "rules", "fill", "example")}
 
 
 def get(name: str) -> dict | None:
@@ -146,8 +151,11 @@ def render(entry: dict) -> str:
         "",
         entry["example"].rstrip("\n"),
     ])
+    lines.extend(["", f"fill: {entry['fill']}{typed}", "", entry["example"].rstrip("\n")])
     return "\n".join(lines) + "\n"
 
 
 __all__ = ["IDIOM_DIR", "IdiomError", "SERVED_EXPRESSION_KEY", "get", "names",
            "render", "served", "table", "with_hole"]
+__all__ = ["IDIOM_DIR", "IdiomError", "get", "names", "render", "served", "table",
+           "with_hole"]

@@ -141,6 +141,7 @@ The JSON form parses to the same policy:
   "neverStanding": ["mail.send", "shell.*"],
   "wasm": {"confined": true,
            "limits": {"fuel": 1000000000, "memory": "64MiB", "wall": "120s"}}
+  "mcp": {"allow": ["llm", "kv*"]}
 }
 ```
 

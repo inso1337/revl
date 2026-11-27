@@ -50,6 +50,7 @@ import re
 import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fnmatch import fnmatchcase
 
 from . import cap_order
@@ -525,6 +526,7 @@ def _canon_cap_spelling(text: str, source, lineno) -> str:
     cannot name a capability-declared dimension (issue #1938) — it is refused
     here rather than silently admitted. A rule that must match a declared
     spelling keys on the bare token instead, via `_cap_token` above."""
+    equal. A malformed spelling is a `PolicyError`, not a silent pass-through."""
     try:
         return cap_order.parse_cap(text.strip()).to_str()
     except cap_order.CapError as exc:
@@ -736,6 +738,7 @@ _OUTCOME_RANK = {
 # a trust set), so they are never self-attested.
 _SELF_ATTESTING_FACETS = frozenset({"fault-sweep", "inverse-roundtrip",
                                     "gauntlet", "strength"})
+                                    "gauntlet"})
 
 # The declaration-strength floors (item 290, §3.2, adopting 309's order). Item
 # 309 records `declared`/`keyed` in the IR (lower.py `_idempotent_register`) and
@@ -766,6 +769,7 @@ class EvidenceRule:
     advisory: `outcome` names the operator's graded disposition (`observe`,
     `canary`, `review`) and the rule never appends a `Violation`. ``outcome is
     None`` is the shipped hard rule; every existing rule keeps that value."""
+    ``component registry:<glob>`` selector (§3.2), else None."""
     scope: str                        # "component" | "realm" | "mcp" | "capability"
     selector: str                     # glob / realm name ("" for mcp)
     origin: str | None                # "registry" for origin-scoped rules, else None
@@ -1476,6 +1480,21 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
                 head.strip(), source, lineno)
             require, self_attested = _split_evidence_body(
                 tail.strip(), source, lineno, "requires evidence")
+            self_attested = False
+            body = tail.strip()
+            close = body.rfind("]")
+            if close != -1:
+                trailer = body[close + 1:].strip().lower()
+                if trailer == "self-attested":
+                    self_attested = True
+                elif trailer:
+                    raise PolicyError(
+                        source, lineno,
+                        f"unexpected trailer after `requires evidence [...]`: "
+                        f"{body[close + 1:].strip()!r} — only `self-attested` "
+                        f"is allowed (item 290, §6.3)")
+                body = body[:close + 1]
+            require = _parse_require_list(body, source, lineno)
             evidence_rules.append(
                 EvidenceRule(scope, selector, origin, require, self_attested))
             continue
@@ -1746,6 +1765,7 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
             head = line[:idx].strip()
             raw_caps = line[idx + len(verb):]
             caps = _split_caps(raw_caps)
+            caps = _split_caps(line[idx + len(verb):])
             if not caps:
                 raise PolicyError(source, lineno,
                                   f"policy line names no capability: {raw.strip()!r}")
@@ -1786,6 +1806,7 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
                   wasm_wall_seconds=wasm_wall_seconds,
                   pair_rules=tuple(pair_rules),
                   composition_pair_rules=tuple(composition_pair_rules))
+                  tuple(auto_approve_rules))
 
 
 def _parse_json(text: str, source: str | None) -> Policy:
@@ -1811,9 +1832,11 @@ def _parse_json(text: str, source: str | None) -> Policy:
         if entry.get("allow") is not None:
             rules.append(Rule("component", pat, True,
                               _json_caps(entry["allow"], source)))
+            rules.append(Rule("component", pat, True, tuple(entry["allow"])))
         if entry.get("deny"):
             rules.append(Rule("component", pat, False,
                               _json_caps(entry["deny"], source)))
+            rules.append(Rule("component", pat, False, tuple(entry["deny"])))
     for entry in doc.get("realms") or []:
         realm = entry.get("realm")
         if realm is None:
@@ -1821,13 +1844,16 @@ def _parse_json(text: str, source: str | None) -> Policy:
         if entry.get("allow") is not None:
             rules.append(Rule("realm", realm, True,
                               _json_caps(entry["allow"], source)))
+            rules.append(Rule("realm", realm, True, tuple(entry["allow"])))
         if entry.get("deny"):
             rules.append(Rule("realm", realm, False,
                               _json_caps(entry["deny"], source)))
+            rules.append(Rule("realm", realm, False, tuple(entry["deny"])))
     tenants = bool((doc.get("tenants") or {}).get("neverReachEachOther"))
     mcp = doc.get("mcp") or {}
     mcp_allow = (_json_caps(mcp["allow"], source)
                  if mcp.get("allow") is not None else None)
+    mcp_allow = tuple(mcp["allow"]) if mcp.get("allow") is not None else None
     leases_enforced = bool((doc.get("leases") or {}).get("enforced"))
     quarantine_required = bool((doc.get("quarantine") or {}).get("required"))
     approvals_bounded = bool(
@@ -1887,6 +1913,7 @@ def _parse_json(text: str, source: str | None) -> Policy:
                               "`reach`/`deny` capability list")
         taint_flow_rules.append(
             TaintFlowRule(origin, _json_caps(caps, source),
+            TaintFlowRule(origin, tuple(caps),
                           bool(entry.get("withoutApproval")
                                or entry.get("without_approval"))))
     evidence_root_local = str(doc.get("evidenceRoot") or "").lower() == "local"
@@ -1908,16 +1935,19 @@ def _parse_json(text: str, source: str | None) -> Policy:
         if entry.get("mcp"):
             evidence_rules.append(
                 EvidenceRule("mcp", "", None, require, self_attested, outcome))
+                EvidenceRule("mcp", "", None, require, self_attested))
             continue
         if entry.get("capability"):
             evidence_rules.append(
                 EvidenceRule("capability", entry["capability"], None, require,
                              self_attested, outcome))
+                             self_attested))
             continue
         if entry.get("realm"):
             evidence_rules.append(
                 EvidenceRule("realm", entry["realm"], None, require,
                              self_attested, outcome))
+                             self_attested))
             continue
         comp = entry.get("component")
         if not comp:
@@ -1929,6 +1959,7 @@ def _parse_json(text: str, source: str | None) -> Policy:
         evidence_rules.append(
             EvidenceRule(scope, selector, origin, require, self_attested,
                          outcome))
+            EvidenceRule(scope, selector, origin, require, self_attested))
     register_rules: list[RegisterRule] = []
     for entry in doc.get("registers") or []:
         cap = entry.get("capability") or entry.get("pattern")
@@ -2086,6 +2117,7 @@ def _parse_json(text: str, source: str | None) -> Policy:
                   wasm_wall_seconds=wasm_wall_seconds,
                   pair_rules=tuple(pair_rules),
                   composition_pair_rules=tuple(composition_pair_rules))
+                  tuple(auto_approve_rules))
 
 
 def parse_policy(text: str, source: str | None = None) -> Policy:
@@ -2154,6 +2186,8 @@ def component_reach(audit: dict, name: str) -> list[Reach]:
 def _entry_realms(entry: dict) -> frozenset[str]:
     """Every realm one component entry is placed in: its `isolate` map values
     and its `routes` realm sets.
+def component_realms(manifest: dict, name: str) -> frozenset[str]:
+    """The realms a component is isolated into (its `isolate` map values).
 
     An `isolate` value is a single-realm placement of a provide or require
     key; a `routes` entry is the item-162 multi-realm placement
@@ -2177,11 +2211,13 @@ def component_realms(manifest: dict, name: str) -> frozenset[str]:
     requirer is selected by the one realm it pins (issue #3121).
 
     A component with no placement lives in the shared realm and is *not* a
+    A component with no isolate lives in the shared realm and is *not* a
     tenant — the tenants rule only pairs components that each name a realm.
     """
     for entry in manifest.get("components") or []:
         if entry.get("name") == name:
             return _entry_realms(entry)
+            return frozenset((entry.get("isolate") or {}).values())
     return frozenset()
 
 
@@ -2193,9 +2229,13 @@ class Violation:
     kind: str                        # capability | deny | pair | tenant
                                      #   | mcp-sandbox | approval | declassify
                                      #   | taint-flow | evidence | register
+    kind: str                        # capability | deny | tenant | mcp-sandbox
+                                     #   | approval | declassify | taint-flow
+                                     #   | evidence | register (item 290)
     component: str
     token: str                       # for a pair rule, both tokens joined by
                                      #   ` + `; every other kind reaches one
+    token: str
     message: str
     why: WhyTrace
     # item 274: the navigable-refusal map for this violation, computed from the
@@ -2364,6 +2404,7 @@ class RuleReport:
     component, and every clause verdict when it did. `outcome` is None for a
     hard `requires evidence` rule and the operator's soft outcome for a
     `<outcome> on evidence` rule (issue #2753)."""
+    component, and every clause verdict when it did."""
     scope: str
     selector: str
     origin: str | None
@@ -2509,14 +2550,52 @@ def _clause_verdict(facet: str, threshold: str, assessment, bundle,
               else status in ("sampled", "exact"))
         fact = strength_statement(getattr(bundle, "promotion", None))
         return ClauseVerdict(facet, threshold, fact, ok, standing, "")
+    return ClauseVerdict(facet, threshold, status, False, standing, "")
 
     return ClauseVerdict(facet, threshold, status, False, standing, "")
+
+def _recompute_component(ir: dict, name: str, published,
+                         *, gauntlet_dossier) -> tuple:
+    """Item 290 §4, slice 3 (`--recompute`): run the operator's OWN local
+    producers against the component in hand and return
+    ``(bundle, recomputed_facets)``.
+
+    The producers are the shipped entry points, reused verbatim (never
+    re-derived here): `fault.sweep_dossier` (the per-component fault sweep),
+    `fault.roundtrip_dossier` (the composition's inverse round-trip), and the
+    caller-supplied cold `mcp.gauntlet.run` dossier. Operator-run evidence needs
+    no attestation root — the operator produced it — so the facets it yields are
+    marked `recomputed` (§6.3: rooted by construction). A producer whose runtime
+    is absent is honestly skipped (never faked): that facet is left as the
+    PUBLISHED bundle carried it and stays out of `recomputed_facets`, so the
+    report keeps marking it `published`.
+    """
+    from . import fault  # noqa: PLC0415 — lazy: the runtime-tested producers
+    from . import registry as reg  # noqa: PLC0415
+    fields: dict = {}
+    recomputed: set = set()
+    try:
+        fields["fault_sweep"] = fault.sweep_dossier(ir, only=name)
+        recomputed.add("fault-sweep")
+    except (ModuleNotFoundError, ImportError):
+        pass  # cordis-py absent: honestly unavailable, never faked
+    try:
+        fields["inverse_roundtrip"] = fault.roundtrip_dossier(ir)
+        recomputed.add("inverse-roundtrip")
+    except (ModuleNotFoundError, ImportError):
+        pass
+    if gauntlet_dossier is not None:
+        fields["gauntlet"] = gauntlet_dossier
+        recomputed.add("gauntlet")
+    base = published if published is not None else reg.EvidenceBundle()
+    return replace(base, **fields), frozenset(recomputed)
 
 
 def _rule_reports(policy: Policy, audit: dict, mcp_components: frozenset,
                   *, evidence, origins, trusted_publishers, key,
                   evidence_ir, recompute=False, recompute_ir=None,
                   recompute_gauntlet=None, recompute_producer=None) -> dict:
+                  recompute_gauntlet=None) -> dict:
     """The single comparison site: every evidence rule against every component,
     every clause verdict (pass and fail). `evaluate` turns a HARD rule's failing
     clauses into violations; a soft rule's failing clauses are advisory and feed
@@ -2524,6 +2603,10 @@ def _rule_reports(policy: Policy, audit: dict, mcp_components: frozenset,
     whole thing. Register rules are reported alongside (slice 1: a `declared`
     floor is met by every selected component; higher floors are parse-rejected
     until 309's ledger).
+    every clause verdict (pass and fail). `evaluate` turns failing clauses into
+    violations; `revl policy evaluate` renders the whole thing. Register rules
+    are reported alongside (slice 1: a `declared` floor is met by every selected
+    component; higher floors are parse-rejected until 309's ledger).
 
     Returns {component: {"evidence": [RuleReport], "registers": [RuleReport]}}.
 
@@ -2555,6 +2638,7 @@ def _rule_reports(policy: Policy, audit: dict, mcp_components: frozenset,
                     "recompute needs `recompute_producer`: pass "
                     "revl.evidence_recompute.recompute_component")
             bundle, recomputed_facets = recompute_producer(
+            bundle, recomputed_facets = _recompute_component(
                 recompute_ir[name], name, bundle,
                 gauntlet_dossier=recompute_gauntlet)
         assessment = None
@@ -2568,6 +2652,7 @@ def _rule_reports(policy: Policy, audit: dict, mcp_components: frozenset,
                 ev_reports.append(RuleReport(rule.scope, rule.selector,
                                              rule.origin, rule.self_attested,
                                              False, (), rule.outcome))
+                                             False, ()))
                 continue
             if assessment is None:
                 b = bundle if bundle is not None else reg.EvidenceBundle()
@@ -2613,6 +2698,7 @@ def _rule_reports(policy: Policy, audit: dict, mcp_components: frozenset,
             ev_reports.append(RuleReport(rule.scope, rule.selector, rule.origin,
                                          rule.self_attested, True,
                                          tuple(clauses), rule.outcome))
+                                         rule.self_attested, True, tuple(clauses)))
         for rrule in policy.register_rules:
             # item 309 §3.2: read the per-token register off the audit's
             # `capability_registers` map (built from the IR's declared registers,
@@ -2772,8 +2858,10 @@ def unpredicted_rules(policy: Policy) -> list[str]:
                rule.scope, rule.selector, rule.origin, rule.self_attested, False,
                tuple(ClauseVerdict(f, t, "", False, "") for f, t in rule.require),
                rule.outcome))
+               tuple(ClauseVerdict(f, t, "", False, "") for f, t in rule.require)))
            for rule in policy.evidence_rules
            if rule.scope in _UNPREDICTABLE_SCOPES and rule.outcome is None]
+           if rule.scope in _UNPREDICTABLE_SCOPES]
     out += [f"capability {rule.capability} requires register {rule.at_least}"
             for rule in policy.register_rules]
     out += [f"requires idempotent-teardown(strength: {rule.strength})"
@@ -2834,6 +2922,7 @@ def predict_refusals(policy: Policy, name: str, *,
     predictable = [r for r in policy.evidence_rules
                    if r.scope not in _UNPREDICTABLE_SCOPES
                    and r.outcome is None]
+                   if r.scope not in _UNPREDICTABLE_SCOPES]
     if not predictable:
         return {"wouldBeRefused": [], "unpredicted": unpredicted}
 
@@ -2901,6 +2990,7 @@ def evaluate(policy: Policy, audit: dict,
     producer that runs the program is passed in as `recompute_producer`
     (`revl.evidence_recompute.recompute_component`), so this module, which the
     compiler imports, never imports the runtime (issue #1780).
+    default off, so an ordinary evaluation is byte-identical to before.
     """
     mcp_components = frozenset(mcp_components or ())
     manifest = audit.get("manifest") or {}
@@ -3021,6 +3111,7 @@ def evaluate(policy: Policy, audit: dict,
             evidence_ir=evidence_ir, recompute=recompute,
             recompute_ir=recompute_ir, recompute_gauntlet=recompute_gauntlet,
             recompute_producer=recompute_producer)
+            recompute_ir=recompute_ir, recompute_gauntlet=recompute_gauntlet)
         violations.extend(_evidence_violations(policy, reports, manifest,
                                                profile))
         violations.extend(_register_violations(policy, reports, manifest))
@@ -3719,6 +3810,7 @@ def _outcome_text(outcome: dict, component: str | None = None) -> str:
     return (f"graded outcome: {name} ({who}{decided['facet']} "
             f"{decided['threshold']} is {decided['fact']}; decided by "
             f"`{decided['rule']}`)")
+    return f"{prefix} requires evidence{tail}{sa}"
 
 
 def explain(policy: Policy, audit: dict,
@@ -3752,6 +3844,7 @@ def explain(policy: Policy, audit: dict,
         recompute=recompute, recompute_ir=recompute_ir,
         recompute_gauntlet=recompute_gauntlet,
         recompute_producer=recompute_producer)
+        recompute_gauntlet=recompute_gauntlet)
     reports = _rule_reports(
         policy, audit, mcp_components, evidence=evidence, origins=origins,
         trusted_publishers=trusted_publishers, key=key,
@@ -3759,6 +3852,7 @@ def explain(policy: Policy, audit: dict,
         recompute_ir=recompute_ir,
         recompute_gauntlet=recompute_gauntlet,
         recompute_producer=recompute_producer) if (
+        recompute_gauntlet=recompute_gauntlet) if (
             policy.evidence_rules or policy.register_rules) else {}
     refused = {v.component for v in violations}
     violations_by_component: dict[str, list] = {}
@@ -3769,6 +3863,8 @@ def explain(policy: Policy, audit: dict,
     comps = []
     all_comps = []
     for name in _components(audit):
+        if component and name != component:
+            continue
         entry = reports.get(name, {"evidence": [], "registers": []})
         rule_objs = []
         n_selected_clauses = 0
@@ -3794,6 +3890,9 @@ def explain(policy: Policy, audit: dict,
             if r.outcome is not None:
                 rule_obj["outcome"] = r.outcome
             rule_objs.append(rule_obj)
+            rule_objs.append({"rule": _rule_line(r), "selected": r.selected,
+                              "selfAttested": r.self_attested,
+                              "clauses": clause_objs})
         for r in entry["registers"]:
             rule_objs.append(
                 {"rule": f"capability {r.selector} requires register "
@@ -3817,6 +3916,7 @@ def explain(policy: Policy, audit: dict,
             verdict = (f"admitted: all {n_selected_clauses} clause(s) across "
                        f"{n_selecting} selecting rule(s) hold")
         comp_obj = {"component": name, "origin": _component_origin(
+        comps.append({"component": name, "origin": _component_origin(
             audit, origins, name), "selected": n_selecting > 0,
             "rules": rule_objs, "refused": refused_here, "verdict": verdict}
         if has_graded_rules:
@@ -3871,6 +3971,8 @@ def explain(policy: Policy, audit: dict,
                               "component": violation.component},
             }
     result = {
+            "rules": rule_objs, "refused": refused_here, "verdict": verdict})
+    return {
         "policy": policy.source,
         "recomputed": bool(recompute),
         "components": comps,
@@ -3879,6 +3981,7 @@ def explain(policy: Policy, audit: dict,
              "rule": (_rule_line(RuleReport(
                  r.scope, r.selector, r.origin, r.self_attested, False, (),
                  r.outcome))
+                 r.scope, r.selector, r.origin, r.self_attested, False, ()))
                  if kind == "evidence"
                  else f"capability {r.capability} requires register {r.at_least}")}
             for kind, r in inert],
@@ -3919,6 +4022,7 @@ def render_explain(result: dict) -> str:
                 gap = "  " if len(c["fact"]) >= 24 else ""
                 lines.append(
                     f"    {c['facet']:<18}{c['fact']:<24}{gap}"
+                    f"    {c['facet']:<18}{c['fact']:<24}"
                     f"required {c['threshold']:<10}({c['standing']}) "
                     f"{glyph}{detail}")
         if comp.get("outcome"):
@@ -3931,6 +4035,8 @@ def render_explain(result: dict) -> str:
         lines.append(f"inert selector ({inert['kind']}): `{inert['rule']}` "
                      f"selects no component in this composition; it {demand} "
                      f"(item 290, §7; item 249 inert-taint precedent)")
+                     f"selects no component in this composition — it requires "
+                     f"nothing (item 290, §7; item 249 inert-taint precedent)")
     if result["inertSelectors"]:
         lines.append("")
     if result.get("outcome"):

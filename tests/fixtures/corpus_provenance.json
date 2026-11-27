@@ -1,6 +1,7 @@
 {
  "note": "Which generation authored each scoring document (roadmap item 542, issue #1221). Generation 0 is PRE-LOOP: it predates the self-improvement loop, which is what the floors are about. It is not a claim that a person typed it, and issue #1397 measured why not. A name absent from every list is UNDECLARED, which counts as loop-authored at every threshold and is an error under `python3 tools/corpus_provenance.py --check`: an unknown provenance must never read as pre-loop, or a document dropped into a globbed corpus would raise the measured independence. `human_authored` is the second, orthogonal axis: the case ids a person typed, which a person names one at a time. It is fail-closed the same way, a document not named there reads as model-authored, and it carries no floor. Names only, no counts and no fractions, for the same reason tests/fixtures/oracle_construct_reach_ledger.json records names only: a derived number in a recorded artifact rots against what it was derived from. `floors` is the minimum percent of each scoring corpus that must remain independent of generation 1 and up; it is an operator decision and the tool holds whatever is written here.",
  "current_generation": 1,
+ "current_generation": 0,
  "floors": {
   "census": 80,
   "emit_go_corpus": 75,
@@ -10,6 +11,7 @@
   "emit_ts_corpus": 75,
   "emit_wasm_corpus": 75,
   "selfhost_oracle": 85
+  "selfhost_oracle": 90
  },
  "human_authored": [],
  "generations": {
@@ -27,6 +29,7 @@
    "admission:near_miss_component_literal_body",
    "admission:near_miss_component_missing_method",
    "admission:near_miss_component_unknown_service",
+   "admission:near_miss_component",
    "admission:near_miss_duplicate_method",
    "admission:near_miss_duplicate_service",
    "admission:near_miss_fn_body",
@@ -374,6 +377,7 @@
    "oracle-accept:a let whose initialiser mentions its own name",
    "oracle-accept:a loop that may run zero times, followed by a return",
    "oracle-accept:a match arm head that shares a module callable's name",
+   "oracle-accept:a match over a parameterized ADT draws no verdict",
    "oracle-accept:a match that covers every case",
    "oracle-accept:a match-arm binding is in scope in the arm",
    "oracle-accept:a multi-realm bind with a provider per realm admits",
@@ -518,6 +522,7 @@
    "oracle-reject:a spawn with no handle emit draws the spawn-bound verdict",
    "oracle-reject:a spawn-handle emit through a provision alias",
    "oracle-reject:a spawn-handle emit under a bound that misses the op's scope",
+   "oracle-reject:a spawn-handle emit under a bound naming the child's key",
    "oracle-reject:a ternary with three undeclared arms names the condition",
    "oracle-reject:a timer body reaching an undeclared key is still G1",
    "oracle-reject:a type alias cycle",
@@ -1477,6 +1482,7 @@
    "tests/fixtures/model_reach_spawn/ok_role_within_the_spawner.rvl",
    "tests/fixtures/model_reach_spawn/ok_spawner_holds_the_role_reach.rvl",
    "tests/fixtures/wasm_true_division_port_gap.rvl"
+   "tests/fixtures/v2_math_main.rvl"
   ]
  }
 }

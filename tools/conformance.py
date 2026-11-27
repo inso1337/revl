@@ -874,6 +874,7 @@ def selfhost_column() -> dict[str, str] | None:
 # the markdown matrix + its README embedding (roadmap item 328)
 # --------------------------------------------------------------------------
 
+_SHORT = {"python": "py", "typescript": "ts"}
 # `?` is deliberately not a verdict. A cell that reaches the renderer with this
 # glyph is a bug: `_write_readme` refuses before rendering (issue #1342). It
 # exists so `--markdown` on a working tree can still show the whole picture.
@@ -898,10 +899,13 @@ SWEEP_END = "<!-- CONFORMANCE-SWEEP:END -->"
 # `tools/tier_guarantees.py` from the checker's own registers and spliced here,
 # under the same staleness gate as the other blocks. The per-tier support block
 # also uses this report and the compiler-owned validator and executor registries.
+# under the same walk and the same staleness gate as the other two, so none of
+# the three can be refreshed while another rots.
 
 
 def _short(tier: str) -> str:
     return short_tier(tier)
+    return _SHORT.get(tier, tier)
 
 
 def _perf_headline() -> str | None:
@@ -1256,6 +1260,11 @@ def _write_readme(*, check_only: bool) -> int:
     guarantee matrix reads the compiler's registers, and the support matrix
     reads this report plus the validator, executor and crash-test checks. One
     gate keeps every committed view current.
+    Two blocks, one walk: the construct x tier matrix and the per-tier emit
+    sweep are two views of the same `run()`, so generating them together costs
+    nothing extra and, more to the point, makes it impossible for one to be
+    regenerated while the other rots (issue #233 — that is exactly what had
+    happened to the sweep, which had been authored by hand).
     """
     report = run()
 
@@ -1315,9 +1324,13 @@ def _write_readme(*, check_only: bool) -> int:
         if updated == text:
             print("docs/conformance.md conformance matrix, emit sweep, guarantee "
                   "matrix and tier support matrix are up to date.")
+            print("docs/conformance.md matrix, emit sweep and guarantee x "
+                  "tier matrix are up to date.")
             return 0
         print("docs/conformance.md generated matrix, sweep, guarantee or support "
               "table is STALE; regenerate it with `python3 "
+        print("docs/conformance.md matrix, emit sweep or guarantee x tier "
+              "matrix is STALE — regenerate it with `python3 "
               "tools/conformance.py --write-readme` (or `make matrix`) and "
               "commit the result.", file=sys.stderr)
         return 1
@@ -1325,10 +1338,14 @@ def _write_readme(*, check_only: bool) -> int:
     if updated == text:
         print("docs/conformance.md generated matrix, emit sweep, guarantee "
               "matrix and tier support table already up to date.")
+        print("docs/conformance.md matrix, emit sweep and guarantee x tier "
+              "matrix already up to date.")
     else:
         doc.write_text(updated, encoding="utf-8")
         print("docs/conformance.md generated matrix, emit sweep, guarantee "
               "matrix and tier support table regenerated.")
+        print("docs/conformance.md matrix, emit sweep and guarantee x tier "
+              "matrix regenerated.")
     return 0
 
 
@@ -1419,15 +1436,20 @@ def main() -> int:
                              "column and a live per-tier emit-timing readout")
     parser.add_argument("--write-readme", action="store_true",
                         help="regenerate the four generated blocks in "
+                        help="regenerate the three generated blocks in "
                              "docs/conformance.md in place: CONFORMANCE-MATRIX, "
                              "CONFORMANCE-SWEEP, GUARANTEE-TIER-MATRIX and "
                              "TIER-SUPPORT-MATRIX")
+                             "CONFORMANCE-SWEEP and GUARANTEE-TIER-MATRIX")
     parser.add_argument("--check-readme", action="store_true",
                         help="exit non-zero if any committed block in "
                              "docs/conformance.md (the construct matrix, the "
                              "per-tier emit sweep, guarantee x tier matrix or "
                              "per-tier support table) differs from a fresh "
                              "generation, the CI staleness gate")
+                             "per-tier emit sweep or the guarantee x tier "
+                             "matrix) differs from a fresh generation — the CI "
+                             "staleness gate")
     args = parser.parse_args()
 
     if args.check_toolchains:

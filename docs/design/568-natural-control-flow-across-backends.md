@@ -47,6 +47,7 @@ Three things, measured rather than assumed.
 `fn`, `type`, `extern` or plain `test` to the pure typed-core path, and that
 path renders none of the components it routes past. A module `fn` beside a
 component with provide methods is the ordinary shape of real revl code: every
+component with provide methods is the ordinary shape of real revl code — every
 revl-harness component file is exactly it, and it is what a migrated dispatch
 looks like the moment a route calls a plain helper from an `if` arm.
 
@@ -75,6 +76,9 @@ the reference ones byte-for-byte. Before this lane the corpus reached a
 provide-method `if` exactly once in `shadowing_near_misses.rvl`, with one arm, no
 `else`, no emission and no loop. It did not reach a method `while`, `for`,
 `break` or `continue` at all. The migrated shape had no oracle over it.
+provide-method `if` exactly once — `shadowing_near_misses.rvl`, one arm, no
+`else`, no emission, no loop — and reached a method `while`, `for`, `break` or
+`continue` not at all. The migrated shape had no oracle over it.
 
 `tests/fixtures/emit_py_corpus/services_control_flow.rvl` is that oracle: the
 harness's dispatch reduced to the sync surface, with the if-chain, an `else`
@@ -88,6 +92,7 @@ agree byte-for-byte.
 
 The document is deliberately SYNC. The self-hosted py and ts emitters carry no
 provide-method `async` at all: an async document diverges on the method
+provide-method `async` at all — an async document diverges on the method
 signature and on the services table's `async` flag, which is a different gap
 from the control flow this document is the oracle for, and mixing them would
 make a red here unreadable.
@@ -97,6 +102,7 @@ make a red here unreadable.
 `x += e` parsed in a module `fn` and not in a provide-method body, where it
 failed as ``expected a statement (`let`, `effect`, `emit`, `fail`, `if`,
 `return`), found 'i'``: a message that reads as though assignment itself were
+`return`), found 'i'`` — a message that reads as though assignment itself were
 out of bounds, in a grammar that carries `var`, assignment, `if`, `while` and
 `for`. The method grammar uses the same `_assign_ahead` lookahead the fn
 grammar uses now, and lowering desugars `x += e` to `x = x + e` exactly as the
@@ -143,6 +149,7 @@ nothing and the move is inert.
    flow.** Measured on the fixture: java drops the provide impl class entirely,
    rust drops its stdlib trait preamble, and wasm raises `IndexError: revl: Str
    index out of range`. The wasm crash is the one to take first: a port that
+   index out of range`. The wasm crash is the one to take first — a port that
    raises cannot even report a divergence. go's self-host port is a different
    matter: the whole live stc-go path is unported by design, so a go entry in
    this corpus needs slice 1 first.

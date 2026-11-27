@@ -36,6 +36,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from revl import compile_source  # noqa: E402
 
 SCENARIO = (BACKEND / "scenarios" / "router.rvl").read_text(encoding="utf-8")
+SCENARIO = (BACKEND / "scenarios" / "router.rvl").read_text()
 
 
 def _emitter():

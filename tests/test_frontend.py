@@ -34,6 +34,7 @@ def test_user_cache_compiles_to_reference_ir():
     backends were built and tested against."""
     ir = compile_files([str(EXAMPLES / "user_cache.rvl")])
     reference = json.loads((EXAMPLES / "user_cache.ir.json").read_text(encoding="utf-8"))
+    reference = json.loads((EXAMPLES / "user_cache.ir.json").read_text())
     assert ir == reference
 
 
@@ -42,6 +43,7 @@ def test_end_to_end_python_golden():
     ir = compile_files([str(EXAMPLES / "user_cache.rvl")])
     emitter = _load_module("revl_py_emit", ROOT / "backends" / "python" / "emit.py")
     golden = (ROOT / "backends" / "python" / "golden" / "user_cache.py").read_text(encoding="utf-8")
+    golden = (ROOT / "backends" / "python" / "golden" / "user_cache.py").read_text()
     assert emitter.emit(ir) == golden
 
 
@@ -50,6 +52,7 @@ def test_end_to_end_typescript_golden():
     ir = compile_files([str(EXAMPLES / "user_cache.rvl")])
     emitter = _load_module("revl_ts_emit", ROOT / "backends" / "typescript" / "emit.py")
     golden = (ROOT / "backends" / "typescript" / "golden" / "user_cache.ts").read_text(encoding="utf-8")
+    golden = (ROOT / "backends" / "typescript" / "golden" / "user_cache.ts").read_text()
     assert emitter.emit(ir) == golden
 
 
@@ -63,6 +66,7 @@ def test_end_to_end_rust_golden():
     ir = compile_files([str(EXAMPLES / "user_cache.rvl")])
     emitter = _load_module("revl_rust_emit", ROOT / "backends" / "rust" / "emit.py")
     golden = (ROOT / "backends" / "rust" / "golden" / "user_cache.rs").read_text(encoding="utf-8")
+    golden = (ROOT / "backends" / "rust" / "golden" / "user_cache.rs").read_text()
     assert emitter.emit(ir) == golden
 
 
@@ -71,6 +75,7 @@ def test_end_to_end_java_golden():
     ir = compile_files([str(EXAMPLES / "user_cache.rvl")])
     emitter = _load_module("revl_java_emit", ROOT / "backends" / "java" / "emit.py")
     golden = (ROOT / "backends" / "java" / "golden" / "user_cache.java").read_text(encoding="utf-8")
+    golden = (ROOT / "backends" / "java" / "golden" / "user_cache.java").read_text()
     assert emitter.emit(ir) == golden
 
 
@@ -657,6 +662,11 @@ REFUSED_ONLY = {"g2_provider_multiplicity.rvl"}
 #       a5_no_inverse_declares_compensate.rvl. Positive tests:
 #       test_a5_compensate_lowering (the clause is carried into the IR) and
 #       tests/test_formal_a5_row_2114.py (the row and its non-vacuity).
+#   A5  compensation accompanies an emission — BY CONSTRUCTION. `compensate` is
+#       an *optional* slot (DESIGN.md §3.5: an emission "may declare" one) that
+#       the grammar binds only to an `emit`, and `emit` requires an `emission`
+#       (G4). There is no "compensation required but missing" program. Positive
+#       test: test_a5_compensate_lowering.
 #   A7  emission flags — ADVISORY to backends; enforcement is G4 itself
 #       (docs/contract-errata.md A7). Covered by g4_unmarked_emission.rvl and
 #       g4_emission_not_declared.rvl.
@@ -665,10 +675,12 @@ REFUSED_ONLY = {"g2_provider_multiplicity.rvl"}
 def test_every_rejection_file_is_covered():
     on_disk = {p.name for p in (EXAMPLES / "rejections").glob("*.rvl")}
     assert on_disk == set(REJECTIONS) | REFUSED_ONLY
+    assert on_disk == set(REJECTIONS)
 
 
 @pytest.mark.parametrize("filename,expected", sorted(REJECTIONS.items()),
                          ids=sorted(REJECTIONS))
+@pytest.mark.parametrize("filename,expected", sorted(REJECTIONS.items()))
 def test_rejection(filename, expected):
     with pytest.raises(RevlError) as excinfo:
         compile_files([str(EXAMPLES / "rejections" / filename)])
@@ -748,6 +760,7 @@ def test_migrator_compiles_to_reference_ir():
     """await + compensate lowering matches the frozen v1 reference."""
     ir = compile_files([str(EXAMPLES / "migrator.rvl")])
     reference = json.loads((EXAMPLES / "migrator.ir.json").read_text(encoding="utf-8"))
+    reference = json.loads((EXAMPLES / "migrator.ir.json").read_text())
     assert ir == reference
 
 

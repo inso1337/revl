@@ -25,6 +25,10 @@ Covered subset (what emits byte-identical):
     the by-value field clone) and field access; ADT construction
     (``Enum::Case`` / ``Enum::Case(arg)`` and the built-in Result/Option
     constructors); ``match`` over user variants (bind + nullary patterns, the ``_`` wildcard vs the
+    ``pub enum``); record literals (``Struct { .. }`` with the by-value field
+    clone) and field access; ADT construction (``Enum::Case`` /
+    ``Enum::Case(arg)`` and the built-in Result/Option constructors); ``match``
+    over user variants (bind + nullary patterns, the ``_`` wildcard vs the
     appended ``unreachable!()``); user record/variant names in ``_rust_type``
     (``List[Point]`` -> ``Vec<Point>``); and the ``_V3Ctx`` type inference
     (``case_adt`` / ``case_payload`` / ``record_by_fields``);
@@ -301,6 +305,7 @@ CORPUS = [
                              #   `if`/`else` guard whose arms `fail`. Before this
                              #   document every one of those arms emitted a
                              #   `<<UNSUPPORTED-comp-step>>` marker and the oracle
+                             #   `<<DEFER-comp-step>>` marker and the oracle
                              #   agreed, because no corpus document had a
                              #   component body step that was not a provision.
     "bridge_types.rvl",      # item 391: the bridge's marshalling beyond the scalars:
@@ -521,6 +526,7 @@ def test_str_borrow_fixpoint_and_owned_boundaries(emitted, reference):
         "fn forward(s: &str)", "fn own_forward(s: String)",
         "pub fn public_count(s: String)", "return forward(&s);",
         "return middle(s);", "return own_middle(s);",
+        "return middle(s);", "return own_middle(s.clone());",
     ):
         assert fragment in src
     assert "forward(&local)" in src
@@ -589,6 +595,7 @@ def test_str_borrow_boundaries_build_and_run(emitted, reference, tmp_path, backe
                         ("borrow_boundaries.rvl", "borrow_shadowing.rvl",
                          "lengths.rvl", "branch_edges.rvl",
                          "list_borrow_per_param.rvl", "return_moves.rvl")])
+                         "lengths.rvl", "branch_edges.rvl")])
     src = (reference.emit(ir) if backend == "reference"
            else emitted["emit_rust_src"](ir))
     bench = _load_bench_rust()
@@ -847,6 +854,7 @@ def test_selfhosted_emitter_typed_core_scaffold(emitted):
     assert "#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]" in rec
     # issue #2905: a name the `return` reads once moves into its field
     assert "Named { label: s, at: p }" in rec
+    assert "Named { label: s.clone(), at: p.clone() }" in rec
     var = emitted["emit_rust_src"](compile_files([str(CORPUS_DIR / "variants.rvl")]))
     assert '#[serde(tag = "$kind", content = "$value")]' in var
     assert "pub enum Tree {" in var
@@ -882,6 +890,8 @@ def test_selfhosted_emitter_extern_section(emitted):
     assert "let _ = noop(up.clone());" in src
     assert "return shout(up);" in src
     assert "<<UNSUPPORTED" not in src and "EXTERN-NO-RS-BODY" not in src
+    assert "return shout(up.clone());" in src
+    assert "<<DEFER" not in src and "<<EXTERN-NO-RS-BODY" not in src
 
 
 def test_selfhosted_emitter_component_bridge_scaffold(emitted):
@@ -956,6 +966,7 @@ def test_bridge_keyword_params_compile_under_cargo(reference, tmp_path):
         ["cargo", "build", "--quiet"], cwd=crate, capture_output=True, text=True
     )
     assert result.returncode == 0, result.stderr[-4000:]
+    assert "<<DEFER" not in src and "<<NONE>>" not in src
 
 
 def test_selfhosted_emitter_effectful_component_scaffold(emitted):
@@ -1028,6 +1039,7 @@ def test_a_str_builtin_only_in_a_test_still_emits_the_helper_traits(
     assert "trait RevlStrOps {" in got and "impl RevlStrOps for str {" in got
     # the port emits in-file tests (item 391), so the whole document agrees
     assert got == want
+        assert "<<DEFER" not in src and "<<NONE>>" not in src
 
 
 def test_selfhosted_emitter_in_file_tests_pass(emitted):
@@ -1182,6 +1194,10 @@ def test_the_rust_emitter_builds_as_rust(reference, tmp_path):
 # emitted one named marker per test, per section. This port now emits a plain
 # `test` block (item 391, the corpus document in_file_tests.rvl holds it to byte
 # agreement), so what stays marked here is the lifecycle and fault sections.
+# In-file `test` / `fault test` / `lifecycle test` emission is deferred out of
+# every self-host slice, and all six ports used to emit NOTHING for it. Each now
+# emits one named marker per test, per section.
+IN_FILE_TEST_SRC = 'fn f() -> Bool { return true }\ntest "probe" { assert f() }'
 
 LIFECYCLE_TEST_SRC = """service Ping { fn ping() -> Int }
 component P provides p: Ping {
@@ -1205,6 +1221,8 @@ fault test "probe" for P {
 """
 
 @pytest.mark.parametrize("source, reference_token, port_token", [
+    pytest.param(IN_FILE_TEST_SRC, "fn probe() {",
+                 "<<UNSUPPORTED-TEST:probe>>", id="in-file-tests"),
     pytest.param(LIFECYCLE_TEST_SRC, "fn revl_lifecycle_probe() {",
                  "<<UNSUPPORTED-TEST:probe>>", id="lifecycle-tests"),
 ])
@@ -1239,11 +1257,13 @@ def test_a_fault_test_section_is_a_reference_refusal_and_a_named_port_marker(
 # ---------------------------------------------------------------------------
 #
 # `<<UNSUPPORTED-stream-host>>` and `<<UNSUPPORTED-comp-step:stream-iter>>` stood in for the
+# `<<DEFER-stream-host>>` and `<<DEFER-comp-step:stream-iter>>` stood in for the
 # stream HOST RUNTIME and the iteration step: the reference lowered the whole
 # `Stream[T]` surface and the Path B port named what it did not carry, so a crate
 # agreeing with the oracle could never be agreeing vacuously. Issue 1153 ported
 # both, so the witness cannot stand any more ("the port no longer emits
 # `<<UNSUPPORTED-stream-host>>`: the boundary has moved"), and it is not deleted
+# `<<DEFER-stream-host>>`: the boundary has moved") — and it is not deleted
 # quietly, because the reason it existed is the reason it is now replaced by a
 # STRONGER claim rather than a weaker one: the port does not merely emit
 # something, it emits the reference's bytes. If either marker ever comes back,
@@ -1254,6 +1274,7 @@ def test_the_stream_surface_is_carried_byte_for_byte(emitted, reference):
     """The tree's own stream scenario agrees with the reference byte for byte —
     `Stream::subscribe(`, `Stream::contract(` and the `revl_stream_record` host
     sink among the bytes, where the port used to emit the two markers
+    sink among the bytes — where the port used to emit the two DEFER markers
     above instead. The corpus document for the same surface, `comp_stream.rvl`,
     reaches only the EMITTER half of this oracle (the native frontend refuses it
     — see `NATIVE_GATE_GAPS` in tests/test_selfhost_compile.py), so this document
@@ -1268,6 +1289,7 @@ def test_the_stream_surface_is_carried_byte_for_byte(emitted, reference):
         assert token in got, f"the port dropped {token}"
     assert got == want
     for marker in ("<<UNSUPPORTED-stream-host>>", "<<UNSUPPORTED-comp-step:stream-iter>>"):
+    for marker in ("<<DEFER-stream-host>>", "<<DEFER-comp-step:stream-iter>>"):
         assert marker not in got, f"{marker} is back: the boundary reopened"
 
 
@@ -1317,6 +1339,8 @@ def test_a_replay_declaration_the_reference_refuses_is_named_here_too(
 
     The port carried markers for both ends of it already -- `<<UNSUPPORTED-host-
     replay>>` at the declaration and `<<UNSUPPORTED-stream-replay>>` at the request --
+    The port carried markers for both ends of it already -- `<<DEFER-host-
+    replay>>` at the declaration and `<<DEFER-stream-replay>>` at the request --
     and neither could ever fire: both were spelled `value_bool(value_field(node,
     "replay"))`, and a replay declaration is a RECORD in the interchange IR
     (`{"count": 4}`, `{"cursor": "orders"}`), never a bool. So the port answered
@@ -1331,6 +1355,7 @@ def test_a_replay_declaration_the_reference_refuses_is_named_here_too(
     )
     got = emitted["emit_rust_src"](ir)
     assert "<<UNSUPPORTED-host-replay>>" in got, "the provider's declaration"
+    assert "<<DEFER-host-replay>>" in got, "the provider's declaration"
     assert "Stream::subscribe(" not in got, (
         "the port emitted a subscription for a document the reference refuses"
     )
@@ -1354,6 +1379,7 @@ def test_the_consumer_side_replay_request_is_named_on_its_own(
     assert "not lowered" in message
     got = emitted["emit_rust_src"](ir)
     assert "<<UNSUPPORTED-stream-replay>>" in got, (
+    assert "<<DEFER-stream-replay>>" in got, (
         "the `subscribe` request's own marker: `render_subscribe` read the "
         "declaration with `value_bool` and could never report it"
     )
@@ -1375,6 +1401,7 @@ def test_a_required_stream_coeffect_the_reference_refuses_is_named_here_too(
     )
     got = emitted["emit_rust_src"](ir)
     assert "<<UNSUPPORTED-REQUIRED-STREAM:Fulfiller.feed>>" in got
+    assert "<<DEFER-required-stream:Stream[OrderCreated]>>" in got
     assert "Box<dyn Stream[OrderCreated]>" not in got, (
         "the literal declared type is back in the requirement's type position"
     )
@@ -1389,6 +1416,7 @@ def test_the_required_stream_marker_is_scoped_to_the_stream_requirement(
     got = emitted["emit_rust_src"](ir)
     assert "Box<dyn Ship>" in got, "the service requirement is untouched"
     assert "<<UNSUPPORTED-REQUIRED-STREAM:Fulfiller.ship>>" not in got
+    assert "<<DEFER-required-stream:Ship>>" not in got
 
 
 # --------------------------------------------------------------------------

@@ -435,6 +435,7 @@ func (m *Map[V]) Drop() {
 	m.mu.Unlock()
 	revlHostRelease()
 }
+func (m *Map[V]) Drop() { hostRecord("map.drop"); revlHostRelease() }
 func (m *Map[V]) Insert(k string, v V) {
 	m.journalNote(k, "insert")
 	m.mu.Lock()
@@ -1020,6 +1021,7 @@ func SiteAbort() stc.Component {
 					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
 				}
 			}()
+		Apply: func(ctx *stc.Context) (stc.Inverse, error) {
 			_revlFrame := newRevlFrame()
 			if err := ctx.Effect(func() stc.Inverse {
 				return func() error { _revlFrame.runCompensationPhase(); return nil }
@@ -1053,6 +1055,7 @@ func ExternOk() stc.Component {
 					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
 				}
 			}()
+		Apply: func(ctx *stc.Context) (stc.Inverse, error) {
 			_revlFrame := newRevlFrame()
 			if err := ctx.Effect(func() stc.Inverse {
 				return func() error { _revlFrame.runCompensationPhase(); return nil }
@@ -1085,6 +1088,7 @@ func ExternAbort() stc.Component {
 					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
 				}
 			}()
+		Apply: func(ctx *stc.Context) (stc.Inverse, error) {
 			_revlFrame := newRevlFrame()
 			if err := ctx.Effect(func() stc.Inverse {
 				return func() error { _revlFrame.runCompensationPhase(); return nil }
@@ -1175,6 +1179,7 @@ func Beat() stc.Component {
 					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
 				}
 			}()
+		Apply: func(ctx *stc.Context) (stc.Inverse, error) {
 			_revlFrame := newRevlFrame()
 			if err := ctx.Effect(func() stc.Inverse {
 				return func() error { _revlFrame.runCompensationPhase(); return nil }
@@ -1270,6 +1275,7 @@ func TestCleanUnloadOfAnUnCalledAgentLeavesNoResidue(revlT *testing.T) {
 		if err := _f.Ready(stdctx.Background()); err != nil {
 			revlT.Fatalf("%s: %v", "lifecycle test \"clean unload of an un-called agent leaves no residue\": load Agent", err)
 		}
+		_fibers["Agent"] = _f
 	}
 	_revlAt = "unload Agent"
 	if _f, _ok := _fibers["Agent"]; _ok {

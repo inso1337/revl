@@ -511,6 +511,11 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # chained builtin call written in place (`x.concat(a).concat(b)`): it
         # nests the receiver's node as the builtin's `target` instead of
         # refusing and dropping the whole component.)
+        # issue #721: provide-method control flow (`if`/`while`/`for`/`break`/
+        # `continue`). The EMITTER half is byte-exact, selfhost/emit_py.rvl
+        # carries `method_control`, so this is a `selfhost/lower.rvl` gap: the
+        # native IR producer does not lower a method-body control-flow step.
+        "services_control_flow.rvl",
         # item 391: a component-body `Stream.source()` acquisition (a `host`
         # node). The EMITTER half is byte-exact on the reference IR; the native
         # IR producer used to drop the whole `let src = effect Stream.source()
@@ -638,6 +643,18 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # block to `cir_block_arm`, which emits the reference's inline
         # `_lower_component_block_arm` `do` node. `branches.rvl` is byte-exact
         # (6542) through the fully-native chain.)
+        # IR producer drops the whole `let src = effect Stream.source() undo
+        # src.close()` step, so the component emits an empty body and the
+        # module loses its `Stream` import. The `Map`/`Pool`/`Job` host calls
+        # in services_host.rvl go through the native chain byte-exact.
+        "services_host_stream.rvl",
+        # component branch shapes. What is left here is ONE form: a
+        # statement-block match arm (`Some(n) => { let doubled = n * 2
+        # doubled + 1 }`), which the shared self-host PARSER has no node for at
+        # all — `selfhost/parser.rvl` reads an arm body as an expression. It is
+        # a parser gap reached through lower.rvl, and it withholds the whole
+        # component because one provide method of fourteen spells it.
+        "branches.rvl",
         # whole-program documents combining several of the above.
         # (`../../../examples/v3_step_scheduler.rvl` left this list with the
         # spawn/instance surface: it is the one py document whose components
@@ -655,6 +672,10 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # `services` rows. `ul_link_externs` now appends the extern section of
         # every module in the document's pure closure, in the reference's
         # order, and the document is byte-exact on py and ts.)
+        # rest of it.)
+        "../../../backends/typescript/tests/fixtures/fr1_loop.rvl",
+        "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
+        "../../../src/revl/truc/components/cli.rvl",
     ),
     "ts": (
         # (issue #2317: `block_arm_records.rvl` left this list. A block match
@@ -698,6 +719,16 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # reproduced" and took the whole method body — and with it the
         # component's `body` — with it. The one native `selfhost/lower.rvl`
         # producer fix closes the residual for BOTH tiers.)
+        # realm documents now compile byte-exact through the native chain.)
+        # whole-program documents combining several of the above
+        "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
+        "../../../examples/java_match.rvl",
+        # component edge shapes. Everything this document spells is byte-exact
+        # through the native chain except its ONE async provide method: the
+        # guard `if`/`fail` pair, the bare `fn` effect bracket, the `emit …
+        # compensate …` step with its `compensate_captures`, the host-map
+        # bracket and the per-invocation method bracket all reproduce.
+        "component_edges.rvl",
         # (`property_edges.rvl` left this list when the `.length` PROPERTY form
         # on a sized receiver started carrying `sized_length`, and
         # `cas_runtime.rvl` when the per-invocation `let … = effect … undo …`
@@ -707,6 +738,10 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # entry above — the one native `selfhost/lower.rvl` producer fix closes
         # the residual for BOTH tiers, because selfhost/emit_ts.rvl already
         # reproduced the reference bytes from the reference IR.)
+        # issue #721: provide-method control flow, the same lower.rvl gap the
+        # py list records: selfhost/emit_ts.rvl reproduces the reference bytes
+        # from the reference IR, and the fully-native chain does not.
+        "../emit_py_corpus/services_control_flow.rvl",
         # issue #106: the families selfhost/emit_ts.rvl learned in one slice.
         # The emitter half of each is byte-exact on the REFERENCE IR (asserted
         # above for every document); the native chain is not, because
@@ -722,6 +757,14 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # (issue #2088: the in-file `tests` section, plain and lifecycle, landed
         # in `selfhost/lower.rvl`, so `lifecycle_cache.rvl`, the item 280
         # Opt-gap document and the scenario `advance.rvl` left this list.)
+        # selfhost/lower.rvl does not produce the IR these documents need:
+        # a routed require's header (the whole component set drops),
+        "../../../stdlib/router.rvl",
+        # an extern's host `refs` (the thunks and their imports drop),
+        "../../../stdlib/fs.rvl",
+        # the in-file `tests` section, plain and lifecycle,
+        "../../../examples/lifecycle_cache.rvl",
+        "../../../backends/go/testdata/opt_gaps_280.rvl",
         # timers inside a lifecycle-tested document,
         # (issue #2092: `../../../examples/async_timer.rvl` left this list with
         # the py entry above — the native producer now stamps the timer step
@@ -738,6 +781,14 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # tiers, since `selfhost/emit_ts.rvl` already reproduced the reference
         # bytes from the reference IR. The six component-position producers are
         # named in the py list above.)
+        "../../../examples/async_timer.rvl",
+        "../../../backends/go/scenarios/advance.rvl",
+        # the stream surface (`subscribe`, `merge`, `every ... in`),
+        "../../../backends/go/testdata/stream_130.rvl",
+        "../emit_rust_corpus/comp_stream.rvl",
+        # the statement-block match arm, which the self-host parser has no node
+        # for (the same document is in the py list above),
+        "../emit_py_corpus/branches.rvl",
         # and the two documents written for this slice, which combine the above.
         # (issue #2086: `ref_externs.rvl` left this list — a declaration whose
         # ONLY body arms are HOST REFS (`= @ts ref sym from "path"`) used to fail
@@ -791,6 +842,12 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # UNCHECKED add. The emitter half is byte-exact on the reference IR
         # (asserted above). A lower.rvl gap, not an emitter one.
         "int_inline_2904.rvl",
+        "routed_timers.rvl",
+        "ref_externs.rvl",
+        # Issue #1592: an extern that declares its own `compensate`. The
+        # emitter half agrees byte for byte on the reference IR; lower.rvl
+        # does not yet lower an extern's declared `compensate` slot.
+        "extern_compensate.rvl",
     ),
     "go": (
         # (issue #2088: in-file `test` blocks. selfhost/emit_go.rvl already
@@ -826,6 +883,17 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # That is a selfhost/lower.rvl gap, not an emitter one: the reference
         # frontend threads the declared type onto the itemless node.
         "comp_provide_empty_list.rvl",
+        # issue #106: in-file `test` blocks. selfhost/emit_go.rvl reproduces the
+        # reference bytes from the reference IR, and selfhost/lower.rvl does not
+        # produce the IR `tests` section, so the fully-native chain emits the
+        # functions without the test functions or the `testing` import. Every
+        # other go corpus document, the stdlib/Opt/Result/Map surface included,
+        # is byte-exact through the native chain.
+        "in_file_tests.rvl",
+        # the same `tests` section gap, on the item 280 Opt-gap document
+        "../../../backends/go/testdata/opt_gaps_280.rvl",
+        # ... and on the issue #1631 erased-Result document
+        "../../../backends/go/testdata/result_erased_1631.rvl",
     ),
     "java": (
         # (async coloring left this list entirely. `comp_await.rvl` and the two
@@ -848,12 +916,16 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # byte-exact on the REFERENCE IR, so the residual is the producer's
         # `_safe_name` handling, not the emitter.
         "comp_provide_ctx_bind.rvl",
+        # no residual: the fully-native chain reproduces the whole java corpus.
     ),
     "rust": (
         # (`component_edges.rvl` left this list with issue #1818: its provide
         # methods return `Some(...)`, which dropped the whole component body.
         # The host-root and realm-placement documents left it earlier, when
         # lower.rvl grew those two surfaces.)
+        # component edge shapes; the host-root and realm-placement documents
+        # left this list when lower.rvl grew those two surfaces.
+        "component_edges.rvl",
         # issue 1153's two component documents. Neither was an EMITTER residual:
         # the rust byte oracle in tests/test_selfhost_emit_rust.py holds both
         # byte-exact when it is handed the REFERENCE IR (host runtime and all),
@@ -863,6 +935,7 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # step drops the WHOLE component `body` — so the native chain emitted
         # 7,067 bytes against the reference's 11,094, the module with no
         # `Job`/`JobHandle` runtime in it. `comp_stream.rvl` was no longer
+        # `Job`/`JobHandle` runtime in it. `comp_stream.rvl` is no longer
         # refused before any rust is built either: the item-130 stream statement
         # forms landed in `selfhost/lower.rvl` (#1139) and the native gate now
         # ADMITS it, so its residual was measured in bytes by the same comparison
@@ -913,6 +986,11 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # reference IR (tests/test_selfhost_emit_rust.py).
         "generic_variant.rvl",
         "comp_provide_generic_variant.rvl",
+        # ADMITS it, so its residual is measured in bytes by the same comparison
+        # as every document above. It is `selfhost/lower.rvl`'s, and it is NAMED
+        # rather than skipped, so the day lower.rvl grows that surface this list
+        # shrinks instead of quietly keeping a waiver nobody rereads.
+        "comp_stream.rvl",
     ),
     # no residual: the fully-native chain reproduces the whole wasm corpus.
     "wasm": (),
@@ -963,6 +1041,7 @@ def test_the_residual_is_located_in_lower_not_in_the_emitter(
             "emitter half of item 146 no longer holds over the enumerated corpus")
 
         if compile_rvl["compile_to_at"](path.read_text(encoding="utf-8"), tier, str(path)) != want:
+        if compile_to(path.read_text(encoding="utf-8"), tier) != want:
             diverged.append(name)
 
     expected = list(LOWER_GAP_DOCS[tier])
@@ -2486,6 +2565,9 @@ def test_native_cache_reach_preserves_non_emitting_and_uncached_functions(admit,
     # one, since selfhost/emit_rust.rvl is byte-exact on the reference IR, and
     # their residual is also named in LOWER_GAP_DOCS above. Every earlier entry
     # closed by returning "" and was DELETED rather than reworded.
+    # The table is EMPTY, and that is the ratchet having worked rather than a
+    # list nobody maintained: both entries it ever held closed by returning "",
+    # and a closed entry is DELETED rather than reworded.
     #
     # The stream entry (`emit_rust_corpus/comp_stream.rvl`, pinned to
     # `G1|`sub` is not a declared requirement of Parked`) was the second of the
@@ -2512,6 +2594,7 @@ NATIVE_GATE_GAPS: dict[str, str] = {
     "emit_rust_corpus/generic_variant.rvl":
         "T1|this function's return expects `Mb[Int]`, got `Mb`",
 }
+NATIVE_GATE_GAPS: dict[str, str] = {}
 
 
 def test_native_gate_admits_the_whole_emit_surface(admit):
