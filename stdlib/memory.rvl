@@ -1,0 +1,136 @@
+// The revl stdlib MEMORY module (issue #2696).
+//
+// A typed memory service for a long-lived, model-driven component: the notes a
+// component keeps between turns, with the origin and the retention of a stored
+// item carried by the item and not forgotten at the store boundary.
+//
+// ------------------------------------------------------------------ the need
+// A memory item is whatever store a provider offers, typed as a plain value.
+// The pieces that make it safe exist separately: `Untrusted[T]`, `Retained[T, P]`,
+// realm placement, and the refusal of a `Secret` flowing to a prompt. This
+// module ties them to a stored item. It is a LIBRARY, not a new language
+// construct: it adds no syntax and no checker rule.
+//
+// ---------------------------------------------------------------- the surface
+// `put`, `get` and `forget` are the three kv-scoped crossings that write, read
+// and drop one item. `put` and `get` are generic over the item's base type:
+//
+//     use "stdlib/memory.rvl" { put, get, forget, MemoryMeta }
+//
+//     let ok = emit put("note-1", note, { origin: "web", purpose: "draft", policy: "" })
+//     let back: Opt[Str] = emit get("note-1")
+//     emit forget("note-1")
+//
+// A value put as `Untrusted[Str]` comes back untrusted: the read carries the
+// origin the write left on the resource, so a `Trusted[T]` sink still refuses
+// it exactly as it refused the value before it was stored. The generic type of
+// `get` is the caller's choice of the base type; the QUALIFIER is not a type
+// argument and cannot be chosen away, because it is not a type-level thing at
+// the call. It is the taint the resource fixpoint carries, and it survives the
+// store boundary regardless of how the read is typed.
+//
+// --------------------------------------------------- why the write is a receiver
+// `put` declares its value `Secret[T]`. That is the RECEIVER half of the
+// `Secret[T]` rule (docs/design/256-capability-bound-secrets.md §7b): a
+// not-for-prompt item typed `Secret[T]` may be written, and the declaration is
+// admission-only, so a plain item is admitted unchanged and is NOT made
+// confidential by the receiver. The receiver is what lets a `Secret[T]` item be
+// stored at all; the READ is where its confidence is restored, by the same
+// resource fixpoint that restores every other origin, and an undeclared
+// receiver (a log, an ordinary serialization, an LLM prompt) then refuses it.
+//
+// A consequence worth stating: the declared receiver also stamps the value as a
+// `Secret` parameter on the crossing, so the runtime's audit recorder redacts
+// the written argument in its trace. That is conservative in the safe
+// direction: a memory write is exactly where a confidential item may land, and
+// a plain item's trace is redacted too rather than risk the other way.
+//
+// ------------------------------------------------------ the #1983 fixpoint
+// The WRITE and the READ name the SAME declared persistence scope (`kv`), so
+// they are siblings of one resource. The compiler already models a persistence
+// resource as flow-insensitive shared state: whatever entered it at any crossing
+// is reachable by any later read of it, in this body, in another body, or across
+// the call graph. `get` is such a read, so it mints what `put` recorded. Nothing
+// in this file re-derives that rule; both crossings name the `kv` scope and the
+// existing `_mint_reload` does the rest. This is also why `put` and `get` must
+// stay a PAIR on one scope: splitting them across scopes would make the read
+// clean and the store would launder the origin it exists to keep.
+//
+// ------------------------------------------------------------ metadata is data
+// `MemoryMeta` is a plain typed record: the origin label, the purpose and the
+// retention policy NAME. The fields are INFORMATIONAL. The checker does not
+// read them and they enforce nothing: `meta.policy` is a string, not a
+// `Retained[T, P]` declaration, and `meta.purpose` is a label. What is enforced
+// lives on the value: an item is untrusted, confidential or retained because the
+// value carries that qualifier. Keep the fields accurate for the audit trail,
+// and rely on the types for the refusal. In particular a plain value whose
+// `meta.policy` names an expired policy is NOT refused, because the field is
+// not the qualifier; a `Retained[T, P]` value is refused at `put` by the same
+// G-RETAIN every other persistence sink raises.
+//
+// ------------------------------------------------------- what is not covered
+// A value COMPUTED from a stored item (an embedding, a summary) is a
+// DERIVATIVE, and derivative handling is the separate design question tracked
+// by issue #2695. This module stores and returns an item unchanged; it does not
+// invent a second rule for derivatives.
+//
+// ---------------------------------------------------------------- tier status
+// The three crossings carry a py-tier reference store (an in-process map) so
+// the module is runnable and testable today. A real deployment backs the same
+// three crossing NAMES with its own host store: the types, the taint and the
+// retention enforcement live above the crossing and do not change with the
+// backend. Other tiers are a follow-up, exactly as `stdlib/net.rvl`'s py-tier
+// crossing is.
+//
+// ------------------------------------------------------------ bump discipline
+// Adding, removing or changing a `pub` symbol here bumps `stdlib/version.rvl`
+// (see its bump log).
+
+// The item's informational record. Every field is a plain `Str`: the label of
+// the source the item came from, the purpose the caller keeps it for, and the
+// retention policy NAME (empty when none applies). See "metadata is data"
+// above: the checker reads none of these.
+pub type MemoryMeta = {
+  origin: Str,
+  purpose: Str,
+  policy: Str,
+}
+
+// WRITE one item into the `kv` resource. The value is declared `Secret[T]` so a
+// not-for-prompt (`Secret[T]`) item is admitted at this crossing; the receiver
+// declaration is admission-only, so a plain value is not made confidential by
+// it. `meta` is stored beside the value and is never consulted by the checker.
+pub extern emission[kv.memory] fn put[T](key: Str, value: Secret[T],
+                                         meta: MemoryMeta) -> Bool
+  = @py {
+    global _revl_memory_items
+    try:
+        items = _revl_memory_items
+    except NameError:
+        items = {}
+        _revl_memory_items = items
+    items[key] = {"value": value, "meta": meta}
+    return True
+  }
+
+// READ one item, or `None` when the key is absent. The value comes back with the
+// origins the resource fixpoint recorded for the `kv` scope, so the qualifier it
+// was written with is the qualifier it is read with.
+pub extern emission[kv.memory] fn get[T](key: Str) -> Opt[T]
+  = @py {
+    items = globals().get("_revl_memory_items") or {}
+    entry = items.get(key)
+    if entry is None:
+        return None
+    return entry["value"]
+  }
+
+// DROP one item. Forgetting is a write to the same `kv` resource. It returns
+// `Unit` on purpose: the read half's mint would otherwise attach the stored
+// origins to a returned `Bool`, and a success flag is not item data.
+pub extern emission[kv.memory] fn forget(key: Str) -> Unit
+  = @py {
+    items = globals().get("_revl_memory_items") or {}
+    items.pop(key, None)
+    return
+  }
