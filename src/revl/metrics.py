@@ -4,6 +4,7 @@
 component's cause chain) and the OTel export (every transition as a span). Where
 those explain or forward *individual* events, this rolls a whole run up into
 the numbers a supervisor actually watches:
+three numbers a supervisor actually watches:
 
 1. **emission count by capability** — how many irreversible emissions crossed a
    boundary, bucketed by the service capability they were scoped to (and, as a
@@ -18,6 +19,7 @@ the numbers a supervisor actually watches:
 3. **residue incidents**: how many teardowns ended with something not undone
    (one ``residue`` event each, issue #2730), by the residue check that failed.
 4. **average lifecycle duration** — per component, the mean of
+3. **average lifecycle duration** — per component, the mean of
    ``withdraw.ts − load.ts`` over each component's load→withdraw lifecycles
    (paired by component **and** generation), plus the lifecycle count.
 
@@ -31,9 +33,12 @@ gate.
 ### Schema v1 graceful degradation (detected by data, not by `v`)
 
 The trace schema is v3 (docs/why-runtime.md); the fields these metrics need
+The trace schema is v2 (docs/why-runtime.md); the fields these metrics need
 (`ts` on every event, `code` on a FAILED cause, the `emit` event kind) all
 arrived additively through v2. A v1 trace, or a v2 trace an older recorder wrote
 without them, simply *lacks* the input:
+arrived additively. A v1 trace, or a v2 trace an older recorder wrote without
+them, simply *lacks* the input:
 
 * **duration** needs `ts`. When load/withdraw lifecycles are present but none
   carry `ts`, the metric is reported as ``{"unavailable": …}`` — detected by the
@@ -48,6 +53,7 @@ from __future__ import annotations
 
 
 from .why_runtime import EMIT, LOAD, RESIDUE, WITHDRAW, read_trace
+from .why_runtime import EMIT, LOAD, WITHDRAW, read_trace
 
 # the bucket a FAILED withdraw with no classifiable code lands in
 UNCLASSIFIED = "unclassified"
@@ -222,6 +228,8 @@ def compute_metrics(events: list[dict]) -> dict:
     span repeats, so a consumer can group metrics by composition without
     reading the trace's first event."""
     document = {
+    document — the shape `revl metrics --json` prints and `render` formats."""
+    return {
         "events": len(events),
         "emissions": _emission_metrics(events),
         "failures": _failure_metrics(events),
@@ -304,6 +312,7 @@ def render(metrics: dict) -> str:
             lines.append(f"  {check.ljust(width)}  {count}")
 
     # 4. avg lifecycle duration
+    # 3. avg lifecycle duration
     duration = metrics.get("lifecycleDuration") or {}
     lines.append("")
     if "unavailable" in duration:

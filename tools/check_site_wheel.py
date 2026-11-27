@@ -147,6 +147,7 @@ def _build_fresh(out_dir: Path) -> Path:
 
 # --- claim 1: the deploy builds it ----------------------------------------- #
 def _check_deploy_builds_the_wheel() -> tuple[list[str], int]:
+def _check_deploy_builds_the_wheel() -> list[str]:
     """`pages.yml` must run a builder before it uploads `site/`.
 
     Read as text, in order: a builder step that came AFTER the upload would
@@ -157,12 +158,15 @@ def _check_deploy_builds_the_wheel() -> tuple[list[str], int]:
     if not path.is_file():
         return ([f"{PAGES_WORKFLOW} is gone; nothing publishes site/ any more."],
                 0)
+        return [f"{PAGES_WORKFLOW} is gone; nothing publishes site/ any more."]
     text = path.read_text(encoding="utf-8")
     lines = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
     upload_at = next((i for i, ln in enumerate(lines) if UPLOAD_ACTION in ln), None)
     if upload_at is None:
         return ([f"{PAGES_WORKFLOW} no longer uses {UPLOAD_ACTION}; "
                  "re-derive this check against whatever publishes site/."], 1)
+        return [f"{PAGES_WORKFLOW} no longer uses {UPLOAD_ACTION}; "
+                "re-derive this check against whatever publishes site/."]
     build_at = next(
         (i for i, ln in enumerate(lines) if any(b in ln for b in BUILDERS)), None
     )
@@ -173,17 +177,21 @@ def _check_deploy_builds_the_wheel() -> tuple[list[str], int]:
             "    The wheel is not committed, so the published playground would "
             "404 on it.",
         ], 1
+        ]
     if build_at > upload_at:
         return [
             f"{PAGES_WORKFLOW} builds the wheel AFTER {UPLOAD_ACTION}, so the "
             "upload carries the state of the checkout, not of the build.",
         ], 1
     return [], 1
+        ]
+    return []
 
 
 # --- claim 2: the pages fetch the name the builder writes ------------------ #
 def _check_consumers_name_the_built_wheel(
         built_name: str) -> tuple[list[str], int]:
+def _check_consumers_name_the_built_wheel(built_name: str) -> list[str]:
     """Every page that loads the wheel must name the file a fresh build writes.
 
     `pyproject.toml` supplies the version that names the wheel; the pages
@@ -209,6 +217,7 @@ def _check_consumers_name_the_built_wheel(
                 f"build writes {built_name} (pyproject.toml's version names it)."
             )
     return problems, found
+    return problems
 
 
 # --- claim 3: the build vendors what the commit tracks --------------------- #
@@ -249,7 +258,10 @@ def _tracked_members() -> dict[str, None] | None:
 
 
 def _check_members(wheel: Path) -> tuple[list[str], int, int, bool]:
+def _check_members(wheel: Path) -> list[str]:
     expected = _tracked_members()
+    if expected is None:
+        return ["    (skipped: git could not list the vendored trees)"]
     with zipfile.ZipFile(wheel) as zf:
         got = {n for n in zf.namelist() if not n.startswith("revl-")}
         dist_info = {n for n in zf.namelist() if n.startswith("revl-")}
@@ -293,6 +305,7 @@ def _print_check_summary(workflows_found: int, consumers_found: int,
     print("Scope: checks the Pages build workflow, wheel names and package "
           "members; it does not execute the published playground or verify "
           "Pyodide behavior in a browser.")
+    return problems
 
 
 def main() -> int:
@@ -318,6 +331,7 @@ def main() -> int:
 
     deploy_problems, workflows_found = _check_deploy_builds_the_wheel()
     problems += deploy_problems
+    problems += _check_deploy_builds_the_wheel()
 
     # Build under ROOT: build_wheel prints its output path relative to ROOT, so
     # a scratch dir outside the tree would make that print raise.
@@ -332,6 +346,8 @@ def main() -> int:
             _check_members(fresh)
         )
         problems += member_problems
+        problems += _check_consumers_name_the_built_wheel(fresh.name)
+        problems += _check_members(fresh)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

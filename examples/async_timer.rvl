@@ -21,6 +21,7 @@
 service Counter {
   fn count() -> Int
   emission[counter] async fn tick()
+  emission async fn tick()
 }
 
 component AsyncCounter provides counter: Counter {

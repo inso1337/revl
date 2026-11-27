@@ -211,6 +211,8 @@ func TestWorkspaceSurvivesTheRunnerHandoff(t *testing.T) {
 			strings.Join(got[i].GetArgs(), "\x00") != strings.Join(want[i].GetArgs(), "\x00") {
 			t.Fatalf("mcp server %d changed in the handoff: %v != %v", i, got[i], want[i])
 		}
+	if len(got) != len(want) || strings.Join(got[0].GetArgs(), "\x00") != strings.Join(want[0].GetArgs(), "\x00") {
+		t.Fatalf("mcp servers changed in the handoff: %v != %v", got, want)
 	}
 }
 

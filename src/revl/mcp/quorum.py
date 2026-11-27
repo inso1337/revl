@@ -207,6 +207,7 @@ def cast_message(binding: dict) -> bytes:
 
 def sign_cast(private_key: int, binding: dict, *,
               network_exposed: bool = True) -> str:
+def sign_cast(private_key: int, binding: dict) -> str:
     """Sign one cast, returning the raw `R || S` hex a caller puts in `asProof`.
 
     The signer lives beside the verifier deliberately. An operator needs SOME
@@ -227,9 +228,11 @@ def sign_cast(private_key: int, binding: dict, *,
     extra this refuses, naming it. A caller that knows its session is local
     (a stdio session on the operator's own machine, a test) passes
     ``network_exposed=False`` and keeps the pure path."""
+    quietly become the place they get stored."""
     from ..tee_quote import CURVE_P256, ecdsa_sign
     return ecdsa_sign(CURVE_P256, private_key, cast_message(binding),
                       network_exposed=network_exposed).hex()
+    return ecdsa_sign(CURVE_P256, private_key, cast_message(binding)).hex()
 
 
 def _verify_cast(public_key_hex: str, binding: dict, proof: str) -> bool:

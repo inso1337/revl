@@ -146,6 +146,7 @@ tracked in issue #2730 slice 3).
 ## 3. Schema v1 graceful degradation
 
 The trace schema is v3 (docs/why-runtime.md §2); the fields these metrics need
+The trace schema is v2 (docs/why-runtime.md §2.1); the fields these metrics need
 all arrived additively — `ts` on every event, `code` on a FAILED cause, and the
 `emit` event kind. A v1 trace (or a v2 trace an older recorder wrote without a
 field) simply lacks the input, and each metric degrades honestly:
@@ -196,3 +197,4 @@ The document `compute_metrics` returns has stable top-level keys `events`,
 `emissions`, `failures`, `residue`, `lifecycleDuration` — exactly what `--json` prints,
 plus the optional `run` block described above, present only on an attested
 trace.
+`emissions`, `failures`, `lifecycleDuration` — exactly what `--json` prints.

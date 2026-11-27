@@ -99,9 +99,11 @@ def check_src(ns):
 # index rules need a `List`. `mf`/`mi` are issue #2949's Map reads: a
 # `Map[Str, V]` subscript answers `V`, and the two checkers must agree on that.
 # The fuzz generators do not draw these names.
+# index rules need a `List`. The fuzz generators do not draw either name.
 ENV = {"x": "Int", "y": "Int", "f": "Float", "s": "Str", "flag": "Bool",
        "m": "Int32", "opt": "Opt[Str]", "xs": "List[Int]",
        "mf": "Map[Str, Float]", "mi": "Map[Str, Int]"}
+       "m": "Int32", "opt": "Opt[Str]", "xs": "List[Int]"}
 
 
 def _ref_parse(src: str):
@@ -771,6 +773,7 @@ component C requires a: A, b: B provides r: R {
     ("an inline arrow argument that emits in its body",
      (ROOT / "tests" / "fixtures" /
       "g4_emit_arrow_argument_inline.rvl").read_text(encoding="utf-8")),
+      "g4_emit_arrow_argument_inline.rvl").read_text()),
     # ---- the declaration-owned approval floor: what is admitted (item 246) --
     # A covering `with` edge, by exact token, by a `*` or `?` glob, and by a
     # dotted-ident token; and an extern without the floor.
@@ -836,6 +839,7 @@ component R provides till: Till {
     ("a witnessed extern in a provide method's effect position",
      (ROOT / "backends" / "go" / "scenarios" /
       "provide_method_witnessed.rvl").read_text(encoding="utf-8")),
+      "provide_method_witnessed.rvl").read_text()),
     ("a service crossing scoped to the floor, covered", _AP_HEAD + """
 service Pay { emission[charge] fn go() -> Int }
 component B requires pay: Pay provides ops: Ops {
@@ -853,6 +857,7 @@ EXAMPLES = ROOT / "examples" / "rejections"
 
 def _fixture(name: str) -> str:
     return (EXAMPLES / name).read_text(encoding="utf-8")
+    return (EXAMPLES / name).read_text()
 
 
 REJECTED_PROGRAMS = [
@@ -1680,9 +1685,11 @@ ACCEPTED_PROG_EXPR = [
     ("type Status = Pending", "Pending"),
     # payload checking at a case call (widening, unknown); a wrong argument
     # count is CASE_ARITY_SILENT_ADMITS below (issue #2447)
+    # payload checking at a case call (widening, unknown, zero args)
     ("type Shape = Circle(Float) | Square", "Circle(1.0)"),
     ("type Shape = Circle(Float) | Square", "Circle(1)"),
     ("type Shape = Circle(Float) | Square", "Circle(q)"),
+    ("type Shape = Circle(Float) | Square", "Circle()"),
     ("type Shape = Circle(Float) | Square", "Square"),
     ("type Box = Wrap(Any) | Empty", "Wrap(1)"),
     ("type Box = Wrap(Any) | Empty", "Empty"),
@@ -1693,6 +1700,7 @@ ACCEPTED_PROG_EXPR = [
     # Some/Ok/Err keep their builtin parametric results
     ("", "Some(1)"),
     ("", "None"),
+    ("", "None(1)"),
     ("", "Some(None)"),
     ("", "Some(Some(1))"),
     ("type Outcome = Ok(Row) | Err(Str)\ntype Row = { name: Str }",
@@ -1711,6 +1719,8 @@ ACCEPTED_PROG_EXPR = [
     ("type Row = { name: Str, age: Int }", "Ok(1) == Err(1)"),
     ("", "Some(1) == Some(2)"),
     ("", "Some(1.5) != Some(2.5)"),
+    ("", "Some(1) == Some(2.5)"),
+    ("", "Some(1) != Some(2.5)"),
     ("", "Ok(Some(1)) == Ok(Some(1))"),
     ("type S = A(Float) | B", "A(x) == A(x)"),
     ("type Box = Wrap(Any) | Empty", "Wrap(1) == Wrap(1)"),
@@ -1915,6 +1925,7 @@ def _gen3(rng: random.Random, ctors: list, depth: int) -> str:
         callable_ctors = [c for c in ctors if c not in FUZZ_NULLARY]
         return (f"{rng.choice(callable_ctors)}({g()})" if callable_ctors
                 else g())
+        return f"{rng.choice(ctors)}({g()})" if ctors else g()
     if roll < 0.55:
         return f"{g()}.length"
     if roll < 0.80:
@@ -2215,6 +2226,7 @@ def test_type_layer_fixture_expressions_agree(verdict_env, case):
     from revl.compiler import compile_source
     path, prog, env, expr, expected, where = case
     source = (ROOT / path).read_text(encoding="utf-8")
+    source = (ROOT / path).read_text()
     try:
         compile_source(source, "diff.rvl")
         pytest.fail(f"{path}: the reference no longer refuses this fixture")

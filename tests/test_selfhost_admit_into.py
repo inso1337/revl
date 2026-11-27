@@ -189,6 +189,12 @@ WITHHELD: dict[str, str] = {
     # alike — the manifest is not what this one is waiting on.
     "hole_draft":
         "the holes family (T3 `refuse_admission`) is not ported",
+    # A component header the reference's parser refuses outright. The native
+    # parser recovers from this particular shape, so the BAD family reaches it
+    # and the gate raises no objection. Standalone too: the manifest changes
+    # nothing about it.
+    "syntax_error":
+        "the BAD parse family does not reach this component-header shape",
 }
 
 
@@ -291,6 +297,7 @@ def test_the_wire_carries_the_signature_it_claims_to(running):
     and a reader deciding a call against a declaration that lost its marking
     would be deciding it against a declaration nobody sent.
     """
+    carries each operation's declared parameter list, names and types."""
     _, wire = running
     rows = wire.split(";")
     assert "!services" in rows, "the exhaustiveness header is the claim"
@@ -299,6 +306,8 @@ def test_the_wire_carries_the_signature_it_claims_to(running):
     assert ":AppSvc,ping():Str" in rows, (
         "an operation with no parameter is `op()`, and its return is still a "
         "claim")
+    assert ":Store,get(key:Str),bump(n:Int),put(key:Str|value:Str)" in rows
+    assert ":AppSvc,ping()" in rows, "an operation with no parameter is `op()`"
 
 
 def test_a_signature_the_wire_cannot_spell_is_withheld_not_mangled():

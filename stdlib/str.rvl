@@ -301,6 +301,14 @@ fn ascii_printable() -> Str {
 // and everything above U+007E) has no pure-revl spelling, because the source
 // reader folds a CR byte to LF and `"..."` carries no escapes, so it goes
 // through the per-tier `Int.to_char` primitive (issue #2285).
+// A single-char string for a code point — the reverse of `Str.charCodeAt`.
+// PURE revl and tier-portable. It covers the control chars U+0009 (tab) and
+// U+000A (newline), and all printable ASCII U+0020..U+007E; for a supported
+// `code`, `str_char(code).charCodeAt(0) == code` and `str_char(10)` equals
+// `str_newline()`. Any other code point (CR, and everything above U+007E) has
+// no pure-revl spelling on the base surface (no `chr` / `fromCharCode`) and
+// returns ""; a wider range would need a blessed per-tier primitive, which no
+// self-host stage yet requires.
 pub fn str_char(code: Int) -> Str {
   if (code == 9) { return str_tab() }
   if (code == 10) { return str_newline() }
@@ -315,6 +323,7 @@ pub fn str_char(code: Int) -> Str {
 // points, U+000D then U+000A (issue #2285).
 pub fn str_crlf() -> Str {
   return str_char(13).concat(str_newline())
+  return ""
 }
 
 // ------------------------------------------------------------------- dedent

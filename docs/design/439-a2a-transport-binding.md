@@ -8,6 +8,7 @@ feeding a bounded inbox that `_poll` drains, with a pushed terminal confirmed by
 one `tasks/get` (`docs/design/439-a2a-task-lifecycle.md` decision 5). T2 (the
 `Stream[T]` sugar) is still not this binding's: the re-verified paragraph under
 "What is NOT decided" records that it is a 130 decision about the provider side.
+surface the property is pinned over; slice G8c).
 The semantics are item 424 gap (c)'s and are not reopened here; the Task
 lifecycle is `docs/design/439-a2a-task-lifecycle.md`'s and is not re-decided
 here. This note records what the binding IS, where every guarantee still applies
@@ -637,6 +638,7 @@ them, and neither note contradicts the other.
   `taint.extract_and_normalize` reads as a taint source whose origin is the
   crossing's reach class (`net`). The provide method returns that source, so the
   flow walk taints it interprocedurally at every consumer of the key, exactly
+  flow walk taints it interprocedurally at every consumer of the key — exactly
   how `revl import a2a` taints by declaring its service operation
   `-> Untrusted[Str]`, except here the service the engineer wrote is unchanged
   and the qualifier lives only on the synthesized crossing. A remote result
@@ -671,6 +673,13 @@ question.
    `StreamResponse` arm, deposits nothing on a refusal, and every pushed value
    is `Untrusted`. Negative exit test: a notification path that admits, or
    re-admits, anything about the sender.
+2. **Push notifications (slice T3).** NOT decided, because an inbound callback is
+   a PROVISION, not a client call, so it lands through item 457 slice S1's routed
+   endpoint rather than through this binding
+   (`docs/design/439-a2a-task-lifecycle.md`, decision 5). Exit test: a routed
+   endpoint that receives a peer's notification and wakes the waiting operation,
+   with the payload `Untrusted` and the endpoint's reach declared. Negative exit
+   test: a notification path that admits, or re-admits, anything about the sender.
 3. **`tasks/resubscribe` and `tasks/get` after our own crash.** NOT decided, and
    the missing piece is not the HTTP call: it is a task id that survives us.
    `TaskRef` is a value the consumer threads through `poll` / `reply` / `cancel`
@@ -731,8 +740,10 @@ question.
    The **`@ts` half of the funnel** is LANDED too, so B1 is now complete on
    both tiers. `a2a_boundary.ts_funnel` emits the same rule the py bodies
    carry: the placeholder and the minimum length read off the same two module
+   carry — the placeholder and the minimum length read off the same two module
    constants, the needle walk spelled the way `backends/typescript/bridge.ts`
    spells it into BOTH coloured ts bodies (`message/send` and the REST
+   spells it — into BOTH coloured ts bodies (`message/send` and the REST
    `message:send`), around each of the four peer-authored interpolations. Exit
    test:
    `tests/test_import_a2a.py::test_the_ts_crossing_scrubs_every_peer_authored_interpolation`,
@@ -778,6 +789,11 @@ before it is this item's. Item 2 (push) is no longer open: T3 landed as the synt
 424 slice C1), 5 (a file `Part` on the coloured `@ts` tier, the async crossing)
 and 6 (gRPC, refused under any `a2a` label and owed its own `through` name)
 each remain owned elsewhere, exactly as written above.
+before it is this item's. Items 2 (push, an inbound PROVISION routed through
+item 457), 4 (`DataPart`, the tagged encoding of item 424 slice C1), 5 (a file
+`Part` on the coloured `@ts` tier, the async crossing) and 6 (gRPC, refused
+under any `a2a` label and owed its own `through` name) each remain owned
+elsewhere, exactly as written above.
 
 What is left in THIS note is therefore a record of decisions, not a backlog:
 every open item names the other item that owns it, and none of the six waits on
@@ -804,6 +820,7 @@ effort against this binding.
   all as EMITTED source, in the one place the three generated py bodies share
   them. Also the ts correlation binding, the ts envelope gates and `ts_funnel`,
   which the importer's two coloured ts bodies use, so what the boundary does
+  which the importer's two coloured ts bodies use — so what the boundary does
   with a peer's text does not depend on which tier answered.
 - `tests/test_439_a2a_boundary.py`: B1's shared contract. The placeholder and the
   needle bound pinned equal to `backends/python/confidential.py`'s AND to

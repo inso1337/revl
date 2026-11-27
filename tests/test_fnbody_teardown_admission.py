@@ -83,6 +83,7 @@ def test_399_acquire_undo_allowed_in_provide_method():
     # in tests/test_site_undo_argument_typecheck.py. Since issue #1859 the site
     # `undo` must also be the inverse the extern DECLARES, so the admitted
     # spelling is an extern whose declared inverse does not take the handle.
+    # in tests/test_site_undo_argument_typecheck.py.
     ir = _compile(_ACQ_UNDO + (
         "extern pure fn r_forget(tag: Str) = @py { return }\n"
         "extern acquire fn r_tag(n: Int) -> RHandle undo r_forget(\"h\")"
@@ -91,6 +92,7 @@ def test_399_acquire_undo_allowed_in_provide_method():
         "component R provides res: Res {\n"
         "  provide res {\n"
         "    fn take() { effect r_tag(0) undo r_forget(\"h\") }\n"
+        "    fn take() { effect r_open(0) undo r_forget(\"h\") }\n"
         "  }\n"
         "}\n"))
     assert any(c["name"] == "R" for c in ir["components"])

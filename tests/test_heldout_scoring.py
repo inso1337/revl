@@ -154,6 +154,9 @@ def test_a_draw_whose_inside_half_is_refused_is_itself_refused(
     """
     record, status = _run(
         census=census, engine=engine,
+    record, status = heldout.run(
+        argv_seed=TEST_SEED, env={}, count=DRAW,
+        changed=["src/revl/lower.py"], census=census, engine=engine,
         reference=lambda src: ("OUT:mutated reference", "mutated"))
     assert status == heldout.REFUSED
     assert record["refusal"] == "draw-inside-refused-by-reference"
@@ -171,6 +174,10 @@ def test_a_scoring_run_writes_nothing_into_the_tree(engine, census, reference):
     before = _porcelain()
     record, _status = _run(
         census=census, engine=engine, reference=reference)
+    record, _status = heldout.run(
+        argv_seed=TEST_SEED, env={}, count=DRAW,
+        changed=["src/revl/lower.py"], census=census, engine=engine,
+        reference=reference)
     assert record["verdict"] == "clean"
     assert _porcelain() == before
 
@@ -226,10 +233,15 @@ def _run(**kw):
     content = kw.pop("seed_content", TEST_SEED)
     with _seed_file(content) as path:
         return heldout.run(seed_file=path, env=env, **kw)
+    base = dict(argv_seed=TEST_SEED, env={}, count=DRAW,
+                changed=["src/revl/lower.py"])
+    base.update(kw)
+    return heldout.run(**base)
 
 
 def test_a_missing_seed_refuses_and_scores_nothing():
     record, status = _run(seed_file=None, env={})
+    record, status = _run(argv_seed="", env={})
     assert status == heldout.REFUSED
     assert record["verdict"] == "refused"
     assert record["refusal"] == "no-seed"
@@ -238,6 +250,7 @@ def test_a_missing_seed_refuses_and_scores_nothing():
 
 def test_a_short_seed_refuses():
     record, status = _run(seed_content="abc")
+    record, status = _run(argv_seed="abc")
     assert status == heldout.REFUSED
     assert record["refusal"] == "seed-too-short"
 
@@ -556,10 +569,12 @@ def test_a_seed_that_is_in_the_tree_refuses():
     in_tree = "gate_reference_census.py"
     assert len(in_tree) >= heldout.MIN_SEED_CHARS
     record, status = _run(seed_content=in_tree)
+    record, status = _run(argv_seed=in_tree)
     assert status == heldout.REFUSED
     assert record["refusal"] == "seed-in-tree"
 
     control, _ = _run(census=_BrokenCensus())
+    control, _ = _run(argv_seed=TEST_SEED, census=_BrokenCensus())
     assert control["refusal"] != "seed-in-tree"
 
 
@@ -600,6 +615,8 @@ def test_a_diff_that_stays_off_the_fence_is_scored(engine, census, reference):
     """The control for the case above: the fence refuses the scorer's own
     paths and nothing else, so an ordinary compiler change is still judged."""
     record, status = _run(
+    record, status = heldout.run(
+        argv_seed=TEST_SEED, env={}, count=DRAW,
         changed=["src/revl/lower.py", "selfhost/lower.rvl",
                  "crates/revl-gate/src/lib.rs", "docs/v2.0-roadmap.md"],
         census=census, engine=engine, reference=reference)
@@ -635,6 +652,8 @@ def test_a_change_to_a_fenced_file_selects_this_file(path=None):
 
     Derived on both sides: the selector reads the `held_out` view out of the
     evaluator enumeration by AST, and this holds every entry of the same set.
+    Derived on both sides: the selector reads `HELD_OUT_FENCE` out of the tool
+    by AST, and this holds every entry of the same tuple.
     """
     spec = importlib.util.spec_from_file_location(
         "affected_tests_under_heldout", ROOT / "tools" / "affected_tests.py")
@@ -685,6 +704,8 @@ def test_a_certifier_that_admits_everything_is_caught_by_the_draw(
     engine._certify = lambda src: True
     try:
         record, status = _run(
+        record, status = heldout.run(
+            argv_seed=TEST_SEED, env={}, count=DRAW,
             changed=["src/revl/lower.py"], census=census, engine=engine,
             reference=reference)
     finally:
@@ -710,6 +731,8 @@ def test_a_draw_that_reaches_no_admission_arm_refuses(
     engine._certify = lambda src: False
     try:
         record, status = _run(
+        record, status = heldout.run(
+            argv_seed=TEST_SEED, env={}, count=DRAW,
             changed=["src/revl/lower.py"], census=census, engine=engine,
             reference=reference)
     finally:
@@ -779,6 +802,7 @@ def test_the_whole_import_closure_of_a_scoring_run_is_classified():
 
 _CLOSURE_PROBE = r'''
 import importlib.util, json, os, sys, tempfile, warnings
+import importlib.util, json, os, sys, warnings
 warnings.filterwarnings("ignore")
 ROOT = %s
 SEED = %s
@@ -792,6 +816,7 @@ spec = importlib.util.spec_from_file_location(
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 record, status = mod.run(seed_file=SEED_FILE, env={}, count=20,
+record, status = mod.run(argv_seed=SEED, env={}, count=20,
                          changed=["src/revl/lower.py"])
 real = os.path.realpath(ROOT) + os.sep
 files = set()
@@ -1076,6 +1101,7 @@ def test_the_allowance_is_the_censuss_own_baseline_families(tmp_path):
     allowance = heldout.bypass_allowance(ROOT)
     blob = json.loads(
         (ROOT / "tools" / "gate_reference_census_baseline.json").read_text(encoding="utf-8"))
+        (ROOT / "tools" / "gate_reference_census_baseline.json").read_text())
     expected = {name.split("/", 1)[1] for name in blob["buckets"]
                 if name.split("/", 1)[0] == "false-admit"}
     assert allowance == expected
@@ -1195,6 +1221,8 @@ def test_a_gate_that_stops_refusing_is_caught_as_a_new_bypass_family(
     already allows, which is clean on the same seed and the same draw.
     """
     record, status = _run(
+    record, status = heldout.run(
+        argv_seed=TEST_SEED, env={}, count=DRAW,
         changed=["src/revl/lower.py"], census=census,
         engine=_NoRefusalGate(engine),
         reference=_in_slice(reference, "T9NEW"))
@@ -1223,6 +1251,8 @@ def test_the_bypass_direction_is_not_reachable_on_this_grammar(
     identical in a report and this repository has confused them before.
     """
     record, status = _run(
+    record, status = heldout.run(
+        argv_seed=TEST_SEED, env={}, count=DRAW,
         changed=["src/revl/lower.py"], census=census, engine=engine,
         reference=reference)
     assert status == heldout.OK
@@ -1261,6 +1291,9 @@ def test_a_family_already_in_the_baseline_is_reported_and_is_not_a_finding(
     assert heldout.bypass_allowance(root) == {allowed}
     record, status = _run(
         root=root, changed=["src/revl/lower.py"], census=census,
+    record, status = heldout.run(
+        argv_seed=TEST_SEED, env={}, count=DRAW, root=root,
+        changed=["src/revl/lower.py"], census=census,
         engine=_NoRefusalGate(engine),
         reference=_in_slice(reference, allowed))
 
@@ -1356,6 +1389,8 @@ def test_a_draw_a_tell_separates_is_refused_rather_than_scored(
         heldout, "draw",
         lambda seed, count: _replant_slice1_names(_real_draw(seed, count)))
     record, status = _run(
+    record, status = heldout.run(
+        argv_seed=TEST_SEED, env={}, count=DRAW,
         changed=["src/revl/lower.py"], census=census, engine=engine,
         reference=reference)
     assert status == heldout.REFUSED

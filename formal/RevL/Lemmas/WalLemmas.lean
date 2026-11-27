@@ -711,6 +711,7 @@ The three effect-taking rules are the only way a configuration moves, so
 ignores its argument. The in-process frame below adds the deferral-queue
 step and the two session verdicts; its body steps are these same
 `SemStep` forms.
+ignores its argument.
 
 ### Fidelity, stated honestly
 
@@ -718,6 +719,10 @@ step and the two session verdicts; its body steps are these same
   WAL guarantees are about: a step either touches nothing, mutates with
   a declared inverse, crosses the boundary one-way, or enqueues a
   class-(b) deferred emission, and it is not a model of the language.
+* Five body forms against revl's roughly twenty. This is the fragment the
+  WAL guarantees are about — a step either touches nothing, mutates with
+  a declared inverse, or crosses the boundary one-way — and it is not a
+  model of the language.
 * A `witnessed` step appends its descriptor and creates its referent in
   ONE step. The reference logs the descriptor after the forward extern
   returns `Ok` (`backends/python/emit.py`), so the real runtime has a

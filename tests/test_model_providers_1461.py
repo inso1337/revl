@@ -43,6 +43,7 @@ from revl.providers import (  # noqa: E402
     ProviderError, bind_for_run, build_hosts, check_bindings, describe_hosts,
     load_config, model_operations, parse_config, placement_of_program,
     read_credential, request_json,
+    request_json,
 )
 
 try:  # noqa: SIM105
@@ -667,10 +668,12 @@ def test_an_async_operation_is_a_coroutine_and_args_become_json(tmp_path,
 
 def test_a_missing_credential_at_dispatch_names_the_role_not_the_variable(
         tmp_path, fake):
+def test_a_missing_credential_at_dispatch_names_the_variable(tmp_path, fake):
     _, ir = _compile(tmp_path)
     hosts = build_hosts(ir, _placement(), _config(fake), environ={})
     with pytest.raises(ProviderError, match="named in `api_key_env` for role"
                        ) as exc:
+    with pytest.raises(ProviderError, match=ENV):
         hosts["llm"].public_label("x")
     assert ENV not in str(exc.value)
     assert fake.requests == []          # nothing was sent without it
@@ -702,6 +705,7 @@ def test_the_credential_is_in_no_artifact_message_repr_or_log(tmp_path, fake,
     seen.append(json.dumps(ir.get("manifest")))
     # the configuration file names the variable, not the value
     seen.append(cfg_path.read_text(encoding="utf-8"))
+    seen.append(cfg_path.read_text())
     hosts = bind_for_run(ir, [str(path)], str(cfg_path), environ=env)
     seen.append("\n".join(describe_hosts(hosts)))
     seen.append(repr(hosts) + repr(load_config(cfg_path)))
@@ -787,6 +791,7 @@ def test_run_refuses_an_unset_credential_variable(tmp_path, fake):
     assert done.returncode == 1
     assert "named in `api_key_env` (role `cloud`)" in done.stderr
     assert ENV not in done.stderr
+    assert f"`{ENV}` (role `cloud`)" in done.stderr
 
 
 def test_run_refuses_providers_on_another_tier(tmp_path, fake):
@@ -818,6 +823,8 @@ def test_run_serves_a_model_crossing_end_to_end_without_leaking_the_key(
     assert fake.requests[-1]["body"]["messages"][0]["content"] == "is this spam"
     assert trace.exists() and trace.read_text(encoding="utf-8").strip()
     for text in (done.stdout, done.stderr, trace.read_text(encoding="utf-8")):
+    assert trace.exists() and trace.read_text().strip()
+    for text in (done.stdout, done.stderr, trace.read_text()):
         assert SECRET not in text
 
 
@@ -838,6 +845,7 @@ def test_bench_clients_send_through_the_adapter(fake):
     request any more, and the local runner's request is the adapter's."""
     for name in ("run.py", "model_pin.py", "decode_grammar_probe.py"):
         text = (ROOT / "bench" / name).read_text(encoding="utf-8")
+        text = (ROOT / "bench" / name).read_text()
         assert "import urllib" not in text, name
         assert "urllib.request" not in text, name
     bench_run = _load_by_path("bench_run_1461", ROOT / "bench" / "run.py")

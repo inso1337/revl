@@ -181,6 +181,8 @@ def test_ts_cas_undo_is_result_guarded_at_both_sites():
     # neither the unguarded `return won ? () =>` form nor a bare remove passes.
     assert ("return won ? $revl_frame.guard(() => ledger.remove(ticket)) "
             ": () => {}") in src
+    # method body: `return won ? () => ledger.remove(ticket) : () => {}`
+    assert "return won ? () =>" in src and "ledger.remove(ticket)" in src
     # the false arm is the identity (a no-op disposer), never a bare remove
     assert "yield () => ledger.remove" not in src
     assert "return () => ledger.remove" not in src

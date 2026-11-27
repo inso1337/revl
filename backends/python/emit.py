@@ -34,6 +34,7 @@ import re
 import sys
 import textwrap
 from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 IR_VERSION = 1
 
@@ -436,6 +437,13 @@ def _deferred_register_kwargs(ext: dict, args: list) -> str:
 # them is escaped and every emitter reference keeps reaching the runtime name.
 # A local of one of these spellings is renamed too; the ladder is the one
 # module-global rename site, and the churn is a pure injective shift.
+# `next` is deliberately ABSENT: it is emitted bare only inside the routed-
+# require router (a self-contained emitted class, item 167), and it is also a
+# common, legitimate revl identifier (a `next` callback parameter, a `next`
+# record field) whose every checked-in use is a local/field that shares no scope
+# with that class. Renaming those would be churn with no collision behind it, so
+# `next` stays off the list until a colliding *module-scope* spelling motivates
+# a narrower guard.
 _EMITTED_BUILTINS = frozenset({
     "AssertionError", "AttributeError", "Exception", "IndexError", "KeyError",
     "OverflowError", "RuntimeError", "TypeError",
@@ -443,6 +451,11 @@ _EMITTED_BUILTINS = frozenset({
     "globals", "hasattr", "hash", "int", "isinstance", "len", "list", "max",
     "min", "next", "object", "ord", "range", "realm_label", "repr", "reversed",
     "set", "setattr", "sorted", "str", "tuple", "type",
+    "AttributeError", "Exception", "OverflowError", "RuntimeError", "TypeError",
+    "abs", "bool", "bytes", "callable", "dict", "float", "getattr", "globals",
+    "hasattr", "hash", "int", "isinstance", "len", "list", "max", "min",
+    "object", "ord", "range", "repr", "reversed", "set", "sorted", "str",
+    "tuple", "type",
 })
 
 # Type names the python emitter injects at module scope, which a user *type* of
@@ -452,6 +465,9 @@ _EMITTED_BUILTINS = frozenset({
 # `class Ok:`/`class Err:` at the top of the module), and that import is
 # suppressed only for a name a user has claimed as a *variant case*, so a user
 # `type Ok = { a: Int }` added a SECOND module-scope
+# ADT's constructors: `_emit_builtin_result` writes `class Ok:`/`class Err:` at
+# the top of the module, but its guard only skipped a name a user had claimed as
+# a *variant case*, so `type Ok = { a: Int }` emitted a SECOND module-scope
 # `class Ok` further down. Python class redefinition is silent and the later
 # class wins, so the runtime's constructor was gone: an accepted program that
 # built a `Result` then died at run time with `TypeError: Ok() takes no
@@ -578,6 +594,7 @@ def _mangle(name: str, extra: "frozenset[str]" = frozenset()) -> str:
     provision keys upstream. Keyword escaping applies at every site regardless,
     since a Python keyword is illegal in any of them."""
     return _mangle_escaping(name, _EMITTED_BUILTINS | extra, temps=True)
+    return _mangle_escaping(name, _EMITTED_BUILTINS | extra)
 
 
 def _method_def_name(name: Any, what: str) -> str:
@@ -622,16 +639,19 @@ def _mangle_kw(name: str) -> str:
 
 def _mangle_escaping(name: str, extra: "frozenset[str]",
                      temps: bool = False) -> str:
+def _mangle_escaping(name: str, extra: "frozenset[str]") -> str:
     """The shared injective append-`_` rung: escape iff `name`, or any name
     reachable from it by dropping trailing `_`, is a keyword or in `extra`, or,
     with `temps`, an emitter temporary (`_emitter_temp`, issue #2913). No
     fixed temporary or scaffolding name ends in `_`, so an escaped name is
     never one (an escaped `_revl*` name stays in that namespace, ending in
     `_`)."""
+    reachable from it by dropping trailing `_`, is a keyword or in `extra`."""
     root = name
     while root:
         if (keyword.iskeyword(root) or keyword.issoftkeyword(root)
                 or root in extra or (temps and _emitter_temp(root))):
+                or root in extra):
             return name + "_"
         if not root.endswith("_"):
             break
@@ -688,6 +708,7 @@ def _inverse_lambda(step: dict, slot: str, params: str = "") -> str:
 
 
 def _ident(name: Any, what: str, *, attr: bool = False, temps: bool = True) -> str:
+def _ident(name: Any, what: str, *, attr: bool = False) -> str:
     """Validate and rename one user identifier. `attr=True` marks a name emitted
     as an attribute the runtime dispatches by its contract spelling (a provide-
     method name) — it takes the keyword-only rung, since it cannot shadow a
@@ -789,6 +810,7 @@ def _check_host_keys(ir: dict) -> None:
                         f"of them (a key containing '__' collides with a "
                         f"namespaced key's mangled spelling)"
                     )
+    return _mangle_kw(name) if attr else _mangle(name, extra)
 
 
 def _snake(name: str) -> str:
@@ -967,6 +989,8 @@ def _scan_uses(root) -> _UsesScan:
             elif kind == "index":
                 # A List subscript `xs[i]` carries an inline guard (`_list_index`)
                 # that faults on a negative index (#549: every tier faults, python
+                # A List subscript `xs[i]` routes through `_revl_index`, which
+                # faults on a negative index (#549: every tier faults, python
                 # would otherwise read from the end). A string-LITERAL key is a
                 # host/`Any` property read, not a List subscript, so it stays a
                 # bare `[...]`. A `Map` subscript (issue #957) is neither: it
@@ -1198,6 +1222,8 @@ _REVL_FTOA_SRC = '''def _revl_ftoa(x):
 # 64-bit edge; the division forms answer Err at a zero divisor (and at the
 # one overflowing quotient).
 _CHECKED_ARITH = ("checked_add", "checked_sub", "checked_mul")
+# The total, value-returning division forms (docs/arithmetic.md): same
+# rounding as the faulting operations, Err(reason) at a zero divisor.
 _CHECKED_DIVS = ("checked_div_trunc", "checked_div_floor",
                  "checked_div_euclid", "checked_mod")
 # Every total form produces a Result, so the Result cases travel with any of
@@ -1516,6 +1542,19 @@ def _annotated_un(node: dict, render) -> str | None:
 # nested read has finished with the name before the outer read rebinds it.
 _FIELD_TMP = "_fv"
 
+# Every name the expression renderer may spell as a walrus target of its own:
+# the bounded-arithmetic temp, the field-read temp, the char-class temp, and
+# the `?.`/`??` chain temps (`_ov<height>`). `_match_expr` needs the set because
+# python refuses an assignment expression that rebinds the iteration variable of
+# the comprehension it sits in, so a payload bound under one of these names has
+# to keep the older walrus binder.
+_WALRUS_TEMPS = frozenset({_BOUNDED_TMP, _FIELD_TMP, "_rc"})
+_OPT_TMP_RE = re.compile(r"_ov\d+\Z")
+
+
+def _walrus_temp(name: str) -> bool:
+    return name in _WALRUS_TEMPS or _OPT_TMP_RE.match(name) is not None
+
 
 def _field_read(target: str, name: str, opt: bool = False,
                 rereadable: bool = False) -> str:
@@ -1794,6 +1833,7 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
     # outside `0 <= i < length()` — python's `s[i]` is END-RELATIVE, so a bare
     # `s[-1]` would read the LAST code point where go, rust, java and ts all
     # fault. Same guard, same reason, as the inline guard on a List subscript
+    # fault. Same guard, same reason, as `_revl_index` on a List subscript
     # (#549, docs/stdlib-2.0.md §Str.codepoint_at).
     if method == "charAt":
         return f"_revl_str_at({target}, {args[0]})"
@@ -1927,6 +1967,12 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
     # so the error travels as a value. Ok/Err are the tagged classes emitted
     # when the IR uses Result (gated in `_uses_builtin_result`).
     if method in _CHECKED_FORMS:
+    # The total forms (docs/arithmetic.md): same quotient as the faulting
+    # operation, but a zero divisor yields Err(reason) instead of raising —
+    # the whole point is that a pure fn cannot `fail`, so the error travels
+    # as a value. Ok/Err are the tagged classes emitted when the IR uses
+    # Result (gated in `_uses_builtin_result`).
+    if method in _CHECKED_DIVS:
         return f"_revl_{method}({target}, {args[0]})"
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): python ints on
     # this tier are already i64-clamped, so str() is the exact decimal. A
@@ -2390,6 +2436,7 @@ class _ComponentEmitter:
                  decorated: set | None = None,
                  function_ceilings: dict | None = None,
                  function_shapes: dict | None = None) -> None:
+                 plan_groups: list | None = None) -> None:
         self.ir = component
         # issue #2688: the ceiling declarations of the externs each local
         # function reaches (`_function_ceiling_caps`). A wrapper emission names
@@ -2468,6 +2515,8 @@ class _ComponentEmitter:
         self.requires = {
             _key_binding(local): service
             for local, service in self.requires_raw.items()
+            _ident(local, "requires key"): service
+            for local, service in (component.get("requires") or {}).items()
         }
         # the runtime key spelling each `req` resolves through -- the host key,
         # which is what the provider registers in `_revl_ctx` (issue #3538:
@@ -2475,6 +2524,9 @@ class _ComponentEmitter:
         self.require_keys = {
             _key_binding(local): _host_key(local)
             for local in self.requires_raw
+        self.provides = {
+            _ident(key, "provides key"): service
+            for key, service in (component.get("provides") or {}).items()
         }
         self.provides = dict(self.provides_raw)
         self.config_fields = component.get("config") or []
@@ -2519,12 +2571,15 @@ class _ComponentEmitter:
         declared = set(self.requires_raw) | set(self.provides_raw)
         for key in self.routes:
             if key not in declared:
+            if key not in self.requires:
                 raise EmitError(f"{self.name}: routed key {key!r} is not a requirement")
         for key in self.isolate:
             if key not in declared:
+            if key not in self.requires and key not in self.provides:
                 raise EmitError(f"{self.name}: isolate key {key!r} is not declared")
         for key in self.intercept:
             if key not in declared:
+            if key not in self.requires:
                 raise EmitError(f"{self.name}: intercept key {key!r} is not a requirement")
         # item 259 slice 2: the checked fan-out plan for THIS component, reduced to
         # the groups the runtime may actually fire concurrently in the activation
@@ -2744,9 +2799,12 @@ class _ComponentEmitter:
             route = self.route_of.get(name)
             if route is not None:
                 return f"_revl_route_{_host_key(route)}"
+            if name in self.routes:
+                return f"_revl_route_{name}"
             # committed-view access: resolves through the fiber's store, so it
             # stays readable during this component's own teardown (R3)
             return _ctx_read(self.require_keys.get(name, name))
+            return f"_revl_ctx.{name}"
         if kind == "call":
             if "target" in expr:
                 target = self._expr(expr.get("target"), where)
@@ -2767,6 +2825,7 @@ class _ComponentEmitter:
                     f"{method!r}, [{args}])"
                     if expr.get("delegate")
                     else f"{_method_access(target, method)}({args})")
+                rendered = f"{_method_access(target, method)}({args})"
                 # item 121 Slice 2: a crossing whose arguments the analysis
                 # proved read completion `site`'s binding fires THROUGH the
                 # marker helper, so the recorder can stamp `producedBy` on this
@@ -3001,6 +3060,8 @@ class _ComponentEmitter:
             idx = expr.get("index")
             # A `Map` subscript reads by KEY (issue #957): the List
             # guard (`_list_index`) compares the index with 0, which raises a TypeError
+            # A `Map` subscript reads by KEY (issue #957): `_revl_index` is the
+            # List guard and compares the index with 0, which raises a TypeError
             # on a `Str` key even for a key that is present.
             if expr.get("key_type") is not None:
                 return (f"_revl_map_index({self._expr(expr.get('target'), where)}, "
@@ -3008,12 +3069,15 @@ class _ComponentEmitter:
             # A string-LITERAL key is a host/`Any` property read (`tc["fn"]`),
             # not a List subscript — emit the bare `[...]` unchanged. A List
             # subscript carries the inline guard of `_list_index`, which faults on a negative
+            # subscript routes through `_revl_index`, which faults on a negative
             # index so python agrees with every other tier (#549).
             if (isinstance(idx, dict) and idx.get("kind") == "lit"
                     and isinstance(idx.get("value"), str)):
                 return f"{self._expr(expr.get('target'), where)}[{self._expr(idx, where)}]"
             return _list_index(expr.get("target"), self._expr(expr.get("target"), where),
                                idx, self._expr(idx, where))
+            return (f"_revl_index({self._expr(expr.get('target'), where)}, "
+                    f"{self._expr(idx, where)})")
         if kind == "bin":
             if expr.get("op") == "??":
                 # `x ?? d`: `Opt[T]` is represented as `T | None` at runtime
@@ -3149,6 +3213,8 @@ class _ComponentEmitter:
                     + (f", {expr['key']!r}, _revl_ctx."
                        f"{_ident(self.require_keys.get(expr['key'], expr['key']), 'lease key')}"
                        if expr.get("key") else "") + ")")
+            return (f"_revl_frame.acquire_lease({cap!r}, "
+                    f"{ttl!r}, {uses!r})")
         if kind == "lease-revoke":
             handle = expr.get("handle")
             if not isinstance(handle, str) or not handle.isidentifier():
@@ -3162,6 +3228,7 @@ class _ComponentEmitter:
             # holding this handle reaches it (supervision-tree addressing).
             target = self._expr(expr.get("target"), where)
             key = _host_key(expr.get("key"))
+            key = expr.get("key")
             if not isinstance(key, str) or not key.isidentifier():
                 raise EmitError(f"{where}: bad instance-get key {key!r}")
             return f"{target}.get({key!r})"
@@ -3186,12 +3253,16 @@ class _ComponentEmitter:
             out.add(indent, self._expr(step.get("expr"), where))
         elif kind == "if":
             def arm(nested: dict) -> None:
+            out.add(indent, f"if {self._expr(step.get('cond'), where)}:")
+            for nested in step.get("then") or []:
                 self._setup_step(out, indent + 1, nested, where)
             out.add(indent, f"if {self._expr(step.get('cond'), where)}:")
             _emit_block(out, indent + 1, step.get("then"), arm)
             if step.get("else"):
                 out.add(indent, "else:")
                 _emit_block(out, indent + 1, step.get("else"), arm)
+                for nested in step.get("else") or []:
+                    self._setup_step(out, indent + 1, nested, where)
         elif kind == "assert":
             out.add(indent, f"assert {self._expr(step.get('expr'), where)}")
         else:
@@ -3254,14 +3325,19 @@ class _ComponentEmitter:
             # RuntimeError by its type, so a `fail` fails a bare `load`
             self.uses.add("fail_error")
             out.add(indent, f"raise _revl_fail_error({self._expr(step.get('message'), where)})")
+            out.add(indent, f"raise RuntimeError({self._expr(step.get('message'), where)})")
         elif kind == "if":
             def arm(nested: dict) -> None:
+            out.add(indent, f"if {self._expr(step.get('cond'), where)}:")
+            for nested in step.get("then") or []:
                 self._body_step(out, indent + 1, nested, where)
             out.add(indent, f"if {self._expr(step.get('cond'), where)}:")
             _emit_block(out, indent + 1, step.get("then"), arm)
             if step.get("else"):
                 out.add(indent, "else:")
                 _emit_block(out, indent + 1, step.get("else"), arm)
+                for nested in step.get("else") or []:
+                    self._body_step(out, indent + 1, nested, where)
         elif kind == "emit":
             deferred = self._deferred_extern(step.get("expr"))
             if deferred is not None:
@@ -3269,6 +3345,7 @@ class _ComponentEmitter:
                 out.add(0)
                 return
             # item 131: `await emit ...` awaits the boundary crossing so the
+            # item 131: `await emit …` awaits the boundary crossing so the
             # emission actually fires (a bare async emit builds a coroutine that
             # never runs).
             #
@@ -3296,6 +3373,8 @@ class _ComponentEmitter:
             # approval edge wraps only the fire (the token is checked and
             # consumed first), so the registration inside that lambda still
             # starts after the token check and when the body returns.
+            # never runs). The compensation registers AFTER, exactly as the sync
+            # spelling registers after the fire (design §4 clause 1).
             aw = "await " if step.get("async") else ""
             compensation = self._step_compensation(step, where)
             seam = (compensation is not None
@@ -3306,6 +3385,7 @@ class _ComponentEmitter:
                                  f"{self._emit_fire(step, where, compensate=compensation)}")
                 out.add(indent, f"yield {temp}.compensation")
             elif (step.get("async") and step.get("approval") is None
+            if (step.get("async") and step.get("approval") is None
                     and self._validated_call(step.get("expr")) is not None):
                 # A `validated` async operation checks the SETTLED response
                 # (item 257), so the await belongs inside the seam:
@@ -3338,6 +3418,33 @@ class _ComponentEmitter:
                     # compensation, not inversion (§6.1).
                     out.add(indent,
                             f"yield _revl_frame.compensation({compensation})")
+            if step.get("compensate") is not None:
+                # item 247 (docs/design/teardown-contract.md): a compensation
+                # is a first-class COMPENSATION entry on the frame's shared
+                # per-activation LIFO stack, not a bare disposer — it
+                # discharges (never runs) on a clean commit and runs
+                # best-effort in PHASE 2 of an abort, only after every proof
+                # inverse (bracket + transactional) in this activation has
+                # completed. This is the two-phase model, not the old
+                # single-interleaved-LIFO ordering the A5 TCK case predates
+                # (docs/contract-errata.md's TCK A5 respec, a5a/a5b); it is
+                # compensation, not inversion (§6.1).
+                out.add(indent, "yield _revl_frame.compensation(lambda: "
+                                 f"{self._expr(step.get('compensate'), where)})")
+            ext_comp = self._compensated_extern(step.get("expr"))
+            if ext_comp is not None:
+                # item 254: the emitted extern DECLARES its own `compensate` (the
+                # extern owns the reversal, so no site spelling is required — the
+                # item-254 network case is `emit put_endpoint(...)` with the
+                # compensating restore carried on the extern). Register it as the
+                # SAME first-class COMPENSATION entry as a site-spelled compensate
+                # (item 247, two-phase): discharged on a clean commit, best-effort
+                # in Phase 2 of an abort after every proof inverse. The reversal
+                # expression is the extern's lowered `compensate` slot (a bare
+                # call, no `result` binding — lower.py `_check_extern_undo`), the
+                # same shape `_witnessed_step` renders for a witnessed `undo`.
+                out.add(indent, "yield _revl_frame.compensation(lambda: "
+                                 f"{self._expr(ext_comp['compensate'], where)})")
         elif kind == "approval":
             self._approval_step(out, indent, step, where)
         elif kind == "await":
@@ -3594,6 +3701,7 @@ class _ComponentEmitter:
                 out.add(indent + 1, "yield _revl_frame.compensation(lambda: "
                                     f"{self._expr(member.get('compensate'), where)}"
                                     f"{self._compensation_call(member.get('compensate'), where)})")
+                                    f"{self._expr(member.get('compensate'), where)})")
         # re-raise the first fault AFTER every fired member's compensation is on
         # the stack, so the L-Raise teardown unwinds a correctly-ordered stack.
         out.add(indent, "_revl_raise_first(_revl_group)")
@@ -3610,6 +3718,7 @@ class _ComponentEmitter:
     def _extern_emit_fire(self, expr: dict, where: str,
                           compensate: Optional[str] = None,
                           method_compensate: Optional[str] = None) -> str:
+    def _extern_emit_fire(self, expr: dict, where: str) -> str:
         """The Python expression that fires a DIRECT host-extern emission
         (`emit announce(msg)`, a kind-3/4 crossing) through the recording seam
         (item 414).
@@ -3665,9 +3774,11 @@ class _ComponentEmitter:
         call`, `apply(call)`) hides the callee the meter would charge entirely.
         Emitting it would leave the declaration silently unenforced, so the
         fail-closed choice is a named emit-time refusal (issue #2688)."""
+        this context settles it."""
         self.uses.add("extern_emit")
         raw_name = expr.get("name")
         name = _ident(raw_name, f"{where}: function")
+        name = _ident(expr.get("name"), f"{where}: function")
         args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
         direct = self._extern_by_name.get(raw_name)
         if direct is not None:
@@ -3693,6 +3804,7 @@ class _ComponentEmitter:
                         f"{compensate}, crossing={name!r})")
         call = (f"{_runtime_ref('extern_emit')}(_revl_ctx, {name!r}, {name}, "
                 f"({args}{',' if args else ''}){budget}{register})")
+                f"({args}{',' if args else ''}))")
         if self._in_async and not self._in_arrow \
                 and name in (_PY_COLORED_FNS | _PY_ASYNC_EXTERNS):
             return f"(await {call})"
@@ -3753,6 +3865,7 @@ class _ComponentEmitter:
     def _emission_fire(self, expr: dict, where: str,
                        compensate: Optional[str] = None,
                        method_compensate: Optional[str] = None) -> str:
+    def _emission_fire(self, expr: dict, where: str) -> str:
         """The Python expression that FIRES an emission expression: a DIRECT
         host-extern crossing (`_emission_shape` == "extern", the one emission
         shape with no receiver to route it) fires through `_extern_emit_fire`, so
@@ -3765,15 +3878,18 @@ class _ComponentEmitter:
         refusal is decided. `method_compensate` is the provide-method
         registration expression for that same seam. Only the extern shape can
         carry either; every other shape renders exactly as before."""
+        site shares, so a new firing site cannot pick up one and miss the other."""
         if self._emission_shape(expr) == "extern":
             return self._extern_emit_fire(
                 expr, where, compensate=compensate,
                 method_compensate=method_compensate)
+            return self._extern_emit_fire(expr, where)
         return self._expr(expr, where)
 
     def _emit_fire(self, step: dict, where: str,
                    compensate: Optional[str] = None,
                    method_compensate: Optional[str] = None) -> str:
+    def _emit_fire(self, step: dict, where: str) -> str:
         """The Python expression that fires an `emit` step's host body. When the
         step carries a `with a` approval edge (item 246), the fire is wrapped in
         `_revl_frame.approval_crossing(a, "C", lambda: <fire>)`: the frame checks
@@ -3795,6 +3911,8 @@ class _ComponentEmitter:
         fire = self._emission_fire(step.get("expr"), where,
                                    compensate=compensate,
                                    method_compensate=method_compensate)
+        changes shape."""
+        fire = self._emission_fire(step.get("expr"), where)
         approval = step.get("approval")
         if approval is None:
             return fire
@@ -3881,10 +3999,14 @@ class _ComponentEmitter:
         #1457): the step above and every value position render the same text.
         `fire` is the plain host call the flush runs, rendered here directly so
         it is not itself turned into an enqueue."""
+        expr = step.get("expr")
         method = expr.get("name")
         args = [self._expr(arg, where) for arg in expr.get("args") or []]
         fire = f"{_ident(method, f'{where}: function')}({', '.join(args)})"
         return (f"_revl_frame.enqueue_deferred({method!r}, {method!r}, "
+        fire = self._expr(expr, where)
+        out.add(indent,
+                f"_revl_frame.enqueue_deferred({method!r}, {method!r}, "
                 f"[{', '.join(args)}], lambda: {fire}"
                 f"{_deferred_register_kwargs(ext, args)})")
 
@@ -4078,6 +4200,7 @@ class _ComponentEmitter:
         self._counter += 1
         tmp = f"_revl_wit{self._counter}"
         undo = self._inverse_expr(ext["undo"], where)  # e.g. `restore(result)`
+        undo = self._expr(ext["undo"], where)  # e.g. `restore(result)`
         out.add(indent, f"{tmp} = {self._expr(step.get('acquire'), where)}")
         out.add(indent, f"if isinstance({tmp}, Ok):")
         # TODO(309-slice3): thread the idempotency register (item 309) into the
@@ -4100,6 +4223,7 @@ class _ComponentEmitter:
                 f"_revl_frame.transactional_method((lambda result: {undo}), "
                 f"{tmp}.value{_transactional_scope_kwargs(ext)}"
                 f"{self._compensation_call(ext['undo'], where, f'{tmp}.value')})")
+                f"{tmp}.value{_transactional_scope_kwargs(ext)})")
         if bind is not None:
             out.add(indent, f"{bind} = {tmp}")
 
@@ -4243,6 +4367,8 @@ class _ComponentEmitter:
         if not step.get("async"):
             out.add(indent, f"def {fn}():")
             mark = out.mark()
+            if not emissions:  # pragma: no cover — the parser rejects an empty body
+                out.add(indent + 1, "pass")
             for emission in emissions:
                 out.add(indent + 1,
                         self._emission_fire(emission.get("expr"), where))
@@ -4261,6 +4387,8 @@ class _ComponentEmitter:
         out.add(indent, f"{inflight} = set()")
         out.add(indent, f"def {fn}():")
         mark = out.mark()
+        if not emissions:  # pragma: no cover — the parser rejects an empty body
+            out.add(indent + 1, "pass")
         for emission in emissions:
             expr = emission.get("expr")
             rendered = self._emission_fire(expr, where)
@@ -4311,15 +4439,20 @@ class _ComponentEmitter:
         key = _host_key(raw)
         name = _ident(key, f"{where}: provide key")
         if key in _CONTEXT_MEMBERS or name in _CONTEXT_MEMBERS:
+        name = _ident(step.get("name"), f"{where}: provide key")
+        if name in _CONTEXT_MEMBERS:
             raise EmitError(
                 f"{where}: provision key {key!r} collides with a cordis-py "
                 f"Context member: `_revl_ctx.{key}` already exists, so the "
+                f"{where}: provision key {name!r} collides with a cordis-py "
+                f"Context member — `_revl_ctx.{name}` already exists, so the "
                 f"provision would fail at activation. Rename the key."
             )
         service = step.get("service")
         if service not in self.services:
             raise EmitError(f"{where}: provide {name!r} names unknown service {service!r}")
         if self.provides.get(raw) != service:
+        if self.provides.get(name) != service:
             raise EmitError(f"{where}: provide {name!r} does not match the component header")
         cls = f"_{_pascal(name)}"
         out.add(indent, f"class {cls}:")
@@ -4330,6 +4463,7 @@ class _ComponentEmitter:
         for method in methods:
             out.add(0)
             self._method(out, indent + 1, name, method, where, raw)
+            self._method(out, indent + 1, name, method, where)
         out.add(0)
         # issue #1474: a method whose `def` had to be renamed is registered
         # under its contract name too, which is what every dispatcher looks up.
@@ -4342,13 +4476,17 @@ class _ComponentEmitter:
         # _revl_ctx.provide's own disposer, yielded into the component accumulator
         out.add(indent, f"yield _revl_ctx.provide({key!r})")
         out.add(indent, f"_revl_ctx.set({key!r}, {cls}())")
+        out.add(indent, f"yield _revl_ctx.provide({name!r})")
+        out.add(indent, f"_revl_ctx.set({name!r}, {cls}())")
 
     def _method(self, out: _Lines, indent: int, provide_name: str, method: dict,
                 where: str, raw_key: str | None = None) -> None:
+    def _method(self, out: _Lines, indent: int, provide_name: str, method: dict, where: str) -> None:
         contract = method.get("name")
         name = _method_def_name(contract, f"{where}: method name")
         key = provide_name if raw_key is None else raw_key
         service = self.services.get(self.provides.get(key)) or {}
+        service = self.services.get(self.provides.get(provide_name)) or {}
         spec = (service.get("methods") or {}).get(contract)
         if spec is None:
             raise EmitError(f"{where}: method {contract!r} is not part of the provided service")
@@ -4405,6 +4543,8 @@ class _ComponentEmitter:
         body = method.get("body") or []
         if not body:
             out.close_block(mark, indent + 1)
+            if not secret_params:
+                out.add(indent + 1, "pass")
             return
         # item 121 Slice 2: the model-hop value-flow analysis over THIS body,
         # before a line of it renders — `_expr` reads the marks it leaves.
@@ -4429,6 +4569,7 @@ class _ComponentEmitter:
         try:
             for step in body:
                 self._method_step(out, body_indent, provide_name, name, step, mwhere, method_is_async)
+                self._method_step(out, indent + 1, provide_name, name, step, mwhere, method_is_async)
         finally:
             self._in_async = prev_async
             self._route_value_emissions = False
@@ -4497,6 +4638,8 @@ class _ComponentEmitter:
                 # the frame's older record for the same key
                 adopt = "adopt_bracket" if _coalescable_bracket(step) else "adopt"
                 out.add(indent, f"_revl_frame.{adopt}(_revl_ctx.effect({fn}, {self._label(label)!r}))")
+                        f"{self._expr(step.get('undo'), where)})")
+                out.add(indent, f"_revl_frame.adopt(_revl_ctx.effect({fn}, {self._label(label)!r}))")
         elif kind == "let-effect":
             wit = self._witnessed_extern(step.get("acquire"))
             if wit is not None:
@@ -4516,6 +4659,7 @@ class _ComponentEmitter:
                 bind = _ident(step.get("bind"), f"{where}: bind")
                 acquire = self._expr(acquire_node, where)
                 undo = self._inverse_expr(step.get("undo"), where)
+                undo = self._expr(step.get("undo"), where)
                 head = _inverse_lambda(step, "undo", bind)
                 if _is_map_cas(step.get("acquire")):
                     # result-guarded undo (item 397): the accumulator entry
@@ -4572,6 +4716,14 @@ class _ComponentEmitter:
                         out, indent, step, where,
                         lambda crossing: self._method_registration(
                             thunk, call, crossing))
+                # guarded and residue-collected. Fire the emission first, then
+                # register — the sync spelling of the activation body's
+                # `<fire>; yield _revl_frame.compensation(...)`.
+                out.add(indent, self._emit_fire(step, where))
+                out.add(indent,
+                        "_revl_frame.compensation_method("
+                        f"{_inverse_lambda(step, 'compensate')}: "
+                        f"{self._expr(step.get('compensate'), where)})")
             else:
                 ext_comp = self._method_compensated_extern(step.get("expr"))
                 if ext_comp is None:
@@ -4584,6 +4736,7 @@ class _ComponentEmitter:
                         out, indent, step, where,
                         lambda crossing: self._method_compensation(
                             ext_comp, where, crossing))
+                out.add(indent, self._emit_fire(step, where))
         elif kind == "return":
             if step.get("expr") is None:
                 out.add(indent, "return")
@@ -4622,9 +4775,14 @@ class _ComponentEmitter:
 
         def block(steps: list) -> None:
             def render(s: dict) -> None:
+            if not steps:
+                out.add(indent + 1, "pass")
+                return
+            for s in steps:
                 self._method_step(out, indent + 1, provide_name, method_name,
                                   s, where, method_is_async)
             _emit_block(out, indent + 1, steps, render)
+                                   s, where, method_is_async)
 
         if kind == "if":
             out.add(indent, f"if {self._expr(step.get('cond'), where)}:")
@@ -4669,6 +4827,7 @@ class _ComponentEmitter:
                 # the fiber landed FAILED, misreported as an unmet `requires`,
                 # on a program every other tier activates (issue #1915).
                 field = spec.get("name")
+                field = _ident(spec.get("name"), f"{where}: config field")
                 out.add(1, f"({field!r}, {spec.get('type')!r}, {spec.get('default')!r}),")
             # item 256 Slice 3: the fields declared `Secret[T]`. The runtime keeps
             # their values out of the `<name>.config` trace line (stdout under
@@ -4708,6 +4867,7 @@ class _ComponentEmitter:
             realms = list(route.get("realms") or [])
             strategy = route.get("strategy")
             out.add(1, f"_revl_route_{_host_key(key)} = _revl_router("
+            out.add(1, f"_revl_route_{key} = _revl_router("
                        f"_revl_ctx, {key!r}, {realms!r}, {strategy!r})")
         out.add(0)
         out.add(1, f"{'async def' if is_async else 'def'} _body():")
@@ -4752,12 +4912,16 @@ class _ComponentEmitter:
         # fiber its dependencies under the HOST spelling (issue #1914)
         inject_host = {self.require_keys.get(_key_binding(key), key):
                        self.intercept.get(key) for key in inject_keys}
+        inject_keys = [key for key in self.requires if key not in self.routes]
         if self.intercept:
             # v2: dict-form inject — non-null values land in the fiber
             # context's intercept chain (the consumer-declared d(k))
             out.add(1, f"'inject': {inject_host!r},")
+            inject = {key: self.intercept.get(key) for key in inject_keys}
+            out.add(1, f"'inject': {inject!r},")
         else:
             out.add(1, f"'inject': {list(inject_host)!r},")
+            out.add(1, f"'inject': {inject_keys!r},")
         out.add(1, f"'apply': _{self.snake}_apply,")
         if self.config_fields:
             # cordis-py reads Config off dict plugins via dict.get (fork
@@ -4796,6 +4960,7 @@ class _ComponentEmitter:
 # builder — still hits it (issue #1923).
 _PY_TYPE = {"Int": "int", "Float": "float", "Bool": "bool", "Str": "str",
             "Bytes": "bytes", "Unit": "None", "Value": "Any"}
+_PY_TYPE = {"Int": "int", "Float": "float", "Bool": "bool", "Str": "str", "Bytes": "bytes", "Unit": "None"}
 
 _PY_BIN_OPS = {
     "==": "==", "===": "==", "!=": "!=", "!==": "!=",
@@ -5247,6 +5412,15 @@ def _match_expr(scrutinee: str, arms: list, awaited: bool = False) -> str:
         # a one-element comprehension, whose iteration variable is a scope the
         # `await` in the body can still be spelled inside.
         if awaited:
+            if _walrus_temp(bind):
+                # Python refuses a walrus that rebinds a comprehension's
+                # iteration variable, and a body reaching one of the emitter's
+                # own walrus temps (`_bi` and friends) does exactly that when
+                # the payload is bound under that name. Such a bind is already
+                # clobbered by the scaffolding that owns the name, with or
+                # without a match, so keep the pre-item-163 spelling rather
+                # than turn a wrong value into a `SyntaxError`.
+                return f"(({bind} := {payload}), {body})[1]"
             return f"[{body} for {bind} in ({payload},)][0]"
         return f"(lambda {bind}: {body})({payload})"
 
@@ -5360,6 +5534,46 @@ def _expr(node: dict) -> str:
         annotated = _annotated_bin(node, _expr)
         if annotated is not None:
             return annotated
+        if node["op"] in ("+", "-", "*") and node.get("operands") == "Int":
+            # Int is bounded 64-bit and overflow TRAPS (docs/arithmetic.md).
+            # python is arbitrary precision, so it is the tier that has to
+            # *impose* the bound rather than detect it — without this, a
+            # program that overflows on every other tier quietly succeeds here,
+            # which is the reference tier disagreeing with all five others.
+            #
+            # The bound is imposed INLINE (roadmap item 436 F5): the in-range
+            # answer, which is every answer a correct program produces, no
+            # longer costs a Python frame. `_revl_i64` stays as the trapping
+            # tail, so the raise and its message are still written once.
+            return _bounded(f"{_expr(node['left'])} {node['op']} "
+                            f"{_expr(node['right'])}", 64)
+        if node["op"] in ("+", "-", "*") and node.get("operands") == "Int32":
+            # Int32 traps at the 32-bit edge, the same imposition at half the
+            # width (docs/arithmetic.md).
+            return _bounded(f"{_expr(node['left'])} {node['op']} "
+                            f"{_expr(node['right'])}", 32)
+        if node["op"] == "/":
+            # true division, IEEE at zero (docs/arithmetic.md)
+            return f"_revl_div({_expr(node['left'])}, {_expr(node['right'])})"
+        if node["op"] == "%" and node.get("operands") == "Float":
+            # The Float remainder is IEEE `fmod`, and IEEE gives it a VALUE at
+            # a zero divisor — `x % 0.0` is NaN, not a fault. python's own `%`
+            # raises `ZeroDivisionError` there, exactly as its `/` does, so it
+            # is the one tier that has to build the IEEE answer (issue #721).
+            # `_revl_rem` below is the Int form and must keep faulting at zero.
+            return f"_revl_frem({_expr(node['left'])}, {_expr(node['right'])})"
+        if node["op"] == "%" and node.get("operands") == "Int":
+            # `%` is the TRUNCATED remainder — it takes the sign of the
+            # dividend, as in TypeScript (§0) — and pairs with `div_trunc` so
+            # that (a.div_trunc(b)) * b + a % b == a. Python's `%` floors and
+            # takes the sign of the *divisor*, so it is the one tier that has
+            # to build this. The Euclidean remainder is `mod`, which is a
+            # different operation with a different name (docs/arithmetic.md).
+            # The same form serves Int and Float (it is `math.fmod` written
+            # out), so an emitted module needs no import for it.
+            # A preamble helper, not a lambda built and applied at every
+            # evaluation (item 436 F6).
+            return f"_revl_rem({_expr(node['left'])}, {_expr(node['right'])})"
         if node["op"] in ("&", "|", "^"):
             # Int32 bitwise AND/OR/XOR (item 366). These are bit patterns, not
             # arithmetic, so they never trap. python's ints are signed and, for
@@ -5400,6 +5614,15 @@ def _expr(node: dict) -> str:
             annotated = _annotated_un(node, _expr)
             if annotated is not None:
                 return annotated
+            if node.get("operands") == "Int":
+                # Negation is `0 - x`, and `0 - Int.MIN` overflows: it goes
+                # through the bound like any other subtraction (docs/
+                # arithmetic.md). Without this, `-Int.MIN` — which traps on
+                # rust and wasm — quietly came back as 2^63 here, out of the
+                # range python itself imposes on every other operation.
+                return f"_revl_i64(-{_expr(node['operand'])})"
+            if node.get("operands") == "Int32":
+                return f"_revl_i32(-{_expr(node['operand'])})"
             return f"(-{_expr(node['operand'])})"
         raise EmitError(f"unsupported unary operator {node['op']!r}")
     if kind == "call":
@@ -5462,11 +5685,13 @@ def _expr(node: dict) -> str:
         # A string-LITERAL key is a host/`Any` property read (`tc["fn"]`), not a
         # List subscript — bare `[...]`. A List subscript routes through
         # the inline guard of `_list_index`, which faults on a negative index so python agrees with
+        # `_revl_index`, which faults on a negative index so python agrees with
         # every other tier (#549).
         if (isinstance(idx, dict) and idx.get("kind") == "lit"
                 and isinstance(idx.get("value"), str)):
             return f"{_expr(node['target'])}[{_expr(idx)}]"
         return _list_index(node["target"], _expr(node["target"]), idx, _expr(idx))
+        return f"_revl_index({_expr(node['target'])}, {_expr(idx)})"
     if kind == "if":
         return f"({_expr(node['then'])} if {_expr(node['cond'])} else {_expr(node['else'])})"
     if kind == "record":
@@ -5744,17 +5969,31 @@ def _fn_stmt(node: dict, out: "_Lines", indent: int) -> None:
     elif step == "if":
         out.add(indent, f"if {_expr(node['cond'])}:")
         _fn_block(node["then"], out, indent + 1)
+        for s in node["then"]:
+            _fn_stmt(s, out, indent + 1)
         if node["else"]:
             out.add(indent, "else:")
             _fn_block(node["else"], out, indent + 1)
+            for s in node["else"]:
+                _fn_stmt(s, out, indent + 1)
     elif step == "while":
         _guard_frame_neutral_loop(node["body"])
         out.add(indent, f"while {_expr(node['cond'])}:")
         _fn_block(node["body"], out, indent + 1)
+        if not node["body"]:
+            out.add(indent + 1, "pass")
+        else:
+            for s in node["body"]:
+                _fn_stmt(s, out, indent + 1)
     elif step == "for":
         _guard_frame_neutral_loop(node["body"])
         out.add(indent, f"for {_mangle(node['bind'])} in {_expr(node['iterable'])}:")
         _fn_block(node["body"], out, indent + 1)
+        if not node["body"]:
+            out.add(indent + 1, "pass")
+        else:
+            for s in node["body"]:
+                _fn_stmt(s, out, indent + 1)
     elif step == "break":
         out.add(indent, "break")
     elif step == "continue":
@@ -5841,6 +6080,8 @@ def _emit_memo_wrapper(name: str, params: list, is_async: bool) -> "_Lines":
 def _emit_functions(functions: list, function_ceilings: dict | None = None,
                     dict_locals: dict | None = None) -> "_Lines":
     global _PY_IN_ASYNC, _PY_AWAIT_LOCALS, _PY_IN_ARROW, _PY_DICT_LOCALS
+def _emit_functions(functions: list) -> "_Lines":
+    global _PY_IN_ASYNC, _PY_AWAIT_LOCALS, _PY_IN_ARROW
     out = _Lines()
     # issue #2688: the runtime backstop tag. A local function that reaches a
     # budgeted extern carries the declaration it inherits, so a crossing that
@@ -5885,9 +6126,40 @@ def _emit_functions(functions: list, function_ceilings: dict | None = None,
                 out.add(0, f"{public_name}._revl_declared_caps = {caps!r}")
     finally:
         _PY_IN_ASYNC = False
+    for fn in functions:
+        name = _ident(fn["name"], "function name")
+        params = ", ".join(_ident(p["name"], "parameter name") for p in fn["params"])
+        # item 92: a phase-2 async-colored fn emits `async def`; its body renders
+        # in an async context with its async-typed parameters as the await-locals
+        # (a call through one yields a coroutine to settle). item 264: an
+        # async-typed param is an async local of a SYNC fn too — the enclosing
+        # `def` never awaits it (that is gated on `_PY_IN_ASYNC`), but an arrow
+        # re-passing it must still render it as a coroutine tail call.
+        is_async = bool(fn.get("async"))
+        _PY_IN_ASYNC = is_async
         _PY_IN_ARROW = False
         _PY_AWAIT_LOCALS = set()
         _PY_DICT_LOCALS = frozenset()
+        _PY_AWAIT_LOCALS = {p["name"] for p in fn["params"]
+                            if _is_async_fn_type(p.get("type"))}
+        # item 310: a `cache pure` fn renders its real body under a private name
+        # and gains a memo wrapper under the public one (below), so every caller
+        # — including a first-class value reference — goes through the table.
+        memoized = _is_cache_pure(fn)
+        if memoized:
+            name = f"_revl_uncached_{name}"
+        out.add(0, f"{'async def' if is_async else 'def'} {name}({params}):")
+        if not fn.get("body"):
+            out.add(1, "pass")
+        for stmt in fn.get("body") or []:
+            _fn_stmt(stmt, out, 1)
+        out.add(0)
+        if memoized:
+            out.extend(_emit_memo_wrapper(
+                _ident(fn["name"], "function name"), fn["params"], is_async))
+    _PY_IN_ASYNC = False
+    _PY_IN_ARROW = False
+    _PY_AWAIT_LOCALS = set()
     return out
 
 
@@ -5925,6 +6197,7 @@ def _emit_py_ref_thunk(name: str, params: str, ext: dict, ref: dict) -> "_Lines"
     # A host attribute name, imported under the `_f` alias, so it binds no
     # local of its own spelling and is never lifted off a temporary (#2913).
     symbol = _ident(ref["symbol"], "ref symbol", attr=True)
+    symbol = _ident(ref["symbol"], "ref symbol")
     where = f"{dotted}.{symbol}"
     out = _Lines()
     is_async = bool(ext.get("async"))
@@ -5985,6 +6258,7 @@ def _inline_extern_param(ext: dict, pname: str) -> str:
 
 def _emit_externs(externs: list, crossings: dict | None = None,
                   gated: bool = True) -> "_Lines":
+def _emit_externs(externs: list, gated: bool = True) -> "_Lines":
     out = _Lines()
     # item 256 Slice 1: the composition secrets map, keyed by secret name, and a
     # FAIL-LOUD lookup. The driver (src/revl/run.py) resolves each bound secret's
@@ -6004,6 +6278,7 @@ def _emit_externs(externs: list, crossings: dict | None = None,
         out.add(3, "\"capability-bound secret `\" + _name + \"` was not \"")
         out.add(3, "\"installed before its extern body ran; the run driver \"")
         out.add(3, "\"has not resolved it (item 256). No default exists \"")
+        out.add(3, "\"must resolve it at plug (item 256). No default exists \"")
         out.add(3, "\"for a secret.\")")
         out.add(1, "return _REVL_SECRETS[_name]")
         out.add(0)
@@ -6055,6 +6330,7 @@ def _emit_externs(externs: list, crossings: dict | None = None,
             _inline_extern_param(ext, p["name"]) if inline
             else _ident(p["name"], "extern parameter name", temps=thunk)
             for p in ext["params"])
+        params = ", ".join(_ident(p["name"], "extern parameter name") for p in ext["params"])
         bodies = ext.get("bodies") or {}
         refs = ext.get("refs") or {}
         # issue #2688: the declared-ceiling tag the runtime backstop reads. A
@@ -6163,12 +6439,15 @@ def _emit_externs(externs: list, crossings: dict | None = None,
             # C0 separators, so a comment stays one comment in the module.
             body_lines, _check_host_body = _host_body_scanner()
             for line in body_lines(body):
+            for line in body.splitlines() or [""]:
                 out.add(1, line)
         # an injected secret or config local is a statement in its own right;
         # a body of only comments is not (issue #2284)
         out.close_block(mark, 1)
         if ceiling_caps:
             out.add(0, f"{name}._revl_declared_caps = {ceiling_caps!r}")
+        elif not ext.get("config") and not ext.get("secrets"):
+            out.add(1, "pass")
         out.add(0)
     return out
 
@@ -6188,6 +6467,10 @@ def _emit_tests(tests: list) -> "_Lines":
             continue
         out.add(0, f"def {fn_name}():")
         _fn_block(test.get("body"), out, 1)
+        if not test.get("body"):
+            out.add(1, "pass")
+        for stmt in test.get("body") or []:
+            _fn_stmt(stmt, out, 1)
         out.add(0)
         out.add(0, f"REVL_TESTS.append(({test['name']!r}, {fn_name}))")
         out.add(0)
@@ -6273,6 +6556,8 @@ def _revl_unreleased(events):
         if not tag or rest.startswith("refused"):
             # `pool.open refused <url>`: the acquisition raised and acquired
             # nothing, so there is nothing to release (issue #1859)
+        tag, _, verb = event.split(" ", 1)[0].rpartition(".")
+        if not tag:
             continue
         if verb in _REVL_ACQUIRE:
             live[tag] = verb
@@ -6399,6 +6684,7 @@ def _emit_lifecycle_test(test: dict, fn_name: str) -> "_Lines":
     out.add(1, "# mix pure `test` blocks with lifecycle ones, and only the latter")
     out.add(1, "# need a runtime.")
     out.add(1, "from cordis import Context as _revl_Context")
+    out.add(1, "from cordis import Context")
     out.add(0)
     uses_abort = _lifecycle_uses_abort(test)
     out.add(1, "async def _run():")
@@ -6413,14 +6699,17 @@ def _emit_lifecycle_test(test: dict, fn_name: str) -> "_Lines":
     # tests/test_2975_lifecycle_driver_locals.py derives this set from the
     # emitted source (locals, imports and defs) and fails on a bare one.
     out.add(2, "_revl_root = _revl_Context()")
+    out.add(2, "root = Context()")
     if _lifecycle_uses_clock(test):
         # item 102: the clock coeffect is a module-global; reset it so this
         # test's `advance` steps start from t=0 and see only its own timers,
         # independent of any earlier lifecycle test in the file.
         out.add(2, "_revl_Clock.reset()")
     out.add(2, "_revl_events = []")
+    out.add(2, "events = []")
     out.add(2, "_REVL_INVERSE_RESIDUE.clear()")
     out.add(2, "_revl_fibers = _revl_live()")
+    out.add(2, "_revl_fibers = {}")
     if uses_abort:
         # item 377: register a 245 session-commit owner BEFORE any component
         # loads, so every activation frame joins its live-frame registry and an
@@ -6430,21 +6719,31 @@ def _emit_lifecycle_test(test: dict, fn_name: str) -> "_Lines":
         out.add(2, "_revl_owner = _revl_SessionOwner()")
         out.add(2, "_revl_set_session_owner(_revl_owner)")
     out.add(2, "_revl_set_trace(_revl_events.append)")
+    out.add(2, "_revl_set_trace(events.append)")
     out.add(2, "try:")
     out.add(3, "_revl_baseline = _revl_residue(_revl_root)")
     _emit_block(out, 3, test.get("body"),
                 lambda step: _lifecycle_step(out, 3, step, where))
+    out.add(3, "baseline = _revl_residue(root)")
+    body = test.get("body") or []
+    if not body:
+        out.add(3, "pass")
+    for step in body:
+        _lifecycle_step(out, 3, step, where)
     out.add(2, "finally:")
     out.add(3, "_revl_set_trace(None)")
     if uses_abort:
         out.add(3, "_revl_clear_session_owner()")
     out.add(3, "for _revl_fiber in reversed(list(_revl_fibers.values())):")
+    out.add(3, "for fiber in reversed(list(_revl_fibers.values())):")
     out.add(4, "try:")
     out.add(5, "await _revl_fiber.dispose()")
+    out.add(5, "await fiber.dispose()")
     out.add(4, "except Exception:")
     out.add(5, "pass")
     out.add(4, "finally:")
     out.add(5, "_REVL_INVERSE_RESIDUE.extend(_revl_collect_inverse_residue(_revl_fiber))")
+    out.add(5, "_REVL_INVERSE_RESIDUE.extend(_revl_collect_inverse_residue(fiber))")
     out.add(0)
     out.add(1, "_revl_asyncio.run(_run())")
     out.add(0)
@@ -6458,6 +6757,7 @@ def _lifecycle_step(out: "_Lines", indent: int, step: dict, where: str) -> None:
         config = ", ".join(f"{name!r}: {_expr(value)}"
                            for name, value in (step.get("config") or {}).items())
         out.add(indent, f"_revl_fibers[{component!r}] = _revl_plug(_revl_root, {component}, {{{config}}})")
+        out.add(indent, f"_revl_fibers[{component!r}] = _revl_plug(root, {component}, {{{config}}})")
         out.add(indent, "await _revl_settle()")
         out.add(indent, f"_revl_load_failed(_revl_fibers[{component!r}], {component!r}, {where!r})")
     elif kind == "unload":
@@ -6469,6 +6769,7 @@ def _lifecycle_step(out: "_Lines", indent: int, step: dict, where: str) -> None:
     elif kind == "call":
         args = ", ".join(_expr(arg) for arg in step.get("args") or [])
         call = (f"await _revl_call(_revl_root, {_host_key(step['key'])!r}, {step['method']!r}, "
+        call = (f"await _revl_call(root, {step['key']!r}, {step['method']!r}, "
                 f"[{args}], {where!r})")
         bind = step.get("bind")
         out.add(indent, f"{_ident(bind, 'lifecycle binding')} = {call}" if bind else call)
@@ -6489,8 +6790,10 @@ def _lifecycle_step(out: "_Lines", indent: int, step: dict, where: str) -> None:
         # left byte-identical to before (docs/design/245-session-commit.md).
         out.add(indent, "_revl_owner.begin_abort()   # mark frames abort, drop queue")
         out.add(indent, "for _revl_fiber in reversed(list(_revl_fibers.values())):")
+        out.add(indent, "for _fiber in reversed(list(_revl_fibers.values())):")
         out.add(indent + 1, "try:")
         out.add(indent + 2, "await _revl_fiber.dispose()   # replay inverses")
+        out.add(indent + 2, "await _fiber.dispose()   # replay inverses")
         out.add(indent + 1, "except Exception:")
         out.add(indent + 2, "pass")
         out.add(indent, "_revl_fibers.clear()")
@@ -6503,6 +6806,7 @@ def _lifecycle_step(out: "_Lines", indent: int, step: dict, where: str) -> None:
         out.add(indent, "await _revl_settle()")
     elif kind == "assert_no_residue":
         out.add(indent, f"_revl_no_residue(_revl_root, _revl_baseline, _revl_events, {where!r})")
+        out.add(indent, f"_revl_no_residue(root, baseline, events, {where!r})")
     elif kind == "assert":
         rendered = _expr(step["expr"])
         out.add(indent, f"assert {rendered}, {where + ': assertion failed'!r}")
@@ -6560,6 +6864,10 @@ def _uses_builtin_result(ir: dict) -> bool:
     is dead-code hygiene — a module that never builds or matches a `Result`
     carries neither the import nor the names."""
 
+    the total division forms (which *produce* a Result). Used to decide
+    whether to emit the built-in Result classes: emitting them into every
+    module would add classes no program references, so the gate is dead-code
+    hygiene — the emitted module carries only the names the program uses."""
     def walk(node) -> bool:
         if isinstance(node, dict):
             if node.get("kind") == "adt" and str(node.get("type", "")).startswith("Result"):
@@ -6568,6 +6876,7 @@ def _uses_builtin_result(ir: dict) -> bool:
                 if any(arm.get("pattern") in ("Ok", "Err") for arm in node.get("arms") or []):
                     return True
             if node.get("method") in _CHECKED_FORMS:
+            if node.get("method") in _CHECKED_DIVS:
                 return True
             return any(walk(v) for v in node.values())
         if isinstance(node, list):
@@ -6577,12 +6886,15 @@ def _uses_builtin_result(ir: dict) -> bool:
     # item 243: a witnessed extern returns `Result[Witness, Error]` and its
     # emitted call site branches on `Ok` to register the transactional inverse,
     # so the Result cases must be imported even if no surface `match`/`adt`
+    # so the Result classes must be present even if no surface `match`/`adt`
     # names them. Any witnessed extern is enough to require them.
     if any(ext.get("class") == "witnessed" for ext in ir.get("externs") or []):
         return True
     # item 362: a pure/total extern that RETURNS a Result builds `Ok(..)`/
     # `Err(..)` in its host body (e.g. `json_try_parse`), so the cases must
     # be imported even when no surface `match`/`adt` names them — the same
+    # `Err(..)` in its host body (e.g. `json_try_parse`), so the classes must
+    # be present even when no surface `match`/`adt` names them — the same
     # reasoning as the witnessed case, extended to any Result-returning extern.
     if any(str(ext.get("returns", "")).startswith("Result")
            for ext in ir.get("externs") or []):
@@ -7419,6 +7731,7 @@ def emit(ir: dict) -> str:
                           scopes.get(component.get("name")), set(crossings),
                           function_ceilings=function_ceilings,
                           function_shapes=function_shapes)
+                          plan_groups.get(component.get("name")))
         for component in components
     ]
     bodies = [emitter.emit() for emitter in emitters]
@@ -7649,16 +7962,21 @@ def emit(ir: dict) -> str:
         # The guard is inlined at each subscript (`_list_index`); only the
         # fault it raises is a function, so the read itself pays no call.
         out.add(0, "def _revl_neg_index():")
+        out.add(0, "def _revl_index(xs, i):")
         out.add(0, '    """A negative List index faults on every tier (#549); '
                    'python would"""')
         out.add(0, '    """otherwise read from the end, so guard it here."""')
         out.add(0, "    raise IndexError('revl: negative list index')")
+        out.add(0, "    if i < 0:")
+        out.add(0, "        raise IndexError('revl: negative list index')")
+        out.add(0, "    return xs[i]")
         out.add(0)
     if _scan.builtins & {"charAt", "charCodeAt", "codepoint_at"}:
         # An index outside `0 <= i < length()` FAULTS on every tier
         # (docs/stdlib-2.0.md §Str.codepoint_at). python's `s[i]` is
         # END-RELATIVE, so `s.charAt(-1)` read the last code point here while
         # go/rust/java/ts faulted — the List subscript story (#549), one type
+        # go/rust/java/ts faulted — the `_revl_index` story (#549), one type
         # over. `slice`-then-guard is still the total form.
         out.add(0, "def _revl_str_at(s, i):")
         out.add(0, '    """A Str index outside 0 <= i < length() faults on '
@@ -7782,11 +8100,22 @@ def emit(ir: dict) -> str:
         out.add(0, "    return _revl_ftoa(v) if isinstance(v, float) else str(v)")
         out.add(0)
     for checked in _CHECKED_FORMS:
+    for checked in _CHECKED_DIVS:
         if checked not in _scan.builtins:
             continue
         # The total forms (docs/arithmetic.md): the same value as the faulting
         # operation where it fits, Err(reason) instead of the fault otherwise
         # — a pure fn cannot `fail`, so the error travels as a value.
+        # The total forms (docs/arithmetic.md): the same quotient as the
+        # faulting operation, but a zero divisor yields Err(reason) instead of
+        # raising — a pure fn cannot `fail`, so the error travels as a value.
+        quotient = {
+            "checked_div_trunc":
+                "abs(a) // abs(b) if (a < 0) == (b < 0) else -(abs(a) // abs(b))",
+            "checked_div_floor": "a // b",
+            "checked_div_euclid": "a // b if b > 0 else -(a // -b)",
+            "checked_mod": "a % abs(b)",
+        }[checked]
         out.add(0, f"def _revl_{checked}(a, b):")
         if checked in _CHECKED_DIVS:
             out.add(0, f'    """Total `{checked[len("checked_"):]}`: a zero divisor '
@@ -7806,15 +8135,25 @@ def emit(ir: dict) -> str:
             value = {"checked_add": "a + b", "checked_sub": "a - b",
                      "checked_mul": "a * b"}[checked]
         out.add(0, f"    v = {value}")
+        out.add(0, f'    """Total `{checked[len("checked_"):]}`: a zero divisor '
+                   'is Err(reason), never a raise."""')
+        out.add(0, "    if b == 0:")
+        out.add(0, f"        return Err({_DIV_ZERO_MSG!r})")
+        out.add(0, f"    q = {quotient}")
         if checked == "checked_mod":
             # a remainder cannot leave the range its operands are already in
             out.add(0, "    return Ok(v)")
+            out.add(0, "    return Ok(q)")
         else:
             # an Int result that leaves i64 (an overflowing product, or the one
             # overflowing quotient Int.MIN/-1) does not fit -> Err, not a value
             out.add(0, "    if -(2**63) <= v <= 2**63 - 1:")
             out.add(0, "        return Ok(v)")
             out.add(0, f"    return Err({_INT_OVERFLOW_MSG!r})")
+            # a quotient of 2^63 (Int.MIN/-1) does not fit i64 -> Err, not a value
+            out.add(0, "    if -(2**63) <= q <= 2**63 - 1:")
+            out.add(0, "        return Ok(q)")
+            out.add(0, "    return Err('revl: Int overflow')")
         out.add(0)
     if _scan.float_interp:
         # Canonical Float -> Str (docs/strings.md): the ECMAScript
@@ -7842,6 +8181,30 @@ def emit(ir: dict) -> str:
     # every component-bearing emitted module already imports from. `Opt` is
     # unaffected: `Some`/`None` are host `None`/identity on this tier, so there
     # is no per-module class to split.
+    # built-in Result is a tagged ADT (so `match` can discriminate Ok/Err),
+    # unless a user type shadows the name. Opt stays host-None, so it needs
+    # no class. Emitted only when the IR actually uses Result — an unused
+    # Ok/Err class in every module would be dead code (docs/conformance.md,
+    # "Golden policy": output is right because it is right, not because a
+    # fixture wants the bytes).
+    if _uses_builtin_result(ir):
+        user_cases = {
+            case["name"]
+            for spec in types.values() if spec.get("kind") == "variant"
+            for case in spec.get("cases") or []
+        }
+        for builtin in ("Ok", "Err"):
+            if builtin in user_cases:
+                continue
+            out.add(0, f"class {builtin}:")
+            out.add(1, '__slots__ = ("value",)')
+            out.add(1, "def __init__(self, value=None):")
+            out.add(2, "self.value = value")
+            out.add(1, "def __eq__(self, other):")
+            out.add(2, f"return isinstance(other, {builtin}) and other.value == self.value")
+            out.add(1, "def __hash__(self):")
+            out.add(2, f"return hash(({builtin!r}, self.value))")
+            out.add(0)
     if types:
         # Only what the record annotations below actually mention (item 436
         # F9): `dataclasses` is no longer imported at all, `Union` never was
@@ -7854,8 +8217,10 @@ def emit(ir: dict) -> str:
     if functions:
         out.extend(_emit_functions(functions, function_ceilings,
                                    _dict_receivers(ir)))
+        out.extend(_emit_functions(functions))
     if externs:
         out.extend(_emit_externs(externs, crossings, gated=bool(components)))
+        out.extend(_emit_externs(externs, gated=bool(components)))
     if tests:
         out.extend(_emit_tests(tests))
     if fault_tests:

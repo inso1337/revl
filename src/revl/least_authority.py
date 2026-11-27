@@ -10,6 +10,7 @@ For a wasm component every one of those three sets is statically decidable:
     `revl audit` enumerates, docs/capabilities.md);
   * the *policy-allowed* set is the item-33 boundary allow-list, less
     whatever a `may not reach` rule denies (deny wins, as in `evaluate`).
+  * the *policy-allowed* set is the item-33 boundary allow-list.
 
 A `@py`/`@ts` host body is G8-opaque, so its host calls are not enumerable and
 this full chain is enforceable only at the wasm tier -- which is exactly why
@@ -91,6 +92,7 @@ class LeastAuthorityBreach:
     """One way a wasm component breaches the least-authority chain."""
 
     leg: str  # "import>declared" | "declared>policy" | "declared>deny"
+    leg: str  # "import>declared" | "declared>policy"
     component: str
     capabilities: tuple[str, ...]  # the offending capability tokens
 
@@ -144,6 +146,8 @@ class LeastAuthorityBreach:
         tail = {"import>declared": "the declared capabilities",
                 "declared>deny": "what the policy's deny rule permits"}.get(
                     self.leg, "the policy allow-list")
+        tail = ("the declared capabilities" if self.leg == "import>declared"
+                else "the policy allow-list")
         steps = [
             TraceStep(self.component, "component", filename, None,
                       f"wasm cell reaching {self._named()}"),
@@ -179,6 +183,7 @@ def component_breaches(
     component (issue #3185): a declared or imported capability matching one is
     refused whatever the allow-list says, since deny wins in `policy.evaluate`
     too.
+    what it likes, exactly as `policy.evaluate` treats it).
 
     ``declared_caps`` is the G8 reach token set, in which `*` (``UNBOUNDED``)
     is the TOP of the lattice -- a bare ``emission``, "any capability" -- and
@@ -257,6 +262,8 @@ def least_authority_breaches(
                 pat for rule in _deny_for(policy, name, realms)
                 for pat in rule.patterns))
         breaches.extend(component_breaches(name, import_caps, declared, allow, deny))
+            allow = _allow_for(policy, name, component_realms(manifest, name))
+        breaches.extend(component_breaches(name, import_caps, declared, allow))
     return breaches
 
 

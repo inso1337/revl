@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import types
@@ -61,8 +62,10 @@ import revl_fs_workspace as ws  # noqa: E402
 
 _NODE_TS_REASON = node_ts_skip_reason(
     "node is required to run the emitted ts consumer")
+_HAS_NODE = shutil.which("node") is not None
 _needs_node = pytest.mark.skipif(
     _NODE_TS_REASON is not None, reason=_NODE_TS_REASON or "")
+    not _HAS_NODE, reason="node is required to run the emitted ts consumer")
 
 
 # The user-origin component, mirroring the harness's reach: the shell verdict

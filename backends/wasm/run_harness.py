@@ -297,6 +297,17 @@ def main() -> int:
             fiber = rt.plug(cname, modules[cname])
             fibers.append((cname, fiber))
             _log(name, "load", cname, f"state={fiber.state.value}")
+    rt = Runtime()
+    # item 322 Slice 2: with record mode on, seed the durable-WAL channel BEFORE
+    # plugging, so a record-mode module's `coeffect:revl:wal` import resolves at
+    # activation and its framing calls relay while the mutation registers.
+    if record:
+        _install_wal_channel(rt, wal_prefix)
+    fibers = []
+    for cname in order:
+        fiber = rt.plug(cname, modules[cname])
+        fibers.append((cname, fiber))
+        _log(name, "load", cname, f"state={fiber.state.value}")
 
         # every fiber the composition placed must be ACTIVE for the mesh to be
         # up (a consumer left INACTIVE means its coeffect never resolved)
@@ -304,6 +315,30 @@ def main() -> int:
         # the composition's own provisions — never the host-provided record
         # channel (item 322 Slice 2's `revl:wal`), which is the host's, not a
         # placed key.
+    # every fiber the composition placed must be ACTIVE for the mesh to be up
+    # (a consumer left INACTIVE means its coeffect never resolved)
+    all_active = all(f.state is State.ACTIVE for _, f in fibers)
+    # the composition's own provisions — never the host-provided record channel
+    # (item 322 Slice 2's `revl:wal`), which is the host's, not a placed key.
+    host_keys = getattr(rt, "host_keys", set())
+    provided = sorted(k for k in rt.table if k not in host_keys)
+    _log(name, "provide", "keys", ", ".join(provided) or "-")
+    if not all_active:
+        stuck = ", ".join(c for c, f in fibers if f.state is not State.ACTIVE)
+        _log(name, "note", "inactive", stuck)
+    print(f"[{proof_name}] {'UP' if all_active else 'PARTIAL'}", flush=True)
+
+    # teardown, consumers before providers (reverse load order)
+    for cname, fiber in reversed(fibers):
+        rt.unplug(fiber)
+        _log(name, "swap", cname, "dispose -> compiled inverses replay (LIFO)")
+
+    if once:
+        live_fibers = len(rt.fibers)
+        # exclude host-provided provisions (item 322 Slice 2's `revl:wal` record
+        # channel) from Σ residue — they are the host's, torn down with the
+        # process, never a composition-left residue (host_provide seeds them and
+        # `unplug` never withdraws them).
         host_keys = getattr(rt, "host_keys", set())
         provided = sorted(k for k in rt.table if k not in host_keys)
         _log(name, "provide", "keys", ", ".join(provided) or "-")
@@ -319,6 +354,15 @@ def main() -> int:
                     detail = " ".join(str(error).split())
                     _log(name, "note", "raised", f"{cname}: {detail[:300]}")
         print(f"[{proof_name}] {'UP' if all_active else 'PARTIAL'}", flush=True)
+        live_services = sum(1 for k in rt.table if k not in host_keys)
+        _log(name, "residue", "registry", f"{live_fibers} live plugin(s)")
+        _log(name, "residue", "provisions", f"{live_services} service(s) provided")
+        if live_fibers == 0 and live_services == 0:
+            print(f"[{proof_name}] NO-RESIDUE — the composition left nothing behind",
+                  flush=True)
+        else:
+            print(f"[{proof_name}] RESIDUE-LEFT — see the residue lines above",
+                  flush=True)
 
         # teardown, consumers before providers (reverse load order)
         for cname, fiber in reversed(fibers):
@@ -361,6 +405,8 @@ def main() -> int:
         return 0 if all_active and not teardown_interrupted else 1
     finally:
         ticker.stop()
+    print(f"[{proof_name}] DOWN", flush=True)
+    return 0 if all_active else 1
 
 
 if __name__ == "__main__":

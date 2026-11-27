@@ -436,6 +436,7 @@ func (m *Map[V]) Drop() {
 	m.mu.Unlock()
 	revlHostRelease()
 }
+func (m *Map[V]) Drop() { hostRecord("map.drop"); revlHostRelease() }
 func (m *Map[V]) Insert(k string, v V) {
 	m.journalNote(k, "insert")
 	m.mu.Lock()
@@ -736,12 +737,17 @@ const revlWALGuarantee = "the WAL records each committed effect's step identity,
 // is fatal (issue #2345): the process stops instead of running on with a record
 // that never became durable. REVL_WAL_ALLOW_UNSYNCED=1 is the explicit opt-out
 // for a target that cannot fsync; it is stamped into the log itself.
+// before the effect it describes is allowed to matter.
 type revlWAL struct {
 	mu       sync.Mutex
 	f        *os.File
 	seq      int
 	seqs     []int
 	unsynced bool
+	mu   sync.Mutex
+	f    *os.File
+	seq  int
+	seqs []int
 }
 
 var revlWALSink *revlWAL
@@ -756,10 +762,13 @@ func revlWALOpen() {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		panic("revl: cannot open the write-ahead log REVL_WAL: " + err.Error())
+		return
 	}
 	unsynced := os.Getenv("REVL_WAL_ALLOW_UNSYNCED") == "1"
 	revlWALSink = &revlWAL{f: f, unsynced: unsynced}
 	header := map[string]any{
+	revlWALSink = &revlWAL{f: f}
+	revlWALSink.write(map[string]any{
 		"record": "header", "walVersion": 1, "generation": 1,
 		"guarantee": revlWALGuarantee,
 	}
@@ -771,6 +780,7 @@ func revlWALOpen() {
 	if unsynced {
 		revlWALSink.write(map[string]any{"record": "durability-opt-out", "fromSeq": 0})
 	}
+	})
 }
 
 func init() { revlWALOpen() }
@@ -810,6 +820,7 @@ func (w *revlWAL) cut(start int64) {
 	if err := w.f.Truncate(start); err != nil {
 		return
 	}
+	_, _ = w.f.Write(append(line, '\n'))
 	_ = w.f.Sync()
 }
 
@@ -974,6 +985,7 @@ func Crasher() stc.Component {
 					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
 				}
 			}()
+		Apply: func(ctx *stc.Context) (stc.Inverse, error) {
 			_revlFrame := newRevlFrame()
 			if err := ctx.Effect(func() stc.Inverse {
 				return func() error { _revlFrame.runCompensationPhase(); return nil }
@@ -1075,6 +1087,7 @@ func TestCrasherLifecycleBootsAndUnloadsClean(revlT *testing.T) {
 		if err := _f.Ready(stdctx.Background()); err != nil {
 			revlT.Fatalf("%s: %v", "lifecycle test \"crasher lifecycle boots and unloads clean\": load Crasher", err)
 		}
+		_fibers["Crasher"] = _f
 	}
 	_revlAt = "unload Crasher"
 	if _f, _ok := _fibers["Crasher"]; _ok {

@@ -169,6 +169,7 @@ def _cargo(subcommand: str, cwd: Path, *extra: str) -> subprocess.CompletedProce
 
 @pytest.fixture(scope="module")
 def prefilter(tmp_path_factory, cargo_target_dir) -> Path:
+def prefilter(tmp_path_factory) -> Path:
     """Build the COMMITTED example, out of tree.
 
     The example is copied to a temp dir and its path dependency rewritten to an
@@ -190,10 +191,12 @@ def prefilter(tmp_path_factory, cargo_target_dir) -> Path:
     (project / "Cargo.toml").write_text(manifest, encoding="utf-8")
 
     built = _cargo("build", project, "--target-dir", str(cargo_target_dir))
+    built = _cargo("build", project)
     assert built.returncode == 0, (
         "the committed rust consumer example failed to build against "
         "crates/revl-gate:\n" + (built.stderr or built.stdout or "")[-4000:])
     binary = cargo_target_dir / "debug" / "agent-prefilter"
+    binary = project / "target" / "debug" / "agent-prefilter"
     assert binary.exists(), f"consumer binary not found at {binary}"
     return binary
 

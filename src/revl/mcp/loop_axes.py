@@ -245,6 +245,7 @@ class LoopAxes:
         budget, not the previous unit's. Reporting is a read: it never moves
         the counter, so reading the report spends nothing and refunds
         nothing."""
+    def document(self, live_owner=None) -> dict:
         crossed = sum(self.boundary.values())
         prompts = self.closed_prompts
         sessions = self.closed_sessions
@@ -259,6 +260,7 @@ class LoopAxes:
         attempt = (self.attempt if unit is None or unit == self._attempt_unit
                    else 0)
         report = {
+        return {
             "reversibilityRate": _axis(self.boundary["a"], crossed),
             "autoApprovedWithProof": _axis(self.boundary["a"] + self.boundary["b"],
                                            crossed),

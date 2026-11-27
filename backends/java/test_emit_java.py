@@ -66,6 +66,7 @@ def _emit(ir, *args, **kwargs) -> str:
 
 def _ir(name: str = "user_cache") -> dict:
     return json.loads((ROOT / "examples" / f"{name}.ir.json").read_text(encoding="utf-8"))
+    return json.loads((ROOT / "examples" / f"{name}.ir.json").read_text())
 
 
 def test_user_cache_emits_java_structure():
@@ -390,6 +391,7 @@ def test_version_gate_accepts_ir_1_2_3():
 def test_user_cache_golden_byte_equality():
     src = _emit(_ir("user_cache"))
     golden = (Path(__file__).resolve().parent / "golden" / "user_cache.java").read_text(encoding="utf-8")
+    golden = (Path(__file__).resolve().parent / "golden" / "user_cache.java").read_text()
     assert src == golden, (
         "backends/java/golden/user_cache.java drifted from the emitter. "
         + _TAIL.format(t="java"))
@@ -1351,6 +1353,10 @@ def test_lifecycle_no_residue_catches_a_real_leak(tmp_path):
     its test omits, and its pool's inverse is replaced by the query the old
     document ran: exactly the program the checker now refuses, reached past
     the checker."""
+    """The negative half, without which the positive one proves nothing:
+    examples/lifecycle_leak.rvl's `undo` runs a query instead of closing the
+    pool, so the composition leaves a live host resource behind. R1 must catch
+    it — a lifecycle test that cannot fail is not a test."""
     ir = compile_files([str(ROOT / "examples" / "lifecycle_leak.rvl")])
     [test] = ir["tests"]
     test["body"].insert(-1, {"step": "unload", "component": "LeakyDatabase"})
@@ -1363,6 +1369,7 @@ def test_lifecycle_no_residue_catches_a_real_leak(tmp_path):
     assert run.returncode != 0, run.stdout
     assert "host resource(s) never released (R1)" in run.stderr
     assert "a composition left loaded leaves residue" in run.stderr
+    assert "a leaky undo leaves residue" in run.stderr
 
 
 @pytest.mark.skipif(JAVAC is None or JAVA is None, reason=NO_JDK)
@@ -1370,8 +1377,11 @@ def test_lifecycle_no_residue_catches_a_component_left_loaded(tmp_path):
     """The R4 half: a composition that is never unloaded still holds its
     fiber, so `assert no_residue` has to fail on that too, not only on a
     host-resource leak. examples/lifecycle_leak.rvl is exactly that document."""
+    host-resource leak."""
     text = (ROOT / "examples" / "lifecycle_leak.rvl").read_text(encoding="utf-8")
     ir = compile_source(text, "left_loaded.rvl")
+    ir = compile_source(text.replace("  unload LeakyDatabase\n", ""),
+                        "left_loaded.rvl")
     run = _run_revl_tests(tmp_path, emit.emit(ir))
     assert run.returncode != 0, run.stdout
     assert "still loaded: [LeakyDatabase] (R4)" in run.stderr
@@ -1484,6 +1494,7 @@ def test_renaming_collision_is_no_longer_lossy():
     assert src.count("long double_(long n)") == 1
     assert src.count("long double__(long n)") == 1
     assert "return revlAdd(double_(n), double__(n));" in src
+    assert "return Math.addExact(double_(n), double__(n));" in src
 
 
 def test_match_in_a_component_method_body():
@@ -1859,6 +1870,9 @@ component SessionLedger provides sessions: SessionStore {
       let prev = store.get(id)
       effect store.insert(id, (prev ?? []).push(msg))
       undo   match prev { Some(v) => store.insert(id, v), None => store.remove(id) }
+      let prev = store.get(id) ?? []
+      effect store.insert(id, prev.push(msg))
+      undo   store.insert(id, prev)
     }
   }
 }

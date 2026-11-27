@@ -74,6 +74,7 @@ def _the_pure_signer_is_the_one_under_test(monkeypatch):
         False, "pinned to the pure path by the differential"))
     assert signing_backend(CURVE_P256) == "pure"
     assert signing_backend(CURVE_P384) == "pure"
+from revl.tee_quote import derive_public_key  # noqa: E402
 
 #: Rounds per domain. Pure-Python P-256 arithmetic is the cost; 12 keeps the
 #: file inside a few seconds while putting 36 independent keys and well over a

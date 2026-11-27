@@ -204,6 +204,7 @@ function encodeBigInts(v: unknown): unknown {
     const o = v as Record<string, unknown>
     const rec: Record<string, unknown> = {}
     for (const k of Object.keys(o)) ownSet(rec, k, encodeBigInts(o[k]))
+    for (const k of Object.keys(o)) rec[k] = encodeBigInts(o[k])
     return rec
   }
   return v
@@ -221,6 +222,7 @@ export function encodeValue(v: unknown): unknown {
     }
     const rec: Record<string, unknown> = {}
     for (const k of Object.keys(o)) ownSet(rec, k, encodeValue(o[k]))
+    for (const k of Object.keys(o)) rec[k] = encodeValue(o[k])
     return rec
   }
   return v
@@ -237,6 +239,7 @@ export function decodeValue(v: unknown): unknown {
     }
     const rec: Record<string, unknown> = {}
     for (const k of Object.keys(o)) ownSet(rec, k, decodeValue(o[k]))
+    for (const k of Object.keys(o)) rec[k] = decodeValue(o[k])
     return rec
   }
   return v
@@ -308,6 +311,7 @@ function typeHead(type: string): { head: string; args: string[] } {
 function substitute(type: string, env: Record<string, string>): string {
   const { head, args } = typeHead(type)
   if (args.length === 0) return Object.hasOwn(env, head) ? env[head] : head
+  if (args.length === 0) return env[head] ?? head
   return `${head}[${args.map((a) => substitute(a, env)).join(', ')}]`
 }
 
@@ -346,6 +350,7 @@ export function decodeAs(v: unknown, type: string | null | undefined,
   if (decl && typeof decl === 'object') {
     const env: Record<string, string> = {}
     ;(decl.params ?? []).forEach((p: string, i: number) => { if (args[i]) ownSet(env, p, args[i]) })
+    ;(decl.params ?? []).forEach((p: string, i: number) => { if (args[i]) env[p] = args[i] })
     if (decl.kind === 'record' && typeof v === 'object' && !Array.isArray(v) && !tagged) {
       const fields = (decl.fields ?? {}) as Record<string, string>
       const o = v as Record<string, unknown>
@@ -357,6 +362,7 @@ export function decodeAs(v: unknown, type: string | null | undefined,
         // declares a type.
         ownSet(rec, k, Object.hasOwn(fields, k)
           ? decodeAs(o[k], substitute(fields[k], env), types) : decodeValue(o[k]))
+        rec[k] = k in fields ? decodeAs(o[k], substitute(fields[k], env), types) : decodeValue(o[k])
       }
       return rec
     }

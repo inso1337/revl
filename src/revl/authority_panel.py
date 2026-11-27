@@ -47,6 +47,10 @@ that cannot be decided header-only, so it is UNCLASSIFIABLE and authority-
 bearing (incompleteness costs noise, never silence). `reach`-bound violations
 never reach the panel: they are refused at resolution
 (`composition._check_reach_bounds`).
+direction: a string-valued field that is not pinned by a `reach` bound is
+UNCLASSIFIABLE and therefore authority-bearing; a numeric/bool field that feeds
+only pure computation gets no token. `reach`-bound violations never reach the
+panel — they are refused at resolution (`composition._check_reach_bounds`).
 """
 
 from __future__ import annotations
@@ -72,6 +76,8 @@ def _digest8(value: object) -> str:
 def _authority_bearing(field: str, value: object, reach: dict | None,
                        config_uses: frozenset | set
                        ) -> tuple[bool, bool]:
+def _authority_bearing(field: str, value: object,
+                       reach: dict | None) -> tuple[bool, bool]:
     """`(bearing, unclassifiable)` for one config field's value.
 
     A value with a declared `reach` bound is authority-bearing and CLASSIFIED
@@ -83,6 +89,12 @@ def _authority_bearing(field: str, value: object, reach: dict | None,
     is UNCLASSIFIABLE and therefore treated as authority-bearing (§8.5
     conjunct 5, the load-bearing one). A string or structured value with no
     declared bound is unclassifiable for the same reason, read or not.
+    A numeric or boolean value that feeds pure computation is not
+    authority-bearing (`pool: 8`, §8.7 "pure, no token"). A value with a
+    declared `reach` bound is authority-bearing and CLASSIFIED (its host was
+    checked at resolution). Anything else the classifier cannot decide — a
+    bare string, a structured value — is UNCLASSIFIABLE and therefore treated
+    as authority-bearing (§8.5 conjunct 5, the load-bearing one).
     """
     if reach and field in reach:
         return True, False
@@ -90,6 +102,7 @@ def _authority_bearing(field: str, value: object, reach: dict | None,
         if field not in config_uses:
             return False, False
         return True, True
+        return False, False
     # A string (or anything else) with no declared bound: the dataflow to a
     # host argument cannot be decided header-only, so fail closed.
     return True, True
@@ -217,6 +230,7 @@ def panel(base, candidate, *, trust_host_code=False) -> dict:
             if field in prior and prior[field] == value:
                 continue                              # unchanged
             bearing, unclass = _authority_bearing(field, value, reach, uses)
+            bearing, unclass = _authority_bearing(field, value, reach)
             if not bearing:
                 continue                              # pure, no token (§8.7)
             token = f"config:@{label}:{field}:{_digest8(value)}"

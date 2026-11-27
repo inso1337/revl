@@ -534,6 +534,8 @@ class _StubDriver:
 
 def _drive(tmp_path, toml_text, driver=None, app_text=_APP, app_arg=None):
     app = _write(tmp_path, "app.rvl", app_text)
+def _drive(tmp_path, toml_text, driver=None):
+    app = _write(tmp_path, "app.rvl", _APP)
     toml = _write(tmp_path, "t.toml", toml_text)
     specs: dict = {}
     real = _placement.subprocess.Popen
@@ -559,6 +561,7 @@ def _drive(tmp_path, toml_text, driver=None, app_text=_APP, app_arg=None):
          mock.patch.object(_placement.subprocess, "Popen", fake_popen):
         rc = _placement.run_placement([app if app_arg is None else app_arg],
                                       toml, once=True)
+        rc = _placement.run_placement([app], toml, once=True)
     return rc, specs
 
 

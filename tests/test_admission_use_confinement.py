@@ -144,6 +144,7 @@ def test_the_refusal_is_not_itself_an_existence_oracle(secret, monkeypatch):
         raise AssertionError("the loader touched the filesystem under confinement")
 
     monkeypatch.setattr(_compiler, "_read_module_text", _boom)
+    monkeypatch.setattr(_compiler, "parse_file", _boom)
     monkeypatch.setattr(_compiler._ModuleLoader, "_exists", _boom)
 
     with pytest.raises(RevlError) as a:
@@ -334,6 +335,7 @@ def test_the_bridge_refusal_is_not_an_existence_oracle(secret, monkeypatch):
         raise AssertionError("the loader touched the filesystem under confinement")
 
     monkeypatch.setattr(_compiler, "_read_module_text", _boom)
+    monkeypatch.setattr(_compiler, "parse_file", _boom)
     monkeypatch.setattr(_compiler._ModuleLoader, "_exists", _boom)
 
     def _diag(path):

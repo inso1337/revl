@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 
 from . import parser as _ast
 from ._paths import backends_root, relpath_or_abs, stdlib_root
+from ._paths import backends_root, stdlib_root
 from .admit_profile import AdmissionProfile
 from .admit_profile import check_no_asset as _check_no_asset
 from .admit_profile import check_no_extern as _check_no_extern
@@ -35,6 +36,7 @@ from .lower import IR_SCHEMA_REVISIONS, IR_TOPLEVEL_FIELDS, check_and_lower
 from .lower import _same_file_two_copies
 from .parser import ExternDecl, FnDecl, Parser, Program, ServiceDecl, TypeDecl, parse_text
 from .type_arity import check_declared_type_arity as _check_declared_type_arity
+from .parser import ExternDecl, FnDecl, Parser, Program, ServiceDecl, TypeDecl, parse_file
 from .typecheck import format_type, parse_type
 
 
@@ -114,6 +116,8 @@ _BACKEND_NAMES_CACHE: dict[tuple, frozenset[str]] = {}
 def _backend_python_module_names() -> frozenset[str]:
     """Return importable top-level names from the Python backend tree, as a
     frozenset (callers only test membership).
+def _backend_python_module_names() -> set[str]:
+    """Return importable top-level names from the Python backend tree.
 
     Inline Python in user modules must not be able to turn the runtime's
     backend search path into an undeclared host dependency.  The compiler
@@ -141,6 +145,7 @@ def _backend_python_module_names() -> frozenset[str]:
         _BACKEND_NAMES_CACHE.clear()
         _BACKEND_NAMES_CACHE[key] = cached
     return cached
+    return {path.stem for path in root.glob("*.py") if path.stem != "__init__"}
 
 
 #: Backend modules whose trusted surface is re-exported through a revl stdlib
@@ -203,6 +208,7 @@ def _check_user_py_body_imports(program: Program, install_origin: bool) -> None:
     module object stays reachable through `sys.modules["runtime"]`, so this is
     not a seal on runtime state (docs/threat-model.md, non-goal 1; issue
     #2344)."""
+    """Refuse backend imports in inline `@py` bodies from user modules."""
     if install_origin:
         return
     bodies = _py_host_bodies(program)
@@ -231,6 +237,31 @@ def _check_user_py_body_imports(program: Program, install_origin: bool) -> None:
                     f"backend module `{offender}`",
                     hint=_backend_import_hint(offender),
                 )
+    for extern in program.externs:
+        for body in extern.bodies:
+            if not isinstance(body, _ast.HostBody) or body.backend != "py":
+                continue
+            try:
+                tree = ast.parse(textwrap.dedent(body.text), mode="exec")
+            except SyntaxError:
+                # The Python backend reports body syntax errors at emission;
+                # do not replace that diagnostic with an import-policy error.
+                continue
+            for node in ast.walk(tree):
+                imported: list[str] = []
+                if isinstance(node, ast.Import):
+                    imported = [alias.name.split(".", 1)[0] for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    imported = [node.module.split(".", 1)[0]]
+                offender = next((name for name in imported if name in backend_names), None)
+                if offender is not None:
+                    raise RevlError(
+                        program.filename,
+                        body.line + max(node.lineno - 1, 0),
+                        f"user-origin @py body for extern `{extern.name}` imports "
+                        f"backend module `{offender}`",
+                        hint=_backend_import_hint(offender),
+                    )
 
 
 @dataclass
@@ -341,6 +372,7 @@ class _ModuleLoader:
         # is the historical behaviour and every operator door keeps it; the
         # bridge gate sets it False (see `resolve_use`).
         self._disk_relative_use = disk_relative_use
+                 profiles: dict[str, AdmissionProfile | None] | None = None) -> None:
         self._cache: dict[str, _LoadedModule] = {}
         # issue #1715: the operator's own text of the files an in-memory source
         # stands in for. `None` keeps every in-memory source wholly the author's
@@ -354,6 +386,7 @@ class _ModuleLoader:
         # Keys are normalised to abspath ONCE here. Every lookup below is by
         # abspath (`has_source`, `load`), so a relative key would never match
         # and the loader would fall through to a disk read on the SAME relative
+        # and the loader would fall through to `parse_file` on the SAME relative
         # path — silently admitting whatever sits on disk under that name in
         # place of the text the caller submitted (`gate_service.admit` passed
         # its keys through verbatim). A caller's in-memory source now stands in
@@ -489,6 +522,9 @@ class _ModuleLoader:
         stdlib_real, stdlib_parent = self._stdlib_real_and_parent()
         if _contained(os.path.realpath(abs_path), stdlib_real):
             return stdlib_parent
+        if _contained(os.path.realpath(abs_path),
+                      os.path.realpath(str(stdlib_root()))):
+            return str(stdlib_root().parent)
         return None
 
     def _check_generated(self, abs_path: str, virtual: str | None) -> None:
@@ -575,6 +611,7 @@ class _ModuleLoader:
         importer_profile = self._profile_for(os.path.abspath(importer_path))
         if in_memory and importer_profile is not None and importer_profile.untrusted \
                 and not self._operator_use(importer_path, use):
+        if in_memory and importer_profile is not None and importer_profile.untrusted:
             self._confine_use(importer_path, use, primary)
         # The importer is virtual whenever it was supplied as text, including
         # the two later resolution passes that do not pass `in_memory`.
@@ -584,6 +621,7 @@ class _ModuleLoader:
                 self._note_stdlib_shadow(use.path, primary, "importer-relative")
                 return primary
         elif self._exists(primary):
+        if self._exists(primary):
             self._note_stdlib_shadow(use.path, primary, "importer-relative")
             return primary
         for base in self._search_path:
@@ -623,6 +661,11 @@ class _ModuleLoader:
                 hint += (f", then a search path ({searched}) — `{use.path}` was "
                          "not found relative to the importer or anywhere on "
                          "that path")
+        hint = "`use` resolves paths relative to the importing file"
+        if self._search_path:
+            searched = ", ".join(self._search_path)
+            hint += (f", then a search path ({searched}) — `{use.path}` was not "
+                     "found relative to the importer or anywhere on that path")
         raise RevlError(importer_path, use.line,
                         f"cannot find imported module `{use.path}`", hint=hint)
 
@@ -650,6 +693,10 @@ class _ModuleLoader:
         the MCP door and the command line both load into memory and compile
         under the authoring profile (issues #2524, #2547). Any other `.rvl`
         read from disk is operator text, and its own `../lib/x.rvl` is the
+        Scope is the same premise the transport jail runs on. An in-memory
+        importer under an untrusted profile is agent-authored (the admitted
+        root, or a `modules=` entry supplied beside it); a `.rvl` read from
+        disk was put there by a human, and its own `../lib/x.rvl` is the
         operator's composition layout, untouched. Two shapes escape and are
         refused: an absolute path, and a relative path that traverses upward
         out of the admitting directory. A relative path that stays inside
@@ -678,6 +725,8 @@ class _ModuleLoader:
                  + ("write the import relative to the admitting directory; "
                     if self._disk_relative_use else "")
                  + "or, for an installed module, use its search-path "
+                 "import names; write the import relative to the admitting "
+                 "directory; or, for an installed module, use its search-path "
                  "spelling (`use \"stdlib/str.rvl\"`). A trusted author's file "
                  "on disk resolves its own imports unchanged",
             category="admission",
@@ -712,6 +761,7 @@ class _ModuleLoader:
             return
         real = os.path.realpath(resolved)
         if _contained(real, self.stdlib_real()):
+        if _contained(real, os.path.realpath(str(stdlib_root()))):
             return
         entry = {"written": written, "resolved": real, "origin": origin}
         if entry not in self.stdlib_shadow:
@@ -723,6 +773,7 @@ class _ModuleLoader:
             start = self._stack.index(abs_path)
             cycle = self._stack[start:] + [abs_path]
             rendered = " -> ".join(relpath_or_abs(p) for p in cycle)
+            rendered = " -> ".join(os.path.relpath(p) for p in cycle)
             raise RevlError(
                 abs_path,
                 1,
@@ -752,6 +803,8 @@ class _ModuleLoader:
                 self.disk_reads[abs_path] = read
                 self._note_dependency(abs_path, read)
             self._check_generated(abs_path, virtual)
+            program = (Parser(virtual, abs_path).parse() if virtual is not None
+                       else parse_file(abs_path))
             # item 396: for a ROOT module under a no-extern profile, refuse
             # BEFORE any body file is resolved, read, or stat'd, so the refusal
             # is byte-identical whether or not the named file exists (no
@@ -766,11 +819,13 @@ class _ModuleLoader:
                     and root_profile.no_extern):
                 authored = self.delta_for(abs_path, program)
                 _check_no_extern([authored], root_profile)
+                _check_no_extern([program], root_profile)
                 # item 459 F1: an `asset` is a compile-time FILE READ the
                 # admitted source chooses the path of. Structural, before any
                 # asset is resolved or stat'd, so an untrusted author cannot
                 # use the refusal itself as a file-existence oracle.
                 _check_no_asset([authored], root_profile)
+                _check_no_asset([program], root_profile)
             # item 396: resolve external host-body files under the jail,
             # replacing each HostBodyFile node with a spliced HostBody. A
             # virtual (in-memory) module resolves ONLY through the sources map
@@ -778,6 +833,7 @@ class _ModuleLoader:
             _resolve_body_files(program, os.path.dirname(abs_path),
                                 self._sources, virtual is not None,
                                 reads=self.host_file_reads)
+                                self._sources, virtual is not None)
             # item 396 option B: resolve external host-MODULE refs against the
             # ROOT-tree jail (a different root than A's per-module jail: B's file
             # must be reachable at deploy time through one import root). A ref
@@ -802,6 +858,7 @@ class _ModuleLoader:
                           self._root_dirs(), self._sources, virtual is not None,
                           install_root=install_root,
                           reads=self.host_file_reads)
+                          install_root=self._origin_install_root(abs_path))
             # item 459 F1: resolve every `asset "<path>"` under the SAME jail
             # the ref above resolves under (same roots, same origin rule, same
             # containment check). After this each asset node is a record
@@ -817,6 +874,10 @@ class _ModuleLoader:
                 _check_user_py_body_imports(
                     program, install_root is not None
                     or _contained(abs_path, self.stdlib_real()))
+                            install_root=self._origin_install_root(abs_path))
+            _check_user_py_body_imports(
+                program, self._origin_install_root(abs_path) is not None
+                or _contained(abs_path, os.path.realpath(str(stdlib_root()))))
             module = _LoadedModule(abs_path, os.path.dirname(abs_path), program)
             for fn in program.fn_decls:
                 if fn.public:
@@ -898,6 +959,7 @@ class _ModuleLoader:
             return
 
         where = relpath_or_abs(used.path)
+        where = os.path.relpath(used.path)
         if any(fn.name == name and not fn.public for fn in used.program.fn_decls):
             raise RevlError(importer.path, line,
                             f"`{name}` is module-private in `{where}` and cannot be imported (G1)",
@@ -1156,6 +1218,7 @@ def compile_source(source: str, filename: str = "<string>",
                    modules: dict[str, str] | None = None,
                    profile: AdmissionProfile | None = None,
                    report: dict | None = None) -> dict:
+                   profile: AdmissionProfile | None = None) -> dict:
     """Compile source text. Nothing is read from or written to the disk.
 
     `manifest` is the runtime-admission gate (see compile_files); `modules`
@@ -1276,6 +1339,7 @@ def compile_source(source: str, filename: str = "<string>",
         virtual[os.path.abspath(path)] = text
     return compile_files([filename], manifest=manifest, replacing=replacing,
                          sources=virtual, profile=profile, report=report)
+                         sources=virtual, profile=profile)
 
 
 def _refuse_unknown_ir_fields(manifest: dict, filename: str) -> None:
@@ -1347,6 +1411,7 @@ def compile_files(paths: list[str], manifest: dict | None = None,
                   operator_sources: dict[str, str] | None = None,
                   report: dict | None = None,
                   *, disk_relative_use: bool = True) -> dict:
+                  profiles: dict[str, AdmissionProfile | None] | None = None) -> dict:
     """Compile a composition: all services and components across the files
     are checked and linked together (the composition manifest, DESIGN §4).
 
@@ -1461,6 +1526,7 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
     loader = _ModuleLoader(sources, profile, profiles=per_root_profiles,
                            operator_sources=operator_sources,
                            disk_relative_use=disk_relative_use)
+    loader = _ModuleLoader(sources, profile, profiles=per_root_profiles)
     # item 396: mark every root abspath before loading, so the root-scoped
     # no-extern check and body-file resolution skip apply even to a root that is
     # reached as another root's `use` dependency.
@@ -1611,6 +1677,12 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
     # import, not reaching into another module's implementation.
     merged.module_private = _module_private_spellings(included, root_ids)
     _apply_module_privacy(included, carried, root_ids)
+    # references to it *inside its own module*. Only `pub` names keep their
+    # bare spelling, so two modules that each define a private `Ctx` (or
+    # `contains`) co-compile, and a `use {dedent}`-then-local-`rstrip` no
+    # longer collides — while a genuine duplicate of a `pub` name (neither is
+    # mangled) still refuses. See _apply_module_privacy.
+    _apply_module_privacy(included)
 
     for module in included:
         for index, decl in enumerate(module.program.type_decls):
@@ -1735,6 +1807,7 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
     # names the externs of the files its composition `use`s with no `use` of
     # its own). A `pub` name that was not imported still resolves, as before.
     hidden_of: dict[int, set[str]] = {}
+            or _contained(module.path, os.path.realpath(str(stdlib_root()))))
     for module in included:
         if id(module) not in root_ids:
             hidden_of[id(module)] = (
@@ -1749,6 +1822,8 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
                      | set(module.named_fns)
                      | (all_externs - hidden))
         blocks_scope = (all_fns | all_externs) - hidden
+        own_fns = {fn.name for fn in module.program.fn_decls}
+        callables = own_fns | set(module.named_fns)
         alias_fns = {
             alias: set(used.public_fns)
             for alias, used in module.aliases.items()
@@ -1838,6 +1913,7 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
         # issue #1728, as in `compile_source`: bound with THIS root's profile.
         _bind_realm_placeholders(module.program,
                                  root_profile.bindings if root_profile else None)
+        _enforce_source([module.program], root_profile)
         if root_profile is not None and root_profile.no_extern:
             _check_no_host_extern_reach(
                 [authored], merged.fn_decls, included_host, root_profile)
@@ -1850,6 +1926,7 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
         if id(module) not in root_ids:
             _bind_realm_placeholders(module.program,
                                      profile.bindings if profile else None)
+                [module.program], merged.fn_decls, included_host, root_profile)
     # The two genuinely whole-compile analysis flags (DESIGN §9.3 Part 3) take the
     # JOIN across roots, in the safe (over-refusing) direction. `taint_strict`
     # only ADDS taint edges, so a composition containing any taint-strict root
@@ -1886,6 +1963,7 @@ def _compile_files(paths: list[str], manifest: dict | None = None,
         _enforce_document_per_root(document, _authored_owners(
             loader, root_modules, seen_components, per_root_profiles, profile))
     elif profiles is None:
+    if profiles is None:
         _enforce_document(document, profile)
     else:
         # #643: carry each component's owning ROOT (its declaring root abspath),
@@ -2187,6 +2265,7 @@ def _module_private_spellings(included: list[_LoadedModule],
 def _apply_module_privacy(included: list[_LoadedModule],
                           carried: list | None = None,
                           root_ids: set[int] | None = None) -> None:
+def _apply_module_privacy(included: list[_LoadedModule]) -> None:
     """Namespace every module-private top-level declaration (roadmap 228).
 
     The merged program flattens the included modules into one flat table keyed
@@ -2217,6 +2296,8 @@ def _apply_module_privacy(included: list[_LoadedModule],
     a root module's own declaration, and a spelling this pass cannot rewrite.
     Where more than one such claim stands, nothing is renamed and the duplicate
     report — naming both files — stays the answer.
+    for this purpose; types are a separate namespace. `pub` duplicates stay a
+    hard error because neither side is a private and so neither is renamed.
     """
     # roadmap 393 (revl-harness F-H39.2): a clashing private EXTERN is not a
     # genuinely-local helper the way a private fn is. A private fn has its own
@@ -2266,9 +2347,11 @@ def _apply_module_privacy(included: list[_LoadedModule],
         type_renames: dict[str, str] = {}
         for decl in list(program.fn_decls) + list(program.externs):
             if _module_scopes_apart(decl, module, val_owners, scoped_vals):
+            if not decl.public and len(val_owners.get(decl.name, ())) > 1:
                 val_renames[decl.name] = f"{decl.name}__m{idx}"
         for decl in program.type_decls:
             if _module_scopes_apart(decl, module, type_owners, scoped_types):
+            if not decl.public and len(type_owners.get(decl.name, ())) > 1:
                 type_renames[decl.name] = f"{decl.name}__m{idx}"
         if val_renames or type_renames:
             _rewrite_module(program, val_renames, type_renames)
@@ -2574,6 +2657,8 @@ def _rewrite_expr(expr, val_renames, type_renames, bound: set[str]) -> None:
                 inner = set(arm)
                 for s in body.stmts:
                     _rewrite_stmt(s, val_renames, type_renames, inner)
+                    recur(s.value, inner)
+                    inner.add(s.name)
                 recur(body.tail, inner)
     elif isinstance(expr, _ast.ExprHole):
         expr.type = _subst_type(expr.type, type_renames)
@@ -2676,6 +2761,7 @@ def _load_root(loader: _ModuleLoader, path: str) -> _LoadedModule:
     # a virtual source stands in for the file it names (in-memory compilation)
     if not loader.has_source(path) and not os.path.exists(path):
         raise file_not_found(path)
+        raise RevlError(path, 1, f"file not found: {path}")
     return loader.load(path)
 
 

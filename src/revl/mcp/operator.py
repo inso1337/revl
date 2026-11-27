@@ -265,6 +265,7 @@ class Grant:
     component *name* or a *realm* it is isolated into; how the labels of one
     target combine (a `may not` on any of them, an allow on the name or on
     every realm) is :meth:`Operator.allows`'s business, not the glob's.
+    component *name* or any *realm* it is isolated into.
     """
 
     verbs: tuple[str, ...]
@@ -275,6 +276,7 @@ class Grant:
         return any(fnmatchcase(verb, pat) for pat in self.verbs)
 
     def covers_label(self, label: str) -> bool:
+    def covers_subject(self, labels: frozenset[str]) -> bool:
         # a `*` subject grant covers anything, including the unnameable WHOLE;
         # a named glob covers WHOLE only if it is literally `*`.
         if label == WHOLE:
@@ -285,6 +287,15 @@ class Grant:
         """Any-of over a label set: the reading of a `may not`, and of a plain
         label set that keeps no name apart from realms."""
         return any(self.covers_label(label) for label in labels)
+        for pat in self.subjects:
+            for label in labels:
+                if label == WHOLE:
+                    if pat == WHOLE:
+                        return True
+                    continue
+                if fnmatchcase(label, pat):
+                    return True
+        return False
 
 
 # ------------------------------------------- what an operator may MINT
@@ -444,6 +455,7 @@ class Operator:
                deny_labels: frozenset[str] | None = None,
                was_labels: frozenset[str] | None = None,
                ) -> tuple[bool, Grant | None]:
+    def allows(self, verb: str, labels: frozenset[str]) -> tuple[bool, Grant | None]:
         """Decide one (verb, target) pair. Deny wins over allow; an allow must
         exist for the pair or it is refused (closed by default).
 
@@ -457,9 +469,11 @@ class Operator:
         :meth:`_selecting_allow`: by the component's name, or by every realm
         it is isolated into."""
         deny_on = labels if deny_labels is None else deny_labels
+        exist for the pair or it is refused (closed by default)."""
         for grant in self.grants:
             if not grant.allow and grant.covers_verb(verb) \
                     and grant.covers_subject(deny_on):
+                    and grant.covers_subject(labels):
                 return False, grant  # explicit prohibition
         sides = (labels,) if was_labels is None else (labels, was_labels)
         chosen: Grant | None = None
@@ -496,6 +510,11 @@ class Operator:
             if chosen is None:
                 chosen = on_realm
         return chosen
+        for grant in self.grants:
+            if grant.allow and grant.covers_verb(verb) \
+                    and grant.covers_subject(labels):
+                return True, grant
+        return False, None  # no allow selects it — refused
 
 
 @dataclass(frozen=True)
@@ -1086,6 +1105,8 @@ def deny_labels_of(labels: frozenset[str]) -> frozenset[str]:
 def was_labels_of(labels: frozenset[str]) -> frozenset[str] | None:
     """The running-side label set an allow is also matched against, if any."""
     return labels.was if isinstance(labels, ChangedLabels) else None
+def _labels_for(ir: dict, name: str, realms) -> frozenset[str]:
+    return frozenset({name}) | frozenset(realms)
 
 
 def _live_targets(ir: dict | None) -> list[tuple[str, frozenset[str]]] | None:
@@ -1128,6 +1149,7 @@ def _changed_targets(old_ir: dict, new_ir: dict) \
     well as where it goes (issue #3188). Reading only one side let the swap
     itself choose the labels the gate saw, so a candidate that added or moved
     a realm escaped a realm-scoped rule."""
+    the candidate. Realms come off whichever side declares the component."""
     from ..policy import component_realms  # noqa: PLC0415 — read-only reuse of item 33
 
     old = {c["name"]: _semantic(c) for c in old_ir.get("components") or []}
@@ -1147,6 +1169,10 @@ def _changed_targets(old_ir: dict, new_ir: dict) \
                if candidate_side and name in old else None)
         changed.append((name, ChangedLabels(allow, deny=was or frozenset(),
                                            was=was)))
+        man = new_man if name in new else old_man
+        source_ir = new_ir if name in new else old_ir
+        changed.append((name, _labels_for(source_ir, name,
+                                          component_realms(man, name))))
     return changed
 
 
@@ -1155,6 +1181,14 @@ def _restore_targets(snap: dict | None, profile=None) \
     """A restore's targets, derived from the composition its `sources` compile
     to, never from the `manifest` the caller writes; and what that compile
     read from disk.
+def _snapshot_targets(snap: dict | None) \
+        -> list[tuple[str, frozenset[str]]]:
+    """A restore's targets, read from the snapshot manifest without compiling
+    (a snapshot is re-admitted by the handler; gating only needs the names)."""
+    if not isinstance(snap, dict):
+        return [("*", frozenset({WHOLE}))]
+    manifest = (snap.get("manifest") or {})
+    from ..policy import component_realms  # noqa: PLC0415 — read-only reuse of item 33
 
     A snapshot document is caller-supplied JSON, so its `manifest` and `meta`
     are claims, not evidence. Reading them scoped the gate to a composition the
@@ -1200,6 +1234,11 @@ def _restore_targets(snap: dict | None, profile=None) \
     except Exception:  # noqa: BLE001 - a failed derivation must not widen
         return None, {}
     return _live_targets(ir), read_digests(report.get("disk_reads"))
+    targets = []
+    for entry in manifest.get("components") or []:
+        name = entry.get("name")
+        targets.append((name, frozenset({name}) | component_realms(manifest, name)))
+    return targets or [("*", frozenset({WHOLE}))]
 
 
 def _compile_candidate(arguments: dict, manifest: dict | None = None,
@@ -1223,6 +1262,9 @@ def _compile_candidate(arguments: dict, manifest: dict | None = None,
         with the same refusal of a module at a provider's file (issue #2763),
         so a composition that resolves for the handler resolves here too and
         one the handler refuses derives nothing.
+      * the operator's sanctioned `providers` — merged UNDER the agent's own
+        `modules` exactly as `server.compile_under_authoring` merges them, so a
+        composition that resolves for the handler resolves here too.
 
     Deliberately UNPROFILED: this derives *which components an action touches*,
     and it neither lowers a host body nor boots anything. The authoring trust is
@@ -1234,9 +1276,13 @@ def _compile_candidate(arguments: dict, manifest: dict | None = None,
 
     from .server import (AUTHORING,  # noqa: PLC0415  (cycle)
                          _refuse_provider_displacement)
+    from .server import AUTHORING  # noqa: PLC0415 — cycle
 
     providers = dict(AUTHORING.providers or {})
     modules = arguments.get("modules") or {}
+    merged = dict(AUTHORING.providers or {})
+    for path, text in (arguments.get("modules") or {}).items():
+        merged.setdefault(path, text)
     try:
         # issue #2763: the same refusal as the handler's own compile, so a
         # module at a provider's file derives no target set (fail closed)
@@ -1291,6 +1337,7 @@ def _cold_load_activation_emits(arguments: dict) -> bool:
 
 
 def _targets(verb: str, session, arguments: dict, restore_profile=None) \
+def _targets(verb: str, session, arguments: dict) \
         -> list[tuple[str, frozenset[str]]] | None:
     """The components a management verb touches, as (name, labels) targets.
 
@@ -1312,6 +1359,7 @@ def _targets(verb: str, session, arguments: dict, restore_profile=None) \
 
     `restore_profile` is the profile a `restore` derivation compiles under (the
     boot's realm bindings, :func:`_restore_targets`); other verbs ignore it."""
+    swap that needed them most."""
     ir = session.ir
     if verb == "swap":
         inline = any(arguments.get(k) is not None
@@ -1332,6 +1380,7 @@ def _targets(verb: str, session, arguments: dict, restore_profile=None) \
         return _live_targets(candidate)
     if verb == "restore":
         return _restore_targets(arguments.get("snapshot"), restore_profile)[0]
+        return _snapshot_targets(arguments.get("snapshot"))
     if verb in {"approve", "override"}:
         # item 471: the `override` verb scopes to the crossing component exactly
         # as `approve` does, through the same ticket-hash resolution — an override
@@ -1356,6 +1405,8 @@ def _approve_targets(session, arguments: dict) \
         -> list[tuple[str, frozenset[str]]] | None:
     """A `revl_approve`'s target: the crossing component the approval names,
     resolved WITHOUT running anything. A ticket `hash` resolves against the
+    resolved WITHOUT running anything (the same resolve-without-running pattern
+    `_snapshot_targets` uses for `restore`). A ticket `hash` resolves against the
     session's outstanding-ticket table; a proactive item-344 `capability` grant
     resolves against the live class map. Either way the target scopes to the
     crossing component and its realms, so a subject-scoped `may approve on
@@ -1403,6 +1454,7 @@ def _approve_targets(session, arguments: dict) \
     manifest = (session.ir or {}).get("manifest") or {}
     realms = component_realms(manifest, name)
     return [(name, _labels_for(session.ir, name, realms))]
+    return [(name or WHOLE, frozenset({name or WHOLE}) | frozenset(realms))]
 
 
 def _distillation_targets(session, arguments: dict) \
@@ -1438,6 +1490,7 @@ def _distillation_targets(session, arguments: dict) \
     for name in members:
         realms = component_realms(manifest, name)
         out.append((name, _labels_for(session.ir, name, realms)))
+        out.append((name, frozenset({name}) | frozenset(realms)))
     return out
 
 
@@ -1649,6 +1702,7 @@ def mint_refusal(operator: Operator | None, *, capability: str,
 
 def decide(session, tool_name: str, arguments: dict, *,
            restore_profile=None) -> Decision:
+def decide(session, tool_name: str, arguments: dict) -> Decision:
     """Gate one MCP verb dispatch against the session's bound operator.
 
     Returns a :class:`Decision`. When no operator is bound (no profile) or the
@@ -1680,6 +1734,7 @@ def decide(session, tool_name: str, arguments: dict, *,
     `restore_profile` is the profile a `restore`'s target derivation compiles
     under: the boot compile's operator realm bindings only (issue #3197, see
     :func:`_restore_targets`)."""
+    restore/undo)."""
     verb = TOOL_VERB.get(tool_name)
     if verb is None and tool_name in COMPOSED_TOOL_VERB:
         # a composed verb: gated as the operation it performs underneath, and
@@ -1711,6 +1766,7 @@ def decide(session, tool_name: str, arguments: dict, *,
                                                restore_profile)
     else:
         targets = _targets(verb, session, arguments)
+    targets = _targets(verb, session, arguments)
     if targets is None:
         # UNDECIDABLE — fail closed. The gate cannot work out which components
         # this action touches, so it scopes the action to the unnameable whole
@@ -1726,13 +1782,16 @@ def decide(session, tool_name: str, arguments: dict, *,
         _name, labels = offender
         allowed, grant = operator.allows(verb, labels, deny_labels_of(labels),
                                          was_labels_of(labels))
+        allowed, grant = operator.allows(verb, labels)
         if not allowed:
             why, message = (_approvals_refusal(operator, verb, arguments)
                             if approvals
                             else _refusal(operator, verb, offender, grant))
+            why, message = _refusal(operator, verb, offender, grant)
             return Decision(gated=True, allowed=False, operator=operator.token,
                             verb=verb, why=why, message=message)
 
     subjects = tuple(sorted(name for name, _ in targets))
     return Decision(gated=True, allowed=True, operator=operator.token,
                     verb=verb, subjects=subjects, disk_reads=disk_reads)
+                    verb=verb, subjects=subjects)

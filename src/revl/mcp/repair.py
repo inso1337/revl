@@ -254,6 +254,7 @@ def _parse_dsl(text: str, source: str | None) -> SelfRepairPolicy:
 
 def _compile(candidate: dict, manifest: dict | None = None,
              over_the_transport: bool = True, report: dict | None = None):
+             over_the_transport: bool = True):
     """Compile a candidate (`source` inline or `files` paths) through
     `server.compile_under_authoring`, the one compiler door for agent-supplied
     source. Returns the IR, or raises RevlError — the caller grades that.
@@ -268,6 +269,7 @@ def _compile(candidate: dict, manifest: dict | None = None,
     the disk mapped to the text it compiled for each. The realm check needs it
     to know which files the compile reached under the profile (issue #2627),
     which a `files` list alone cannot say."""
+    module."""
     from .server import compile_under_authoring  # noqa: PLC0415 — cycle
 
     source = candidate.get("source")
@@ -278,6 +280,7 @@ def _compile(candidate: dict, manifest: dict | None = None,
                                    modules=candidate.get("modules"),
                                    over_the_transport=over_the_transport,
                                    report=report)
+                                   over_the_transport=over_the_transport)
 
 
 def _capabilities_reached(audit: dict) -> list[str]:
@@ -348,6 +351,10 @@ class RemediationStrategy:
     whatever dict it returns. Two strategies are anticipated; only the swap is
     built here, deliberately (item 59's verified canary is being built in
     parallel and is not a dependency of this loop):
+    The loop calls `remediate(session, ir, origin)` and records whatever dict it
+    returns. Two strategies are anticipated; only the swap is built here,
+    deliberately (item 59's verified canary is being built in parallel and is
+    not a dependency of this loop):
 
       * `SwapRemediation` — the landed hot-swap (item 23). Atomic: a rejected
         migration rolls the whole thing back (session.swap's own contract).
@@ -367,6 +374,7 @@ class RemediationStrategy:
 
     def remediate(self, session, ir: dict, origin: dict | None, *,
                   over_the_transport: bool, authored: bool) -> dict:
+    def remediate(self, session, ir: dict, origin: dict | None) -> dict:
         raise NotImplementedError
 
 
@@ -384,6 +392,8 @@ class SwapRemediation(RemediationStrategy):
         # strategy interface; the compile report already folded it in.
         del over_the_transport
         state = session.swap(ir, origin=origin, agent_authored=authored)
+    def remediate(self, session, ir: dict, origin: dict | None) -> dict:
+        state = session.swap(ir, origin=origin)
         return {"strategy": self.name, "applied": True, "swap": state}
 
 
@@ -501,6 +511,7 @@ def run_repair(session, arguments: dict,
                 "the self-repair policy authorizes this component in its "
                 "running realms, but not in the realms the candidate places "
                 "it in, so the loop halts and hands off to a human")
+                                over_the_transport=over_the_transport)
     if gate["blocked"]:
         status = (STATUS_AWAITING_ACK if gate["reason"] == "widening"
                   else STATUS_INELIGIBLE if gate["reason"] == "eligibility"
@@ -534,6 +545,7 @@ def run_repair(session, arguments: dict,
                                                      list(host_bodies)},
                                          over_the_transport=over_the_transport,
                                          authored=gate["authored"])
+                                         origin=candidate_arg)
     except Exception as exc:  # noqa: BLE001 — a swap failure is a graded result
         remediation = {"strategy": strategy.name, "applied": False,
                        "error": f"{type(exc).__name__}: {exc}",
@@ -569,6 +581,7 @@ def _run_gates(session, candidate_arg: dict, running_ir: dict | None,
                policy: SelfRepairPolicy, accepted: set,
                over_the_transport: bool = True, *,
                component: str) -> tuple[dict, dict]:
+               over_the_transport: bool = True) -> tuple[dict, dict]:
     """Run gauntlet (31) -> boundary policy (33) -> widening/may-touch (21) in
     order, short-circuiting at the first block. Returns `(verdicts, gate)` where
     `gate` carries `blocked`, `reason`, and — when everything passed — the
@@ -581,6 +594,7 @@ def _run_gates(session, candidate_arg: dict, running_ir: dict | None,
     component to another realm would otherwise swap in outside the realm that
     made it eligible. The candidate must itself be selected, and may not add a
     realm that no rule selects."""
+    compiled candidate IR to swap."""
     from . import gauntlet as _gauntlet  # noqa: PLC0415 — sibling, avoid a cycle
 
     verdicts: dict = {}
@@ -599,6 +613,7 @@ def _run_gates(session, candidate_arg: dict, running_ir: dict | None,
         candidate_ir = _compile(candidate_arg,
                                 over_the_transport=over_the_transport,
                                 report=compile_report)
+                                over_the_transport=over_the_transport)
     except (RevlError, ValueError) as error:
         verdicts["policy"] = {"evaluated": False,
                               "reason": f"candidate is not a whole composition: {error}"}
@@ -691,6 +706,7 @@ def _run_gates(session, candidate_arg: dict, running_ir: dict | None,
                               "candidate_ir": candidate_ir,
                               "authored": bool(compile_report.get("authored")),
                               "_approval_host_bodies": host_bodies}
+                              "candidate_ir": candidate_ir}
     else:
         verdicts["widening"] = {"evaluated": False,
                                 "reason": "nothing loaded — no running boundary to "
@@ -755,6 +771,7 @@ def _realm_removal_refusal(running_ir: dict | None, candidate_ir: dict,
     except RevlError as error:
         return report(error)["diagnostics"]
     return None
+    return verdicts, {"blocked": False, "reason": None, "candidate_ir": candidate_ir}
 
 
 # ---------------------------------------------------------------- candidate
@@ -1019,6 +1036,9 @@ def _status_note(status: str) -> str:
         STATUS_REJECTED: "a gate refused the candidate (gauntlet, realm "
                          "placement, policy, or the may-touch bound). The "
                          "running composition is untouched.",
+        STATUS_REJECTED: "a gate refused the candidate (gauntlet, policy, or "
+                         "the may-touch bound). The running composition is "
+                         "untouched.",
         STATUS_PLANNED: "every gate is green; the swap was not performed "
                         "(apply=False) — a rehearsal.",
     }.get(status, status)

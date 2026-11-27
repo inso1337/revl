@@ -327,6 +327,11 @@ fail-loud, now at the call that needed it. The seam is strict on the NAME (a nam
 the running composition does not declare is refused, so a typo cannot become a
 silently-installed key) and records only `{name, capability, action, generation}`
 in `_Driver.secret_events`.
+**Bind side.** The driver resolves each secret's value once at plug (`run.py`, a
+`_resolve_secrets(ir, secret_source)` sibling of `_resolve_extern_config`),
+sourcing from the environment or a secret store keyed by the secret name, and
+installs `module._REVL_SECRETS.update(...)`. The value is fixed at plug and lives
+only in the module global.
 
 **The "nowhere else" property, mechanically.** The binding is emitted *only*
 inside the `def` of an emission extern whose declared capability matches the
@@ -440,6 +445,9 @@ crossing kind. Each is a distinct code path and gets its own test:
    self._is_unnameable(resolved)` path in `_taint_of_call`, whose every-argument
    sink over-approximation via `_on_sink` is gated on `any_sink`, and whose
    result now always joins the callee VALUE's taint, issue #3110). Extend the
+3. **The unnameable indirect / `*` callable** (the `indirect and self.any_sink
+   and self._is_unnameable(resolved)` path in `_taint_of_call`, which already
+   over-approximates every argument as a sink via `_on_sink`). Extend the
    over-approximation to fire for a `secret`-carrying argument independently of
    `any_sink`: a first-class emitting callable revl cannot name must refuse a
    `secret` argument, because what cannot be named cannot be proven to re-emit
@@ -748,12 +756,14 @@ emitted backend source: `revl compile -o`, a bundle's `ir/ir.json` and
 copy is the `.rvl` source itself). The lock file and the attestation carry only
 digests, and the site wheel vendors the compiler rather than any user program,
 so it stops there, but "in every build artifact" is already further than a
+so it stops there — but "in every build artifact" is already further than a
 reader who trusted the qualifier would guess.
 
 This is deliberate and stays legal: the repo's own leak canaries put a real
 value in place precisely so a test can detect it downstream
 (`tests/test_secret_externalization.py`). So the frontend WARNS rather than
 refusing: `taint.LiteralSecretDefaultWarning`, raised once per field where
+refusing — `taint.LiteralSecretDefaultWarning`, raised once per field where
 `mentions_secret(field.type)` holds and the default is not `null`. The warning
 names the form that has no value to leak, which is 1a's bound secret:
 

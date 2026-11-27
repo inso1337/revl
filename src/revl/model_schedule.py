@@ -102,6 +102,7 @@ matches is the provider's published profile, which reaches revl only as
 Nothing loads or unloads a model here. The schedule is a plan-time decision
 the conductor prints and refuses on; the provision keyed by role, with its
 load, unload and `no_residue` teardown, is slice S2 and has landed.
+load, unload and `no_residue` teardown, is slice S2 and is not built.
 """
 
 from __future__ import annotations
@@ -237,6 +238,7 @@ class Step:
     clause, and `_Search.order()` reads residency on a step ONLY when it is
     True - so `options` is the whole ordering for an arm that did not opt in,
     whatever the host reports."""
+    order the program wrote them; a council member is a one-option step."""
     component: str
     action: str
     origin: str
@@ -271,6 +273,7 @@ def _arm_steps(component: str, action: str, origin: str, placement: dict) -> lis
     # A council member step is one option by construction, so it is never
     # rankable and never carries the opt-in; `revl.model_route` refuses the
     # clause on a council arm rather than leaving it here unread.
+        return [Step(component, action, origin, candidates)]
     return [Step(component, action, origin, (member,), council)
             for member in candidates]
 
@@ -354,6 +357,8 @@ class Schedule:
                 f"reported holding at plan time ({held}); this decision is "
                 f"not reproducible from the composition alone")
         return lines
+        return [f"model schedule [{self.host}]: {p.describe()}"
+                for p in self.placements]
 
     def to_dict(self) -> dict:
         return {
@@ -381,6 +386,9 @@ def schedule(host: str, devices, roles: dict, steps,
     residency = dict(residency or {})
     steps = list(steps)
     search = _Search(host, tuple(devices), roles, steps, residency)
+def schedule(host: str, devices, roles: dict, steps) -> Schedule:
+    """Place every step on `devices`, or raise `ScheduleRefusal`."""
+    search = _Search(host, tuple(devices), roles, list(steps))
     if not search.place(0):
         raise ScheduleRefusal(_refusal(search))
     chosen = tuple(search.chosen)
@@ -393,10 +401,12 @@ def schedule(host: str, devices, roles: dict, steps,
     ranked = residency if any(s.prefer_resident for s in steps) else {}
     return Schedule(host, tuple(devices), chosen, dict(search.resident),
                     demands, ranked)
+                    demands)
 
 
 class _Search:
     """Depth-first placement over the steps, candidates in written order.
+    """Depth-first placement over the steps, candidates in written order."""
 
     `residency` is what the host already holds, and `order()` is the only
     place it is read: the search itself is unchanged, so the set of
@@ -405,6 +415,7 @@ class _Search:
     """
 
     def __init__(self, host, devices, roles, steps, residency=None):
+    def __init__(self, host, devices, roles, steps):
         self.host = host
         self.devices = devices
         self.roles = roles
@@ -447,6 +458,7 @@ class _Search:
             # fallback reported by an opted-in arm is the position the program
             # wrote rather than the position residency moved it to.
             rank = step.options.index(role_name)
+        for rank, role_name in enumerate(step.options):
             for device, how in self.options(role_name):
                 self._count_attempt()
                 self._take(index, step, rank, role_name, device, how)
@@ -556,6 +568,7 @@ def _message(search: _Search, step: Step, free: dict, resident: dict) -> str:
         f"the program did not declare; declare a device that fits in "
         f"[[processes.{search.host}.devices]], or place the component on a "
         f"host that has one (item 515, {_DESIGN}){ranked}")
+        f"host that has one (item 515, {_DESIGN})")
 
 
 def _why_not(search: _Search, profile, free: dict, resident: dict) -> str:
@@ -643,6 +656,7 @@ def _declaration_closure(loader, roots) -> list:
 
 def placement_schedules(files, processes: dict,
                         residency: dict | None = None) -> list:
+def placement_schedules(files, processes: dict) -> list:
     """Schedule every placement host, or raise `ScheduleRefusal`.
 
     Every host's `devices` table is validated whether or not anything is
@@ -666,6 +680,7 @@ def placement_schedules(files, processes: dict,
         if steps:
             schedules.append(schedule(name, hosts[name], roles, steps,
                                       (residency or {}).get(name) or {}))
+            schedules.append(schedule(name, hosts[name], roles, steps))
     return schedules
 
 
@@ -763,6 +778,8 @@ def handoff(decided: Schedule) -> dict:
     the entry it was.
     """
     entry = {
+    from the composition's files instead of believing the entry."""
+    return {
         "host": decided.host,
         "devices": [{"name": d.name, "device": d.device,
                      "memory_mib": d.memory_mib,
@@ -806,6 +823,7 @@ def verify_handoff(files, host: str, components, entry) -> dict | None:
     if not isinstance(entry, dict) or not (
             {"host", "devices", "schedule"} <= set(entry)
             and set(entry) <= {"host", "devices", "schedule", "residency"}):
+    if not isinstance(entry, dict) or set(entry) != {"host", "devices", "schedule"}:
         raise ScheduleRefusal(
             f"host `{host}`: the model schedule in its spec is malformed")
     if entry["host"] != host:
@@ -835,6 +853,7 @@ def verify_handoff(files, host: str, components, entry) -> dict | None:
             f"than carried (item 2118, {_DESIGN})")
     expected = schedule(host, parse_devices(host, entry["devices"]), roles,
                         steps, residency).to_dict()
+                        steps).to_dict()
     if entry["schedule"] != expected:
         raise ScheduleRefusal(
             f"host `{host}`: the model schedule in its spec does not match the "

@@ -37,10 +37,12 @@ is the trace of the run, `w₁` is the world the run actually built, and
 `RevL.Lemmas` documents the fragment's limits: six body forms (the
 `deferred` form is the queue step, not an effect step, so it does not
 enter these theorems), a `witnessed` step that appends its descriptor and
-mutates in one step (`SemStep`, the collapsed view of a window the
-reference has; `SplitStep` states the window and
-`RevL.A8.window_breaks_exact_residue` shows where the equation below stops
-holding), and no cascading abort, compensation drain or escrow.
+mutates atomically (collapsing a real window the reference has), and no
+cascading abort, compensation drain or escrow.
+`RevL.Lemmas` documents the fragment's limits: five body forms, a
+`witnessed` step that appends its descriptor and mutates atomically
+(collapsing a real window the reference has), and no cascading abort,
+compensation drain or escrow.
 
 ## Scope
 

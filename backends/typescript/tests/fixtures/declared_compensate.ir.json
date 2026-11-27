@@ -233,6 +233,7 @@
                       "value": 1
                     },
                     "operands": "Int"
+                    }
                   },
                   "mutable": false
                 },
@@ -423,6 +424,7 @@
                       "value": 1
                     },
                     "operands": "Int"
+                    }
                   },
                   "mutable": false
                 },

@@ -1426,6 +1426,7 @@ def _compute_list_param_borrows(functions: list) -> "dict[str, frozenset]":
     `return acc` no longer makes a read-only `ts` in the same function owned,
     so its callers lend the list instead of copying it.
     """
+    """Find internal List parameters used only by read-only operations."""
     names = frozenset(fn.get("name") for fn in functions if fn.get("name"))
     borrow = {
         fn.get("name"): frozenset(
@@ -1436,6 +1437,7 @@ def _compute_list_param_borrows(functions: list) -> "dict[str, frozenset]":
 
     def escapes(node, candidates, safe, out):
         """Add to `out` every candidate that reaches a consuming position."""
+    def escapes(node, candidates, safe):
         if isinstance(node, dict):
             kind = node.get("kind")
             if kind in ("var", "name", "req"):
@@ -1443,15 +1445,19 @@ def _compute_list_param_borrows(functions: list) -> "dict[str, frozenset]":
                 if ident in candidates and not safe:
                     out.add(ident)
                 return
+                return (node.get("id") or node.get("name")) in candidates and not safe
             if kind in ("len", "index"):
                 escapes(node.get("target"), candidates, True, out)
                 return
+                return escapes(node.get("target"), candidates, True)
             if kind == "builtin":
                 read = node.get("method") in ("length", "at")
                 escapes(node.get("target"), candidates, True, out)
                 for a in node.get("args") or []:
                     escapes(a, candidates, read, out)
                 return
+                return (escapes(node.get("target"), candidates, True) or
+                        any(escapes(a, candidates, read) for a in node.get("args") or []))
             cname, args = _free_fn_call(node, names)
             if cname is not None:
                 allowed = borrow.get(cname, frozenset())
@@ -1463,6 +1469,12 @@ def _compute_list_param_borrows(functions: list) -> "dict[str, frozenset]":
         elif isinstance(node, list):
             for v in node:
                 escapes(v, candidates, safe, out)
+                return any(escapes(a, candidates, i in allowed)
+                           for i, a in enumerate(args))
+            return any(escapes(v, candidates, False) for v in node.values())
+        if isinstance(node, list):
+            return any(escapes(v, candidates, safe) for v in node)
+        return False
 
     changed = True
     while changed:
@@ -1475,6 +1487,8 @@ def _compute_list_param_borrows(functions: list) -> "dict[str, frozenset]":
             escapes(fn.get("body") or [], candidates, False, escaped)
             if escaped:
                 kept = frozenset(i for i in current if params[i].get("name") not in escaped)
+            if escapes(fn.get("body") or [], candidates, False):
+                kept = frozenset(i for i in current if params[i].get("name") not in candidates)
                 if kept != current:
                     borrow[fn.get("name")] = kept
                     changed = True
@@ -1821,6 +1835,7 @@ def _ident(name: object, role: str) -> str:
     if role in _RUST_VALUE_ROLES and _in_revl_namespace(name):
         # the emitter's own `revl_*`/`REVL_*` helpers must stay reachable bare
         return name + "_"
+    extra = _RUST_TYPE_RESERVED if role == "type name" else frozenset()
     return _mangle(name, extra)
 
 
@@ -2137,14 +2152,22 @@ def _emit_compensations(step: dict, compensated: dict | None) -> list:
     own declared one (item 254, issue #1592); the declared one is the default
     only when the site spells none. The rule the py reference keeps. An extern
     is matched as a `fn`-kind call naming it."""
+    """The compensations an `emit` step registers, in order: the site-spelled
+    `compensate` clause, then the emitted extern's own declared one (item 254,
+    issue #1592), the order the py reference registers them in. An extern is
+    matched as a `fn`-kind call naming it."""
+    out = []
     if step.get("compensate") is not None:
         return [step["compensate"]]
+        out.append(step["compensate"])
     expr = step.get("expr")
     if compensated and isinstance(expr, dict) and expr.get("kind") == "fn":
         ext = compensated.get(expr.get("name"))
         if ext is not None:
             return [_as_fn_call(ext["compensate"])]
     return []
+            out.append(_as_fn_call(ext["compensate"]))
+    return out
 
 
 def _reaches_declared(node, compensated: dict | None) -> bool:
@@ -2254,6 +2277,7 @@ def _component_needs_teardown(component: dict, witnessed: dict,
             or _method_bodies_have_compensation(component, compensated)
             or _method_bodies_have_witnessed(component, witnessed)
             or _component_ui_scoped(component))
+            or _method_bodies_have_witnessed(component, witnessed))
 
 
 # item 322 Slice 2: record mode. When True, a witnessed transactional step also
@@ -2635,6 +2659,8 @@ class _Env:
             _key_binding(key): key for key in self.requires_raw
         }
         self.provides: dict[str, str] = dict(self.provides_raw)
+        self.reqs: dict[str, str] = dict(component.get("requires") or {})
+        self.provides: dict[str, str] = dict(component.get("provides") or {})
         # item 167: routed requires (item 162's `routes` IR) — a required key
         # bound across N named realms with a strategy. Its handle is a router
         # struct (re-resolving live workers per call), not a single `ctx.require`.
@@ -2741,6 +2767,7 @@ def _emit_service_traits(services: dict, types: dict | None = None) -> list[str]
     for sname, service in services.items():
         _ident(sname, "service")
         out.append(f"pub trait {_svc(sname)}: Send + Sync {{")
+        out.append(f"pub trait {sname}: Send + Sync {{")
         for mname, method in (service.get("methods") or {}).items():
             # The trait DECLARATION must carry the SAME `_mname` rename the impl
             # blocks, bridge proxy/dispatch, and every call site use (line ~3696,
@@ -4802,6 +4829,7 @@ def _map_value_expr_type(node: dict, var_types: dict, env: _Env) -> str | None:
             return "Int"
         if method in ("charAt", "join", "repeat", "to_str", "to_char",
                       "slice"):
+        if method in ("charAt", "join", "repeat", "to_str", "slice"):
             return "Str"
         if method == "split":
             return "List[Str]"
@@ -5069,6 +5097,8 @@ def _rust_render_pure_stmts(steps: list, env: _Env, scope: dict,
                 arg_scope[param] = f"{_ident(param, 'parameter')}.clone()"
             parts.append("let _ = %s;" % _journal_service_emit(
                 step.get("expr"), env, _expr(step['expr'], env, arg_scope)))
+                arg_scope[param] = f"{param}.clone()"
+            parts.append(f"let _ = {_expr(step['expr'], env, arg_scope)};")
         elif kind == "break":
             parts.append("break;")
         elif kind == "continue":
@@ -5100,6 +5130,8 @@ def _req_ident(local: str, env: "_Env | None" = None) -> str:
 def _method_body(env: _Env, method: dict) -> str:
     rename = {b: _self_bind(env, b) for b in _binds(env.component)}
     rename.update({local: f"self.{_req_ident(local, env)}" for local in env.reqs})
+    rename = {b: f"self.{b}" for b in _binds(env.component)}
+    rename.update({local: f"self.{local}" for local in env.reqs})
     if _has_config(env.component):
         rename["config"] = "self.config"
     return _pure_method_statements(env, method, rename)
@@ -5228,8 +5260,10 @@ def _self_bind(env: _Env, bind: str) -> str:
 
 def _method_scope_rename(env: _Env) -> dict[str, str]:
     rename = {b: _self_bind(env, b) for b in _binds(env.component)}
+    rename = {b: f"self.{b}" for b in _binds(env.component)}
     for req in env.reqs:
         rename[req] = f"self.{_req_ident(req, env)}"
+        rename[req] = f"self.{req}"
     if _has_config(env.component):
         rename["config"] = "self.config"
     return rename
@@ -5265,6 +5299,7 @@ def _acquire_moved_locals(node: object, ctx: "_V3Ctx", acc: set[str]) -> None:
     """Method-body locals the acquire consumes *by value without a clone*.
 
     Two acquire constructs move a bare local uncloned. One is a host-Map method
+    Only one acquire construct moves a bare local uncloned: a host-Map method
     that takes its argument by value — `insert(key, value)` (its `get`/`remove`
     borrow the key, and service-call / record / free-fn arguments are already
     cloned by `_by_value_arg`). The other is `??`, whose sole lowering is
@@ -5274,6 +5309,8 @@ def _acquire_moved_locals(node: object, ctx: "_V3Ctx", acc: set[str]) -> None:
     prev { .. }`, so the undo closure would find `prev` already moved, E0382).
     Those bare-identifier operands are the ones an `undo` that re-reads them
     must clone ahead of (item 114)."""
+    cloned by `_by_value_arg`). Those bare-identifier arguments are the ones an
+    `undo` that re-reads them must clone ahead of (item 114)."""
     if isinstance(node, dict):
         if (node.get("kind") == "bin" and node.get("op") == "??"):
             left = node.get("left")
@@ -5326,10 +5363,13 @@ def _method_undo_clones(env: _Env, method: dict, out: list[str], indent: int) ->
     pad = "    " * indent
     for bind in _binds(env.component):
         out.append(f"{pad}let {bind}_undo = self.{_ident(bind, 'binding')}.clone();")
+        out.append(f"{pad}let {bind}_undo = self.{bind}.clone();")
     for req in env.reqs:
         out.append(f"{pad}let {req}_undo = self.{_req_ident(req, env)}.clone();")
+        out.append(f"{pad}let {req}_undo = self.{req}.clone();")
     for param in method.get("params") or []:
         out.append(f"{pad}let {param}_undo = {_ident(param, 'parameter')}.clone();")
+        out.append(f"{pad}let {param}_undo = {param}.clone();")
 
 
 def _provide_let_type(env: _Env, value: object, ctx: "_V3Ctx") -> str | None:
@@ -5419,6 +5459,7 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             acquire_rename = dict(rename)
             for param in method.get("params") or []:
                 acquire_rename[param] = f"{_ident(param, 'parameter')}.clone()"
+                acquire_rename[param] = f"{param}.clone()"
             label = _string(f"{env.name}.{method.get('name')}.{kind}.{index}")
             undo_node = step.get("undo")
             acquire_node = step.get("acquire") or step.get("expr")
@@ -5432,6 +5473,7 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             for local in sorted(_undo_reclone_locals(
                     acquire_node, undo_node, body_locals, env.v3_ctx())):
                 out.append(f"{pad}let {local}_undo = {_ident(local, 'binding')}.clone();")
+                out.append(f"{pad}let {local}_undo = {local}.clone();")
                 undo_rename[local] = f"{local}_undo"
             acquire = _expr(acquire_node, env, acquire_rename)
             # issue #2009: arm the host-map journal across the acquire and
@@ -5452,16 +5494,21 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
                 out.append(
                     f"{pad}let _ = self.ctx.effect({label}, move || {{ {undo}; Ok(()) }});"
                 )
+            out.append(
+                f"{pad}let _ = self.ctx.effect({label}, move || {{ {undo}; Ok(()) }});"
+            )
         elif kind == "emit":
             acquire_rename = dict(rename)
             for param in method.get("params") or []:
                 acquire_rename[param] = f"{_ident(param, 'parameter')}.clone()"
+                acquire_rename[param] = f"{param}.clone()"
             acquire_node = step.get("expr")
             env.v3_ctx().declared_skip = acquire_node
             acquire = _expr(acquire_node, env, acquire_rename)
             env.v3_ctx().declared_skip = None
             if not _is_ui_crossing(acquire_node, env.v3_ctx()):
                 acquire = _journal_service_emit(acquire_node, env, acquire)
+            out.append(f"{pad}let _ = {acquire};")
             compensations = _emit_compensations(step, env.compensated)
             if _is_ui_crossing(acquire_node, env.v3_ctx()):
                 # issue #1369: a computer-use crossing registers its own
@@ -5485,9 +5532,11 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
                 for local in sorted(_undo_reclone_locals(
                         acquire_node, compensate_node, body_locals, env.v3_ctx())):
                     out.append(f"{pad}let {local}_undo = {_ident(local, 'binding')}.clone();")
+                    out.append(f"{pad}let {local}_undo = {local}.clone();")
                     undo_rename[local] = f"{local}_undo"
                 if not env.v3_ctx().ui_scope:
                     out.append(f"{pad}let _revl_teardown = revl_teardown_of(&self.ctx);")
+                out.append(f"{pad}let _revl_teardown = revl_teardown_of(&self.ctx);")
                 _emit_compensation_registration(
                     env, compensate_node, f"{env.name}.{method.get('name')}.compensate.{index}",
                     out, indent, undo_rename, ctx_expr="self.ctx", propagate=False)
@@ -5520,8 +5569,10 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             if kind == "let":
                 out.append(f"{pad}let {'mut ' if step.get('mutable') else ''}"
                            f"{name} = {value};")
+                           f"{name} = {_expr(step['value'], env, rename)};")
             else:
                 out.append(f"{pad}{name} = {value};")
+                out.append(f"{pad}{name} = {_expr(step['value'], env, rename)};")
             if inferred is not None:
                 env.v3_ctx().var_types[step.get("name")] = inferred
             if kind == "let" and step.get("name") is not None:
@@ -5541,6 +5592,7 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             acquire_rename = dict(rename)
             for param in method.get("params") or []:
                 acquire_rename[param] = f"{_ident(param, 'parameter')}.clone()"
+                acquire_rename[param] = f"{param}.clone()"
             label = _string(f"{env.name}.{method.get('name')}.let-effect.{index}")
             undo_node = step.get("undo")
             acquire_node = step.get("acquire")
@@ -5548,6 +5600,7 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             for local in sorted(_undo_reclone_locals(
                     acquire_node, undo_node, body_locals, env.v3_ctx())):
                 out.append(f"{pad}let {local}_undo = {_ident(local, 'binding')}.clone();")
+                out.append(f"{pad}let {local}_undo = {local}.clone();")
                 undo_rename[local] = f"{local}_undo"
             acquire = _expr(acquire_node, env, acquire_rename)
             jrn = _bracket_writes_host_map(step)
@@ -5570,6 +5623,10 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
                     f"{pad}let _ = self.ctx.effect({label}, "
                     f"move || {{ if {bind} {{ {undo}; }} Ok(()) }});"
                 )
+            out.append(
+                f"{pad}let _ = self.ctx.effect({label}, "
+                f"move || {{ if {bind} {{ {undo}; }} Ok(()) }});"
+            )
         elif kind == "await":
             raise EmitError("await steps are not allowed inside method bodies (A1)")
         elif kind in ("if", "while", "for", "break", "continue"):
@@ -5611,18 +5668,22 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
 
     for local, service in env.reqs.items():
         _req_ident(local, env)
+        _ident(local, "requirement")
         if service not in services:
             raise EmitError(f"requirement {local!r} names unknown service {service!r}")
     for key, service in env.provides.items():
         _ident(_host_key(key), "provision")
+        _ident(key, "provision")
         if service not in services:
             raise EmitError(f"provision {key!r} names unknown service {service!r}")
     # `isolate`/`intercept` name the RAW wiring key, not the binding (issue #1914)
     for key in isolate:
         if key not in env.requires_raw and key not in env.provides_raw:
+        if key not in env.reqs and key not in env.provides:
             raise EmitError(f"{name}: isolate key {key!r} is not declared")
     for key in intercept:
         if key not in env.requires_raw:
+        if key not in env.reqs:
             raise EmitError(f"{name}: intercept key {key!r} is not a requirement")
 
     out: list[str] = []
@@ -5646,17 +5707,22 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
             continue
         _ident(_host_key(key), "provision")
         struct = f"{cname}{_camel(_host_key(key))}"
+        _ident(key, "provision")
+        struct = f"{cname}{_camel(key)}"
         out.append(f"struct {struct} {{")
         for b in _binds(component):
             out.append(f"    {_ident(b, 'binding')}: {_bind_field_type(env, b, map_values)},")
+            out.append(f"    {_ident(b, 'binding')}: Arc<{_host_of(component, b, map_values)}>,")
         if env.reqs:
             for local, req_service in env.reqs.items():
                 out.append(f"    {_req_ident(local, env)}: Arc<Box<dyn {_svc(req_service)}>>,")
+                out.append(f"    {local}: Arc<Box<dyn {req_service}>>,")
         out.extend(_config_struct_field(component, key))
         if has_effectful:
             out.append("    ctx: Arc<cordis::Context>,")
         out.append("}")
         out.append(f"impl {_svc(service)} for {struct} {{")
+        out.append(f"impl {service} for {struct} {{")
         provide = next(
             (s for s in component.get("body") or []
              if s.get("step") == "provide" and s.get("name") == key),
@@ -5667,6 +5733,7 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
             mname = _method_ident(original_mname)
             params = ", ".join(
                 f"{_ident(p, 'parameter')}: {_rust_type(_param_type(env, key, original_mname, p), env.types)}"
+                f"{p}: {_rust_type(_param_type(env, key, original_mname, p), env.types)}"
                 for p in method.get("params") or []
             )
             ret = (_rust_type(_method_return(env, key, original_mname), env.types)
@@ -5686,6 +5753,7 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
             secret_params = _secret_method_params(
                 env, key, original_mname, method.get("params") or [])
             mark = "".join(_secret_mark_call(t, _ident(p, 'parameter'), tail=" ", types=env.types)
+            mark = "".join(_secret_mark_call(t, p, tail=" ", types=env.types)
                            for p, t in secret_params)
             if has_effectful:
                 env.v3_ctx().declared_ctx = "self.ctx"
@@ -5698,6 +5766,7 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
                 _ui_scoped_method_body(env, method, scope, ret, out)
                 out.append("    }")
             elif _method_has_effectful_steps(method):
+            if _method_has_effectful_steps(method):
                 out.append(f"    fn {mname}(&self, {params}) -> {ret} {{")
                 if secret_params:
                     out.append(f"        {mark.rstrip()}")
@@ -5716,6 +5785,8 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
             raw = env.req_keys.get(local, local)
             if raw in intercept:
                 base = f"{cname}{_camel(_host_key(raw))}"
+            if local in intercept:
+                base = f"{cname}{_camel(local)}"
                 defs: list[str] = []
                 type_names: dict = {}
                 counter = [0]
@@ -5724,10 +5795,14 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
                 # needed here, only the literal from `_intercept_json_lit`.
                 _intercept_json_type(intercept[raw], base, defs, type_names, counter)
                 meta_lit = _intercept_json_lit(intercept[raw], base, defs, type_names, counter)
+                _intercept_json_type(intercept[local], base, defs, type_names, counter)
+                meta_lit = _intercept_json_lit(intercept[local], base, defs, type_names, counter)
                 out.extend(defs)
                 inject_parts.append(f".require_with({_string(raw)}, {meta_lit})")
+                inject_parts.append(f".require_with({_string(local)}, {meta_lit})")
             else:
                 inject_parts.append(f".require({_string(raw)})")
+                inject_parts.append(f".require({_string(local)})")
         inject = "Inject::none()" + "".join(inject_parts)
     else:
         inject = _rust_inject(env)
@@ -5735,6 +5810,7 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
     # item 167: a per-(component, key) router struct for each routed require.
     for key in env.routes:
         out.extend(_emit_router_struct(env, cname, key, env.requires_raw[key], env.routes[key]))
+        out.extend(_emit_router_struct(env, cname, key, env.reqs[key], env.routes[key]))
 
     uses_await = _component_uses_await(component)
     plugin_fn = "cordis::plugin_async::<{0}, _, _>" if uses_await else "cordis::plugin_sync::<{0}, _>"
@@ -5773,15 +5849,20 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
             service = step.get("service")
             pkey = _provide_local(key)
             struct = f"{env.name}{_camel(_host_key(key))}"
+            struct = f"{env.name}{_camel(key)}"
             fields = ", ".join(
                 [f"{_ident(b, 'binding')}: {_ident(b, 'binding')}.clone()" for b in _binds(env.component)]
                 + [f"{_req_ident(local, env)}: {_req_ident(local, env)}.clone()"
                    for local in env.reqs]
+                [f"{_ident(b, 'binding')}: {b}.clone()" for b in _binds(env.component)]
+                + [f"{local}: {local}.clone()" for local in env.reqs]
                 + _config_ctor_field(env.component, key)
                 + (["ctx: Arc::new(ctx.clone())"] if has_effectful else [])
             )
             out.append(f"            let {pkey}_box: Box<dyn {_svc(service)}> = Box::new({struct} {{ {fields} }});")
             out.append(f"            ctx.provide({_string(key)}, {pkey}_box)?;")
+            out.append(f"            let {key}_box: Box<dyn {service}> = Box::new({struct} {{ {fields} }});")
+            out.append(f"            ctx.provide({_string(key)}, {key}_box)?;")
         else:
             _emit_step(step, env, out, indent=3)
     if env.needs_teardown:
@@ -5806,6 +5887,8 @@ def _emit_component_auto(component: dict, services: dict, ir: dict | None = None
 
 def _collect_realm_labels(components: list) -> list[tuple[str, str]]:
     """Every distinct ``(realm, key)`` pair the program isolates on, sorted.
+def _collect_realm_labels(components: list) -> list[str]:
+    """Every distinct realm-label string the program isolates on, sorted.
 
     Keyed by the PAIR, not the realm string alone (issue #2014). cordis-rs keys
     its provision store by ``Isolation`` alone, so one Isolation per realm
@@ -5818,18 +5901,26 @@ def _collect_realm_labels(components: list) -> list[tuple[str, str]]:
     is injective and the last ``/`` recovers the split) makes index assignment a
     pure function of the pair *set*, so the same source lowers to the same
     Isolation values on every build.
+    Sorting makes index assignment a pure function of the label *set*, so the
+    same source lowers to the same Isolation values on every build.
     """
     pairs: set[tuple[str, str]] = set()
+    labels: set[str] = set()
     for component in components:
         for key, realm in (component.get("isolate") or {}).items():
             pairs.add((realm, key))
+        for realm in (component.get("isolate") or {}).values():
+            labels.add(realm)
         # item 167: a router resolves its worker realms by label too; every such
         # realm has a provider (G2, verified at link time) so it is normally
         # already collected, but register it explicitly to be robust.
         for key, route in (component.get("routes") or {}).items():
+        for route in (component.get("routes") or {}).values():
             for realm in route.get("realms") or []:
                 pairs.add((realm, key))
     return sorted(pairs, key=lambda pair: f"{pair[0]}/{pair[1]}")
+                labels.add(realm)
+    return sorted(labels)
 
 
 def _revl_realm_helper(components: list) -> list[str]:
@@ -5845,19 +5936,25 @@ def _revl_realm_helper(components: list) -> list[str]:
     warn about, context.rs:20-25). Distinct `(realm, key)` pairs get distinct
     indices, so an equal pair shares a slot (a component resolving a sibling's
     provision in the same realm) and no two pairs ever collide. Unlike the
+    warn about, context.rs:20-25). Distinct labels get distinct indices, so
+    equal strings share a realm and no two realms ever collide. Unlike the
     former `DefaultHasher`, this registry is fixed build-to-build and depends
     on no std hashing internals.
     """
     labels = _collect_realm_labels(components)
     lines = [
         "pub fn _revl_realm(realm: &str, key: &str) -> cordis::Isolation {",
+        "pub fn _revl_realm(label: &str) -> cordis::Isolation {",
         "    // Top bit reserved for realm labels: disjoint from cordis-rs's",
         "    // monotonic scope counter (starts at 1, +1 each isolate()).",
         "    const REVL_REALM_TAG: u64 = 0x8000_0000_0000_0000;",
         "    let index: u64 = match (realm, key) {",
+        "    let index: u64 = match label {",
     ]
     for i, (realm, key) in enumerate(labels):
         lines.append(f"        ({_string(realm)}, {_string(key)}) => {i},")
+    for i, label in enumerate(labels):
+        lines.append(f"        {_string(label)} => {i},")
     lines.append(
         '        other => panic!("revl: realm label {other:?} missing from '
         'compile-time registry"),'
@@ -5891,6 +5988,8 @@ def _emit_router_struct(env: "_Env", cname: str, key: str, service: str,
     """
     struct = f"RevlRouter{cname}{_camel(_host_key(key))}"
     boxed = f"std::sync::Arc<Box<dyn {_svc(service)}>>"
+    struct = f"RevlRouter{cname}{_camel(key)}"
+    boxed = f"std::sync::Arc<Box<dyn {service}>>"
     realms = list(route.get("realms") or [])
     strategy = route.get("strategy") or "round_robin"
     realm_lits = ", ".join(f"{_string(r)}.to_string()" for r in realms)
@@ -5922,6 +6021,8 @@ def _emit_router_struct(env: "_Env", cname: str, key: str, service: str,
         "            let scoped = self.ctx.isolate_with("
         "self.key.as_str(), _revl_realm(realm.as_str(), self.key.as_str()));",
         f"            if let Ok(Some(handle)) = scoped.get::<Box<dyn {_svc(service)}>>"
+        "self.key.as_str(), _revl_realm(realm.as_str()));",
+        f"            if let Ok(Some(handle)) = scoped.get::<Box<dyn {service}>>"
         "(self.key.as_str()) {",
         "                out.push((realm.clone(), handle));",
         "            }",
@@ -5966,6 +6067,7 @@ def _emit_router_struct(env: "_Env", cname: str, key: str, service: str,
         "    }",
         "}",
         f"impl {_svc(service)} for {struct} {{",
+        f"impl {service} for {struct} {{",
     ]
     for mname, method in methods.items():
         rmname = _method_ident(mname)
@@ -6036,16 +6138,21 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
             continue
         _ident(_host_key(key), "provision")
         struct = f"{cname}{_camel(_host_key(key))}"
+        _ident(key, "provision")
+        struct = f"{cname}{_camel(key)}"
         out.append(f"struct {struct} {{")
         for b in _binds(component):
             out.append(f"    {_ident(b, 'binding')}: {_bind_field_type(env, b, map_values)},")
+            out.append(f"    {_ident(b, 'binding')}: Arc<{_host_of(component, b, map_values)}>,")
         # a provide-method may call a required service, so the provider owns
         # the same bindings the effectful path captures (java does this too)
         for local, req_service in env.reqs.items():
             out.append(f"    {_req_ident(local, env)}: Arc<Box<dyn {_svc(req_service)}>>,")
+            out.append(f"    {local}: Arc<Box<dyn {req_service}>>,")
         out.extend(_config_struct_field(component, key))
         out.append("}")
         out.append(f"impl {_svc(service)} for {struct} {{")
+        out.append(f"impl {service} for {struct} {{")
         provide = next(
             (s for s in component.get("body") or []
              if s.get("step") == "provide" and s.get("name") == key),
@@ -6057,6 +6164,7 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
             mname = method.get("name")
             params = ", ".join(
                 f"{_ident(p, 'parameter')}: {_rust_type(_param_type(env, key, mname, p), env.types)}"
+                f"{p}: {_rust_type(_param_type(env, key, mname, p), env.types)}"
                 for p in method.get("params") or []
             )
             ret = (_rust_type(_method_return(env, key, mname), env.types)
@@ -6076,6 +6184,7 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
             secret_params = _secret_method_params(
                 env, key, mname, method.get("params") or [])
             mark = "".join(_secret_mark_call(t, _ident(p, 'parameter'), tail=" ", types=env.types)
+            mark = "".join(_secret_mark_call(t, p, tail=" ", types=env.types)
                            for p, t in secret_params)
             out.append(f"    fn {_method_ident(mname)}(&self, {params}) -> {ret} {{ {mark}{_method_body(env, method)} }}")
         out.append("}")
@@ -6084,6 +6193,7 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
     # item 167: a per-(component, key) router struct for each routed require.
     for key in env.routes:
         out.extend(_emit_router_struct(env, cname, key, env.requires_raw[key], env.routes[key]))
+        out.extend(_emit_router_struct(env, cname, key, env.reqs[key], env.routes[key]))
 
     inject = _rust_inject(env)
     uses_await = _component_uses_await(component)
@@ -6126,6 +6236,7 @@ def _rust_inject(env: "_Env") -> str:
     no single-realm provider (the workers live in the named realms), so a fiber
     waiting on one would hang Pending forever; the router resolves them per call."""
     gated = [env.req_keys.get(k, k) for k in env.reqs if k not in env.route_of]
+    gated = [k for k in env.reqs if k not in env.routes]
     return "Inject::none()" if not gated else f"Inject::new({_string(gated)})"
 
 
@@ -6164,9 +6275,13 @@ def _emit_req_bindings(env: "_Env", cname: str, out: list[str], indent: int) -> 
         if local in env.route_of:
             struct = f"RevlRouter{cname}{_camel(_host_key(raw))}"
             out.append(f"{pad}let {_req_ident(local, env)}: std::sync::Arc<Box<dyn {_svc(service)}>> = "
+        if local in env.routes:
+            struct = f"RevlRouter{cname}{_camel(local)}"
+            out.append(f"{pad}let {local}: std::sync::Arc<Box<dyn {service}>> = "
                        f"{struct}::_revl_new(ctx.clone());")
         else:
             out.append(f"{pad}let {_req_ident(local, env)} = ctx.require::<Box<dyn {_svc(service)}>>({_string(raw)})?;")
+            out.append(f"{pad}let {local} = ctx.require::<Box<dyn {service}>>({_string(local)})?;")
 
 
 def _emit_setup_value(node: dict, env: _Env) -> str:
@@ -6381,6 +6496,7 @@ def _emit_compensation_registration(env: "_Env", compensate_node: dict, label_te
         out.append(f"{pad}{env.v3_ctx().ui_scope}.register(\"\", "
                    f"{_ui_comp(label_text, compensate_node, call)});")
         return
+    call = _expr(compensate_node, env, rename=rename)
     label = _string(label_text)
     tail = "?;" if propagate else ";"
     lead = "" if propagate else "let _ = "
@@ -6410,10 +6526,12 @@ def _emit_activation_compensation(env: "_Env", compensate_node: dict, out: list[
     for req in env.reqs:
         req_c = f"{req}_comp"
         out.append(f"{pad}let {req_c} = {_req_ident(req, env)}.clone();")
+        out.append(f"{pad}let {req_c} = {req}.clone();")
         rename[req] = req_c
     for local in sorted(referenced & set(env.activation_binds)):
         local_c = f"{local}_comp"
         out.append(f"{pad}let {local_c} = {_ident(local, 'binding')}.clone();")
+        out.append(f"{pad}let {local_c} = {local}.clone();")
         rename[local] = local_c
     _emit_compensation_registration(
         env, compensate_node, env.name + ".compensate", out, indent, rename)
@@ -6449,12 +6567,14 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
             out.append(f"{pad}let {bind} = Arc::new({acquire});")
         if jrn:
             out.append(f"{pad}revl_journal_disarm();")
+        out.append(f"{pad}let {bind} = Arc::new({acquire});")
         undo_name = f"{bind}_undo"
         out.append(f"{pad}let {undo_name} = {bind}.clone();")
         undo_rename = {step["bind"]: undo_name}
         for req in env.reqs:
             req_undo = f"{req}_undo"
             out.append(f"{pad}let {req_undo} = {_req_ident(req, env)}.clone();")
+            out.append(f"{pad}let {req_undo} = {req}.clone();")
             undo_rename[req] = req_undo
         is_cas = _is_map_cas(step.get("acquire"))
         if is_cas:
@@ -6471,6 +6591,7 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
                     continue
                 local_undo = f"{local}_undo"
                 out.append(f"{pad}let {local_undo} = {_ident(local, 'binding')}.clone();")
+                out.append(f"{pad}let {local_undo} = {local}.clone();")
                 undo_rename[local] = local_undo
         undo = _expr(step["undo"], env, rename=undo_rename)
         label = _string(env.name + "." + step["bind"] + ".undo")
@@ -6487,6 +6608,9 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
                 out.append(
                     f"{pad}ctx.effect({label}, "
                     f"move || {{ if *{undo_name} {{ {undo}; }} Ok(()) }})?;")
+            out.append(
+                f"{pad}ctx.effect({label}, "
+                f"move || {{ if *{undo_name} {{ {undo}; }} Ok(()) }})?;")
         else:
             if jrn:
                 out.append(
@@ -6496,6 +6620,7 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
             else:
                 out.append(
                     f"{pad}ctx.effect({label}, move || {{ {undo}; Ok(()) }})?;")
+            out.append(f"{pad}ctx.effect({label}, move || {{ {undo}; Ok(()) }})?;")
     elif kind == "effect":
         for setup in step.get("setup") or []:
             _emit_setup_step(setup, env, out, indent)
@@ -6508,6 +6633,7 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         for req in env.reqs:
             req_undo = f"{req}_undo"
             out.append(f"{pad}let {req_undo} = {_req_ident(req, env)}.clone();")
+            out.append(f"{pad}let {req_undo} = {req}.clone();")
             undo_rename[req] = req_undo
         undo = _expr(step["undo"], env, rename=undo_rename)
         jrn = _bracket_writes_host_map(step)
@@ -6524,12 +6650,16 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
                 f"revl_journal_disarm(); Ok(()) }})?;")
         else:
             out.append(f"{pad}ctx.effect({label}, move || {{ {undo}; Ok(()) }})?;")
+        out.append(f"{pad}ctx.effect({label}, move || {{ {undo}; Ok(()) }})?;")
     elif kind == "emit":
         out.append("%slet _ = %s;" % (pad, _journal_service_emit(
             step.get("expr"), env, _expr(step['expr'], env))))
         # one compensation per crossing, registered after the fire: the
         # site-spelled clause, else the extern's own declared one (item 254,
         # issues #1592 and #1902).
+        out.append(f"{pad}let _ = {_expr(step['expr'], env)};")
+        # the site-spelled clause, then the extern's own declared one (item
+        # 254, issue #1592), each registered after the fire.
         for compensate_node in _emit_compensations(step, env.compensated):
             _emit_activation_compensation(env, compensate_node, out, indent)
     elif kind == "timer":
@@ -6557,6 +6687,7 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         for req in env.reqs:
             cloned = f"{req}_t{n}"
             out.append(f"{pad}let {cloned} = {_req_ident(req, env)}.clone();")
+            out.append(f"{pad}let {cloned} = {req}.clone();")
             rename[req] = cloned
         # a firing that emits an extern declaring its own `compensate` registers
         # it on the activation's accumulator, once per firing, after the fire
@@ -6574,6 +6705,7 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
                     f"timer body carries emissions only, found {em.get('step')!r}")
             out.append("%s    let _ = %s;" % (pad, _journal_service_emit(
                 em.get("expr"), env, _expr(em.get('expr'), env, rename=rename))))
+            out.append(f"{pad}    let _ = {_expr(em.get('expr'), env, rename=rename)};")
             for compensate_node in _emit_compensations(em, env.compensated):
                 out.append(f"{pad}    let _revl_teardown = revl_teardown_of(&_revl_ctx_t{n});")
                 _emit_compensation_registration(
@@ -6633,14 +6765,19 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         service = step.get("service")
         pkey = _provide_local(key)
         struct = f"{env.name}{_camel(_host_key(key))}"
+        struct = f"{env.name}{_camel(key)}"
         fields = ", ".join(
             [f"{_ident(b, 'binding')}: {_ident(b, 'binding')}.clone()" for b in _binds(env.component)]
             + [f"{_req_ident(local, env)}: {_req_ident(local, env)}.clone()"
                for local in env.reqs]
+            [f"{_ident(b, 'binding')}: {b}.clone()" for b in _binds(env.component)]
+            + [f"{local}: {local}.clone()" for local in env.reqs]
             + _config_ctor_field(env.component, key)
         )
         out.append(f"{pad}let {pkey}_box: Box<dyn {_svc(service)}> = Box::new({struct} {{ {fields} }});")
         out.append(f"{pad}ctx.provide({_string(key)}, {pkey}_box)?;")
+        out.append(f"{pad}let {key}_box: Box<dyn {service}> = Box::new({struct} {{ {fields} }});")
+        out.append(f"{pad}ctx.provide({_string(key)}, {key}_box)?;")
     elif kind == "stream-iter":
         # item 130 Slice 4: `every <x> in <sub> { … }` on this blocking tier is
         # a plain `loop` over the cancel-channel `next`, the SAME shape the go
@@ -7153,6 +7290,7 @@ _BUILTIN_RESULT = {
     "div_euclid": "Int", "mod": "Int", "size": "Int",
     "charAt": "Str", "join": "Str", "repeat": "Str", "str": "Str",
     "to_str": "Str", "to_char": "Str",
+    "to_str": "Str",
     "startsWith": "Bool", "endsWith": "Bool", "has": "Bool",
     "is_alnum": "Bool", "is_digit": "Bool", "is_alpha": "Bool",
     "is_space": "Bool",
@@ -7231,6 +7369,7 @@ def _v3_infer_type(node: object, ctx: "_V3Ctx") -> str | None:
                 return _v3_subst(ctx.fn_returns.get(fn), generic[1])
             if fn in ctx.fn_returns:
                 return ctx.fn_returns.get(fn)
+            return ctx.fn_returns.get(node.get("name"))
         if kind == "call" and "callee" in node:
             callee = node.get("callee") or {}
             if callee.get("kind") == "var":
@@ -7583,6 +7722,13 @@ class _V3Ctx:
                else self.raw_by_emitted.get(type_name))
         spec = self.types.get(raw) if raw is not None else None
         return frozenset(spec.get("params") or []) if spec else frozenset()
+        """The declared field -> type map of an emitted record type, so a field
+        VALUE can be lowered with its target type as context. Empty for a
+        synthesized/unknown name."""
+        spec = self.types.get(type_name)
+        if spec is None or spec.get("kind") != "record":
+            return {}
+        return dict(spec.get("fields") or {})
 
     def record_type_for_names(self, names: list[str],
                               expected: str | None = None) -> str:
@@ -7922,6 +8068,7 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
                 _render_expr(a, ctx, rename, expected=_v3_arg_expected(
                     outer_name, outer_generic, i, a, ctx))
                 for i, a in enumerate(arg_nodes)]
+            arg_exprs = [_render_expr(a, ctx, rename) for a in arg_nodes]
             args = ", ".join(arg_exprs)
             # A method/host call MOVES each by-value argument into the callee, so
             # a reused non-Copy argument (`amb.push(cn)` then `ct.remove(&cn)`,
@@ -8371,6 +8518,7 @@ def _v3_instance_get(node: dict, ctx: _V3Ctx, rename: dict[str, str]) -> str:
         raise EmitError(f"instance-get: bad key {key!r}")
     return (
         f"{handle}.get::<Box<dyn {_svc(service)}>>({_string(key)})"
+        f"{handle}.get::<Box<dyn {service}>>({_string(key)})"
         '.expect("revl: instance-get resolution failed")'
         '.expect("revl: instance provision absent")'
     )
@@ -8589,6 +8737,11 @@ def _v3_builtin(method: str, target: str, args: list[str],
     # value. The turbofish pins Result<i64, String> so the expression is
     # context-free; operands are bound once, since a block evaluates them
     # exactly once.
+    # The total forms (docs/arithmetic.md): same quotient as the faulting
+    # operation, but a zero divisor yields Err(reason) instead of panicking —
+    # `fail` is refused in a pure fn, so the error travels as a value. The
+    # turbofish pins Result<i64, String> so the expression is context-free;
+    # operands are bound once, since a block evaluates them exactly once.
     if method in _CHECKED_DIVS:
         return _v3_checked_div(method, target, args[0])
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): i64::to_string
@@ -9133,6 +9286,7 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
             # (`let mut out = []; .. out = out.push(x)`) compiles (E0282).
             if _v3_is_empty_list(node.get("value")):
                 elem = ctx.vec_elems.get(raw_name) or ("Unit" if dead_binding else None)
+                elem = ctx.vec_elems.get(node.get("name"))
                 if isinstance(elem, str):
                     annot = f": Vec<{_rust_type(elem, ctx.types)}>"
                 elif raw_name not in ctx.vec_pinned:
@@ -9177,6 +9331,8 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
                                         expected=ctx.current_return)
             finally:
                 ctx.return_moves = saved_moves
+            rendered = _render_expr(node['expr'], ctx,
+                                    expected=ctx.current_return)
             # The RETURN half of the `Any`-boxing coercion (`_coerce_any_arg`):
             # a declared `-> Any` erases to the opaque `Value`, so returning a
             # concrete `Str`/`Int`/… from such a function is E0308 exactly as
@@ -9497,6 +9653,7 @@ def _emit_v3_types(types: dict) -> list[str]:
                 out.append("")
                 continue
             out.append(f"#[derive({derives})]")
+            out.append("#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]")
             out.append(f"pub struct {name} {{")
             for field, ftype in (spec.get("fields") or {}).items():
                 rendered = _rust_type(ftype, types)
@@ -9515,6 +9672,7 @@ def _emit_v3_types(types: dict) -> list[str]:
                         f'    #[serde(rename = "{field}")]'
                         if raw_name not in carrying
                         else "    // no serde derive: the item carries the erased `Value`")
+                    out.append(f'    #[serde(rename = "{field}")]')
                 out.append(f"    {fname}: {rendered},")
             out.append("}")
         elif spec.get("kind") == "variant":
@@ -9529,6 +9687,9 @@ def _emit_v3_types(types: dict) -> list[str]:
             scope = dict(types, **{p: {"kind": "param"} for p in params})
             generics = f"<{', '.join(_ident(p, 'type name') for p in params)}>" if params else ""
             out.append(f"pub enum {name}{generics} {{")
+            out.append("#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]")
+            out.append('#[serde(tag = "$kind", content = "$value")]')
+            out.append(f"pub enum {name} {{")
             for case in spec.get("cases") or []:
                 cname = _ident(case.get("name"), "case name")
                 payload = case.get("payload")
@@ -9536,6 +9697,7 @@ def _emit_v3_types(types: dict) -> list[str]:
                     out.append(f"    {cname},")
                 else:
                     rendered = _rust_type(payload, scope)
+                    rendered = _rust_type(payload, types)
                     if (raw_name, case.get("name")) in boxed_cases:
                         rendered = f"Box<{rendered}>"
                     out.append(f"    {cname}({rendered}),")
@@ -9632,6 +9794,7 @@ def _emit_v3_functions(functions: list, types: dict, externs: list,
         visibility = "pub " if is_public else ""
         generics = _v3_fn_generics(fn, tparams, ctx)
         out.append(f"{visibility}fn {name}{generics}({params}) -> {returns} {{")
+        out.append(f"{visibility}fn {name}({params}) -> {returns} {{")
         out.extend(view_prologue)
         if not fn.get("body"):
             out.append("    todo!()")
@@ -9989,6 +10152,7 @@ def _journalled_emission(name: str, params: str, forward: str,
 def _emit_v3_externs(externs: list, types: dict, journal: bool = False) -> list[str]:
     """`journal` (record mode with components, issue #2345) wraps each
     `extern emission fn` so its durable start record is written first."""
+def _emit_v3_externs(externs: list, types: dict) -> list[str]:
     out: list[str] = []
     # item 378 Stage 5: emit the config seam once, before the externs, when any
     # extern carries a config schema (byte-identical when none do).
@@ -10047,6 +10211,7 @@ def _emit_v3_externs(externs: list, types: dict, journal: bool = False) -> list[
             check_host_body("rs", body,
                             where=f"extern `{ext.get('name')}`", error=EmitError)
             for line in body_lines(body):
+            for line in body.splitlines() or [""]:
                 out.append("    " + line)
         else:
             out.append("    // (empty @rs body)")
@@ -10236,6 +10401,7 @@ def _emit_v3_lifecycle_tests(tests: list, types: dict, functions: list,
                 args = ", ".join(_render_expr(arg, ctx, {})
                                  for arg in step.get("args") or [])
                 call = (f'root.require::<Box<dyn {_svc(service)}>>({_string(key)})'
+                call = (f'root.require::<Box<dyn {service}>>({_string(key)})'
                         f".expect({_string(where + ': ' + key + ' is ACTIVE (R2)')})"
                         f".{method_name}({args})")
                 bind = step.get("bind")
@@ -11177,6 +11343,7 @@ def _revl_record_preamble() -> list[str]:
         "/// record that never became durable. `REVL_WAL_ALLOW_UNSYNCED=1` is the",
         "/// explicit opt-out for a target that cannot fsync; it is stamped into the",
         "/// log itself.",
+        "/// matter. Mirrors the go tier's `revlWAL`.",
         "struct RevlWal {",
         "    file: std::fs::File,",
         "    seq: u64,",
@@ -11215,6 +11382,10 @@ def _revl_record_preamble() -> list[str]:
         "            if self.file.set_len(start).is_ok() {",
         "                let _ = self.file.sync_all();",
         "            }",
+        "        if let Ok(mut line) = serde_json::to_string(rec) {",
+        "            line.push('\\n');",
+        "            let _ = self.file.write_all(line.as_bytes());",
+        "            let _ = self.file.sync_all(); // fsync per record",
         "        }",
         "    }",
         "}",
@@ -11237,10 +11408,13 @@ def _revl_record_preamble() -> list[str]:
         "            {",
         "                Ok(f) => f,",
         '                Err(e) => panic!("revl: cannot open the write-ahead log REVL_WAL: {e}"),',
+        "                Err(_) => return None,",
         "            };",
         '            let unsynced = std::env::var("REVL_WAL_ALLOW_UNSYNCED").ok().as_deref() == Some("1");',
         "            let mut wal = RevlWal { file, seq: 0, seqs: Vec::new(), unsynced };",
         "            let mut header = serde_json::json!({",
+        "            let mut wal = RevlWal { file, seq: 0, seqs: Vec::new() };",
+        "            wal.write(&serde_json::json!({",
         '                "record": "header", "walVersion": 1, "generation": 1,',
         '                "guarantee": REVL_WAL_GUARANTEE,',
         "            });",
@@ -11252,6 +11426,7 @@ def _revl_record_preamble() -> list[str]:
         "            if unsynced {",
         '                wal.write(&serde_json::json!({ "record": "durability-opt-out", "fromSeq": 0 }));',
         "            }",
+        "            }));",
         "            Some(std::sync::Mutex::new(wal))",
         "        })",
         "        .as_ref()",
@@ -11514,6 +11689,7 @@ def _revl_ftoa_helper() -> list[str]:
 # Serialize/Deserialize). `Value` alone stays unmarshallable: it is opaque, and
 # so is a declared record/variant that CONTAINS one, because `_emit_v3_types`
 # gives it only `Clone, Debug` (#3019).
+# Serialize/Deserialize). `Value` alone stays unmarshallable: it is opaque.
 _SCALAR_OPTION = ("Option<String>", "Option<i64>", "Option<bool>", "Option<f64>")
 
 # The EMITTED idents of the declarations that carry the erased value, set by
@@ -11546,6 +11722,8 @@ def _result_is_opaque(ok_type: str, err_type: str) -> bool:
     unmarshallable; the method is then treated as the opaque `Value` itself.
     """
     return not (_bridge_serde_ok(ok_type) and _bridge_serde_ok(err_type))
+    """True when `rtype` can cross via serde: not the opaque cordis `Value`."""
+    return not re.search(r"\bValue\b", rtype)
 
 
 def _split_result(rtype: str):
@@ -11603,6 +11781,7 @@ def _bridge_arg_ser(name: str, rtype: str) -> str:
         return f"serde_json::json!({name})"
     result = _split_result(rtype)
     if result is not None and not _result_is_opaque(*result):
+    if _split_result(rtype):
         return _result_to_json(name)
     if _bridge_serde_ok(rtype):
         return f"serde_json::to_value(&{name}).unwrap_or(serde_json::Value::Null)"
@@ -11621,6 +11800,7 @@ def _bridge_arg_extract(index: int, rtype: str) -> str | None:
         return f"args[{index}].as_bool().unwrap_or(false)"
     result = _split_result(rtype)
     if result is not None and not _result_is_opaque(*result):
+    if result:
         return _result_ok_err(f"args[{index}]", result[0], result[1])
     if _bridge_serde_ok(rtype):
         return f'serde_json::from_value::<{rtype}>(args[{index}].clone()).expect("bridge: decode arg")'
@@ -11645,6 +11825,7 @@ def _bridge_ret_deser(value: str, rtype: str) -> str | None:
         return table[rtype]
     result = _split_result(rtype)
     if result is not None and not _result_is_opaque(*result):
+    if result:
         return _result_ok_err(value, result[0], result[1])
     if _bridge_serde_ok(rtype):
         return f'serde_json::from_value::<{rtype}>({value}.clone()).expect("bridge: decode return")'
@@ -11663,6 +11844,7 @@ def _bridge_ret_ser(call: str, rtype: str) -> str:
                 f".collect::<Vec<_>>()) }}")
     result = _split_result(rtype)
     if result is not None and not _result_is_opaque(*result):
+    if _split_result(rtype):
         # item 421 F5: only a document that declares a `Secret[T]` carries the
         # funnel, so a marking-free unit stays byte-identical (`_SECRET_MODE`).
         return _result_to_json_funneled(call) if _SECRET_MODE else _result_to_json(call)
@@ -11721,6 +11903,7 @@ def _emit_bridge(ir: dict) -> list[str]:
         # consumer-side proxy
         out.append(f"pub struct {sname}Proxy {{ pub socket: String, pub key: String }}")
         out.append(f"impl {_svc(sname)} for {sname}Proxy {{")
+        out.append(f"impl {sname} for {sname}Proxy {{")
         for mname, method in methods.items():
             params = method.get("params") or []
             proxy_params = [
@@ -11729,10 +11912,12 @@ def _emit_bridge(ir: dict) -> list[str]:
                 for p in params
             ]
             plist = ", ".join(f"{name}: {ptype}" for name, ptype in proxy_params)
+            plist = ", ".join(f"{p['name']}: {_rust_type(p.get('type'), types)}" for p in params)
             ret = _rust_type(method.get("returns"), types) if method.get("returns") else "()"
             argvec = ", ".join(
                 _bridge_arg_ser(name, ptype) for name, ptype in proxy_params
             )
+            argvec = ", ".join(_bridge_arg_ser(p["name"], _rust_type(p.get("type"), types)) for p in params)
             deser = _bridge_ret_deser("_v", ret)
             out.append(f"    fn {_method_ident(mname)}(&self, {plist}) -> {ret} {{")
             if deser is None:
@@ -11745,6 +11930,7 @@ def _emit_bridge(ir: dict) -> list[str]:
         # provider-side dispatch. Issue #1634: a call this cannot make is an
         # `Err`, never `null` (which the runner used to send as `ok: true`).
         out.append(f"fn _revl_dispatch_{_snake(sname)}(svc: &dyn {_svc(sname)}, method: &str, "
+        out.append(f"fn _revl_dispatch_{_snake(sname)}(svc: &dyn {sname}, method: &str, "
                    "args: &[serde_json::Value]) -> Result<serde_json::Value, String> {")
         out.append("    match method {")
         for mname, method in methods.items():
@@ -11783,6 +11969,7 @@ def _emit_bridge(ir: dict) -> list[str]:
         out.append("            cordis::Inject::none(),")
         out.append("            move |ctx, _config| {")
         out.append(f"                let proxy: Box<dyn {_svc(sname)}> = Box::new({sname}Proxy "
+        out.append(f"                let proxy: Box<dyn {sname}> = Box::new({sname}Proxy "
                    "{ socket: socket.clone(), key: key_string.clone() });")
         out.append("                ctx.provide(key_string.as_str(), proxy)?;")
         out.append("                Ok(cordis::PluginOutput::none())")
@@ -11801,6 +11988,7 @@ def _emit_bridge(ir: dict) -> list[str]:
     out.append("    match key {")
     for key, service in provided.items():
         out.append(f'        "{key}" => match ctx.require::<Box<dyn {_svc(service)}>>("{key}") {{')
+        out.append(f'        "{key}" => match ctx.require::<Box<dyn {service}>>("{key}") {{')
         out.append(f"            Ok(svc) => _revl_dispatch_{_snake(service)}(&**svc, method, args),")
         out.append(f'            Err(_) => Err("no provider for key \'{key}\' right now".to_string()),')
         out.append("        },")
@@ -11838,6 +12026,7 @@ def _emit_bridge(ir: dict) -> list[str]:
         for key, realm in isolate.items():
             expr += (f".isolate_with({_string(key)}, "
                      f"_revl_realm({_string(realm)}, {_string(key)}))")
+            expr += f".isolate_with({_string(key)}, _revl_realm({_string(realm)}))"
         out.append(f'        "{snake}" => {expr},')
     out.append("        _ => ctx.clone(),")
     out.append("    }")
@@ -11941,6 +12130,11 @@ def _emit_components(ir: dict, components: list) -> list[str]:
         # also for a journalled `extern emission fn`. Gated so a non-record
         # emission (every existing golden) is byte-identical.
         out.extend(_revl_record_preamble())
+        if _RECORD_MODE:
+            # item 322 Slice 2: the durable WAL sink rides alongside the teardown
+            # accumulator (a witnessed transactional step needs both). Gated so a
+            # non-record emission — every existing golden — is byte-identical.
+            out.extend(_revl_record_preamble())
     for component in components:
         out.extend(_emit_component_auto(component, ir.get("services") or {}, ir))
     out.extend(_emit_bridge(ir))
@@ -11984,6 +12178,7 @@ def _emit_v3(ir: dict) -> str:
     if externs:
         out.extend(_emit_v3_externs(externs, types,
                                     journal=_RECORD_MODE and bool(components)))
+        out.extend(_emit_v3_externs(externs, types))
     if functions:
         out.extend(_emit_v3_functions(functions, types, externs, analyses))
     if tests:
@@ -12185,6 +12380,7 @@ def emit(ir: dict, record: bool = False) -> str:
     Mirrors backends/go/emit.py's `emit(..., record=...)`.
     """
     global _RECORD_MODE, _SECRET_MODE, _JOURNAL_MODE, _RECORD_SINK
+    global _RECORD_MODE, _SECRET_MODE
     _RECORD_MODE = record
     _RECORD_SINK = False
     if not isinstance(ir, dict):

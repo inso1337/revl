@@ -30,9 +30,12 @@ import importlib
 
 from .compiler import compile_files
 from .diagnostics import obligations, report
+from .distribute import distributability
 from .errors import RevlError
 from .holes import render as render_holes
 from .inverse import inverse_class
+from .run import run_command
+from .test import test_command
 
 from .cli.document import (  # noqa: F401 — _wiring_documents re-exported
     _RESOLVES_A_COMPOSITION, _composition_document, _wiring_documents)
@@ -87,6 +90,16 @@ _run_why = _deferred(".cli.observe", "_run_why")
 _run_promote = _deferred(".cli.promote", "_run_promote")
 _run_slo = _deferred(".cli.slo", "_run_slo")
 _run_update = _deferred(".update.cli", "_run_update")
+from .cli.change import (
+    _run_apply, _run_branch, _run_canary, _run_compare, _run_estop, _run_plan,
+    _run_quarantine, _run_recover, _run_repair, _run_replay, _run_undo)
+from .cli.interop import (
+    _run_contract, _run_export, _run_fmt, _run_import, _run_mcp, _run_serve,
+    _run_sourcemap)
+from .cli.observe import (
+    _run_attest, _run_changelog, _run_dash, _run_diff, _run_explain,
+    _run_history_query, _run_metrics, _run_profile, _run_trace, _run_why)
+from .cli.slo import _run_slo
 
 
 # The G8 boundary walk lives in `revl.boundary` (a CLI-free module) so the
@@ -248,17 +261,20 @@ def _run_policy(args) -> int:
             # so the export rule sees nothing and an entry whose source lives
             # in an export directory evaluated with the operator's trust.
             ir = compile_source(entry.source, entry.source_path)
+            ir = compile_source(entry.source, "component.rvl")
             audit = audit_report(ir)
             name = next(iter(audit.get("boundary") or {}), args.candidate)
             evidence[name] = entry.evidence_bundle or reg.EvidenceBundle()
             origins[name] = "registry"
             evidence_ir[name] = reg._normalize_ir_for_attest(
                 compile_source(entry.source, entry.source_path))
+                compile_source(entry.source, "component.rvl"))
             if recompute:
                 recompute_ir[name] = ir
                 # the cold gauntlet compiles the same file, by the same real
                 # path, so it cannot be the one compile that still sees a label
                 gauntlet_args = {"files": [entry.source_path]}
+                gauntlet_args = {"source": entry.source}
         else:
             if not args.files:
                 print("error: policy evaluate needs a POLICY and PROGRAM.rvl "
@@ -567,6 +583,7 @@ def _run_audit(args, ir: dict) -> int:
             print(f"error: cannot read audit WAL {args.wal}: {error}",
                   file=sys.stderr)
             return 2
+    item-33 policy gate (`--policy`) and the authority-drift gate (`--diff`)."""
     if getattr(args, "policy", None):
         # the third leg of the gate (item 33): absolute authority. The policy
         # is evaluated as set operations over the same audit graph `--diff`
@@ -657,6 +674,11 @@ def _run_audit(args, ir: dict) -> int:
          # item 396: a ref-only extern crosses on its ref tier, so the shared
          # helper unions the ref backends in (`audit_report` calls the same one).
          "backends": extern_backends(ext),
+         # item 396: a ref-only extern has no `bodies` key but DOES cross on its
+         # ref tier, so union the ref backends in — otherwise a ref-only extern
+         # would audit as "no bodies" while emitting fine.
+         "backends": sorted(set(ext.get("bodies") or {})
+                            | set(ext.get("refs") or {})),
          # item 373: carry the reach onto the audit extern entry so the surface
          # can name what a crossing is bounded to. Absent unless declared, so the
          # `--json` audit of every existing composition is byte-identical.
@@ -693,8 +715,11 @@ def _run_audit(args, ir: dict) -> int:
             _capability_registers, _env_surface, _function_specs_surface,
             _generated_surface, _recovery_surface, _retention_surface,
             _secrets_surface)
+            _capability_registers, _env_surface, _recovery_surface,
+            _retention_surface, _secrets_surface)
         from .cardinality import cardinality  # noqa: PLC0415
         document = stamp(
+        print(json.dumps(stamp(
             {"manifest": manifest, "boundary": boundary,
              "externs": declared_externs,
              "distributability": distribution,
@@ -739,6 +764,8 @@ def _run_audit(args, ir: dict) -> int:
                 document["participantRefusals"] = refusals
         print(json.dumps(document, indent=2))
         return 1 if participant_surface is not None and participant_surface[1] else 0
+             **_retention_surface(ir)}), indent=2))
+        return 0
     print("composition (providers first):", " -> ".join(manifest.get("loadOrder") or []))
     for row in ir.get("generated_from") or []:
         print(f"generated: {row['file']} from {row['model']} "
@@ -758,6 +785,7 @@ def _run_audit(args, ir: dict) -> int:
     # what the host must inject BEFORE any of them can load. Name, type,
     # requiredness and the author-written bound only; a value never reaches the
     # audit (it arrives at `revl run --env` time and never enters the IR).
+    from .audit_diff import _env_table  # noqa: PLC0415
     contract = _env_table(ir)
     if contract:
         print(f"\nenvironment contract (boot component {contract['component']}):")
@@ -1293,12 +1321,14 @@ def _run_scaffold(args) -> int:
         print(json.dumps(document, indent=2))
         if args.out:
             with open(args.out, "w", encoding="utf-8") as handle:
+            with open(args.out, "w") as handle:
                 handle.write(document["source"])
         return 0
 
     source = build_skeleton(spec)
     if args.out:
         with open(args.out, "w", encoding="utf-8") as handle:
+        with open(args.out, "w") as handle:
             handle.write(source)
         print(f"wrote {args.out}", file=sys.stderr)
     else:
@@ -1793,6 +1823,7 @@ def _dispatch(args) -> int:
             profile = None
             bind_realm = getattr(args, "bind_realm", None)
             if getattr(args, "taint_strict", False) or bind_realm:
+            if getattr(args, "taint_strict", False):
                 from .admit_profile import AdmissionProfile  # noqa: PLC0415 — lazy
                 from .realm_placeholders import parse_bindings  # noqa: PLC0415
                 try:
@@ -1803,6 +1834,7 @@ def _dispatch(args) -> int:
                 profile = AdmissionProfile(
                     taint_strict=bool(getattr(args, "taint_strict", False)),
                     realm_bindings=bindings)
+                profile = AdmissionProfile(taint_strict=True)
             ir = compile_files(args.files, profile=profile)
         except RevlError as error:
             if getattr(args, "json_diagnostics", False):

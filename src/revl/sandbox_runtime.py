@@ -273,6 +273,7 @@ def _run(argv: list[str], *, timeout: float = _DOCKER_TIMEOUT) -> tuple[int, str
     into a refusal."""
     try:
         proc = _childproc.run(argv, capture_output=True, timeout=timeout)
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError:
         return 127, "", f"{argv[0]}: not found"
     except subprocess.TimeoutExpired:
@@ -341,6 +342,7 @@ def accepted_uname(platform: str) -> tuple[str, ...] | None:
 
 def container_flags(env: dict, *, name: str, mounts: list[tuple[str, str]],
                     interactive: bool = True,
+                    interactive: bool = True, workdir: str | None = None,
                     network: str | None = None) -> list[str]:
     """The confinement flags one envelope derives, as a list, deterministically.
 
@@ -351,6 +353,10 @@ def container_flags(env: dict, *, name: str, mounts: list[tuple[str, str]],
     the image does not carry it, the host runtime; every one of them is reported
     in the achieved record, so nothing the driver adds on the author's behalf is
     invisible.
+    resolved mount list (path, mode) — the declared `fs` grants plus the
+    placement directory and, when the image does not carry it, the host
+    runtime; every one of them is reported in the achieved record, so nothing
+    the driver adds on the author's behalf is invisible.
 
     `network` is the per-process seam-only network a seam-carrying sandbox joins
     (item 411 T3): an `--internal` user-defined network the conductor created,
@@ -402,6 +408,10 @@ def container_flags(env: dict, *, name: str, mounts: list[tuple[str, str]],
         # so a path the conductor wrote into the spec resolves to the same file
         # on the other side of it.
         flags += ["-v", f"{path}:{path}:{'rw' if mode == 'rw' else 'ro'}"]
+    if workdir:
+        # the same working directory as the conductor, so a relative source path
+        # the placement was invoked with resolves to the same file inside.
+        flags += ["--workdir", workdir]
     if interactive:
         # the runner's control channel (`repoint`) is newline-delimited JSON on
         # stdin, so stdin must stay open across the boundary.
@@ -490,6 +500,8 @@ def seam_dir_mounts(ctx: dict) -> list[tuple[str, str]]:
 
 def source_mounts(files) -> list[tuple[str, str]]:
     """The composition's own compile inputs, read-only, one FILE mount each.
+def source_mounts(files, cwd: str) -> list[tuple[str, str]]:
+    """The composition's own `.rvl` sources, read-only.
 
     A py process re-COMPILES the composition it was handed (item 337 boot
     re-admission: the running manifest it judges its seams against is one it
@@ -506,6 +518,11 @@ def source_mounts(files) -> list[tuple[str, str]]:
     `placement.run_placement` resolves its roots before launch and passes this
     function the compile's exact input set (its roots, every `use` dependency,
     and every host file a ref, asset or body read).
+    builds itself, not one the conductor asserts), so its own program text has
+    to be readable inside the boundary. The conductor's working directory comes
+    with them because the file list it was invoked with may be relative to it,
+    and the container runs with the same working directory so those paths
+    resolve to the same files.
     """
     # abspath, not resolve: the compile collects BOTH the symlink spelling it
     # opens and the real path, and the in-boundary compile opens the spelling it
@@ -559,6 +576,10 @@ def _overbroad_host_mount(pname: str, mounts: list[tuple[str, str]], env: dict, 
                     f"through the wider mount, so the placement refuses rather "
                     f"than widening the boundary the envelope declared.")
     return None
+    dirs = {cwd}
+    for f in files:
+        dirs.add(str(Path(f).resolve().parent))
+    return [(d, "ro") for d in sorted(dirs)]
 
 
 # --------------------------------------------------------------------------
@@ -984,6 +1005,12 @@ class ContainerDriver:
         # manifest is a claim ABOUT, so it is the set the canary confirms first,
         # and its RUNTIME line says whether the image can be the runner on its
         # own.
+        # PHASE 1 — the declared envelope alone: the placement directory (the
+        # process reads its own spec there) plus the granted `fs` mounts. This
+        # is the set the manifest is a claim ABOUT, so it is the set the canary
+        # confirms first, and its RUNTIME line says whether the image can be the
+        # runner on its own.
+        cwd = ctx.get("cwd") or os.getcwd()
         # item 411 T3: a seam-carrying sandbox runs on its per-process seam-only
         # network with the relay up, and the canary discriminates a seam (open)
         # from egress (a dropped isolation target) instead of the net=none probe.
@@ -1005,6 +1032,10 @@ class ContainerDriver:
         # and (when the image is not a revl runner itself) the conductor's own
         # runtime. All read-only, all reported.
         host_mounts = source_mounts(ctx.get("files") or [])
+        # the host paths the driver adds on the author's behalf: the sources the
+        # process re-compiles, and (when the image is not a revl runner itself)
+        # the conductor's own runtime. All read-only, all reported.
+        host_mounts = source_mounts(ctx.get("files") or [], cwd)
         pythonpath: str | None = None
         if probe.get("RUNTIME") != "image":
             runtime, rt_err = _runtime_mounts()
@@ -1067,6 +1098,7 @@ class ContainerDriver:
             "enforced": True,
             "image": image,
             "platform": env.get("platform"),
+            "workdir": cwd,
             "mounts": final,
             "host_mounts": host_mounts,
             "pythonpath": pythonpath,
@@ -1314,6 +1346,7 @@ class ContainerDriver:
         argv = ([docker, "run"]
                 + container_flags(achieved["_env"], name=name,
                                   mounts=achieved["mounts"],
+                                  workdir=achieved.get("workdir"),
                                   network=achieved.get("seam_network"))
                 + env_flags + [str(achieved["image"])] + inner)
         # the child's environment is the CONDUCTOR's process environment for

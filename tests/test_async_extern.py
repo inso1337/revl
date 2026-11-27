@@ -269,6 +269,8 @@ def test_py_emits_async_extern_as_async_def_and_awaited_call():
     # seam (issue #1603) and the `await` stays outside the seam.
     assert ("return (await _revl_extern_emit(_revl_ctx, 'host_dispose', "
             "host_dispose, (handle,)))") in out
+    # the async provide method awaits the async extern — no coroutine leak
+    assert "return (await host_dispose(handle))" in out
     # and the whole module is syntactically valid python (the erased `def`
     # holding an `await` used to be a SyntaxError here)
     compile(out, "<emitted>", "exec")
@@ -288,6 +290,7 @@ def test_py_non_async_extern_stays_a_blocking_def_and_is_not_awaited():
     # an emission in value position fires through the recording seam (issue
     # #1603), and nothing awaits it
     assert "return _revl_extern_emit(_revl_ctx, 'tag', tag, (x,))" in out
+    assert "return tag(x)" in out
     assert "await tag(" not in out
     assert "await _revl_extern_emit(_revl_ctx, 'tag'" not in out
 
@@ -335,6 +338,7 @@ def test_exit_py_async_extern_await_runs_with_no_coroutine_leak(tmp_path):
     for _module in ("runtime.py", "confidential.py"):
         (tmp_path / _module).write_text(
             (root / "backends" / "python" / _module).read_text(encoding="utf-8"))
+            (root / "backends" / "python" / _module).read_text())
     (tmp_path / "app.py").write_text(_emit_py(compile_source(exit_src, "exit.rvl")))
     (tmp_path / "driver.py").write_text(
         "import warnings\n"

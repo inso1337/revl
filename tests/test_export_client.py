@@ -139,6 +139,7 @@ def test_resource_method_is_refused_naming_the_method(tmp_path):
     component P provides p: Pool {
       let ledger = effect open_ledger("l") undo close_ledger(ledger)
       provide p { fn grab(path) = ledger }
+      provide p { fn grab(path) = open_ledger(path) }
     }
     """
     ir = _compile(source, tmp_path)

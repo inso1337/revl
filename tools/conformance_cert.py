@@ -102,6 +102,8 @@ SLOW_TIERS = ("rust", "java")
 # is deliberately the least common denominator every one of the six emitters can
 # lower and run — Int/Bool/Str/List over pure functions, no Float (the corpus
 # predates Float support on the wasm tier) — so a
+# lower and run — Int/Bool/Str/List over pure functions, no Float (wasm has no
+# Float value representation and would honestly *refuse* it, not run it) — so a
 # green cert exercises as many tiers as the box has toolchains for.
 
 DEFAULT_CORPUS: dict[str, str] = {

@@ -164,6 +164,7 @@ def _symlink_refusal(path: pathlib.Path, rel: str) -> TrucNameRefusal:
             f"{os.readlink(path)!r}, and truc writes only files that are the "
             f"project's own, never through a link (the target may be outside "
             f"the project). Remove the link and re-run.")
+    `_vendor_dir` uses for a linked directory, aimed at the entry instead."""
     return TrucNameRefusal(
         f"refusing to write `{rel}`: it is a symlink to "
         f"{os.readlink(path)!r}, and a truc's bytes are the ones under "
@@ -311,6 +312,7 @@ def entry_read(registry: str, name: str) -> str:
     `Opt[Str]`: a missing key would fault a typed field read, and the plan must
     be able to say "no dossier" explicitly, so `commit_add` refuses a dossier
     that appears between plan and commit."""
+    (+ `dossier.json` when present). A truc *is* this triple, vendored."""
     _check_name(name)
     base = pathlib.Path(registry, "components", name)
     src = base / "component.rvl"
@@ -320,6 +322,7 @@ def entry_read(registry: str, name: str) -> str:
         # empty keeps the boundary total (a host body never crashes the loop).
         return json.dumps({"name": name, "source": "", "manifest": "",
                            "dossier": None})
+        return json.dumps({"name": name, "source": "", "manifest": ""})
     out = {
         "name": name,
         "source": src.read_text(encoding="utf-8"),
@@ -328,6 +331,8 @@ def entry_read(registry: str, name: str) -> str:
     dossier = base / "dossier.json"
     out["dossier"] = (dossier.read_text(encoding="utf-8")
                       if dossier.exists() else None)
+    if dossier.exists():
+        out["dossier"] = dossier.read_text(encoding="utf-8")
     return json.dumps(out)
 
 
@@ -361,6 +366,7 @@ def toml_manifest(project_dir: str) -> str:
     handed to the pure planner, whose typed parse would fail without saying
     which entry or how to spell it. An entry with no `grant` grants nothing
     (fail-closed)."""
+    resolved to absolute, the `[trucs]` table flattened to an ordered list."""
     import tomllib  # noqa: PLC0415 — stdlib, py3.11+
 
     p = pathlib.Path(project_dir, "truc.toml")
@@ -391,6 +397,14 @@ def toml_manifest(project_dir: str) -> str:
                 "was not read")
         trucs.append({"name": tname, "registry": t.get("registry", "local"),
                       "grant": grant})
+        if path:
+            resolved[rname] = os.path.abspath(os.path.join(project_dir, path))
+        else:
+            resolved[rname] = (r or {}).get("url", "")
+    trucs = [
+        {"name": tname, "registry": (t or {}).get("registry", "local")}
+        for tname, t in (data.get("trucs") or {}).items()
+    ]
     default_reg = resolved.get("local") or next(iter(resolved.values()), "")
     return json.dumps({
         "name": assembly.get("name", ""),
@@ -645,6 +659,10 @@ def admit_all(ordered_json: str, lock_json: str = "",
     """Admit an ordered list of `{path, source, name, grant}` through revl's
     own gate, *incrementally*, exactly as docs/design/truc-architecture.md §3.2
     describes: each candidate is linked against the running composition
+def admit_all(ordered_json: str) -> str:
+    """Admit an ordered list of `{path, source, name}` through revl's own gate,
+    *incrementally*, exactly as docs/design/truc-architecture.md §3.2 describes:
+    each candidate is linked against the running composition
     (`compile_files(files, manifest=running)`) so ambient services are in scope
     without redeclaration and G2/G3 span everything admitted so far. The first
     candidate that breaks the assembly stops the loop and its diagnostic (with
@@ -671,6 +689,7 @@ def admit_all(ordered_json: str, lock_json: str = "",
     listed in the verdict's `trusted`, which is what `add` records in the row's
     lock entry.
     """
+    from revl.compiler import compile_files  # noqa: PLC0415 — in-process gate
     from revl.errors import RevlError  # noqa: PLC0415
 
     items = json.loads(ordered_json)
@@ -680,13 +699,20 @@ def admit_all(ordered_json: str, lock_json: str = "",
     trusted: list[str] = []
     for item in items:
         label = item.get("name") or item["path"]
+        path = item["path"]
+        label = item.get("name") or path
         try:
             ir, basis = _admit_row(item, running, bool(trust_host_code),
                                    lock_trusted)
+            ir = compile_files([path], manifest=running, sources={path: item["source"]})
+            running = {"manifest": ir.get("manifest") or {},
+                       "services": ir.get("services") or {}}
+            admitted.append(label)
         except RevlError as error:
             return json.dumps({
                 "ok": False,
                 "diagnostic": _refusal_text(item, running, error),
+                "diagnostic": str(error),
                 "failed": label,
                 "admitted": admitted,
                 "trusted": trusted,
@@ -746,6 +772,7 @@ def write_assembly(project_dir: str, manifest_json: str) -> str:
     is untouched (all-or-nothing). A vendored file that no longer matches its
     lock pin is refused here too, before `build/` is touched
     (`_vendored_drift`)."""
+    is untouched (all-or-nothing)."""
     if not manifest_json:
         return "skipped"
     drift = _vendored_drift(project_dir)
@@ -761,6 +788,7 @@ def write_assembly(project_dir: str, manifest_json: str) -> str:
     data = json.loads(manifest_json)
     _write_no_follow(out / "assembly.json", json.dumps(data, indent=2),
                      "build/assembly.json")
+    (out / "assembly.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
     return "written"
 
 
@@ -1151,6 +1179,10 @@ def commit_add(project_dir: str, plan_json: str) -> str:
     an entry and its index row together. A re-add drops a vendored
     `dossier.json` when the entry no longer ships one, so the directory keeps
     exactly the triple the plan checked."""
+    truc *is* a vendored registry entry, §1.1) and the lock row is a verbatim
+    projection of the index row (§4.2: copied, never recomputed by truc),
+    with the sha256 already re-verified against the fetched bytes by the
+    planner before this runs, plus an `admitted` provenance stamp."""
     if not plan_json:
         return "skipped"
     plan = json.loads(plan_json)
@@ -1185,12 +1217,15 @@ def commit_add(project_dir: str, plan_json: str) -> str:
     # the entry's knowledge records travel with it (issue #1769), one file per
     # record under `trucs/<name>/knowledge/`, as they sit in the registry
     copies += _knowledge_copies(src_dir)
+    copies = [(fname, src_dir / fname) for fname in _VENDORED_FILES
+              if (src_dir / fname).exists()]
     # Every destination is checked before the first write, so a refusal leaves
     # nothing behind: no half-vendored directory, and no target written through.
     if (dst_dir / _KNOWLEDGE_DIR).is_symlink():
         raise _symlink_refusal(dst_dir / _KNOWLEDGE_DIR,
                                f"trucs/{name}/{_KNOWLEDGE_DIR}")
     for fname in [f for f, _ in sources] + [f for f, _ in copies]:
+    for fname, _ in copies:
         if (dst_dir / fname).is_symlink():
             raise _symlink_refusal(dst_dir / fname, f"trucs/{name}/{fname}")
     dst_dir.mkdir(parents=True, exist_ok=True)
@@ -1204,6 +1239,8 @@ def commit_add(project_dir: str, plan_json: str) -> str:
         _write_no_follow(dst_dir / fname, sp.read_text(encoding="utf-8"),
                          f"trucs/{name}/{fname}")
 
+    # verbatim projection of the index row into the lock (§4.2).
+    row = json.loads(index_row(reg_abs, name))
     index_version = str(row.get("indexVersion", "0"))
     lock_row = {
         "name": name,
@@ -1213,6 +1250,8 @@ def commit_add(project_dir: str, plan_json: str) -> str:
         # unversioned entry records "" and stays honestly unpinnable.
         "version": row.get("version", ""),
         **pins,
+        "sourceHash": row.get("sourceHash", ""),
+        "manifestHash": row.get("manifestHash", ""),
         "provides": row.get("provides") or {},
         "requires": row.get("requires") or {},
         "capabilities": row.get("capabilities") or [],
@@ -1226,6 +1265,7 @@ def commit_add(project_dir: str, plan_json: str) -> str:
         # record is bound to `sourceHash` above; `assemble` reads it.
         "admitted": {"at": now(), "indexVersion": index_version,
                      "admission": _admission_of(add)},
+        "admitted": {"at": now(), "indexVersion": index_version},
     }
     knowledge = _knowledge_pin(src_dir, dst_dir)
     if knowledge is not None:
@@ -1238,6 +1278,7 @@ def commit_add(project_dir: str, plan_json: str) -> str:
     lock["trucs"] = [r for r in (lock.get("trucs") or [])
                      if r.get("name") != name] + [lock_row]
     _write_lock(project_dir, lock)
+    lock_path.write_text(json.dumps(lock, indent=2), encoding="utf-8")
 
     _toml_add_truc(project_dir, name, reg_name)
     return "committed"
@@ -1413,6 +1454,7 @@ def _toml_add_truc(project_dir: str, name: str, registry: str) -> None:
             text += "\n"
         text += f"\n[trucs]\n{line}\n"
     _write_no_follow(p, text, "truc.toml")
+    p.write_text(text, encoding="utf-8")
 
 
 def commit_rm(project_dir: str, plan_json: str) -> str:
@@ -1445,6 +1487,7 @@ def commit_rm(project_dir: str, plan_json: str) -> str:
         lock["trucs"] = [r for r in (lock.get("trucs") or [])
                          if r.get("name") != name]
         _write_lock(project_dir, lock)
+        lock_path.write_text(json.dumps(lock, indent=2), encoding="utf-8")
 
     _toml_rm_truc(project_dir, name)
     return "removed"
@@ -1476,6 +1519,7 @@ def _toml_rm_truc(project_dir: str, name: str) -> None:
     if text.endswith("\n") and not new.endswith("\n"):
         new += "\n"
     _write_no_follow(p, new, "truc.toml")
+    p.write_text(new, encoding="utf-8")
 
 
 # -- ship / publish (emission[registry]; slice S4) --------------------------
@@ -1534,6 +1578,10 @@ def _ship_target(project_dir: str) -> tuple[dict, str, str, str, str]:
     a real file, so every publish of the entry carries this; an entry that names
     no file comes back as `""` and the publish side refuses rather than
     compiling without it (issue #2563)."""
+def _ship_target(project_dir: str) -> tuple[dict, str, str, str]:
+    """The `[ship]` table, the source being shipped, and the target registry
+    (name + absolute path). Shared by `ship_context` and `release_facts` so the
+    two can never disagree about WHICH registry or WHICH source is in play."""
     data = _ship_toml(project_dir)
     assembly = data.get("assembly") or {}
     ship = data.get("ship") or {}
@@ -1547,6 +1595,7 @@ def _ship_target(project_dir: str) -> tuple[dict, str, str, str, str]:
     if entry:
         src_path = pathlib.Path(project_dir, entry[0])
         if src_path.is_file():
+        if src_path.exists():
             source = src_path.read_text(encoding="utf-8")
             source_path = str(src_path.resolve())
 
@@ -1559,6 +1608,8 @@ def _ship_target(project_dir: str) -> tuple[dict, str, str, str, str]:
     reg_abs = (os.path.abspath(os.path.join(project_dir, reg_path))
                if reg_path else "")
     return ship, source, source_path, reg_name, reg_abs
+               if reg_path else reg.get("url", ""))
+    return ship, source, reg_name, reg_abs
 
 
 def release_facts(project_dir: str, name: str) -> str:
@@ -1587,6 +1638,7 @@ def release_facts(project_dir: str, name: str) -> str:
     from revl.registry import release_facts as registry_release_facts
 
     ship, source, source_path, _reg_name, reg_abs = _ship_target(project_dir)
+    ship, source, _reg_name, reg_abs = _ship_target(project_dir)
     version = str(ship.get("version", "") or "")
     scheme = str(ship.get("version_scheme", SCHEME_SEMVER) or SCHEME_SEMVER)
     publisher = str(ship.get("publisher", "") or "")
@@ -1604,6 +1656,9 @@ def release_facts(project_dir: str, name: str) -> str:
     if not reg_abs:
         # there is no target registry at all; the pure Shipper's plan cannot
         # name one, so there is nothing for this verdict to add.
+    if not reg_abs or not os.path.isdir(reg_abs):
+        # no registry on disk yet: nothing is published, so nothing is being
+        # replaced. `publish` creates it, exactly as it did before.
         return json.dumps({"ok": True, "diagnostic": "", "version": version,
                            "scheme": scheme, "publisher": publisher,
                            "previousVersion": "", "note": ""})
@@ -1615,6 +1670,7 @@ def release_facts(project_dir: str, name: str) -> str:
     facts = registry_release_facts(reg_abs, name, source, version,
                                    scheme=scheme, publisher=publisher,
                                    source_path=source_path)
+                                   scheme=scheme, publisher=publisher)
     note = ""
     if not facts["isUpdate"] and not version:
         note = (" Published UNVERSIONED: nothing pins which release this is, and "
@@ -1648,6 +1704,7 @@ def ship_context(project_dir: str) -> str:
     registry compiles the text by its real origin (issue #2563).
     """
     ship, source, source_path, reg_name, reg_abs = _ship_target(project_dir)
+    ship, source, reg_name, reg_abs = _ship_target(project_dir)
 
     policy = _registry_policy(reg_abs) if reg_abs and os.path.isdir(reg_abs) else "audit"
 
@@ -1697,6 +1754,7 @@ def _remember_ship_knowledge(project_dir: str) -> None:
 
 
 def gauntlet_evidence(source: str, source_path: str = "") -> str:
+def gauntlet_evidence(source: str) -> str:
     """Run the proving ground (item 31, `revl.mcp.gauntlet`) cold on the shipped
     source and return the facts the pure Shipper checks, plus the full dossier
     text to stamp. Isolated: the gauntlet boots the candidate in a throwaway
@@ -1712,11 +1770,13 @@ def gauntlet_evidence(source: str, source_path: str = "") -> str:
     graded and BOOTED with the operator's trust. Empty means the text has no
     file behind it (`ship_context` records the same empty path); the gauntlet
     then grades it as before and the publish refuses it later."""
+    author's supplied evidence is current for the source being shipped."""
     import concurrent.futures  # noqa: PLC0415
     import contextvars  # noqa: PLC0415
 
     from revl.mcp import gauntlet  # noqa: PLC0415 — in-process, like the gate
     from revl.mcp.session import Session, _lend_turn  # noqa: PLC0415
+    from revl.mcp.session import Session  # noqa: PLC0415
 
     # The gauntlet boots the candidate in a scratch Session, which drives its
     # own asyncio loop. ship runs this from *inside* truc's own running Session
@@ -1730,6 +1790,8 @@ def gauntlet_evidence(source: str, source_path: str = "") -> str:
         candidate = ({"files": [source_path]} if source_path
                      else {"source": source})
         return gauntlet.run(Session(), candidate, over_the_transport=False)
+        return gauntlet.run(Session(), {"source": source},
+                            over_the_transport=False)
 
     # the compile happens on the worker thread, and a thread does not inherit
     # the caller's context variables: `compiler._RULE` (the export rule for
@@ -1743,6 +1805,8 @@ def gauntlet_evidence(source: str, source_path: str = "") -> str:
         caller_context = contextvars.copy_context()
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             dossier = pool.submit(caller_context.run, _grade).result()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        dossier = pool.submit(_grade).result()
     lifecycle = ((dossier.get("tested") or {}).get("lifecycle")) or {}
     admission = ((dossier.get("proved") or {}).get("admission")) or {}
     return json.dumps({
@@ -1796,6 +1860,7 @@ def publish(plan_json: str) -> str:
             "<truc ship>", 0,
             f"truc: refusing to publish: the plan's source path {source_path!r} "
             "is not absolute, so it does not name the file the text came from")
+    pathlib.Path(reg, "components").mkdir(parents=True, exist_ok=True)
     publish_release(
         reg, plan["name"], plan["source"],
         version=plan.get("version") or None,
@@ -1807,6 +1872,7 @@ def publish(plan_json: str) -> str:
                       and plan.get("dossierText") else None),
         knowledge=_SHIP_KNOWLEDGE,
         source_path=source_path)
+                      and plan.get("dossierText") else None))
     return "published"
 
 

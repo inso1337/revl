@@ -18,9 +18,11 @@ sites per path) with a LITERAL initial fuel: at most
 `(k^(iters+1) - 1) / (k - 1)` activations, each crossing at most
 `max(base, per_iter)`, certified only while the activation count is within
 `_BRANCHING_CALL_CEILING`. Everything the recognizer cannot certify still reports `unbounded`;
+`unbounded`. Everything the recognizer cannot certify still reports `unbounded`;
 in particular a fan-out (`f(n-1); f(n-1)`) crosses `2^n - 1` times and is NEVER
 reported as the linear ceiling `<= n` (the CRITICAL clause-4 fix); it is
 certified only by the branching form above, with a literal fuel under the ceiling. Multi-fn /
+reported as the linear ceiling `<= n` (the CRITICAL clause-4 fix). Multi-fn /
 mutual recursion stays `unbounded` this slice (§5.2 OPEN).
 
 The soundness tie (§5.1): the count fold reuses the EXACT reach `_boundary`
@@ -290,6 +292,7 @@ def _param_escapes(node, pname: str, fname: str, index: int) -> bool:
 def _certify_recursion(fname, decl, direct, recursive, closure,
                        reach, fn_caps_map, has_loop, unknown_dispatch,
                        types=None):
+                       reach, fn_caps_map, has_loop, unknown_dispatch):
     """Decide whether the self-recursive fn `fname` is a certifiable LINEAR
     iteration (docs/design/260 §2.2 clauses 1,2,4). On success returns a record
     `{ok: True, params, fuel_index, fuel_op, c, k, base, cont}`; on refusal
@@ -393,9 +396,12 @@ def _certify_recursion(fname, decl, direct, recursive, closure,
     if branch > 1 and _self_call_in_uncounted_construct(body, fname):
         # a self-call inside a local arrow (or loop) can run any number of times
         # per activation; the syntactic count above does not cover it
+    # self-calls sequentially reachable on one path fan out to `2^n - 1`.
+    if _path_max_calls(cont, is_self) > 1:
         return refuse("fanout")
     if _path_max_calls(base, is_self) != 0:
         return refuse_late("noguard")
+        return refuse("noguard")
 
     # --- clause 1: every self-call strictly decreases the SAME fuel param by a
     # positive literal, and threads every FUNCTION-TYPED argument by identity,
@@ -407,29 +413,38 @@ def _certify_recursion(fname, decl, direct, recursive, closure,
     types = types or {}
     fn_typed = [_type_mentions_fn(p.get("type"), types)
                 for p in decl.get("params") or []]
+    # positive literal, and threads every OTHER argument by identity (so an arrow
+    # parameter cannot be swapped for a wider dispatch on the back-edge).
     k_min = None
     for call in self_calls:
         args = call.get("args") or []
         if len(args) != len(params):
             return refuse_late("nonfuel")
+            return refuse("nonfuel")
         fuel_arg = args[fuel_index]
         if not (isinstance(fuel_arg, dict) and fuel_arg.get("kind") == "bin"
                 and fuel_arg.get("op") == "-"
                 and _bare_name(fuel_arg.get("left")) == pname):
             return refuse_late("nonfuel")
+            return refuse("nonfuel")
         k = _int_lit(fuel_arg.get("right"))
         if k is None or k < 1:
             return refuse_late("nonfuel")
+            return refuse("nonfuel")
         k_min = k if k_min is None else min(k_min, k)
         for j, arg in enumerate(args):
             if j == fuel_index or _bare_name(arg) == params[j]:
+            if j == fuel_index:
                 continue
             if fn_typed[j]:
                 return refuse_late("rebinds-fn")
+            if _bare_name(arg) != params[j]:
+                return refuse("nonfuel")
 
     return {"ok": True, "params": params, "fuel_index": fuel_index,
             "fuel_op": op, "c": c, "k": k_min, "base": base, "cont": cont,
             "body": body, "branch": branch}
+            "fuel_op": op, "c": c, "k": k_min, "base": base, "cont": cont}
 
 
 def _local_call_names(node, out: set) -> None:
@@ -733,12 +748,15 @@ def cardinality(ir: dict) -> dict:
                     name, decl, direct, recursive, _closure(name), reach,
                     fn_caps_map, has_loop, _UNKNOWN_DISPATCH,
                     types=ir.get("types") or {})
+                    fn_caps_map, has_loop, _UNKNOWN_DISPATCH)
         return certify_cache[name]
 
     closure_cache: dict[str, set] = {}
 
     def _classify(name: str, ext: str) -> tuple[str, str] | None:
         """Why a crossing of `ext` reached through fn `name` is `unbounded`.
+    def _classify(name: str) -> tuple[str, str]:
+        """Why a crossing reached through fn `name` is `unbounded` in Slice 1.
 
         Recursion outranks a loop outranks a plain host-extern reach, so the
         loudest true cause is named. Deterministic AND reachability-first: the
@@ -762,6 +780,17 @@ def cardinality(ir: dict) -> dict:
         if ext in crossings:
             return ("host", name)
         return None
+        loudest true cause is named. Deterministic: the culprit is the
+        lexicographically-first member of the reachable closure with that
+        property."""
+        closure = _closure(name)
+        rec = sorted(closure & recursive)
+        if rec:
+            return ("recursion", rec[0])
+        loops = sorted(closure & has_loop)
+        if loops:
+            return ("loop", loops[0])
+        return ("host", name)
 
     def _reason(kind: str, detail: str) -> str:
         if kind == "recursion":
@@ -1070,6 +1099,7 @@ def cardinality(ir: dict) -> dict:
                 fname = (node.get("callee") or {}).get("name")
             args = node.get("args") or []
             arg_vecs = [carried_vec(arg) for arg in args]
+            arg_vecs = [count_expr(arg) for arg in args]
             rec = _certify(fname)
             if not rec["ok"]:
                 resolutions[id(node)] = {"int": {}}
@@ -1133,6 +1163,7 @@ def cardinality(ir: dict) -> dict:
                             base_m[p], per_iter[p])
                     else:
                         mult = base_m[p] + iters * per_iter[p]
+                    mult = base_m[p] + iters * per_iter[p]
                     if mult == 0:
                         continue
                     for cap, cnt in arg_vecs[i].items():
@@ -1205,12 +1236,17 @@ def cardinality(ir: dict) -> dict:
                 # A `pure`/`acquire` extern reveals no crossing at all.
                 if name in crossings:
                     _mark(name, "host", name)
+                # a host extern reached directly from the component body
+                _mark(name, "host", name)
                 continue
             reached = reach.get(name, set())
             for ext in reached:
                 cause = _classify(name, ext)
                 if cause is not None:
                     _mark(ext, *cause)
+            kind, detail = _classify(name)
+            for ext in reach.get(name, set()):
+                _mark(ext, kind, detail)
             fn_caps = fn_caps_map.get(name) or set()
             for cap in fn_caps:
                 if cap == _UNKNOWN_DISPATCH:
@@ -1219,6 +1255,7 @@ def cardinality(ir: dict) -> dict:
                 cause = _classify(name, cap)
                 if cause is not None:
                     _mark(cap, *cause)
+                _mark(cap, kind, detail)
 
         # the first-class launder: an emitting callable handed to a dispatcher is
         # named in no call position; `_calls_in`'s value channel records it.

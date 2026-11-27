@@ -129,6 +129,7 @@ def _node_ts_skip_reason() -> "str | None":
 
 
 _NODE_TS_REASON = _node_ts_skip_reason()
+_HAS_NODE = shutil.which("node") is not None
 _needs_node = pytest.mark.skipif(
     _NODE_TS_REASON is not None, reason=_NODE_TS_REASON or "")
 
@@ -149,6 +150,7 @@ _needs_pinned = pytest.mark.skipif(
     not _HAS_PINNED,
     reason="pinned workspace needs directory-fd and no-follow filesystem "
            "support, which this platform does not provide")
+    not _HAS_NODE, reason="node is required to run the emitted ts ref thunks")
 
 
 # ===========================================================================
@@ -942,6 +944,7 @@ _MUTATIONS = {
         '            # every symlink outside the root, a fact about what lives there\n'
         '            # (#3184)\n'
         '            _sanitized(path),\n'
+        '            real,\n'
         '        )',
         '    if False:\n'
         '        raise ConfinementError("EOUTSIDE", "x", real)'),
@@ -950,10 +953,13 @@ _MUTATIONS = {
         '    target = os.path.join(root, path.replace("../", ""))'),
     "realpath-skipped": (
         '    real = os.path.realpath(os.path.normpath(target))',
+        '    real = os.path.realpath(target)',
         '    real = os.path.normpath(target)'),
     "dotdot-refused-textually-instead": (
         '    real = os.path.realpath(os.path.normpath(target))',
         '    real = target if ".." not in path else os.path.realpath(os.path.normpath(target))'),
+        '    real = os.path.realpath(target)',
+        '    real = target if ".." not in path else os.path.realpath(target)'),
     "unset-root-falls-back-to-cwd": (
         '    if not root:\n'
         '        raise ConfinementError(\n'

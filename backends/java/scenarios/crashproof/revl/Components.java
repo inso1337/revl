@@ -268,6 +268,8 @@ public final class Components {
     // that cannot be made durable, fails class initialisation (issue #2345), so no
     // component body runs without its log. REVL_WAL_ALLOW_UNSYNCED=1 is the
     // explicit opt-out for a target that cannot fsync; it is stamped into the log.
+    // Runs once at class load. A failed open leaves the sink null (recording is
+    // silently off) rather than crashing a composition that only wanted to run.
     private static void revlWalOpen() {
         String path = System.getenv("REVL_WAL");
         if (path == null || path.isEmpty()) {
@@ -285,12 +287,16 @@ public final class Components {
         if (revlWalUnsynced) {
             System.err.println("warning: REVL_WAL_ALLOW_UNSYNCED=1 disables the WAL fsync guarantee");
             durability = ",\"durability\":\"unsynced-opt-out\"";
+            revlWalOut = null;
+            revlWalChannel = null;
+            return;
         }
         revlWalWrite("{\"record\":\"header\",\"walVersion\":1,\"generation\":1,\"guarantee\":"
                 + revlWalStr(REVL_WAL_GUARANTEE) + durability + "}");
         if (revlWalUnsynced) {
             revlWalWrite("{\"record\":\"durability-opt-out\",\"fromSeq\":0}");
         }
+                + revlWalStr(REVL_WAL_GUARANTEE) + "}");
     }
 
     // One durable JSON line: write, flush, and fsync (FileChannel.force(true))
@@ -324,6 +330,7 @@ public final class Components {
                     revlWalCut(start);
                     throw new java.io.UncheckedIOException("revl: write-ahead log fsync failed", sync);
                 }
+            } catch (java.io.IOException ignored) {
             }
         }
     }

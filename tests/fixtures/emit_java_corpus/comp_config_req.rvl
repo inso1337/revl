@@ -15,6 +15,7 @@ service Sink {
 service Logger {
   emission fn log(msg: Str)
   fn tag(root: Int) -> Str
+  fn tag(id: Int) -> Str
 }
 
 component Audit requires sink: Sink provides logger: Logger {
@@ -27,5 +28,6 @@ component Audit requires sink: Sink provides logger: Logger {
       emit   sink.write(msg)
     }
     fn tag(root) = sink.read()
+    fn tag(id) = sink.read()
   }
 }

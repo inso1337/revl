@@ -81,7 +81,10 @@ import sys
 # NOT put on `sys.path`: nothing here imports a sibling by bare name, and left
 # there it would answer the next bare `import emit` with this backend's
 # emitter (issue #2204).
+# combined run still executes the wasm emitter exactly once.
 _HERE = pathlib.Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
 
 
 def _load_wasm_emit():
@@ -90,6 +93,7 @@ def _load_wasm_emit():
     module = sys.modules.get(name)
     bound = getattr(module, "__file__", None)
     if module is None or bound is None or pathlib.Path(bound).resolve() != path:
+    if module is None:
         spec = importlib.util.spec_from_file_location(name, _HERE / "emit.py")
         assert spec is not None and spec.loader is not None, _HERE / "emit.py"
         module = importlib.util.module_from_spec(spec)
@@ -151,6 +155,8 @@ def _san(ty: str) -> str:
     point between dots, which no revl name contains either."""
     return "".join(c if c.isalnum() or c == "_" else _SAN.get(c, f".{ord(c):x}.")
                    for c in ty)
+    `List_Person_`). Only used to name the per-type helper functions."""
+    return "".join(c if c.isalnum() else "_" for c in ty)
 
 
 def _internal_wasm(ty: str | None) -> str:
@@ -683,8 +689,10 @@ class _Canon:
         `fn` carries `name`/`params`/`returns` in the SAME shape whether it is a
         top-level pure `fn` or a service method. `call_symbol` names the core
         function the wrapper delegates to: for a pure `fn` it is `$fn.<name>` (the
+        function the wrapper delegates to: for a pure `fn` it is `$<name>` (the
         default); for a service method it is the named provide-method function
         (`$__prov:<key>.<method>`), which carries the very same internal ABI a
+        (`$__prov_<key>_<method>`), which carries the very same internal ABI a
         pure `fn` does, so exactly one wrapper shape serves both.
 
         `arena` turns this wrapper into a per-call arena (item 432(e), reclaim
@@ -699,6 +707,7 @@ class _Canon:
         params = fn.get("params") or []
         ret = fn.get("returns")
         callee = call_symbol or _emit_mod._uid("fn", name)
+        callee = call_symbol or f"${name}"
         export_name = f"{package}/{iface}#{_kebab_name(name)}"
 
         # flatten each param into named core params
@@ -932,10 +941,13 @@ def _provide_symbol(export_name: str) -> str:
     # `provide:kv.get_x` and `provide:kv_get.x` both `$__prov_kv_get_x`
     # (issue #1756).
     return "$__prov:" + export_name[len("provide:"):]
+    # `provide:realm/kv.get` -> `$__prov_realm_kv_get`
+    return "$__prov_" + _san(export_name[len("provide:"):])
 
 
 def _name_provide_funcs(module: str) -> tuple[str, dict[str, str]]:
     """Give every `provide:` export in `module` a callable `$__prov:*` symbol.
+    """Give every `provide:` export in `module` a callable `$__prov_*` symbol.
     Returns the rewritten module and a `{export_name: symbol}` map."""
     symbols: dict[str, str] = {}
 
@@ -1072,6 +1084,7 @@ def _canonical_module(core: str, canon: _Canon, exports: list[str],
     module = _emit_mod.prune_unreachable_funcs(_splice_canonical(core, additions))
     _emit_mod.refuse_duplicate_exports(module, set())
     return module
+    return _emit_mod.prune_unreachable_funcs(_splice_canonical(core, additions))
 
 
 def _splice_canonical(core: str, additions: list[str]) -> str:
@@ -1419,6 +1432,7 @@ def run_component(component_path: pathlib.Path, invoke: str, *,
                   config_fields=(),
                   isolate=None,
                   declared_targets=()) -> str:
+                  fuel: int | None = None) -> str:
     """Invoke `invoke` (a WAVE call expr, e.g. ``make("x", 5)``) on the
     component under wasmtime's COMPONENT MODEL (``wasmtime run --invoke``, which
     only accepts a component here) and return wasmtime's WAVE-formatted result
@@ -1443,6 +1457,14 @@ def run_component(component_path: pathlib.Path, invoke: str, *,
     ``config_fields`` is the set of config fields a spawn template may read.
     """
     limits = _run_limits(limits, fuel, memory_bytes, wall_seconds)
+    ``fuel`` bounds the guest by *work* (wasm instructions) rather than by
+    elapsed time: when the budget is spent wasmtime traps with "all fuel
+    consumed by WebAssembly" and exits non-zero, which reads as an ordinary
+    contained trap. Without it the only bound on a boundary function that never
+    returns is the wall-clock ``timeout`` below, so a guest that loops forever
+    is killed as a ``subprocess.TimeoutExpired`` — a Python exception, not a
+    trap — which is the wrong shape for a caller that grades traps. Callers
+    that invoke an untrusted candidate should pass a budget."""
     binary = wasmtime_binary()
     if binary is None:
         raise EmitError("wasmtime not found")
@@ -1471,9 +1493,15 @@ def run_component(component_path: pathlib.Path, invoke: str, *,
         raise ComponentTrap(
             "wall", f"the guest did not return within the "
                     f"{limits.wall_seconds}s ceiling and was killed") from exc
+    argv = [binary, "run"]
+    if fuel is not None:
+        argv += ["-W", f"fuel={fuel}"]
+    argv += ["--invoke", invoke, str(component_path)]
+    result = subprocess.run(argv, capture_output=True, text=True, timeout=120)
     if result.returncode != 0:
         detail = result.stderr.strip()
         raise ComponentTrap(_classify_failure(detail), detail)
+        raise EmitError(f"component invocation failed: {result.stderr.strip()}")
     return result.stdout.strip()
 
 
@@ -1493,6 +1521,7 @@ def run_component_str(component_path: pathlib.Path, func: str, arg: str, *,
                       config_fields=(),
                       isolate=None,
                       declared_targets=()) -> str:
+                      fuel: int | None = None) -> str:
     """`func(arg)` for a ``string``-returning export — unquotes the WAVE result.
 
     The argument rides in ONE argv entry (`--invoke 'func("...")'`), and Linux
@@ -1511,6 +1540,9 @@ def run_component_str(component_path: pathlib.Path, func: str, arg: str, *,
     ``declared_targets``) are forwarded to :func:`run_component`; a generated
     component is confined by default, so no caller has to remember to pass a
     budget."""
+    ``fuel`` is forwarded to :func:`run_component`; pass a budget when the
+    candidate is untrusted, so a non-terminating boundary function traps
+    instead of stalling the runtime until the wall-clock timeout."""
     if len(arg) > ARGV_STR_LIMIT:
         raise EmitError(
             f"argument of {len(arg)} bytes exceeds what one argv entry can "
@@ -1521,6 +1553,7 @@ def run_component_str(component_path: pathlib.Path, func: str, arg: str, *,
                         wall_seconds=wall_seconds, declared=declared,
                         allowed=allowed, config_fields=config_fields,
                         isolate=isolate, declared_targets=declared_targets)
+    out = run_component(component_path, f'{func}("{arg}")', fuel=fuel)
     if len(out) >= 2 and out[0] == '"' and out[-1] == '"':
         return out[1:-1]
     return out

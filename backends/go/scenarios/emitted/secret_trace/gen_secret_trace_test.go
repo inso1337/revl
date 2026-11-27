@@ -764,6 +764,7 @@ func (m *Map[V]) Drop() {
 	m.mu.Unlock()
 	revlHostRelease()
 }
+func (m *Map[V]) Drop() { hostRecord("map.drop"); revlHostRelease() }
 func (m *Map[V]) Insert(k string, v V) {
 	m.journalNote(k, "insert")
 	m.mu.Lock()
@@ -858,6 +859,7 @@ func Issuer() stc.Component {
 					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
 				}
 			}()
+		Apply: func(ctx *stc.Context) (stc.Inverse, error) {
 			var pool *Pool
 			if err := ctx.Effect(func() stc.Inverse {
 				pool = PoolOpen("pg://main", 2)
@@ -957,6 +959,7 @@ func TestTheIssuerActivatesAndRevertsItsPool(revlT *testing.T) {
 		if err := _f.Ready(stdctx.Background()); err != nil {
 			revlT.Fatalf("%s: %v", "lifecycle test \"the issuer activates and reverts its pool\": load Issuer", err)
 		}
+		_fibers["Issuer"] = _f
 	}
 	_revlAt = "unload Issuer"
 	if _f, _ok := _fibers["Issuer"]; _ok {

@@ -258,6 +258,7 @@ vocabulary. The floor vocabulary is therefore `declared`, `keyed`, and
 
 **Item 207 removed `shape-proven` from this section.** It was written here as
 a PEER of `keyed` (a static proof over an inverse body), but nothing ever
+a PEER of `keyed` — a static proof over an inverse body — and nothing ever
 produced it. Its provenance is an inverse, and every consumer that graded the
 register set grades a forward emission, so no declaration could reach it; over
 the whole producible vocabulary the `shape-proven` floor was an exact synonym
@@ -328,6 +329,7 @@ the policy-level `evidenceRoot` are the section-6.3 acknowledgments (the
 example shows both forms; a real file needs at most one). An `"outcome"` key
 selects the advisory soft form of issue #2753 (`observe`, `canary` or
 `review`); omitted, the entry is the hard `requires evidence` rule.
+example shows both forms; a real file needs at most one).
 
 An unknown facet name, status, or register level is a `PolicyError` at parse
 time (a closed vocabulary, like every other rule family): a typo must not

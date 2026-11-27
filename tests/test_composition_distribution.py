@@ -90,6 +90,7 @@ def _project(tmp_path: Path, *, lock: dict | None = None) -> Path:
 
 _PINNED = {"lockVersion": 1,
            "trucs": [{"name": "pg_database", "sourceHash": _sha(_PG_COMPONENT)}]}
+           "trucs": [{"name": "pg_database", "sourceHash": "a" * 64}]}
 
 
 # --------------------------------------------------------------------------- #
@@ -147,6 +148,8 @@ def test_a_stack_layer_from_path_outside_its_truc_is_refused(tmp_path):
         "lockVersion": 1,
         "trucs": [{"name": "pg_database", "sourceHash": _sha(_PG_COMPONENT)},
                   {"name": "evil", "sourceHash": _sha(_PG_COMPONENT)}]})
+        "trucs": [{"name": "pg_database", "sourceHash": "a" * 64},
+                  {"name": "evil", "sourceHash": "b" * 64}]})
     # a secret the project keeps outside any truc
     (tmp_path / "secret.rvl").write_text(_PG_COMPONENT)
     evil = tmp_path / "trucs" / "evil"
@@ -172,10 +175,18 @@ def test_a_stack_layer_reading_its_own_truc_is_admitted(tmp_path):
         "lockVersion": 1,
         "trucs": [{"name": "pg_database", "sourceHash": _sha(_PG_COMPONENT)},
                   {"name": "metrics_kit", "sourceHash": _sha(_KIT_COMPONENT)}]})
+        "trucs": [{"name": "pg_database", "sourceHash": "a" * 64},
+                  {"name": "metrics_kit", "sourceHash": "b" * 64}]})
     kit = tmp_path / "trucs" / "metrics_kit"
     kit.mkdir(parents=True)
     (kit / "services.rvl").write_text("service Metrics { fn tick() -> Int }\n")
     (kit / "component.rvl").write_text(_KIT_COMPONENT, encoding="utf-8")
+    (kit / "component.rvl").write_text("""
+use "services.rvl" { }
+component KitMetrics provides metrics: Metrics {
+  provide metrics { fn tick() = 1 }
+}
+""")
     (kit / "layer.rvl").write_text("""
 layer MetricsKit for Demo {
   add row @metrics from "component.rvl" provides metrics

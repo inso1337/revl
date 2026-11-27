@@ -218,6 +218,7 @@ def test_first_class_emitting_arrow_is_unbounded_never_zero():
     handed on as a value). The fold reads IR, so it is measured on the IR an
     earlier compiler emitted (`tests/_legacy_emission_ir.py`)."""
     src = """
+    card = _card("""
 service Svc { emission fn run() -> Int }
 extern emission fn boom() -> Int = @py { return 1 }
 fn dispatch(f: () -> Int) -> Int { return f() }
@@ -230,6 +231,7 @@ component C provides svc: Svc {
         compile_source(src, "t.rvl")
     with value_rule_off():
         card = _card(src)
+""")
     assert card["C"]["verdict"] == "unbounded"
     # the unnameable boundary `*` is present and unbounded, never counted 0
     star = card["C"]["per_capability"]["*"]

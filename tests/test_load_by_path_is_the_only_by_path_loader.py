@@ -56,6 +56,9 @@ _EXTERNAL = ("the cordis-wasm runtime from a checkout OUTSIDE this repository, "
 # registration.
 ALLOWED = {
     ("tests/_load_by_path.py", "load_by_path"): "the helper itself",
+    ("tests/_backend_import.py", "backend_emitter"):
+        "a caching loader for backend emitters under per-tier unique names; "
+        "it returns the registered module before loading",
     ("tests/test_tier_host_trace_secret_421_f6.py", "_backend"):
         "returns the registered module before loading, and needs the emitter's "
         "directory on sys.path while it executes",

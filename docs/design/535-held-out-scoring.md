@@ -26,6 +26,7 @@ scoring run is judged on. The generator, the scorer, the bucket vocabulary and
 the fence are all public and meant to be read; the draw is a function of a
 **seed that is proved absent from the tracked tree before a single program is
 generated**, and it exists only in memory for the length of one run. Four
+generated**, and it exists only in memory for the length of one run. Three
 things are enforced rather than promised: the draw is never written to the tree
 (so it cannot become readable next time); the seed is a file outside every git
 repository, readable only by its owner, and its content is checked against the
@@ -36,6 +37,13 @@ a diff that reaches the scorer's own files is refused instead of scored. Every
 unknown is a refusal, including the two vacuity unknowns: a draw on which the
 gate issued no admission, and a draw carrying no near miss the reference
 refuses, are refusals rather than clean verdicts.
+(so it cannot become readable next time), the seed is checked against the
+tracked tree with `git grep` and a seed found there is refused, and the
+candidate's changed-file set is required and a diff that reaches the scorer's
+own files is refused instead of scored. Every unknown is a refusal, including
+the two vacuity unknowns: a draw on which the gate issued no admission, and a
+draw carrying no near miss the reference refuses, are refusals rather than
+clean verdicts.
 
 ## 1. The gap, measured
 
@@ -94,6 +102,10 @@ What it leaves open, in descending order of seriousness:
    is still readable and the only recovery is still to re-draw; what custody and
    rotation add is that the re-draw cannot be the same draw twice without the
    verdict saying so. This is the residual that option 2.4 partially covers and
+   operator pasting it into a pull request. Real and not fully answered: the
+   verdict carries `sha256` of the seed rather than the seed, and rotation is a
+   stated parameter, but a leaked seed's draw is readable and the only recovery
+   is to re-draw. This is the residual that option 2.4 partially covers and
    nothing here eliminates.
 4. **The candidate special-cases the grammar's surface.** A compiler change
    that handles generated-looking programs on a shortcut that real programs do
@@ -109,6 +121,8 @@ What it leaves open, in descending order of seriousness:
    the string inside it is still the operator's, and a candidate that talked the
    operator into a particular seed has still chosen the draw. Custody is slice
    5's other half and is done; this remains open.
+5. **The operator picks a seed the candidate suggested.** Not answered.
+   Custody of the seed is slice 5.
 
 ### 2.2 Keep the set outside the repository and have the gate fetch it (REJECTED)
 
@@ -181,6 +195,7 @@ Not withheld at all, deliberately: the grammar, the near-miss families, the
 scorer, the bucket vocabulary, the fence, and this document.
 
 ### 3.2 The four enforcements
+### 3.2 The three enforcements
 
 **The set is not a file.** `draw()` builds programs in memory. Nothing writes a
 `.rvl`. `test_a_scoring_run_writes_nothing_into_the_tree` compares
@@ -211,12 +226,23 @@ executable. The residual is stated rather than papered over: a candidate that
 runs as the same OS user can read an owner-only file, and a candidate that
 controls the gate host can lie about the verdict (section 6, non-goal). What the
 check establishes is location and permissions, not process isolation.
+**The seed is proved absent from the tree.** `git grep --fixed-strings` over
+the tracked tree, because what a candidate reads is what is tracked. A seed
+found there is refused (`seed-in-tree`), a seed shorter than 16 characters is
+refused without being searched for (a short string matches by accident and the
+refusal would be noise), and a tree that cannot be searched is refused
+(`seed-check-unavailable`). This is the enforcement that turns "the candidate
+cannot read it" into a check: the repository is readable, so the requirement is
+that the seed is not in it, and that requirement is executable.
 
 The test suite eats its own cooking here. A literal seed committed in
 `tests/test_heldout_scoring.py` would be refused, correctly, so the fixture seed
 is the digest of a phrase rather than the phrase, written into a disposable
 owner-only file outside the tree, and
 `test_the_fixture_seed_is_itself_absent_from_the_tree` holds the content half.
+`tests/test_heldout_scoring.py` would be refused, correctly, so the fixture
+seed is the digest of a phrase rather than the phrase, and
+`test_the_fixture_seed_is_itself_absent_from_the_tree` holds that property.
 A fixture seed is not held out from anybody -- a reader recomputes it in a line
 -- which is why the verdict records `seed_source` and this document says so
 rather than leaving the distinction to a comment.
@@ -240,6 +266,11 @@ scorer keeps, not a guarantee about an operator who deliberately forks it.
 **The diff cannot reach the scorer.** `HELD_OUT_FENCE` is the `held_out` view
 of the evaluator set in the table below. Those are the files that decide what is
 drawn and what counts as a divergence. The candidate's changed-file set is
+**The diff cannot reach the scorer.** `HELD_OUT_FENCE` is five paths:
+`tools/heldout_scoring.py`, `tests/test_heldout_scoring.py`,
+`tools/gate_reference_census.py`, `tools/build_gate_crate.py` and
+`tests/test_selfhost_lower.py`. Those are the files that decide what is drawn
+and what counts as a divergence. The candidate's changed-file set is
 **required** -- a run that does not know what the candidate changed cannot
 claim the candidate could not reach the scorer, so `no-diff` is a refusal --
 and a diff that touches a fenced path is refused with the path named.
@@ -323,6 +354,9 @@ into every scorecard and every controller verdict, and the controller refuses a
 stage record whose digest differs from its own. It proves identity, not
 correctness: who holds the expected value, and how it rotates, is the custody
 question in issue #2762.
+produce. The fence is the scorer, never the subject. Two of the five fenced
+paths are under `tests/`, and they are exempted by name rather than by
+forbidding the directory.
 
 Refused is not failed. A candidate that has to change the census tool is making
 a semantic change to the scorer, and item 537's own list says a semantic change
@@ -425,6 +459,7 @@ fail-open shape, and most serious findings in this repository have it.
 | `seed-file-unreadable:...` | the file could not be stat'ed or read |
 | `seed-file-unresolvable:...` | the path could not be canonicalised |
 | `seed-empty` | the file holds only whitespace |
+| `no-seed` | no `--seed` and no `REVL_HELDOUT_SEED` |
 | `seed-too-short` | fewer than 16 characters |
 | `seed-in-tree` | `git grep` finds it in the tracked tree |
 | `seed-check-unavailable:...` | git missing, or an exit status that is neither found nor not-found |
@@ -461,6 +496,10 @@ scored run, 1 for the first), `protocol_digest`, `seed_digest`, `seed_source`,
 `draw_digest`, `fence`, `candidate_changed_files`, `liveness`,
 `zero_tolerance` (the case ids, by bucket) and `buckets` (counts). A refusal
 record carries the name and an empty score, never a partial one.
+`rotation`, `seed_digest`, `seed_source`, `draw_digest`, `fence`,
+`candidate_changed_files`, `liveness`, `zero_tolerance` (the case ids, by
+bucket) and `buckets` (counts). A refusal record carries the name and an empty
+score, never a partial one.
 
 `protocol_digest` is the evaluator identity from section 3.2. It is in every
 record, refusals included, so a record that names no protocol is visibly
@@ -472,6 +511,9 @@ operator's file. It is in the record because the tool cannot tell whether that
 file is secret and should not pretend to. It can tell, and does, that the file
 is outside every git repository, owner-only, and that its content is not in the
 tracked tree.
+`seed_source` is `argv` or `env`, and it is in the record because the tool
+cannot tell whether an operator's seed is secret and should not pretend to. It
+can tell, and does, that the seed is not in the repository.
 
 Slice 2 and slice 3 add `bypass` (the allowance, the families found, the
 families beyond the allowance, and `reachable`) and `tells` (per named tell,
@@ -651,6 +693,10 @@ FAILED component and not a skipped one, and a REFUSED run is a fail with the
 refusal name in the reason. The seed file path is not a candidate record key,
 because a candidate that could name its own seed would choose the draw it is
 judged on.
+Fail-closed on two paths of its own: an unset `REVL_HELDOUT_SEED` is a FAILED
+component and not a skipped one, and a REFUSED run is a fail with the refusal
+name in the reason. The seed is not a candidate record key, because a candidate
+that could name its own seed would choose the draw it is judged on.
 
 There is also a CI job now, `held-out` in `.github/workflows/ci.yml`, and its
 seed is drawn IN THE JOB rather than held in a repository secret. That follows
@@ -667,6 +713,10 @@ that routes to human review, and the size bound is a review bound whose
 regenerated-artifact churn is already excluded from the line count. The job is
 advisory (`NOT_REQUIRED_CHECKS`) for that reason and the enforcement is in the
 reward, where a conjunction admits no advisory verdict.
+fails except `diff-reaches-fence`, which passes with an annotation because a
+candidate changing the scorer is making a semantic change that routes to human
+review. The job is advisory (`NOT_REQUIRED_CHECKS`) for that reason and the
+enforcement is in the reward, where a conjunction admits no advisory verdict.
 
 **Slice 5 -- rotation and custody (CUSTODY DONE, ROTATION ENFORCED).** Where the
 seed comes from, who holds it, how often it changes, and what happens when it
@@ -681,6 +731,10 @@ instead of exporting a literal. What remains of the slice is what custody cannot
 answer: an operator who picks a seed the candidate suggested (2.1.5), a
 commitment with a third-party timestamp (2.4), and same-user readability on a
 shared host (2.1.3).
+**Slice 5 -- rotation and custody (NOT DONE).** Where the seed comes from, who
+holds it, how often it changes, and what happens when it leaks. Two rotations
+are now implemented rather than one -- operator-supplied per invocation, and
+per-run-drawn in CI -- and neither decides custody. Still open.
 
 **Slice 6 -- the other eight mechanisms (NOT DONE).** Item 537's exit also asks
 that the remaining mechanisms in the review's list are each either implemented
@@ -688,6 +742,9 @@ or recorded as a named, unowned demand. One of nine is implemented in full, and
 the size half of demand 6 now has a named refusal; the dependency-closure half
 and the other seven mechanisms are named in section 6 as demands, which is the
 weaker half of that exit and is honest about being weaker.
+or recorded as a named, unowned demand. One of nine is implemented. The other
+eight are named in section 6 as demands, which is the weaker half of that exit
+and is honest about being weaker.
 
 ## 6. Non-goals, and the demands this does not meet
 
@@ -717,6 +774,7 @@ and does not have an owner for.
 5. The second-model council of item 516.
 6. A bound on a diff's **dependency closure**. Its size half is now implemented
    (`diff-too-large`); the closure is not.
+6. A bound on a diff's size and its dependency closure.
 7. A rule that routes a semantic change to the approval authority of item 55.
 8. A commitment with a third-party timestamp rather than the operator's own.
 
@@ -730,6 +788,7 @@ corrupt rotation ledger, a seed file other users can read, a reused seed
 digest, a diff over the file limit, a diff over the line limit, a large diff
 that touches the fence keeping the fence refusal, the line count skipping the
 regenerated paths, `no-diff`, each fenced path, an engine that will
+`seed-in-tree`, `no-diff`, each of the six fenced paths, an engine that will
 not build, an unreadable bypass allowance, a draw a tell separates, and both
 vacuity shapes; a refused run consumes no rotation and a second scored seed
 advances the count to 2; a scored verdict carries the seed digest and
@@ -747,9 +806,17 @@ one byte of `tools/evolution_progress.py` moves `protocol_digest`, a build
 artifact under `formal/` does not, every `EVALUATOR_PATHS` entry exists, and
 `tools/evolution_controller.py` refuses a stage record from another checkout
 with `PROTOCOL_MISMATCH` rather than reading it.
+vacuity shapes; a scoring run leaves `git status --porcelain` byte-identical;
+the reference admits every `inside:` program of a 200-program draw; a certifier
+mutated to admit everything is caught; a gate with no compiler in it that rides
+a surface tell is caught 50 times in 200 on the draw that ships and **is not
+caught at all** on a draw shaped the way slice 1's was; a gate whose refusal
+arm is gone is caught as a new `false-admit` family under an injected in-slice
+reference and is clean under a baselined one.
 
 Verified on the wiring: `tools/evolution_reward.py` fails the `held-out`
 component on an unset seed file, on a refusal, on a divergence and on a run that
+component on an unset seed, on a refusal, on a divergence and on a run that
 writes no record, and verifies only on a clean one; the probe leaves the
 candidate tree as it found it. The CI job, run on the branch that adds it,
 exits 2 with `diff-reaches-fence` naming both scorer files, which is the
@@ -759,6 +826,7 @@ seed file and the ledger write beside it are covered by the unit tests and not
 by CI. A pinned test reads the workflow and holds `diff-too-large:*` in the
 same warning branch as `diff-reaches-fence:*`; the job's live behavior on a
 batch push over the line bound is not exercised by this pull request.
+annotated-and-not-blocking path.
 
 **Not verified, and not claimed.** That the draw is indistinguishable from real
 programs: it is not, `closed-vocabulary` recognition is 1.00, and section 3.7
@@ -783,3 +851,11 @@ reference depends on: the closure test classifies that file as **subject**,
 which is correct (the candidate must be able to change it) and is also the
 limit of what a fence can do. That the CI job has ever run on GitHub: it is
 added by this change and its first run is this pull request's.
+than leaving an empty bucket to be misread. That an operator's seed is secret
+-- the tool checks only that it is not in the repository. That the fence is
+complete against a candidate that reaches the scorer by a route other than
+editing one of its files, for example by changing a file `src/revl/` imports
+that the census's reference depends on: the closure test classifies that file
+as **subject**, which is correct (the candidate must be able to change it) and
+is also the limit of what a fence can do. That the CI job has ever run on
+GitHub: it is added by this change and its first run is this pull request's.

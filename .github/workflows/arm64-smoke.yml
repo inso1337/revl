@@ -7,6 +7,8 @@ name: arm64-smoke
 # pointer-width assumption would break. It is DELIBERATELY not a PR gate: it runs
 # on main + a nightly schedule (and on demand), on a lane separate from the
 # hosted x86 runners, so it adds coverage and capacity without slowing any PR.
+# on main + a nightly schedule (and on demand), on a lane separate from the x86
+# runners, so it adds coverage and capacity without slowing any PR.
 #
 # Python comes from uv (not actions/setup-python): the box is Ubuntu 20.04 and
 # setup-python@v5 has no 3.11 arm64 build for 20.04, so it always failed. uv

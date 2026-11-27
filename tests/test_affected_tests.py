@@ -69,6 +69,9 @@ def test_compile_reachable_nonleaf_is_full():
     assert "attest" in at.compile_reachable(ROOT)
     r = sel("src/revl/attest.py")
     assert r["full"] is True and "compile-reachable" in r["reason"]
+    # run_go is on the lazy compile-reachable graph -> full even though it looks
+    # tier-specific. Fail-safe over-selection is intended.
+    assert sel("src/revl/run_go.py")["full"] is True
 
 
 # --- stdlib module -> only tests touching its public API ------------------- #
@@ -164,6 +167,7 @@ def test_deleted_test_file_is_still_full():
 def test_added_test_file_alone_is_not_full():
     # Nothing else changed, so nothing but the new test (and the two
     # whole-tree guards, since an added test is a new `.py`) can newly fail.
+    # Nothing else changed, so nothing but the new test can newly fail.
     r = _override(["tests/test_newthing.py"], added={"tests/test_newthing.py"})
     assert r is not None and r["full"] is False
     # An added test is a .py change, so the read_text guard (issue #2639) and
@@ -172,6 +176,7 @@ def test_added_test_file_alone_is_not_full():
     assert set(r["pytest"]) == {
         "tests/test_newthing.py", at.READ_TEXT_GUARD_TEST,
         at.OPEN_ENCODING_GUARD}
+    assert r["pytest"] == ["tests/test_newthing.py"]
     assert r["backends"] == []
 
 
@@ -467,12 +472,16 @@ def test_modified_test_file_without_importers_selects_only_itself_and_the_guards
     whole-tree guards (a modified `.py` can add a bare read_text site or an
     unpinned open); no other test is dragged in. A synthetic name is used so
     the assertion does not rot when tests are added."""
+def test_modified_test_file_without_importers_is_only_itself():
+    """A leaf test nothing imports still selects just itself (no over-selection).
+    A synthetic name is used so the assertion does not rot when tests are added."""
     r = sel("tests/test__no_importer_sentinel__.py")
     assert set(r["pytest"]) == {
         "tests/test__no_importer_sentinel__.py",
         at.READ_TEXT_GUARD_TEST,
         at.OPEN_ENCODING_GUARD,
     }
+    assert r["pytest"] == ["tests/test__no_importer_sentinel__.py"]
 
 
 def test_test_importers_ignores_prefix_siblings():
@@ -1008,6 +1017,8 @@ def test_the_derived_rule_does_not_replace_the_hand_written_tables():
     computes, walks to from a root it holds in a variable, or declares only in
     prose. Only some of the modules in BENCH_DEPENDENT_TESTS spell a `bench/`
     path, so the derived rule finds fewer than the table declares. It is a
+    prose. Of the 18 modules in BENCH_DEPENDENT_TESTS, exactly three spell a
+    `bench/` path, so the derived rule finds three of eighteen. It is a
     complement to those tables, not their replacement."""
     cp = at.companion_paths(ROOT)
     spelled = {t for t, paths in cp.items()
@@ -1450,12 +1461,16 @@ def test_a_backend_import_counts_where_the_backend_is_loaded(tmp_path):
     """A `backends/` file runs only when something loads it, so its `revl.*`
     imports are edges from every module that loads code (by path, by name, or
     by `exec`), not roots. A mention of `exec(` in a comment loads nothing."""
+def test_a_module_a_backend_imports_is_reachable(tmp_path):
+    """The compile path loads backend files by path, so their `revl.*` imports
+    are roots even though no `src/revl` module names them."""
     root = _tree(tmp_path, {
         "src/revl/__init__.py": "from . import loader, prose\n",
         "src/revl/loader.py": "import importlib.util\n"
                               "def load(p):\n"
                               "    return importlib.util.spec_from_file_location('x', p)\n",
         "src/revl/prose.py": "# a shell sink: emit sh.exec(emit fs.read(p))\n",
+        "src/revl/__init__.py": "",
         "src/revl/viahost.py": "",
         "src/revl/alone.py": "",
         "backends/py/emit.py": "from revl.viahost import thing\n",
@@ -1519,6 +1534,17 @@ def test_a_leaf_module_change_does_not_word_match_the_importer_closure():
             f"reach metrics is selected: the importer closure is being "
             f"word-matched again"
         )
+def test_an_mcp_module_on_the_compile_path_still_selects_full():
+    """The other direction, on a real chain: `revl.gate` (on the import chain
+    of `revl/__init__`) lazily imports `revl.mcp.session`, which imports
+    `revl.mcp.operator`, which imports `revl.mcp.server`. Each of those can run
+    while compiling, so a change to any of them is FULL."""
+    reach = at.compile_reachable(ROOT)
+    assert {"gate", "mcp.session", "mcp.operator", "mcp.server"} <= reach
+    for module in ("session", "operator", "server"):
+        r = sel(f"src/revl/mcp/{module}.py")
+        assert r["full"] is True, module
+        assert "compile-reachable" in r["reason"]
 
 
 def test_a_test_that_reaches_a_leaf_module_through_its_cli_command_is_selected(
@@ -2042,3 +2068,9 @@ def test_the_corpus_inputs_are_empty_without_a_workflow_and_keep_a_deleted_test(
         "      - run: pytest tests/test_gone.py\n", encoding="utf-8")
     assert at.ci_backend_corpus_inputs(tmp_path) == frozenset(
         {"tests/test_gone.py"})
+def test_a_module_reached_only_through_a_subpackage_is_full():
+    """The unsound direction the old graph had: `revl.run` is reached only
+    through a `revl.mcp` module's relative import, which the old resolution
+    dropped, so a change to it got a narrow selection."""
+    assert "run" in at.compile_reachable(ROOT)
+    assert sel("src/revl/run.py")["full"] is True

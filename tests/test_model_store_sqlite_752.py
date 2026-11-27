@@ -33,6 +33,9 @@ Two check layers, mirroring examples/model_store.rvl's own split
   confined to the driver's `@py` extern bodies), a value that looks like SQL is
   bound and stored verbatim, and the driver's table/column identifiers are
   declared and validated; and
+  the row write still lowers to a revertible `effect` whose inverse is the
+  natural `remove` counterpart, and no raw SQL leaks into the model or query
+  code (it is confined to the driver's `@py` extern bodies); and
 * the lifecycle assertions run on the real cordis-py runtime when it is
   installed (`sh backends/python/setup.sh`): the sqlite driver reverts
   residue-free on teardown and on an injected fault (`abort`) after a create,
@@ -40,6 +43,8 @@ Two check layers, mirroring examples/model_store.rvl's own split
   own driver shows each inverse restored the row's value, while a broken
   create, update or delete inverse leaves the wrong value behind so the revert
   assertion FAILS.
+  residue-free on teardown and on an injected fault (`abort`), and — the teeth
+  — a broken inverse leaves the write behind so the revert assertion FAILS.
 """
 
 import json
@@ -102,6 +107,8 @@ def _lifecycle_block(source: str, title: str) -> str:
 
 # The five lifecycle tests examples/model_store.rvl and the sqlite example
 # share verbatim (the three abort tests, one per mutation, are sqlite-only).
+# The three lifecycle tests examples/model_store.rvl and the sqlite example
+# share verbatim (the fourth, the injected-fault abort, is sqlite-only).
 _SHARED_TITLES = (
     "a created row is readable under its store-assigned key, and reverts residue-free",
     "list returns every created row, and keys are never reused",
@@ -140,6 +147,7 @@ def test_both_drivers_provide_the_same_store_service():
     """The compiled surface is the same for both drivers: identical `Store`
     methods, identical emission/return shape, including the R6 update/delete
     verbs the swap must not change."""
+    methods, identical emission/return shape."""
     mem_ir = compile_files([str(MEMORY)])
     sql_ir = compile_files([str(SQLITE)])
     assert mem_ir["services"]["Store"] == sql_ir["services"]["Store"]
@@ -315,9 +323,11 @@ def test_no_raw_sql_in_the_model_or_query_code():
             "an aborted update reverts residue-free on the sqlite driver",
             "an aborted delete reverts residue-free on the sqlite driver",
         )]
+        _lifecycle_block(src, "an aborted write reverts residue-free on the sqlite driver")]
     haystack = "\n".join(model_regions).lower()
     for tok in ("select ", "insert into", "delete from", "create table",
                 "update notes", " where ", "drop table", "query(", " sql:"):
+                "query(", " sql:"):
         assert tok not in haystack, f"raw SQL leaked into the model/query code: {tok!r}"
 
 
@@ -349,6 +359,13 @@ def test_the_sqlite_driver_runs_and_reverts_residue_free():
                   "an aborted delete reverts residue-free on the sqlite driver"):
         assert f"PASS {title}" in result.stdout, title
     assert "[py] pass: 8 test(s) passed" in result.stdout
+    assert ("PASS a created row is readable under its store-assigned key, "
+            "and reverts residue-free") in result.stdout
+    assert "PASS list returns every created row, and keys are never reused" in result.stdout
+    assert "PASS a reloaded store starts empty" in result.stdout
+    assert ("PASS an aborted write reverts residue-free on the sqlite driver"
+            in result.stdout)
+    assert "[py] pass: 4 test(s) passed" in result.stdout
 
 
 @needs_runtime
@@ -365,7 +382,19 @@ def test_an_invalid_table_identifier_is_refused_at_open(tmp_path):
     result = _revl_test(path)
     assert result.returncode != 0, result.stdout + result.stderr
     assert "refused table or column identifier" in (result.stdout + result.stderr)
+# A file-backed sqlite driver whose db OUTLIVES the component (the `acquire`
+# inverse re-opens the file, it never deletes it), so an aborted write can be
+# OBSERVED after re-loading the store. This is the teeth for the injected-fault
+# revert: the `:memory:` example proves the composition tears down clean, and
+# this proves the row inverse actually ran. {db} is a real temp path.
+_TEETH_TEMPLATE = r'''
+type Note = {{ id: Str, body: Str }}
+type Draft = {{ body: Str }}
 
+service Store {{
+  fn get(id: Str) -> Opt[Note]
+  emission fn create(draft: Draft) -> Str
+}}
 
 @needs_runtime
 @pytest.mark.parametrize("names, refused", [
@@ -392,7 +421,38 @@ def test_a_plain_but_undeclared_identifier_is_refused(tmp_path, names, refused):
     assert result.returncode != 0, result.stdout + result.stderr
     assert ("refused table or column identifier: " + refused
             in result.stdout + result.stderr), result.stdout + result.stderr
+extern pure fn sq_open() -> Str = @py {{
+    import sqlite3
+    conn = sqlite3.connect("{db}")
+    conn.execute("CREATE TABLE IF NOT EXISTS notes (id TEXT PRIMARY KEY, body TEXT)")
+    conn.commit(); conn.close()
+    return "{db}"
+}}
+extern pure fn sq_get(id: Str) -> Opt[Note] = @py {{
+    import sqlite3
+    conn = sqlite3.connect("{db}")
+    row = conn.execute("SELECT id, body FROM notes WHERE id = ?", (id,)).fetchone()
+    conn.close()
+    if row is None:
+        return None
+    return {{"id": row[0], "body": row[1]}}
+}}
+extern pure fn sq_insert(id: Str, body: Str) -> Unit = @py {{
+    import sqlite3
+    conn = sqlite3.connect("{db}")
+    conn.execute("INSERT INTO notes (id, body) VALUES (?, ?)", (id, body))
+    conn.commit(); conn.close()
+    return
+}}
+extern pure fn sq_remove(id: Str) -> Unit = @py {{
+    import sqlite3
+    conn = sqlite3.connect("{db}")
+    {remove_body}
+    return
+}}
 
+component SqliteStore provides store: Store {{
+  let db = effect sq_open() undo sq_open()
 
 @needs_runtime
 def test_a_value_that_looks_like_sql_is_bound_and_stored_verbatim(tmp_path):
@@ -406,6 +466,17 @@ def test_a_value_that_looks_like_sql_is_bound_and_stored_verbatim(tmp_path):
     OR text."""
     src = SQLITE.read_text(encoding="utf-8") + r'''
 lifecycle test "a hostile value is data, not SQL" {
+  provide store {{
+    fn get(id) = sq_get(id)
+    fn create(draft) {{
+      effect sq_insert("note-0", draft.body)
+      undo sq_remove("note-0")
+      return "note-0"
+    }}
+  }}
+}}
+
+lifecycle test "an aborted write is observably gone on re-open" {{
   load SqliteStore
   let id = call store.create({ body: "x'); DROP TABLE notes; --" })
   let hit = call store.get(id)
@@ -483,6 +554,7 @@ _TEETH_TESTS = r'''
 lifecycle test "an aborted create is observably gone on re-open" {
   load SqliteStore
   call store.create({ body: "doomed" })
+  call store.create({{ body: "doomed" }})
   abort
   load SqliteStore
   let seen = call store.get("note-0")
@@ -512,6 +584,7 @@ lifecycle test "an aborted delete restores the removed row on re-open" {
   unload SqliteStore
   assert no_residue
 }
+}}
 '''
 
 _TEETH_TITLES = {
@@ -602,6 +675,9 @@ def _run_teeth(tmp_path: Path, broken: str | None) -> tuple:
     path = tmp_path / f"teeth_{broken or 'ok'}.rvl"
     path.write_text(src, encoding="utf-8")
     return _revl_test(path), _rows_after(db_path)
+_REMOVE_OK = ('conn.execute("DELETE FROM notes WHERE id = ?", (id,))\n'
+              '    conn.commit(); conn.close()')
+_REMOVE_BROKEN = 'conn.close()'  # the inverse does nothing — the write survives
 
 
 @needs_runtime
@@ -612,10 +688,18 @@ def test_the_injected_fault_write_revert_is_observable(tmp_path):
     delete inverses put back the seeded value, seen both in-language after the
     re-load and by reading the file after the run."""
     result, rows = _run_teeth(tmp_path, None)
+    """Positive teeth: write a row, ABORT, re-open the store on the same file —
+    the row is gone, because `create`'s inverse (the DELETE) replayed."""
+    db = (tmp_path / "notes.db").as_posix()
+    src = _TEETH_TEMPLATE.format(db=db, remove_body=_REMOVE_OK)
+    path = tmp_path / "teeth_ok.rvl"
+    path.write_text(src, encoding="utf-8")
+    result = _revl_test(path)
     assert result.returncode == 0, result.stdout + result.stderr
     for title in _TEETH_TITLES.values():
         assert f"PASS {title}" in result.stdout, title
     assert rows == _ROWS_RESTORED
+    assert "PASS an aborted write is observably gone on re-open" in result.stdout
 
 
 @needs_runtime
@@ -627,8 +711,18 @@ def test_a_broken_inverse_leaves_the_write_and_is_caught(tmp_path, broken):
     two still pass, and the file holds the value the broken inverse left. An
     assertion that can only pass is not an assertion."""
     result, rows = _run_teeth(tmp_path, broken)
+def test_a_broken_inverse_leaves_the_write_and_is_caught(tmp_path):
+    """Negative teeth: break the inverse so the aborted write survives — the
+    in-language `assert seen == None` then FAILS. An assertion that can only
+    pass is not an assertion."""
+    db = (tmp_path / "notes.db").as_posix()
+    src = _TEETH_TEMPLATE.format(db=db, remove_body=_REMOVE_BROKEN)
+    path = tmp_path / "teeth_broken.rvl"
+    path.write_text(src, encoding="utf-8")
+    result = _revl_test(path)
     assert result.returncode == 1, result.stdout + result.stderr
     assert f"FAIL {_TEETH_TITLES[broken]}" in result.stdout, result.stdout
+    assert "FAIL an aborted write is observably gone on re-open" in result.stdout
     assert "assertion failed" in result.stdout
     for other, title in _TEETH_TITLES.items():
         if other != broken:

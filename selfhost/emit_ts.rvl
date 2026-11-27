@@ -259,9 +259,11 @@ type StmtOut = { lines: List[Str], counter: Int }
 // `empty_list_types` computes; it rides on ACx because a `let` can sit at any
 // depth of the statement tree `v3_stmt` walks.
 type ACx = { in_async: Bool, in_arrow: Bool, ops: List[Str], async_names: List[Str], async_locals: List[Str], empty_lists: Map[Str, Str], routes: List[Str], req_keys: Map[Str, Str], test_mode: Bool, comps: List[Any], i64_tmp: Bool, module: Map[Str, Str] }
+type ACx = { in_async: Bool, in_arrow: Bool, ops: List[Str], async_names: List[Str], async_locals: List[Str], empty_lists: Map[Str, Str], routes: List[Str], test_mode: Bool, comps: List[Any] }
 
 // The sync, non-component context: the pure fn/test pass and every sync body.
 fn sync_acx(module: Map[Str, Str]) -> ACx { return { in_async: false, in_arrow: false, ops: [], async_names: [], async_locals: [], empty_lists: Map.empty(), routes: [], req_keys: Map.empty(), test_mode: false, comps: [], i64_tmp: false, module: module } }
+fn sync_acx() -> ACx { return { in_async: false, in_arrow: false, ops: [], async_names: [], async_locals: [], empty_lists: Map.empty(), routes: [], test_mode: false, comps: [] } }
 
 // The `"<reqKey>#<method>"` await-seed key.
 fn async_op_key(req_key: Str, method: Str) -> Str {
@@ -462,6 +464,7 @@ fn ts_scalar_type(name: Str) -> Str {
   // `Value` (stdlib/value.rvl) is the named erased-dynamic builtin and takes
   // the same host erasure as the `Any` wildcard (issue #3019).
   if (name == "Any" || name == "Value") { return "any" }
+  if (name == "Any") { return "any" }
   if (name == "Never") { return "never" }
   return ""
 }
@@ -477,6 +480,7 @@ fn last_index(s: Str, ch: Str) -> Int {
 
 // `_split_v3_types`: split a type-arg list on the top-level commas only. Braces
 // nest like brackets, so a structural record type stays one part (issue #2297).
+// `_split_v3_types`: split a type-arg list on the top-level commas only.
 fn split_type_args(inner: Str) -> List[Str] {
   var parts = []
   var depth = 0
@@ -486,10 +490,12 @@ fn split_type_args(inner: Str) -> List[Str] {
   while (i < n) {
     let ch = inner.charAt(i)
     if (ch == "[" || ch == "(" || ch == "{") {
+    if (ch == "[" || ch == "(") {
       depth += 1
       current = current.concat(ch)
     } else {
       if (ch == "]" || ch == ")" || ch == "}") {
+      if (ch == "]" || ch == ")") {
         depth -= 1
         current = current.concat(ch)
       } else {
@@ -623,6 +629,7 @@ fn ts_type(name: Str) -> Str {
     let args = split_type_args(inner)
     if (base == "Opt") { return ts_type(args[0]).concat(" | undefined") }
     if (base == "List") { return ts_list_type(ts_type(args[0])) }
+    if (base == "List") { return ts_type(args[0]).concat("[]") }
     if (base == "Map") { return `Map<${ts_type(args[0])}, ${ts_type(args[1])}>` }
     if (base == "Result") {
       return `{ kind: "Ok"; value: ${ts_type(args[0])} } | { kind: "Err"; value: ${ts_type(args[1])} }`
@@ -744,6 +751,9 @@ fn commajoin(nodes: List[Any], counter: Int, acx: ACx) -> Rendered {
 // constructors -> identity lambda, host roots -> host.<name>, and anything
 // else is a local (`local_ident`).
 fn render_var(node: Any, acx: ACx) -> Str {
+// `_v3_var`: a bare name. None -> undefined, the Some/Ok/Err constructors ->
+// identity lambda, host roots -> host.<name>, otherwise the mangled name.
+fn render_var(node: Any) -> Str {
   let nm = value_str(value_field(node, "name"))
   let module_kind = acx.module.has(nm) ? map_get(acx.module, nm) : ""
   if (module_kind == "fn") { return mangle_module(nm) }
@@ -751,6 +761,7 @@ fn render_var(node: Any, acx: ACx) -> Str {
   if (nm == "Some" || nm == "Ok" || nm == "Err") { return "((value) => value)" }
   if (nm == "Pool" || nm == "Map" || nm == "Job") { return "host.".concat(nm) }
   return local_ident(nm, acx.module)
+  return ident(nm)
 }
 
 // `_literal`: null/bool are keywords, an Int literal is a BigInt literal (`123n`),
@@ -851,6 +862,7 @@ fn render_builtin(method: Str, target: Str, args: List[Str], arg_nodes: List[Any
   }
   if (method == "set") {
     return { text: `(<K, V>(_m: Map<K, V>, _k: K, _v: V) => { const _c = new Map(_m); _c.set(_k, _v); return _c })(${target}, ${args[0]}, ${args[1]})`, counter: counter }
+    return { text: `(() => { const c = new Map(${target}); c.set(${args[0]}, ${args[1]}); return c })()`, counter: counter }
   }
   if (method == "lookup") { return { text: `${target}.get(${args[0]})`, counter: counter } }
   if (method == "has") { return { text: `${target}.has(${args[0]})`, counter: counter } }
@@ -860,6 +872,7 @@ fn render_builtin(method: Str, target: Str, args: List[Str], arg_nodes: List[Any
   }
   if (method == "remove") {
     return { text: `(<K, V>(_m: Map<K, V>, _k: K) => { const _c = new Map(_m); _c.delete(_k); return _c })(${target}, ${args[0]})`, counter: counter }
+    return { text: `(() => { const c = new Map(${target}); c.delete(${args[0]}); return c })()`, counter: counter }
   }
   if (method == "to_str") { return { text: `${target}.toString()`, counter: counter } }
   return { text: `<<UNSUPPORTED-BUILTIN:${method}>>`, counter: counter }
@@ -912,12 +925,14 @@ fn emission_call_node(node: Any, acx: ACx) -> Bool {
 // with no `await` in its text and the arm arrow's own `async`/`await` pair is
 // what resolves it. Mirrors the reference exactly.
 fn match_expr(node: Any, counter: Int, outer: ACx) -> Rendered {
+fn match_expr(node: Any, counter: Int, acx: ACx) -> Rendered {
   let c0 = counter + 1
   let tmp = `$revl_match_${c0}`
   let sr = expr(value_field(node, "scrutinee"), c0, outer)
   // issue #2904: the arms render inside the IIFE's own function, which does
   // not declare the Int temp, so an arm keeps the `revlI64` call.
   let acx = { outer | i64_tmp = false }
+  let sr = expr(value_field(node, "scrutinee"), c0, acx)
   var c = sr.counter
   let arms = value_list(value_field(node, "arms"))
   var is_opt = false
@@ -945,6 +960,7 @@ fn match_expr(node: Any, counter: Int, outer: ACx) -> Rendered {
           let bind = value_str(value_field(arm, "bind"))
           if (bind != "") {
             let b = local_ident(bind, acx.module)
+            let b = ident(bind)
             if (arm_is_async(body, acx, colour_by_text)) {
               lines = lines.push(`  if (${tmp} !== undefined) return (await (async (${b}) => (${body}))(${tmp}))`)
             } else {
@@ -977,6 +993,7 @@ fn match_expr(node: Any, counter: Int, outer: ACx) -> Rendered {
       let bind = value_str(value_field(arm, "bind"))
       if (bind != "") {
         let b = local_ident(bind, acx.module)
+        let b = ident(bind)
         if (arm_is_async(body, acx, colour_by_text)) {
           lines = lines.push(`      return (await (async (${b}) => (${body}))(${tmp}.value))`)
         } else {
@@ -1102,6 +1119,8 @@ fn render_bin(node: Any, counter: Int, acx: ACx) -> Rendered {
       if (op == "==" || op == "===") { sop = "===" }
       return { text: `(${typed_literal(ln, l.text)} ${sop} ${typed_literal(rn, r.text)})`, counter: r.counter }
     }
+    let l = expr(value_field(node, "left"), counter, acx)
+    let r = expr(value_field(node, "right"), l.counter, acx)
     let call = `revlEq(${l.text}, ${r.text})`
     if (op == "==" || op == "===") { return { text: call, counter: r.counter } }
     return { text: `(!${call})`, counter: r.counter }
@@ -1131,6 +1150,7 @@ fn render_bin(node: Any, counter: Int, acx: ACx) -> Rendered {
   let r = expr(value_field(node, "right"), l.counter, acx)
   if (is_addsubmul(op) && opnd == "Int") {
     return { text: bounded_i64(`${l.text} ${jop} ${r.text}`, acx), counter: r.counter }
+    return { text: `revlI64(${l.text} ${jop} ${r.text})`, counter: r.counter }
   }
   if (is_addsubmul(op) && opnd == "Int32") {
     return { text: `revlI32(${l.text} ${jop} ${r.text})`, counter: r.counter }
@@ -1174,6 +1194,7 @@ fn render_un(node: Any, counter: Int, acx: ACx) -> Rendered {
   if (op == "-") {
     let opnd = node_operands(node)
     if (opnd == "Int") { return { text: bounded_i64(`-${r.text}`, acx), counter: r.counter } }
+    if (opnd == "Int") { return { text: `revlI64(-${r.text})`, counter: r.counter } }
     if (opnd == "Int32") { return { text: `revlI32(-${r.text})`, counter: r.counter } }
     return { text: `(-${r.text})`, counter: r.counter }
   }
@@ -1227,6 +1248,7 @@ fn render_arrow(node: Any, counter: Int, acx: ACx) -> Rendered {
       }
     }
     parts = parts.push(`${local_ident(value_str(p), acx.module)}: ${t}`)
+    parts = parts.push(`${ident(value_str(p))}: ${t}`)
     i += 1
   }
   let params = parts.join(", ")
@@ -1238,6 +1260,7 @@ fn render_arrow(node: Any, counter: Int, acx: ACx) -> Rendered {
   // are inherited (the reference's `with_scope` leaves them untouched), so an
   // async callable invoked inside an async arrow is still awaited.
   let body_acx = { in_async: is_async, in_arrow: true, ops: acx.ops, async_names: acx.async_names, async_locals: acx.async_locals, empty_lists: acx.empty_lists, routes: acx.routes, req_keys: acx.req_keys, test_mode: acx.test_mode, comps: acx.comps, i64_tmp: false, module: acx.module }
+  let body_acx = { in_async: is_async, in_arrow: true, ops: acx.ops, async_names: acx.async_names, async_locals: acx.async_locals, empty_lists: acx.empty_lists, routes: acx.routes, test_mode: acx.test_mode, comps: acx.comps }
   let br = expr(value_field(node, "body"), counter, body_acx)
   // Item 435(b): the `async` followed the DECLARED type, so `(msgs) =>
   // model.complete(msgs)` rendered `async (msgs: any) =>
@@ -1259,6 +1282,7 @@ fn render_arrow(node: Any, counter: Int, acx: ACx) -> Rendered {
     var argn = []
     for (cn of captures) {
       let cm = local_ident(value_str(cn), acx.module)
+      let cm = ident(value_str(cn))
       bound = bound.push(`${cm}: any`)
       argn = argn.push(cm)
     }
@@ -1472,6 +1496,7 @@ fn expr_inner(node: Any, counter: Int, acx: ACx) -> Rendered {
   let kind = node_kind(node)
   if (kind == "lit") { return { text: render_lit(node), counter: counter } }
   if (kind == "var") { return { text: render_var(node, acx), counter: counter } }
+  if (kind == "var") { return { text: render_var(node), counter: counter } }
   if (kind == "record") { return render_record(value_list(value_field(node, "fields")), counter, acx) }
   if (kind == "record_update") { return render_record_update(node, counter, acx) }
   if (kind == "list") { return render_list(value_list(value_field(node, "items")), counter, acx) }
@@ -1531,6 +1556,7 @@ fn expr_inner(node: Any, counter: Int, acx: ACx) -> Rendered {
   // (slice 3); a routed `req` reads through its router proxy (slice 8).
   if (kind == "name") {
     return { text: local_ident(value_str(value_field(node, "id")), acx.module), counter: counter }
+    return { text: ident(value_str(value_field(node, "id"))), counter: counter }
   }
   if (kind == "config") {
     // Read through the RAW key (bracket form for a JS reserved word), matching
@@ -1551,9 +1577,12 @@ fn expr_inner(node: Any, counter: Int, acx: ACx) -> Rendered {
     if (acx.req_keys.has(rname)) { rkey = map_get(acx.req_keys, rname) }
     if (list_contains(acx.routes, rkey)) {
       return { text: "_revl_route_".concat(ident(host_key(rkey))), counter: counter }
+    if (list_contains(acx.routes, rname)) {
+      return { text: "_revl_route_".concat(ident(rname)), counter: counter }
     }
     // Committed-view access: resolved through the fiber's snapshot (R3).
     return { text: "ctx.".concat(ident(host_key(rkey))), counter: counter }
+    return { text: "ctx.".concat(ident(rname)), counter: counter }
   }
   // ---- slice-3 expr kinds ----
   // `fn` (`_fn_call`): a call to a top-level `fn`/`extern`, the component
@@ -1562,6 +1591,7 @@ fn expr_inner(node: Any, counter: Int, acx: ACx) -> Rendered {
   if (kind == "fn") {
     let raw_name = value_str(value_field(node, "name"))
     let fname = mangle_module(raw_name)
+    let fname = ident(raw_name)
     let ar = commajoin(value_list(value_field(node, "args")), counter, acx)
     if (acx.in_async && list_contains(acx.async_names, raw_name)) {
       return { text: `(await ${fname}(${ar.text}))`, counter: ar.counter }
@@ -1649,6 +1679,7 @@ fn render_do(node: Any, counter: Int, acx: ACx) -> Rendered {
     if (value_bool(value_field(st, "mutable"))) { kw = "let" }
     let ann = empty_list_ann(value_field(st, "value"), value_str(value_field(st, "name")), elt)
     parts = parts.push(`${kw} ${local_ident(value_str(value_field(st, "name")), acx.module)}${ann} = ${r.text};`)
+    parts = parts.push(`${kw} ${ident(value_str(value_field(st, "name")))}${ann} = ${r.text};`)
   }
   let tr = expr(value_field(node, "tail"), c, acx)
   parts = parts.push(`return ${tr.text};`)
@@ -2001,6 +2032,7 @@ fn v3_stmt(node: Any, indent: Int, counter: Int, acx: ACx) -> StmtOut {
     for (name of value_list(value_field(node, "names"))) {
       let raw = value_str(name)
       let binding = local_ident(raw, acx.module)
+      let binding = ident(raw)
       if (is_record && raw != binding) {
         names = names.push(`${prop_key(raw)}: ${binding}`)
       } else {
@@ -2014,6 +2046,7 @@ fn v3_stmt(node: Any, indent: Int, counter: Int, acx: ACx) -> StmtOut {
       let rest = value_field(node, "rest")
       if (!value_is_null(rest) && value_str(rest) != "") {
         names = names.push(`...${local_ident(value_str(rest), acx.module)}`)
+        names = names.push(`...${ident(value_str(rest))}`)
       }
       lhs = `[${names.join(", ")}]`
     }
@@ -2026,9 +2059,11 @@ fn v3_stmt(node: Any, indent: Int, counter: Int, acx: ACx) -> StmtOut {
     // issue #273: `[]` alone has no element type; annotate it.
     let ann = empty_list_ann(value_field(node, "value"), value_str(value_field(node, "name")), a.empty_lists)
     return { lines: [`${pad}${kw} ${local_ident(value_str(value_field(node, "name")), acx.module)}${ann} = ${r.text}`], counter: r.counter }
+    return { lines: [`${pad}${kw} ${ident(value_str(value_field(node, "name")))}${ann} = ${r.text}`], counter: r.counter }
   }
   if (step == "assign") {
     let nm = local_ident(value_str(value_field(node, "name")), acx.module)
+    let nm = ident(value_str(value_field(node, "name")))
     if (is_inplace_write(node)) {
       let w = inplace_stmt(nm, value_field(node, "value"), counter, a)
       return { lines: [`${pad}${w.text}`], counter: w.counter }
@@ -2078,6 +2113,7 @@ fn v3_stmt(node: Any, indent: Int, counter: Int, acx: ACx) -> StmtOut {
   if (step == "for") {
     let ir = expr(value_field(node, "iterable"), counter, a)
     let bind = local_ident(value_str(value_field(node, "bind")), acx.module)
+    let bind = ident(value_str(value_field(node, "bind")))
     var out = [`${pad}for (const ${bind} of ${ir.text}) {`]
     var c = ir.counter
     for (s of value_list(value_field(node, "body"))) {
@@ -2091,6 +2127,7 @@ fn v3_stmt(node: Any, indent: Int, counter: Int, acx: ACx) -> StmtOut {
   if (step == "expr") {
     let r = expr(value_field(node, "expr"), counter, a)
     return { lines: [`${pad}${asi_safe(r.text)}`], counter: r.counter }
+    return { lines: [`${pad}${r.text}`], counter: r.counter }
   }
   if (step == "assert") {
     let e = value_field(node, "expr")
@@ -2148,6 +2185,7 @@ fn test_assert(e: Any, pad: Str, counter: Int, a: ACx) -> StmtOut {
 // blank-line separated. The `$revl_match_N` counter threads across the whole
 // document (one `_Ctx` counter in the reference).
 fn emit_functions(functions: List[Any], async_names: List[Str], module: Map[Str, Str]) -> List[Str] {
+fn emit_functions(functions: List[Any], async_names: List[Str]) -> List[Str] {
   var out = []
   var c = 0
   for (fnode of functions) {
@@ -2158,6 +2196,7 @@ fn emit_functions(functions: List[Any], async_names: List[Str], module: Map[Str,
       out = out.push(`<<UNSUPPORTED-PUB-FN-MODULE-NAME:${raw_name}>>`)
     }
     let name = mangle_module(raw_name)
+    let name = ident(value_str(value_field(fnode, "name")))
     var parts = []
     // A parameter typed `(…) -> Async[T]` is an async value local (item 92): a
     // call through it returns a Promise and is awaited in the body. Collect
@@ -2167,6 +2206,7 @@ fn emit_functions(functions: List[Any], async_names: List[Str], module: Map[Str,
     for (p of value_list(value_field(fnode, "params"))) {
       let ptype = value_str(value_field(p, "type"))
       parts = parts.push(`${local_ident(value_str(value_field(p, "name")), module)}: ${ts_type(ptype)}`)
+      parts = parts.push(`${ident(value_str(value_field(p, "name")))}: ${ts_type(ptype)}`)
       if (is_async_fn_type(ptype)) { locals = locals.push(value_str(value_field(p, "name"))) }
     }
     let params = parts.join(", ")
@@ -2183,8 +2223,11 @@ fn emit_functions(functions: List[Any], async_names: List[Str], module: Map[Str,
                                value_str(value_field(fnode, "returns")))
     let sync_base = sync_acx(module)
     var body_acx = { sync_base | empty_lists = elt, i64_tmp = true }
+    let sync_base = sync_acx()
+    var body_acx = { sync_base | empty_lists = elt }
     if (value_bool(value_field(fnode, "async"))) {
       body_acx = { in_async: true, in_arrow: false, ops: [], async_names: async_names, async_locals: locals, empty_lists: elt, routes: [], req_keys: Map.empty(), test_mode: false, comps: [], i64_tmp: true, module: module }
+      body_acx = { in_async: true, in_arrow: false, ops: [], async_names: async_names, async_locals: locals, empty_lists: elt, routes: [], test_mode: false, comps: [] }
       out = out.push(`export async function ${name}(${params}): Promise<${returns}> {`)
     } else {
       out = out.push(`export function ${name}(${params}): ${returns} {`)
@@ -2197,6 +2240,7 @@ fn emit_functions(functions: List[Any], async_names: List[Str], module: Map[Str,
       for (s of body) {
         let r = v3_stmt(s, 2, c, body_acx)
         lines = lines.concat(r.lines)
+        out = out.concat(r.lines)
         c = r.counter
       }
       out = out.concat(declare_i64_tmp(lines))
@@ -2579,6 +2623,7 @@ fn extern_body_lines(body: Str, coerce_int: Bool, is_async: Bool) -> List[Str] {
 // `@ts` body is refused, matching the reference; VARIANT/non-ts externs are not
 // in the covered corpus.
 fn emit_externs(externs: List[Any], ui_externs: List[Str], module: Map[Str, Str]) -> List[Str] {
+fn emit_externs(externs: List[Any]) -> List[Str] {
   var out = []
   // item 378 Stage 5: the plug-time config seam, once, before the externs,
   // when any extern carries a config schema (byte-identical when none do).
@@ -2595,6 +2640,7 @@ fn emit_externs(externs: List[Any], ui_externs: List[Str], module: Map[Str, Str]
   if (any_secret) { out = out.concat(secret_scaffold(externs)) }
   for (ext of externs) {
     let name = mangle_module(value_str(value_field(ext, "name")))
+    let name = ident(value_str(value_field(ext, "name")))
     var parts = []
     var args = []
     for (p of value_list(value_field(ext, "params"))) {
@@ -2629,6 +2675,7 @@ fn emit_externs(externs: List[Any], ui_externs: List[Str], module: Map[Str, Str]
       public = "_revl_ui_".concat(name)
     }
     var impl = public
+    var impl = name
     var export_kw = "export "
     if (secret_return) {
       impl = "_revl_secret_".concat(name)
@@ -2645,6 +2692,7 @@ fn emit_externs(externs: List[Any], ui_externs: List[Str], module: Map[Str, Str]
     }
     if (!value_has(bodies, "ts")) {
       out = out.push(`<<UNSUPPORTED-EXTERN-NO-TS-BODY:${name}>>`)
+      out = out.push(`<<EXTERN-NO-TS-BODY:${name}>>`)
     } else {
       // issue #1369: the wrapper is emitted only for an extern that HAS a body,
       // matching the reference (which refuses a bodyless one outright).
@@ -2654,6 +2702,7 @@ fn emit_externs(externs: List[Any], ui_externs: List[Str], module: Map[Str, Str]
       if (value_bool(value_field(ext, "async"))) {
         if (secret_return) {
           out = out.push(`${public == name ? "export " : ""}async function ${public}(${params}): Promise<${returns}> {`)
+          out = out.push(`export async function ${name}(${params}): Promise<${returns}> {`)
           out = out.push(`  return host.secretResult(await ${impl}(${arg_list}))`)
           out = out.push("}")
           out = out.push("")
@@ -2662,6 +2711,7 @@ fn emit_externs(externs: List[Any], ui_externs: List[Str], module: Map[Str, Str]
       } else {
         if (secret_return) {
           out = out.push(`${public == name ? "export " : ""}function ${public}(${params}): ${returns} {`)
+          out = out.push(`export function ${name}(${params}): ${returns} {`)
           out = out.push(`  return host.secretResult(${impl}(${arg_list}))`)
           out = out.push("}")
           out = out.push("")
@@ -2681,6 +2731,8 @@ fn emit_externs(externs: List[Any], ui_externs: List[Str], module: Map[Str, Str]
       } else {
         for (line of extern_body_lines(body, coerce_int, value_bool(value_field(ext, "async")))) {
           out = out.push(line)
+        for (line of py_splitlines(body)) {
+          out = out.push("  ".concat(line))
         }
       }
       out = out.push("}")
@@ -2890,12 +2942,14 @@ fn is_map_cas(acq: Any) -> Bool {
 }
 
 fn pinned_arrow(step: Any, slot: Str, arrow: Str, module: Map[Str, Str]) -> Str {
+fn pinned_arrow(step: Any, slot: Str, arrow: Str) -> Str {
   let names = value_list(value_field(step, `${slot}_captures`))
   if (names.length() == 0) { return arrow }
   var bound = []
   var args = []
   for (name of names) {
     let n = local_ident(value_str(name), module)
+    let n = ident(value_str(name))
     bound = bound.push(`${n}: any`)
     args = args.push(n)
   }
@@ -2907,6 +2961,7 @@ fn pinned_arrow(step: Any, slot: Str, arrow: Str, module: Map[Str, Str]) -> Str 
 // item-141 await-seed fires on a req-keyed async-op call, and an explicit
 // `await` step lands (A1). A sync method's `acx` is `sync_acx()`.
 fn method_body(steps: List[Any], level: Int, counter: Int, acx: ACx, frame_var: Str, provide_name: Str, method_name: Str, in_method: Bool) -> StmtOut {
+fn method_body(steps: List[Any], level: Int, counter: Int, acx: ACx, frame_var: Str, provide_name: Str, method_name: Str) -> StmtOut {
   let pad = ind(level)
   var out = []
   var c = counter
@@ -2922,11 +2977,13 @@ fn method_body(steps: List[Any], level: Int, counter: Int, acx: ACx, frame_var: 
       if (value_bool(value_field(step, "mutable"))) { kw = "let" }
       let ann = empty_list_ann(value_field(step, "value"), value_str(value_field(step, "name")), elt)
       out = out.push(`${pad}${kw} ${local_ident(value_str(value_field(step, "name")), acx.module)}${ann} = ${r.text}`)
+      out = out.push(`${pad}${kw} ${ident(value_str(value_field(step, "name")))}${ann} = ${r.text}`)
     } else {
       if (kind == "assign") {
         let r = expr(value_field(step, "value"), c, acx)
         c = r.counter
         out = out.push(`${pad}${local_ident(value_str(value_field(step, "name")), acx.module)} = ${r.text}`)
+        out = out.push(`${pad}${ident(value_str(value_field(step, "name")))} = ${r.text}`)
       } else {
         if (kind == "return") {
           let e = value_field(step, "expr")
@@ -2952,6 +3009,7 @@ fn method_body(steps: List[Any], level: Int, counter: Int, acx: ACx, frame_var: 
             var has_bind = false
             if (kind == "let-effect") {
               bind = local_ident(value_str(value_field(step, "bind")), acx.module)
+              bind = ident(value_str(value_field(step, "bind")))
               has_bind = true
               out = out.push(`${pad}let ${bind}: any`)
             }
@@ -2968,11 +3026,13 @@ fn method_body(steps: List[Any], level: Int, counter: Int, acx: ACx, frame_var: 
               out = out.push(`${pad}  ${bind} = ${ar.text}`)
             } else {
               out = out.push(`${pad}  ${asi_safe(ar.text)}`)
+              out = out.push(`${pad}  ${ar.text}`)
             }
             var inverse = pinned_arrow(step, "undo", `() => ${ur.text}`, acx.module)
             // issue #2009: the inverse runs with the journal re-armed, so a key
             // only the undo writes is judged too (py `Frame._guard`).
             if (frame_var != "") { inverse = `${frame_var}.guard(${inverse})` }
+            var inverse = pinned_arrow(step, "undo", `() => ${ur.text}`)
             if (has_bind && is_map_cas(value_field(step, "acquire"))) {
               inverse = `${bind} ? ${inverse} : () => {}`
             }
@@ -2981,6 +3041,7 @@ fn method_body(steps: List[Any], level: Int, counter: Int, acx: ACx, frame_var: 
           } else {
             if (kind == "emit") {
               let er = emit_compensated(step, level, c, acx, `${provide_name}.${method_name}`, provide_name, `${frame_var}.compensationMethod`, in_method)
+              let er = emit_compensated(step, level, c, acx, `${provide_name}.${method_name}`, provide_name, `${frame_var}.compensationMethod`)
               out = out.concat(er.lines)
               c = er.counter
             } else {
@@ -2999,6 +3060,7 @@ fn method_body(steps: List[Any], level: Int, counter: Int, acx: ACx, frame_var: 
               // iterable expression is rendered BEFORE the arms so the
               // await-seed counter advances in the reference's order.
               let cr = method_control(step, level, c, acx, frame_var, provide_name, method_name, in_method)
+              let cr = method_control(step, level, c, acx, frame_var, provide_name, method_name)
               out = out.concat(cr.lines)
               c = cr.counter
             } else {
@@ -3021,12 +3083,14 @@ fn method_body(steps: List[Any], level: Int, counter: Int, acx: ACx, frame_var: 
 // NON-EMPTY else arm — the reference tests the arm for truth, not for presence,
 // so an `if` whose else arm lowered to nothing emits no `} else {` at all.
 fn method_control(step: Any, level: Int, counter: Int, acx: ACx, frame_var: Str, provide_name: Str, method_name: Str, in_method: Bool) -> StmtOut {
+fn method_control(step: Any, level: Int, counter: Int, acx: ACx, frame_var: Str, provide_name: Str, method_name: Str) -> StmtOut {
   let pad = ind(level)
   let kind = value_str(value_field(step, "step"))
   if (kind == "while") {
     let r = expr(value_field(step, "cond"), counter, acx)
     var out = [`${pad}while (${r.text}) {`]
     let b = method_body(value_list(value_field(step, "body")), level + 1, r.counter, acx, frame_var, provide_name, method_name, in_method)
+    let b = method_body(value_list(value_field(step, "body")), level + 1, r.counter, acx, frame_var, provide_name, method_name)
     out = out.concat(b.lines)
     out = out.push(`${pad}}`)
     return { lines: out, counter: b.counter }
@@ -3035,6 +3099,8 @@ fn method_control(step: Any, level: Int, counter: Int, acx: ACx, frame_var: Str,
     let r = expr(value_field(step, "iterable"), counter, acx)
     var out = [`${pad}for (const ${local_ident(value_str(value_field(step, "bind")), acx.module)} of ${r.text}) {`]
     let b = method_body(value_list(value_field(step, "body")), level + 1, r.counter, acx, frame_var, provide_name, method_name, in_method)
+    var out = [`${pad}for (const ${ident(value_str(value_field(step, "bind")))} of ${r.text}) {`]
+    let b = method_body(value_list(value_field(step, "body")), level + 1, r.counter, acx, frame_var, provide_name, method_name)
     out = out.concat(b.lines)
     out = out.push(`${pad}}`)
     return { lines: out, counter: b.counter }
@@ -3042,12 +3108,14 @@ fn method_control(step: Any, level: Int, counter: Int, acx: ACx, frame_var: Str,
   let r = expr(value_field(step, "cond"), counter, acx)
   var out = [`${pad}if (${r.text}) {`]
   let t = method_body(value_list(value_field(step, "then")), level + 1, r.counter, acx, frame_var, provide_name, method_name, in_method)
+  let t = method_body(value_list(value_field(step, "then")), level + 1, r.counter, acx, frame_var, provide_name, method_name)
   out = out.concat(t.lines)
   var c = t.counter
   let els = value_list(value_field(step, "else"))
   if (els.length() > 0) {
     out = out.push(`${pad}} else {`)
     let e = method_body(els, level + 1, c, acx, frame_var, provide_name, method_name, in_method)
+    let e = method_body(els, level + 1, c, acx, frame_var, provide_name, method_name)
     out = out.concat(e.lines)
     c = e.counter
   }
@@ -3060,6 +3128,7 @@ fn method_control(step: Any, level: Int, counter: Int, acx: ACx, frame_var: Str,
 // agree). An operation the service declares `async` lowers to an `async` method
 // whose body renders in an async context (the await-seed's `ops`, item 219).
 fn provide_impl(step: Any, services: Any, ops: List[Str], routes: List[Str], req_keys: Map[Str, Str], known_types: List[Str], async_names: List[Str], comps: List[Any], comp_name: Str, units: List[Str], frame_var: Str, level: Int, counter: Int, module: Map[Str, Str]) -> StmtOut {
+fn provide_impl(step: Any, services: Any, ops: List[Str], routes: List[Str], known_types: List[Str], async_names: List[Str], comps: List[Any], frame_var: Str, level: Int, counter: Int) -> StmtOut {
   let pad = ind(level)
   let svc_name = value_str(value_field(step, "service"))
   let declared = value_field(value_field(services, svc_name), "methods")
@@ -3086,8 +3155,10 @@ fn provide_impl(step: Any, services: Any, ops: List[Str], routes: List[Str], req
       let pspec = value_at(spec_params, i)
       let ptype = ts_type_v1(value_str(value_field(pspec, "type")), known_types)
       sig_parts = sig_parts.push(`${local_ident(value_str(pn), module)}: ${ptype}`)
+      sig_parts = sig_parts.push(`${ident(value_str(pn))}: ${ptype}`)
       if (value_bool(value_field(pspec, "secret"))) {
         secret_params = secret_params.push(local_ident(value_str(pn), module))
+        secret_params = secret_params.push(ident(value_str(pn)))
       }
       i += 1
     }
@@ -3097,9 +3168,12 @@ fn provide_impl(step: Any, services: Any, ops: List[Str], routes: List[Str], req
     var prefix = ""
     let sync_base = sync_acx(module)
     var body_acx = { sync_base | routes = routes, req_keys = req_keys, comps = comps }
+    let sync_base = sync_acx()
+    var body_acx = { sync_base | routes = routes, comps = comps }
     if (is_async) {
       prefix = "async "
       body_acx = { in_async: true, in_arrow: false, ops: ops, async_names: async_names, async_locals: [], empty_lists: Map.empty(), routes: routes, req_keys: req_keys, test_mode: false, comps: comps, i64_tmp: false, module: module }
+      body_acx = { in_async: true, in_arrow: false, ops: ops, async_names: async_names, async_locals: [], empty_lists: Map.empty(), routes: routes, test_mode: false, comps: comps }
     }
     out = out.push(`${pad}${prefix}${name}(${sig_parts.join(", ")}) {`)
     // A param the service declared `Secret[T]` is a declared DISCLOSURE
@@ -3130,6 +3204,7 @@ fn provide_impl(step: Any, services: Any, ops: List[Str], routes: List[Str], req
       body_level = level + 2
     }
     let br = method_body(value_list(value_field(method, "body")), body_level, c, body_acx, frame_var, svc_name, name, true)
+    let br = method_body(value_list(value_field(method, "body")), level + 1, c, body_acx, frame_var, svc_name, name)
     out = out.concat(br.lines)
     c = br.counter
     if (scoped) { out = out.push(`${pad}  })`) }
@@ -3159,15 +3234,19 @@ fn crossing_key_name(target: Any) -> Str {
 // the emitted `Frame` local (`$revl_frame`, "" when the component needs none) —
 // a compensation entry registers through it (item 243 Slice 2b).
 fn component_step(step: Any, services: Any, ops: List[Str], routes: List[Str], req_keys: Map[Str, Str], known_types: List[Str], async_names: List[Str], comps: List[Any], comp_name: Str, units: List[Str], frame_var: Str, level: Int, counter: Int, module: Map[Str, Str]) -> StmtOut {
+fn component_step(step: Any, services: Any, ops: List[Str], routes: List[Str], known_types: List[Str], async_names: List[Str], comps: List[Any], comp_name: Str, frame_var: Str, level: Int, counter: Int) -> StmtOut {
   let pad = ind(level)
   let sync_base = sync_acx(module)
   let a = { sync_base | routes = routes, req_keys = req_keys, comps = comps }
+  let sync_base = sync_acx()
+  let a = { sync_base | routes = routes, comps = comps }
   let kind = value_str(value_field(step, "step"))
   if (kind == "let-effect" || kind == "effect") {
     let awaited = value_bool(value_field(step, "async"))
     var acquire_acx = a
     if (awaited && kind == "let-effect") {
       acquire_acx = { in_async: true, in_arrow: false, ops: ops, async_names: async_names, async_locals: [], empty_lists: Map.empty(), routes: routes, req_keys: req_keys, test_mode: false, comps: comps, i64_tmp: false, module: module }
+      acquire_acx = { in_async: true, in_arrow: false, ops: ops, async_names: async_names, async_locals: [], empty_lists: Map.empty(), routes: routes, test_mode: false, comps: comps }
     }
     let ar = expr(value_field(step, "acquire"), counter, acquire_acx)
     var out = []
@@ -3178,11 +3257,13 @@ fn component_step(step: Any, services: Any, ops: List[Str], routes: List[Str], r
     if (frame_var != "") { out = out.push(`${pad}${frame_var}.journalBegin()`) }
     if (kind == "let-effect") {
       let bind = local_ident(value_str(value_field(step, "bind")), module)
+      let bind = ident(value_str(value_field(step, "bind")))
       out = out.push(`${pad}const ${bind} = ${ar.text}`)
     } else {
       var acquire_text = ar.text
       if (awaited) { acquire_text = `await ${acquire_text}` }
       out = out.push(`${pad}${asi_safe(acquire_text)}`)
+      out = out.push(`${pad}${acquire_text}`)
     }
     let ur = expr(value_field(step, "undo"), ar.counter, a)
     // Phase-1 continue-and-record (docs/design/teardown-contract.md): a bracket
@@ -3202,6 +3283,7 @@ fn component_step(step: Any, services: Any, ops: List[Str], routes: List[Str], r
     var inverse = `() => ${ur.text}`
     if (kind == "let-effect" && is_map_cas(value_field(step, "acquire"))) {
       inverse = `${local_ident(value_str(value_field(step, "bind")), module)} ? ${inverse} : () => {}`
+      inverse = `${ident(value_str(value_field(step, "bind")))} ? ${inverse} : () => {}`
     }
     out = out.push(`${pad}yield ${frame_var}.bracket(${b_crossing}, ${json_dumps(b_undo)}, ${inverse})`)
     return { lines: out, counter: ur.counter }
@@ -3217,11 +3299,14 @@ fn component_step(step: Any, services: Any, ops: List[Str], routes: List[Str], r
   }
   if (kind == "emit") {
     return emit_compensated(step, level, counter, a, `${comp_name}.body`, comp_name, `yield ${frame_var}.compensation`, false)
+    return emit_compensated(step, level, counter, a, `${comp_name}.body`, comp_name, `yield ${frame_var}.compensation`)
   }
   if (kind == "provide") {
     let name = value_str(value_field(step, "name"))
     var out = [`${pad}yield ctx.provide(${json_dumps(host_key(name))}, {`]
     let pr = provide_impl(step, services, ops, routes, req_keys, known_types, async_names, comps, comp_name, units, frame_var, level + 1, counter, module)
+    var out = [`${pad}yield ctx.provide(${json_dumps(name)}, {`]
+    let pr = provide_impl(step, services, ops, routes, known_types, async_names, comps, frame_var, level + 1, counter)
     out = out.concat(pr.lines)
     out = out.push(`${pad}} satisfies ${ident(value_str(value_field(step, "service")))})`)
     return { lines: out, counter: pr.counter }
@@ -3232,6 +3317,7 @@ fn component_step(step: Any, services: Any, ops: List[Str], routes: List[Str], r
     var c = cr.counter
     for (s of value_list(value_field(step, "then"))) {
       let r = component_step(s, services, ops, routes, req_keys, known_types, async_names, comps, comp_name, units, frame_var, level + 1, c, module)
+      let r = component_step(s, services, ops, routes, known_types, async_names, comps, comp_name, frame_var, level + 1, c)
       out = out.concat(r.lines)
       c = r.counter
     }
@@ -3240,6 +3326,7 @@ fn component_step(step: Any, services: Any, ops: List[Str], routes: List[Str], r
       out = out.push(`${pad}} else {`)
       for (s of els) {
         let r = component_step(s, services, ops, routes, req_keys, known_types, async_names, comps, comp_name, units, frame_var, level + 1, c, module)
+        let r = component_step(s, services, ops, routes, known_types, async_names, comps, comp_name, frame_var, level + 1, c)
         out = out.concat(r.lines)
         c = r.counter
       }
@@ -3260,6 +3347,7 @@ fn component_step(step: Any, services: Any, ops: List[Str], routes: List[Str], r
     // above the loop (its dedup memory is constant in the stream's length). The
     // event name and key stay raw: the runtime indexes by their source spelling.
     let item = local_ident(value_str(value_field(step, "bind")), module)
+    let item = ident(value_str(value_field(step, "bind")))
     let sr = expr(value_field(step, "subject"), counter, a)
     var c = sr.counter
     var out = []
@@ -3280,6 +3368,7 @@ fn component_step(step: Any, services: Any, ops: List[Str], routes: List[Str], r
     if (gate != "") { out = out.push(`${pad}  if (!${gate}.admit(${item}, ${json_dumps(where)})) continue`) }
     for (inner of value_list(value_field(step, "body"))) {
       let r = component_step(inner, services, ops, routes, req_keys, known_types, async_names, comps, comp_name, units, frame_var, level + 1, c, module)
+      let r = component_step(inner, services, ops, routes, known_types, async_names, comps, comp_name, frame_var, level + 1, c)
       out = out.concat(r.lines)
       c = r.counter
     }
@@ -3329,6 +3418,7 @@ fn timer_step(step: Any, ops: List[Str], async_names: List[Str], comp_name: Str,
     for (em of value_list(value_field(step, "body"))) {
       let r = expr(value_field(em, "expr"), c, a)
       out = out.push(`${pad}  ${asi_safe(r.text)}`)
+      out = out.push(`${pad}  ${r.text}`)
       c = r.counter
       let tr = timer_compensation(em, n, comp_name, frame_var, level + 1, c, a)
       out = out.concat(tr.lines)
@@ -3351,6 +3441,7 @@ fn timer_step(step: Any, ops: List[Str], async_names: List[Str], comp_name: Str,
       out = out.push(`${pad}  ${inflight}.add(_revl_task)`)
     } else {
       out = out.push(`${pad}  ${asi_safe(r.text)}`)
+      out = out.push(`${pad}  ${r.text}`)
       let tr = timer_compensation(em, n, comp_name, frame_var, level + 1, c, a)
       out = out.concat(tr.lines)
       c = tr.counter
@@ -3373,6 +3464,7 @@ fn timer_compensation(em: Any, n: Int, comp_name: Str, frame_var: Str, level: In
 
 // Both activation and method compensation snapshot arguments at registration.
 fn emit_compensated(step: Any, level: Int, counter: Int, a: ACx, site_prefix: Str, scope_name: Str, register: Str, in_method: Bool) -> StmtOut {
+fn emit_compensated(step: Any, level: Int, counter: Int, a: ACx, site_prefix: Str, scope_name: Str, register: Str) -> StmtOut {
     let pad = ind(level)
     let er = expr(value_field(step, "expr"), counter, a)
     var emitted = er.text
@@ -3380,10 +3472,13 @@ fn emit_compensated(step: Any, level: Int, counter: Int, a: ACx, site_prefix: St
       emitted = `await ${emitted}`
     }
     var out = [`${pad}${asi_safe(emitted)}`]
+    var out = [`${pad}${emitted}`]
     var c = er.counter
     // one compensation per crossing (issue #1902), registered after the fire:
     // the site-spelled clause, else the emitted extern's own declared one
     // (item 254, issue #1592)
+    // the site-spelled clause, then the emitted extern's own declared one
+    // (item 254, issue #1592), each registered after the fire
     let comp = value_field(step, "compensate")
     if (!value_is_null(comp)) {
       let r = register_compensation(comp, false, level, c, a, site_prefix, scope_name, register)
@@ -3391,6 +3486,7 @@ fn emit_compensated(step: Any, level: Int, counter: Int, a: ACx, site_prefix: St
       c = r.counter
     }
     let idx = value_is_null(comp) ? compensated_extern_index(value_field(step, "expr"), a.comps) : -1
+    let idx = compensated_extern_index(value_field(step, "expr"), a.comps)
     if (idx >= 0) {
       // issue #1369: inside a provide method a computer-use extern is reached
       // through its `uiCrossing` wrapper, and THAT is where the extern's own
@@ -3476,6 +3572,7 @@ fn register_compensation(comp: Any, declared: Bool, level: Int, counter: Int, a:
       }
       let args_joined = temps.join(", ")
       var run_ts = `${mangle_module(name)}(${args_joined})`
+      var run_ts = `${ident(name)}(${args_joined})`
       if (comp_kind == "host") { run_ts = `host.${name}(${args_joined})` }
       let crossing = `{ key: ${json_dumps(name)}, method: ${json_dumps(name)}, args: [${args_joined}], site: ${json_dumps(site)} }`
       out = out.push(`${pad}${register}(${crossing}, ${json_dumps(name)}, [${args_joined}], () => ${run_ts})`)
@@ -3535,6 +3632,7 @@ fn config_interface(comp: Any) -> List[Str] {
 
 // `_component`: one component's config interface + plugin object.
 fn component_lines(comp: Any, services: Any, known_types: List[Str], async_names: List[Str], comps: List[Any], units: List[Str], counter: Int, module: Map[Str, Str]) -> StmtOut {
+fn component_lines(comp: Any, services: Any, known_types: List[Str], async_names: List[Str], comps: List[Any], counter: Int) -> StmtOut {
   let name = ident(value_str(value_field(comp, "name")))
   var out = config_interface(comp)
   // issue #3127: the placement spec names a component to the runner, so one
@@ -3564,12 +3662,14 @@ fn component_lines(comp: Any, services: Any, known_types: List[Str], async_names
     var inj_parts = []
     for (k of req_keys) {
       inj_parts = inj_parts.push(`${json_dumps(host_key(k))}: ${json_dumps(value_field(icept, k))}`)
+      inj_parts = inj_parts.push(`${json_dumps(k)}: ${json_dumps(value_field(icept, k))}`)
     }
     out = out.push(`  inject: {${inj_parts.join(", ")}},`)
   } else {
     var inject_parts = []
     for (k of req_keys) {
       inject_parts = inject_parts.push(json_dumps(host_key(k)))
+      inject_parts = inject_parts.push(json_dumps(k))
     }
     out = out.push(`  inject: [${inject_parts.join(", ")}],`)
   }
@@ -3577,6 +3677,7 @@ fn component_lines(comp: Any, services: Any, known_types: List[Str], async_names
   if (provide_keys.length() > 0) {
     var pk = []
     for (k of provide_keys) { pk = pk.push(json_dumps(host_key(k))) }
+    for (k of provide_keys) { pk = pk.push(json_dumps(k)) }
     out = out.push(`  provide: [${pk.join(", ")}],`)
   }
   // item 131: an async body colors `apply` `async` (and `await`s its
@@ -3631,6 +3732,7 @@ fn component_lines(comp: Any, services: Any, known_types: List[Str], async_names
   // `component_step`, where a compensation registers through it; "" otherwise.
   let raw_name = value_str(value_field(comp, "name"))
   let needs_frame = component_needs_frame(comp, comps, units)
+  let needs_frame = component_needs_frame(comp, comps)
   var frame_var = ""
   if (needs_frame || component_has_bracket(comp)) {
     frame_var = "$revl_frame"
@@ -3647,6 +3749,7 @@ fn component_lines(comp: Any, services: Any, known_types: List[Str], async_names
     var strategy = "undefined"
     if (!value_is_null(strat) && value_str(strat) != "") { strategy = json_dumps(strat) }
     out = out.push(`    const _revl_route_${ident(host_key(k))} = revlRouter(ctx, ${json_dumps(host_key(k))}, [${realm_parts.join(", ")}], ${strategy})`)
+    out = out.push(`    const _revl_route_${ident(k)} = revlRouter(ctx, ${json_dumps(k)}, [${realm_parts.join(", ")}], ${strategy})`)
   }
   // One generator per body (LIFO teardown). An async body compiles to an async
   // generator (v1/A1) and its `ctx.effect(...)` is `await`ed inside the `async
@@ -3671,6 +3774,7 @@ fn component_lines(comp: Any, services: Any, known_types: List[Str], async_names
   var c = counter
   for (step of body) {
     let r = component_step(step, services, ops, route_keys, req_bindings(comp), known_types, async_names, comps, raw_name, units, frame_var, 3, c, module)
+    let r = component_step(step, services, ops, route_keys, known_types, async_names, comps, raw_name, frame_var, 3, c)
     out = out.concat(r.lines)
     c = r.counter
   }
@@ -3693,6 +3797,7 @@ fn component_lines(comp: Any, services: Any, known_types: List[Str], async_names
 // order. An `async` operation returns a `Promise<…>` on this tier (services
 // 2.0 §5).
 fn service_interfaces(services: Any, known_types: List[Str], module: Map[Str, Str]) -> List[Str] {
+fn service_interfaces(services: Any, known_types: List[Str]) -> List[Str] {
   var out = []
   for (sname of value_keys(services)) {
     let svc = value_field(services, sname)
@@ -3703,6 +3808,7 @@ fn service_interfaces(services: Any, known_types: List[Str], module: Map[Str, St
       var sig_parts = []
       for (p of value_list(value_field(method, "params"))) {
         sig_parts = sig_parts.push(`${local_ident(value_str(value_field(p, "name")), module)}: ${ts_type_v1(value_str(value_field(p, "type")), known_types)}`)
+        sig_parts = sig_parts.push(`${ident(value_str(value_field(p, "name")))}: ${ts_type_v1(value_str(value_field(p, "type")), known_types)}`)
       }
       var returns = ts_return_type_v1(value_field(method, "returns"), known_types)
       if (value_bool(value_field(method, "async"))) { returns = `Promise<${returns}>` }
@@ -3750,6 +3856,7 @@ fn context_augmentation(components: List[Any]) -> List[Str] {
   var i = 0
   for (k of keys) {
     out = out.push(`    ${host_key(k)}: ${svcs[i]}`)
+    out = out.push(`    ${k}: ${svcs[i]}`)
     i += 1
   }
   out = out.push("  }")
@@ -3769,11 +3876,13 @@ fn emit_component_tail(ir: Any, async_names: List[Str]) -> List[Str] {
   // signature carrying `List[Msg]` lines up with the emitted `interface Msg`.
   let known_types = value_keys(value_field(ir, "types"))
   out = out.concat(service_interfaces(value_field(ir, "services"), known_types, module))
+  out = out.concat(service_interfaces(value_field(ir, "services"), known_types))
   let components = value_list(value_field(ir, "components"))
   out = out.concat(context_augmentation(components))
   var c = 0
   for (comp of components) {
     let r = component_lines(comp, value_field(ir, "services"), known_types, async_names, compensated_externs(ir), ui_units(ir), c, module)
+    let r = component_lines(comp, value_field(ir, "services"), known_types, async_names, compensated_externs(ir), c)
     out = out.concat(r.lines)
     out = out.push("")
     c = r.counter
@@ -3849,6 +3958,7 @@ fn revl_i64_helper() -> Str {
   o = o.push("const REVL_I64_MAX = 2n ** 63n - 1n")
   o = o.push("function revlI64(v: bigint): bigint {")
   o = o.push("  if (BigInt.asIntN(64, v) !== v) throw new RangeError('revl: Int overflow')")
+  o = o.push("  if (v < REVL_I64_MIN || v > REVL_I64_MAX) throw new RangeError('revl: Int overflow')")
   o = o.push("  return v")
   o = o.push("}")
   return o.join(newline())
@@ -3941,6 +4051,9 @@ fn revl_str_helper() -> Str {
   // no surrogate unit is its own view, others decode through `Array.from`;
   // strings of 64 units or more sit in an 8-slot least-recently-used cache, so
   // an index scan stays linear whatever else the loop reads. Mirrors `_REVL_STR_HELPER` in
+  // The code-point decode is memoised in two slots (item 435(c)): every helper
+  // here measures or indexes `Array.from(s)`, so decoding per call made an
+  // index scan quadratic. Mirrors `_REVL_STR_HELPER` in
   // backends/typescript/emit.py byte for byte; `revlIndexOf` deliberately
   // keeps its own `Array.from` over a per-call substring.
   o = o.push("const revlCpsN = 8")
@@ -3951,6 +4064,17 @@ fn revl_str_helper() -> Str {
   o = o.push("  for (let i = 0; i < s.length; i++) {")
   o = o.push("    const u = s.charCodeAt(i)")
   o = o.push("    if (u >= 0xD800 && u <= 0xDFFF) return Array.from(s)")
+  o = o.push("let revlCpsK0: string | undefined")
+  o = o.push("let revlCpsV0: string[] = []")
+  o = o.push("let revlCpsK1: string | undefined")
+  o = o.push("let revlCpsV1: string[] = []")
+  o = o.push("function revlCps(s: string): string[] {")
+  o = o.push("  if (s === revlCpsK0) return revlCpsV0")
+  o = o.push("  if (s === revlCpsK1) {")
+  o = o.push("    const k = revlCpsK1, v = revlCpsV1")
+  o = o.push("    revlCpsK1 = revlCpsK0; revlCpsV1 = revlCpsV0")
+  o = o.push("    revlCpsK0 = k; revlCpsV0 = v")
+  o = o.push("    return v")
   o = o.push("  }")
   o = o.push("  return s")
   o = o.push("}")
@@ -3967,6 +4091,9 @@ fn revl_str_helper() -> Str {
   o = o.push("  if (k === revlCpsN) k--")
   o = o.push("  for (; k > 0; k--) { revlCpsK[k] = revlCpsK[k - 1]; revlCpsV[k] = revlCpsV[k - 1]; revlCpsF[k] = revlCpsF[k - 1] }")
   o = o.push("  revlCpsK[0] = s; revlCpsV[0] = v; revlCpsF[0] = f")
+  o = o.push("  const v = Array.from(s)")
+  o = o.push("  revlCpsK1 = revlCpsK0; revlCpsV1 = revlCpsV0")
+  o = o.push("  revlCpsK0 = s; revlCpsV0 = v")
   o = o.push("  return v")
   o = o.push("}")
   o = o.push(`function revlLen(x: string | ArrayLike<unknown>): bigint {`)
@@ -3981,6 +4108,9 @@ fn revl_str_helper() -> Str {
   o = o.push(`  if (typeof x !== "string") return (x as Uint8Array | unknown[]).slice(i, j)`)
   o = o.push("  const v = revlCps(x)")
   o = o.push(`  return typeof v === "string" ? v.slice(i, j) : v.slice(i, j).join("")`)
+  o = o.push(`  return typeof x === "string"`)
+  o = o.push(`    ? revlCps(x).slice(i, j).join("")`)
+  o = o.push(`    : (x as string | Uint8Array | unknown[]).slice(i, j)`)
   o = o.push("}")
   o = o.push("function revlCharAt(s: string, i: bigint): string {")
   o = o.push("  const c = revlCps(s)[Number(i)]")
@@ -4176,6 +4306,7 @@ fn uses_spawn(n: Any) -> Bool {
 // no covered document declares a witnessed extern, so it is out of this port —
 // see item 324; a re-enabled witnessed fixture would extend this walk.)
 fn body_needs_frame(steps: List[Any], comps: List[Any], units: List[Str], comp_name: Str) -> Bool {
+fn body_needs_frame(steps: List[Any], comps: List[Any]) -> Bool {
   for (step of steps) {
     let kind = value_str(value_field(step, "step"))
     if (kind == "emit" && emit_registers(step, comps)) { return true }
@@ -4197,11 +4328,14 @@ fn body_needs_frame(steps: List[Any], comps: List[Any], units: List[Str], comp_n
           return true
         }
         if (body_needs_frame(value_list(value_field(method, "body")), comps, units, comp_name)) { return true }
+        if (body_needs_frame(value_list(value_field(method, "body")), comps)) { return true }
       }
     }
     if (kind == "if") {
       if (body_needs_frame(value_list(value_field(step, "then")), comps, units, comp_name)) { return true }
       if (body_needs_frame(value_list(value_field(step, "else")), comps, units, comp_name)) { return true }
+      if (body_needs_frame(value_list(value_field(step, "then")), comps)) { return true }
+      if (body_needs_frame(value_list(value_field(step, "else")), comps)) { return true }
     }
   }
   return false
@@ -4209,6 +4343,8 @@ fn body_needs_frame(steps: List[Any], comps: List[Any], units: List[Str], comp_n
 
 fn component_needs_frame(comp: Any, comps: List[Any], units: List[Str]) -> Bool {
   return body_needs_frame(value_list(value_field(comp, "body")), comps, units, value_str(value_field(comp, "name")))
+fn component_needs_frame(comp: Any, comps: List[Any]) -> Bool {
+  return body_needs_frame(value_list(value_field(comp, "body")), comps)
 }
 
 // `_ComponentEmitter.compensated` / `_Ctx.compensated` (item 254, issue #1592):
@@ -4372,6 +4508,7 @@ fn acquire_method_name(node: Any) -> Str {
 fn uses_frame(ir: Any) -> Bool {
   for (comp of value_list(value_field(ir, "components"))) {
     if (component_needs_frame(comp, compensated_externs(ir), ui_units(ir))) { return true }
+    if (component_needs_frame(comp, compensated_externs(ir))) { return true }
   }
   return false
 }
@@ -4421,6 +4558,9 @@ fn runtime_imports(ir: Any) -> Str {
     names = names.push("assertNoResidue as $revl_assertNoResidue")
     // issue #1911: only an `abort` step reaches a live frame.
     if (uses_lifecycle_abort(ir)) { names = names.push("frameForCtx as $revl_frameForCtx") }
+    names = names.push("plug")
+    names = names.push("snapshotRuntime")
+    names = names.push("assertNoResidue")
   }
   return `import { ${names.join(", ")} } from '../runtime.ts'`
 }
@@ -4615,6 +4755,7 @@ fn revl_helpers(ir: Any) -> List[Str] {
   // `Int`. Gated by the same predicate the wrapper itself uses, and emitted at
   // the reference's position (after `revlI64`, before `revlI32`).
   if (uses_extern_int_coercion(ir)) { out = out.push(revl_to_bigint_helper()); out = out.push("") }
+  if (uses_bounded_int(ir) || uses_int_arith(ir)) { out = out.push(revl_i64_helper()); out = out.push("") }
   if (uses_bounded_int32(ir)) { out = out.push(revl_i32_helper()); out = out.push("") }
   if (uses_int_arith(ir)) { out = out.push(revl_int_arith_helper()); out = out.push("") }
   if (uses_checked_arith(ir)) { out = out.push(revl_checked_arith_helper()); out = out.push("") }
@@ -4665,6 +4806,7 @@ fn uses_lifecycle_abort(ir: Any) -> Bool {
 }
 
 fn pure_test_lines(tests: List[Any], module: Map[Str, Str]) -> List[Str] {
+fn pure_test_lines(tests: List[Any]) -> List[Str] {
   var out = []
   var c = 0
   for (t of tests) {
@@ -4678,9 +4820,12 @@ fn pure_test_lines(tests: List[Any], module: Map[Str, Str]) -> List[Str] {
         let base = sync_acx(module)
         let acx = { base | empty_lists = empty_list_types(body, [], ""), test_mode = true, i64_tmp = true }
         var lines = []
+        let base = sync_acx()
+        let acx = { base | empty_lists = empty_list_types(body, [], ""), test_mode = true }
         for (st of body) {
           let r = v3_stmt(st, 2, c, acx)
           lines = lines.concat(r.lines)
+          out = out.concat(r.lines)
           c = r.counter
         }
         out = out.concat(declare_i64_tmp(lines))
@@ -4714,6 +4859,9 @@ fn lifecycle_step(step: Any, services: Any, provided: Any, counter: Int, acx: AC
       `    const $revl_f = $revl_plug($revl_root, ${comp_name}, {${items.join(", ")}})`,
       "    await $revl_f",
       `    $revl_fibers.set(${json_dumps(comp_name)}, await $revl_f)`,
+      `    const _f = plug(root, ${comp_name}, {${items.join(", ")}})`,
+      "    await _f",
+      `    _revl_fibers.set(${json_dumps(comp_name)}, await _f)`,
       "    await _revl_settle()",
       "  }"
     ], counter: c }
@@ -4723,6 +4871,8 @@ fn lifecycle_step(step: Any, services: Any, provided: Any, counter: Int, acx: AC
     return { lines: [
       `  await (await $revl_fibers.get(${comp_key})).dispose()`,
       `  $revl_fibers.delete(${comp_key})`,
+      `  await (await _revl_fibers.get(${comp_key})).dispose()`,
+      `  _revl_fibers.delete(${comp_key})`,
       "  await _revl_settle()"
     ], counter: counter }
   }
@@ -4741,9 +4891,11 @@ fn lifecycle_step(step: Any, services: Any, provided: Any, counter: Int, acx: AC
     var await_kw = ""
     if (value_bool(value_field(method, "async"))) { await_kw = "await " }
     let call = `$revl_root.${ident(host_key(key))}.${mname}(${args.join(", ")})`
+    let call = `root.${ident(key)}.${mname}(${args.join(", ")})`
     let bind = value_field(step, "bind")
     var line = `  ${await_kw}${call}`
     if (!value_is_null(bind)) { line = `  const ${local_ident(value_str(bind), acx.module)} = ${await_kw}${call}` }
+    if (!value_is_null(bind)) { line = `  const ${ident(value_str(bind))} = ${await_kw}${call}` }
     return { lines: [line, "  await _revl_settle()"], counter: c }
   }
   if (kind == "assert") {
@@ -4782,18 +4934,21 @@ fn lifecycle_step(step: Any, services: Any, provided: Any, counter: Int, acx: AC
       "  }",
       "  $revl_fibers.clear()",
       "  await _revl_settle()"
+      "  assertNoResidue(root, _revl_baseline)"
     ], counter: counter }
   }
   return { lines: [`  <<UNSUPPORTED-LIFECYCLE-STEP:${kind}>>`], counter: counter }
 }
 
 fn lifecycle_test_lines(tests: List[Any], services: Any, components: List[Any], module: Map[Str, Str]) -> List[Str] {
+fn lifecycle_test_lines(tests: List[Any], services: Any, components: List[Any]) -> List[Str] {
   var provided = Map.empty()
   for (comp of components) {
     let provs = value_field(comp, "provides")
     for (k of value_keys(provs)) { provided = provided.set(k, value_str(value_field(provs, k))) }
   }
   let base = sync_acx(module)
+  let base = sync_acx()
   let acx = { base | test_mode = true }
   var out = []
   var c = 0
@@ -4801,6 +4956,7 @@ fn lifecycle_test_lines(tests: List[Any], services: Any, components: List[Any], 
     if (value_bool(value_field(t, "lifecycle"))) {
       let steps = value_list(value_field(t, "body"))
       var body = ["  const $revl_root = new Context()"]
+      var body = ["  const root = new Context()"]
       var advances = false
       for (st of steps) {
         if (value_str(value_field(st, "step")) == "advance") { advances = true }
@@ -4810,6 +4966,8 @@ fn lifecycle_test_lines(tests: List[Any], services: Any, components: List[Any], 
       if (advances) { body = body.push("  host.clockReset()") }
       body = body.push("  const $revl_baseline = $revl_snapshotRuntime($revl_root)")
       body = body.push("  const $revl_fibers = new Map<string, any>()")
+      body = body.push("  const _revl_baseline = snapshotRuntime(root)")
+      body = body.push("  const _revl_fibers = new Map<string, any>()")
       for (st of steps) {
         let r = lifecycle_step(st, services, provided, c, acx)
         body = body.concat(r.lines)
@@ -5067,11 +5225,15 @@ pub fn emit_ts_src(ir: Any) -> Str {
   // awaited callee is already declared above it.
   if (externs.length() > 0) { out = out.concat(emit_externs(externs, ui_extern_names(externs), module)) }
   if (functions.length() > 0) { out = out.concat(emit_functions(functions, async_names, module)) }
+  if (externs.length() > 0) { out = out.concat(emit_externs(externs)) }
+  if (functions.length() > 0) { out = out.concat(emit_functions(functions, async_names)) }
   // The in-file test section: plain tests, then lifecycle drivers. A `fault
   // test` keeps its named marker (issue #1123).
   if (tests.length() > 0) {
     out = out.concat(pure_test_lines(tests, module))
     out = out.concat(lifecycle_test_lines(tests, value_field(ir, "services"), value_list(value_field(ir, "components")), module))
+    out = out.concat(pure_test_lines(tests))
+    out = out.concat(lifecycle_test_lines(tests, value_field(ir, "services"), value_list(value_field(ir, "components"))))
   }
   let fault_markers = fault_test_markers(ir)
   if (fault_markers.length() > 0) { out = out.concat(fault_markers); out = out.push("") }
@@ -5120,10 +5282,13 @@ test "the slice-3 expr kinds render fn and adt" {
   // `$N` literals cannot be spelled in an in-file string — the lexer reserves
   // the legacy `$N`/`${` forms — so they are verified through component_exprs).
   assert expr({ kind: "fn", name: "tag", args: [{ kind: "lit", value: 1 }] }, 0, sync_acx(Map.empty())).text
+  assert expr({ kind: "fn", name: "tag", args: [{ kind: "lit", value: 1 }] }, 0, sync_acx()).text
     == "tag(1n)"
   assert expr({ kind: "adt", case: "Ok", args: [{ kind: "lit", value: 1 }] }, 0, sync_acx(Map.empty())).text
+  assert expr({ kind: "adt", case: "Ok", args: [{ kind: "lit", value: 1 }] }, 0, sync_acx()).text
     == expected_ok_adt()
   assert expr({ kind: "adt", case: "Missing", args: [] }, 0, sync_acx(Map.empty())).text == expected_missing_adt()
+  assert expr({ kind: "adt", case: "Missing", args: [] }, 0, sync_acx()).text == expected_missing_adt()
 }
 
 test "the await-seed awaits a req-keyed async op only in an async, non-arrow body" {
@@ -5135,11 +5300,15 @@ test "the await-seed awaits a req-keyed async op only in an async, non-arrow bod
                args: [{ kind: "name", id: "k" }] }
   let ops = [async_op_key("store", "get")]
   assert expr(call, 0, { in_async: true, in_arrow: false, ops: ops, async_names: [], async_locals: [], empty_lists: Map.empty(), routes: [], req_keys: Map.empty(), test_mode: false, comps: [], i64_tmp: false, module: Map.empty() }).text
+  assert expr(call, 0, { in_async: true, in_arrow: false, ops: ops, async_names: [], async_locals: [], empty_lists: Map.empty(), routes: [], test_mode: false, comps: [] }).text
     == "(await ctx.store.get(k))"
   assert expr(call, 0, sync_acx(Map.empty())).text == "ctx.store.get(k)"
   assert expr(call, 0, { in_async: true, in_arrow: true, ops: ops, async_names: [], async_locals: [], empty_lists: Map.empty(), routes: [], req_keys: Map.empty(), test_mode: false, comps: [], i64_tmp: false, module: Map.empty() }).text
+  assert expr(call, 0, sync_acx()).text == "ctx.store.get(k)"
+  assert expr(call, 0, { in_async: true, in_arrow: true, ops: ops, async_names: [], async_locals: [], empty_lists: Map.empty(), routes: [], test_mode: false, comps: [] }).text
     == "ctx.store.get(k)"
   assert expr(call, 0, { in_async: true, in_arrow: false, ops: [], async_names: [], async_locals: [], empty_lists: Map.empty(), routes: [], req_keys: Map.empty(), test_mode: false, comps: [], i64_tmp: false, module: Map.empty() }).text
+  assert expr(call, 0, { in_async: true, in_arrow: false, ops: [], async_names: [], async_locals: [], empty_lists: Map.empty(), routes: [], test_mode: false, comps: [] }).text
     == "ctx.store.get(k)"
 }
 
@@ -5149,6 +5318,7 @@ test "the slice-6 instance-get expr kind reads a provision off a handle" {
   // keys the lexer reserves, so it cannot be spelled as an in-file record.
   assert expr({ kind: "instance-get", target: { kind: "name", id: "w" }, key: "counter" },
               0, sync_acx(Map.empty())).text
+              0, sync_acx()).text
     == expected_instance_get()
 }
 

@@ -556,6 +556,9 @@ def authority_diff(running_ir: dict, candidate_ir: dict) -> dict:
                    a new `taint:` crossing (an untrusted origin newly
                    reaching an emission), or a new `declassify:` (an added
                    `endorse`)
+      capability   a new `host:` crossing, a widened per-emission capability
+                   scope, or a host body appearing on a backend it was not on
+      taint        a new `emit:` crossing, which is a new boundary edge out
       realm        a reach bound that loosened or moved (`confined(T)` to
                    `unconfined`, or to a different bound)
       budget       a per-capability emission ceiling that widened, including
@@ -585,6 +588,9 @@ def authority_diff(running_ir: dict, candidate_ir: dict) -> dict:
     narrowed = _env_narrowed(prev, new, delta)
     buckets = _crossing_buckets(t for t in delta["added"] if t not in narrowed)
     buckets.update({
+    buckets = {
+        "host_added": sorted(c for c in delta["added"] if c.startswith("host:")),
+        "emit_added": sorted(c for c in delta["added"] if c.startswith("emit:")),
         "reach_weakened": list(delta["reach_weakened"]),
         "scope_widened": list(diff_capability_scopes(prev, new)["scope_widened"]),
         "backends_added": list(diff_backends(prev, new)["backends_added"]),
@@ -595,6 +601,8 @@ def authority_diff(running_ir: dict, candidate_ir: dict) -> dict:
     unclaimed = buckets[_UNCLAIMED_BUCKET]
     diff = {axis: sorted([t for bucket in names for t in buckets[bucket]]
                          + unclaimed)
+    }
+    diff = {axis: sorted(t for bucket in names for t in buckets[bucket])
             for axis, names in _AXIS_OF_BUCKET.items()}
     unmeasured = sorted(set(AUTHORITY_AXES) - set(diff))
     return {"diff": diff, "unmeasured": unmeasured, "buckets": buckets,

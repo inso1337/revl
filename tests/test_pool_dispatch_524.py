@@ -177,6 +177,7 @@ def peer_runner(tmp_path, charter_record, *, identity=WORKER_ID,
 def honest_task(charter_record, *, peer_id=WORKER, task_id="t-1",
                 source=PURE_SOURCE, runner=pd.RUNNER_TEST_PY,
                 identity=None, policy_digest=None):
+                identity=None):
     body = pd.build_task(
         pool_id=charter_record["pool_id"],
         charter_digest=pp.canonical_digest(charter_record),
@@ -185,6 +186,7 @@ def honest_task(charter_record, *, peer_id=WORKER, task_id="t-1",
         grant={"caps": sorted(ENTRY_CAPS), "budgets": {}},
         policy_digest=(policy_digest if policy_digest is not None
                        else pp.canonical_digest(charter_record)))
+        effect_class=EffectClass.PURE)
     return pd.sign_task(body, identity or OPERATOR_ID)
 
 
@@ -269,6 +271,7 @@ def test_a_task_crosses_a_socket_runs_on_the_peer_and_comes_back_verified(
     assert receipt["budget_consumed"]["wall_seconds"] >= 0.0
     # And the ledger says it was delivered exactly once, with the signed task
     # the receipt answers kept beside it.
+    # And the ledger says it was delivered exactly once.
     ledger = pd.load_ledger(pool_dir)
     entry = ledger.tasks[outcome["task_id"]]
     assert entry["state"] == pd.STATE_DELIVERED
@@ -588,6 +591,7 @@ def corpus(charter_record):
 
 def test_every_corpus_task_is_refused_on_its_own_link(tmp_path):
     """Non-vacuity, both directions: 16 signed tasks, 16 refusals, and an
+    """Non-vacuity, both directions: 15 signed tasks, 15 refusals, and an
     honest control that differs only in being well formed is RUN."""
     _pool_dir, record, _roster, _directory = pool_on_disk(tmp_path)
     runner = peer_runner(tmp_path, record)
@@ -599,6 +603,8 @@ def test_every_corpus_task_is_refused_on_its_own_link(tmp_path):
         seen[name] = answer["link"]
     assert len(seen) == 16
     assert len(set(seen.values())) == 8
+    assert len(seen) == 15
+    assert len(set(seen.values())) == 7
 
     control = runner.handle(honest_task(record, task_id="control"))
     assert control["ok"], control

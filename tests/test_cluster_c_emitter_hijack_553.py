@@ -394,6 +394,8 @@ def test_java_reserves_injected_type_names(name: str):
 #          scope (since issue #1932 the module IMPORTS the cases from the shared
 #          runtime instead, so the same hijack hazard is now an import shadow),
 #          guarded only by the set of user VARIANT CASE names — a user
+#   py   : `_emit_builtin_result` injects `class Ok:` / `class Err:` at module
+#          scope, guarded only by the set of user VARIANT CASE names — a user
 #          `type Ok` is not in it. Python class redefinition is silent and the
 #          later class wins, so the user's `Ok` replaced the runtime's
 #          constructor and the emitted test crashed with
@@ -447,6 +449,7 @@ _JAVA_INJECTED_TYPE_HOST_ROOTS = ["Pool", "Job"]
 # test` that holds the emission on the live path.
 _ACCESSOR_LIFECYCLE = (
     (ROOT / "backends" / "go" / "scenarios" / "accessor.rvl").read_text(encoding="utf-8")
+    (ROOT / "backends" / "go" / "scenarios" / "accessor.rvl").read_text()
     + """
 lifecycle test "accessor" {
   load App

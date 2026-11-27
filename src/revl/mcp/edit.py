@@ -68,6 +68,7 @@ import os
 import re
 
 from ..compiler import file_not_found
+from ..compiler import compile_source
 from ..diagnostics import report
 from ..errors import RevlError
 from . import effect_classes as _effect_classes
@@ -75,6 +76,7 @@ from . import fillspec
 from .authoring_loop import blast_radius, unmet_requirements
 from .persist import (ORIGIN_DEPENDENCIES, ORIGIN_FILES, ORIGIN_FILES_CONTENT,
                       ORIGIN_MODULES, ORIGIN_SOURCE)
+from .authoring_loop import blast_radius
 
 _WORD_HOLE = re.compile(r"\bhole\b")
 
@@ -89,6 +91,7 @@ class EditError(RuntimeError):
 
 def virtual_source(session) -> dict:
     """The server-side working source set for `session`.
+    """The server-side working source set for `session`: ``{source, modules}``.
 
     Seeded from the running composition's admission inputs (`session.origin`)
     and carried on ``session.draft`` across edits, so an agent edits a source
@@ -102,6 +105,10 @@ def virtual_source(session) -> dict:
     no text for a file (one restored from an older snapshot). Disk is never
     written: the edited text lives on the session, and `revl_snapshot` carries
     it.
+    the server already holds instead of resending it. Only inline buffers are
+    editable — the `source` string and any in-memory `modules` — because those
+    are the ones the audit's #1 finding re-serializes and the ones a snapshot
+    can faithfully reproduce. A file-backed composition edits on disk and swaps.
     """
     draft = getattr(session, "draft", None)
     if draft is not None:
@@ -148,6 +155,24 @@ def _files_source(origin: dict, *, require_all: bool = True) -> dict:
             # keeps reading those files from disk and no swap or export writes
             # one.
             ORIGIN_DEPENDENCIES: dict(origin.get(ORIGIN_DEPENDENCIES) or {})}
+def _resolve_buffer(vs: dict, target: str | None) -> str:
+    """Which named buffer an edit addresses. `None`/"source" is the main inline
+    source; anything else must name an in-memory module."""
+    if target in (None, "source"):
+        if vs.get("source") is None:
+            raise EditError(
+                "there is no inline `source` buffer to edit — this composition "
+                "was not loaded from inline source, so revl_edit has nothing "
+                "server-side to patch. Edit the file(s) and revl_swap, or "
+                "revl_load an inline `source` to iterate on it with revl_edit")
+        return "source"
+    if target in vs.get("modules", {}):
+        return target
+    available = ["source"] if vs.get("source") is not None else []
+    available += sorted(vs.get("modules") or {})
+    raise EditError(
+        f"no server-side source buffer named {target!r}; "
+        f"editable buffers: {', '.join(available) or 'none'}")
 
 
 def _read_disk(path: str) -> str | None:
@@ -157,6 +182,8 @@ def _read_disk(path: str) -> str | None:
             return handle.read()
     except OSError:
         return None
+def _get_text(vs: dict, buffer: str) -> str:
+    return vs["source"] if buffer == "source" else vs["modules"][buffer]
 
 
 def _match_file(files: list, target: str) -> str | None:
@@ -352,11 +379,14 @@ def _set_text(vs: dict, buffer: tuple[str, str], text: str) -> None:
     if kind == "dependency":          # issue #1779: read-only, never patched
         raise _read_only_refusal(key)
     if kind == "source":
+def _set_text(vs: dict, buffer: str, text: str) -> None:
+    if buffer == "source":
         vs["source"] = text
     elif kind == "file":
         vs["files_content"][key] = text
     else:
         vs["modules"][key] = text
+        vs["modules"][buffer] = text
 
 
 # ---------------------------------------------------------------- patching
@@ -446,6 +476,10 @@ def _apply_one(text: str, edit: dict) -> tuple[str, dict]:
         if expr != sent:
             echo["canonical"] = expr
         return text[:start] + expr + text[end:], echo
+        expr = str(edit["expr"])
+        return text[:start] + expr + text[end:], {
+            "form": "hole", "line": int(edit["hole"]),
+            "replaced": text[start:end], "expr": expr}
 
     if "anchor" in edit:
         anchor = str(edit["anchor"])
@@ -455,6 +489,7 @@ def _apply_one(text: str, edit: dict) -> tuple[str, dict]:
         occurrences = text.count(anchor)
         if occurrences == 0:
             return _token_anchor(text, anchor, replacement, edit.get("count"))
+            raise EditError(f"anchor {anchor!r} does not occur in the buffer")
         count = edit.get("count")
         if count is None:
             new_text = text.replace(anchor, replacement)
@@ -744,6 +779,7 @@ def _apply_edits(text: str, edits: list) -> tuple[str, list[dict]]:
 
 def compile_virtual(vs: dict, *, manifest: dict | None = None,
                     replacing: tuple = (), report: dict | None = None) -> dict:
+                    replacing: tuple = ()) -> dict:
     """Compile a working source set through the same entry points a full swap
     uses, so the admission gate is literally identical.
 
@@ -752,6 +788,8 @@ def compile_virtual(vs: dict, *, manifest: dict | None = None,
     inserts an `extern ... = @py { ... }` has to be refused for exactly the
     reason the same text sent to `revl_swap` is. The profile is READ from the
     server rather than passed in, so trust is decided in one place.
+    server rather than passed in, so trust is decided in one place."""
+    from .server import AUTHORING  # noqa: PLC0415 — lazy, avoids an import cycle
 
     What the compile READ is recorded back onto `vs` as its READ-ONLY
     dependency buffers (issue #1779), so the compile that decides is the
@@ -872,6 +910,10 @@ def candidate_arguments(vs: dict, replacing: tuple = ()) -> dict:
     else:
         arguments = {k: v for k, v in vs.items() if k in ("source", "modules")}
     return {**arguments, "replacing": list(replacing)}
+        return compile_source(vs["source"], "<candidate>.rvl", manifest=manifest,
+                              replacing=replacing, modules=vs.get("modules") or None,
+                              profile=AUTHORING.profile())
+    raise EditError("the working source set has no inline `source` to compile")
 
 
 def _origin_from(vs: dict) -> dict:
@@ -887,6 +929,10 @@ def _origin_from(vs: dict) -> dict:
     # swapped a working set keeps serving records anchored to what it compiled
     if vs.get(ORIGIN_DEPENDENCIES):
         origin[ORIGIN_DEPENDENCIES] = dict(vs[ORIGIN_DEPENDENCIES])
+    if vs.get("source") is not None:
+        origin["source"] = vs["source"]
+    if vs.get("modules"):
+        origin["modules"] = dict(vs["modules"])
     return origin
 
 
@@ -894,6 +940,7 @@ def _origin_from(vs: dict) -> dict:
 
 def apply_edit(session, arguments: dict, verify=None, *, commit: bool = True,
                base: dict | None = None) -> dict:
+def apply_edit(session, arguments: dict) -> dict:
     """Patch the server-side source of the running composition, then re-admit.
 
     Returns the admission verdict / open holes / diagnostic — never the whole
@@ -922,6 +969,10 @@ def apply_edit(session, arguments: dict, verify=None, *, commit: bool = True,
         check_imports(vs, touched)
     except _JailError as error:
         return _jail_refused(str(error))
+    vs = copy.deepcopy(virtual_source(session))
+    buffer = _resolve_buffer(vs, arguments.get("target") or arguments.get("component"))
+    new_text, applied = _apply_edits(_get_text(vs, buffer), edits)
+    _set_text(vs, buffer, new_text)
 
     replacing = tuple(arguments.get("replacing") or ())
     return admit(session, vs, before, applied, replacing, verify, commit=commit)
@@ -943,8 +994,10 @@ def admit(session, vs: dict, before: dict, applied: list, replacing: tuple,
     # says, so an edit under `--author-trust trusted` still cannot re-seat live
     # operator instance state without the disclosure gate (#2423).
     compile_report: dict = {}
+    # its last good state.
     try:
         ir = compile_virtual(vs, report=compile_report)
+        ir = compile_virtual(vs)
     except RevlError as error:
         rejected = report(error)
         rejected["edited"] = False
@@ -982,8 +1035,10 @@ def admit(session, vs: dict, before: dict, applied: list, replacing: tuple,
                     **_effect_classes.report(ir, session.ir, against=True),
                     "note": f"proposed with {len(holes)} open hole(s); fill them "
                             "before it can commit"}
+        session.draft = vs
         return {"ok": True, "edited": True, "swapped": False, "admitted": False,
                 "applied": applied, "touched": _touched(before, vs), "holes": holes,
+                "applied": applied, "holes": holes,
                 "blastRadius": blast_radius(session.ir, ir),
                 **_summary(ir),
                 **_effect_classes.report(ir, session.ir, against=True),
@@ -1022,6 +1077,7 @@ def admit(session, vs: dict, before: dict, applied: list, replacing: tuple,
     # back to the whole composition, i.e. fails closed, when they cannot be
     # derived).
     gate_arguments = candidate_arguments(vs, replacing)
+    gate_arguments = {**vs, "replacing": list(replacing)}
     refusal = _srv._leases.check_swap(session, gate_arguments)
     if refusal is not None:
         return _srv._refused_by_lease(refusal)
@@ -1068,6 +1124,9 @@ def admit(session, vs: dict, before: dict, applied: list, replacing: tuple,
     except _srv.ApprovalRequired as error:
         error.host_bodies = authored_host_bodies
         raise
+    # composition that is running now, so preflight comes with the change.
+    radius = blast_radius(session.ir, ir)
+    state = session.swap(ir, origin=_origin_from(vs))
     session.draft = None  # committed; re-derives from the new running source
     return {"ok": True, "edited": True, "admitted": True, "swapped": True,
             "applied": applied, "touched": _touched(before, vs),
@@ -1117,6 +1176,7 @@ def _jail_refused(message: str) -> dict:
                              "category": "admission", "message": message}],
             "note": "nothing was read or compiled; the running composition and "
                     "the server-side source are untouched"}
+            "applied": applied, "blastRadius": radius, **_summary(ir), **state}
 
 
 def _summary(ir: dict) -> dict:
@@ -1127,3 +1187,4 @@ def _summary(ir: dict) -> dict:
 
 __all__ = ["apply_edit", "virtual_source", "compile_virtual", "file_modules",
            "candidate_arguments", "EditError"]
+__all__ = ["apply_edit", "virtual_source", "compile_virtual", "EditError"]

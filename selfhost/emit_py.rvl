@@ -33,6 +33,7 @@
 // below `emit_services_table`: `_emit_types` (record + variant declarations, the
 // `_py_type` map, forward-ref quoting), the built-in Result import (issue
 // #1932 — `Ok`/`Err` come from the runtime, not the module), the
+// `_py_type` map, forward-ref quoting), the built-in Result classes, the
 // canonical Float->Str `_revl_ftoa` helper, and host roots in fn/test bodies
 // (and, since item 391, host calls in component bodies).
 // Slice 4 (item 206) adds externs (`_emit_externs`, the verbatim `@py` body via
@@ -72,12 +73,24 @@
 //     activation-body effect/emit steps, the activation-body `await` step,
 //     destructuring `let` (`let_pattern`), and the in-file `test` /
 //     `lifecycle test` / `fault test` sections;
+//   * async coloring (colored fns / async externs' await-seed / awaited call
+//     sites), realm placements (`isolate`/`intercept`/`routes`/router),
+//     spawn/instances, in-file `test`/`fault_test`/`lifecycle test` emission,
+//     and the ABI;
 //   * method-body `let-effect` — EMITTED (the `_revl_frame.acquire` form) but not
 //     yet cross-checked: admitted bound acquisitions use spawn or result-declared
 //     host verbs (Map/Pool), whose component runtime lowering lands in slice 5.
 //     Bound witnessed acquisition in a provide method is frontend-rejected.
 // Exact residual conditions and reproducing inputs, including stream replay,
 // approval dispatch, validated retry and full model-flow provenance, live in
+//     Bound witnessed acquisition in a provide method is frontend-rejected;
+//   * `let_pattern` (record/list destructuring): still unimplemented here, but no
+//     longer a PERMANENT exclusion — item 179 replaced the reference's
+//     `__revl_destructure_{id(node)}` (a nondeterministic Python object id) with a
+//     per-`_Lines` monotonic counter in deterministic emission order, so its bytes
+//     are now reproducible and a future slice CAN port + cross-check it.
+// Exact residual conditions and reproducing inputs, including runtime streams,
+// approval/deferred/validated dispatch and full model-flow provenance, live in
 // the Python entries of selfhost_{blind_spots,uncovered_lines}.json. These are
 // measured limitations, not a claim of whole-emitter parity.
 //
@@ -185,6 +198,14 @@ extern pure fn newline() -> Str = @py { return chr(10) }
 // `_EMITTER_TEMP_RE`: `_bi`, `_fv`, `_ov<N>`, the `_revl*` namespace, ...) is
 // lifted the same way, so a user local cannot rebind a temporary (issue #2913).
 extern pure fn mangle_with(name: Str, builtins: Bool, types: Bool, temps: Bool) -> Str = @py {
+// identifier that is a Python keyword emits and RUNS instead of crashing.
+// A pure function of the name — declaration and use sites agree without a table
+// — and INJECTIVE, so two distinct revl identifiers never land on one Python
+// identifier. Escape a name iff the name or any name reachable from it by
+// dropping trailing `_` is a keyword, by exactly one `_`: that shifts the whole
+// `kw`/`kw_`/`kw__` ladder up a rung (`lambda` -> `lambda_`, `lambda_` ->
+// `lambda__`) and leaves every other name verbatim, so nothing collapses.
+extern pure fn mangle(name: Str) -> Str = @py {
     import keyword
     extra = set()
     if builtins:
@@ -209,6 +230,7 @@ extern pure fn mangle_with(name: Str, builtins: Bool, types: Bool, temps: Bool) 
     while root:
         if (keyword.iskeyword(root) or keyword.issoftkeyword(root) or root in extra
                 or temp(root)):
+        if keyword.iskeyword(root) or keyword.issoftkeyword(root):
             return name + "_"
         if not root.endswith("_"):
             break
@@ -416,10 +438,12 @@ fn list_index(target: Any, target_src: Str, idx: Any, index_src: Str) -> Str {
 }
 
 // Does the IR read a List subscript `xs[i]` (guarded inline)? A
+// Does the IR read a List subscript `xs[i]` (routed through `_revl_index`)? A
 // string-LITERAL key is a host/`Any` property read, not a List subscript, so
 // it does not pull the helper in (#549).
 fn uses_index(n: Any) -> Bool {
   if (node_kind(n) == "index" && value_is_null(value_field(n, "key_type"))) {
+  if (node_kind(n) == "index") {
     let idx = value_field(n, "index")
     if (!(node_kind(idx) == "lit" && value_kind(value_field(idx, "value")) == "str")) {
       return true
@@ -608,6 +632,7 @@ fn render_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
   // outside `0 <= i < length()` — python's `s[i]` is END-RELATIVE, so a bare
   // `s[-1]` would read the LAST code point where go, rust, java and ts all
   // fault. Same guard, same reason, as the inline guard on a List subscript.
+  // fault. Same guard, same reason, as `_revl_index` on a List subscript.
   if (method == "charAt") { return `_revl_str_at(${target}, ${args[0]})` }
   if (method == "charCodeAt") { return `ord(_revl_str_at(${target}, ${args[0]}))` }
   // Codepoint-at-index scan (item 276, item 391 self-host port): the Unicode
@@ -690,6 +715,10 @@ fn render_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
   // error travels as a value. The helper is emitted into the preamble by
   // `checked_block`.
   if (is_checked_form(method)) { return `_revl_${method}(${target}, ${args[0]})` }
+  // quotient as the faulting operation, but a zero divisor yields Err(reason)
+  // instead of raising — a pure fn cannot `fail`, so the error travels as a
+  // value. The helper is emitted into the preamble by `checked_div_block`.
+  if (is_checked_div(method)) { return `_revl_${method}(${target}, ${args[0]})` }
   if (method == "to_str") {
     // A Float `.to_str()` renders through `_revl_ftoa`, the same canonical
     // ECMAScript Number::toString a `${aFloat}` interpolation uses, so
@@ -951,6 +980,7 @@ fn as_async_block() -> List[Str] {
 }
 
 fn bind_payload(bind: Str, body: Str, payload: Str, node: Any, aw: Bool) -> Str {
+fn bind_payload(bind: Str, body: Str, payload: Str, node: Any) -> Str {
   if (arm_body_is_bind(node, bind)) { return payload }
   if (!arm_body_mentions(node, bind)) { return body }
   // The body reads the bind through `mangle`, so the binder is spelled the
@@ -962,10 +992,12 @@ fn bind_payload(bind: Str, body: Str, payload: Str, node: Any, aw: Bool) -> Str 
     return `[${body} for ${py} in (${payload},)][0]`
   }
   return `(lambda ${py}: ${body})(${payload})`
+  return `(lambda ${bind}: ${body})(${payload})`
 }
 
 // `_match_expr` one arm: nested conditional inside a one-shot `lambda match: …`.
 fn match_branch(arm: Any, rest: Str, has_rest: Bool, head: Str, aw: Bool) -> Str {
+fn match_branch(arm: Any, rest: Str, has_rest: Bool, head: Str) -> Str {
   let pattern = value_str(value_field(arm, "pattern"))
   let bnode = value_field(arm, "body")
   var body = expr(bnode)
@@ -978,8 +1010,10 @@ fn match_branch(arm: Any, rest: Str, has_rest: Bool, head: Str, aw: Bool) -> Str
     if (pattern == "Some") {
       cond = `${head} is not None`
       if (bind != "") { body = bind_payload(bind, body, "match", bnode, aw) }
+      if (bind != "") { body = bind_payload(bind, body, "match", bnode) }
     } else {
       if (bind != "") { body = bind_payload(bind, body, "match.value", bnode, aw) }
+      if (bind != "") { body = bind_payload(bind, body, "match.value", bnode) }
       cond = `isinstance(${head}, ${pattern})`
     }
   }
@@ -1005,6 +1039,7 @@ fn match_folds(arms: List[Any]) -> Bool {
 }
 
 fn match_expr(scrutinee: Str, arms: List[Any], aw: Bool) -> Str {
+fn match_expr(scrutinee: Str, arms: List[Any]) -> Str {
   let folds = match_folds(arms)
   var result = ""
   var has = false
@@ -1014,6 +1049,7 @@ fn match_expr(scrutinee: Str, arms: List[Any], aw: Bool) -> Str {
     var head = "match"
     if (folds && i == 0) { head = `(match := ${scrutinee})` }
     result = match_branch(arm, result, has, head, aw)
+    result = match_branch(arm, result, has, head)
     has = true
     i -= 1
   }
@@ -1236,6 +1272,7 @@ fn annotated_un(node: Any, ob: Str) -> Str {
   if (opnd == "Int") { return `_revl_i64(-${ob})` }
   if (opnd == "Int32") { return `_revl_i32(-${ob})` }
   return ""
+  return `lambda ${lp}: ${expr(value_field(node, "body"))}`
 }
 
 fn render_bin(node: Any) -> Str {
@@ -1256,29 +1293,50 @@ fn render_bin(node: Any) -> Str {
     var rights = []
     for (s of spine) { rights = rights.push(expr(value_field(s, "right"))) }
     return chain_text(spine, leaf, rights)
+  let opnd = node_operands(node)
+  if (is_addsubmul(op) && opnd == "Int") {
+    return bounded(`${expr(value_field(node, "left"))} ${op} ${expr(value_field(node, "right"))}`, "64")
   }
   let lb = expr(value_field(node, "left"))
   let rb = expr(value_field(node, "right"))
   let ann = annotated_bin(node, lb, rb)
   if (ann != "") { return ann }
+  if (is_addsubmul(op) && opnd == "Int32") {
+    return bounded(`${expr(value_field(node, "left"))} ${op} ${expr(value_field(node, "right"))}`, "32")
+  }
+  if (op == "/") {
+    return `_revl_div(${expr(value_field(node, "left"))}, ${expr(value_field(node, "right"))})`
+  }
+  if (op == "%" && opnd == "Float") {
+    // The Float remainder is IEEE `fmod`, which has a VALUE at a zero
+    // divisor (NaN) where the Int one faults (issue #721).
+    return `_revl_frem(${expr(value_field(node, "left"))}, ${expr(value_field(node, "right"))})`
+  }
+  if (op == "%" && opnd == "Int") {
+    return `_revl_rem(${expr(value_field(node, "left"))}, ${expr(value_field(node, "right"))})`
+  }
   if (op == "&" || op == "|" || op == "^") {
     // Int32 bitwise AND/OR/XOR (item 366): for operands already in i32 range,
     // python's `&`/`|`/`^` produce an in-range result, so no re-wrap is needed.
     return `(${lb} ${op} ${rb})`
+    return `(${expr(value_field(node, "left"))} ${op} ${expr(value_field(node, "right"))})`
   }
   if (op == ">>") {
     // Arithmetic (sign-extending) right shift; the count is taken mod 32
     // (`& 31`), matching wasm/JS. python `>>` is arithmetic and the magnitude
     // only shrinks, so the result stays in i32 range.
     return `(${lb} >> (${rb} & 31))`
+    return `(${expr(value_field(node, "left"))} >> (${expr(value_field(node, "right"))} & 31))`
   }
   if (op == "<<") {
     // Left shift wraps into 32-bit two's complement (a bit op, no trap): the
     // count is taken mod 32 and the result is re-wrapped.
     return `_revl_i32_wrap(${lb} << (${rb} & 31))`
+    return `_revl_i32_wrap(${expr(value_field(node, "left"))} << (${expr(value_field(node, "right"))} & 31))`
   }
   let pop = py_bin_op(op)
   return `(${lb} ${pop} ${rb})`
+  return `(${expr(value_field(node, "left"))} ${pop} ${expr(value_field(node, "right"))})`
 }
 
 fn render_un(node: Any) -> Str {
@@ -1294,6 +1352,10 @@ fn render_un(node: Any) -> Str {
     let ann = annotated_un(node, ob)
     if (ann != "") { return ann }
     return `(-${ob})`
+    let opnd = node_operands(node)
+    if (opnd == "Int") { return `_revl_i64(-${expr(value_field(node, "operand"))})` }
+    if (opnd == "Int32") { return `_revl_i32(-${expr(value_field(node, "operand"))})` }
+    return `(-${expr(value_field(node, "operand"))})`
   }
   return `<<UNSUPPORTED-UN:${op}>>`
 }
@@ -1343,10 +1405,13 @@ fn expr_inner(node: Any) -> Str {
     // A string-LITERAL key is a host/`Any` property read (`tc["fn"]`), not a
     // List subscript — bare `[...]`. A List subscript carries the inline
     // guard of `list_index`, which faults on a negative index (#549).
+    // List subscript — bare `[...]`. A List subscript routes through
+    // `_revl_index`, which faults on a negative index (#549).
     if (node_kind(idx) == "lit" && value_kind(value_field(idx, "value")) == "str") {
       return `${expr(value_field(node, "target"))}[${expr(idx)}]`
     }
     return list_index(value_field(node, "target"), expr(value_field(node, "target")), idx, expr(idx))
+    return `_revl_index(${expr(value_field(node, "target"))}, ${expr(idx)})`
   }
   if (kind == "if") {
     return `(${expr(value_field(node, "then"))} if ${expr(value_field(node, "cond"))} else ${expr(value_field(node, "else"))})`
@@ -1366,6 +1431,12 @@ fn expr_inner(node: Any) -> Str {
   // against the class the module IMPORTS from the runtime (issue #1932).
   // `Opt`'s `Some`/`None` never reach here: they stay host-value/None and are
   // handled by the `call`/`var` arms above.
+  // item 391 (self-host port): TAGGED ADT construction. The built-in `Result`
+  // (`Ok`/`Err`) and every user variant case are emitted as classes (see
+  // `result_class` / `emit_types`), so building one is a plain constructor call
+  // on the case NAME — unmangled, exactly as the class is declared. `Opt`'s
+  // `Some`/`None` never reach here: they stay host-value/None and are handled
+  // by the `call`/`var` arms above.
   if (kind == "adt") {
     return `${value_str(value_field(node, "case"))}(${commajoin(value_list(value_field(node, "args")))})`
   }
@@ -1373,6 +1444,7 @@ fn expr_inner(node: Any) -> Str {
   if (kind == "arrow") { return render_arrow(node) }
   if (kind == "match") {
     return match_expr(expr(value_field(node, "scrutinee")), value_list(value_field(node, "arms")), value_bool(value_field(node, "__awaited__")))
+    return match_expr(expr(value_field(node, "scrutinee")), value_list(value_field(node, "arms")))
   }
   if (kind == "record_update") {
     return render_record_update(expr(value_field(node, "base")), value_list(value_field(node, "updates")))
@@ -1598,20 +1670,36 @@ fn fn_stmt(node: Any, indent: Int) -> List[Str] {
   if (step == "if") {
     out = out.push(line(indent, `if ${expr(value_field(node, "cond"))}:`))
     out = out.concat(fn_block(value_list(value_field(node, "then")), indent + 1))
+    for (s of value_list(value_field(node, "then"))) { out = out.concat(fn_stmt(s, indent + 1)) }
     let els = value_list(value_field(node, "else"))
     if (els.length() > 0) {
       out = out.push(line(indent, "else:"))
       out = out.concat(fn_block(els, indent + 1))
+      for (s of els) { out = out.concat(fn_stmt(s, indent + 1)) }
     }
     return out
   }
   if (step == "while") {
     out = out.push(line(indent, `while ${expr(value_field(node, "cond"))}:`))
     return out.concat(fn_block(value_list(value_field(node, "body")), indent + 1))
+    let body = value_list(value_field(node, "body"))
+    if (body.length() == 0) {
+      out = out.push(line(indent + 1, "pass"))
+    } else {
+      for (s of body) { out = out.concat(fn_stmt(s, indent + 1)) }
+    }
+    return out
   }
   if (step == "for") {
     out = out.push(line(indent, `for ${mangle(value_str(value_field(node, "bind")))} in ${expr(value_field(node, "iterable"))}:`))
     return out.concat(fn_block(value_list(value_field(node, "body")), indent + 1))
+    let body = value_list(value_field(node, "body"))
+    if (body.length() == 0) {
+      out = out.push(line(indent + 1, "pass"))
+    } else {
+      for (s of body) { out = out.concat(fn_stmt(s, indent + 1)) }
+    }
+    return out
   }
   if (step == "expr") {
     out = out.push(line(indent, expr(value_field(node, "expr"))))
@@ -1663,9 +1751,12 @@ fn memo_source() -> List[Str] {
 }
 
 fn emit_memo_wrapper(name: Str, params: List[Any], is_async: Bool) -> List[Str] {
+fn emit_memo_wrapper(name: Str, params: List[Any]) -> List[Str] {
   let args = fn_params(params)
   let inner = (is_async ? "await " : "").concat("_revl_uncached_").concat(name)
   var out = [`${is_async ? "async def" : "def"} ${name}(${args}):`, "    \"\"\"item 310 `cache pure`: memoized on the structural args key.\"\"\"",
+  let inner = "_revl_uncached_".concat(name)
+  var out = [`def ${name}(${args}):`, "    \"\"\"item 310 `cache pure`: memoized on the structural args key.\"\"\"",
     `    _revl_k = _revl_memo_key((${py_repr(name)}${if (args == "") { "" } else { ", " }}${args},))`,
     "    if _revl_k is _REVL_NOMEMO:", `        return ${inner}(${args})`,
     "    _revl_v = _REVL_MEMO.get(_revl_k, _REVL_MISS)", "    if _revl_v is _REVL_MISS:",
@@ -2007,6 +2098,7 @@ fn dr_stamp(node: Any, names: List[Str]) -> Any {
 }
 
 fn emit_functions(source_functions: List[Any], ir: Any) -> List[Str] {
+fn emit_functions(functions: List[Any]) -> List[Str] {
   var out = []
   let direct = dict_receivers(ir)
   // one destructure counter for the whole functions section
@@ -2031,8 +2123,13 @@ fn emit_functions(source_functions: List[Any], ir: Any) -> List[Str] {
     let body = value_list(colour(stamped, doc_colour(ir, None, locals, false), is_async, false))
     out = out.push(`${is_async ? "async def" : "def"} ${body_name}(${params}):`)
     out = out.concat(fn_block(body, 1))
+    out = out.push(`def ${body_name}(${params}):`)
+    let body = value_list(value_field(fnode, "body"))
+    if (body.length() == 0) { out = out.push(line(1, "pass")) }
+    for (s of body) { out = out.concat(fn_stmt(s, 1)) }
     out = out.push("")
     if (memoized) { out = out.concat(emit_memo_wrapper(name, value_list(value_field(fnode, "params")), is_async)) }
+    if (memoized) { out = out.concat(emit_memo_wrapper(name, value_list(value_field(fnode, "params")))) }
   }
   return out
 }
@@ -2140,6 +2237,8 @@ fn extern_config_bind(name: Str, schema: List[Any]) -> Str {
   return `_revl_config = _revl_extern_config(${py_repr(name)}, ${py_repr(required)}, {${defaults.join(", ")}})`
 }
 
+// reproduced faithfully; the await-seed / awaited call sites it needs are
+// DEFERRED to slice 5 (so an async extern is excluded from the cross-check).
 // The extern classes whose host body crosses a boundary (issue #1504), the
 // reference's `_GATED_EXTERN_CLASSES`.
 fn gated_extern_class(cls: Str) -> Bool {
@@ -2256,6 +2355,7 @@ fn emit_externs(externs: List[Any], gated: Bool) -> List[Str] {
       let why = host_param_refusal(pn)
       if (refused == "" && why != "" && !value_is_null(value_field(value_field(ext, "bodies"), "py"))) { refused = `${pn} ${why}` }
     }
+    for (p of value_list(value_field(ext, "params"))) { ps = ps.push(mangle(value_str(value_field(p, "name")))) }
     var kw = "def"
     if (value_bool(value_field(ext, "async"))) { kw = "async def" }
     // item 421 F6 (ported per item 429(d)): the extern's declared return carried
@@ -2289,6 +2389,12 @@ fn emit_externs(externs: List[Any], gated: Bool) -> List[Str] {
       let thunk = value_is_null(comp) ? "None" : `lambda: ${expr(comp)}`
       let call = value_is_null(comp) ? "" : call_kwarg(comp, "")
       out = out.push(`@${runtime_ref("declared_crossing")}(${py_repr(value_str(value_field(ext, "name")))}, ${thunk}, ui=True${call})`)
+    out = out.push(`${kw} ${name}(${ps.join(", ")}):`)
+    let body = dedent(strip_nl(value_str(value_field(value_field(ext, "bodies"), "py"))))
+    if (body != "") {
+      for (ln of splitlines(body)) { out = out.push(line(1, ln)) }
+    } else {
+      out = out.push(line(1, "pass"))
     }
     let py_body = value_field(value_field(ext, "bodies"), "py")
     // item 396 option B: a `@py ref` extern with no inline body is a lazy import
@@ -2316,6 +2422,7 @@ fn emit_externs(externs: List[Any], gated: Bool) -> List[Str] {
       out = out.concat(close_block(lines, 1))
       out = out.push("")
     }
+    out = out.push("")
   }
   return out
 }
@@ -2411,12 +2518,17 @@ fn div_euclid_block() -> List[Str] {
 // A negative List index FAULTS on every tier (#549): python would otherwise
 // silently read from the end, so guard the read here. Mirrors the reference
 // `_revl_neg_index` preamble def.
+// `_revl_index` preamble def.
 fn index_block() -> List[Str] {
   var o = []
   o = o.push("def _revl_neg_index():")
+  o = o.push("def _revl_index(xs, i):")
   o = o.push(`    """A negative List index faults on every tier (#549); python would"""`)
   o = o.push(`    """otherwise read from the end, so guard it here."""`)
   o = o.push(`    raise IndexError('revl: negative list index')`)
+  o = o.push("    if i < 0:")
+  o = o.push(`        raise IndexError('revl: negative list index')`)
+  o = o.push("    return xs[i]")
   o = o.push("")
   return o
 }
@@ -2492,6 +2604,13 @@ fn checked_value(method: Str) -> Str {
   if (method == "checked_add") { return "a + b" }
   if (method == "checked_sub") { return "a - b" }
   if (method == "checked_mul") { return "a * b" }
+// item 391 (self-host port): the preamble helper behind a total division form
+// (docs/arithmetic.md). Same quotient as the faulting operation, but a zero
+// divisor answers `Err(reason)` instead of raising, and a quotient that leaves
+// the i64 range (Int.MIN / -1) answers `Err` rather than a wrong value. `Ok`/
+// `Err` are the tagged classes `uses_builtin_result` already gates on the
+// presence of a checked division, so the helper never names a missing class.
+fn checked_quotient(method: Str) -> Str {
   if (method == "checked_div_trunc") {
     return "abs(a) // abs(b) if (a < 0) == (b < 0) else -(abs(a) // abs(b))"
   }
@@ -2501,6 +2620,7 @@ fn checked_value(method: Str) -> Str {
 }
 
 fn checked_block(method: Str) -> List[Str] {
+fn checked_div_block(method: Str) -> List[Str] {
   let short = method.slice(8, method.length())
   var o = []
   o = o.push("def _revl_".concat(method).concat("(a, b):"))
@@ -2514,14 +2634,22 @@ fn checked_block(method: Str) -> List[Str] {
       .concat("`: an overflow is Err(reason), never a raise.\"\"\""))
   }
   o = o.push("    v = ".concat(checked_value(method)))
+  o = o.push("    \"\"\"Total `".concat(short)
+    .concat("`: a zero divisor is Err(reason), never a raise.\"\"\""))
+  o = o.push("    if b == 0:")
+  o = o.push("        return Err('revl: division by zero')")
+  o = o.push("    q = ".concat(checked_quotient(method)))
   if (method == "checked_mod") {
     // a remainder cannot leave the range its operands are already in
     o = o.push("    return Ok(v)")
+    o = o.push("    return Ok(q)")
   } else {
     // an Int result that leaves i64 (an overflowing product, or the one
     // overflowing quotient Int.MIN/-1) does not fit -> Err, not a value
     o = o.push("    if -(2**63) <= v <= 2**63 - 1:")
     o = o.push("        return Ok(v)")
+    o = o.push("    if -(2**63) <= q <= 2**63 - 1:")
+    o = o.push("        return Ok(q)")
     o = o.push("    return Err('revl: Int overflow')")
   }
   o = o.push("")
@@ -2590,6 +2718,11 @@ fn comp_names(ir: Any) -> Str {
 // `instance-get` cexpr kinds), async operations and the await-seed, the
 // activation-body `await` step and the lifecycle-test driver are ported (item
 // 391). The
+// threaded through provides/methods). STILL DEFERRED to slice 5: async coloring
+// (async methods / await bodies / the
+// await-seed), realm placements (`isolate`/`intercept`/`routes`/the
+// router), spawn/instances, lifecycle TESTS (the `plug`/`set_trace`/`Clock`/
+// `asyncio` driver), and the `spawn`/`instance-get` cexpr kinds. The
 // component-body `${…}` template (the `format` cexpr, `_revl_fmt` + the `fmt`
 // runtime import) is ported — a fn body lowers `${…}` to `interp` instead, so
 // `format` is the component/method-body twin of the fn-body f-string concat.
@@ -2708,6 +2841,7 @@ fn carrow(node: Any) -> Str {
   for (p of value_list(value_field(node, "params"))) { ps = ps.push(mangle(value_str(p))) }
   let lp = ps.join(", ")
   return async_arrow(value_str(value_field(node, "__async_shape__")), `lambda ${lp}: ${cexpr(value_field(node, "body"))}`)
+  return `lambda ${lp}: ${cexpr(value_field(node, "body"))}`
 }
 
 // component `bin`/`un`: the SAME annotated rendering the module-fn spine uses
@@ -2715,6 +2849,7 @@ fn carrow(node: Any) -> Str {
 // host operator is what made a `provide` method answer `-7 % 2` as python's
 // floored `1` while the same expression in a module `fn` answered the
 // truncated `-1` docs/arithmetic.md specifies.
+// component `bin`: NO arithmetic specialization (the reference difference).
 fn cbin(node: Any) -> Str {
   let op = node_op(node)
   if (op == "??") {
@@ -2738,6 +2873,7 @@ fn cbin(node: Any) -> Str {
   if (ann != "") { return ann }
   let pop = py_bin_op(op)
   return `(${lb} ${pop} ${rb})`
+  return `(${cexpr(value_field(node, "left"))} ${pop} ${cexpr(value_field(node, "right"))})`
 }
 
 fn cun(node: Any) -> Str {
@@ -2749,10 +2885,12 @@ fn cun(node: Any) -> Str {
     if (ann != "") { return ann }
     return `(-${ob})`
   }
+  if (op == "-") { return `(-${cexpr(value_field(node, "operand"))})` }
   return `<<UNSUPPORTED-UN:${op}>>`
 }
 
 fn cmatch_branch(arm: Any, rest: Str, has_rest: Bool, head: Str, aw: Bool) -> Str {
+fn cmatch_branch(arm: Any, rest: Str, has_rest: Bool, head: Str) -> Str {
   let pattern = value_str(value_field(arm, "pattern"))
   let bnode = value_field(arm, "body")
   var body = cexpr(bnode)
@@ -2765,8 +2903,10 @@ fn cmatch_branch(arm: Any, rest: Str, has_rest: Bool, head: Str, aw: Bool) -> St
     if (pattern == "Some") {
       cond = `${head} is not None`
       if (bind != "") { body = bind_payload(bind, body, "match", bnode, aw) }
+      if (bind != "") { body = bind_payload(bind, body, "match", bnode) }
     } else {
       if (bind != "") { body = bind_payload(bind, body, "match.value", bnode, aw) }
+      if (bind != "") { body = bind_payload(bind, body, "match.value", bnode) }
       cond = `isinstance(${head}, ${pattern})`
     }
   }
@@ -2777,6 +2917,7 @@ fn cmatch_branch(arm: Any, rest: Str, has_rest: Bool, head: Str, aw: Bool) -> St
 }
 
 fn cmatch(scrutinee: Str, arms: List[Any], aw: Bool) -> Str {
+fn cmatch(scrutinee: Str, arms: List[Any]) -> Str {
   let folds = match_folds(arms)
   var result = ""
   var has = false
@@ -2785,6 +2926,7 @@ fn cmatch(scrutinee: Str, arms: List[Any], aw: Bool) -> Str {
     var head = "match"
     if (folds && i == 0) { head = `(match := ${scrutinee})` }
     result = cmatch_branch(arms[i], result, has, head, aw)
+    result = cmatch_branch(arms[i], result, has, head)
     has = true
     i -= 1
   }
@@ -2840,6 +2982,8 @@ fn cexpr(node: Any) -> Str {
     return mangle(id)
   }
   if (kind == "req") { return ctx_read(value_str(value_field(node, "name"))) }
+  if (kind == "name") { return mangle(value_str(value_field(node, "id"))) }
+  if (kind == "req") { return "_revl_ctx.".concat(value_str(value_field(node, "name"))) }
   // `config.<field>` (slice 4): a read of the resolved config dict. The field
   // is repr'd RAW (unlike the schema declaration, which mangles it) — mirroring
   // the reference `_expr` config branch exactly.
@@ -2879,6 +3023,7 @@ fn cexpr(node: Any) -> Str {
       return `${cexpr(value_field(node, "target"))}[${cexpr(idx)}]`
     }
     return list_index(value_field(node, "target"), cexpr(value_field(node, "target")), idx, cexpr(idx))
+    return `_revl_index(${cexpr(value_field(node, "target"))}, ${cexpr(idx)})`
   }
   if (kind == "bin") { return cbin(node) }
   if (kind == "un") { return cun(node) }
@@ -2893,6 +3038,7 @@ fn cexpr(node: Any) -> Str {
   if (kind == "arrow") { return carrow(node) }
   if (kind == "match") {
     return cmatch(cexpr(value_field(node, "scrutinee")), value_list(value_field(node, "arms")), value_bool(value_field(node, "__awaited__")))
+    return cmatch(cexpr(value_field(node, "scrutinee")), value_list(value_field(node, "arms")))
   }
   if (kind == "builtin") {
     var args = []
@@ -3091,10 +3237,12 @@ fn setup_step(step: Any, indent: Int) -> List[Str] {
   if (kind == "if") {
     out = out.push(line(indent, `if ${cexpr(value_field(step, "cond"))}:`))
     out = out.concat(setup_block(value_list(value_field(step, "then")), indent + 1))
+    for (n of value_list(value_field(step, "then"))) { out = out.concat(setup_step(n, indent + 1)) }
     let els = value_list(value_field(step, "else"))
     if (els.length() > 0) {
       out = out.push(line(indent, "else:"))
       out = out.concat(setup_block(els, indent + 1))
+      for (n of els) { out = out.concat(setup_step(n, indent + 1)) }
     }
     return out
   }
@@ -3168,6 +3316,7 @@ fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp
   let kind = value_str(value_field(step, "step"))
   if (kind == "let" || kind == "assign") {
     var out = [line(indent, `${mangle(value_str(value_field(step, "name")))} = ${method_value(value_field(step, "value"), externs)}`)]
+    var out = [line(indent, `${mangle(value_str(value_field(step, "name")))} = ${cexpr(value_field(step, "value"))}`)]
     return { lines: out, counter: counter }
   }
   if (kind == "effect") {
@@ -3187,12 +3336,14 @@ fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp
     // the cordis unwind, is logged, never recorded in `compensation_residue`, and so
     // is invisible to `revl test` and `revl run`'s no-residue proof.
     out = out.push(line(indent + 1, `yield _revl_frame._guard(${inverse_lambda(step, "undo", "")}: ${cexpr(value_field(step, "undo"))})`))
+    out = out.push(line(indent + 1, `yield _revl_frame._guard(lambda: ${cexpr(value_field(step, "undo"))})`))
     let c = counter + 1
     let label = `${comp_name}.${provide_name}.${method_name}#${c}`
     // issue #3304: an absolute table inverse may be coalesced with the frame's
     // older record for the same key, as the reference's `_coalescable_bracket`
     let adopt = coalescable_bracket(step) ? "adopt_bracket" : "adopt"
     out = out.push(line(indent, `_revl_frame.${adopt}(_revl_ctx.effect(${fname}, ${py_repr(label)}))`))
+    out = out.push(line(indent, `_revl_frame.adopt(_revl_ctx.effect(${fname}, ${py_repr(label)}))`))
     return { lines: out, counter: c }
   }
   if (kind == "let-effect") {
@@ -3206,6 +3357,7 @@ fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp
     let c = counter + 1
     let label = `${comp_name}.${provide_name}.${method_name}#${c}`
     var out = [line(indent, `${bind} = _revl_frame.acquire(${py_repr(label)}, lambda: ${acq}, ${undo_fn})`)]
+    var out = [line(indent, `${bind} = _revl_frame.acquire(${py_repr(label)}, lambda: ${acq}, lambda ${bind}: ${inv})`)]
     return { lines: out, counter: c }
   }
   if (kind == "emit") {
@@ -3226,6 +3378,7 @@ fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp
       // residue-collected. Mirrors the reference emit.py's `_method_step`.
       var out = [line(indent, emission_fire(value_field(step, "expr")))]
       out = out.push(line(indent, `_revl_frame.compensation_method(${inverse_lambda(step, "compensate", "")}: ${cexpr(value_field(step, "compensate"))}${call_kwarg(value_field(step, "compensate"), "")})`))
+      out = out.push(line(indent, `_revl_frame.compensation_method(lambda: ${cexpr(value_field(step, "compensate"))})`))
       return { lines: out, counter: counter }
     }
     var out = [line(indent, emission_fire(value_field(step, "expr")))]
@@ -3236,6 +3389,7 @@ fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp
   if (kind == "return") {
     if (value_is_null(value_field(step, "expr"))) { return { lines: [line(indent, "return")], counter: counter } }
     return { lines: [line(indent, `return ${method_value(value_field(step, "expr"), externs)}`)], counter: counter }
+    return { lines: [line(indent, `return ${cexpr(value_field(step, "expr"))}`)], counter: counter }
   }
   if (kind == "break") { return { lines: [line(indent, "break")], counter: counter } }
   if (kind == "continue") { return { lines: [line(indent, "continue")], counter: counter } }
@@ -3274,16 +3428,19 @@ fn method_control(step: Any, indent: Int, provide_name: Str, method_name: Str, c
   let kind = value_str(value_field(step, "step"))
   if (kind == "while") {
     var out = [line(indent, `while ${method_value(value_field(step, "cond"), externs)}:`)]
+    var out = [line(indent, `while ${cexpr(value_field(step, "cond"))}:`)]
     let b = method_block(value_list(value_field(step, "body")), indent + 1, provide_name, method_name, comp_name, counter, externs)
     return { lines: out.concat(b.lines), counter: b.counter }
   }
   if (kind == "for") {
     let binder = mangle(value_str(value_field(step, "bind")))
     var out = [line(indent, `for ${binder} in ${method_value(value_field(step, "iterable"), externs)}:`)]
+    var out = [line(indent, `for ${binder} in ${cexpr(value_field(step, "iterable"))}:`)]
     let b = method_block(value_list(value_field(step, "body")), indent + 1, provide_name, method_name, comp_name, counter, externs)
     return { lines: out.concat(b.lines), counter: b.counter }
   }
   var out = [line(indent, `if ${method_value(value_field(step, "cond"), externs)}:`)]
+  var out = [line(indent, `if ${cexpr(value_field(step, "cond"))}:`)]
   let t = method_block(value_list(value_field(step, "then")), indent + 1, provide_name, method_name, comp_name, counter, externs)
   out = out.concat(t.lines)
   var c = t.counter
@@ -3327,6 +3484,8 @@ fn method_lines(m: Any, indent: Int, provide_name: Str, comp_name: Str, counter:
   // wrapped every call its body awaits.
   let is_async = value_bool(value_field(value_field(specs, value_str(value_field(m, "name"))), "async"))
   var head = `${is_async ? "async def" : "def"} ${name}(self`
+  let name = mangle(value_str(value_field(m, "name")))
+  var head = `def ${name}(self`
   for (p of value_list(value_field(m, "params"))) { head = head.concat(", ").concat(mangle(value_str(p))) }
   head = head.concat("):")
   var out = []
@@ -3367,6 +3526,7 @@ fn method_lines(m: Any, indent: Int, provide_name: Str, comp_name: Str, counter:
   }
   for (s of body) {
     let se = method_step(s, body_indent, provide_name, name, comp_name, c, externs)
+    let se = method_step(s, indent + 1, provide_name, name, comp_name, c, externs)
     out = out.concat(se.lines)
     c = se.counter
   }
@@ -3382,6 +3542,7 @@ fn provide_lines(step: Any, indent: Int, comp_name: Str, counter: Int, services:
   // derived from it.
   let key = host_key(value_str(value_field(step, "name")))
   let name = mangle(key)
+  let name = mangle(value_str(value_field(step, "name")))
   let svc = value_str(value_field(step, "service"))
   // item 421 F6: the provided service's method specs, the only place the
   // `Secret[T]` param stamps survive.
@@ -3402,6 +3563,8 @@ fn provide_lines(step: Any, indent: Int, comp_name: Str, counter: Int, services:
   out = out.push("")
   out = out.push(line(indent, `yield _revl_ctx.provide(${py_repr(key)})`))
   out = out.push(line(indent, `_revl_ctx.set(${py_repr(key)}, ${cls}())`))
+  out = out.push(line(indent, `yield _revl_ctx.provide(${py_repr(name)})`))
+  out = out.push(line(indent, `_revl_ctx.set(${py_repr(name)}, ${cls}())`))
   return { lines: out, counter: c }
 }
 
@@ -3416,6 +3579,7 @@ fn timer_compensation(em: Any, indent: Int, externs: List[Any]) -> List[Str] {
 }
 
 fn timer_emit(step: Any, indent: Int, counter: Int, externs: List[Any]) -> EmitLines {
+fn timer_emit(step: Any, indent: Int, counter: Int) -> EmitLines {
   let mode = value_str(value_field(step, "mode"))
   var sched = "schedule_after"
   if (mode == "every") { sched = "schedule_every" }
@@ -3423,7 +3587,10 @@ fn timer_emit(step: Any, indent: Int, counter: Int, externs: List[Any]) -> EmitL
   let fname = `_timer_${c}`
   let handle = fname.concat("_h")
   var out = []
+  out = out.push(line(indent, `def ${fname}():`))
   let emissions = value_list(value_field(step, "body"))
+  if (emissions.length() == 0) { out = out.push(line(indent + 1, "pass")) }
+  for (em of emissions) { out = out.push(line(indent + 1, emission_fire(value_field(em, "expr")))) }
   let interval = value_int(value_field(step, "interval_ms"))
   // item 170: a timer body coloured `async` fires into an in-flight window.
   // Each emission that reaches a coroutine is spawned as a tracked task (a sync
@@ -3457,6 +3624,7 @@ fn timer_emit(step: Any, indent: Int, counter: Int, externs: List[Any]) -> EmitL
   out = out.push(line(indent + 1, `for _revl_task in list(${inflight}):`))
   out = out.push(line(indent + 2, "_revl_task.cancel()"))
   out = out.push(line(indent, `yield ${cancel}`))
+  out = out.push(line(indent, `yield lambda: ${handle}.cancel()`))
   return { lines: out, counter: c }
 }
 
@@ -3953,6 +4121,8 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
     } else {
       out = out.push(line(indent, `yield lambda: ${inv}`))
     }
+    out = out.push(line(indent, `${mangle(value_str(value_field(step, "bind")))} = ${cexpr(value_field(step, "acquire"))}`))
+    out = out.push(line(indent, `yield lambda: ${cexpr(value_field(step, "undo"))}`))
     out = out.push("")
     return { lines: out, counter: counter }
   }
@@ -3967,6 +4137,7 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
       // issue #1945: journal the host Map keys the bracket writes
       out = out.push(line(indent, "_revl_frame._journal_begin()"))
       out = out.push(line(indent, `${await_prefix(step)}${cexpr(value_field(step, "acquire"))}`))
+      out = out.push(line(indent, cexpr(value_field(step, "acquire"))))
       out = out.push(line(indent, `yield lambda: ${cexpr(value_field(step, "undo"))}`))
     }
     out = out.push("")
@@ -3983,6 +4154,7 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
   }
   if (kind == "fail") {
     var out = [line(indent, `raise _revl_fail_error(${cexpr(value_field(step, "message"))})`)]
+    var out = [line(indent, `raise RuntimeError(${cexpr(value_field(step, "message"))})`)]
     out = out.push("")
     return { lines: out, counter: counter }
   }
@@ -4009,6 +4181,7 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
       return { lines: seam, counter: c }
     }
     var out = [line(indent, `${await_prefix(step)}${emission_fire(value_field(step, "expr"))}`)]
+    var out = [line(indent, emission_fire(value_field(step, "expr")))]
     if (!value_is_null(value_field(step, "compensate"))) {
       // item 247 (docs/design/teardown-contract.md): a compensation is a
       // first-class COMPENSATION entry on the frame's shared per-activation
@@ -4019,6 +4192,7 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
       // single-interleaved-LIFO ordering (docs/contract-errata.md TCK A5
       // respec, a5a/a5b); it is compensation, not inversion (§6.1).
       out = out.push(line(indent, `yield _revl_frame.compensation(lambda: ${cexpr(value_field(step, "compensate"))}${call_kwarg(value_field(step, "compensate"), "")})`))
+      out = out.push(line(indent, `yield _revl_frame.compensation(lambda: ${cexpr(value_field(step, "compensate"))})`))
     }
     // item 254: the reversal an emission extern declares on itself. Every such
     // declaration is an extern `fn` crossing, which the seam branch above
@@ -4032,12 +4206,14 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
     var c = counter
     let te = emit_body_steps(value_list(value_field(step, "then")), indent + 1, comp_name, c, services, externs)
     out = out.concat(close_block(te.lines, indent + 1))
+    out = out.concat(te.lines)
     c = te.counter
     let els = value_list(value_field(step, "else"))
     if (els.length() > 0) {
       out = out.push(line(indent, "else:"))
       let ee = emit_body_steps(els, indent + 1, comp_name, c, services, externs)
       out = out.concat(close_block(ee.lines, indent + 1))
+      out = out.concat(ee.lines)
       c = ee.counter
     }
     out = out.push("")
@@ -4046,6 +4222,7 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
   if (kind == "stream-iter") { return stream_iter(step, indent, comp_name, counter, services, externs) }
   if (kind == "timer") {
     let e = timer_emit(step, indent, counter, externs)
+    let e = timer_emit(step, indent, counter)
     var out = e.lines
     out = out.push("")
     return { lines: out, counter: e.counter }
@@ -4186,6 +4363,7 @@ fn colour_component(steps: Any, cx: Colour, services: Any) -> Any {
 }
 
 fn component_body(comp: Any, services: Any, externs: List[Any], ir: Any) -> List[Str] {
+fn component_body(comp: Any, services: Any, externs: List[Any]) -> List[Str] {
   let name = mangle(value_str(value_field(comp, "name")))
   let sn = snake(name)
   var out = []
@@ -4199,11 +4377,15 @@ fn component_body(comp: Any, services: Any, externs: List[Any], ir: Any) -> List
   // spelled after a python keyword in the schema ALONE, so the schema refused
   // the key the author wrote and the fiber landed FAILED (issue #1915). The
   // `secret` list below has always been raw for the same reason.
+  // validates/resolves it before apply runs. The field name is mangled (as the
+  // reference `_ident`s it); type/default are repr'd verbatim.
   let config_fields = value_list(value_field(comp, "config"))
   if (config_fields.length() > 0) {
     out = out.push(`_${upper(sn)}_CONFIG = _revl_ConfigSchema([`)
     for (spec of config_fields) {
       out = out.push(line(1, `(${py_repr(value_field(spec, "name"))}, ${py_repr(value_field(spec, "type"))}, ${py_repr(value_field(spec, "default"))}),`))
+      let field = mangle(value_str(value_field(spec, "name")))
+      out = out.push(line(1, `(${py_repr(field)}, ${py_repr(value_field(spec, "type"))}, ${py_repr(value_field(spec, "default"))}),`))
     }
     // item 256 Slice 3: the config fields declared `Secret[T]`. The qualifier is
     // stripped off the declared type before lowering, so a field's `secret`
@@ -4257,6 +4439,7 @@ fn component_body(comp: Any, services: Any, externs: List[Any], ir: Any) -> List
   let marked = mark_component(coloured, reqs_host, services, name)
   let body_steps = routed_hosts.length() > 0 ? route_reqs(marked, routed_hosts) : marked
   out = out.push(line(1, body_is_async(value_list(body_steps)) ? "async def _body():" : "def _body():"))
+  out = out.push(line(1, "def _body():"))
   // item 247 second-pass (F1): `begin` yielded FIRST -> disposed LAST (cordis
   // LIFO), the Phase-2 post-unwind hook at the bottom of the unwind stack, so a
   // post-activation abort's activation-body offsets are drained after Phase 1
@@ -4264,6 +4447,7 @@ fn component_body(comp: Any, services: Any, externs: List[Any], ir: Any) -> List
   out = out.push(line(2, "yield _revl_frame.begin"))
   if (body_may_fan_out(value_list(body_steps))) { out = out.push(line(2, "<<UNSUPPORTED-COMPONENT:parallel-emit>>")) }
   let e = emit_body_steps(value_list(body_steps), 2, name, 0, services, externs)
+  let e = emit_body_steps(value_list(value_field(comp, "body")), 2, name, 0, services, externs)
   out = out.concat(e.lines)
   out = out.push(line(2, "yield _revl_frame.drain"))
   out = out.push("")
@@ -4293,6 +4477,8 @@ fn component_body(comp: Any, services: Any, externs: List[Any], ir: Any) -> List
   } else {
     out = out.push(line(1, `'inject': ${py_repr(inject)},`))
   }
+  for (k of value_keys(value_field(comp, "requires"))) { inject = inject.push(mangle(k)) }
+  out = out.push(line(1, `'inject': ${py_repr(inject)},`))
   out = out.push(line(1, `'apply': _${sn}_apply,`))
   if (config_fields.length() > 0) {
     out = out.push(line(1, `'Config': _${upper(sn)}_CONFIG,`))
@@ -4356,6 +4542,8 @@ fn emit_services_table(services: Any) -> List[Str] {
 //   * the built-in Result import  — `Ok`/`Err`, added to the sorted
 //     `from runtime import` line when `_uses_builtin_result` holds and not
 //     suppressed per-name because a user variant case shadows it (issue #1932);
+//   * built-in Result classes  — `Ok`/`Err`, gated by `_uses_builtin_result`
+//     and suppressed per-name when a user variant case shadows it;
 //   * `_revl_ftoa`  — the canonical Float->Str interpolation helper, gated by
 //     `_uses_float_interp` (a `${…}` over a provably-Float expression);
 //   * host roots in fn/test bodies: a `var` naming `Map`/`Pool`/`Job`/`Stream`
@@ -4367,6 +4555,9 @@ fn emit_services_table(services: Any) -> List[Str] {
 // `ConfigSchema`, and method-body `effect`/`let-effect`/compensated-`emit` (the
 // `_revl_frame.adopt`/`.acquire` accumulator + `_label` counter). STILL DEFERRED:
 // the canonical ABI.
+// `_revl_frame.adopt`/`.acquire` accumulator + `_label` counter). STILL DEFERRED
+// to slice 5: in-file `test`/`fault_test`/`lifecycle test` emission, async
+// coloring, realm placements, spawn/instances, and the canonical ABI.
 
 // -------------------------------------------------------------- string utils
 // `trim` / `lstrip` / `last_index_of` / `ident_tokens` now come from
@@ -4508,10 +4699,12 @@ fn typing_imports(types: Any) -> List[Str] {
 fn emit_types(types: Any) -> List[Str] {
   var all_names = []
   for (nm of value_keys(types)) { all_names = all_names.push(mangle_type(nm)) }
+  for (nm of value_keys(types)) { all_names = all_names.push(mangle(nm)) }
   var emitted = []
   var out = []
   for (nm of value_keys(types)) {
     let name = mangle_type(nm)
+    let name = mangle(nm)
     let spec = value_field(types, nm)
     if (value_str(value_field(spec, "kind")) == "record") {
       out = out.push(`class ${name}:`)
@@ -4521,6 +4714,7 @@ fn emit_types(types: Any) -> List[Str] {
       for (f of fkeys) {
         let ftype = value_str(value_field(fields, f))
         out = out.push(line(1, `${mangle_kw(f)}: ${type_ann(ftype, all_names, emitted)}`))
+        out = out.push(line(1, `${mangle(f)}: ${type_ann(ftype, all_names, emitted)}`))
       }
       emitted = emitted.push(name)
     } else {
@@ -4559,6 +4753,8 @@ fn emit_types(types: Any) -> List[Str] {
 // `_uses_builtin_result`: does the IR construct or match the built-in Result?
 // An `adt` typed `Result*`, a `match` arm on Ok/Err, or a total-form builtin
 // (which produces a Result). Recurses over every node exactly as the
+// An `adt` typed `Result*`, a `match` arm on Ok/Err, or a checked-division
+// builtin (which produces a Result). Recurses over every node exactly as the
 // reference `any(walk(v) …)` does.
 fn is_checked_div(m: Str) -> Bool {
   return m == "checked_div_trunc" || m == "checked_div_floor"
@@ -4580,6 +4776,7 @@ fn walk_result(n: Any) -> Bool {
     }
   }
   if (is_checked_form(value_str(value_field(n, "method")))) { return true }
+  if (is_checked_div(value_str(value_field(n, "method")))) { return true }
   for (c of value_children(n)) { if (walk_result(c)) { return true } }
   return false
 }
@@ -4602,6 +4799,23 @@ fn uses_builtin_result(ir: Any) -> Bool {
 
 // The user variant CASE names — the built-in Result import above and the
 // reference both suppress a name a user ADT case claims for itself.
+// The one Result class, for a builtin name not shadowed by a user variant case.
+fn result_class(builtin: Str) -> List[Str] {
+  var out = []
+  out = out.push(`class ${builtin}:`)
+  out = out.push(line(1, `__slots__ = ("value",)`))
+  out = out.push(line(1, "def __init__(self, value=None):"))
+  out = out.push(line(2, "self.value = value"))
+  out = out.push(line(1, "def __eq__(self, other):"))
+  out = out.push(line(2, `return isinstance(other, ${builtin}) and other.value == self.value`))
+  out = out.push(line(1, "def __hash__(self):"))
+  out = out.push(line(2, `return hash((${py_repr(builtin)}, self.value))`))
+  out = out.push("")
+  return out
+}
+
+// The user variant CASE names — the reference suppresses a built-in Result
+// class whose name a user ADT case shadows.
 fn user_case_names(types: Any) -> List[Str] {
   var names = []
   for (nm of value_keys(types)) {
@@ -4741,6 +4955,10 @@ fn uses_extern_emit(n: Any, deferred: List[Str]) -> Bool {
   if (value_str(value_field(n, "step")) == "emit" && node_kind(value_field(n, "expr")) == "fn"
       && !list_contains(deferred, value_str(value_field(value_field(n, "expr"), "name")))) { return true }
   for (c of value_children(n)) { if (uses_extern_emit(c, deferred)) { return true } }
+// missing for a site that renders the seam.
+fn uses_extern_emit(n: Any) -> Bool {
+  if (value_str(value_field(n, "step")) == "emit" && node_kind(value_field(n, "expr")) == "fn") { return true }
+  for (c of value_children(n)) { if (uses_extern_emit(c)) { return true } }
   return false
 }
 fn ir_uses_extern_emit(ir: Any) -> Bool {
@@ -4768,6 +4986,7 @@ fn uses_value_emission(n: Any, externs: List[Any], deferred: List[Str]) -> Bool 
 
 fn seam_value_emission(node: Any, externs: List[Any], deferred: List[Str]) -> Bool {
   return is_value_emission(node, externs) && !list_contains(deferred, value_str(value_field(node, "name")))
+  return uses_extern_emit(value_field(ir, "components"))
 }
 
 // Safe pure-function templates mirror the reference's evaluation-preserving
@@ -5102,8 +5321,35 @@ fn lifecycle_harness() -> List[Str] {
 }
 
 fn has_lifecycle_test(ir: Any) -> Bool {
+// ------------------------------------------ the deferred in-file test section
+// In-file `test` / `fault test` / `lifecycle test` emission is deferred out of
+// every self-host emitter slice. The reference emits a driver section for it;
+// this port does not. Emitting NOTHING made that divergence SILENT, which is
+// the one failure mode the marker convention exists to prevent: a deferred
+// family that answers with a named `<<UNSUPPORTED-...>>` marker is loud in the
+// emitted bytes and is pinned by a boundary test, while a section the port
+// simply skips is invisible to the byte oracle (no corpus document on any tier
+// carries a test section) and is counted as mirrored by
+// tools/selfhost_coverage.py. Measured across all six self-host emitters while
+// closing issue #1123: every one of them dropped the section in silence.
+//
+// Markers, not emission: porting the drivers is the separate, larger half.
+//
+// The marker names the IR SECTION and the test's name, and deliberately does
+// NOT read the per-test lifecycle discriminant to tell a `lifecycle test` from
+// a plain one. `tools/selfhost_coverage.py` reads "this tier ports construct X"
+// straight off the boolean-flag read spelling in the self-host source, so
+// branching on that flag here would claim a port of the lifecycle-driver arm
+// this slice does not have, and would move that tier/construct pair out of the
+// ledger's `unported` baseline on the strength of a marker. A marker is a
+// refusal, not an implementation; it says only what it knows. (That scan is
+// over the raw file text, comments included, so naming the spelling in prose
+// registers it too, which is why this note does not.)
+fn deferred_test_markers(ir: Any) -> List[Str] {
+  var out = []
   for (t of value_list(value_field(ir, "tests"))) {
     if (value_bool(value_field(t, "lifecycle"))) { return true }
+    out = out.push(`<<UNSUPPORTED-TEST:${value_str(value_field(t, "name"))}>>`)
   }
   return false
 }
@@ -5402,6 +5648,8 @@ fn host_key_collision_markers(ir: Any) -> List[Str] {
         } else { seen = seen.set(host, k) }
       }
     }
+  for (t of value_list(value_field(ir, "fault_tests"))) {
+    out = out.push(`<<UNSUPPORTED-FAULT-TEST:${value_str(value_field(t, "name"))}>>`)
   }
   return out
 }
@@ -5485,6 +5733,7 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   // through the runtime `Stream`.
   if (ir_uses_host_root(ir, "Stream") || uses_kind(value_field(ir, "components"), "subscribe")
       || uses_kind(value_field(ir, "components"), "stream-iter")) { imports = imports.push("Stream") }
+  if (ir_uses_host_root(ir, "Stream")) { imports = imports.push("Stream") }
   if (need_mark_secret) { imports = imports.push("mark_secret as _revl_mark_secret") }
   // issue #2378: a `fail` step raises the runtime's marked RuntimeError.
   if (uses_kind(value_field(ir, "components"), "fail")) { imports = imports.push("fail_error as _revl_fail_error") }
@@ -5587,9 +5836,12 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   // The total forms, in the reference's `_CHECKED_FORMS` order.
   for (checked of ["checked_add", "checked_sub", "checked_mul",
                    "checked_div_trunc", "checked_div_floor",
+  // The total division forms, in the reference's `_CHECKED_DIVS` order.
+  for (checked of ["checked_div_trunc", "checked_div_floor",
                    "checked_div_euclid", "checked_mod"]) {
     if (uses_builtin_method(ir, checked)) {
       out = out.concat(checked_block(checked))
+      out = out.concat(checked_div_block(checked))
     }
   }
   if (uses_float_interp(ir)) { out = out.concat(ftoa_block()) }
@@ -5599,6 +5851,14 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   // The built-in `Result` cases are not emitted here (issue #1932): the module
   // IMPORTS them from the shared runtime, in the `from runtime import …` line
   // above, so one class object serves every module.
+  // Built-in Result classes (gated), each suppressed if a user variant case
+  // shadows the name.
+  let types = value_field(ir, "types")
+  if (uses_builtin_result(ir)) {
+    let shadow = user_case_names(types)
+    if (!list_contains(shadow, "Ok")) { out = out.concat(result_class("Ok")) }
+    if (!list_contains(shadow, "Err")) { out = out.concat(result_class("Err")) }
+  }
   // Type declarations (gated): only the `typing` names the record annotations
   // below actually mention, then the classes (item 436 F9).
   let types = value_field(ir, "types")
@@ -5612,6 +5872,7 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   }
   let functions = value_list(value_field(ir, "functions"))
   if (functions.length() > 0) { out = out.concat(emit_functions(functions, ir)) }
+  if (functions.length() > 0) { out = out.concat(emit_functions(functions)) }
   // Externs (slice 4): `def <name>(...)` + dedented verbatim body, gated on a
   // non-empty extern list, between the functions and the SERVICES table.
   let externs = value_list(value_field(ir, "externs"))
@@ -5631,6 +5892,7 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   }
   for (c of components) {
     out = out.concat(component_body(c, value_field(ir, "services"), externs, ir))
+    out = out.concat(component_body(c, value_field(ir, "services"), externs))
     out = out.push("")
     out = out.push("")
   }
@@ -5641,6 +5903,10 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   }
   out = out.push("COMPONENTS = {".concat(pairs.join(", ")).concat("}"))
   out = out.concat(host_key_collision_markers(ir))
+  // The deferred in-file test section: one named marker per test instead of
+  // silence (issue #1123).
+  let test_markers = deferred_test_markers(ir)
+  if (test_markers.length() > 0) { out = out.concat(test_markers) }
   return out.join(newline()).concat(newline())
 }
 
@@ -5685,6 +5951,7 @@ test "builtin surface renders portable python" {
 test "empty match is the non-exhaustive throw" {
   let empty = []
   assert match_expr("o", empty, false) == "((match := o), (_ for _ in ()).throw(TypeError('non-exhaustive match')))[1]"
+  assert match_expr("o", empty) == "((match := o), (_ for _ in ()).throw(TypeError('non-exhaustive match')))[1]"
 }
 
 test "py_type maps the surface types" {

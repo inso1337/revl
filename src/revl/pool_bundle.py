@@ -307,6 +307,7 @@ def bundle_name(given: str, cwd: Optional[Path] = None) -> str:
     # on another Windows drive there is no relative name: keep the absolute
     # one, which path_problem refuses (issue #1944)
     name = relpath_or_abs(os.path.abspath(os.path.join(base, given)), base)
+    name = os.path.relpath(os.path.abspath(os.path.join(base, given)), base)
     return PurePosixPath(*Path(name).parts).as_posix()
 
 

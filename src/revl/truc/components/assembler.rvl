@@ -16,6 +16,10 @@ pub service Assembler {
   emission[gate, ws] fn rm(name: Str, trustHostCode: Bool) -> Int
   emission[gate, ws] fn assemble(trustHostCode: Bool) -> Int
   emission[gate, ws] fn assemble_check(trustHostCode: Bool) -> Int
+  emission[fetch, gate, index, ws] fn add(name: Str) -> Int
+  emission[gate, ws] fn rm(name: Str) -> Int
+  emission[gate, ws] fn assemble() -> Int
+  emission[gate, ws] fn assemble_check() -> Int
   emission[ws] fn apply(trustHostCode: Bool) -> Int
   emission[ws] fn stack_check() -> Int
   emission[ws] fn unknown(cmd: Str) -> Int
@@ -34,16 +38,22 @@ component Assembler
     // command only) admits a host body, and the lock row records which way it
     // went.
     fn add(name, thc) {
+    // written to disk: commit_add gets "" and does nothing.
+    fn add(name) {
       let m = emit ws.manifest(".")
       let lock = emit ws.read("truc.lock")
       let reg = plan.registry_of(m)
       let row = emit index.row(reg, name)
       let entryJson = emit fetch.entry(reg, name)
       let spec = plan.add_spec(m, name)
+      let spec = plan.assemble_spec(m)
       let g = emit ws.read_sources(".", spec)
       let ordered = plan.ordered_with_candidate(g, m, name, entryJson)
       let v = emit gate.admit_all(ordered, lock, thc)
       let r = plan.add_report(m, row, name, entryJson, v)
+      let ordered = plan.ordered_with_candidate(g, name, entryJson)
+      let v = emit gate.admit_all(ordered)
+      let r = plan.add_report(row, name, entryJson, v)
       emit ws.commit_add(".", plan.report_commit(r))
       emit ws.print(plan.report_msg(r))
       return plan.report_code(r)
@@ -54,6 +64,8 @@ component Assembler
     // Planner returns empty compose-sources, so build/ is untouched. A row's
     // host body admits only by its lock record or by `thc`, this command only.
     fn assemble(thc) {
+    // Planner returns empty compose-sources, so build/ is untouched.
+    fn assemble() {
       let m = emit ws.manifest(".")
       let lock = emit ws.read("truc.lock")
       let spec = plan.assemble_spec(m)
@@ -61,6 +73,8 @@ component Assembler
       let d = plan.drift(lock, g)
       let ordered = plan.ordered_sources(g, m)
       let v = emit gate.admit_all(ordered, lock, thc)
+      let ordered = plan.ordered_sources(g)
+      let v = emit gate.admit_all(ordered)
       let r = plan.assemble_report(d, v, g)
       emit ws.write_assembly(".", plan.report_sources(r))
       emit ws.print(plan.report_msg(r))
@@ -76,12 +90,15 @@ component Assembler
     // The remainder is admitted like `assemble`: a row's host body admits only
     // by its lock record or by `thc`, this command only (issue #2561).
     fn rm(name, thc) {
+    fn rm(name) {
       let m = emit ws.manifest(".")
       let lock = emit ws.read("truc.lock")
       let spec = plan.rm_spec(m, name)
       let g = emit ws.read_sources(".", spec)
       let ordered = plan.ordered_sources(g, m)
       let v = emit gate.admit_all(ordered, lock, thc)
+      let ordered = plan.ordered_sources(g)
+      let v = emit gate.admit_all(ordered)
       let r = plan.rm_report(m, name, v)
       emit ws.commit_rm(".", plan.report_commit(r))
       emit ws.print(plan.report_msg(r))
@@ -95,6 +112,7 @@ component Assembler
     // The manifest/dossier drift is read here as a value because a dry run
     // never reaches write_assembly, where `assemble` is refused on it.
     fn assemble_check(thc) {
+    fn assemble_check() {
       let m = emit ws.manifest(".")
       let lock = emit ws.read("truc.lock")
       let spec = plan.assemble_spec(m)
@@ -104,6 +122,9 @@ component Assembler
       let ordered = plan.ordered_sources(g, m)
       let v = emit gate.admit_all(ordered, lock, thc)
       let r = plan.check_report(d, vd, v, g)
+      let ordered = plan.ordered_sources(g)
+      let v = emit gate.admit_all(ordered)
+      let r = plan.check_report(d, v, g)
       emit ws.write_assembly(".", plan.report_sources(r))
       emit ws.print(plan.report_msg(r))
       return plan.report_code(r)
@@ -132,6 +153,7 @@ component Assembler
 
     fn unknown(cmd) {
       emit ws.print(`truc: unknown command "${cmd}"; usage: truc <add NAME [--trust-host-code] | rm NAME [--trust-host-code] | assemble [--check] [--trust-host-code] | apply [--trust-host-code] | stack check>`)
+      emit ws.print(`truc: unknown command "${cmd}" — usage: truc <add NAME | rm NAME | assemble [--check] | apply [--trust-host-code] | stack check>`)
       return 2
     }
   }

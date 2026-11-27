@@ -80,6 +80,8 @@ unconditional there, and a snapshot from `revl_snapshot` always names the set it
 was taken from. The operator's own paths (`revl mcp serve --restore`, crash
 recovery) skip the check when the snapshot names no components. The authority is always the freshly
 compiled IR; the stored manifest is only ever compared against, never loaded.
+substitution. The authority is always the freshly compiled IR; the stored
+manifest is only ever compared against, never loaded.
 
 ## Using it
 

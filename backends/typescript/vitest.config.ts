@@ -41,5 +41,7 @@ export default defineConfig({
     // suite. The assertion is untouched; only the clock is.
     testTimeout: TS_TIMEOUT_MS,
     hookTimeout: TS_TIMEOUT_MS,
+    testTimeout: 60_000,
+    hookTimeout: 60_000,
   },
 })

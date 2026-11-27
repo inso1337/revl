@@ -524,6 +524,8 @@ def test_the_two_checked_in_fixtures_are_the_same_one_word_apart():
     two programs is which role the proposer names."""
     control = BINDING_CONTROL.read_text(encoding="utf-8")
     refused = BINDING_REFUSED.read_text(encoding="utf-8")
+    control = BINDING_CONTROL.read_text()
+    refused = BINDING_REFUSED.read_text()
     assert compile_source(control, "binding.rvl")
     err = refusal(refused)
     assert err.code == PLACE_CODE
@@ -919,6 +921,11 @@ def test_the_dissent_record_is_per_member_and_readable():
     type lacks is refused by name against that type. That is what
     `test_a_dissent_payload_dispatches_like_any_other_adt_payload` below
     proves, for a user ADT and for the answer type alike."""
+    Written as a module `fn` rather than inside a `provide` body because a
+    match-arm payload does not pin a method receiver there - a PRE-EXISTING
+    limit that has nothing to do with this slice, pinned as parity by
+    `test_a_dissent_payload_dispatches_like_any_other_adt_payload` below so a
+    later reader does not mistake it for a property of the answer type."""
     assert compile_source("""
 fn settle(a: Aggregate[Str]) -> Int {
   return match a {
@@ -960,6 +967,11 @@ def test_a_dissent_payload_dispatches_like_any_other_adt_payload():
     `fn` was admitted. Issue #2198 seeds the payload type there, as the `fn`
     stratum does, so both now dispatch the same way. A method the payload type
     does not have is still refused, by name and against that type."""
+    A match-arm payload does not pin a stdlib method receiver inside a
+    `provide` body, for a user ADT and for `Aggregate[T]` alike. That is a
+    pre-existing gap in method dispatch, not something this slice introduced
+    and not something it should paper over: the two behave the same way, and
+    this test is what says so."""
     adt = """
 type Row = { id: Int }
 type Outcome = Ok(List[Row]) | Missing
@@ -967,6 +979,7 @@ type Outcome = Ok(List[Row]) | Missing
 service S { fn f(o: Outcome) -> Int }
 component C provides out: S {
   provide out { fn f(o) = match o { Ok(d) => d.METHOD(), Missing => 0, } }
+  provide out { fn f(o) = match o { Ok(d) => d.length(), Missing => 0, } }
 }
 """
     provided = _consumer("""      Agreed(v)    => 0,
@@ -987,6 +1000,12 @@ component C provides out: S {
     assert "no builtin method `upper` on `List[Row]`" in adt_err.message
     assert ("no builtin method `upper` on `List[DissentEntry]`"
             in provided_err.message)
+    adt_err = refusal(adt)
+    provided_err = refusal(_consumer("""      Agreed(v)    => 0,
+      Split(d)     => d.length(),
+      Inquorate(d) => d.length(),""", returns="Int"))
+    assert "on a value of unknown type" in adt_err.message
+    assert "on a value of unknown type" in provided_err.message
 
 
 @pytest.mark.parametrize("name", ("Aggregate", "Answer", "DissentEntry"))
@@ -1090,6 +1109,7 @@ def test_the_answer_module_imports_none_of_item_471s_machinery():
     import ast
 
     source = (ROOT / "src" / "revl" / "model_answer.py").read_text(encoding="utf-8")
+    source = (ROOT / "src" / "revl" / "model_answer.py").read_text()
     imported = set()
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):

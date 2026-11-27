@@ -43,6 +43,7 @@ idempotent on replay (rule 5): once the world is already restored, a second run
 is a no-op, so an abort that crashes mid replay and a later `revl recover`
 cannot clobber. It is `acquire` rather than `pure` because it genuinely mutates
 the filesystem: it unlinks or renames real files, so `pure` would be a false
+the filesystem — it unlinks or renames real files — so `pure` would be a false
 statement of effect, invisible to the G8 audit and callable from any pure
 position. `acquire` states the effect and, being effect-position-bound, refuses
 a bare call from a plain `fn` (G4). The reversal is terminal, so each names a
@@ -90,9 +91,12 @@ The guard has three properties that make it real rather than decorative:
    misreport their effect and leave them callable from any pure position); they
    are effect-position-bound and carry no capability token (item 243 rule 3
    leaves no capability-scoped spelling for an inverse) and are reconstructed
+   are effect-position-bound and carry no capability token — item 243 rule 3
+   leaves no capability-scoped spelling for an inverse — and are reconstructed
    from WAL data by `revl recover` with no revl source involved at all. Two
    things keep that safe: the effect gate (a bare inverse call from a plain `fn`
    is refused, G4) and the shrunken authority: a sidecar we made, moved back
+   is refused, G4) and the shrunken authority — a sidecar we made, moved back
    inside the root we own.
 3. **The reversal machinery lives inside the root.** The session garbage dir
    (`.revl-fs-garbage`) and the preimage snapshots (`.revl-fs-preimage`) are
@@ -190,6 +194,7 @@ the read half is untouched, because `resolve_within`, `lexists_confined` and
 `_root_dirfd`, so a caller on such a host can still observe the workspace (issue
 #1946; pinned by `tests/test_fs_dirfd_unsupported_1946.py`). A failed bind
 releases its duplicate and leaves no partial binding.
+unavailable. A failed bind releases its duplicate and leaves no partial binding.
 There is no unsafe platform fallback. Without binding, legacy relative paths,
 symlink resolution and environment-based root selection remain unchanged;
 root replacement is still outside that legacy mode's guarantee.
@@ -283,6 +288,7 @@ CommittedSidecarCleanup.run() -> CleanupOutcome  # .completed / .state / .code /
 cannot forge one. The trusted commit path calls it *after* it holds the durable
 acknowledgment of the actual `Session.commit_confirm` that the finalizer declines
 to assume. That is where the acknowledgment is asserted, giving it one owner and
+to assume — that is where the acknowledgment is asserted, giving it one owner and
 one carrier rather than scattered host state. Minting validates the same
 argument shape the finalizer requires (64-lowercase-hex digest, nonnegative
 device/inode), so a receipt can never name a target the finalizer would only
@@ -295,12 +301,16 @@ consumes it, so one receipt authorizes cleanup of exactly the one sidecar it
 named. `run()` performs the same `finalize_committed_sidecar` under the same
 exclusivity contract (it makes **no** stronger atomicity claim against writers
 violating that exclusivity) but *reports* the result rather than raising:
+exclusivity contract — it makes **no** stronger atomicity claim against writers
+violating that exclusivity — but *reports* the result rather than raising:
 `CleanupOutcome(completed=True)` when the owned preimage was removed, or
 `completed=False` with the finalizer's own `(code, message, path)` when the
 sidecar is **unresolved** (missing evidence, a detectable mismatch, a lost root,
 or an unbound process). An explicit missing/mismatch failure stays unresolved; it
 is never silently reported as "already clean". Success is idempotent: a
 completed handle re-reports completed without a second filesystem touch, and an
+is never silently reported as "already clean". Success is idempotent — a
+completed handle re-reports completed without a second filesystem touch — and an
 unresolved handle stays live, so the host can drain cooperative actors and call
 `run()` again.
 
@@ -336,6 +346,7 @@ refusal, never with a fact about what lives out there: the `EOUTSIDE` refusal's
 resolved spelling, so neither the on-disk case nor a symlink target outside the
 root is reported. The resolved path appears only in the `Ok` value of a path
 inside the root.
+refusal, never with a fact about what lives out there.
 
 **Why they had to exist at the revl level.** A consumer's *host body* had no
 supported door to the guard. Item 396(B) jails a user-origin `= @ts ref` to the
@@ -348,6 +359,7 @@ finding.
 What was left was a relative path guess into the install tree
 (`require("../../revl_fs_ts.ts")`, three candidates deep), which breaks whenever
 revl moves; a downstream project hit that three times.
+revl moves; revl-harness hit that three times.
 
 So the door is a revl one. The consumer asks revl for the decision and does its
 own reading with the plain host filesystem module in **legacy, unbound mode**.
@@ -386,6 +398,7 @@ consumer that reaches the jail on py and on ts importing nothing.
 The witnessed catalog above overwrites unconditionally: `write` truncates the
 target whatever its current state, and the `WriteWitness` records where the
 preimage went, not which inode the write landed on. A downstream consumer
+preimage went, not which inode the write landed on. A consumer (revl-harness)
 that guards reversible writes against external drift needs two things the host
 cannot add from outside, because anything it checks by name before the native
 open is re-derived from the name and a same-UID writer can swap the target in
@@ -404,14 +417,18 @@ fs.write(path, data: str, *, expect=<prior_digest | fs.ABSENT | None>) -> fs.Wri
 
 `expect=` is checked on the descriptor `open_confined_write` verified, **before**
 the snapshot and before the truncate, so a refusal never mutates the target, and
+the snapshot and before the truncate, so a refusal never mutates the target —
 there is no partial write:
 
 - `fs.ABSENT`: refuse (`EEXPECT`) if the target already exists; the existing
+- `fs.ABSENT` — refuse (`EEXPECT`) if the target already exists; the existing
   file is not overwritten.
 - a `"sha256:..."` digest (a prior receipt's `new_digest`): refuse (`EEXPECT`)
+- a `"sha256:..."` digest (a prior receipt's `new_digest`) — refuse (`EEXPECT`)
   unless the target currently exists and its content still hashes to it. A
   drifted or absent target leaves nothing changed.
 - `None`: no guard.
+- `None` — no guard.
 
 `WriteReceipt.prev_digest` is the original content's digest read through the held
 fd (or `None` for a created target), `new_digest` is the bytes just written, and
@@ -450,6 +467,7 @@ result over the target and the abort reported a clean, residue-free reversal.
 
 `snapshot_preimage` now captures the sidecar's own identity and the witness
 carries it, so the canonical inverse can check it. Four facts, on the way in
+carries it, so the canonical inverse can check it. Three facts, on the way in
 and again on the installed result:
 
 * the sidecar is a regular file (`EOUTSIDE` otherwise),
@@ -473,6 +491,9 @@ The stat comparison runs on the fstat BEFORE the digest read, so a sidecar that
 already differs on inode or size is refused without reading it: a replacement
 can be huge or sparse, and the refusal should not do whatever work the replacer
 chose.
+  replacement cannot forge; `ctime_ns` is what makes an in-place rewrite visible
+  without re-reading the bytes, and unlike `mtime_ns` an unprivileged writer
+  cannot set it back with `utimes`.
 
 The second pass is there because the rename is by name: re-checking the
 installed result is what closes the window between the first check and the
@@ -481,6 +502,7 @@ identity afterwards rather than trusting its pre-syscall check. It drops
 `ctime_ns`, which the rename itself legitimately bumps, and it compares the
 digest again because the window it exists for is exactly a rewrite between the
 first read and the rename.
+`ctime_ns`, which the rename itself legitimately bumps.
 
 This is not an opt-in profile and adds no vocabulary. It lives in the canonical
 `restore`, so every caller gets it, and a refusal simply raises, which the
@@ -494,9 +516,12 @@ caller-independent checks and still restores; refusing every such replay would
 strand a recoverable WAL.
 
 Both tiers carry the stat check (`install_captured_sidecar` in
+Both tiers carry it (`install_captured_sidecar` in
 `backends/python/revl_fs_workspace.py`, `installCapturedSidecar` in
 `backends/typescript/revl_fs_ts.ts`, each a listed `syscall-time` entry point);
 the digest comparison is in both hosts, the TypeScript peer landing with #2652. `tests/test_fs_restore_sidecar_identity_1016.py` and
+`backends/typescript/revl_fs_ts.ts`, each a listed `syscall-time` entry point).
+`tests/test_fs_restore_sidecar_identity_1016.py` and
 `backends/typescript/tests/fs_restore_sidecar_identity.test.ts` pin the tampered,
 swapped, re-linked and non-regular sidecars, the post-install re-check, and the
 untampered control that must stay silent.
@@ -537,6 +562,9 @@ regular file (including one that already carried a second link), does the
 inverse open the parked inode `O_RDONLY|O_NOFOLLOW` through that parent and
 re-read the bytes. A parked directory and a file whose mode denies read carry no
 digest and stay stat-only.
+honest `rm` of a directory still reverses. For the same reason the sidecar is
+`lstat`ed through the chain-checked parent rather than opened: opening a
+write-only file to check it would refuse a reversal `rm` accepted.
 
 The failure direction matches: a sidecar that cannot be shown to be the parked
 one is reported as `restore-residue` through the existing merged residue Record

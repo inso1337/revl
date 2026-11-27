@@ -148,6 +148,8 @@ is already an added `host:` crossing, and a removed one gave up its reach
 entirely. An extern whose entry has no `inverse` on either side is not
 comparable and is skipped, so a baseline captured before this field existed
 produces neither a false weakening nor a false strengthening.
+additions fail**. Giving up authority (a removal) never needs a gate. Exit code
+is `0` iff there are no unacknowledged additions.
 
 ## Acknowledging an intended widening
 
@@ -156,10 +158,12 @@ thing that works:
 
 - `--accept <crossing>` (repeatable): acknowledge one gated token (an
   addition, or a weakened or widened fact such as `backend:x:ts`).
+- `--accept <crossing>` (repeatable) — acknowledge one addition by its token.
   The token is exactly the string printed after the `+` in the report, so the
   ack list is copy-paste from the failure output.
 - `--accept-all`: acknowledge every gated token in this diff (additions and
   every weakened or widened fact).
+- `--accept-all` — acknowledge every addition in this diff.
 
 An acknowledged addition is reported (as `~`, `acknowledged`) but does not fail
 the gate.
@@ -196,6 +200,8 @@ Accepting that widening on purpose:
 `registers_weakened` / `registers_strengthened` / `cardinality_widened` /
 `cardinality_tightened` / `acknowledged` / `unacknowledged` / `widened`
 decision object instead of the human report.
+`added` / `removed` / `unchanged` / `acknowledged` / `unacknowledged` /
+`widened` decision object instead of the human report.
 
 ## Capturing a baseline
 

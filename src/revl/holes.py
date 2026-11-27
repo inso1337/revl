@@ -34,6 +34,8 @@ def collect(ir: dict) -> list[dict]:
     stack = [ir.get(section) for section in reversed(EMITTABLE_SECTIONS)]
     while stack:
         node = stack.pop()
+
+    def walk(node) -> None:
         if isinstance(node, dict):
             if node.get("kind") == "hole":
                 found.append({
@@ -43,8 +45,15 @@ def collect(ir: dict) -> list[dict]:
                     "message": node.get("message"),
                 })
             stack.extend(reversed(list(node.values())))
+            for value in node.values():
+                walk(value)
         elif isinstance(node, list):
             stack.extend(reversed(node))
+            for value in node:
+                walk(value)
+
+    for section in EMITTABLE_SECTIONS:
+        walk(ir.get(section))
     return sorted(found, key=lambda h: (str(h["file"]), h["line"] or 0))
 
 

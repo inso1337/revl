@@ -33,6 +33,8 @@ Design notes
 * **The OTel SDK is an optional dependency.** The ``otel`` extra, installed
   from a checkout with ``pip install ".[otel]"``, pulls it in; the base install
   stays dependency-light. The mapping itself
+* **The OTel SDK is an optional dependency.** ``pip install revl[otel]`` pulls
+  it in; the base install stays dependency-light. The mapping itself
   (:func:`build_spans`) is pure Python with no OTel import at all, so it is
   fully testable without the SDK — you assert the intermediate span structure.
   Only :func:`export_to_otel` touches the SDK, and if it is absent it returns a
@@ -286,6 +288,7 @@ def build_spans(events: list[dict], *, run_name: str = "revl run") -> list[SpanM
         attributes={"revl.trace.events": len(valid),
                     "revl.schema.version": wr.SCHEMA_VERSION,
                     **header_attributes})
+                    "revl.schema.version": wr.SCHEMA_VERSION})
     spans: list[SpanModel] = [root]
 
     for ev in valid:
@@ -334,10 +337,12 @@ def build_spans(events: list[dict], *, run_name: str = "revl run") -> list[SpanM
             span_id=_span_id(ev.get("seq")),
             name=(f"{component} {event_kind}" if component is not None
                   else str(event_kind)),
+            name=f"{component} {event_kind}",
             kind=event_kind,
             parent_id=parent,
             component=component,
             status=_status_of(event_kind, dst),
+            status=_status_for(event_kind, dst),
             attributes=attributes,
             events=[_cause_event(cause)],
             links=links,
@@ -465,6 +470,7 @@ def export_to_otel(events: list[dict], *, span_exporter=None,
             "reason": "the OpenTelemetry SDK is not installed; "
                       "run `pip install '.[otel]'` from a checkout to enable "
                       "OTel export",
+                      "run `pip install revl[otel]` to enable OTel export",
             "spans": len(build_spans(events, run_name=run_name)),
         }
 
@@ -596,6 +602,8 @@ def main(argv: list[str] | None = None) -> int:
             print("note: the OpenTelemetry SDK is not installed — printed the "
                   "span mapping instead. `pip install '.[otel]'` from a "
                   "checkout to emit spans to a collector.", file=sys.stderr)
+                  "span mapping instead. `pip install revl[otel]` to emit "
+                  "spans to a collector.", file=sys.stderr)
         return 0
 
     result = export_to_otel(events, run_name=args.run_name)

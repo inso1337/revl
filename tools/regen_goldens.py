@@ -130,11 +130,13 @@ def produce_typescript() -> dict[str, str]:
     # (item 92), a verbatim `@ts` body coerced to its declared `Int` on the
     # way out (#2147 — the result-side mirror of the argument-side conversion
     # at the seam, #1566).
+    # (item 92).
     for stem, golden in (("fr3_json", "fr3_json.ts"),
                          ("async_http", "async_http.ts"),
                          ("async_agent_loop", "async_agent_loop.ts"),
                          ("async_fn_values", "async_fn_values.ts"),
                          ("ts_extern_result_int", "ts_extern_result_int.ts")):
+                         ("async_fn_values", "async_fn_values.ts")):
         ir = json.loads((fixtures / f"{stem}.ir.json").read_text(encoding="utf-8"))
         out[f"backends/typescript/golden/{golden}"] = emit.emit(ir)
 
@@ -161,6 +163,9 @@ def produce_rust() -> dict[str, str]:
         # into a staged copy of the crate and never writes this file
         # (src/revl/placement.py::_build_rust, issue #2199), so the committed
         # copy is the reference
+        # --placement --backend rust` REGENERATES this file from the running
+        # IR and restores it afterwards (src/revl/placement.py::_build_rust,
+        # tests/test_run_rust.py), so the committed copy is the reference
         # composition's emission and nothing else — the same bytes as the
         # golden above, from the same producer and the same IR. It was a
         # committed emitted artifact that no target declared and no test
@@ -324,6 +329,7 @@ TARGETS: tuple[Target, ...] = (
                "backends/wasm/golden/canonical_service.wit",
                "backends/wasm/scenarios/crashproof/crashproof.ir.json",
                "backends/wasm/host/demo.wat"),
+               "backends/wasm/scenarios/crashproof/crashproof.ir.json"),
         produce=produce_wasm,
         commands=(("bash", "backends/wasm/scenarios/crashproof/regen.sh"),),
         requires=("bash",),

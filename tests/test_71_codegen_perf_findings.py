@@ -73,6 +73,7 @@ if str(BENCH) not in sys.path:
 # imported first and leaks into every later test (issue #1829). Loaded by path
 # under a name only this file uses.
 run = load_by_path("bench_codegen_python_run", BENCH / "run.py")
+run = importlib.import_module("run")
 copycount = importlib.import_module("copycount")
 
 

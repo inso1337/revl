@@ -7,6 +7,7 @@ jco-transpiled wasm component (`npm i` the gate) — each with a real out-of-tre
 consumer that admits or pre-filters agent-authored code against the packaged
 surface (docs/design/338-revl-as-dependency.md; docs/gate-dependency-contract.md
 "Publish status: built and rehearsed; the upload is the owner's step").
+"Publish status: the only remaining step").
 
 Every part of that except the registry upload is built and gated from the
 committed source in CI already, each by its own suite:
@@ -19,6 +20,7 @@ committed source in CI already, each by its own suite:
   `tests/test_gate_consumer_example_rs.py`, with the crate's release path
   rehearsed by `.github/workflows/release-dryrun-crate.yml` and pinned by
   `tests/test_gate_crate_release_path.py`;
+  `tests/test_gate_consumer_example_rs.py`;
 * wasm/js — `tests/test_gate_wasm_drift.py`, `tests/test_gate_wasm_vector.py`
   and `tests/test_gate_consumer_example_js.py`.
 
@@ -35,6 +37,7 @@ Deliberately dependency-free (no PyYAML): the workflow assertions are made
 against the file text with stable structural anchors, so this suite runs the
 same in a minimal environment as it does in the full CI matrix. The crate
 rehearsal's own structure is parsed in `tests/test_gate_crate_release_path.py`.
+same in a minimal environment as it does in the full CI matrix.
 """
 
 from __future__ import annotations
@@ -115,6 +118,7 @@ def test_rust_crate_is_committed_generated_source():
     rather than latent: `release-dryrun-crate.yml` runs the real `cargo package`
     through `tools/check_crate_package.py` and holds no registry credential, so
     the upload is still only the owner's."""
+    crates.io copy."""
     cargo = CRATES / "revl-gate" / "Cargo.toml"
     assert cargo.exists(), "crates/revl-gate is missing"
     text = cargo.read_text(encoding="utf-8")
@@ -207,6 +211,7 @@ def test_contract_doc_states_the_publish_only_remainder_for_all_three_registries
     doc = DOCS / "gate-dependency-contract.md"
     text = doc.read_text(encoding="utf-8")
     assert "Publish status: built and rehearsed; the upload is the owner's step" in text
+    assert "Publish status: the only remaining step" in text
     for registry in ("PyPI", "crates.io", "npm"):
         assert registry in text, (
             f"the publish-status section must name {registry} as a registry "

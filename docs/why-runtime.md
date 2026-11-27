@@ -53,6 +53,7 @@ it:
 ```
 
 Four `event` kinds (`load`, `withdraw`, the v2 `emit` and the v3 `residue`) and four `cause`
+Three `event` kinds (`load`, `withdraw`, and the v2 `emit`) and four `cause`
 kinds:
 
 | cause kind | on | means |

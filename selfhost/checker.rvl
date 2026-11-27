@@ -73,6 +73,7 @@ fn lookup_at(env: List[Bind], n: Str, i: Int) -> Str {
 // answer `V` in both checkers, which is what lets the equality marker see a
 // map read's width. Neither name is drawn by the fuzz generators, whose
 // unknown stays `q`.
+// Neither name is drawn by the fuzz generators, whose unknown stays `q`.
 pub fn base_env() -> List[Bind] {
   return [
     { name: "x", ty: "Int" },
@@ -568,6 +569,7 @@ fn infer_t(e: Expr, env: List[Bind], tt: Tt, ct: Ct) -> Infer {
     Rec(r)     => infer_rec_t(r.fields, env, tt, ct),
     RecUpd(r)  => infer_recupd_t(r, env, tt, ct),
     Templ(t)   => infer_templ_t(t.parts, env, tt, ct),
+    Templ(_)   => ok_ty("Str"),
     _          => ok_ty(""),   // outside the slice: walked, not typed
   }
 }
@@ -1036,6 +1038,7 @@ fn infer_call_t(c: CallN, env: List[Bind], tt: Tt, ct: Ct) -> Infer {
     // a named ADT case constructor; anything else (plain fns — no signature
     // table in this slice — and non-name callees) stays unchecked
     Var(n) => case_call_flow(c, n, args, env, tt, ct),
+    Var(n) => case_call_ty(n, unwrap_case(ct, n), args, ct.has(n), tt),
     _      => ok_ty(""),
   }
 }
@@ -1254,6 +1257,7 @@ fn check_default_t(e: Expr, expected: Str, env: List[Bind], tt: Tt, ct: Ct,
     return mismatch(where_, expected, a.ty)
   }
   return nested_flow(e, expected, a.ty, env, tt, ct, where_)
+  return ok_ty("")
 }
 
 fn check_struct_against(struct: List[RecField], expected: Str, spec: TySpec,
@@ -2057,6 +2061,7 @@ fn mk_comp(nm: Str, rq: List[Bind], pv: List[Provide],
 fn mk_ev2(l: List[Str], c: List[Str], u: List[Str]) -> Ev {
   return { labels: l, caps: c, unnamed: u }
 }
+fn mk_ev2(l: List[Str], c: List[Str]) -> Ev { return { labels: l, caps: c } }
 
 fn tbl_or_empty(built: TblR) -> Tt {
   if (built.err != "") { return Map.empty() }
@@ -2740,12 +2745,17 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
     let kl = qkey_len(ts, i + 1)
     if (!atk(ts, i + 1 + kl, "{")) {
       return { provs: provs, setup: setup, i: i + 1 + kl, ok: false }
+    let key = tkc(ts, i + 1).text
+    if (!atk(ts, i + 2, "{")) {
+      return { provs: provs, setup: setup, i: i + 2, ok: false }
     }
     let pend = close_brace(ts, i + 1 + kl)
+    let pend = close_brace(ts, i + 2)
     if (pend == 0 - 1) {
       return { provs: provs, setup: setup, i: ts.length(), ok: false }
     }
     let ms = p_prov_methods(ts, i + 2 + kl, pend - 1, [])
+    let ms = p_prov_methods(ts, i + 3, pend - 1, [])
     if (!ms.ok) {
       return { provs: provs, setup: setup, i: pend, ok: false }
     }
@@ -2779,8 +2789,11 @@ fn p_component(ts: List[Token], i: Int, pg: Prog) -> PStep {
       if (atk(ts, k, "ident") && atk(ts, k + kl, ":")
           && atk(ts, k + kl + 1, "ident")) {
         let pair = { name: qkey_text(ts, k), ty: tkc(ts, k + kl + 1).text }
+      if (atk(ts, k, "ident") && atk(ts, k + 1, ":") && atk(ts, k + 2, "ident")) {
+        let pair = { name: tkc(ts, k).text, ty: tkc(ts, k + 2).text }
         if (isReq) { reqs = reqs.push(pair) } else { provh = provh.push(pair) }
         k += kl + 2
+        k += 3
       } else { k += 1 }
     }
     j = k
@@ -3134,6 +3147,7 @@ fn reached_caps(called: List[Str], caps: CapsT, i: Int,
 type Ctx = { compName: Str, reqMap: Map[Str, Str], svcs: Map[Str, SvcD],
              fns: Map[Str, FnD], caps: CapsT, tt: Tt }
 type Ev  = { labels: List[Str], caps: List[Str], unnamed: List[Str] }
+type Ev  = { labels: List[Str], caps: List[Str] }
 type Ck  = { ctx: Ctx, env: List[Bind], ev: Ev, msg: Str }
 
 type MethR = { m: MethSig, ok: Bool }
@@ -3242,6 +3256,7 @@ fn refuse_ck(ck: Ck, msg: Str) -> Ck {
 }
 
 fn empty_ev() -> Ev { return { labels: [], caps: [], unnamed: [] } }
+fn empty_ev() -> Ev { return { labels: [], caps: [] } }
 
 fn bind_map(env: List[Bind]) -> Map[Str, Str] {
   var m: Map[Str, Str] = Map.empty()
@@ -3296,6 +3311,7 @@ fn note_host_emission(s: Stmt, ck: Ck) -> Ck {
   return { ctx: ck.ctx, env: ck.env,
            ev: mk_ev2(union_into(ck.ev.labels, ["a host emission"]),
                       ck.ev.caps, ck.ev.unnamed),
+                      ck.ev.caps),
            msg: ck.msg }
 }
 
@@ -3358,6 +3374,7 @@ fn ck_ordered(before: Ev, ck: Ck, step: Bool) -> Ck {
   return { ctx: ck.ctx, env: ck.env,
            ev: mk_ev2(order_ev_labels(before.labels, ck.ev.labels, step),
                       ck.ev.caps, ck.ev.unnamed),
+                      ck.ev.caps),
            msg: ck.msg }
 }
 
@@ -3772,6 +3789,7 @@ fn req_call(root: Str, meth: Str, args: List[Expr], mode: Int,
   if (decl.isEm && mode == mode_head()) {
     let lab = ev.labels.push(root.concat(".").concat(meth))
     ev = mk_ev2(lab, union_into(ev.caps, [root]), ev.unnamed)
+    ev = mk_ev2(lab, union_into(ev.caps, [root]))
   }
   return walk_args(args, 0, arg_mode(mode), mk_ck2(ck.ctx, ck.env, ev, ""))
 }
@@ -3801,6 +3819,7 @@ fn fn_call(name: Str, args: List[Expr], mode: Int, ck: Ck) -> Ck {
     let cc = caps_of(ck.ctx.caps, name)
     let lab = ev.labels.push(name.concat("()"))
     ev = mk_ev2(lab, union_into(ev.caps, cc), union_into(ev.unnamed, cc))
+    ev = mk_ev2(lab, union_into(ev.caps, cc))
   }
   let wck = walk_args(args, 0, arg_mode(mode),
                       mk_ck2(ck.ctx, ck.env, ev, ""))
@@ -3897,6 +3916,7 @@ fn g4_verdict(svcName: Str, mname: Str, decl: MethSig, ev: Ev) -> Str {
   if (decl.isEm && decl.caps.length() > 0) {
     let extra = sort_strs(drop_verb_covered(minus_list(ev.caps, decl.caps),
                                             ev.labels, decl.caps, ev.unnamed))
+    let extra = sort_strs(minus_list(ev.caps, decl.caps))
     if (extra.length() > 0) {
       var msg = "`".concat(svcName).concat(".").concat(mname)
         .concat("` is declared `emission[").concat(decl.caps.join(", "))
@@ -4174,6 +4194,7 @@ fn is_space_ch(c: Str) -> Bool {
 // the wrong arity (bare `Opt`, `List[]`, `Map[Str]`) is not a type spelling;
 // recurses into arguments. A builtin scalar takes no type arguments (issue
 // #2963). User/nominal heads are not arity-checked.
+// recurses into arguments. User/nominal heads are not arity-checked.
 fn generic_arity(h: Str) -> Int {
   if (h == "Opt" || h == "List") { return 1 }
   if (h == "Map" || h == "Result") { return 2 }

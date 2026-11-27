@@ -103,6 +103,7 @@ class _FakeSession:
         self.authored = []
 
     def swap(self, ir, origin=None, *, agent_authored):
+    def swap(self, ir, origin=None):
         self.swaps.append(ir)
         self.authored.append(agent_authored)
         return {"generation": len(self.swaps)}

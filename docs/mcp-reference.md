@@ -7,6 +7,7 @@ query verbs appended to it).
 
 <!-- docgen:mcp-verb-count begin -->
 The server has exactly the verbs below, one section each (`python3 tools/docgen.py --show mcp-verb-count` counts them). By default `tools/list` advertises the core tier and `revl_verbs` returns the rest - or calls one, given `name` and `args`; see "Find a verb".
+The advertised list is exactly the 56 verbs below, one section each.
 <!-- docgen:mcp-verb-count end -->
 
 Start the server with `revl mcp serve` (see [commands-reference.md](commands-reference.md#revl-mcp)
@@ -32,10 +33,13 @@ order, and each verb on it opens its description with "Authoring loop step N of
    what a swap would do. For the test impact of changed repository files, pass
    their paths to `revl_affected_tests`; it returns the same selection as the
    pre-merge selector, including `FULL` and a reason when it cannot narrow.
+   or removing a component. `revl_edit` returns it in `blastRadius` for the
+   components it touches, and `revl_plan` shows what a swap would do.
 5. **check:** `revl_check` returns `selfCheck`, every guarantee G1-G9 as pass or
    fail with the code and the fix. Called with no candidate it checks the
    composition the session holds, so the loop can verify what steps 1-4 built
    without re-sending it.
+   fail with the code and the fix.
 6. **commit:** `revl_admit` against the running manifest, then `revl_swap`.
    `revl_edit` re-admits and swaps on its own. On a cold start, use `revl_load`.
 
@@ -52,6 +56,7 @@ same three-way input, and you pass exactly one form:
 - `files` - an array of `.rvl` paths, absolute or relative. A relative path
   resolves against the operator's sanctioned root(s), not the server's cwd; an
   absolute one outside every root is refused.
+- `files` - an array of `.rvl` paths.
 - `modules` - in-memory sources for `use` imports, keyed by the path the import
   names, so a multi-module candidate is checked without touching the
   filesystem.
@@ -193,6 +198,7 @@ it starts, names the unavailable verbs on stderr and in the `initialize`
 instructions, and each of those verbs answers with
 `{"ok": false, "refused": true, "unavailable": "cordis-py runtime", "next": ...}`,
 `next` being the operator step that fixes it. A few verbs keep working with less: `revl_ship` cannot
+`next` being the fix. A few verbs keep working with less: `revl_ship` cannot
 `apply`, `revl_gauntlet` and `revl_quarantine` skip their substrate battery,
 and the history verbs answer only from an inline `timeline`/`trace`. The lists
 live in `src/revl/mcp/runtime_gate.py`, and `revl doctor` reports which case
@@ -341,6 +347,7 @@ answering compiler's identity beside it. Under `revl mcp proxy` the `initialize`
 | `revl_export` | no | yes | - |
 | `revl_change` | no | yes | - (source) |
 | `revl_source` | yes | no | - (source) |
+| `revl_edit` | no | yes | `edits` |
 | `revl_gauntlet` | yes | no | - (source) |
 | `revl_test_run` | no | no | `selection`, `cwd` |
 | `revl_quarantine` | yes | no | - (source) |
@@ -372,6 +379,7 @@ answering compiler's identity beside it. Under `revl mcp proxy` the `initialize`
 | `revl_timeline` | yes | no | - |
 | `revl_inspect_step` | yes | no | `at` |
 | `revl_step_back` | no | yes | - |
+| `revl_step_back` | no | yes | `to` |
 | `revl_replay_bisect` | yes | no | `assert` |
 | `revl_replay_forward` | no | yes | `from` |
 | `revl_grammar` | yes | no | - |
@@ -570,6 +578,8 @@ guarantee:
   a red one elsewhere.
 - `note`: why a draft with holes is not admissible, the unmet-requirement
   warning, or why rows are `unchecked`.
+- `note`: why a draft with holes is not admissible, or why rows are
+  `unchecked`.
 
 - Inputs: `source` / `files` / `modules`, or none at all (see below);
   `artifactId` names text the session already holds in place of `source` (see
@@ -694,6 +704,7 @@ store.
   its prose repair says `known: false`.
 
 `payloadKey` is `repaired`.
+- Inputs: `source` / `files` / `modules`.
 
 ### `revl_admit`
 
@@ -739,6 +750,8 @@ which tests and pre-merge gates cover the paths.
 
 It reports a plan; it does not execute tests. Run the selected targets or
 `sh tools/pre_merge.sh --affected` before opening a PR.
+- Inputs: `source` / `files` / `modules`; `manifest` (omit to plan against the
+  loaded session, or against nothing for a cold start); `replacing`.
 
 ### `revl_ship`
 
@@ -760,12 +773,15 @@ The acting, cross-host half of `revl_ship`: drive an admission-gated
 cross-machine reconfiguration of the running composition onto a second host
 (`via = ssh`) through the same leg `revl deploy` uses ([deploy.md](deploy.md),
 roadmap item 476, issue #830). Runs the deploy-map admission gate first -
+roadmap item 476, issue #830). Runs the deploy-map admission gate first —
 refusing a machine boundary without a pinned host key (`known_hosts`), an
 unknown `via`, a network provider, and so on - and reports the plan. Without
+unknown `via`, a network provider, and so on — and reports the plan. Without
 `apply`, or with `apply: false`, this is a REHEARSAL: it admits and plans and
 mutates NOTHING on either host. With `apply: true` it stages the attested
 bundle under each pinned host key and drives the coordinated
 PREPARE/COMMIT/ABORT protocol - the far host re-hashes the bytes it runs, the
+PREPARE/COMMIT/ABORT protocol — the far host re-hashes the bytes it runs, the
 conductor verifies the signed admission and COMMIT receipts, and a remote the
 conductor cannot settle on ABORT is `unresolved`, never a false rollback. The
 crossing is irreversible, so `apply: true` is additionally refused without the
@@ -774,6 +790,8 @@ identical re-issue after a yes fires exactly once.
 
 Host, port, `known_hosts`, `host_key`, `remote_bundle` and the runner flags
 (`extra_args`) are keys of the `[processes.<p>.deploy]` table inside `placement`, not top-level
+Host, port, `known_hosts`, `host_key`, `remote_bundle` and the ssh options are
+keys of the `[processes.<p>.deploy]` table inside `placement`, not top-level
 arguments. A `via = ssh` target needs `host`, `known_hosts` (the PINNED
 host-key file) and `remote_bundle` (the path on the far host the bundle is
 staged to and re-hashed); `host_key` is a conductor-side copy of the far host's
@@ -883,6 +901,9 @@ this tool is for asking about a construct before there is a hole in it.
   (issue #2115). The submit-ready fills are a hole's
   `fillable.producers[].write`. With no `name` it returns
   `{ok, idioms: [{name, summary}]}`. An unknown name
+- Inputs (optional): `name`, an idiom such as `emission-method`, `effect-undo`
+  or `spawn`, returns `{ok, idiom: {name, summary, rules, fill, example}}`.
+  With no `name` it returns `{ok, idioms: [{name, summary}]}`. An unknown name
   is refused, listing the idioms. The same table is printed by
   [`revl idiom`](commands-reference.md#revl-idiom).
 
@@ -918,6 +939,7 @@ form is still a verdict on the rewrite.
 
 - Inputs: `source` (required); `filename`; `migrate`; `handle` (true: answer
   with `artifactId` instead of `formatted`).
+- Inputs: `source` (required); `filename`; `migrate`.
 
 ### `revl_explain`
 
@@ -927,6 +949,8 @@ already carries the code. Every code the compiler, the gate, the session and
 the HTTP faces emit has an entry - not only the design catalogue's, and
 barring the curriculum's reserved set noted below - and an unknown code
 answers with the roster of known ones rather than with nothing.
+already carries the code. An unknown code answers with the roster of known ones
+rather than with nothing.
 
 - Inputs: `code` (required; a diagnostic code such as `G4`, case-insensitive).
 
@@ -977,6 +1001,7 @@ never boots while a hole remains.
   activation). With a draft held and no source: boots the draft. With the
   approval gate on (the `revl mcp serve` default since issue #1706) an
   omitted `record` records, and `record: false` is refused.
+  activation).
 
 ### `revl_call`
 
@@ -1072,6 +1097,8 @@ that edited server-side with `revl_edit` need not re-serialize the whole file.
 A swap that lands, inline or by name, carries `blastRadius` in the shape
 `revl_edit` gives it below, read off the composition that was running before
 the swap (issue #1704).
+the source the server already holds - so an agent that edited server-side with
+`revl_edit` need not re-serialize the whole file.
 
 A swap that lands also carries `compensationResidue`, in the shape `unload`
 gives it: one record for each key an `undo` of a disposed frame did not put
@@ -1086,6 +1113,7 @@ its `noResidue` is then false.
   `service` (the WIT interface name the quarantine tier groups the
   candidate's functions under, when a policy arms it; default: the sole
   declared service, else `Candidate`).
+- Inputs: `source` / `files` / `modules` (all optional); `replacing`.
 
 ### `revl_edit`
 
@@ -1236,6 +1264,9 @@ A swapped edit, a draft edit with open holes and a proposal (`commit: false`)
 all carry `blastRadius`, which makes preflight automatic. It is read off the
 composition that is running when the edit arrives. Its `touched` names
 components, where the top-level `touched` above names symbols:
+A swapped edit and a draft edit with open holes both carry `blastRadius`, which
+makes preflight automatic. It is read off the composition that is running when
+the edit arrives:
 - `touched`: the components whose definition changed, plus added and removed
   ones. Shifted source lines alone do not count. A component also counts when a
   service it provides or requires changed its declaration.
@@ -1774,6 +1805,8 @@ edit still reaches it. The answer is
   `comments`; `proposal` (true: read your speculative proposal, issue #1696);
   `files` / `source` when nothing is loaded, with `modules` for an inline
   `source`'s `use` imports.
+  replacement}` / `{anchor, replacement, count?}`); `target` (which server-side
+  buffer to edit, omit for the main inline source); `replacing`.
 
 ### `revl_unload`
 
@@ -1791,10 +1824,12 @@ runtime can move an action between classes
 ([245-session-commit.md](design/245-session-commit.md), Decision 2):
 
 - **(a) witnessed-revertible** - an `effect` over a `witnessed` extern (item
+- **(a) witnessed-revertible** — an `effect` over a `witnessed` extern (item
   243). Runs freely mid-session; its declared inverse is registered on the
   activation frame. On commit it discharges (the mutation persists); on abort it
   replays (the mutation reverts).
 - **(b) deferrable** - an `emission` extern declared `deferred`
+- **(b) deferrable** — an `emission` extern declared `deferred`
   (`extern emission deferred fn send(...)`). The call does NOT fire the host
   body; it ENQUEUES a descriptor on the session's deferral queue and returns
   Unit. On commit the queue flushes FIFO (each host body fires once); on abort
@@ -1802,6 +1837,7 @@ runtime can move an action between classes
   exact by construction. A deferred emission must return Unit, may not declare
   `compensate` or `async`, and may not appear in a teardown slot (all checked).
 - **(c) immediate** - a plain `emission` extern. Fires at the call. On abort it
+- **(c) immediate** — a plain `emission` extern. Fires at the call. On abort it
   has already crossed; `compensate` (item 247) may offset it.
 
 The commit is two-step and hash-bound. `revl_commit` derives its gate target
@@ -1864,6 +1900,7 @@ when the live state was read and nothing was lost. If the live state cannot be
 read, `note` says so and the rollback still runs. A rollback the activation
 gate refuses after the teardown restarts the running generation cold too: the
 refusal carries `stateDropped` for the state that restart discarded.
+Restore the generation that was running before the last swap. No inputs.
 
 ### `revl_undo`
 
@@ -2330,6 +2367,7 @@ reaches PAUSES for a human ack (`awaiting-ack`) instead of swapping; an
 ineligible component halts. An untrusted candidate (inline `source` or
 `modules`) that removes a surviving provider's realm placement is `rejected`
 with `blockedBy: realm` and a G9 diagnostic, `apply: false` included. Returns the INCIDENT DOSSIER reconstructed from the
+ineligible component halts. Returns the INCIDENT DOSSIER reconstructed from the
 causal trace ([repair-loop.md](repair-loop.md)).
 
 - Inputs: `component` (required); `trace` (item-27 lifecycle events) or
@@ -2342,6 +2380,7 @@ causal trace ([repair-loop.md](repair-loop.md)).
   (take the reuse match over a supplied `candidate`; default: only when none
   is supplied); `limit` (how many registry candidates the reuse check ranks,
   default 5).
+  but does not swap); `registry` (dir for the reuse check).
 
 ### `revl_canary`
 
@@ -2494,6 +2533,11 @@ change, the undo it ran (`via`, through the same gates as any call) and the
 with `undoDepth: 0`. The answer carries the `"disk": {"inSync", "stale"}` block
 (issue #2037), naming the retracted change disk still holds and pointing at
 `revl_export` when the revert is not yet durable.
+Unwind the accumulator to step k by running the registered inverses from the top
+down, newest first - leaving the component LIVE, not torn down. Refuses if the
+range crosses an emission with no `compensate`; `force` crosses anyway and
+reports what was crossed. The guarantee is "the inverses ran in order", never
+"state was restored".
 
 With `to`, unwind the accumulator to step k by running the registered inverses
 from the top down, newest first - leaving the component LIVE, not torn down.
@@ -2503,6 +2547,7 @@ order", never "state was restored".
 
 - Inputs: none (revert the last change); or `to` (`-1` unwinds everything),
   `component`, `force`.
+- Inputs: `to` (required; `-1` unwinds everything); `component`; `force`.
 
 ### `revl_replay_bisect`
 

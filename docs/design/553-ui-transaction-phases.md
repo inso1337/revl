@@ -410,6 +410,10 @@ does not fire on it and steps 1-8 and 10 are unaffected.
   substrate's host bodies (item 539), exactly as the actuations are, and the
   run artifact says so in `performedBy`. No other phase runs, and the other
   five tiers have no unit.
+  is kept as the control the run is measured against. What remains true is that
+  revl performs nothing: the compensating crossings are the substrate's (item
+  539), exactly as the actuations are, and the run artifact says so in
+  `performedBy`.
 - **The postcondition check WAS POSITIONAL.** It reported that a read follows
   an actuation in the same method, not that the read checks that actuation.
   538 slice 5 (issue #1370, PR #1386) bound it: a read carries a step's

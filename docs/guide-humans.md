@@ -334,6 +334,7 @@ below; the exhaustive per-command flag reference is
 | `revl verify BUNDLE` | check a bundle tier by tier; nonzero on a failing tier, so it is usable as a release gate | [commands-reference.md](commands-reference.md#revl-verify) |
 | `revl deploy MAP` | deploy a composition across process seams with attested admission (the receiver re-hashes IR+artifact and checks the signed evidence chain) and coordinated two-phase rollback; `--dry-run`, `--json` | [deploy.md](deploy.md) |
 | `revl deploy-admit` | the far-side deploy runner: reads JSON admit/commit requests on stdin and writes signed verdicts on stdout, verifying each against this host's own trust store (`--key`, `--host-key`, the two `--require-*` floors, and the receiver rules `--max-age`, `--not-before`, `--capability-ceiling`, `--revoked-key`, `--recheck-source`) | [deploy.md](deploy.md) |
+| `revl deploy-admit` | the far-side deploy runner: reads JSON admit/commit requests on stdin and writes signed verdicts on stdout, verifying each against this host's own trust store (`--key`, `--host-key`, `--require-gauntlet`, `--require-conformance`) | [deploy.md](deploy.md) |
 | `revl truc VERB …` | the component manager namespaced under the compiler, `add`/`rm`/`assemble`/`ship`/`reproduce`, tail passed through unchanged | [truc.md](truc.md) |
 
 Two module entry points sit outside the `revl` subcommand tree. `python -m
@@ -389,6 +390,7 @@ python3 tools/conformance.py             # every construct x every backend
 ```
 
 The first form (`revl <cmd>`) is the documented happy path: `backends/python/setup.sh` (or `uv pip install -e ".[test]"` at the root) installs the `revl` console script on `PATH`, and a script entry point is window-free by design (issue #317 / #336). Callers that need a venv's interpreter explicitly reach the same code with `python -P -m revl <cmd>` (PYTHONSAFEPATH, 3.11+): the `-P` is the safety bit; without it, `-m` puts the CWD at `sys.path[0]`. `revl doctor` reports which shape it is under.
+The first form (`revl <cmd>`) is the documented happy path: `backends/python/setup.sh` (or `uv pip install -e ".[test]"` at the root) installs the `revl` console script on `PATH`, and a script entry point is window-free by design (issue #317 / #336). Callers that need a venv's interpreter explicitly reach the same code with `python -P -m revl <cmd>` (PYTHONSAFEPATH, 3.11+) — the `-P` is the safety bit; without it, `-m` puts the CWD at `sys.path[0]`. `revl doctor` reports which shape it is under.
 
 `run --backend py` needs the cordis-py runtime (`backends/python/setup.sh`);
 without it the command says so and exits nonzero, and the end-to-end tests in
@@ -492,6 +494,7 @@ easiest place to overclaim:
 <!-- docgen:mcp-test-count begin -->
 The `mcp serve` tool surface, its annotations and its structured rejections
 are gated by `tests/test_mcp.py`.
+are gated by `tests/test_mcp.py` (47 tests).
 <!-- docgen:mcp-test-count end -->
 
 ## Backends

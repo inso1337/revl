@@ -69,6 +69,7 @@ export const UserCache = {
             $revl_frame.journalBegin()
             store.insert(key, value)
             return $revl_frame.guard(() => store.remove(key))
+            return () => store.remove(key)
           })
           ctx.db.execute(`INSERT INTO cache_log VALUES (${key})`)
         },

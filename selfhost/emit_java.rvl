@@ -29,6 +29,7 @@
 //     if/while/for, bare-expr, assert); and the base `_expr` algebra (lit, name,
 //     var incl `None`->`Optional.empty()`, bin incl `??`/`==`/exact-arith/`/`/
 //     comparisons/`&&`, un incl `revlNeg`, the 2.0 call and the `fn`
+//     comparisons/`&&`, un incl `Math.negateExact`, the 2.0 call and the `fn`
 //     call with `Some`/`None`, the widen markers, field, index, ternary, list,
 //     the empty `maplit`, and non-float `${..}` interpolation).
 //
@@ -70,12 +71,14 @@
 // each is a real reference surface this slice does not reach (its fixtures avoid
 // it), NOT an approximation. Where a covered fixture could plausibly reach one, a
 // loud `<<UNSUPPORTED-*>>` marker keeps a byte diff from silently passing (item 207):
+// loud `<<DEFER-*>>` marker keeps a byte diff from silently passing (item 207):
 //   * a local bound to an UNANNOTATED `Map.empty()` (issue #274): the reference
 //     learns the map's value type from the body's `m.set(k, v)` writers, or falls
 //     back to the raw `java.util.Map`; neither is ported (the HOST `Map.new()`
 //     inference is). The annotated `var m: Map[Str, Int] = Map.empty()` IS covered
 //     (its pin rides on the literal), and the unannotated one surfaces
 //     `<<UNSUPPORTED-map-local-unpinned>>`;
+//     `<<DEFER-map-local-unpinned>>`;
 //   * the whole item-130 `Stream[T]` surface, which the reference java backend
 //     now LOWERS (the emitted `Stream`/`Subscription`/`EventContract` runtime,
 //     the `subscribe` acquisition, and the `stream-iter` loop behind
@@ -92,6 +95,7 @@
 //     and body-level `effect`/`emit`/`if`/`fail`/`await` in item 238 — see COVERS.)
 //     A component outside the supported subset routes to
 //     `<<UNSUPPORTED-component-nonsimple:N>>`;
+//     `<<DEFER-component-nonsimple:N>>`;
 //   * spawn/instances (`_v3_spawn`/`instance-get`/`RevlSpawnHandle`), timers and
 //     routers; and the `Pool` host runtime — `_emit_host_stubs` emits Map/Job, but
 //     a `Pool` acquisition surfaces a loud `<<UNSUPPORTED-host-stub:Pool>>`;
@@ -99,8 +103,14 @@
 //     Result and the sealed `RevlResult` are ported), and `_emit_checked_div_helpers`,
 //     so the `checked_*` division methods stay behind a loud
 //     `<<UNSUPPORTED-checked-div:..>>`; and the `revlDivFloor`/`revlDivEuclid`/`revlMod`
+//     a `Pool` acquisition surfaces a loud `<<DEFER-host-stub:Pool>>`;
+//   * the built-in Result surface — `Ok`/`Err` construction and `match`, the
+//     sealed `RevlResult` (`_emit_result_type`), and `_emit_checked_div_helpers`,
+//     so the `checked_*` builtin methods stay behind a loud
+//     `<<DEFER-checked-div:..>>`; and the `revlDivFloor`/`revlDivEuclid`/`revlMod`
 //     int-arith block, so `div_floor`/`div_euclid`/`mod` stay behind a loud
 //     `<<UNSUPPORTED-int-arith:..>>` (`div_trunc` is the `revlDivTrunc` stdlib group and IS
+//     `<<DEFER-int-arith:..>>` (`div_trunc` is inline `Math.divideExact` and IS
 //     covered);
 //   * functional record-update `{r | f = e}` — the JAVA reference itself RAISES on
 //     `record_update` (only python/typescript emit it), a structural exclusion;
@@ -108,6 +118,7 @@
 //     the canonical Float->Str `revlFtoa` (so `${aFloat}` interpolation is
 //     excluded, since it also pulls in the `_emit_ftoa_helper` block, and a Float
 //     `to_str()` receiver surfaces `<<UNSUPPORTED-ftoa:to_str>>`);
+//     `to_str()` receiver surfaces `<<DEFER-ftoa:to_str>>`);
 //   * java-specific NUANCES — the `_reject_fn_type` refusal of a declared function
 //     type, local `let`-bound arrows and their `_inline_arrow` beta-reduction, and
 //     `let_pattern` (the reference threads a per-`_V3Ctx` emission-order index
@@ -126,6 +137,7 @@
 use "../stdlib/value.rvl" {
   value_kind, value_is_null, value_field, value_keys,
   value_list, value_at, value_str, value_bool, value_opt, value_int, value_children
+  value_list, value_at, value_str, value_bool, value_opt, value_int
 }
 use "../stdlib/str.rvl" { trim, split_top, last_index_of, rstrip }
 use "../stdlib/list.rvl" { list_contains, list_sort, list_dedup }
@@ -199,6 +211,8 @@ fn emitter_reserved() -> List[Str] {
           "RevlSecretShape", "RevlResult", "RevlActivation",
           "RevlFrame", "RevlSpawnHandle"]
 }
+// `_EMITTER_RESERVED`: `_fn_name` also renames a callable colliding with these.
+fn emitter_reserved() -> List[Str] { return ["ctx", "config", "root"] }
 
 // `_mangle` (== `_ident`'s rename for a field/type/other non-renamable role).
 // INJECTIVE: escape a name iff the name or any name reachable from it by
@@ -208,11 +222,18 @@ fn emitter_reserved() -> List[Str] {
 // Java identifier. `extra` folds a position-specific reserved set into every
 // rung, as the reference's `_mangle(name, extra)` does.
 fn mangle_extra(name: Str, extra: List[Str]) -> Str {
+// `_mangle` (== `_ident`'s rename for a binding/param/name/type). INJECTIVE:
+// escape a name iff the name or any name reachable from it by dropping trailing
+// `_` is reserved, by exactly one `_`, so the whole `kw`/`kw_`/`kw__` ladder
+// shifts up a rung (`double` -> `double_`, `double_` -> `double__`) instead of
+// collapsing two distinct revl identifiers onto one Java identifier.
+fn mangle(name: Str) -> Str {
   var root = name
   while (root.length() > 0) {
     if (list_contains(java_reserved(), root) || list_contains(extra, root)) {
       return name.concat("_")
     }
+    if (list_contains(java_reserved(), root)) { return name.concat("_") }
     if (root.charAt(root.length() - 1) != "_") { return name }
     root = root.slice(0, root.length() - 1)
   }
@@ -342,6 +363,9 @@ fn exact_method(op: Str) -> Str {
   if (op == "+") { return "revlAdd" }
   if (op == "-") { return "revlSub" }
   return "revlMul"
+  if (op == "+") { return "addExact" }
+  if (op == "-") { return "subtractExact" }
+  return "multiplyExact"
 }
 fn is_addsubmul(op: Str) -> Bool { return op == "+" || op == "-" || op == "*" }
 fn is_int_operand(opnd: Str) -> Bool { return opnd == "Int" || opnd == "Int32" }
@@ -384,6 +408,7 @@ type Ctx = {
   // (`fret`); see `selector_type_args`.
   gen: Map[Str, Bool], gfns: Map[Str, Bool], pn: Map[Str, Bool],
   pt: Map[Str, Str], fret: Map[Str, Str]
+  rn: Map[Str, Str]
 }
 // A rendered expression: its text AND the running match-temp counter.
 type Rendered = { text: Str, counter: Int }
@@ -434,6 +459,9 @@ fn covers_variant(ctx: Ctx, patterns: List[Str]) -> Bool {
 // wrapper form for a type-ARGUMENT position (long/int/double/boolean box in the
 // v3 table, `_V3_BOXED`; `String`/`byte[]`/etc. pass through, and `void` is not
 // a type argument at all, which is the reference's gap too).
+// wrapper form for a type-ARGUMENT position (only long/double/boolean box in the
+// v3 table — `int`/`String`/etc. pass through, matching the reference's inline
+// dict, which is intentionally narrower than the v1/v2 `_BOXED`).
 fn box(java_type: Str, boxed: Bool) -> Str {
   if (!boxed) { return java_type }
   if (java_type == "long") { return "java.lang.Long" }
@@ -458,6 +486,7 @@ fn type_map(name: Str) -> Str {
 fn java_v3_type(tv: Any, boxed: Bool) -> Str {
   if (value_is_null(tv)) { return "void" }
   let raw = value_str(tv)
+  if (raw == "Unit") { return "void" }
   let name = trim(raw)
   if (name == "") { return "Object" }
   // item 383 (self-host port): a declared function type `(P, ..) -> R` is NOT
@@ -466,9 +495,11 @@ fn java_v3_type(tv: Any, boxed: Bool) -> Str {
   // with primitives without boxing (the reference's `_reject_fn_type`, which
   // RAISES). A pure emitter fn cannot `fail`, so the refusal surfaces as a loud
   // out-of-subset `<<UNSUPPORTED-fn-type>>` marker, keeping a byte diff from silently
+  // out-of-subset `<<DEFER-fn-type>>` marker, keeping a byte diff from silently
   // mangling the type. `.map`/`.filter`/`.reduce` reach here through their
   // `list_map`/`list_filter`/`list_reduce` function-value parameters.
   if (name.startsWith("(")) { return "<<UNSUPPORTED-fn-type>>" }
+  if (name.startsWith("(")) { return "<<DEFER-fn-type>>" }
   let tm = type_map(name)
   if (tm != "") { return box(tm, boxed) }
   // `Any` has no `type_map` entry; it is the open type, `Object` in every
@@ -504,6 +535,9 @@ fn java_v3_type(tv: Any, boxed: Bool) -> Str {
     var applied = []
     for (a of args) { applied = applied.push(java_v3_type(a, true)) }
     return `${base}<${applied.join(", ")}>`
+    var objs = []
+    for (a of args) { objs = objs.push("Object") }
+    return `${base}<${objs.join(", ")}>`
   }
   // A user type name (`_ident`) — mapped to its emitted class/interface name.
   return mangle(name)
@@ -669,6 +703,7 @@ fn render_var(node: Any, ctx: Ctx) -> Str {
   let name = value_str(value_field(node, "name"))
   if (has_fn(ctx, name)) { return fn_name(name) }
   let m = ident_binding(name)
+  let m = mangle(name)
   if (name == "None") { return "java.util.Optional.empty()" }
   return m
 }
@@ -703,6 +738,7 @@ fn render_bin(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   }
   if (is_addsubmul(op) && is_int_operand(opnd)) {
     return { text: `${exact_method(op)}(${left}, ${right})`, counter: c }
+    return { text: `Math.${exact_method(op)}(${left}, ${right})`, counter: c }
   }
   // Java has NO relational operator on `String`: `(a < b)` reached javac as
   // "bad operand types for binary operator '<'", so a document that ordered
@@ -727,6 +763,7 @@ fn render_un(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   }
   if (op == "-") {
     if (is_int_operand(node_operands(node))) { return { text: `revlNeg(${r.text})`, counter: r.counter } }
+    if (is_int_operand(node_operands(node))) { return { text: `Math.negateExact(${r.text})`, counter: r.counter } }
     return { text: `(-${r.text})`, counter: r.counter }
   }
   return { text: `<<UNSUPPORTED-UN:${op}>>`, counter: r.counter }
@@ -783,6 +820,7 @@ fn v3_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
   if (method == "checked_div_trunc" || method == "checked_div_floor"
       || method == "checked_div_euclid" || method == "checked_mod") {
     return `<<UNSUPPORTED-checked-div:${method}>>`
+    return `<<DEFER-checked-div:${method}>>`
   }
   if (method == "length") { return `revlLength(${target})` }
   if (method == "push") { return `revlPush(${target}, ${args[0]})` }
@@ -805,8 +843,13 @@ fn v3_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
   // it) truncates identically and faults on the one overflow (`Int.MIN / -1`)
   // plain `/` would wrap.
   if (method == "div_trunc") { return `revlDivTrunc(${target}, ${args[0]})` }
+  if (method == "to_int32") { return `Math.toIntExact(${target})` }
+  // `div_trunc` truncates toward zero; `Math.divideExact` truncates identically
+  // and throws on the one overflow (`Int.MIN / -1`) plain `/` would wrap.
+  if (method == "div_trunc") { return `Math.divideExact(${target}, ${args[0]})` }
   if (method == "div_floor" || method == "div_euclid" || method == "mod") {
     return `<<UNSUPPORTED-int-arith:${method}>>`
+    return `<<DEFER-int-arith:${method}>>`
   }
   if (method == "indexOf") { return `revlIndexOf(${target}, ${args[0]})` }
   if (method == "split") { return `revlSplit(${target}, ${args[0]})` }
@@ -825,6 +868,7 @@ fn v3_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
   if (method == "remove") { return `revlMapRemove(${target}, ${args[0]})` }
   if (method == "to_str") {
     if (recv == "Float") { return `<<UNSUPPORTED-ftoa:to_str>>` }
+    if (recv == "Float") { return `<<DEFER-ftoa:to_str>>` }
     return `String.valueOf(${target})`
   }
   // The reverse of `codepoint_at` (issue #2285): a lambda binds the receiver
@@ -856,6 +900,7 @@ fn render_adt(case: Str, args: List[Str], ctx: Ctx) -> Str {
   let owner = map_get(ctx.ca, case)
   if (resolved(owner)) { return `new ${mangle(owner)}.${case}(${args.join(", ")})` }
   if (case == "Ok" || case == "Err") { return `<<UNSUPPORTED-result-ctor:${case}>>` }
+  if (case == "Ok" || case == "Err") { return `<<DEFER-result-ctor:${case}>>` }
   return `<<UNSUPPORTED-ADT:${case}>>`
 }
 
@@ -879,6 +924,7 @@ fn render_call(node: Any, ctx: Ctx, counter: Int) -> Rendered {
     let tn = value_field(node, "target")
     let tr = render_expr(tn, ctx, c)
     return { text: `${tr.text}.${method_name(value_str(value_field(node, "method")))}(${args.join(", ")})`, counter: tr.counter }
+    return { text: `${tr.text}.${mangle(value_str(value_field(node, "method")))}(${args.join(", ")})`, counter: tr.counter }
   }
   let ck = node_kind(callee)
   if (ck == "var") {
@@ -888,6 +934,7 @@ fn render_call(node: Any, ctx: Ctx, counter: Int) -> Rendered {
     if (name == "Some") { return { text: `java.util.Optional.of(${args[0]})`, counter: c } }
     if (name == "None") { return { text: "java.util.Optional.empty()", counter: c } }
     if (name == "Ok" || name == "Err") { return { text: `<<UNSUPPORTED-result-ctor:${name}>>`, counter: c } }
+    if (name == "Ok" || name == "Err") { return { text: `<<DEFER-result-ctor:${name}>>`, counter: c } }
     return { text: `${name}(${args.join(", ")})`, counter: c }
   }
   if (ck == "field") {
@@ -996,6 +1043,7 @@ fn infers_exactly(node: Any, ctx: Ctx) -> Bool {
       && infers_exactly(args[0], ctx)
   }
   return false
+  return { text: `new ${mangle(tn)}(${out_args.join(", ")})`, counter: c }
 }
 
 // Component templates use positional $N substitutions and $$ dollar escapes.
@@ -1088,6 +1136,8 @@ fn render_interp(node: Any, ctx: Ctx, counter: Int) -> Rendered {
 // enclosing statement only pads the first line). A built-in Result (`Ok`/`Err`,
 // when NOT shadowed) switches over the sealed `RevlResult`; only its
 // CONSTRUCTION is deferred (`<<UNSUPPORTED-result-ctor:..>>`).
+// enclosing statement only pads the first line). Built-in Result (`Ok`/`Err`) is
+// DEFERRED.
 fn opt_arm_body(arms: List[Any], want: Str, ctx: Ctx, counter: Int) -> Rendered {
   for (arm of arms) {
     if (value_str(value_field(arm, "pattern")) == want) {
@@ -1150,6 +1200,7 @@ fn opt_bind(arms: List[Any]) -> Str {
     if (value_str(value_field(arm, "pattern")) == "Some") {
       let b = value_str(value_field(arm, "bind"))
       if (b != "" && b != "_") { return ident_binding(b) }
+      if (b != "" && b != "_") { return mangle(b) }
     }
   }
   return "__revl_v"
@@ -1240,6 +1291,7 @@ fn match_expr(node: Any, ctx: Ctx, counter: Int) -> Rendered {
         } else {
           lines = lines.push(`                final var ${ident_binding(bind)} = ${case_var}.value;`)
         }
+        lines = lines.push(`                final var ${mangle(bind)} = ${case_var}.value;`)
         lines = lines.push(`                yield (${br.text});`)
         lines = lines.push(`            }`)
       } else {
@@ -1271,9 +1323,11 @@ fn render_inner(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   if (kind == "name") {
     // A modern component capture (`this.sink`) arrives via the rename map;
     // otherwise a bare `name` is `_ident(.., "binding")`.
+    // otherwise a bare `name` is a plain identifier (`_ident` = `mangle`).
     let idv = value_str(value_field(node, "id"))
     if (ctx.rn.has(idv)) { return { text: map_get(ctx.rn, idv), counter: counter } }
     return { text: ident_binding(idv), counter: counter }
+    return { text: mangle(idv), counter: counter }
   }
   // component dialect (item 225): a required-service reference — `this.sink` inside
   // a provide-method body (via the rename map), else the bare requirement local.
@@ -1440,10 +1494,18 @@ fn nameable_v3_type(raw: Str, ctx: Ctx) -> Bool {
 // ADT-construction binding declares as its sealed interface (`final Owner o`,
 // restoring the type the frontend gave the expression); else the `var` /
 // `final var` inference.
+// `_let_keyword`: an empty list literal declares as raw `java.util.List` (keeps
+// erasure in play); an empty `maplit` declares as the Map type its `expected`
+// pin names (issue #274 — `var` would freeze the local at `Map.of()`'s
+// `Map<Object, Object>` and neither the writer static nor the `return` would
+// then apply); an ADT-construction binding declares as its sealed interface
+// (`final Owner o`, restoring the type the frontend gave the expression); else
+// the `var` / `final var` inference.
 fn let_keyword(node: Any, ctx: Ctx) -> Str {
   let value = value_field(node, "value")
   if (node_kind(value) == "list" && value_list(value_field(value, "items")).length() == 0) {
     return empty_list_decl_type(value, ctx)
+    return "java.util.List"
   }
   if (node_kind(value) == "maplit" && value_list(value_field(value, "entries")).length() == 0) {
     let pin = value_field(value, "expected")
@@ -1454,6 +1516,7 @@ fn let_keyword(node: Any, ctx: Ctx) -> Str {
     // this slice does not cover, so the answer is a loud marker rather than a
     // guess (item 207). No covered fixture reaches it.
     return "<<UNSUPPORTED-map-local-unpinned>>"
+    return "<<DEFER-map-local-unpinned>>"
   }
   if (node_kind(value) == "adt") {
     let owner = map_get(ctx.ca, value_str(value_field(value, "case")))
@@ -1483,6 +1546,7 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int, counter: Int) -> Sout {
   let step = value_str(value_field(node, "step"))
   if (step == "let" || step == "assign") {
     let nm = ident_binding(value_str(value_field(node, "name")))
+    let nm = mangle(value_str(value_field(node, "name")))
     let r = render_expr(value_field(node, "value"), ctx, counter)
     if (step == "let") {
       return { lines: [pad.concat(`${let_keyword(node, ctx)} ${nm} = ${r.text};`)], counter: r.counter }
@@ -1522,6 +1586,7 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int, counter: Int) -> Sout {
   if (step == "for") {
     let ir = render_expr(value_field(node, "iterable"), ctx, counter)
     let bind = ident_binding(value_str(value_field(node, "bind")))
+    let bind = mangle(value_str(value_field(node, "bind")))
     var out = [pad.concat(`for (var ${bind} : ${ir.text}) {`)]
     let br = emit_stmts(value_list(value_field(node, "body")), ctx, indent + 1, ir.counter)
     out = out.concat(br.lines)
@@ -1664,6 +1729,7 @@ fn emit_v3_types(types: Any) -> List[Str] {
     let kind = value_str(value_field(spec, "kind"))
     if (kind == "record") {
       out = out.push(`public static final class ${mn}${type_params(spec)} {`)
+      out = out.push(`public static final class ${mn} {`)
       let fields = value_field(spec, "fields")
       let fnames = value_keys(fields)
       for (f of fnames) {
@@ -1699,11 +1765,13 @@ fn emit_v3_types(types: Any) -> List[Str] {
       let tparams = type_params(spec)
       let owner = `${mn}${tparams}`
       out = out.push(`public sealed interface ${owner} permits ${permits.join(", ")} {`)
+      out = out.push(`public sealed interface ${mn} permits ${permits.join(", ")} {`)
       for (case of cases) {
         let cname = mangle(value_str(value_field(case, "name")))
         let payload = value_field(case, "payload")
         if (value_is_null(payload)) {
           out = out.push(`    final class ${cname}${tparams} implements ${owner} {`)
+          out = out.push(`    final class ${cname} implements ${mn} {`)
           out = out.push(`        public ${cname}() {}`)
           for (l of emit_v3_value_equality(cname, [], [], `${mn}.${cname}`)) {
             if (l == "") { out = out.push("") } else { out = out.push("    ".concat(l)) }
@@ -1712,6 +1780,7 @@ fn emit_v3_types(types: Any) -> List[Str] {
         } else {
           let ptype = java_v3_type(payload, false)
           out = out.push(`    final class ${cname}${tparams} implements ${owner} {`)
+          out = out.push(`    final class ${cname} implements ${mn} {`)
           out = out.push(`        public final ${ptype} value;`)
           out = out.push(`        public ${cname}(${ptype} value) { this.value = value; }`)
           let peq = [v3_component_eq(ptype, "this.value", "__revl_other.value")]
@@ -1740,6 +1809,7 @@ fn emit_v3_functions(functions: List[Any], ctx: Ctx) -> List[Str] {
     var ps = []
     for (p of value_list(value_field(fnode, "params"))) {
       ps = ps.push(`${java_v3_type(value_field(p, "type"), false)} ${ident_binding(value_str(value_field(p, "name")))}`)
+      ps = ps.push(`${java_v3_type(value_field(p, "type"), false)} ${mangle(value_str(value_field(p, "name")))}`)
     }
     let ret = java_v3_type(value_field(fnode, "returns"), false)
     lines = lines.push(`public static ${ret} ${name}(${ps.join(", ")}) {`)
@@ -1760,6 +1830,7 @@ fn emit_v3_functions(functions: List[Any], ctx: Ctx) -> List[Str] {
       lines = lines.push("    // (empty body)")
     } else {
       let r = emit_stmts(body, fctx, 1, c)
+      let r = emit_stmts(body, ctx, 1, c)
       lines = lines.concat(r.lines)
       c = r.counter
     }
@@ -1868,6 +1939,7 @@ fn build_ctx(ir: Any) -> Ctx {
   for (name of value_keys(types)) { tys = tys.set(name, true) }
   return { fns: fns, ca: ca, cp: cp, rbf: rbf, vcases: vcases, rfields: rfields, rn: Map.empty(), tys: tys,
            gen: gen, gfns: gfns, pn: Map.empty(), pt: Map.empty(), fret: fret }
+  return { fns: fns, ca: ca, cp: cp, rbf: rbf, vcases: vcases, rfields: rfields, rn: Map.empty() }
 }
 
 // Swap in a fresh rename map (the component-capture scope for one render); the
@@ -1882,6 +1954,7 @@ fn set_rn(ctx: Ctx, rn: Map[Str, Str]) -> Ctx {
 fn set_pn(ctx: Ctx, pn: Map[Str, Bool], pt: Map[Str, Str]) -> Ctx {
   return { fns: ctx.fns, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, vcases: ctx.vcases, rfields: ctx.rfields, rn: ctx.rn, tys: ctx.tys,
            gen: ctx.gen, gfns: ctx.gfns, pn: pn, pt: pt, fret: ctx.fret }
+  return { fns: ctx.fns, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, vcases: ctx.vcases, rfields: ctx.rfields, rn: rn }
 }
 
 // ============================================================ components/services
@@ -1894,12 +1967,14 @@ fn set_pn(ctx: Ctx, pn: Map[Str, Bool], pt: Map[Str, Str]) -> Ctx {
 // isolate/intercept, and body steps that are all `provide`.
 //
 // Everything richer is DEFERRED, each behind a loud `<<UNSUPPORTED-*>>` marker so a byte
+// Everything richer is DEFERRED, each behind a loud `<<DEFER-*>>` marker so a byte
 // diff can never silently pass on an unported form (item 207's discipline):
 //   * the MODERN `_emit_component_modern` path — isolate/intercept, effectful
 //     method bodies, and any `if`/`fail`/`await`/`return` or `setup` body step
 //     (the `Context.EffectScope fx` provider shape). Detected conservatively:
 //     anything outside the simple predicate below routes to a
 //     `<<UNSUPPORTED-component-nonsimple:NAME>>` marker;
+//     `<<DEFER-component-nonsimple:NAME>>` marker;
 //   * component `config` (the `<Comp>Plugin(params)` ctor + `_config_default_lit`
 //     application) — a config-carrying component stays LEGACY but is deferred here;
 //   * required-service routing (`req`/the `ctx.get(..)` locals + provider fields),
@@ -1910,6 +1985,7 @@ fn set_pn(ctx: Ctx, pn: Map[Str, Bool], pt: Map[Str, Str]) -> Ctx {
 // The provider METHOD body reuses the v1 `_expr` surface for the two kinds the
 // simple unit forces — `lit` (`_lit`) and `name` (a bound param, `_ident`) — and
 // marks any other kind `<<UNSUPPORTED-method-expr:KIND>>`.
+// marks any other kind `<<DEFER-method-expr:KIND>>`.
 
 // `_emit_service_interfaces_v3`: each `service` -> a `public interface S` with one
 // method per op (param names `_ident`ed/mangled, a `void` return when the op
@@ -1926,16 +2002,19 @@ fn emit_service_interfaces_v3(services: Any) -> List[Str] {
       var params = []
       for (p of value_list(value_field(method, "params"))) {
         params = params.push(`${java_v3_type(value_field(p, "type"), false)} ${ident_binding(value_str(value_field(p, "name")))}`)
+        params = params.push(`${java_v3_type(value_field(p, "type"), false)} ${mangle(value_str(value_field(p, "name")))}`)
       }
       var ret = "void"
       let r = value_field(method, "returns")
       if (!value_is_null(r)) { ret = java_v3_type(r, false) }
       out = out.push(`    ${ret} ${method_name(mname)}(${params.join(", ")});`)
+      out = out.push(`    ${ret} ${mname}(${params.join(", ")});`)
     }
     out = out.push("}")
     out = out.push("")
   }
   return out.concat(method_name_table(services))
+  return out
 }
 
 // The v1 method-body expression surface for the simple provider path: only the
@@ -1943,12 +2022,15 @@ fn emit_service_interfaces_v3(services: Any) -> List[Str] {
 // simple unit carries no binds/reqs, so the reference's `rename` map is empty and
 // a `name` is just `_ident(.., "binding")` (a body-reference role, so the
 // scaffolding ladder applies). A user-case `name` cannot occur here (the
+// a `name` is just `_ident` (mangle). A user-case `name` cannot occur here (the
 // method returns a scalar), so no ADT/ctx lookup is needed.
 fn v1_method_expr(node: Any) -> Str {
   let k = node_kind(node)
   if (k == "lit") { return java_lit(node) }
   if (k == "name") { return ident_binding(value_str(value_field(node, "id"))) }
   return `<<UNSUPPORTED-method-expr:${k}>>`
+  if (k == "name") { return mangle(value_str(value_field(node, "id"))) }
+  return `<<DEFER-method-expr:${k}>>`
 }
 
 // `_method_body` (SUBSET): a single `return <expr>` inlines to `return <expr>;`
@@ -1974,6 +2056,7 @@ fn method_body(method: Any, ret_is_void: Bool) -> Str {
       let e = value_field(s0, "expr")
       if (value_is_null(e)) {
         if (!ret_is_void) { return "<<UNSUPPORTED-bare-return-nonvoid>>" }
+        if (!ret_is_void) { return "<<DEFER-bare-return-nonvoid>>" }
         return "return;"
       }
       let value = v1_method_expr(e)
@@ -2021,6 +2104,7 @@ fn list_nonempty(v: Any) -> Bool {
 // empty or a lone `return [<lit|name>]`), so anything it admits the reference emits
 // via the legacy path with a lit/name body — and anything it rejects gets a loud
 // `<<UNSUPPORTED-component-nonsimple:NAME>>` rather than a wrong-shaped emission.
+// `<<DEFER-component-nonsimple:NAME>>` rather than a wrong-shaped emission.
 fn method_simple_ok(method: Any) -> Bool {
   let steps = value_list(value_field(method, "body"))
   if (steps.length() == 0) { return true }
@@ -2052,6 +2136,7 @@ fn component_simple_ok(comp: Any) -> Bool {
 // (a `host` acquisition node, or a `field` access on a `var` named after a host
 // root), then emit each used root's runtime class. Map/Job are ported; Pool stays
 // a loud `<<UNSUPPORTED-host-stub:Pool>>` (no covered fixture reaches it).
+// a loud `<<DEFER-host-stub:Pool>>` (no covered fixture reaches it).
 fn collect_hosts(node: Any, acc: List[Str]) -> List[Str] {
   let k = value_kind(node)
   if (k == "record") {
@@ -2083,6 +2168,7 @@ fn emit_host_stubs(ir: Any) -> List[Str] {
     if (host == "Job") { out = out.concat(job_runtime()) }
     if (host == "Map") { out = out.concat(map_runtime()) }
     if (host == "Pool") { out = out.push("<<UNSUPPORTED-host-stub:Pool>>") }
+    if (host == "Pool") { out = out.push("<<DEFER-host-stub:Pool>>") }
   }
   return out
 }
@@ -2288,6 +2374,7 @@ fn map_value_expr_type(node: Any, var_types: Map[Str, Str], comp: Any, services:
         || method == "indexOf" || method == "to_int") { return "Int" }
     if (method == "charAt" || method == "join" || method == "repeat" || method == "to_str"
         || method == "to_char" || method == "slice") { return "Str" }
+    if (method == "charAt" || method == "join" || method == "repeat" || method == "to_str" || method == "slice") { return "Str" }
     if (method == "split") { return "List[Str]" }
     if (method == "concat") { return map_value_expr_type(value_field(node, "target"), var_types, comp, services, functions, ctx, types) }
     return ""
@@ -2303,6 +2390,7 @@ fn map_value_expr_type(node: Any, var_types: Map[Str, Str], comp: Any, services:
     let target = value_field(node, "target")
     if (value_str(value_field(target, "kind")) == "req") {
       let sname = req_service_of(comp, value_str(value_field(target, "name")))
+      let sname = value_str(value_field(value_field(comp, "requires"), value_str(value_field(target, "name"))))
       if (sname != "") {
         let decl = value_field(value_field(value_field(services, sname), "methods"), value_str(value_field(node, "method")))
         return value_str(value_field(decl, "returns"))
@@ -2313,6 +2401,7 @@ fn map_value_expr_type(node: Any, var_types: Map[Str, Str], comp: Any, services:
       let ct = value_field(callee, "target")
       if (value_str(value_field(ct, "kind")) == "req") {
         let sname = req_service_of(comp, value_str(value_field(ct, "name")))
+        let sname = value_str(value_field(value_field(comp, "requires"), value_str(value_field(ct, "name"))))
         if (sname != "") {
           let decl = value_field(value_field(value_field(services, sname), "methods"), value_str(value_field(callee, "name")))
           return value_str(value_field(decl, "returns"))
@@ -2554,6 +2643,7 @@ fn await_join(node: Any, ctx: Ctx, counter: Int) -> Rendered {
 // keeps a byte diff from silently passing if one ever arrives.
 fn emit_setup_stmt(step: Any, ctx: Ctx, pad: Str, counter: Int) -> Sout {
   return { lines: [pad.concat(`<<UNSUPPORTED-setup-step:${value_str(value_field(step, "step"))}>>`)], counter: counter }
+  return { lines: [pad.concat(`<<DEFER-setup-step:${value_str(value_field(step, "step"))}>>`)], counter: counter }
 }
 
 // ============================================== RevlFrame teardown (item 321)
@@ -2696,6 +2786,7 @@ fn stdlib_block_header() -> List[Str] {
 // which is the order `_emit_stdlib_helpers` emits the selected groups in.
 fn stdlib_group_names() -> List[Str] {
   return ["revlLength", "revlSlice", "revlIndexOf", "revlCharAt", "revlCharCodeAt", "revlConcat", "revlPush", "revlSplit", "revlJoin", "revlRepeat", "revlParseInt", "revlMapSet", "revlMapGet", "revlMapHas", "revlStrCmp", "revlMapRemove", "revlMapKeys", "revlAdd", "revlSub", "revlMul", "revlNeg", "revlToInt32", "revlDivTrunc"]
+  return ["revlLength", "revlSlice", "revlIndexOf", "revlCharAt", "revlCharCodeAt", "revlConcat", "revlPush", "revlSplit", "revlJoin", "revlRepeat", "revlParseInt", "revlMapSet", "revlMapGet", "revlMapHas", "revlStrCmp", "revlMapRemove", "revlMapKeys"]
 }
 
 // Each group VERBATIM (its own leading comment lines ride with it, so a group
@@ -3381,6 +3472,8 @@ fn emit_component_stmts(comp: Any, services: Any, cname: Str, steps: List[Any], 
         let raw_bind = value_str(value_field(step, "bind"))
         let bind = ident_binding(raw_bind)
         let surface = map_get(map_values, raw_bind)
+        let bind = mangle(value_str(value_field(step, "bind")))
+        let surface = map_get(map_values, bind)
         var decl = "var"
         if (surface != "") { decl = `Map<${java_v3_type(surface, true)}>` }
         let ar = render_expr(value_field(step, "acquire"), ctx, c)
@@ -3427,10 +3520,12 @@ fn emit_component_stmts(comp: Any, services: Any, cname: Str, steps: List[Any], 
       let svc = value_str(value_field(step, "service"))
       let pkey = value_str(value_field(step, "name"))
       let struct = `${cname}${camel(host_key(pkey))}`
+      let struct = `${cname}${camel(pkey)}`
       var cargs = ["ctx", "fx"]
       if (needs_frame) { cargs = cargs.push("frame") }
       for (l of req_locals) { cargs = cargs.push(l) }
       for (b of bind_names) { cargs = cargs.push(ident_binding(b)) }
+      for (b of bind_names) { cargs = cargs.push(b) }
       for (f of provider_config_fields(comp)) {
         cargs = cargs.push(mangle(value_str(value_field(f, "name"))))
       }
@@ -3477,6 +3572,7 @@ fn emit_component_stmts(comp: Any, services: Any, cname: Str, steps: List[Any], 
 // `fail`->`CordisException` throw. A component is emitted here when it needs the
 // modern path AND falls inside the supported subset (`modern_supported` &&
 // `needs_modern_subset`); anything else routes to `<<UNSUPPORTED-component-nonsimple>>`.
+// `needs_modern_subset`); anything else routes to `<<DEFER-component-nonsimple>>`.
 // DEFERRED (slice 6+, each a loud marker or a structural DEFER): spawn/instances,
 // timers, routers, the `Pool` runtime, `setup` blocks, and method-body
 // `let`/`assign`/`await`/arrow bindings.
@@ -3820,6 +3916,7 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
   let req_map = req_bindings(comp)
   var req_locals = []
   for (local of req_map.keys()) { req_locals = req_locals.push(mangle(local)) }
+  if (!value_is_null(reqs_m)) { req_locals = value_keys(reqs_m) }
   let bind_names = binds(comp)
   // FR-4 (item 238): bind -> revl surface value type for each host Map binding,
   // so provider fields, ctor params and the apply() local all pin `Map<V>`.
@@ -3829,6 +3926,8 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
   var rn: Map[Str, Str] = Map.empty()
   for (b of bind_names) { rn = rn.set(b, `this.${ident_binding(b)}`) }
   for (local of req_map.keys()) { rn = rn.set(local, `this.${mangle(local)}`) }
+  for (b of bind_names) { rn = rn.set(b, `this.${b}`) }
+  for (local of req_locals) { rn = rn.set(local, `this.${local}`) }
   let mctx = set_rn(base_ctx, rn)
   // `has_await` (a top-level `await` body step) colors the plugin async: the
   // interface widens to `AsyncPlugin` and `apply` gains `throws Exception`.
@@ -3841,15 +3940,19 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
   for (key of value_keys(provs_m)) {
     let srv = value_str(value_field(provs_m, key))
     let struct = `${cname}${camel(host_key(key))}`
+    let struct = `${cname}${camel(key)}`
     out = out.push(`public static final class ${struct} implements ${srv} {`)
     out = out.push("    private final Context ctx;")
     out = out.push("    private final Context.EffectScope fx;")
     if (needs_frame) { out = out.push("    private final RevlFrame frame;") }
     for (b of req_map.keys()) {
       out = out.push(`    private final ${value_str(value_field(reqs_m, map_get(req_map, b)))} ${mangle(b)};`)
+    for (local of req_locals) {
+      out = out.push(`    private final ${value_str(value_field(reqs_m, local))} ${local};`)
     }
     for (b of bind_names) {
       out = out.push(`    private final ${bind_type(comp, b, base_ctx, map_values)} ${ident_binding(b)};`)
+      out = out.push(`    private final ${bind_type(comp, b, base_ctx, map_values)} ${b};`)
     }
     // A provide method that reads `config.<f>` needs the field HERE, not only
     // on the plugin (see `provider_config_fields`).
@@ -3860,9 +3963,12 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
     if (needs_frame) { cparams = cparams.push("RevlFrame frame") }
     for (b of req_map.keys()) {
       cparams = cparams.push(`${value_str(value_field(reqs_m, map_get(req_map, b)))} ${mangle(b)}`)
+    for (local of req_locals) {
+      cparams = cparams.push(`${value_str(value_field(reqs_m, local))} ${local}`)
     }
     for (b of bind_names) {
       cparams = cparams.push(`${bind_type(comp, b, base_ctx, map_values)} ${ident_binding(b)}`)
+      cparams = cparams.push(`${bind_type(comp, b, base_ctx, map_values)} ${b}`)
     }
     for (f of provider_cfg) {
       cparams = cparams.push(`${java_v3_type(value_field(f, "type"), false)} ${mangle(value_str(value_field(f, "name")))}`)
@@ -3873,10 +3979,13 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
     if (needs_frame) { out = out.push("        this.frame = frame;") }
     for (b of req_map.keys()) {
       out = out.push(`        this.${mangle(b)} = ${mangle(b)};`)
+    for (local of req_locals) {
+      out = out.push(`        this.${local} = ${local};`)
     }
     for (b of bind_names) {
       let field = ident_binding(b)
       out = out.push(`        this.${field} = ${field};`)
+      out = out.push(`        this.${b} = ${b};`)
     }
     for (f of provider_cfg) {
       let cfn = mangle(value_str(value_field(f, "name")))
@@ -3888,10 +3997,13 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
       let mn = value_str(value_field(method, "name"))
       let mnm = method_name(mn)
       let svc_method = value_field(svc_methods, mn)
+      let mnm = mangle(mn)
+      let svc_method = value_field(svc_methods, mnm)
       var params = []
       for (pn of value_list(value_field(method, "params"))) {
         let pname = value_str(pn)
         params = params.push(`${java_v3_type(service_param_type(svc_method, pname), false)} ${ident_binding(pname)}`)
+        params = params.push(`${java_v3_type(service_param_type(svc_method, pname), false)} ${pname}`)
       }
       var ret_is_void = true
       var ret = "void"
@@ -3943,6 +4055,9 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
     let raw = map_get(req_map, b)
     let srvn = value_str(value_field(reqs_m, raw))
     out = out.push(`        ${srvn} ${mangle(b)} = ctx.get(ServiceKey.of(${srvn}.class, ${json_dumps(raw)}));`)
+  for (local of req_locals) {
+    let srvn = value_str(value_field(reqs_m, local))
+    out = out.push(`        ${srvn} ${local} = ctx.get(ServiceKey.of(${srvn}.class, ${json_dumps(local)}));`)
   }
   out = out.push("        try {")
   // The activation body (item 238): `let-effect`/`effect`/`emit`/`if`/`fail`/
@@ -3995,6 +4110,7 @@ fn emit_component(comp: Any, services: Any, ctx: Ctx, types: Any, functions: Lis
       return emit_component_modern(comp, services, ctx, types, functions, wnames)
     }
     return [`<<UNSUPPORTED-component-nonsimple:${name}>>`]
+    return [`<<DEFER-component-nonsimple:${name}>>`]
   }
   let cname = mangle(name)
   let provs = value_field(comp, "provides")
@@ -4003,6 +4119,7 @@ fn emit_component(comp: Any, services: Any, ctx: Ctx, types: Any, functions: Lis
   for (key of value_keys(provs)) {
     let srv = value_str(value_field(provs, key))
     let struct = `${cname}${camel(host_key(key))}`
+    let struct = `${cname}${camel(key)}`
     out = out.push(`public static final class ${struct} implements ${srv} {`)
     out = out.push(`    ${struct}() {`)
     out = out.push("    }")
@@ -4014,12 +4131,14 @@ fn emit_component(comp: Any, services: Any, ctx: Ctx, types: Any, functions: Lis
       for (pn of value_list(value_field(method, "params"))) {
         let pname = value_str(pn)
         params = params.push(`${java_v3_type(service_param_type(svc_method, pname), false)} ${ident_binding(pname)}`)
+        params = params.push(`${java_v3_type(service_param_type(svc_method, pname), false)} ${pname}`)
       }
       var ret_is_void = true
       var ret = "void"
       let r = value_field(svc_method, "returns")
       if (!value_is_null(r)) { ret = java_v3_type(r, false) ret_is_void = false }
       out = out.push(`    public ${ret} ${method_name(mn)}(${params.join(", ")}) { ${method_body(method, ret_is_void)} }`)
+      out = out.push(`    public ${ret} ${mangle(mn)}(${params.join(", ")}) { ${method_body(method, ret_is_void)} }`)
     }
     out = out.push("}")
     out = out.push("")
@@ -4035,6 +4154,7 @@ fn emit_component(comp: Any, services: Any, ctx: Ctx, types: Any, functions: Lis
     let key = value_str(value_field(step, "name"))
     let srv = value_str(value_field(step, "service"))
     let struct = `${cname}${camel(host_key(key))}`
+    let struct = `${cname}${camel(key)}`
     out = out.push(`            undos.add(ctx.provide(ServiceKey.of(${srv}.class, ${json_dumps(key)}), new ${struct}()));`)
   }
   if (body.length() > 0) {
@@ -4356,6 +4476,10 @@ pub fn emit_java_src(ir: Any) -> Str {
     refusals = refusals.concat(namespaced_key_markers(ir))
   }
   out = out.concat(refusals)
+  // The deferred in-file test section: one named marker per test instead of
+  // silence (issue #1123).
+  let test_markers = deferred_test_markers(ir)
+  if (test_markers.length() > 0) { out = out.concat(test_markers) }
   return rstrip(out.join(newline())).concat(newline())
 }
 
@@ -4473,6 +4597,9 @@ test "bin-op table and exact-method map the arithmetic surface" {
   assert exact_method("+") == "revlAdd"
   assert exact_method("-") == "revlSub"
   assert exact_method("*") == "revlMul"
+  assert exact_method("+") == "addExact"
+  assert exact_method("-") == "subtractExact"
+  assert exact_method("*") == "multiplyExact"
 }
 
 test "keyword-colliding identifiers are renamed by appending underscore" {

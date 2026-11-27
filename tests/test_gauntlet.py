@@ -89,6 +89,7 @@ def _fresh_session():
 # ------------------------------------------------------ the dossier shape
 
 def test_the_verb_is_advertised(all_mcp_tools):
+def test_the_verb_is_advertised():
     listed = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     names = {t["name"] for t in listed["result"]["tools"]}
     assert "revl_gauntlet" in names
@@ -184,6 +185,7 @@ def test_the_lifecycle_battery_boots_unloads_and_counts_no_residue():
     assert lifecycle["ran"] is True
     # issue #1859: the four counters plus the host-resource pairing
     assert lifecycle["counts"] == {"checks": 5, "passed": 5, "failed": 0}
+    assert lifecycle["counts"] == {"checks": 4, "passed": 4, "failed": 0}
     assert all(lifecycle["checks"].values())
 
 

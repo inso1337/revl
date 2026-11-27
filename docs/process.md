@@ -3,6 +3,7 @@
 The short version: **agents run targeted tests, push a branch, and open a PR.
 GitHub CI runs the PR jobs, and the heavy jobs run after merge (or on the
 merge queue when it is enabled). The orchestrator merges on green.**
+GitHub CI runs the full matrix. The orchestrator merges on green.**
 
 ## Why this exists
 
@@ -17,6 +18,8 @@ belong to neither of them. Everyone waited, and the result was not even reliable
 
 CI runs the same jobs on clean, isolated runners. That is where the full suite
 belongs: the PR jobs on the PR, the heavy jobs after merge.
+CI runs the same matrix on clean, isolated runners. That is where the full suite
+belongs.
 
 ## What an agent does
 
@@ -32,9 +35,13 @@ belongs: the PR jobs on the PR, the heavy jobs after merge.
 3. Commit the branch.
 4. Before the first push and again before merge, run the branch and merge-tree
    checks:
+   Do not run the root `tests/` tree. Do not run the cordis suite.
+3. Commit and push the branch.
+4. Run the cheap pre-PR checks. They take seconds and catch most `lint` reds:
 
    ```
    ./tools/pre_pr.sh --merge-ref
+   ./tools/pre_pr.sh
    ```
 
    This fetches the current `origin/main`, checks the clean branch tree, then
@@ -47,6 +54,7 @@ belongs: the PR jobs on the PR, the heavy jobs after merge.
    The branch-only checks can still be run while editing with
    `./tools/pre_pr.sh`. The merge-ref mode runs these same checks on both trees:
    ruff; a Python 3.11 syntax sweep (CI runs 3.11, the dev venv
+   Seven checks: ruff; a Python 3.11 syntax sweep (CI runs 3.11, the dev venv
    is newer, so 3.12+ syntax passes locally and reds CI); the workflow
    permission gate (`tools/check_workflow_permissions.py`, self-test then
    `--strict`); the runtime seam check (`tools/check_runtime_seams.py`); the
@@ -65,12 +73,18 @@ belongs: the PR jobs on the PR, the heavy jobs after merge.
    and `tests/test_affected_tests.py` for selector mapping pins on both trees.
    These focused checks may take longer than the branch-only pre-PR loop; the
    full root suite and backend suites remain CI's job.
+   `--strict`); the roadmap marker gate; drift checks on both generated gate
+   crates, `crates/revl-gate` (`tools/build_gate_crate.py --check`) and
+   `crates/revl-gate-wasm` (`tools/build_gate_wasm.py --check`); and the
+   source-derived doc blocks (`tools/docgen.py --check`). It does not run any
+   suite.
 
    A red on either gate-crate check is yours to fix before the PR, not the
    orchestrator's at merge: run the matching builder without `--check` and
    commit the regenerated crate. A red on the docs check is `make docs-gen`
    when a generated block is stale, or a missing section to write when a
    coverage check names an undocumented subcommand or MCP verb; never a hand
+   coverage check names an undocumented subcommand or MCP verb — never a hand
    edit inside a `<!-- docgen:KEY -->` region, which the next generation
    overwrites.
 
@@ -94,6 +108,7 @@ belongs: the PR jobs on the PR, the heavy jobs after merge.
    filter cannot decide, the check runs anyway.
 
 5. Push the branch and open a PR that closes the issue:
+5. Open a PR that closes the issue:
 
    ```
    gh pr create --repo inso1337/revl --fill --body "Closes #<issue>"
@@ -143,6 +158,7 @@ failure and is not a receipt.
 
 - Do not run the full suite locally. That is left to CI: the PR jobs on the PR,
   the heavy jobs after merge.
+- Do not run the full suite locally. That is CI's job now.
 - Do not block waiting on a background suite. Report and stop.
 - Do not fix a red you did not cause. A pre-existing failing test or a red CI on
   main belongs to the orchestrator. Say you saw it and leave it alone.
@@ -407,6 +423,8 @@ The heavy jobs never run on a pull request (issue #1678): `frontend` (the
 merge queue (`merge_group`), against the merged result that lands, when the
 queue is enabled in branch protection. Without the queue, they run on push to
 main, the nightly schedule and `workflow_dispatch`. `ci.yml` is also exposed
+merge queue (`merge_group`), against the merged result that lands, and on push
+to main, the nightly schedule and `workflow_dispatch`. `ci.yml` is also exposed
 as a `workflow_call`, so the PyPI publish gates on the full matrix too.
 `tests/test_ci_pr_queue_split_1678.py` pins the split.
 
@@ -433,6 +451,9 @@ Issue #1817 trims three things:
   always run all six. A skipped backend job reports `skipping`.
 - CodeQL on main is grouped by ref, so a burst of merges is scanned once at the
   newest commit, and a documentation-only push is not scanned.
+workflow was queuing behind scans of code that had not landed. Everything that
+reaches main is still scanned. What a PR loses is the pre-merge signal; dispatch
+a scan by hand against the branch when a change warrants one.
 
 ## What CI does not cover
 
@@ -476,6 +497,9 @@ built wheel's member list **equals** `git ls-files` of the trees
 `hatch_build.TREES` maps into it, plus the `.dist-info`: set equality, so an
 over-wide `exclude` is as red as an over-inclusion. It also asserts that the
 **sdist** carries no file the commit does not track. It exists because the
+`hatch_build.TREES` maps into it, plus the `.dist-info` — set equality, so an
+over-wide `exclude` is as red as an over-inclusion — and that the **sdist**
+carries no file the commit does not track. It exists because the
 wheel used to `force-include` `backends/` and `stdlib/` verbatim.
 `force-include` runs after file selection and is exempt from every exclude rule
 and from the ignore files, so the wheel contained whatever sat on the builder's
@@ -616,6 +640,10 @@ generator was skipped for a missing tool without `--allow-skip`.
 ## Merging
 
 The orchestrator merges when CI is green. A branch is never merged on a local
+The orchestrator merges when CI is green, and regenerates the site wheel if the
+change touched it. The gate crates are no longer on that list: `pre_pr.sh` checks
+both, so a drifted crate is the branch author's to fix before the PR opens. A
+branch is never merged on a local
 green alone, because a local green certifies only what actually ran on that
 machine at that moment.
 
@@ -627,9 +655,22 @@ them. #2620 merged with `root-suite-affected (4)` red, a real regression that
 #2840 fixed after the merge. The shards stay advisory, which keeps the required
 rollup fast, and the rule is enforced at the merge boundary instead, for every
 non-required job rather than by name:
+That regeneration is no longer only a habit. Issue #252: the committed
+playground/site wheel vendors all of `src/revl`, so it is stale after almost any
+source change, and it is deliberately not a per-PR gate (as one it reddened CI
+on every source change, which is an outage class rather than a defect). The
+merge-time assignment above was the whole of its ownership, and under the actual
+flow — agents run targeted tests, CI runs the matrix, the pipeline merges on
+green — nobody ran it, so the wheel was found stale three times in one day.
+`.github/workflows/site-wheel.yml` now runs `tools/check_site_wheel.py` on every
+push to main and weekly, and fails on main when the committed wheel does not
+match a fresh build. It never runs on a pull request, so no PR is red for not
+having rebuilt a deploy artifact. When it goes red, the fix is one command on a
+branch:
 
     python3 tools/merge_gate.py merge <pr> --merge     # or --squash / --rebase
     python3 tools/merge_gate.py check <pr>             # verdict only
+    python3 tools/check_site_wheel.py --write
 
 The gate reads every check on the pull request and refuses while any context's
 newest run is red, cancelled (not green, and not absent), unfinished, or was
@@ -682,14 +723,18 @@ are checked by `pre_pr.sh`, so a drifted crate is the branch author's to fix
 before the PR opens.
 
 Generated doc blocks are different, because a stale one does fail CI. Issue
+The same applies to the generated doc blocks, and for the same reason. Issue
 #296: `docs/DOC-STATUS.md`'s `doc-status` block embeds a row per `docs/*.md`, so
 **any** landing that touches **any** doc re-stales it. Unlike the site
 wheel check, `tools/docgen.py --check` *is* a per-PR gate (it runs in the required
+wheel, `tools/docgen.py --check` *is* a per-PR gate (it runs in the required
 `frontend` job). So a stale block on main reddens every open PR at once, for a
 reason none of their authors caused. It was already stale at the merge commit
 that introduced the gate.
 
 So `make docs-gen` is merge-time regeneration the orchestrator owns:
+So `make docs-gen` joins the site wheel and the gate crate as merge-time
+regeneration the orchestrator owns:
 
     make docs-gen        # or: python3 tools/docgen.py --write
 

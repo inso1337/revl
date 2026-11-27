@@ -197,6 +197,7 @@ def resolve_refs(program, module_dir: str, root_dirs: list[str],
                  sources: dict[str, str], is_virtual: bool,
                  install_root: str | None = None,
                  reads: set[str] | None = None) -> None:
+                 install_root: str | None = None) -> None:
     """Resolve every `HostRef` node in `program`'s externs against a ROOT-tree
     jail, pinning `rel_path` (relative to the containing root) and `sha256` onto
     each node. A virtual module resolves through `sources` only (no disk read);
@@ -239,13 +240,16 @@ def resolve_refs(program, module_dir: str, root_dirs: list[str],
                 _resolve_ref_memory(body, ext.name, module_dir, sources,
                                     _lexical_roots(root_dirs, install_root),
                                     program.filename, root_kind)
+                                    jail_roots, program.filename, root_kind)
             else:
                 _resolve_ref_disk(body, ext.name, module_dir, jail_roots,
                                   program.filename, root_kind, reads=reads)
+                                  program.filename, root_kind)
 
 
 def _resolve_ref_disk(body, decl_name, module_dir, real_roots, filename,
                       root_kind=None, reads: set[str] | None = None):
+                      root_kind=None):
     candidate = os.path.join(module_dir, body.path)
     if not os.path.exists(candidate):
         raise RevlError(
@@ -300,9 +304,11 @@ def _outside_root_hint(root_kind: str | None) -> str:
 
 
 def _resolve_ref_memory(body, decl_name, module_dir, sources, roots,
+def _resolve_ref_memory(body, decl_name, module_dir, sources, real_roots,
                         filename, root_kind=None):
     key = os.path.abspath(os.path.join(module_dir, body.path))
     root = _pick_root_lexical(key, roots)
+    root = _pick_root(key, [os.path.abspath(r) for r in real_roots])
     if root is None:
         raise RevlError(
             filename, body.line,
@@ -357,6 +363,7 @@ def resolve_assets(program, module_dir: str, root_dirs: list[str],
                    sources: dict[str, str], is_virtual: bool,
                    install_root: str | None = None,
                    reads: set[str] | None = None) -> None:
+                   install_root: str | None = None) -> None:
     """Resolve every `asset "<path>"` in `program` against the root-tree jail,
     filling the node's record fields with the root-relative path and the
     sha256 of the file's bytes.
@@ -396,10 +403,12 @@ def resolve_assets(program, module_dir: str, root_dirs: list[str],
         if is_virtual:
             _resolve_asset_memory(node, module_dir, sources,
                                   _lexical_roots(root_dirs, install_root),
+                                  [os.path.abspath(r) for r in jail_roots],
                                   program.filename, root_kind)
         else:
             _resolve_asset_disk(node, module_dir, jail_roots,
                                 program.filename, root_kind, reads=reads)
+                                program.filename, root_kind)
 
 
 def _reject_bad_asset_path(node, filename: str) -> None:
@@ -450,6 +459,7 @@ def _record_asset(node, rel_path: str, digest: str, root_kind: str | None) -> No
 
 def _resolve_asset_disk(node, module_dir, real_roots, filename, root_kind,
                         reads: set[str] | None = None):
+def _resolve_asset_disk(node, module_dir, real_roots, filename, root_kind):
     candidate = os.path.join(module_dir, node.written)
     if not os.path.exists(candidate):
         raise RevlError(
@@ -490,9 +500,11 @@ def _resolve_asset_disk(node, module_dir, real_roots, filename, root_kind,
 
 
 def _resolve_asset_memory(node, module_dir, sources, roots, filename,
+def _resolve_asset_memory(node, module_dir, sources, real_roots, filename,
                           root_kind):
     key = os.path.abspath(os.path.join(module_dir, node.written))
     root = _pick_root_lexical(key, roots)
+    root = _pick_root(key, real_roots)
     if root is None:
         raise RevlError(
             filename, node.line,

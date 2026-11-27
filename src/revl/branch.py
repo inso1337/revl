@@ -62,6 +62,9 @@ class BranchError(RuntimeError):
 #: it was. It cannot say WHY, because what the model was asked and what it
 #: answered are not on the record, and the reasoning span itself is never
 #: written. Emptying this list is a claim that the WAL now carries those too.
+#: differently, and since Slice 3a WHICH model answered at what cost; it cannot
+#: say WHY, because what the model was asked and what it answered are not on the
+#: record. Emptying this list is a claim that the WAL now carries those too.
 NOT_COMPARABLE = (
     {"axis": "decisionCause",
      "why": "a model decision records the model, usage, latency and attempts "
@@ -74,6 +77,8 @@ NOT_COMPARABLE = (
             "the text is never written. A comparison still shows which model "
             "each side asked and what it cost, never the reasoning that chose "
             "between them"},
+            "temperature or seed, so a comparison shows which model each side "
+            "asked and what it cost, never the reasoning that chose between them"},
     {"axis": "counterfactual",
      "why": "neither side can be re-executed from the WAL, so `what would have "
             "happened if` is not answerable here — only `what did happen` on "

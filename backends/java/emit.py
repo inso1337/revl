@@ -4406,13 +4406,13 @@ def _emit_v3_externs(externs: list, journal: bool = False) -> list[str]:
             impl = f"_revl_secret_{name}"
             forward = ", ".join(_ident(p.get("name"), "extern parameter name")
                                 for p in ext.get("params") or [])
-            lines.append(f"public static {ret} {name}({params}) {{")
+            lines.append(f"public static {generics}{ret} {name}({params}) {{")
             lines.append(f"    return revlSecretResult({impl}({forward}));")
             lines.append("}")
             lines.append("")
             lines.append(f"private static {ret} {impl}({params}) {{")
         else:
-            lines.append(f"public static {ret} {name}({params}) {{")
+            lines.append(f"public static {generics}{ret} {name}({params}) {{")
         # item 378 Stage 5: a config extern binds `_revl_config` as the first
         # body line; None for a no-config extern (byte-identical body splice).
         config_bind = _java_extern_config_bind(ext)
@@ -4705,11 +4705,50 @@ def _pin_record_targets(body: object, params: object, ret_type: object,
     walk()
 
 
+
+
+_JAVA_TYPE_WORD = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
+
+
+def _v3_fn_type_params(fn: dict, types: dict) -> list[str]:
+    """The type parameters of a function signature, in first-use order.
+
+    The IR carries the author's spelling (`fn id[T](x: T) -> T` arrives as
+    params typed `T`, with no parameter list), so the emitter applies the
+    checker's implicit rule: a single-uppercase name that no `type` declares
+    is a type parameter. An explicit list (`fn first[Elem](xs: List[Elem])`)
+    rides the IR as `type_params` and is used instead, in declaration order;
+    a listed name no parameter or return mentions is dropped, as nothing at a
+    call could bind it. The go and rust tiers read the same rule (issue #2325).
+    """
+    surfaces = [p.get("type") for p in fn.get("params") or []] + [fn.get("returns")]
+    explicit = fn.get("type_params")
+    if isinstance(explicit, list) and explicit:
+        used = {w for s in surfaces if isinstance(s, str)
+                for w in _JAVA_TYPE_WORD.findall(s)}
+        return [t for t in explicit if isinstance(t, str) and t in used]
+    found: list[str] = []
+    declared = types if isinstance(types, dict) else {}
+    for surface in surfaces:
+        if not isinstance(surface, str):
+            continue
+        for word in _JAVA_TYPE_WORD.findall(surface):
+            if (len(word) == 1 and word.isupper() and word not in declared
+                    and word not in found):
+                found.append(word)
+    return found
+
+
 def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]:
     ctx = _V3Ctx(types, functions, externs)
     lines: list[str] = []
     for fn in functions:
         name = _fn_name(fn.get("name"))
+        tparams = _v3_fn_type_params(fn, types)
+        # issue #2325: a generic fn declares its type parameters, so `T` in a
+        # parameter or return names a type javac can resolve
+        generics = (f"<{ ', '.join(_ident(t, 'type parameter') for t in tparams)}> "
+                    if tparams else "")
         params = ", ".join(
             f"{_java_v3_type(p.get('type'))} {_ident(p.get('name'), 'parameter name')}"
             for p in fn.get("params") or []
@@ -4722,7 +4761,7 @@ def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]
                            if p.get("name") in ctx.param_names}
         _pin_value_map_locals(fn.get("body"), fn.get("params"), ctx)
         _pin_record_targets(fn.get("body"), fn.get("params"), fn.get("returns"), ctx)
-        lines.append(f"public static {ret} {name}({params}) {{")
+        lines.append(f"public static {generics}{ret} {name}({params}) {{")
         if not fn.get("body"):
             lines.append("    // (empty body)")
         else:

@@ -447,6 +447,10 @@ test "its underscore twin keeps its own body"                { assert pick(false
     # equality marker see it), and the annotation stays as the declared form of
     # the same contract. The unchecked non-`K` key is a separate frontend gap
     # (see the issue's shape 2).
+    # build. The binding is ANNOTATED because the checker still infers no type
+    # for a map subscript, so `m[k].slice(0, 1)` is refused outright as a
+    # method on an unknown receiver — a frontend gap, separate from this
+    # lowering the way the unchecked non-`K` key is (see the issue's shape 2).
     "a Str-keyed Map is indexed by its key": """
 type Point = { x: Int, y: Int }
 
@@ -1040,6 +1044,7 @@ DIVERGENCES = {
     # Asserted positively in WIDENING below; docs/arithmetic.md has the write-up.
     # ~~"negating Int.MIN does not trap on every tier"~~ **Closed.** go now
     # negates through `revlSub(0, x)`, java through `revlNeg`, ts
+    # negates through `revlSub(0, x)`, java through `Math.negateExact`, ts
     # through `revlI64(-x)` — so every bounded tier faults on `-Int.MIN` exactly
     # as it does on any other Int overflow. Asserted positively below
     # (test_negation_of_int_min_traps + the per-tier emit checks).
@@ -1048,6 +1053,8 @@ DIVERGENCES = {
     # bounds the faulting quotient through `_revl_i64`, go through `revlDivTrunc`
     # / `revlDivFloor` (which panic), java through `revlDivTrunc` /
     # `revlNeg`; the checked forms return `Err("revl: Int overflow")`.
+    # / `revlDivFloor` (which panic), java through `Math.divideExact` /
+    # `Math.negateExact`; the checked forms return `Err("revl: Int overflow")`.
     # rust/wasm/ts already trapped. Asserted positively below
     # (test_div_int_min_traps + the checked-Err and per-tier emit checks).
     #
@@ -1100,6 +1107,8 @@ DIVERGENCES = {
 #     tier. java's plain `/` wrapped back to `Int.MIN`; it now uses
 #     `revlDivTrunc`, which throws like `revlAdd`/`revlSub`/`revlMul`
 #     already used for `+`/`-`/`*`.
+#     `Math.divideExact`, which throws like the `Math.*Exact` family already
+#     used for `+`/`-`/`*`.
 #   - A NEGATIVE SLICE bound is END-RELATIVE on every tier (the PO decision for
 #     #549: py and ts already sliced python/JS-style, so the reference follows
 #     them). go/rust/java used to clamp the negative bound to 0 (the wrong
@@ -1370,6 +1379,7 @@ def test_map_index_miss_faults_with_its_reason_slow(tier: str, capsys):
 # cannot build must be caught here even when no toolchain is installed.
 _MAP_INDEX_EMITTED = {
     "python": ("_revl_map_index(", "_revl_neg_index"),
+    "python": ("_revl_map_index(", "_revl_index("),
     # `revlIndex` is the List read the Map subscript used to be routed to (with
     # the key wrapped in `Number(...)`); the probe has no List subscript at all,
     # so the helper must be absent from the module entirely.
@@ -1852,7 +1862,12 @@ def test_wasm_float_is_ieee_binary64():
     and on wasmtime `0.1 + 0.2` answers `0.30000000000000004`, the binary64
     result, not `0.3`. The tier's remaining numeric-adjacent refusal by name is
     `Map`, pinned by `test_wasm_has_no_map_to_index`.
+def test_wasm_refuses_float_by_name():
+    """The wasm tier lowers Int/Bool and nothing else numeric, so `Float` is a
+    *deliberate* limit — it must refuse with a reason rather than emit
+    something that quietly is not IEEE.
     """
+    from revl.errors import RevlError
     import importlib.util as _il
     spec = _il.spec_from_file_location("emit_wasm_ieee", ROOT / "backends" / "wasm" / "emit.py")
     module = _il.module_from_spec(spec)
@@ -1873,6 +1888,9 @@ def test_wasm_float_is_ieee_binary64():
                              capture_output=True, text=True, timeout=60)
     assert out.returncode == 0, out.stderr
     assert out.stdout.strip().splitlines()[-1] == "0.30000000000000004", out.stdout
+    with pytest.raises((RevlError, Exception)) as failure:
+        module.emit(compile_source("pub fn f() -> Float { return 1.5 }", "f.rvl"))
+    assert "Float" in str(failure.value)
 
 
 def test_go_equality_is_not_native_comparison():
@@ -1982,6 +2000,7 @@ def test_every_bounded_tier_uses_the_same_trap_message():
                             ("python", "revl: Int overflow"),
                             ("typescript", "throw new RangeError('revl: Int overflow')"),
                             ("java", 'throw new ArithmeticException("revl: Int overflow")')):
+                            ("java", "Math.addExact")):
         emitted = _emit(backend, INT_OVERFLOW)
         assert needle in emitted, (backend, emitted[:400])
 
@@ -2054,6 +2073,8 @@ def test_bounded_tiers_emit_checked_int_negation():
     assert ("(BigInt.asIntN(64, $revl_i64 = -x) === $revl_i64"
             " ? $revl_i64 : revlI64($revl_i64))") in ts
     assert "if (BigInt.asIntN(64, v) !== v) throw new RangeError('revl: Int overflow')" in ts
+    assert "Math.negateExact(" in _emit("java", NEG_INT_MIN)
+    assert "revlI64(-" in _emit("typescript", NEG_INT_MIN)
 
 
 # -------------------------------------------------- Int.MIN / -1 overflows too
@@ -2284,6 +2305,7 @@ def test_every_tier_imposes_the_i32_bound_on_arithmetic():
         "python": "_revl_i32(",
         "typescript": "revlI32(",
         "java": "revlAdd(",
+        "java": "Math.addExact",
         "wasm": "$int32_add",
     }
     for backend, needle in checks.items():
@@ -2303,6 +2325,7 @@ def test_narrowing_is_explicit_and_checked_on_every_tier():
         "python": "_revl_i32(",
         "typescript": "revlI32(Number(",
         "java": "revlToInt32(",
+        "java": "Math.toIntExact",
         "wasm": "$int32_narrow",
     }
     for backend, needle in checks.items():

@@ -20,6 +20,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from . import _childproc, lifecycle
+from . import lifecycle
 from .compiler import compile_files
 from .errors import RevlError
 from .holes import refuse_admission
@@ -290,8 +291,10 @@ def _start_vite(frontend: Path, host: str, port: int) -> subprocess.Popen[str]:
     # Vite exits instead of moving and the boot check below reports the port
     # failure on the URL `revl dev` was asked to serve.
     return _childproc.popen(
+    return subprocess.Popen(
         [npm, "run", "dev", "--", "--host", host, "--port", str(port), "--strictPort"],
         cwd=frontend,
+        text=True,
     )
 
 

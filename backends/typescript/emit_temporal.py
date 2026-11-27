@@ -73,6 +73,7 @@ from typing import Any
 # backend's identifier / literal / scope / type machinery unchanged. emit.py is
 # loaded under several names across the repo (`emit` for the standalone CLI,
 # `revl_typescript_emit` for the bundle), so `emit.py::emit` registers
+# `revl_bundle_typescript_emit` for the bundle), so `emit.py::emit` registers
 # itself as `sys.modules["emit"]` and puts backends/typescript on the path
 # BEFORE it imports this module — the import below then resolves to that one
 # shared module, keeping a single copy of the emitter machinery (`EmitError`
@@ -726,6 +727,7 @@ def _crossing_signature(call: dict, comp: dict, index: "_Index",
 
 def _render_component(comp: dict, ir: dict, ctx: "_Ctx", index: "_Index",
                       activities: dict, module_scope: frozenset) -> list[str]:
+                      activities: dict) -> list[str]:
     name = _ident(comp.get("name"), "component")
     scope = _Scope(comp)
     for local in (comp.get("requires") or {}):
@@ -984,6 +986,7 @@ def emit_temporal(ir: dict, *, runtime_import: str = "@temporalio/workflow") -> 
 
     # Refusal precedes emission (the closed allowlist, CRITICAL 2; and the
     # workflow module's own reserved names, issue #3187).
+    # Refusal precedes emission (the closed allowlist, CRITICAL 2).
     _refuse_outside_allowlist(ir, index)
     module_scope = _check_temporal_names(ir)
 
@@ -999,6 +1002,7 @@ def emit_temporal(ir: dict, *, runtime_import: str = "@temporalio/workflow") -> 
         seen.add(comp.get("name"))
         rendered.extend(_render_component(comp, ir, doc_ctx, index, activities,
                                           module_scope))
+        rendered.extend(_render_component(comp, ir, doc_ctx, index, activities))
         rendered.append("")
 
     # `recordResidue` is the durable residue sink activity every workflow drains

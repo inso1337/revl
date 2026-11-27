@@ -54,6 +54,11 @@ The experiment prescribed by [docs/syntax-2.0.md §10](../docs/syntax-2.0.md):
   handle) and reports turns, emitted tokens and received tokens for both.
   Committed table: `results/shape-ab.md`, reproduced by
   `tests/test_shape_ab_2847.py`. Free, no model, no transport.
+  iterations-to-green everything else tracks. Recomputes green against the
+  current checker (like `rescore.py`) and sums the output tokens the model
+  emitted across every attempt up to the admitted one. Free — reads committed
+  data, no model. Committed number: `results/tokens-to-green.md`; the
+  protocol-side companion analysis: `results/token-surface-audit.md`.
 - `framework_unload_survey.py`: the third host's selection evidence. Named,
   falsifiable claims about each candidate framework's published API, checked
   against the artifact the package index serves at a pinned version.
@@ -221,6 +226,7 @@ where the embeddable gate admits programs the reference compiler refuses.
 ### The third host, and how it was chosen
 
 The framework is `@modelcontextprotocol/sdk`, pinned at 1.32.0. The criterion
+The framework is `@modelcontextprotocol/sdk`, pinned at 1.30.0. The criterion
 that decided it is the one `bench/hosts.json` stated before any framework was
 named: a host with no unload path cannot fail the residue column honestly,
 because it scores maximally badly by construction for a reason that says
@@ -336,6 +342,8 @@ python3 bench/run.py --runner local --base-url http://127.0.0.1:11434/v1 \
 
 Without `--resume`, naming an existing label starts it over: the run rewrites
 `results.jsonl` from the rows it generated itself.
+The framework's own cells are still `not-run`. Naming a host is not running one,
+and the report says which of the two happened.
 
 ### The injection-escape column
 
@@ -399,6 +407,10 @@ three-host row is measured over a fraction of the thirty briefs and carries
 that `n`, every claim stands at the `measured` rung because nobody outside
 this repository has reproduced it, and nothing is published outside this
 repository.
+framework is named but not run, the raw-ts and framework hosts have not been
+generated with the pinned model, every claim stands at the `measured` rung
+because nobody outside this repository has reproduced it, and nothing is
+published outside this repository.
 
 ## The blast-radius benchmark (issue #1702)
 
@@ -622,6 +634,13 @@ makes revl the cheapest language for an agent to write, and its house rule is
 has to be a number it moves. The output-side measure is **output tokens spent
 per admitted component**, across *all* attempts up to admission (retries are
 not free):
+Iterations-to-green counts *turns*; it does not count *spend*. A two-iteration
+component that emitted 900 output tokens cost more than a three-iteration one
+that emitted 300. Item 50 makes revl the cheapest language for an agent to
+write, and its house rule is *measured, not assumed* — so before any
+optimization can claim it pays, there has to be a number it moves. That number
+is **output tokens spent per admitted component**, across *all* attempts up to
+admission (retries are not free):
 
 ```bash
 python3 bench/tokens.py                    # both model runs
@@ -649,6 +668,12 @@ It is recorded in two places, and is explicit about which is real:
   `output_tokens`, `tokens.py` uses it verbatim instead of the proxy. Historical
   corpora and providers without input usage or turn counts remain unavailable;
   the report does not infer zero or backfill them.
+- **In future funded runs (exact):** `run.py` now captures cline's
+  `output_tokens` per attempt into `results.jsonl`, and writes a
+  `tokens_to_green` summary row + a *mean tokens-to-green* column into each
+  run's `summary.md`. Where a committed cell carries a recorded `output_tokens`,
+  `tokens.py` uses it verbatim instead of the proxy — so the next paid run
+  upgrades the number from proxy to exact with no code change.
 
 The committed figure today: **mean ~149 est. output tokens-to-green** across 136
 admitted components (real as-run cost $0.29). The costliest cells and the
@@ -657,6 +682,9 @@ per-variant breakdown are in `results/tokens-to-green.md`.
 `tokens.py` measures the *generation* half of the token economy; the
 protocol-side half, tokens an agent burns re-sending source and running chatty
 MCP verb sequences, is ranked in `results/token-surface-audit.md`, an
+This is only the *generation* half of the token economy. The larger,
+protocol-side half — tokens an agent burns re-sending source and running chatty
+MCP verb sequences — is ranked in `results/token-surface-audit.md`, an
 analysis-only audit cross-referenced with the item-38 demand ranking (demand =
 what agents retry; tokens = what retries cost). The third, *response* half is
 the text each verb's answer puts back into the agent's context, paid again on
@@ -668,6 +696,12 @@ wire-form, `revl_edit` structured patches) each have to move a measured number
 before they ship; no trick ships on taste. Where the paying tricks eventually
 land is the "How you're measured" contract in `../docs/guide-ai-agents.md`;
 these metrics are the scale.
+what agents retry; tokens = what retries cost). That audit is the map of *where
+the spend goes*; the optimizations item 50 will weigh against this metric (a
+compound one-intent verb, a terser authoring wire-form, `revl_edit` structured
+patches) each have to move tokens-to-green here before they ship — no trick
+ships on taste. Where the paying tricks eventually land is the "How you're
+measured" contract in `../docs/guide-ai-agents.md`; this metric is the scale.
 
 ## Reading the results
 
@@ -682,6 +716,11 @@ question is comparative: does 2.0 syntax (the TS-subset strata) compile
 *better or no worse* than the 1.x surface in models' hands, and do host blocks
 help or hurt? First-pass rate is the headline; attempts-to-green measures how
 well the compiler's diagnostics convert misses into one-shot corrections.
+green-within-max-iters, mean iterations-to-green, and cost. The §10 question
+is comparative: does 2.0 syntax (the TS-subset strata) compile *better or no
+worse* than the 1.x surface in models' hands, and do host blocks help or
+hurt? First-pass rate is the headline; iterations-to-green measures how well
+the compiler's diagnostics convert misses into one-shot corrections.
 
 Caveats worth keeping in mind:
 

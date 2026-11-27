@@ -555,8 +555,10 @@ async def _invoke(ctx, exports: dict, req: dict, module=None) -> dict:
                              f"(exported: {listed})"}
         within = _served_within(req)
         result = _call_served(service, method, args, within)
+        result = getattr(service, method)(*args)
         if inspect.isawaitable(result):
             result = await _await_served(result, within)
+            result = await result
         return {"ok": True, "value": _encode_value(result)}
     except Exception as exc:  # marshal the failure across the seam
         # ...with the caller's own argument values scrubbed out of it first
@@ -899,6 +901,9 @@ class _Client:
             check = getattr(runtime, name, None)
             if callable(check):
                 check(f"{key}.{method}")
+        check = getattr(runtime, "_estop_check", None)
+        if callable(check):
+            check(f"{key}.{method}")
         seconds = self.deadline_for(method, deadline)
         # Encode the arguments through the SAME fail-closed marshaller the return
         # path uses (Finding B): a scalar/list/dict/record/ADT arg encodes (byte-

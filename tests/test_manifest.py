@@ -170,6 +170,8 @@ def test_boundary_report():
     # refused against the declarations), so its scope is `db`, not the whole
     # `any` surface
     assert boundary["UserCache"]["capabilities"] == {"db.execute": ["db"]}
+    # `Database.execute` is declared bare `emission`, so its scope is "any"
+    assert boundary["UserCache"]["capabilities"] == {"db.execute": ["*"]}
 
 
 def test_audit_cli_json(capsys):

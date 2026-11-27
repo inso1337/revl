@@ -113,6 +113,14 @@ if [ -z "$PYTHON" ]; then
     for cand in .venv/bin/python "$main_root/.venv/bin/python"; do
         if tools_ok "$cand"; then PYTHON=$cand; break; fi
     done
+if [ -x .venv/bin/pytest ]; then
+    PYTEST=.venv/bin/pytest
+elif [ -x "$main_root/.venv/bin/pytest" ]; then
+    PYTEST="$main_root/.venv/bin/pytest"
+elif command -v pytest >/dev/null 2>&1; then
+    PYTEST=pytest
+else
+    PYTEST=""
 fi
 if [ -z "$PYTHON" ] && command -v pytest >/dev/null 2>&1; then
     cand=$(pytest_python "$(command -v pytest)" || true)
@@ -131,6 +139,7 @@ fi
 # for the full `make pre-merge` — that stays the release/CI gate. The selector
 # fails SAFE: any change to a core/compile-reachable frontend file, or any file
 # it cannot map, requires an explicit escalation to the full gate.
+# it cannot map, falls back to the full gate here.
 AFF=0
 AFF_BASE=""
 PLAN=0
@@ -193,6 +202,7 @@ if [ "$AFF" -eq 1 ]; then
     if [ -z "$PY" ]; then
         echo "pre-merge --affected: selector unavailable (no python3 or python on PATH)."
         refuse "review the change and run 'make pre-merge'."
+        echo "pre-merge --affected: no python3 to run the selector -> running FULL gate."
     else
         base_arg=""
         [ -n "$AFF_BASE" ] && base_arg="--base $AFF_BASE"
@@ -210,11 +220,17 @@ if [ "$AFF" -eq 1 ]; then
             SEL_ERR_LOST=0
             rm -f "$SEL_ERR_FILE"
         fi
+        SEL_OUT=$("$PY" tools/affected_tests.py --root "$root" --format machine $base_arg 2>/dev/null)
         SEL_FULL=$(printf '%s\n' "$SEL_OUT" | sed -n 's/^FULL //p')
         SEL_REASON=$(printf '%s\n' "$SEL_OUT" | sed -n 's/^REASON //p')
         echo "pre-merge --affected: selector receipt:"
         if [ -n "$SEL_OUT" ]; then
             printf '%s\n' "$SEL_OUT" | sed 's/^/  /'
+        if [ -z "$SEL_OUT" ] || [ -z "$SEL_FULL" ]; then
+            echo "pre-merge --affected: selector produced no usable output -> running FULL gate."
+        elif [ "$SEL_FULL" = "1" ]; then
+            echo "pre-merge --affected: ${SEL_REASON:-full}"
+            echo "pre-merge --affected: selection is the FULL gate (nothing skipped)."
         else
             echo "  (no output)"
         fi
@@ -256,6 +272,13 @@ if [ "$AFF" -eq 1 ]; then
         if [ -n "$SEL_REFUSAL" ]; then
             echo "pre-merge --affected: $SEL_REFUSAL"
             refuse "$SEL_HOW"
+            RUN_ALL=0
+            SEL_PYTEST=$(printf '%s\n' "$SEL_OUT" | sed -n 's/^PYTEST //p')
+            SEL_BACKENDS=$(printf '%s\n' "$SEL_OUT" | sed -n 's/^BACKENDS //p')
+            SEL_GATES=$(printf '%s\n' "$SEL_OUT" | sed -n 's/^GATES //p')
+            echo "pre-merge --affected: ${SEL_REASON:-targeted}"
+            echo "pre-merge --affected: pytest $(printf '%s' "$SEL_PYTEST" | wc -w | tr -d ' ') node(s) | backends [${SEL_BACKENDS:-none}] | gates [${SEL_GATES:-none}]"
+            echo "pre-merge --affected: inner-loop gate only; full \`make pre-merge\` still required at release/CI."
         fi
     fi
 fi
@@ -285,6 +308,7 @@ step() {
         planned=$((planned + 1))
         return
     fi
+    ran=$((ran + 1))
     if out=$("$@" 2>&1); then
         rc=0
     else
@@ -448,6 +472,7 @@ elif [ -n "$PYTEST" ]; then
     [ "$AFF" -eq 1 ] && SLOW_ENV="REVL_SKIP_SLOW=1"
     CORDIS_LOG=$(mktemp "${TMPDIR:-/tmp}/revl-premerge-cordis.XXXXXX") || CORDIS_LOG=""
     step "$flabel" env REVL_CORDIS_SKIP_LOG="$CORDIS_LOG" $SLOW_ENV "$PYTEST" $SEL_PYTEST -q -p no:cacheprovider
+    step "$flabel" "$PYTEST" $SEL_PYTEST -q -p no:cacheprovider
 else
     skip "frontend  (pytest tests/)" "no pytest that can import the suite's deps"
 fi
@@ -463,6 +488,7 @@ if ! want frontend; then
     note "frontend-cordis (cordis-py venv)"
 else
     cordis_step
+    skip "frontend  (pytest tests/)" "no pytest on PATH or in .venv"
 fi
 
 # 2. The python backend semantics + golden suite — the suite item 247's respec
@@ -491,6 +517,7 @@ elif command -v go >/dev/null 2>&1; then
     else
         step "backend-go  (emit goldens)" "$PYTEST" backends/go/test_emit_go.py -q -p no:cacheprovider
     fi
+    step "backend-go  (emit goldens)" "$PYTEST" backends/go/test_emit_go.py -q -p no:cacheprovider
 else
     skip "backend-go  (emit goldens)" "no go toolchain"
 fi
@@ -516,6 +543,9 @@ gemit java "backend-java (emit goldens)" backends/java/test_emit_java.py
 # driver exit 3 (its SKIPPED code) only when a target skipped and nothing
 # drifted or broke, and `skip_on 3` turns that into a SKIPPED line here.
 step "goldens      (drift, all targets)" skip_on 3 "$PYTHON" tools/regen_goldens.py --check --strict
+# a missing gofmt is an ordinary fact about the machine, so this line does not
+# pass it.
+step "goldens      (drift, all targets)" python3 tools/regen_goldens.py --check
 
 # 4. Generated-artifact gates (pure Python, always run): the README conformance
 #    matrix must match a fresh generation, the same contract the frontend CI job
@@ -525,11 +555,13 @@ step "goldens      (drift, all targets)" skip_on 3 "$PYTHON" tools/regen_goldens
 #    fetch, from what git tracks.
 if want gate conformance; then
     step "conformance matrix (--check-readme)" "$PYTHON" tools/conformance.py --check-readme
+    step "conformance matrix (--check-readme)" python3 tools/conformance.py --check-readme
 else
     note "conformance matrix (--check-readme)"
 fi
 if want gate site-wheel; then
     step "site wheel deploy contract"        "$PYTHON" tools/check_site_wheel.py
+    step "site wheel deploy contract"          python3 tools/check_site_wheel.py
 else
     note "site wheel deploy contract"
 fi
@@ -541,6 +573,7 @@ fi
 # block; prose is the fix for a coverage failure.
 if want gate docs; then
     step "docs drift      (docgen --check)"  "$PYTHON" tools/docgen.py --check
+    step "docs drift      (docgen --check)"    python3 tools/docgen.py --check
 else
     note "docs drift      (docgen --check)"
 fi
@@ -553,6 +586,8 @@ fi
 if want gate docs; then
     step "vision claims   (self-test)"  "$PYTHON" tools/check_vision_claims.py --self-test
     step "vision claims   (--check)"    "$PYTHON" tools/check_vision_claims.py --check
+    step "vision claims   (self-test)"  python3 tools/check_vision_claims.py --self-test
+    step "vision claims   (--check)"    python3 tools/check_vision_claims.py --check
 else
     note "vision claims   (--check)"
 fi
@@ -591,6 +626,8 @@ fi
 if want gate vocabulary; then
     step "vocabulary mirrors (self-test)" "$PYTHON" tools/check_vocabulary_mirrors.py --self-test
     step "vocabulary mirrors (--check)"   "$PYTHON" tools/check_vocabulary_mirrors.py --check
+    step "vocabulary mirrors (self-test)" python3 tools/check_vocabulary_mirrors.py --self-test
+    step "vocabulary mirrors (--check)"   python3 tools/check_vocabulary_mirrors.py --check
 else
     note "vocabulary mirrors (--check)"
 fi
@@ -627,6 +664,7 @@ else
 fi
 
 # 7. The formal backbone (formal/STATUS.md): lake build, then the axioms
+# 6. The formal backbone (formal/STATUS.md): lake build, then the axioms
 #    gate (no theorem may depend on sorryAx — an unfinished proof — or any
 #    project-defined axiom), then the harness census. Needs elan/lake;
 #    absent, loud-skip — CI's `formal` job is the real gate for those.
@@ -715,6 +753,7 @@ ci_only_suites() {
 ci_only_suites
 
 # Clean up the emit shim and the cordis skip log.
+# Clean up the emit shim.
 [ -n "$EMIT_PATH" ] && rm -rf "$EMIT_PATH"
 [ -n "$CORDIS_LOG" ] && rm -f "$CORDIS_LOG"
 

@@ -472,6 +472,7 @@ def test_the_swap_boundary_seals_the_generation_it_ends(tmp_path, monkeypatch):
         ir = compile_files([str(tmp_path / "consumer.rvl"),
                             str(tmp_path / "billing.rvl")])
         session.swap(ir, origin={"files": [str(doc)]}, agent_authored=False)
+        session.swap(ir, origin={"files": [str(doc)]})
         assert session._generation == 2
 
         sealed = [e for e in session._history if e["generation"] == 1][0]

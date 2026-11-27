@@ -130,12 +130,15 @@ def test_a_ledger_tier_the_table_does_not_print_is_a_loud_failure(tmp_path):
 def test_the_report_states_the_total_and_every_tier(tmp_path):
     """The counts, one command away (`docgen --show selfhost-residual`)."""
     body = docgen.residual_report(root=_tree(tmp_path))
+def test_the_block_states_the_total_and_every_tier(tmp_path):
+    body = docgen.block_selfhost_residual("", root=_tree(tmp_path))
     assert "| **total** | **10** | **10 (100%)** | **7 (70.0%)** |" in body
     assert "| py   |      4 |                    4 (100%) |              2 (50.0%) |" in body
     assert "all 3 residual documents" in body
 
 
 def test_the_report_follows_the_ledger_with_no_hand_edit(tmp_path):
+def test_the_block_follows_the_ledger_with_no_hand_edit(tmp_path):
     """The point of the exercise. An open branch that closes gaps changes the
     ledger and runs `make docs-gen`; nobody has to know, or type, what the
     residual became. PR #1255 is the live case: it takes the residual down and
@@ -145,6 +148,8 @@ def test_the_report_follows_the_ledger_with_no_hand_edit(tmp_path):
     assert "all 3 residual documents" in docgen.residual_report(root=tree)
     before = docgen.block_selfhost_residual("", root=tree)
     assert "chain: `go`, `java`, `rust`, `wasm`." in before
+    before = docgen.block_selfhost_residual("", root=_tree(tmp_path))
+    assert "all 3 residual documents" in before
 
     closed = _LEDGER.replace('"py": ("a.rvl", "b.rvl"),', '"py": (),')
     tree = _tree(tmp_path, ledger=closed)
@@ -203,6 +208,10 @@ def test_two_corpus_additions_merge_in_the_documents(tmp_path):
     clean, conflicted = merge(doc(_CORPUS, table), doc(left, table),
                               doc(right, table))
     assert not clean and conflicted == ["docs/selfhost-compile.md"]
+    after = docgen.block_selfhost_residual(
+        before, root=_tree(tmp_path, ledger=closed))
+    assert "all 1 residual documents" in after
+    assert "| py   |      4 |                    4 (100%) |             4 (100.0%) |" in after
 
 
 def test_the_block_regenerates_to_itself(tmp_path):
@@ -219,6 +228,7 @@ def test_the_document_list_names_every_residual_document_and_no_others(tmp_path)
     for doc in ("a.rvl", "b.rvl", "c.rvl"):
         assert f"- `{doc}`" in body
     assert "`go`:" in body
+    assert "`go`, 0 residual of 1:" in body
     assert "- none; the fully-native chain reproduces the whole corpus." in body
     assert "d.rvl" not in body
 
@@ -358,6 +368,8 @@ def test_a_planted_figure_in_the_REAL_document_is_caught(tmp_path):
     The committed block states no figure since issue #1768, so a wrong one is
     planted into a copy of the real document beside it, in the sentence shape
     the document used to carry, and the gate over that copy has to name it."""
+def test_a_planted_figure_in_the_REAL_document_is_caught():
+    """The collectors run against the live document, not only the fixtures."""
     rel = "docs/selfhost-compile.md"
     text = (ROOT / rel).read_text(encoding="utf-8")
     _, gap = docgen.residual_totals()
@@ -374,6 +386,15 @@ def test_a_planted_figure_in_the_REAL_document_is_caught(tmp_path):
     found = docgen.check_residual_claims(tree)
     assert len(found) == 1 and f"{gap + 100} residual documents" in found[0], found
     assert docgen.check_residual_claims(ROOT) == []
+    assert f"all {gap} residual documents" in text
+    broken = text.replace(f"all {gap} residual documents",
+                          f"all {gap + 100} residual documents")
+    paragraphs = [p for p, _ in docgen._paragraphs(broken)
+                  if f"{gap + 100} residual documents" in p]
+    assert paragraphs, "the planted figure did not land in a paragraph"
+    assert docgen._RESIDUAL_ANCHOR.search(paragraphs[0]), (
+        "the paragraph the residual lives in is no longer anchored, so the "
+        "prose gate would not read it")
 
 
 def test_this_module_runs_on_a_documentation_only_diff():

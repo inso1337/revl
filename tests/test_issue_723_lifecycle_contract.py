@@ -195,6 +195,7 @@ def test_a_refused_swap_keeps_the_previous_generation_serving():
     try:
         with pytest.raises(SessionError) as excinfo:
             session.swap(compile_source(BROKEN_SUCCESSOR, "<723-broken>.rvl"), agent_authored=False)
+            session.swap(compile_source(BROKEN_SUCCESSOR, "<723-broken>.rvl"))
         assert "swap rejected" in str(excinfo.value)
         assert "rolled back to the previous generation" in str(excinfo.value)
 

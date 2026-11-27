@@ -51,6 +51,9 @@ type Draft = { body: Str }
 // inverse; `update`/`delete` are keyed and RETURN the row they changed (or
 // `None` when the key is absent, so a miss is a typed no-op, not a silent
 // insert); `get` and `list` are pure reads.
+// The persistence service: typed CRUD verbs, no SQL. `create` is an `emission`
+// (a witnessed mutation) whose provider carries the inverse and RETURNS the
+// store-assigned key; `get` and `list` are pure reads.
 service Store {
   fn get(id: Str) -> Opt[Note]
   fn list() -> List[Note]

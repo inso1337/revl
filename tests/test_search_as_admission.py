@@ -56,6 +56,7 @@ _ADMISSIBLE = {
         service Database {
           fn query(sql: Str) -> List[Row]
           emission[db] fn execute(sql: Str) -> Int
+          emission fn execute(sql: Str) -> Int
         }
         component MysqlDatabase provides db: Database {
           config { url: Str = "mysql://", pool_size: Int = 4 }
@@ -72,6 +73,7 @@ _ADMISSIBLE = {
         service Database {
           fn query(sql: Str) -> List[Row]
           emission[db] fn execute(sql: Str) -> Int
+          emission fn execute(sql: Str) -> Int
           fn ping() -> Bool
         }
         component AuditedDatabase provides db: Database {
@@ -121,9 +123,12 @@ _INCOMPATIBLE = {
         // effect boundary (G4/G8). The gate refuses. (`emission[db]` on both
         // methods, so the refusal is the purity widening and not an undeclared
         // scope.)
+        // effect boundary (G4/G8). The gate refuses.
         service Database {
           emission[db] fn query(sql: Str) -> List[Row]
           emission[db] fn execute(sql: Str) -> Int
+          emission fn query(sql: Str) -> List[Row]
+          emission fn execute(sql: Str) -> Int
         }
         component EmittingQueryDatabase provides db: Database {
           config { url: Str = "e://", pool_size: Int = 4 }
