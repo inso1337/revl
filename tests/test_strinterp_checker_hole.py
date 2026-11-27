@@ -85,6 +85,11 @@ def test_dollar_brace_in_a_plain_string_is_redirected_to_a_template():
     assert "does not interpolate" in err
     assert "refused, not emitted as literal text" in err
     assert "triple-quoted string" in err and '"""..."""' in err
+    # issue #3502: the message says the shape is refused, and names BOTH working
+    # forms — the triple-quoted verbatim literal for data, the template for
+    # interpolation
+    assert "REFUSED" in err
+    assert '"""echo ${HOME}"""' in err
     assert "backtick template" in err and "`hi ${name}`" in err
 
 
