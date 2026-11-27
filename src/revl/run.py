@@ -1410,6 +1410,14 @@ class _Driver:
         # this list (name, from_state, to_state), in the order they settle
         self._observing: dict | None = None
         self._settled: list[tuple] = []
+        # issue #3436: every fiber that settles FAILED, at boot or at teardown,
+        # collected here so the run's exit code can name them instead of
+        # reading a failed composition as success
+        self._failed: set[str] = set()
+        # ... and every component whose teardown recorded an inverse (undo)
+        # failure, which lands as compensation residue rather than a FAILED
+        # fiber state
+        self._failed_undo: set[str] = set()
 
         # item 477 follow-up 1 (#622): the OWNED production silence observer for
         # the live generation. Created and armed at the end of `_load`, stopped
@@ -1550,6 +1558,8 @@ class _Driver:
                     record["traceback"] = "".join(traceback.format_exception(err))
                 self._events.append(record)
                 self._seq += 1
+        if new == "FAILED":
+            self._failed.add(fiber.name)
         # observation window (open during a `--withdraw`): capture each fiber
         # the moment it comes to rest in a down state. `from` is the fiber's
         # state at the START of the window, so a UNLOADING waypoint collapses
@@ -2462,9 +2472,12 @@ class _Driver:
                 if rec is not None:
                     rec["outcome"] = "returned"
                 if frame is not None:
-                    self._compensation_residue.extend(
-                        getattr(frame, "compensation_residue", ())
-                    )
+                    residue = getattr(frame, "compensation_residue", ())
+                    if residue:
+                        self._compensation_residue.extend(residue)
+                        # issue #3436: name the component whose undo failed, so
+                        # the exit code can say which one
+                        self._failed_undo.add(name)
                 await self._flush()
         finally:
             # Ambient host provisions are owned by the driver too.  Settled in a
@@ -2870,6 +2883,22 @@ class _Driver:
         print("error: " + "; ".join(problems), file=sys.stderr, flush=True)
         return 1
 
+    def _settle_verdict(self) -> int:
+        """The exit code after boot/teardown (issue #3436): any fiber that
+        settled FAILED — a boot failure or an `undo` that raised at teardown —
+        is named on stderr and fails the run. `revl run` may not exit 0 over a
+        failed composition; a script or service manager reads that as success."""
+        failed, undos = sorted(self._failed), sorted(self._failed_undo)
+        if not failed and not undos:
+            return 0
+        parts = []
+        if failed:
+            parts.append("component(s) ended FAILED: " + ", ".join(failed))
+        if undos:
+            parts.append("undo failure(s) at teardown of: " + ", ".join(undos))
+        print("error: " + "; ".join(parts), file=sys.stderr)
+        return 1
+
     async def hold_repl(self, once: bool = False) -> int:
         module = self._emit_module(self.ir)
         print("== load composition ==")
@@ -2879,6 +2908,7 @@ class _Driver:
             print("\n== once — boot complete, tearing down ==")
             await self._teardown()
             return self._run_exit_code()
+            return self._settle_verdict()
         print("\n== live — call provided services (`:keys` to list, `:q` or Ctrl-D to quit) ==")
         if self.recorder is not None:
             print("   recording — `:timeline`, `:inspect k`, `:back k [!]`, "
@@ -2924,6 +2954,7 @@ class _Driver:
                 pass
             await self._teardown()
         return self._run_exit_code()
+        return self._settle_verdict()
 
     # -- one-shot withdrawal (records the causal trace + runs the oracle) --
 
@@ -2941,6 +2972,7 @@ class _Driver:
             print("\n" + why_runtime.render_oracle(report))
         await self._teardown()
         return self._run_exit_code()
+        return self._settle_verdict()
 
     # -- watch -------------------------------------------------------------
 
@@ -2982,6 +3014,7 @@ class _Driver:
                 pass
             await self._teardown()
         return self._run_exit_code()
+        return self._settle_verdict()
 
     async def _reload(self, files: list[str]) -> None:
         print("\n== change detected — recompile ==")
