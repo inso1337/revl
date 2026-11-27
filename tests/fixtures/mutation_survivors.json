@@ -1,0 +1,37 @@
+{
+ "_about": [
+  "The mutants of the refusal arms of one module that NO test noticed, written",
+  "by tools/mutation_runner.py --write and gated by --check (issue #2761,",
+  "slice 7). Each entry is {arm, operator, line, digest}: the arm is",
+  "<function>#<n>, the n-th refusal arm in that function; the digest is the",
+  "hash of the arm's source, so a rewritten arm retires its entry.",
+  "",
+  "This file is in the tree and a candidate can read it: the first version of",
+  "mutation testing is NOT hidden. Where hidden mutants should live is issue",
+  "#1207's question."
+ ],
+ "target": "src/revl/anchor.py",
+ "tests": [
+  "tests/test_anchor.py"
+ ],
+ "survivors": [
+  {
+   "arm": "_validated_digests#1",
+   "operator": "drop-refusal",
+   "line": 101,
+   "digest": "5802eedfbf92b42d"
+  },
+  {
+   "arm": "make_anchor#2",
+   "operator": "drop-refusal",
+   "line": 191,
+   "digest": "f0173b07410a3950"
+  },
+  {
+   "arm": "parse_digest_arg#1",
+   "operator": "drop-refusal",
+   "line": 134,
+   "digest": "9e383b7b664228c1"
+  }
+ ]
+}

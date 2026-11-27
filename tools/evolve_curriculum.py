@@ -39,6 +39,7 @@ docs/design/533-evolution-curriculum.md for the argument, the measured
 populations, and the cases the signal gets wrong.
 
 SOURCES. The review names eight. This module reads seven of them; the rest are
+SOURCES. The review names eight. This module reads five of them; the rest are
 staged in the design doc's slice plan. Each adapter below states the artifact
 it reads, and every task it emits carries that artifact by path, so a reader
 can go and look.
@@ -811,6 +812,74 @@ def adapter_tracker(snapshot=None) -> Derivation:
     return Derivation("tracker", tuple(dict.fromkeys(signals)), tuple(tasks))
 
 
+# --------------------------------------------------------------------------- #
+# Adapter 6 -- mutation testing: a refusal a mutant removes and no test notices  #
+# --------------------------------------------------------------------------- #
+# tools/mutation_runner.py mutates the refusal arms of one narrow module and runs
+# that module's tests against each mutant. A mutant that survives is a refusal
+# nothing pins in one direction: delete it (or negate its guard) and every test
+# stays green, so a candidate that removed the refusal could not be told from one
+# that kept it. Closing the hole is writing the test that kills the mutant, which
+# is a task with a verifier the tool already runs.
+#
+# The survivors are recorded in `tests/fixtures/mutation_survivors.json`, which
+# `mutation_runner.py --check` holds equal to a fresh run. This source reads the
+# ledger rather than running the mutants (each is a test-suite run), and keeps a
+# survivor only while its arm is still in the target with the same source, so a
+# rewritten arm retires its entry instead of leaving a task about code that is
+# gone. The mutants and the ledger are readable by a candidate: the first version
+# is in the tree, and where hidden mutants live is issue #1207's question.
+#
+# The rung is the mechanism's own. The mutation run makes one implementation
+# agree with its own tests, over the test files the ledger names, so it lands on
+# `easy`. The design expected `expert` for this source; the ladder has no line
+# for "measures a suite", and the signal, not the expectation, decides.
+MUTATION_LEDGER = "tests/fixtures/mutation_survivors.json"
+MUTATION_RUNNER = "tools/mutation_runner.py"
+
+
+def adapter_mutation_survivors(ledger=None, root=None) -> Derivation:
+    base = Path(root) if root else ROOT       # a staged tree the test owns
+    path = Path(ledger) if ledger else base / MUTATION_LEDGER
+    if not path.is_file():
+        # No ledger is not "no survivors". It is the source failing to read its
+        # artifact, and an empty derivation makes `check` say so.
+        return Derivation("mutation-survivors", (), ())
+    runner = _load("_ec_mutation", MUTATION_RUNNER)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    target, tests = data["target"], list(data["tests"])
+    if not (base / target).is_file():
+        raise FileNotFoundError(f"{path} names {target}, which is not in the tree")
+    # Measured before the survivors are looked at: a mutation run over this
+    # target and these tests is a property of the ledger's configuration.
+    signal = Signal(impls=(REFERENCE,), breadth=breadth_of(tests))
+    current = {a.id: a for a in runner.arms(
+        (base / target).read_text(encoding="utf-8"))}
+    module = runner.module_name(target)
+    tasks: list[Task] = []
+    for survivor in data["survivors"]:
+        arm = current.get(survivor["arm"])
+        if arm is None or arm.digest != survivor["digest"]:
+            continue                      # the arm was rewritten or removed
+        operator = survivor["operator"]
+        tasks.append(_task(
+            task_id=f"mutant/{module}/{survivor['arm']}/{operator}",
+            source="mutation testing",
+            artifact=target,
+            locator=f"{survivor['arm']}, line {arm.line}",
+            gap=(f"the {operator} mutant of the refusal arm {survivor['arm']} "
+                 f"of {target} survives: {runner.EFFECT[operator]} and no test "
+                 f"in {', '.join(tests)} fails"),
+            subject=", ".join(tests),
+            mechanism=f"{MUTATION_RUNNER} --check",
+            verify=(f"python3 {MUTATION_RUNNER} --check  # the mutant is "
+                    f"killed; then python3 {MUTATION_RUNNER} --write to drop "
+                    f"its entry from {MUTATION_LEDGER}"),
+            signal=signal,
+        ))
+    return Derivation("mutation-survivors", (signal,), tuple(tasks))
+
+
 ADAPTERS = {
     "construct-reach": adapter_construct_reach,
     "census-bypass": adapter_census_bypass,
@@ -819,6 +888,7 @@ ADAPTERS = {
     "cross-tier-probes": adapter_cross_tier_probe,
     "design-docs": adapter_design_docs,
     "tracker": adapter_tracker,
+    "mutation-survivors": adapter_mutation_survivors,
 }
 
 
