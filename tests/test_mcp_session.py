@@ -775,7 +775,7 @@ _HELD_VERBS = [
 
 # the marker each verb's held answer carries, the way `revl_check {}` answers
 # `checked: "session"` (issue #2117)
-_MARKER = {"revl_plan": "planned"}
+_MARKER = {"revl_plan": "planned", "revl_context": "grounded"}
 
 
 def _marker(verb):
@@ -911,6 +911,7 @@ _MARKED_VERBS = [
     ("revl_query_reach", {"component": "C"}),
     ("revl_query_drift", {"service": "Cache"}),
     ("revl_plan", {}),
+    ("revl_context", {"component": "C"}),
 ]
 
 
