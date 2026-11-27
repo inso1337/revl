@@ -973,19 +973,41 @@ def build_parser() -> argparse.ArgumentParser:
         dest="receipts_command", metavar="{export,verify}")
     receipts_export = receipts_sub.add_parser(
         "export", help="sign a receipt per action and chain them")
-    receipts_export.add_argument(
-        "--actions", required=True, metavar="FILE",
+    receipts_source = receipts_export.add_mutually_exclusive_group(required=True)
+    receipts_source.add_argument(
+        "--actions", default=None, metavar="FILE",
         help='a JSON document of actions: a bare list or {"actions": [...], '
              '"session_verdict": "committed"|"aborted"}')
+    receipts_source.add_argument(
+        "--wal", default=None, metavar="FILE",
+        help="derive the actions from a write-ahead log (`revl run --wal`): "
+             "every emission crossing, every settled deferred emission and "
+             "every approval spend, in the order the log recorded them. "
+             "Needs --worker")
+    receipts_export.add_argument(
+        "--worker", default=None, metavar="NAME",
+        help="with --wal: the identity the receipts attribute the actions to "
+             "(the log holds none)")
+    receipts_export.add_argument(
+        "--task", default=None, metavar="NAME",
+        help="with --wal: the task the actions belong to (default: the "
+             "session name)")
+    receipts_export.add_argument(
+        "--policy-digest", default=None, metavar="HEX", dest="policy_digest",
+        help="with --wal: the 64-hex digest of the policy in force, bound as "
+             "given; omitted means the run had none")
     receipts_export.add_argument(
         "--session", required=True, metavar="NAME",
         help="the session the chain belongs to (one session per chain)")
     receipts_export.add_argument(
-        "--session-verdict", default="committed", metavar="VERDICT",
+        "--session-verdict", default=None, metavar="VERDICT",
         # mirrors action_receipt.SESSION_VERDICTS; kept a literal so parser
         # assembly stays import-light
         choices=("committed", "aborted"),
-        help="the session's verdict, bound into every receipt")
+        help="the session's verdict, bound into every receipt. With --actions "
+             "the default is committed; with --wal it is read from the log "
+             "(`commit-approved` or an `aborted` marker) and a log that says "
+             "neither is refused until this is given")
     receipts_export.add_argument(
         "--key", action="append", default=[], metavar="PATH",
         help="the signing key file. Falls back to REVL_RECEIPT_KEY_FILE (a "
@@ -1997,6 +2019,28 @@ def build_parser() -> argparse.ArgumentParser:
                           "FILE` rolls forward or back and states a checked verdict "
                           "(docs/crash-recovery.md). With --placement, each process "
                           "writes FILE.<process> and FILE is the run's index")
+    run.add_argument("--receipts-out", default=None, metavar="FILE",
+                     help="at teardown, write a signed, chained receipt per "
+                          "consequential action the run's WAL recorded: each "
+                          "emission crossing, and the deferred emissions that "
+                          "fired and approval spends the log holds (a plain "
+                          "`revl run` journals emission crossings; the others "
+                          "come from a session owner that writes them) "
+                          "(issue #2757, "
+                          "docs/design/570-action-receipt-chain.md). Requires "
+                          "--wal, --receipts-worker and a key; a chain that "
+                          "cannot be completed is not written and the run "
+                          "exits non-zero")
+    run.add_argument("--receipts-key", default=None, metavar="PATH",
+                     help="the receipt signing key file. Falls back to "
+                          "REVL_RECEIPT_KEY_FILE (a path) then "
+                          "REVL_RECEIPT_KEY (the secret); never hardcoded")
+    run.add_argument("--receipts-worker", default=None, metavar="NAME",
+                     help="the identity the receipts attribute the run's "
+                          "actions to (the log holds none)")
+    run.add_argument("--receipts-session", default=None, metavar="NAME",
+                     help="the session name the chain is bound to (default: "
+                          "the WAL file's name without its extension)")
     run.add_argument("--require-settled-wal", action="store_true",
                      help="refuse a new run while the WAL contains unresolved emissions")
     run.add_argument("--allow-unsynced-wal", action="store_true",

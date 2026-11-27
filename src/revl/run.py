@@ -1282,7 +1282,8 @@ class _Driver:
                  root_dirs: list | None = None, secrets: dict | None = None,
                  secrets_may_be_absent: bool = False,
                  estop_latch: str | None = None, ambient: dict | None = None,
-                 ambient_check=None, run_header: dict | None = None):
+                 ambient_check=None, run_header: dict | None = None,
+                 receipts: dict | None = None):
         self.ir = ir
         self.config = config
         # item 256 Slice 1: an optional caller-supplied secret store (name ->
@@ -1378,6 +1379,18 @@ class _Driver:
                     "WAL contains unresolved crossings: " + json.dumps(unresolved)
                 )
         self.recorder = self._make_recorder() if (record or wal_path) else None
+        # issue #2757: signed action receipts. The recorder observes every record
+        # the WAL makes durable, so a receipt can only describe a crossing the
+        # log also holds. Engaged BEFORE the WAL is opened (`open_wal`), so the
+        # log's header, which names the bundle digest, is observed too.
+        self._receipts = receipts
+        self._receipt_recorder = None
+        self.receipts_error: str | None = None
+        if receipts is not None and self.recorder is not None and wal_path:
+            from .action_receipt_writer import ReceiptRecorder  # noqa: PLC0415
+            self._receipt_recorder = ReceiptRecorder(
+                worker=receipts["worker"], task=receipts["session"])
+            self.recorder.engage_receipts(self._receipt_recorder.observe)
 
         # -- causal trace (docs/why-runtime.md) ----------------------------
         # `trace_path`/`withdraw` turn on the causal-trace recorder: every
@@ -1449,6 +1462,51 @@ class _Driver:
         from .mcp.session import replay_module  # noqa: PLC0415 — lazy, no cordis
 
         return replay_module().Recorder(self.ir)
+
+    def _export_receipts(self, *, failed: bool) -> None:
+        """Sign the run's receipts and write the chain (issue #2757).
+
+        The verdict is the log's own when it records one (`commit-approved` or
+        an `aborted` marker). Otherwise it is `aborted` when the run died, when
+        teardown failed or when it left residue, and `committed` only when the
+        run ended in a teardown that completed with none of those and no abort
+        recorded. A log that records BOTH markers is refused by the recorder.
+        A refusal (a gap in the chain, an unreadable key) is held in
+        `receipts_error` for `run_command` to turn into a non-zero exit, never
+        swallowed: a run that asked for receipts and cannot give a complete
+        chain has not delivered what it was asked for.
+
+        The chain is written to a temporary file and moved into place, so a
+        reader never sees a half-written chain."""
+        recorder = self._receipt_recorder
+        if recorder is None or self.receipts_error is not None:
+            return
+        verdict = recorder.session_verdict() or ("aborted" if failed else "committed")
+        out = self._receipts["out"]
+        temporary = out + ".partial"
+        try:
+            chain = recorder.export(self._receipts["key"],
+                                    session=self._receipts["session"],
+                                    session_verdict=verdict)
+            with open(temporary, "w", encoding="utf-8") as handle:
+                json.dump(chain, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+            os.replace(temporary, out)
+        except (RevlError, ValueError, OSError) as error:
+            self.receipts_error = str(error)
+            self._log("receipts", "NOT written", self.receipts_error)
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+            return
+        self._log("receipts", "written",
+                  f"{chain['count']} receipt(s), {verdict} -> {out}")
+        if recorder.unsettled:
+            self._log("receipts", "unsettled",
+                      f"{recorder.unsettled} deferred emission(s) never "
+                      "settled: no receipt, they did not cross or no record "
+                      "says they did")
 
     def _commit_wal(self) -> None:
         """Activation finished cleanly — stamp the WAL's `activation-complete`
@@ -2969,6 +3027,10 @@ class _Driver:
         # original fault is re-raised afterwards so the failed teardown is still
         # reported as a failure.
         failure: BaseException | None = None
+        # issue #2757: teardown also runs when the run itself died (an error out
+        # of load or eval reaches `finally`), and that is not an orderly end, so
+        # a receipt chain must not call the session committed.
+        in_flight = sys.exc_info()[0] is not None
         try:
             await self._dispose_all(self.ir)
         except BaseException as exc:  # noqa: BLE001 (reported below, then re-raised)
@@ -3007,6 +3069,7 @@ class _Driver:
               if all(ok for _, ok, _ in checks)
               else "  RESIDUE LEFT — see FAILs above")
         if failure is not None:
+            self._export_receipts(failed=True)
             raise failure
         self.runtime.set_trace(None)
         if self.trace_path is not None:
@@ -3020,6 +3083,7 @@ class _Driver:
         # steady-state work as orphaned residue.
         if self.recorder is not None and self.wal_path is not None:
             self.recorder.close_wal(clean=True)
+            self._export_receipts(failed=in_flight or bool(left))
 
 
 # --------------------------------------------------------------------------
@@ -3189,6 +3253,51 @@ def run_command(args, hold_once: bool = False) -> int:
             return 2
         print("warning: --allow-unsynced-wal disables the WAL fsync guarantee",
               file=sys.stderr)
+    receipts = None
+    if getattr(args, "receipts_out", None):
+        # issue #2757: the receipts are derived from the write-ahead log, so a
+        # run with no log has nothing to derive them from. Refuse the pair
+        # rather than accept a flag that would silently sign nothing, and
+        # resolve the key BEFORE anything boots: a run that cannot sign its
+        # receipts should not run first and fail after.
+        if (not getattr(args, "wal", None) or getattr(args, "placement", None)
+                or getattr(args, "backend", "py") != "py"):
+            print("error: --receipts-out requires --wal and the single-process "
+                  "Python backend", file=sys.stderr)
+            return 2
+        if not getattr(args, "receipts_worker", None):
+            print("error: --receipts-out requires --receipts-worker: the log "
+                  "holds no identity to attribute the actions to",
+                  file=sys.stderr)
+            return 2
+        from . import action_receipt  # noqa: PLC0415
+        try:
+            receipt_keys = action_receipt.resolve_keys(
+                [args.receipts_key] if getattr(args, "receipts_key", None) else [])
+        except RevlError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+        if len(receipt_keys) != 1:
+            print("error: --receipts-out signs with exactly one key",
+                  file=sys.stderr)
+            return 2
+        # a chain already at this path is not this run's. Removed now, so a
+        # boot that fails before teardown cannot leave a stale chain that still
+        # verifies sitting where this run's was promised.
+        if os.path.isfile(args.receipts_out):
+            try:
+                os.unlink(args.receipts_out)
+            except OSError as error:
+                print(f"error: cannot replace {args.receipts_out}: {error}",
+                      file=sys.stderr)
+                return 2
+        receipts = {
+            "out": args.receipts_out, "key": receipt_keys[0],
+            "worker": args.receipts_worker,
+            "session": (getattr(args, "receipts_session", None)
+                        or os.path.splitext(os.path.basename(args.wal))[0]
+                        or "session"),
+        }
     if getattr(args, "require_settled_wal", False):
         from .wal import read_wal, unresolved_crossings, WALIntegrityError
         wal_path = getattr(args, "wal", None)
@@ -3480,7 +3589,8 @@ def run_command(args, hold_once: bool = False) -> int:
                          ambient_check=_both_checks(
                              _model_host_check(args, model_hosts),
                              _policy_check(run_policy)),
-                         run_header=run_header)
+                         run_header=run_header,
+                         receipts=receipts)
     except UnsettledWalError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

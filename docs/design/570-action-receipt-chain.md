@@ -6,10 +6,13 @@ issue #2757. This note is the design the item asks for before code, and it
 records the decisions the issue leaves open: key custody, rotation and the
 anchoring option.
 
-Status: the first slice is landed with this note. `src/revl/action_receipt.py`
-defines the receipt, the two receipt kinds, the commitments and the chain;
-`revl receipts export` and `revl receipts verify` are the reachable verbs.
-`tests/test_action_receipt_chain_2757.py` pins the three acceptance clauses.
+Status: two slices are landed. The first (this note's sections 0 to 11) is
+`src/revl/action_receipt.py`: the receipt, the two receipt kinds, the
+commitments and the chain, with `revl receipts export --actions` and `revl
+receipts verify`; `tests/test_action_receipt_chain_2757.py` pins the three
+acceptance clauses. The second (section 12) is the runtime writer: a recorder
+that observes the write-ahead log, `revl receipts export --wal` and `revl run
+--receipts-out`; `tests/test_action_receipt_writer_2757.py` pins it.
 
 Reconciles with: item 127 and `src/revl/attest.py` (the signed-record
 construction and the key-file discipline this reuses), item 413.3 and
@@ -135,12 +138,8 @@ which are allowed. A body thinned by kind would recreate, at audit time, the
 "which field got dropped" question the UI receipt (`revl.ui_action`) exists to
 remove.
 
-This slice's export API takes the actions from the caller. The runtime writer
-that emits a receipt at a live crossing is the next slice, and it is
-deliberately not claimed here: the crossing writer lives in the py backend and
-supplying it from a test would be a second, untested emission path. What is
-landed is the record shape, the commitment rule and the verifier the writer
-will target.
+The first slice's export API takes the actions from the caller. The runtime
+writer that derives them at the crossing is section 12.
 
 ## 5. The commitments, and the confirmation-oracle rule
 
@@ -257,9 +256,9 @@ The checks are ordered so a caller branches on the link that fired:
 
 * It is not a WAL replacement. The WAL remains the runtime's recovery surface;
   this is the audit artifact exported FROM a session.
-* It does not wire itself into every crossing yet. The emission point is the
-  next slice (§4); what is claimed here is the record, the commitment rule, the
-  chain and the verifier.
+* The record, the commitment rule, the chain and the verifier are sections 0
+  to 11. What writes receipts at a live crossing, and what it does not cover,
+  is section 12.
 * It is not a public-key signature, a timestamp authority, or proof that a
   value was what the signer said. It proves the signer committed to that value
   under that key, which is what makes the chain auditable.
@@ -274,3 +273,124 @@ The checks are ordered so a caller branches on the link that fired:
   member (`tests/test_action_receipt_chain_2757.py`);
 * a receipt for a call that handled a secret carries no value digest and says
   why, enforced in both directions (`commitment` and `check_commitment`).
+
+## 12. The runtime writer
+
+The first slice left the actions to the caller. This one derives them from what
+the run already records, and says which crossings that covers.
+
+### 12.1 The seam is the write-ahead log
+
+Every consequential crossing already passes through one writer, in one order,
+and is durable before it fires. A second hook at each emission site would be a
+second source of truth that could disagree with the log `revl recover` trusts.
+So the writer observes the log: `WriteAheadLog.attach_observer` hands every
+record to a callable once it is durable (never one that was cut back out after a
+failed fsync), and `Recorder.engage_receipts` carries that callable across a
+`--watch` reload so no generation's crossings go unaccounted. The backend is
+stdlib-only and holds no key, so it holds a bare callable and learns nothing
+about signing, the same shape the model-decision sink takes. A log nobody
+observes writes the records it always wrote.
+
+`revl.action_receipt_writer.ReceiptRecorder` is that callable. The same class
+reads a finished log (`recorder_from_wal`), so the offline path and the live path
+follow the same rules.
+
+### 12.2 What is a consequential action
+
+* an `effect` record whose boundary class is `emission`: a boundary crossing,
+  journalled ahead of the fire. Receipt kind `effect-crossing`.
+* a `deferred-emission` record that a later `flushed` or `flush-residue` record
+  settles. The receipt sits at the flush, because that is when the crossing
+  happened. A deferral that was dropped on abort or never settled either never
+  crossed or crossed with no record of it, so it has no receipt.
+  `ReceiptRecorder.unsettled` counts it, and `revl receipts export --wal` and
+  `revl run --receipts-out` both report that count when it is not zero, so the
+  absence is stated and not silent.
+* an `approval-consumed` record: the spend of an approval. Receipt kind
+  `approval-use`, joined to its `approval-emission` when the crossing returned.
+  A spend whose crossing never returned is recorded with capability and
+  component `unresolved` and the result `{"fired": false}`, never dropped.
+
+Compensations, provisions, in-process effects, fenced `admit-crossing` records,
+cache-hit deliveries and shared reclaims are not receipted in this slice.
+An `effect-crossing` receipt carries `approval: null`: the log does not link an
+emission to the spend that authorised it, so the approval is named by the
+`approval-use` receipt, and the join to a crossing is by component and
+capability, not by sequence number.
+
+### 12.3 What a commitment covers here
+
+The input commitment covers the description of the crossing the log already
+holds, after the log's own redaction: label, service, key, method and the
+arguments, with every declared `Secret[T]` position already replaced by the
+log's placeholder. A placeholder anywhere in the arguments (nested, or too deep
+to read) makes the origin `secret`, so the commitment is suppressed with that
+reason and carries no digest. The digest of any other argument is therefore over
+bytes the log already holds in plaintext: a receipt discloses nothing the log
+does not.
+
+The limit of that statement: the log records the declared `Secret[T]` positions
+and no other origin class, so a `confidential` value the log holds in plaintext
+is salted-committed. An operator who shares a chain more widely than the log
+should know that, and the salt is in the chain (section 5).
+
+The result commitment covers the recorded outcome (`emission-complete`,
+`emission-failed`, `operator-resolved`, `flushed`, `flush-residue`, or
+`unsettled` when nothing recorded how a journalled crossing ended) and its
+error text, never a returned value: the log holds none, by design. The error
+text is classified like the input: the log redacts a registered secret inside
+host text, so a placeholder there suppresses the result commitment too.
+
+"A placeholder anywhere" means as a whole value, inside a longer string, or as
+a mapping key, all of which the log's redaction produces. A value nested too
+deeply to read is treated as carrying one.
+
+### 12.4 The bundle, the policy and the verdict
+
+`bundle` is the composition digest the log's header names, or the `generation`
+record in force for a crossing after a reload, so a chain that spans a reload
+binds each crossing to the composition that made it. `policy` is bound as the
+caller gives it and is null when none is given; it is never inferred.
+
+The session verdict is the log's own when it records one: `commit-approved` is
+`committed` (design 245's window rule) and an `aborted` marker is `aborted`. A
+log with both contradicts itself and the export is refused, whatever verdict the
+caller names. A log that records neither is refused until the caller names a
+verdict. `revl run --receipts-out` is the one place a verdict is supplied for
+the caller: it is `aborted` when the run died, when teardown failed or when it
+left residue, and `committed` only when the run ended in a teardown that
+completed with none of those and no abort recorded.
+
+### 12.5 Fail direction
+
+`observe` is total: a record it cannot read is a recorded gap, never an
+exception into the run. A gap is also recorded for an emission record that
+describes no crossing, and for a sequence number journalled twice with the first
+never settled (a log whose tier restarts its numbering), because either would let
+an outcome record settle the wrong crossing. `export` refuses while a gap stands,
+because a chain with a hole in it would verify, and a verified chain that omits
+an action is the failure this feature exists to rule out. `revl run
+--receipts-out` that cannot write a complete chain writes nothing and exits
+non-zero; it is refused before anything boots when `--wal`, `--receipts-worker`
+or a key is missing. A chain already at the output path is removed before the
+run, so a boot that fails cannot leave a stale chain that still verifies, and
+the chain is moved into place from a temporary file so a reader never sees half
+of one.
+
+### 12.6 What this slice does NOT claim
+
+* It covers the py single-process backend with a write-ahead log. A placement run
+  (one log per process) and the other tiers are not covered.
+* A plain `revl run` journals emission crossings. Deferred emissions, approval
+  spends and the `commit-approved` marker are written by a session owner that
+  holds the log, which a plain run does not install, so `--receipts-out` receipts
+  emission crossings in practice and the other kinds appear when the log holds
+  them. `revl receipts export --wal` reads any log, including one a session
+  wrote.
+* A crash writes no chain. The log survives it, and `revl receipts export --wal`
+  reads it afterwards.
+* Model calls are not receipted here. Their signed record is
+  `revl.model_evidence` (item 517); binding it into the chain is a later slice.
+* It does not turn a `confidential` origin the log cannot see into a suppressed
+  commitment (section 12.3).
