@@ -8093,10 +8093,19 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         # Each branch tail is a value position: a bare non-Copy binding reused
         # after the `if`-expression must clone here or the later read borrows a
         # moved value (E0382). A fresh temporary or a Copy scalar stays bare.
-        then_v = _by_value_tail(
-            node["then"], _render_expr(node["then"], ctx, rename), ctx)
-        else_v = _by_value_tail(
-            node["else"], _render_expr(node["else"], ctx, rename), ctx)
+        # A FIELD tail (`decl.caps`) gets the same treatment through
+        # `_by_value_field_clone` (issue #3627): the ternary branch was the one
+        # value position the body-level reuse signal did not reach, so the
+        # branch moved the field and a later read of it in the same record
+        # literal borrowed a moved value (E0382).
+        def _branch_tail(branch: object) -> str:
+            rendered = _render_expr(branch, ctx, rename)
+            field_clone = _by_value_field_clone(branch, rendered, ctx)
+            if field_clone is not None:
+                return field_clone
+            return _by_value_tail(branch, rendered, ctx)
+        then_v = _branch_tail(node["then"])
+        else_v = _branch_tail(node["else"])
         return f"if {_render_expr(node['cond'], ctx, rename)} {{ {then_v} }} else {{ {else_v} }}"
 
     if kind == "record_update":
