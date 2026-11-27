@@ -147,6 +147,15 @@ self-consistency):
 - **Key order** is record-declaration / insertion order (py dict, ts object).
 - **Booleans/null** spelled `true`/`false`/`null`; **ints** exact, incl. beyond
   2^53 (py int, ts bigint replacer, go int64 — see the two Int/bigint notes).
+- **An absent `Opt` member keeps its key as `null`** on py and ts (issue
+  #3642): ts represents `None` as `undefined`, which `JSON.stringify` drops
+  from an object, so the @ts replacer maps `undefined` to `null` — the same
+  bytes py's `json.dumps(None)` writes. **Go caveat:** go lowers an Opt to the
+  two-value `RevlOpt` struct (item 434 (d)), which `encoding/json` marshals as
+  `{"Value":"","Ok":false}` rather than `null`, on every Opt value — pinned by
+  `test_go_opt_still_marshals_as_the_revlopt_struct` until the go prelude
+  teaches `RevlOpt` a `MarshalJSON` (its own roadmap item, like the record
+  caveat before item 390).
 - **Floats**: values that share a decimal form across Python and JS (`1.5`,
   `-0.25`) are byte-identical. A **whole-number float** (`1.0` vs `1`), `-0.0`,
   or an extreme-exponent float can still format differently between the two
