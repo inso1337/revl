@@ -797,3 +797,36 @@ def test_at_reads_only_a_canonical_shipped_remainder(tmp_path):
     for rest in ("/etc/passwd", "stdlib/../x.rvl", "other/x.rvl"):
         assert _at(str(tmp_path), "stdlib:" + rest) == os.path.join(
             str(tmp_path), "stdlib:" + rest)
+
+
+def test_composition_use_stdlib_resolves_against_the_shipped_stdlib(tmp_path):
+    """Issue #3530: a composition-level `use "stdlib/..."` resolves the way a
+    row `from "stdlib/..."` does (#3529): composition-relative file first,
+    then the shipped stdlib."""
+    doc = tmp_path / "web.rvl"
+    doc.write_text('composition Web {\n  use "stdlib/wire.rvl"\n}\n')
+    table = resolve_file(str(doc), str(tmp_path))
+    assert table.uses == ["stdlib:stdlib/wire.rvl"]
+    document = compile_composition(str(doc), str(tmp_path))
+    # the shipped wire.rvl's service joins the document's service table
+    assert "Wire" in document["services"]
+
+
+def test_composition_use_a_missing_stdlib_path_keeps_the_same_refusal(tmp_path):
+    doc = tmp_path / "web.rvl"
+    doc.write_text('composition Web {\n  use "stdlib/nope.rvl"\n}\n')
+    with pytest.raises(RevlError) as caught:
+        resolve_file(str(doc), str(tmp_path))
+    assert "composition Web uses `stdlib/nope.rvl`, which does not exist" \
+        in str(caught.value)
+
+
+def test_composition_use_a_local_file_named_like_a_stdlib_path_wins(tmp_path):
+    """Same precedence as a row `from`: the composition-relative file wins over
+    the shipped stdlib."""
+    (tmp_path / "stdlib").mkdir()
+    (tmp_path / "stdlib" / "wire.rvl").write_text(SERVICES)
+    doc = tmp_path / "web.rvl"
+    doc.write_text('composition Web {\n  use "stdlib/wire.rvl"\n}\n')
+    table = resolve_file(str(doc), str(tmp_path))
+    assert table.uses == ["stdlib/wire.rvl"]
