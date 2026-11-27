@@ -2250,6 +2250,19 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
     seen: dict[str, str] = {}
     for decl in program.fn_decls:
         decl_file = decl.source or filename
+        if decl.name.startswith("__") and not decl.name.endswith("__"):
+            # Python rewrites a name starting with two underscores inside a
+            # class body (`__h` -> `_C__h`), so a call written in a provided
+            # method would raise NameError instead of reaching the module-level
+            # def (issue #3582). Refuse the spelling here, where one diagnostic
+            # covers every tier.
+            raise RevlError(decl_file, decl.line,
+                            f"top-level function `{decl.name}` is refused: Python rewrites a "
+                            f"name starting with two underscores inside a class body "
+                            f"(`_C{decl.name}`), so a call from a provided method would not "
+                            f"reach it (issue #3582)",
+                            hint="rename the function; a name ending with two underscores "
+                                 "(like `__h__`) is not mangled")
         if decl.name in seen:
             first_file = seen[decl.name]
             if os.path.abspath(first_file) == os.path.abspath(decl_file):
