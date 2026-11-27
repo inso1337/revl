@@ -119,7 +119,10 @@ def _rpc(port, rpc_method, params=None, *, token=None, rid=1, headers=None,
         params["_meta"] = dict(meta)
     sent = {"MCP-Protocol-Version": PROTOCOL_VERSION, "Mcp-Method": rpc_method}
     if rpc_method == "tools/call":
-        sent["Mcp-Name"] = params.get("name", "")
+        # issue #3537: the server binds Mcp-Name to the hatch-RESOLVED verb,
+        # so a well-formed test call sends the resolved verb's name by default
+        from revl.mcp.disclosure import resolved_call
+        sent["Mcp-Name"] = resolved_call(params)[0] or ""
     sent.update(headers or {})
     return _send(port, {"jsonrpc": "2.0", "id": rid, "method": rpc_method,
                         "params": params}, token=token, headers=sent,
@@ -979,6 +982,35 @@ def test_an_encoded_mcp_name_is_decoded_before_comparison(serving):
                            {"name": "revl_state", "arguments": {}},
                            token=SECRETS["alice"], headers={"Mcp-Name": encoded})
     assert status == 200, body
+
+
+def test_a_hatch_call_binds_mcp_name_to_the_resolved_verb(serving):
+    """Issue #3537: a `revl_verbs` hatch call IS the verb it names (#2073), so
+    the Mcp-Name header binds to the RESOLVED verb — a header naming
+    `revl_verbs` must not authorize a call that runs another verb."""
+    transport = serving()
+    port = _port(transport)
+    token = SECRETS["alice"]
+    hatch = {"name": "revl_verbs",
+             "arguments": {"name": "revl_state", "args": {}}}
+    # header naming the discovery tool while the inner verb is another: refused
+    status, body, _ = _rpc(port, "tools/call", hatch, token=token,
+                           headers={"Mcp-Name": "revl_verbs"})
+    assert status == 400 and body["error"]["code"] == -32020, (status, body)
+    # header naming the resolved verb: accepted, same as a direct call
+    status, body, _ = _rpc(port, "tools/call", hatch, token=token,
+                           headers={"Mcp-Name": "revl_state"})
+    assert status == 200, (status, body)
+
+
+def test_a_direct_call_still_binds_mcp_name_to_its_own_verb(serving):
+    transport = serving()
+    port = _port(transport)
+    status, body, _ = _rpc(port, "tools/call",
+                           {"name": "revl_state", "arguments": {}},
+                           token=SECRETS["alice"],
+                           headers={"Mcp-Name": "revl_state"})
+    assert status == 200, (status, body)
 
 
 # ---------------------------------------------------------------- 10: exposure
