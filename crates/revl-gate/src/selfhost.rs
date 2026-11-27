@@ -14647,6 +14647,10 @@ fn bare_declared(cx: Ctx__m2, name: &str) -> bool {
     return (contains__m2(&cx.scopeNames, name) || contains__m2(&cx.fnNames, name));
 }
 
+fn ctx_scope(cx: Ctx__m2, names: Vec<String>) -> Ctx__m2 {
+    return Ctx__m2 { svcs: cx.svcs.clone(), ambOps: cx.ambOps.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: names, fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), svcTys: cx.svcTys.clone(), localArrows: cx.localArrows.clone(), acqWhere: cx.acqWhere.clone(), emitPos: cx.emitPos.clone(), acqRoot: cx.acqRoot, appr: cx.appr.clone() };
+}
+
 fn ctx_bind(cx: Ctx__m2, names: &[String]) -> Ctx__m2 {
     return Ctx__m2 { svcs: cx.svcs.clone(), ambOps: cx.ambOps.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: union_into(cx.scopeNames.clone(), names), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), svcTys: svc_shadow(cx.svcTys.clone(), names), localArrows: cx.localArrows.clone(), acqWhere: cx.acqWhere.clone(), emitPos: cx.emitPos.clone(), appr: cx.appr.clone(), acqRoot: cx.acqRoot };
 }
@@ -17498,7 +17502,8 @@ fn check_component(comp: CompD, cx: Ctx__m2, gtys: &[Bind], fns: &[FnD], ts: &[T
     let setupAlias = alias_in(&comp.setup, 0i64, cx.handles.clone(), std::collections::HashMap::new());
     let setupArrows = arrows_in(&comp.setup, 0i64, std::collections::HashMap::new());
     let setupSvcTys = svc_tys_in(&comp.setup, 0i64, svc_seed(cx.clone()), cx.clone());
-    let scx = ctx_svc(ctx_arrows(ctx_alias(cx.clone(), setupAlias.clone()), setupArrows.clone()), setupSvcTys.clone());
+    let compLocals = stmt_binds(&comp.setup, 0i64, vec![]);
+    let scx = ctx_scope(ctx_svc(ctx_arrows(ctx_alias(cx.clone(), setupAlias.clone()), setupArrows.clone()), setupSvcTys.clone()), compLocals.clone());
     let sa = walk_stmts(&comp.setup, 0i64, scx.clone(), empty_ac());
     if (sa.msg != "") {
         return mk_verd(tagged(&sa.tag, &sa.msg), body_line(&comp.setup, scx, comp.line));
@@ -17523,7 +17528,6 @@ fn check_component(comp: CompD, cx: Ctx__m2, gtys: &[Bind], fns: &[FnD], ts: &[T
         return mk_verd(tagged("A1", &sA1), if (sl == 0i64) { comp.line } else { sl });
     }
     let pcx = cx.clone();
-    let compLocals = stmt_binds(&comp.setup, 0i64, vec![]);
     let g6Rows = g6_bind_rows(comp.clone());
     let mut pi = 0i64;
     while (pi < comp.provs.revl_length()) {
@@ -17540,7 +17544,7 @@ fn check_component(comp: CompD, cx: Ctx__m2, gtys: &[Bind], fns: &[FnD], ts: &[T
             if (sigv.v != "") {
                 return sigv;
             }
-            let mcx = ctx_svc(ctx_arrows(ctx_alias(pcx.clone(), alias_in(&pm.body, 0i64, pcx.handles.clone(), setupAlias.clone())), arrows_in(&pm.body, 0i64, setupArrows.clone())), svc_tys_in(&pm.body, 0i64, svc_param_tys(setupSvcTys.clone(), pm.clone(), decl.clone(), pcx.clone()), pcx.clone()));
+            let mcx = ctx_scope(ctx_svc(ctx_arrows(ctx_alias(pcx.clone(), alias_in(&pm.body, 0i64, pcx.handles.clone(), setupAlias.clone())), arrows_in(&pm.body, 0i64, setupArrows.clone())), svc_tys_in(&pm.body, 0i64, svc_param_tys(setupSvcTys.clone(), pm.clone(), decl.clone(), pcx.clone()), pcx.clone())), union_into(union_into(compLocals.clone(), &pm.params), &stmt_binds(&pm.body, 0i64, vec![])));
             let rb = mth_rebind(pm.clone(), &union_into(pm.params.clone(), &compLocals), 0i64);
             let a = walk_method_stmts(&pm.body, 0i64, mcx.clone(), empty_ac());
             if (a.msg != "") {
