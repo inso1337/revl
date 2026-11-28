@@ -41027,6 +41027,78 @@ pub fn split_top(s: String, sep: String) -> Vec<String> {
     return parts;
 }
 
+pub fn lower(s: String) -> String {
+    let s_revl_cs: std::vec::Vec<char> = s.chars().collect();
+    let mut out = String::from("");
+    let mut i = 0i64;
+    let n = (s_revl_cs.len() as i64);
+    while (i < n) {
+        let x = { s_revl_cs[(i) as usize] as u32 as i64 };
+        if ((x >= 65i64) && (x <= 90i64)) {
+            out.push_str(&str_char((x).checked_add(32i64).expect("revl: Int overflow")));
+        } else {
+            out.push_str(&({ let _rsn = s_revl_cs.len() as i64; let _rsa = { let x = (i) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = ((i).checked_add(1i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; s_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() }));
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+pub fn upper(s: String) -> String {
+    let s_revl_cs: std::vec::Vec<char> = s.chars().collect();
+    let mut out = String::from("");
+    let mut i = 0i64;
+    let n = (s_revl_cs.len() as i64);
+    while (i < n) {
+        let x = { s_revl_cs[(i) as usize] as u32 as i64 };
+        if ((x >= 97i64) && (x <= 122i64)) {
+            out.push_str(&str_char((x).checked_sub(32i64).expect("revl: Int overflow")));
+        } else {
+            out.push_str(&({ let _rsn = s_revl_cs.len() as i64; let _rsa = { let x = (i) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = ((i).checked_add(1i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; s_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() }));
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+pub fn lines(s: String) -> Vec<String> {
+    let s_revl_cs: std::vec::Vec<char> = s.chars().collect();
+    let mut out: Vec<String> = vec![];
+    let mut cur = String::from("");
+    let mut i = 0i64;
+    let n = (s_revl_cs.len() as i64);
+    while (i < n) {
+        let x = { s_revl_cs[(i) as usize] as u32 as i64 };
+        if ((x == 10i64) || (x == 13i64)) {
+            out.push(cur.clone());
+            cur = String::from("");
+            if (((x == 13i64) && ((i).checked_add(1i64).expect("revl: Int overflow") < n)) && ({ s_revl_cs[((i).checked_add(1i64).expect("revl: Int overflow")) as usize] as u32 as i64 } == 10i64)) {
+                i = (i).checked_add(1i64).expect("revl: Int overflow");
+            }
+        } else {
+            cur.push_str(&({ let _rsn = s_revl_cs.len() as i64; let _rsa = { let x = (i) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = ((i).checked_add(1i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; s_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() }));
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    if (cur != "") {
+        out.push(cur.clone());
+    }
+    return out;
+}
+
+pub fn slice_from(s: String, i: i64) -> String {
+    let s_revl_cs: std::vec::Vec<char> = s.chars().collect();
+    let mut start = i;
+    if (start < 0i64) {
+        start = 0i64;
+    }
+    let n = (s_revl_cs.len() as i64);
+    if (start > n) {
+        start = n;
+    }
+    return { let _rsn = s_revl_cs.len() as i64; let _rsa = { let x = (start) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = (n) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; s_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() };
+}
+
 pub fn str_newline() -> String {
     return format!("\n");
 }
