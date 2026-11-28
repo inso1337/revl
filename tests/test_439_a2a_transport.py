@@ -3030,7 +3030,8 @@ def _compiled_namespace(ir):
     spec.loader.exec_module(emitter)
     stub = types.ModuleType("runtime")
     stub.__getattr__ = lambda name: (
-        (lambda *a, **k: (lambda f: f)) if name == "estop_gated"
+        (lambda *a, **k: (lambda f: f)) if name in (
+            "estop_gated", "int_result", "secret_result", "declared_crossing")
         else (lambda *a, **k: None))
     previous = sys.modules.get("runtime")
     sys.modules["runtime"] = stub

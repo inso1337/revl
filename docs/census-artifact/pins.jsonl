@@ -1,6 +1,932 @@
 ["decides_verdicts", "backends/python/emit.py"]
 
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/01-kv-provider/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/01-kv-provider/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/01-kv-provider/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/01-kv-provider/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/02-pg-pool/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/02-pg-pool/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/02-pg-pool/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/02-pg-pool/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/02-pg-pool/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/02-pg-pool/v2host/attempt-3.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/03-user-cache/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/03-user-cache/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/03-user-cache/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/03-user-cache/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/04-migrator/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/04-migrator/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/04-migrator/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/05-rate-limiter/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/05-rate-limiter/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/05-rate-limiter/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/05-rate-limiter/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/05-rate-limiter/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/06-audit-logger/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/06-audit-logger/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/06-audit-logger/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/06-audit-logger/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/07-session-store/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/07-session-store/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/07-session-store/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/08-feature-flags/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/08-feature-flags/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/08-feature-flags/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/08-feature-flags/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/08-feature-flags/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/09-warmup-cache/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/09-warmup-cache/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/09-warmup-cache/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/09-warmup-cache/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/10-metrics/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/10-metrics/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/10-metrics/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/11-outbox/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/11-outbox/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/11-outbox/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/12-replicator/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/12-replicator/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/12-replicator/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/12-replicator/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/12-replicator/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/13-provider-consumer-pair/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/13-provider-consumer-pair/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/13-provider-consumer-pair/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/13-provider-consumer-pair/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/13-provider-consumer-pair/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/14-health-check/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/14-health-check/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/14-health-check/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/15-search-index/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/15-search-index/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/15-search-index/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/15-search-index/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/16-notifier/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/16-notifier/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/16-notifier/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/16-notifier/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/16-notifier/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/17-billing-ledger/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/17-billing-ledger/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/17-billing-ledger/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/17-billing-ledger/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/17-billing-ledger/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/18-config-echo/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/18-config-echo/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/18-config-echo/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/19-lock-manager/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/19-lock-manager/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/19-lock-manager/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/19-lock-manager/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/20-work-queue/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/20-work-queue/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/20-work-queue/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/20-work-queue/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/21-two-stage-boot/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/21-two-stage-boot/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/21-two-stage-boot/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/22-cascade/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/22-cascade/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/22-cascade/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/22-cascade/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/22-cascade/v2host/attempt-3.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/23-dedupe-store/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/23-dedupe-store/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/23-dedupe-store/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/24-normalizing-cache/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/24-normalizing-cache/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/24-normalizing-cache/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/24-normalizing-cache/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/25-checksum-log/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/25-checksum-log/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/25-checksum-log/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/25-checksum-log/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/25-checksum-log/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/26-log-rotator/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/26-log-rotator/v1/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/26-log-rotator/v1/attempt-3.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/26-log-rotator/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/26-log-rotator/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/26-log-rotator/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/26-log-rotator/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/27-inventory/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/27-inventory/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/27-inventory/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/28-greeter/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/28-greeter/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/28-greeter/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/28-greeter/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/29-mesh/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/29-mesh/v1/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/29-mesh/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/29-mesh/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/29-mesh/v2/attempt-3.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/29-mesh/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/29-mesh/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/29-mesh/v2host/attempt-3.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/30-saga-transfer/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/30-saga-transfer/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/baseline-deepseek-v4-pro/30-saga-transfer/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/01-kv-provider/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/01-kv-provider/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/01-kv-provider/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/02-pg-pool/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/02-pg-pool/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/02-pg-pool/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/03-user-cache/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/03-user-cache/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/03-user-cache/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/04-migrator/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/04-migrator/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/04-migrator/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/05-rate-limiter/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/05-rate-limiter/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/05-rate-limiter/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/06-audit-logger/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/06-audit-logger/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/06-audit-logger/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/07-session-store/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/07-session-store/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/07-session-store/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/08-feature-flags/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/08-feature-flags/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/08-feature-flags/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/09-warmup-cache/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/09-warmup-cache/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/09-warmup-cache/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/10-metrics/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/10-metrics/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/10-metrics/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/11-outbox/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/11-outbox/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/11-outbox/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/12-replicator/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/12-replicator/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/12-replicator/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/13-provider-consumer-pair/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/13-provider-consumer-pair/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/13-provider-consumer-pair/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/14-health-check/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/14-health-check/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/14-health-check/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/15-search-index/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/15-search-index/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/15-search-index/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/16-notifier/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/16-notifier/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/16-notifier/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/17-billing-ledger/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/17-billing-ledger/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/17-billing-ledger/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/18-config-echo/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/18-config-echo/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/18-config-echo/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/19-lock-manager/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/19-lock-manager/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/19-lock-manager/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/20-work-queue/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/20-work-queue/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/20-work-queue/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/21-two-stage-boot/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/21-two-stage-boot/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/21-two-stage-boot/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/22-cascade/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/22-cascade/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/22-cascade/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/23-dedupe-store/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/23-dedupe-store/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/23-dedupe-store/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/24-normalizing-cache/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/24-normalizing-cache/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/24-normalizing-cache/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/25-checksum-log/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/25-checksum-log/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/25-checksum-log/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/26-log-rotator/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/26-log-rotator/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/26-log-rotator/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/27-inventory/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/27-inventory/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/27-inventory/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/28-greeter/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/28-greeter/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/28-greeter/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/29-mesh/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/29-mesh/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/29-mesh/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/30-saga-transfer/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/30-saga-transfer/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/gpt-oss-20b-oneshot/30-saga-transfer/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/mock-pinned/01-kv-provider/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/mock-pinned/01-kv-provider/v1/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/mock-pinned/01-kv-provider/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/mock-pinned/01-kv-provider/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/mock-pinned/01-kv-provider/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/mock-pinned/01-kv-provider/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/mock-validation/01-kv-provider/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/mock-validation/01-kv-provider/v1/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/mock-validation/01-kv-provider/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/mock-validation/01-kv-provider/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/mock-validation/01-kv-provider/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/mock-validation/01-kv-provider/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/mock-validation/02-pg-pool/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/mock-validation/02-pg-pool/v1/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/mock-validation/02-pg-pool/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/mock-validation/02-pg-pool/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/mock-validation/02-pg-pool/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/mock-validation/02-pg-pool/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/mock-validation/03-user-cache/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/mock-validation/03-user-cache/v1/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/mock-validation/03-user-cache/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/mock-validation/03-user-cache/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/mock-validation/03-user-cache/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/mock-validation/03-user-cache/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/opus-4-8-pilot/01-kv-provider/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/opus-4-8-pilot/01-kv-provider/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/opus-4-8-pilot/01-kv-provider/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/opus-4-8-pilot/02-pg-pool/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/opus-4-8-pilot/02-pg-pool/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/opus-4-8-pilot/02-pg-pool/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/opus-4-8-pilot/03-user-cache/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/opus-4-8-pilot/03-user-cache/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/opus-4-8-pilot/03-user-cache/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/pilot-rest/01-kv-provider/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/pilot-rest/01-kv-provider/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/pilot-v2/01-kv-provider/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/pinned-three-host/01-kv-provider/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/pinned-three-host/01-kv-provider/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/pinned-three-host/02-pg-pool/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/pinned-three-host/02-pg-pool/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/pinned-three-host/02-pg-pool/v2/attempt-3.rvl"]
+
+["decides_verdicts", "bench/results/pinned-three-host/03-user-cache/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/pinned-three-host/03-user-cache/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/pinned-three-host/03-user-cache/v2/attempt-3.rvl"]
+
+["decides_verdicts", "bench/results/pinned-three-host/04-migrator/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/pinned-three-host/05-rate-limiter/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/pinned-three-host/06-audit-logger/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/01-kv-provider/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/01-kv-provider/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/01-kv-provider/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/02-pg-pool/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/02-pg-pool/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/02-pg-pool/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/02-pg-pool/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/03-user-cache/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/03-user-cache/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/03-user-cache/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/04-migrator/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/04-migrator/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/04-migrator/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/05-rate-limiter/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/05-rate-limiter/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/05-rate-limiter/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/06-audit-logger/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/06-audit-logger/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/06-audit-logger/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/07-session-store/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/07-session-store/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/07-session-store/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/08-feature-flags/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/08-feature-flags/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/08-feature-flags/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/09-warmup-cache/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/09-warmup-cache/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/09-warmup-cache/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/10-metrics/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/10-metrics/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/10-metrics/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/11-outbox/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/11-outbox/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/11-outbox/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/12-replicator/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/12-replicator/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/12-replicator/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/13-provider-consumer-pair/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/13-provider-consumer-pair/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/13-provider-consumer-pair/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/14-health-check/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/14-health-check/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/14-health-check/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/15-search-index/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/15-search-index/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/15-search-index/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/16-notifier/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/16-notifier/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/16-notifier/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/17-billing-ledger/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/17-billing-ledger/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/17-billing-ledger/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/18-config-echo/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/18-config-echo/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/18-config-echo/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/19-lock-manager/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/19-lock-manager/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/19-lock-manager/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/20-work-queue/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/20-work-queue/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/20-work-queue/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/21-two-stage-boot/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/21-two-stage-boot/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/21-two-stage-boot/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/22-cascade/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/22-cascade/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/22-cascade/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/22-cascade/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/23-dedupe-store/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/23-dedupe-store/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/23-dedupe-store/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/24-normalizing-cache/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/24-normalizing-cache/v1/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/24-normalizing-cache/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/24-normalizing-cache/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/24-normalizing-cache/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/rerun-deepseek-v4-pro-20260826/25-checksum-log/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/01-kv-provider/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/01-kv-provider/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/01-kv-provider/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/02-pg-pool/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/02-pg-pool/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/02-pg-pool/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/02-pg-pool/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/02-pg-pool/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/03-user-cache/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/03-user-cache/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/03-user-cache/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/03-user-cache/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/04-migrator/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/04-migrator/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/04-migrator/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/05-rate-limiter/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/05-rate-limiter/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/05-rate-limiter/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/06-audit-logger/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/06-audit-logger/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/06-audit-logger/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/06-audit-logger/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/06-audit-logger/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/07-session-store/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/07-session-store/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/07-session-store/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/08-feature-flags/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/08-feature-flags/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/08-feature-flags/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/09-warmup-cache/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/09-warmup-cache/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/09-warmup-cache/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/10-metrics/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/10-metrics/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/10-metrics/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/11-outbox/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/11-outbox/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/11-outbox/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/12-replicator/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/12-replicator/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/12-replicator/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/12-replicator/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/13-provider-consumer-pair/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/13-provider-consumer-pair/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/13-provider-consumer-pair/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/14-health-check/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/14-health-check/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/14-health-check/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/15-search-index/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/15-search-index/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/15-search-index/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/15-search-index/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/16-notifier/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/16-notifier/v1/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/16-notifier/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/16-notifier/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/16-notifier/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/16-notifier/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/17-billing-ledger/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/17-billing-ledger/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/17-billing-ledger/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/17-billing-ledger/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/18-config-echo/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/18-config-echo/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/18-config-echo/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/19-lock-manager/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/19-lock-manager/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/19-lock-manager/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/19-lock-manager/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/20-work-queue/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/20-work-queue/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/20-work-queue/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/20-work-queue/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/20-work-queue/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/21-two-stage-boot/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/21-two-stage-boot/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/21-two-stage-boot/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/22-cascade/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/22-cascade/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/22-cascade/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/22-cascade/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/23-dedupe-store/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/23-dedupe-store/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/23-dedupe-store/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/24-normalizing-cache/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/24-normalizing-cache/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/24-normalizing-cache/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/24-normalizing-cache/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/25-checksum-log/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/25-checksum-log/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/25-checksum-log/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/25-checksum-log/v2/attempt-3.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/25-checksum-log/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/25-checksum-log/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/26-log-rotator/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/26-log-rotator/v1/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/26-log-rotator/v1/attempt-3.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/26-log-rotator/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/26-log-rotator/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/26-log-rotator/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/26-log-rotator/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/27-inventory/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/27-inventory/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/27-inventory/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/28-greeter/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/28-greeter/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/28-greeter/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/28-greeter/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/29-mesh/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/29-mesh/v1/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/29-mesh/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/29-mesh/v2/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/29-mesh/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/29-mesh/v2host/attempt-2.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/30-saga-transfer/v1/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/30-saga-transfer/v2/attempt-1.rvl"]
+
+["decides_verdicts", "bench/results/typed-deepseek-v4-pro/30-saga-transfer/v2host/attempt-1.rvl"]
+
+["decides_verdicts", "tests/_backend_import.py"]
+
 ["decides_verdicts", "tests/_compiled_ir.py"]
+
+["decides_verdicts", "tests/_load_by_path.py"]
+
+["decides_verdicts", "tests/test_2490_provide_local_constructor_name.py"]
+
+["decides_verdicts", "tests/test_423_component_body_call_checking.py"]
+
+["decides_verdicts", "tests/test_selfhost_compile.py"]
 
 ["decides_verdicts", "tests/test_selfhost_lower.py"]
 
@@ -10,9 +936,15 @@
 
 ["reference", "src/revl/__init__.py"]
 
+["reference", "src/revl/_childproc.py"]
+
 ["reference", "src/revl/_doc_text.py"]
 
+["reference", "src/revl/_ecdsa_backend.py"]
+
 ["reference", "src/revl/_paths.py"]
+
+["reference", "src/revl/activation.py"]
 
 ["reference", "src/revl/admission.py"]
 
@@ -30,11 +962,17 @@
 
 ["reference", "src/revl/decode_grammar.py"]
 
+["reference", "src/revl/deploy.py"]
+
 ["reference", "src/revl/diagnostics.py"]
+
+["reference", "src/revl/distribute.py"]
 
 ["reference", "src/revl/emission_analysis.py"]
 
 ["reference", "src/revl/errors.py"]
+
+["reference", "src/revl/estop.py"]
 
 ["reference", "src/revl/export_area.py"]
 
@@ -78,15 +1016,29 @@
 
 ["reference", "src/revl/parser.py"]
 
+["reference", "src/revl/peer_offer.py"]
+
+["reference", "src/revl/placement.py"]
+
+["reference", "src/revl/placement_wal.py"]
+
 ["reference", "src/revl/policy.py"]
 
 ["reference", "src/revl/realm_placeholders.py"]
+
+["reference", "src/revl/refusal.py"]
 
 ["reference", "src/revl/resources.py"]
 
 ["reference", "src/revl/retention.py"]
 
+["reference", "src/revl/sandbox_runtime.py"]
+
 ["reference", "src/revl/taint.py"]
+
+["reference", "src/revl/tee_attestation.py"]
+
+["reference", "src/revl/tee_quote.py"]
 
 ["reference", "src/revl/type_arity.py"]
 

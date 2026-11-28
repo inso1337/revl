@@ -91,6 +91,7 @@ _IMPORT_ALIAS = {
     "clear_session_owner": "_revl_clear_session_owner",
     "mark_secret": "_revl_mark_secret",
     "secret_result": "_revl_secret_result",
+    "int_result": "_revl_int_result",
     "estop_gated": "_revl_estop_gated",
     "declare_secret_types": "_revl_declare_secret_types",
     "declared_crossing": "_revl_declared_crossing",
@@ -4872,6 +4873,32 @@ def _split_type_name(name: str) -> tuple:
     return head, _split_types(name[name.index("[") + 1: name.rindex("]")])
 
 
+def _int_reachable(roots, types: dict) -> bool:
+    """True iff an `Int` is REACHABLE from the declared type strings `roots` -
+    a bare `Int`, an `Int` in a generic argument (`List[Int]`, `Opt[Int]`,
+    `Map[Str, Int]`, ...), or an `Int` in a field of a reachable record (issue
+    #3441: the extern boundary range-checks everything the declared return can
+    carry, so the check is gated on exactly this walk). Cyclic types terminate
+    on `seen`."""
+    pending = [name for name in roots if name]
+    seen: set = set()
+    while pending:
+        name = pending.pop()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        head, args = _split_type_name(name)
+        if head == "Int":
+            return True
+        spec = types.get(head) if head else None
+        fields = spec.get("fields") if isinstance(spec, dict) else None
+        if isinstance(fields, dict):
+            pending.extend(fields.values())
+        else:
+            pending.extend(args)
+    return False
+
+
 def _secret_shape_facts(roots, types: dict) -> tuple:
     """`(needs_shape, record_table)` for declared `Secret[T]` type strings.
 
@@ -6087,6 +6114,13 @@ def _emit_externs(externs: list, crossings: dict | None = None,
                 out.add(0, f"@{_runtime_ref('secret_result')}(_declared={returns!r})")
             else:
                 out.add(0, f"@{_runtime_ref('secret_result')}")
+        # issue #3441: an extern whose declared return can hold an `Int` gets
+        # its result range-checked at the boundary, naming the extern, so an
+        # out-of-range host value fails where it enters instead of later in
+        # unrelated revl arithmetic. Emitted ONLY for an Int-reachable return,
+        # so every other extern is byte-identical.
+        if _int_reachable([ext.get("returns") or ""], _PY_TYPES):
+            out.add(0, f"@{_runtime_ref('int_result')}({ext['name']!r})")
         # item 396 option B: a `@py ref sym from "module.py"` extern emits a LAZY
         # import THUNK — never a body — that imports the host symbol at the
         # extern's FIRST CALL, inside the extern frame, and caches it. A module-
@@ -7483,6 +7517,12 @@ def emit(ir: dict) -> str:
         # outside any component emitter, so the import is gated here rather than
         # through `emitter.uses`.
         | ({"secret_result"} if any(ext.get("secret_return") for ext in externs)
+           else set())
+        # issue #3441: an Int-reachable extern return is range-checked at the
+        # boundary (`_emit_externs`), so the runtime helper is imported only
+        # when some extern declares one.
+        | ({"int_result"} if any(
+            _int_reachable([ext.get("returns") or ""], types) for ext in externs)
            else set())
         # an extern declaring `compensate` or a computer-use capability is
         # decorated (`_emit_externs`). A document with neither is byte-identical.

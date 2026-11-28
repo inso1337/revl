@@ -4577,6 +4577,18 @@ _REVL_TO_BIGINT_HELPER = """function revlToBigInt(v: unknown): bigint {
   return v as bigint // not an integer: leave it for the caller to refuse loudly
 }"""
 
+# issue #3441: the result-side boundary check for a verbatim `@ts` body
+# declared `Int`. `revlToBigInt` coerces the type but not the RANGE: a body
+# returning 2n**63n was accepted and faulted later in unrelated arithmetic.
+# `revlExternInt` adds the i64 bound and fails naming the extern, at the
+# boundary where the value enters. Emitted only when some extern's wrapper
+# uses it, so every other module is byte-identical.
+_REVL_EXTERN_INT_HELPER = """function revlExternInt(v: unknown, name: string): bigint {
+  const b = revlToBigInt(v)
+  if (BigInt.asIntN(64, b) !== b) throw new RangeError('extern `' + name + '` returned an Int outside the 64-bit range: ' + b)
+  return b
+}"""
+
 # Int32 is a `number`; the bound is imposed the same way, at 32 bits. The
 # double holds every i32 sum/product exactly, so only the range check is needed
 # (docs/arithmetic.md).
@@ -4816,7 +4828,7 @@ def _ts_extern_needs_int_coercion(ext: dict) -> bool:
 
 
 def _ts_extern_body_lines(body: str, coerce_int: bool, is_async: bool,
-                          where: str = "") -> list[str]:
+                          where: str = "", extern_name: str = "") -> list[str]:
     """The verbatim `@ts` body, spliced at the extern's own indentation.
 
     `body` is already dedented and its own `return` statements are its own —
@@ -4838,8 +4850,12 @@ def _ts_extern_body_lines(body: str, coerce_int: bool, is_async: bool,
     if not coerce_int:
         return ["  " + line for line in lines]
     kw = "async " if is_async else ""
-    head = "  return revlToBigInt(" + ("await " if is_async else "") + f"({kw}() => {{"
-    return [head, *["    " + line for line in lines], "  })())"]
+    # issue #3441: the coerced result is also RANGE-checked here, naming the
+    # extern, so an out-of-range host value fails at the boundary.
+    head = ("  return revlExternInt(" + ("await " if is_async else "")
+            + f"({kw}() => {{")
+    return [head, *["    " + line for line in lines],
+            "  })(), " + _string(extern_name) + ")"]
 
 
 def _revl_helpers(ir: dict) -> list[str]:
@@ -4870,6 +4886,8 @@ def _revl_helpers(ir: dict) -> list[str]:
     # `Int`. Gated by the same predicate the wrapper itself uses.
     if any(_ts_extern_needs_int_coercion(e) for e in ir.get("externs") or []):
         out.extend([_REVL_TO_BIGINT_HELPER, ""])
+        # issue #3441: the range-check wrapper, gated by the same predicate
+        out.extend([_REVL_EXTERN_INT_HELPER, ""])
     if _uses_bounded_int32(ir):
         out.extend([_REVL_I32_HELPER, ""])
     if _uses_int_arith(ir):
@@ -5999,7 +6017,8 @@ def _emit_ts_externs(externs: list, ui_externs: Optional[set] = None) -> list[st
             body = textwrap.dedent(bodies["ts"].strip("\n"))
             if body:
                 lines.extend(_ts_extern_body_lines(
-                    body, coerce_int, True, f"extern `{ext.get('name')}`"))
+                    body, coerce_int, True, f"extern `{ext.get('name')}`",
+                    str(ext.get("name") or "")))
             else:
                 lines.append("  // (empty @ts body)")
             lines.append("}")
@@ -6018,7 +6037,8 @@ def _emit_ts_externs(externs: list, ui_externs: Optional[set] = None) -> list[st
         body = textwrap.dedent(bodies["ts"].strip("\n"))
         if body:
             lines.extend(_ts_extern_body_lines(
-                body, coerce_int, False, f"extern `{ext.get('name')}`"))
+                body, coerce_int, False, f"extern `{ext.get('name')}`",
+                str(ext.get("name") or "")))
         else:
             lines.append("  // (empty @ts body)")
         lines.append("}")

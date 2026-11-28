@@ -126,6 +126,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from revl import compile_files  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "tests"))
+import test_selfhost_compile as _shc  # noqa: E402
 
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_rust_corpus"
 CORPUS = [
@@ -422,8 +423,7 @@ def _exec_emitted() -> dict:
         "rsemit_selfhost_backend", ROOT / "backends" / "python" / "emit.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    stub = types.ModuleType("runtime")
-    stub.__getattr__ = lambda name: (lambda *a, **k: None)  # PEP 562
+    stub = _shc._runtime_stub()
     had_runtime = "runtime" in sys.modules
     previous = sys.modules.get("runtime")
     sys.modules["runtime"] = stub

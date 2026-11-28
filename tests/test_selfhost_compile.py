@@ -65,6 +65,27 @@ from _load_by_path import load_by_path  # noqa: E402
 
 # ---------------------------------------------------------------- harness
 
+def _runtime_stub() -> types.ModuleType:
+    """The lazy `runtime` stand-in every selfhost harness execs emitted modules
+    against. Decorator factories the emitter puts on extern `def`s (issue
+    #3441's `int_result` among them - stdlib externs like `value_len` return
+    `Int`) must answer with a real pass-through decorator under this stub, or
+    `@_revl_int_result('x')` would decorate with `None`."""
+    stub = types.ModuleType("runtime")
+
+    def _attr(name):
+        if name in ("int_result", "estop_gated", "secret_result", "declared_crossing"):
+            def _factory(*a, **k):
+                if a and callable(a[0]):  # used bare: `@_revl_secret_result`
+                    return a[0]
+                return lambda fn: fn
+            return _factory
+        return lambda *a, **k: None
+
+    stub.__getattr__ = _attr  # PEP 562
+    return stub
+
+
 def _exec_selfhost(rvl_relpath: str) -> dict:
     """Compile a self-host stage (selfhost/<file>.rvl) with revl, emit python,
     exec it, and return its module namespace. Identical in shape to the harness
@@ -78,8 +99,7 @@ def _exec_selfhost(rvl_relpath: str) -> dict:
         ROOT / "backends" / "python" / "emit.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    stub = types.ModuleType("runtime")
-    stub.__getattr__ = lambda name: (lambda *a, **k: None)  # PEP 562
+    stub = _runtime_stub()
     had = "runtime" in sys.modules
     previous = sys.modules.get("runtime")
     sys.modules["runtime"] = stub

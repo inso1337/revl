@@ -127,6 +127,8 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+from test_selfhost_compile import _runtime_stub  # noqa: E402
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_files, compile_source  # noqa: E402
@@ -254,8 +256,7 @@ def _exec_emitted() -> dict:
         "pyemit_selfhost_lower_ir", ROOT / "backends" / "python" / "emit.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    stub = types.ModuleType("runtime")
-    stub.__getattr__ = lambda name: (lambda *a, **k: None)  # PEP 562
+    stub = _runtime_stub()
     had = "runtime" in sys.modules
     previous = sys.modules.get("runtime")
     sys.modules["runtime"] = stub
@@ -1135,8 +1136,7 @@ def test_native_component_and_extern_ir_is_emitter_ready(lower_to_ir):
     AND the externs document — the native component/method body and externs IR is
     emitter-ready, the completion proof for component programs (item 230)."""
     refemit = _reference_emit()
-    stub = types.ModuleType("runtime")
-    stub.__getattr__ = lambda name: (lambda *a, **k: None)
+    stub = _runtime_stub()
     had = "runtime" in sys.modules
     previous = sys.modules.get("runtime")
     sys.modules["runtime"] = stub
@@ -1180,8 +1180,7 @@ def test_native_function_ir_is_emitter_ready(lower_to_ir):
     produces the SAME bytes as applied to the reference IR, for every function
     document — the native `functions`/`types` IR is emitter-ready."""
     refemit = _reference_emit()
-    stub = types.ModuleType("runtime")
-    stub.__getattr__ = lambda name: (lambda *a, **k: None)
+    stub = _runtime_stub()
     had = "runtime" in sys.modules
     previous = sys.modules.get("runtime")
     sys.modules["runtime"] = stub
@@ -1216,8 +1215,7 @@ def test_native_ir_is_emitter_ready(lower_to_ir):
     produces the SAME bytes as applied to the reference IR (services_basic) — the
     native IR is emitter-ready end to end."""
     refemit = _reference_emit()
-    stub = types.ModuleType("runtime")
-    stub.__getattr__ = lambda name: (lambda *a, **k: None)
+    stub = _runtime_stub()
     had = "runtime" in sys.modules
     previous = sys.modules.get("runtime")
     sys.modules["runtime"] = stub

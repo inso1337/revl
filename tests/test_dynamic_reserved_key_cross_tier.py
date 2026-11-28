@@ -48,6 +48,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "tests"))
+from test_selfhost_compile import _runtime_stub  # noqa: E402
 
 from revl import compile_files, compile_source  # noqa: E402
 from revl.errors import RevlError  # noqa: E402
@@ -134,8 +136,7 @@ def _emit(backend: str, ir: dict) -> str:
 
 def _exec_py(ir: dict) -> dict:
     code = _emit("python", ir)
-    stub = types.ModuleType("runtime")
-    stub.__getattr__ = lambda name: (lambda *a, **k: None)  # PEP 562
+    stub = _runtime_stub()
     had, previous = "runtime" in sys.modules, sys.modules.get("runtime")
     sys.modules["runtime"] = stub
     try:

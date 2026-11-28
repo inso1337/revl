@@ -2554,21 +2554,23 @@ fn ui_crossing_wrapper(ext: Any, name: Str, impl: Str, params: Str, arg_list: St
 // on the async extern path, where the body may `await`; the `await` that
 // follows resolves it before the coercion.
 // Mirrors `_ts_extern_body_lines` in backends/typescript/emit.py.
-fn extern_body_lines(body: Str, coerce_int: Bool, is_async: Bool) -> List[Str] {
+fn extern_body_lines(body: Str, coerce_int: Bool, is_async: Bool, extern_name: Str) -> List[Str] {
   var out = []
   let lines = py_splitlines(body)
   if (!coerce_int) {
     for (line of lines) { out = out.push("  ".concat(line)) }
     return out
   }
-  var head = "  return revlToBigInt("
+  // issue #3441: the coerced result is also RANGE-checked at the boundary,
+  // naming the extern (mirrors `_ts_extern_body_lines` in the reference).
+  var head = "  return revlExternInt("
   if (is_async) { head = head.concat("await ") }
   head = head.concat("(")
   if (is_async) { head = head.concat("async ") }
   head = head.concat("() => {")
   out = out.push(head)
   for (line of lines) { out = out.push("    ".concat(line)) }
-  out = out.push("  })())")
+  out = out.push("  })(), ".concat(json_dumps(extern_name)).concat(")"))
   return out
 }
 
@@ -2679,7 +2681,7 @@ fn emit_externs(externs: List[Any], ui_externs: List[Str], module: Map[Str, Str]
       if (body == "") {
         out = out.push("  // (empty @ts body)")
       } else {
-        for (line of extern_body_lines(body, coerce_int, value_bool(value_field(ext, "async")))) {
+        for (line of extern_body_lines(body, coerce_int, value_bool(value_field(ext, "async")), value_str(value_field(ext, "name")))) {
           out = out.push(line)
         }
       }
@@ -3843,6 +3845,21 @@ fn revl_to_bigint_helper() -> Str {
   return o.join(newline())
 }
 
+// issue #3441: the result-side boundary RANGE check for a verbatim `@ts` body
+// declared `Int`. The mirror of `_REVL_EXTERN_INT_HELPER` in
+// backends/typescript/emit.py: `revlToBigInt` coerces the type but not the
+// range, so a body returning 2n**63n was accepted; this adds the i64 bound and
+// fails naming the extern, at the boundary where the value enters.
+fn revl_extern_int_helper() -> Str {
+  var o = []
+  o = o.push("function revlExternInt(v: unknown, name: string): bigint {")
+  o = o.push("  const b = revlToBigInt(v)")
+  o = o.push("  if (BigInt.asIntN(64, b) !== b) throw new RangeError('extern `' + name + '` returned an Int outside the 64-bit range: ' + b)")
+  o = o.push("  return b")
+  o = o.push("}")
+  return o.join(newline())
+}
+
 fn revl_i64_helper() -> Str {
   var o = []
   o = o.push("const REVL_I64_MIN = -(2n ** 63n)")
@@ -4614,7 +4631,13 @@ fn revl_helpers(ir: Any) -> List[Str] {
   // issue #2147: the result-side coercion of a verbatim `@ts` body declared
   // `Int`. Gated by the same predicate the wrapper itself uses, and emitted at
   // the reference's position (after `revlI64`, before `revlI32`).
-  if (uses_extern_int_coercion(ir)) { out = out.push(revl_to_bigint_helper()); out = out.push("") }
+  if (uses_extern_int_coercion(ir)) {
+    out = out.push(revl_to_bigint_helper())
+    out = out.push("")
+    // issue #3441: the range-check wrapper, gated by the same predicate
+    out = out.push(revl_extern_int_helper())
+    out = out.push("")
+  }
   if (uses_bounded_int32(ir)) { out = out.push(revl_i32_helper()); out = out.push("") }
   if (uses_int_arith(ir)) { out = out.push(revl_int_arith_helper()); out = out.push("") }
   if (uses_checked_arith(ir)) { out = out.push(revl_checked_arith_helper()); out = out.push("") }

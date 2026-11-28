@@ -2420,6 +2420,66 @@ def secret_result(fn=None, *, _declared=None):
     return _wrap(fn)
 
 
+_INT64_MIN = -(2 ** 63)
+_INT64_MAX = 2 ** 63 - 1
+
+
+def _check_int_tree(name: str, value) -> None:
+    """Issue #3441: every `int` inside a value returned by extern `name` must
+    fit the 64-bit `Int` the declaration promises. `bool` is an `int` subclass
+    in Python but a distinct revl type, so it passes through; records and maps
+    are dicts and lists/tuples/sets are containers, walked recursively so an
+    `Int` FIELD of a returned record or list is checked where it sits."""
+    if isinstance(value, bool):
+        return
+    if isinstance(value, int):
+        if value < _INT64_MIN or value > _INT64_MAX:
+            raise RuntimeError(
+                f"extern `{name}` returned an Int outside the 64-bit range: {value}")
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _check_int_tree(name, key)
+            _check_int_tree(name, item)
+        return
+    if isinstance(value, (list, tuple, set, frozenset)):
+        for item in value:
+            _check_int_tree(name, item)
+
+
+def int_result(name: str):
+    """Decorator on an extern whose DECLARED return can hold an `Int` (issue
+    #3441): the boundary checks the returned value against the 64-bit range and
+    fails naming the extern, instead of letting an out-of-range host value be
+    accepted and fault later in unrelated revl arithmetic. One wrapper per
+    declaration, the verbatim `@py` body untouched - the same shape as
+    `secret_result`."""
+    def _wrap(fn):
+        if inspect.iscoroutinefunction(fn):
+            async def _int_result_async(*args, **kwargs):
+                value = await fn(*args, **kwargs)
+                _check_int_tree(name, value)
+                return value
+            _int_result_async.__name__ = fn.__name__
+            _int_result_async.__qualname__ = fn.__qualname__
+            _int_result_async.__doc__ = fn.__doc__
+            return _int_result_async
+
+        def _int_result_sync(*args, **kwargs):
+            value = fn(*args, **kwargs)
+            # a sync extern handing back an awaitable is a colour error the
+            # ref thunk already refuses; do not check it here
+            if not inspect.isawaitable(value):
+                _check_int_tree(name, value)
+            return value
+        _int_result_sync.__name__ = fn.__name__
+        _int_result_sync.__qualname__ = fn.__qualname__
+        _int_result_sync.__doc__ = fn.__doc__
+        return _int_result_sync
+
+    return _wrap
+
+
 # ---------------------------------------------------------------------------
 # item 259 slice 2: checked parallel emissions - the py runtime fan-out
 # ---------------------------------------------------------------------------

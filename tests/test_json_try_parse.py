@@ -50,6 +50,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "tests"))
+from test_selfhost_compile import _runtime_stub  # noqa: E402
 
 from _builtin_cases import serve_builtin_cases  # noqa: E402
 from revl import compile_files  # noqa: E402
@@ -84,8 +86,7 @@ def _emit(backend: str, ir: dict) -> str:
 
 def _exec_py(ir: dict) -> dict:
     code = _emit("python", ir)
-    stub = types.ModuleType("runtime")
-    stub.__getattr__ = lambda name: (lambda *a, **k: None)  # PEP 562
+    stub = _runtime_stub()
     # issue #1932: the module imports the built-in Result cases from the shared
     # runtime, so the stub must serve the real ones (an `Ok(x)` that answered
     # `None` would silently erase a Result the emitted code goes on to inspect).

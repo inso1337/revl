@@ -110,6 +110,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from revl import compile_files  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "tests"))
+from test_selfhost_compile import _runtime_stub  # noqa: E402
 
 from _boundary_witness import shared_witness_token_reason  # noqa: E402
 from _builtin_cases import serve_builtin_cases  # noqa: E402
@@ -508,8 +509,7 @@ def _exec_emitted() -> dict:
         "pyemit_selfhost_backend", ROOT / "backends" / "python" / "emit.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    stub = types.ModuleType("runtime")
-    stub.__getattr__ = lambda name: (lambda *a, **k: None)  # PEP 562
+    stub = _runtime_stub()
     had_runtime = "runtime" in sys.modules
     previous = sys.modules.get("runtime")
     sys.modules["runtime"] = stub
@@ -758,8 +758,7 @@ def test_selfhosted_emitter_lowers_components_and_services(emitted):
     src = emitted["emit_py_src"](ir)
     assert "def _backing_apply(_revl_ctx, _revl_config):" in src
     assert "yield _revl_ctx.provide('health')" in src
-    stub = types.ModuleType("runtime")
-    stub.__getattr__ = lambda name: (lambda *a, **k: None)  # PEP 562
+    stub = _runtime_stub()
     had = "runtime" in sys.modules
     prev = sys.modules.get("runtime")
     sys.modules["runtime"] = stub

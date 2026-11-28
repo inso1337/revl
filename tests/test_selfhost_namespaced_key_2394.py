@@ -41,6 +41,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tests"))
+import test_selfhost_compile as _shc  # noqa: E402
 
 from revl import compile_files  # noqa: E402
 
@@ -145,8 +146,7 @@ def _exec_stage(rel: str) -> dict:
         "ns2394_emit_" + rel.replace("/", "_"), ROOT / "backends" / "python" / "emit.py")
     emitter = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(emitter)
-    stub = types.ModuleType("runtime")
-    stub.__getattr__ = lambda name: (lambda *a, **k: None)
+    stub = _shc._runtime_stub()
     had = "runtime" in sys.modules
     previous = sys.modules.get("runtime")
     sys.modules["runtime"] = stub
