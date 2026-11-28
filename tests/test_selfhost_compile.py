@@ -800,13 +800,14 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # is the only corpus document that reaches `journalBegin()`/`guard()` —
         # its `provide`-method bracket is the one shape where no activation-body
         # bracket ever created the `Frame`.)
-        # issue #2904: `later(cb: () -> Async[Int], k: Int)` returns
-        # `cb() + k`. The reference IR stamps that `+` `operands: "Int"`, so
-        # it renders through the i64 bound test; the native lower.rvl IR does
-        # not, and the native chain renders a bare `((await cb()) + k)`, an
-        # UNCHECKED add. The emitter half is byte-exact on the reference IR
-        # (asserted above). A lower.rvl gap, not an emitter one.
-        "int_inline_2904.rvl",
+        # (issue #2904 / #3422: `int_inline_2904.rvl`'s `later(cb:
+        # () -> Async[Int], k: Int)` returns `cb() + k`. The reference IR
+        # stamps that `+` `operands: "Int"`; until #3422 the native lower.rvl
+        # did not (`infer_callee` kept the `Async[Int]` call return), so the
+        # native chain rendered a bare unchecked add. `infer_callee` now
+        # unwraps an `Async[T]` call return to `T` (the tier-level await is
+        # implicit), so the fixture left this list: `cb() + k` is stamped in
+        # the native IR and renders through the i64 bound test, byte-exact.)
     ),
     "go": (
         # (issue #2088: in-file `test` blocks. selfhost/emit_go.rvl already

@@ -35933,10 +35933,15 @@ fn infer_method(recv: Expr, method: &str, env: Vec<Bind>) -> String {
     return builtin_ret(method, infer(recv, env));
 }
 
+fn awaited_return_ty(ret: String) -> String {
+    let args = type_args(&ret);
+    return if ((parse_head(ret.clone()) == "Async") && (args.revl_length() == 1i64)) { (args)[(0i64) as usize].clone() } else { ret.clone() };
+}
+
 fn infer_callee(callee: Expr, env: Vec<Bind>) -> String {
     return match callee.clone() {
     Expr::Field(f) => { let f = *f; if is_empty_map_callee(callee.clone()) { String::from("Map[Str, Never]") } else { infer_method(f.target.clone(), &f.name, env.clone()) } },
-    _ => function_return_ty(&infer(callee.clone(), env.clone())),
+    _ => awaited_return_ty(function_return_ty(&infer(callee.clone(), env.clone()))),
 };
 }
 
