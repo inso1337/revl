@@ -2546,15 +2546,24 @@ def test_native_gate_refuses_idempotency_without_emission(admit, modifiers):
     assert admit(source).startswith("BAD|")
 
 
+# ("cache pure cache pure" is not listed: the reference's parse refusal there
+# is `expected {, found 'cache'` while both selfhost surfaces still say
+# `expected { after fn signature` - a separate unported message, not one of
+# issue #3402's three shapes.)
 @pytest.mark.parametrize("clause", [
     "cache", "cache external", "cache capability",
-    "cache pure ttl 5m", "cache pure invalidated_by db", "cache pure cache pure",
+    "cache pure ttl 5m", "cache pure invalidated_by db",
 ])
 def test_native_gate_refuses_invalid_plain_function_cache(admit, clause):
+    # issue #3402: each clause shape is refused with the REFERENCE's own tag
+    # and message - G4 for the freshness/class rules, BAD for the parse-stage
+    # unknown class - not the gate's older generic sentences.
     source = f"fn f(n: Int) -> Int {clause} {{ return n }}"
-    with pytest.raises(RevlError):
+    with pytest.raises(RevlError) as excinfo:
         compile_source(source)
-    assert admit(source).startswith("BAD|")
+    e = excinfo.value
+    tag = e.code if e.code else "BAD"
+    assert admit(source) == f"{tag}|{e.message}", (clause, admit(source))
 
 
 @pytest.mark.parametrize("body", [

@@ -96,6 +96,9 @@ pub struct FnD {
     params: Vec<ParamN>,
     body: Vec<Stmt>,
     cachePure: bool,
+    cacheCls: String,
+    cacheInv: bool,
+    cacheTtl: bool,
     line: i64,
     caps: Vec<String>,
     inv: String,
@@ -10117,11 +10120,11 @@ fn mk_step(p: Prog, i: i64) -> PStep {
 }
 
 fn mk_fnd(nm: String, em: bool, asy: bool, cs: Vec<String>, slots: Vec<i64>, aps: Vec<String>, ps: Vec<ParamN>, bd: Vec<Stmt>, ln: i64, cps: Vec<String>, ver: bool) -> FnD {
-    return FnD { name: nm, isEmExtern: em, isAsyncExtern: asy, callees: cs, asyncSlots: slots, asyncParams: aps, params: ps, body: bd, cachePure: false, line: ln, caps: cps, inv: String::from(""), isVerified: ver, totCalls: vec![], totOpaque: false };
+    return FnD { name: nm, isEmExtern: em, isAsyncExtern: asy, callees: cs, asyncSlots: slots, asyncParams: aps, params: ps, body: bd, cachePure: false, cacheCls: String::from(""), cacheInv: false, cacheTtl: false, line: ln, caps: cps, inv: String::from(""), isVerified: ver, totCalls: vec![], totOpaque: false };
 }
 
 fn fnd_with_inv(f: FnD, inv: String) -> FnD {
-    return FnD { name: f.name.clone(), isEmExtern: f.isEmExtern, isAsyncExtern: f.isAsyncExtern, callees: f.callees.clone(), asyncSlots: f.asyncSlots.clone(), asyncParams: f.asyncParams.clone(), params: f.params.clone(), body: f.body.clone(), cachePure: f.cachePure, line: f.line, caps: f.caps.clone(), inv: inv, isVerified: f.isVerified, totCalls: f.totCalls.clone(), totOpaque: f.totOpaque };
+    return FnD { name: f.name.clone(), isEmExtern: f.isEmExtern, isAsyncExtern: f.isAsyncExtern, callees: f.callees.clone(), asyncSlots: f.asyncSlots.clone(), asyncParams: f.asyncParams.clone(), params: f.params.clone(), body: f.body.clone(), cachePure: f.cachePure, cacheCls: f.cacheCls.clone(), cacheInv: f.cacheInv, cacheTtl: f.cacheTtl, line: f.line, caps: f.caps.clone(), inv: inv, isVerified: f.isVerified, totCalls: f.totCalls.clone(), totOpaque: f.totOpaque };
 }
 
 fn mk_msig(nm: String, em: bool, cs: Vec<String>, asy: bool, ps: Vec<ParamN>, ret: String) -> MSig {
@@ -11362,10 +11365,29 @@ fn p_fn_v(ts: Vec<Token>, i: i64, pg: Prog, ver: bool) -> PStep {
     if ati(&ts, rti, "ensures") {
         return mk_step(bad_prog(pg, fn_spec_unsupported()), rti);
     }
-    let cachePure = (ati(&ts, rti, "cache") && atw(&ts, (rti).checked_add(1i64).expect("revl: Int overflow"), "pure"));
-    if cachePure {
-        rti = (rti).checked_add(2i64).expect("revl: Int overflow");
+    let mut cacheCls = String::from("");
+    let mut cacheInv = false;
+    let mut cacheTtl = false;
+    if ati(&ts, rti, "cache") {
+        let cbad0 = cache_class_miss(&ts, rti);
+        if (cbad0 != "") {
+            return mk_step(bad_prog(pg, cbad0), rti);
+        }
+        let cend = cache_clause_end(&ts, rti);
+        let mut ck = (rti).checked_add(2i64).expect("revl: Int overflow");
+        while (ck < cend) {
+            if ati(&ts, ck.clone(), "invalidated_by") {
+                cacheInv = true;
+            }
+            if ati(&ts, ck.clone(), "ttl") {
+                cacheTtl = true;
+            }
+            ck = (ck).checked_add(1i64).expect("revl: Int overflow");
+        }
+        cacheCls = tkc(&ts, (rti).checked_add(1i64).expect("revl: Int overflow")).text;
+        rti = cend;
     }
+    let cachePure = (cacheCls == "pure");
     let dmiss = dp_order_miss(&param_defaults_at(ts.clone(), fn_params_i(&ts, i)), 0i64, false);
     if (dmiss != "") {
         return mk_step(bad_prog(pg, (String::from("parameter `").revl_concat(&dmiss)).revl_concat("` has no default but follows a defaulted parameter")), rti);
@@ -11384,7 +11406,7 @@ fn p_fn_v(ts: Vec<Token>, i: i64, pg: Prog, ver: bool) -> PStep {
             return mk_step(bad_prog(pg, String::from("unexpected expression in fn body")), rti);
         }
         let ebody = vec![mkstmt(String::from("return"), sh.e.clone())];
-        return mk_step(push_fn(pg, FnD { name: nm, isEmExtern: false, isAsyncExtern: false, callees: body_callees(&ebody, 0i64, vec![]), asyncSlots: async_slots_of(&ps.ps), asyncParams: async_params_of(&ps.ps), params: ps.ps.clone(), body: ebody.clone(), cachePure: cachePure.clone(), line: tkc(&ts, i).line, caps: vec![], inv: String::from(""), isVerified: ver, totCalls: calls_in(sh.e.clone(), vec![]), totOpaque: false }), sh.i);
+        return mk_step(push_fn(pg, FnD { name: nm, isEmExtern: false, isAsyncExtern: false, callees: body_callees(&ebody, 0i64, vec![]), asyncSlots: async_slots_of(&ps.ps), asyncParams: async_params_of(&ps.ps), params: ps.ps.clone(), body: ebody.clone(), cachePure: cachePure.clone(), cacheCls: cacheCls, cacheInv: cacheInv, cacheTtl: cacheTtl, line: tkc(&ts, i).line, caps: vec![], inv: String::from(""), isVerified: ver, totCalls: calls_in(sh.e.clone(), vec![]), totOpaque: false }), sh.i);
     }
     if (!atk(&ts, rti, "{")) {
         return mk_step(bad_prog(pg, String::from("expected { after fn signature")), rti);
@@ -11398,7 +11420,7 @@ fn p_fn_v(ts: Vec<Token>, i: i64, pg: Prog, ver: bool) -> PStep {
         return mk_step(bad_prog(pg, String::from("unexpected expression in fn body")), bend);
     }
     let tot = tot_block(ts.clone(), rti, vec![]);
-    return mk_step(push_fn(pg, FnD { name: nm, isEmExtern: false, isAsyncExtern: false, callees: body_callees(&body, 0i64, vec![]), asyncSlots: async_slots_of(&ps.ps), asyncParams: async_params_of(&ps.ps), params: ps.ps.clone(), body: body.clone(), cachePure: cachePure.clone(), line: tkc(&ts, i).line, caps: vec![], inv: String::from(""), isVerified: ver, totCalls: tot.calls.clone(), totOpaque: (!tot.ok) }), bend);
+    return mk_step(push_fn(pg, FnD { name: nm, isEmExtern: false, isAsyncExtern: false, callees: body_callees(&body, 0i64, vec![]), asyncSlots: async_slots_of(&ps.ps), asyncParams: async_params_of(&ps.ps), params: ps.ps.clone(), body: body.clone(), cachePure: cachePure.clone(), cacheCls: cacheCls, cacheInv: cacheInv, cacheTtl: cacheTtl, line: tkc(&ts, i).line, caps: vec![], inv: String::from(""), isVerified: ver, totCalls: tot.calls.clone(), totOpaque: (!tot.ok) }), bend);
 }
 
 fn cache_class_miss(ts: &[Token], k: i64) -> String {
@@ -11418,6 +11440,9 @@ fn cache_class_miss(ts: &[Token], k: i64) -> String {
 fn py_word_repr(t: Token) -> String {
     if (t.kind == "eof") {
         return String::from("None");
+    }
+    if (t.kind.revl_length() == 1i64) {
+        return (String::from("'").revl_concat(&t.text)).revl_concat("'");
     }
     if ((t.kind == "ident") || (t.kind == "kw")) {
         return (String::from("'").revl_concat(&t.text)).revl_concat("'");
@@ -12455,7 +12480,8 @@ fn p_top(ts: Vec<Token>, i: i64, pg: Prog) -> Prog {
         return p_top(ts.clone(), secret_end(&ts, i), pg);
     }
     if (t.kind != "kw") {
-        return p_top(ts.clone(), skip_line(&ts, i), bad_prog(pg, String::from("unexpected token at top level")));
+        let found = py_word_repr(t.clone());
+        return p_top(ts.clone(), skip_line(&ts, i), bad_prog(pg, if (found == "") { String::from("unexpected token at top level") } else { String::from("expected a top-level declaration, found ").revl_concat(&found) }));
     }
     if (atw(&ts, i, "verified") && atw(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "fn")) {
         let sv = p_fn_v(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), pg.clone(), true);
@@ -17493,7 +17519,7 @@ fn check_cache_fns(fns: &[FnD]) -> Verd {
     let mut has_cache = false;
     let mut n = 0i64;
     while (n < fns.revl_length()) {
-        if (fns)[(n) as usize].cachePure.clone() {
+        if ((fns)[(n) as usize].cachePure.clone() || ((fns)[(n) as usize].cacheCls != "")) {
             has_cache = true;
         }
         n = (n).checked_add(1i64).expect("revl: Int overflow");
@@ -17505,6 +17531,18 @@ fn check_cache_fns(fns: &[FnD]) -> Verd {
     let mut i = 0i64;
     while (i < fns.revl_length()) {
         let f = (fns)[(i) as usize].clone();
+        if ((f.cacheCls == "pure") && (f.cacheInv || f.cacheTtl)) {
+            return mk_verd(tagged("G4", &((String::from("`cache pure` on fn `").revl_concat(&f.name)).revl_concat("` cannot declare a freshness bound"))), f.line);
+        }
+        if ((f.cacheCls == "capability") && f.cacheInv) {
+            return mk_verd(tagged("G4", &((String::from("`cache capability` on fn `").revl_concat(&f.name)).revl_concat("` cannot declare `invalidated_by`"))), f.line);
+        }
+        if (((f.cacheCls == "external") && (!f.cacheInv)) && (!f.cacheTtl)) {
+            return mk_verd(tagged("G4", &(((String::from("cache external requires a freshness bound: ").revl_concat("declare `invalidated_by <token>` and/or `ttl <duration>`: an ")).revl_concat("external result changes without notice, so an unbounded cache ")).revl_concat("serves the past as the present"))), f.line);
+        }
+        if ((f.cacheCls == "capability") || (f.cacheCls == "external")) {
+            return mk_verd(tagged("G4", &((((String::from("`cache ").revl_concat(&f.cacheCls)).revl_concat("` on fn `")).revl_concat(&f.name)).revl_concat("` is not allowed on a plain `fn`"))), f.line);
+        }
         let crossed = sort_strs(&caps_of(caps.clone(), f.name.clone()));
         if (f.cachePure && (crossed.revl_length() > 0i64)) {
             return mk_verd(tagged("G4", &((((String::from("the reach of fn `").revl_concat(&f.name)).revl_concat("` crosses ")).revl_concat(&(crossed)[(0i64) as usize])).revl_concat(": a crossing result is not pure"))), f.line);
@@ -29958,8 +29996,24 @@ fn running_name_folds(ts: Vec<Token>, pg: Prog, svcs: &[String], kept: &[String]
     return fold_after_parse(ts, pg.clone(), fold_running("component", &comp_decl_lines(&pg.comps), kept));
 }
 
+fn lex_dollar_scan(ts: &[Token]) -> Verd {
+    let mut i = 0i64;
+    while (i < ts.revl_length()) {
+        let t = tkc(ts, i);
+        if ((t.kind == "error") && (t.text == "plain string does not interpolate")) {
+            return mk_verd(tagged("BAD", &((String::from("a plain `\"...\"` string does not interpolate ").revl_concat("— the `$")).revl_concat("{...}` is emitted as literal text"))), t.line);
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
+}
+
 pub fn admit_src(src: String) -> String {
     let ts = lex_src(src.clone());
+    let lxd = lex_dollar_scan(&ts);
+    if (lxd.v != "") {
+        return lxd.v;
+    }
     let fgn = foreign_scan_ts(&ts);
     if (fgn != "") {
         return tagged("FOREIGN", &fgn);
@@ -30004,6 +30058,10 @@ pub fn admit_src(src: String) -> String {
 
 pub fn admit_all(src: String) -> String {
     let ts = lex_src(src.clone());
+    let lxd = lex_dollar_scan(&ts);
+    if (lxd.v != "") {
+        return fmt_all(&(vec![lxd.clone()]));
+    }
     let fgn = foreign_scan_ts(&ts);
     if (fgn != "") {
         return fmt_all(&(vec![mk_verd(tagged("FOREIGN", &fgn), 0i64)]));
