@@ -4572,8 +4572,10 @@ def test_provided_variant_exhaustiveness_matches_reference(admit, name, src):
     _agree(admit, src)
 
 
-# Issue #2981: the `event` field case, whose two refusals differ in tag (see
-# the test below), so it is held to both pinned verdicts instead of `_agree`.
+# Issue #2981: the `event` field case. Since issue #3396 the gate runs the
+# event-contract check itself, so both trees refuse it with the SAME G4 wire;
+# before that, the gate could only reach the T1 exhaustiveness refusal one
+# phase later, and the two verdicts differed in tag.
 PROVIDED_VARIANT_EVENT_FIELD_2981 = """event Voted(key: id) { id: Str, a: Aggregate[Str] }
 
 fn settle(v: Voted) -> Str {
@@ -4586,10 +4588,13 @@ fn settle(v: Voted) -> Str {
 
 
 def _assert_event_field_verdicts_2981(admit, src):
+    # issue #3396: the gate now refuses with the reference's G4 wire, so full
+    # agreement holds (before, the gate's only verdict here was the T1
+    # exhaustiveness refusal, one phase later).
     assert _ref(src) == ("G4", "`event Voted` reaches `Aggregate[Str]`, which "
                          "has no JSON-Schema derivation, so its delivered "
                          "items cannot be checked against a schema")
-    assert admit(src) == "T1|non-exhaustive match: missing case `Agreed`"
+    _agree(admit, src)
 
 
 def test_provided_variant_event_field_seeds_the_gate_fail_closed(admit):
@@ -4597,11 +4602,10 @@ def test_provided_variant_event_field_seeds_the_gate_fail_closed(admit):
     seeds from, because its parser adds every event to `program.type_decls`.
 
     The reference refuses this program on G4 (no JSON-Schema derivation for
-    `Aggregate[Str]`), a check the gate does not run; the gate refuses it on
-    the missing `Agreed` case only because its provided-type walk reads event
-    fields. Without that arm the gate admits a program the reference refuses.
+    `Aggregate[Str]`); since issue #3396 the gate runs that same check and
+    refuses with the same G4 wire, ahead of the exhaustiveness phase. Before
+    #3396 the gate could only reach the missing-`Agreed` T1 refusal.
     """
-    # `_agree` cannot hold: both refuse, under different tags (G4 vs T1).
     _assert_event_field_verdicts_2981(admit, PROVIDED_VARIANT_EVENT_FIELD_2981)
 
 
@@ -9249,7 +9253,7 @@ def test_provided_variant_exhaustiveness_in_the_3107_spellings(admit, name, src)
     _verified_2981(PROVIDED_VARIANT_EVENT_FIELD_2981),
 ], ids=["shorthand", "verified"])
 def test_provided_variant_event_field_in_the_3107_spellings(admit, src):
-    # `_agree` cannot hold: both refuse, under different tags (G4 vs T1).
+    # since #3396 both refuse with the same G4 wire: `_agree` holds.
     _assert_event_field_verdicts_2981(admit, src)
 
 

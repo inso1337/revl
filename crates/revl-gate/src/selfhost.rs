@@ -27339,6 +27339,10 @@ fn collect_nonlink(ts: Vec<Token>, pg: Prog, hands: &[MHand], wrefs: &[Verd], am
     if (cfgv.v != "") {
         return NoLink { done: true, refs: vec![cfgv.clone()] };
     }
+    let evdv = event_decls_walk(ts.clone(), 0i64, al.clone());
+    if (evdv.v != "") {
+        return NoLink { done: true, refs: vec![evdv.clone()] };
+    }
     let cshv = csh_refusal(ts.clone());
     if (cshv.v != "") {
         return NoLink { done: true, refs: vec![cshv.clone()] };
@@ -27445,6 +27449,101 @@ fn collect_nonlink(ts: Vec<Token>, pg: Prog, hands: &[MHand], wrefs: &[Verd], am
     }
     refs = append_verds(refs.clone(), &test_refusals(ts.clone(), &nr_binds(&ts, gtys.clone()), al.clone()));
     return NoLink { done: false, refs: refs };
+}
+
+fn event_decl_refusal(ts: Vec<Token>, i: i64, al: std::collections::HashMap<String, String>) -> Verd {
+    let line = tkc(&ts, i).line;
+    let name = tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text;
+    let j = (i).checked_add(2i64).expect("revl: Int overflow");
+    if (!atk(&ts, j.clone(), "(")) {
+        return no_verd();
+    }
+    if (((!ati(&ts, (j).checked_add(1i64).expect("revl: Int overflow"), "key")) || (!atk(&ts, (j).checked_add(2i64).expect("revl: Int overflow"), ":"))) || (!atk(&ts, (j).checked_add(3i64).expect("revl: Int overflow"), "ident"))) {
+        return no_verd();
+    }
+    let key = tkc(&ts, (j).checked_add(3i64).expect("revl: Int overflow")).text;
+    let d = sc_event_decl(ts.clone(), i, al.clone());
+    if (d.ty.kind == "") {
+        return no_verd();
+    }
+    let fs = d.ty.fields;
+    let mut names: Vec<String> = vec![];
+    let mut keyTy = String::from("");
+    let mut found = false;
+    let mut p = 0i64;
+    while (p < fs.revl_length()) {
+        names.push((fs)[(p) as usize].name.clone());
+        if ((fs)[(p) as usize].name == key) {
+            found = true;
+            keyTy = (fs)[(p) as usize].ty.clone();
+        }
+        p = (p).checked_add(1i64).expect("revl: Int overflow");
+    }
+    if (!found) {
+        let listed = if (names.revl_length() == 0i64) { String::from("(none)") } else { join_comma(&sort_strs(&names), 0i64, String::from("")) };
+        return mk_verd(tagged("G4", &((((((((String::from("`event ").revl_concat(&name)).revl_concat("` declares `key: ")).revl_concat(&key)).revl_concat("`, but `")).revl_concat(&key)).revl_concat("` is not one of its fields (")).revl_concat(&listed)).revl_concat(")"))), line);
+    }
+    if ((keyTy != "Str") && (keyTy != "Int")) {
+        return mk_verd(tagged("G4", &((((((String::from("`event ").revl_concat(&name)).revl_concat("` key `")).revl_concat(&key)).revl_concat("` has type `")).revl_concat(&keyTy)).revl_concat("`, which is not scalar-serializable"))), line);
+    }
+    let env = schema_env(ts.clone(), 0i64, std::collections::HashMap::new(), al.clone());
+    if (!sc_expressible(name.clone(), env.clone(), &(vec![]))) {
+        let reason = sc_expressible_reason(name.clone(), env.clone(), &(vec![]));
+        let why = if (reason == "") { String::from("is not expressible") } else { reason.clone() };
+        return mk_verd(tagged("G4", &((((String::from("`event ").revl_concat(&name)).revl_concat("` ")).revl_concat(&why)).revl_concat(", so its delivered items cannot be checked against a schema"))), line);
+    }
+    return no_verd();
+}
+
+fn event_decls_walk(ts: Vec<Token>, i: i64, al: std::collections::HashMap<String, String>) -> Verd {
+    if ((i >= ts.revl_length()) || atk(&ts, i, "eof")) {
+        return no_verd();
+    }
+    let t = tkc(&ts, i);
+    if at_boot(&ts, i) {
+        return event_decls_walk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), al);
+    }
+    if at_event(&ts, i) {
+        let v = event_decl_refusal(ts.clone(), i, al.clone());
+        if (v.v != "") {
+            return v;
+        }
+        return event_decls_walk(ts.clone(), event_decl_end(&ts, i), al);
+    }
+    if (t.kind != "kw") {
+        return event_decls_walk(ts.clone(), skip_line(&ts, i), al);
+    }
+    if at_pub_prefix(&ts, i) {
+        return event_decls_walk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), al);
+    }
+    if (t.text == "use") {
+        return event_decls_walk(ts.clone(), skip_line(&ts, i), al);
+    }
+    if (t.text == "test") {
+        let e = test_block_end(&ts, i);
+        if (e != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            return event_decls_walk(ts, e, al);
+        }
+        return event_decls_walk(ts.clone(), skip_line(&ts, i), al);
+    }
+    if (t.text == "type") {
+        return event_decls_walk(ts.clone(), cfg_one_type(ts.clone(), i).i, al);
+    }
+    if (t.text == "extern") {
+        let step = p_extern(ts.clone(), i, empty_prog());
+        return event_decls_walk(ts.clone(), if (step.i > i) { step.i } else { skip_line(&ts, i) }, al);
+    }
+    if (t.text == "fn") {
+        let step = p_fn(ts.clone(), i, empty_prog());
+        return event_decls_walk(ts.clone(), if (step.i > i) { step.i } else { skip_line(&ts, i) }, al);
+    }
+    if (t.text == "service") {
+        return event_decls_walk(ts.clone(), p_service(ts.clone(), i, empty_prog()).i, al);
+    }
+    if (t.text == "component") {
+        return event_decls_walk(ts.clone(), p_component(ts.clone(), i, empty_prog()).i, al);
+    }
+    return event_decls_walk(ts.clone(), skip_line(&ts, i), al);
 }
 
 fn collect_refusals(ts: Vec<Token>, pg: Prog) -> Vec<Verd> {
@@ -31674,6 +31773,67 @@ fn sc_expressible_spec(sp: ScTy, env: std::collections::HashMap<String, ScTy>, s
         return true;
     }
     return false;
+}
+
+fn sc_expressible_reason(ty: String, env: std::collections::HashMap<String, ScTy>, seen: &[String]) -> String {
+    if (ty == "") {
+        return String::from("has no declared type to validate");
+    }
+    if sc_scalar(&ty) {
+        return String::from("");
+    }
+    let p = ty_parse(ty.clone());
+    if ((p.head == "List") && (p.args.revl_length() == 1i64)) {
+        return sc_expressible_reason((p.args)[(0i64) as usize].clone(), env, seen);
+    }
+    if ((p.head == "Opt") && (p.args.revl_length() == 1i64)) {
+        if sc_admits_null((p.args)[(0i64) as usize].clone()) {
+            return (((((String::from("reaches `").revl_concat(&ty)).revl_concat("`, whose inner type `")).revl_concat(&(p.args)[(0i64) as usize])).revl_concat("` already accepts `null`, so the outer `Opt` has no JSON document")).revl_concat(" of its own and both layers derive the same schema (declare a named")).revl_concat(" variant that gives each absence a tag)");
+        }
+        return sc_expressible_reason((p.args)[(0i64) as usize].clone(), env, seen);
+    }
+    if ((p.head == "Map") && (p.args.revl_length() == 2i64)) {
+        if ((p.args)[(0i64) as usize] != "Str") {
+            return (((String::from("reaches `").revl_concat(&ty)).revl_concat("`, whose key type `")).revl_concat(&(p.args)[(0i64) as usize])).revl_concat("` is not expressible (JSON object keys are strings; use a `Str` key)");
+        }
+        return sc_expressible_reason((p.args)[(1i64) as usize].clone(), env, seen);
+    }
+    if ((p.head == "Result") && (p.args.revl_length() == 2i64)) {
+        return ((String::from("reaches an untagged `").revl_concat(&ty)).revl_concat("`, which cannot name its constructor at a validating boundary")).revl_concat(" (declare a named tagged variant instead)");
+    }
+    if contains__m2(seen, &ty) {
+        return ((((String::from("is recursive (`").revl_concat(&ty)).revl_concat("` reaches `")).revl_concat(&ty)).revl_concat("`), which an inline schema cannot express (the `$ref`/`$defs` route")).revl_concat(" is a later slice; §3.3)");
+    }
+    let sp = sc_at(env.clone(), ty.clone());
+    if (sp.kind == "") {
+        return (String::from("reaches `").revl_concat(&ty)).revl_concat("`, which has no JSON-Schema derivation");
+    }
+    let inner = seen.revl_concat(&vec![ty.clone()]);
+    if (sp.kind == "record") {
+        let mut i = 0i64;
+        while (i < sp.fields.revl_length()) {
+            let r = sc_expressible_reason((sp.fields)[(i) as usize].ty.clone(), env.clone(), &inner);
+            if (r != "") {
+                return r;
+            }
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+        return String::from("");
+    }
+    if (sp.kind == "variant") {
+        let mut i = 0i64;
+        while (i < sp.cases.revl_length()) {
+            if ((sp.cases)[(i) as usize].payload != "") {
+                let r = sc_expressible_reason((sp.cases)[(i) as usize].payload.clone(), env.clone(), &inner);
+                if (r != "") {
+                    return r;
+                }
+            }
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+        return String::from("");
+    }
+    return (String::from("reaches `").revl_concat(&ty)).revl_concat("`, which has no JSON-Schema derivation");
 }
 
 fn sc_stub(ty: &str) -> String {
