@@ -30958,11 +30958,22 @@ fn infer_method(recv: Expr, method: Str, env: List[Bind]) -> Str {
   return builtin_ret(method, infer(recv, env))
 }
 
+// item 92 / issue #3422: calling an async-typed value yields the UNWRAPPED T -
+// the tier-level await is implicit, and no expression ever has type `Async[T]`
+// (the reference's `_call_result` rule). Without this the operand stamp on
+// `cb() + k` (left operand a call through a `() -> Async[Int]` parameter) saw
+// `Async[Int]` instead of `Int` and stamped nothing, so the native chain
+// emitted an unbounded `+` where the reference emitted the bounded one.
+fn awaited_return_ty(ret: Str) -> Str {
+  let args = type_args(ret)
+  return parse_head(ret) == "Async" && args.length() == 1 ? args[0] : ret
+}
+
 fn infer_callee(callee: Expr, env: List[Bind]) -> Str {
   return match callee {
     Field(f) => is_empty_map_callee(callee) ? "Map[Str, Never]"
       : infer_method(f.target, f.name, env),
-    _ => function_return_ty(infer(callee, env)),
+    _ => awaited_return_ty(function_return_ty(infer(callee, env))),
   }
 }
 
