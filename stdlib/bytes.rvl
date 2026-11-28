@@ -1,0 +1,49 @@
+// The revl stdlib BYTES module (issue #3442).
+//
+// `Bytes` could be measured, indexed, sliced, concatenated and compared, but
+// not BUILT from numbers in revl, so binary framing (a WebSocket frame, a PNG
+// chunk, a length-prefixed record) had to live inside a host body. This module
+// is the constructor pair plus the typed index read:
+//
+//     use "stdlib/bytes.rvl" { bytes_from_list, bytes_to_list, byte_at }
+//
+// Tier status: `bytes_from_list`/`bytes_to_list` are per-tier externs with @py
+// and @ts bodies (`bytes` on py, `Uint8Array` on ts); a tier with no body
+// refuses the extern with the standard "no @<tier> body" refusal, same as any
+// host-bodied extern. `byte_at` is PURE revl over the frozen `Bytes` index
+// surface and lowers on every tier.
+
+// Build a Bytes from a list of numbers. Every element must be an Int in
+// 0..255; anything else fails the call naming the function, at the boundary
+// (issue #3442's acceptance: an element of 256 is refused).
+pub extern pure fn bytes_from_list(xs: List[Int]) -> Bytes =
+  @py {
+    for x in xs:
+      if not isinstance(x, int) or isinstance(x, bool) or x < 0 or x > 255:
+        raise ValueError("bytes_from_list: element outside 0..255: %r" % (x,))
+    return bytes(xs)
+  }
+  = @ts {
+    for (const x of xs) {
+      if (typeof x !== "bigint" || x < 0n || x > 255n)
+        throw new RangeError("bytes_from_list: element outside 0..255: " + x)
+    }
+    return new Uint8Array(xs.map((x) => Number(x)))
+  }
+
+// The inverse: every byte as an Int, in order.
+pub extern pure fn bytes_to_list(b: Bytes) -> List[Int] =
+  @py {
+    return list(b)
+  }
+  = @ts {
+    return Array.from(b, (x) => BigInt(x))
+  }
+
+// The typed index read. `b[i]` on its own is the tier's byte type and a method
+// call on it is refused as "value of unknown type"; bound through a declared
+// Int return, the read is typed (Int32 widens to Int at the return) and the
+// result can be compared, masked and rebuilt portably.
+pub fn byte_at(b: Bytes, i: Int) -> Int {
+  return b[i]
+}
