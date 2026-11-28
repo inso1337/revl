@@ -718,18 +718,24 @@ def test_every_author_name_read_free_is_refused_as_a_host_global():
     reads: each respelling must be refused, since the bare call would reach
     the host's `fetch`."""
     free = _free_author_names()
-    assert {"zqClose", "zqOpen", "zqDrop", "zqLease"} <= free  # positive control
-    emitted = []
-    for name in sorted(free):
-        src = re.sub(rf"\b{name}\b", "fetch", _SCAFFOLDING_PROBE)
-        try:
-            EMIT.emit(compile_source(src, f"{name}_as_fetch.rvl"), target="temporal")
-        except EMIT.EmitError as exc:
-            if "reserves" not in str(exc):
-                emitted.append(f"{name}: {exc}")
-        else:
-            emitted.append(name)
-    assert not emitted, f"free author names that may take a host global: {emitted}"
+    # issues #3386/#3393: externs reached in an effect/undo position are now
+    # BOUND as activities (destructured out of proxyActivities), not read free -
+    # so the probe's zq externs must NOT be in the free set anymore.
+    assert not ({"zqClose", "zqOpen", "zqDrop", "zqLease"} & free), free
+    code = _strip_ts_comments_and_strings(EMIT.emit(
+        compile_source(_SCAFFOLDING_PROBE, "zq_probe.rvl"), target="temporal"))
+    bound_groups = re.findall(r"const\s*\{([^}]*)\}\s*=\s*proxyActivities", code)
+    bound = {n.strip() for g in bound_groups for n in g.split(",")}
+    assert {"zqClose", "zqOpen", "zqDrop", "zqLease"} <= bound  # positive control
+    # a name still read free - an extern the program never reaches - respelled
+    # as the host global `fetch` must still be refused (fail-closed, issue #3187).
+    probe = _SCAFFOLDING_PROBE + "extern pure fn fetch(zqX: Int) = @ts { return }\n"
+    try:
+        EMIT.emit(compile_source(probe, "fetch_probe.rvl"), target="temporal")
+    except EMIT.EmitError as exc:
+        assert "reserves" in str(exc), exc
+    else:
+        raise AssertionError("an unreached pure extern named `fetch` was admitted")
 
 
 def test_scaffolding_identifier_collector_sees_every_kind_of_name():
@@ -850,6 +856,11 @@ export function proxyActivities() {
         // saga aborts AFTER h has already been assigned the real (canary)
         // value by the acquire that landed just before it.
         if (prop === "boomTrigger") throw new Error("boom activity failed")
+        // issues #3386/#3393: the acquire/inverse externs are activities now,
+        // bound out of this proxy - the driver implements them here, not as
+        // same-named functions in its own file (that would redeclare them).
+        if (prop === "r_open") return globalThis.__CANARY__
+        if (prop === "r_close") throw new Error(`r_close failed for handle ${args[0]}`)
       }
     },
   })
@@ -875,8 +886,7 @@ export function __runQuery(query) { return handlers.get(query)() }
 import {{ __runQuery }} from "./temporal-stub.mjs"
 {workflow_src}
 const CANARY = {json.dumps(canary)}
-async function r_open(n) {{ return CANARY }}
-function r_close(h) {{ throw new Error(`r_close failed for handle ${{h}}`) }}
+globalThis.__CANARY__ = CANARY
 
 async function main() {{
   try {{
@@ -1029,7 +1039,7 @@ def test_emission_extern_crossing_renders_as_an_activity():
     no input that ever clears the bar."""
     got = _emit_temporal_module().emit_temporal(compile_source(_KEYED_SRC, "pay.revl"))
     assert "await charge(\"visa\", 100n)" in got
-    assert 'saga.push({ name: "refund", run: () => refund("visa", 100n)' in got
+    assert 'saga.push({ name: "refund", run: async () => { await refund("visa", 100n) }' in got
     assert "  charge(card: string, total: bigint): Promise<string>" in got
 
 

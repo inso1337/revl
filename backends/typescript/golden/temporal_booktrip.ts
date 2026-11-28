@@ -92,9 +92,9 @@ export async function BookTrip(): Promise<void> {
   const residue: Residue[] = []
   setHandler(BookTripResidue, () => residue)
   try {
-    saga.push({ name: "flights.cancel", run: () => flightsCancel("ABC"), args: () => [] })  // write-ahead: registered before the forward await
+    saga.push({ name: "flights.cancel", run: async () => { await flightsCancel("ABC") }, args: () => [] })  // write-ahead: registered before the forward await
     await flightsReserve("ABC")
-    saga.push({ name: "payments.refund", run: () => paymentsRefund("visa", 100n), args: () => [] })  // write-ahead: registered before the forward await
+    saga.push({ name: "payments.refund", run: async () => { await paymentsRefund("visa", 100n) }, args: () => [] })  // write-ahead: registered before the forward await
     await paymentsCharge("visa", 100n)
     await settle("visa", 100n)
     // clean completion: the saga stack is discharged, never run.

@@ -589,6 +589,32 @@ def _redaction_args(node: Any, scope: "_Scope") -> str:
     return "() => [" + ", ".join(exprs) + "]"
 
 
+# -------------------------------------------- witnessed declared inverse
+
+def _bind_result_var(node: Any, holder: str) -> Any:
+    """Deep-copy `node`, binding the item-243 `result` placeholder of a declared
+    inverse to the `Ok` payload of `holder` (rendered as `holder.value`)."""
+    if isinstance(node, list):
+        return [_bind_result_var(x, holder) for x in node]
+    if not isinstance(node, dict):
+        return node
+    if node.get("kind") == "var" and node.get("name") == "result":
+        return {"kind": "field",
+                "target": {"kind": "var", "name": holder}, "name": "value"}
+    return {k: _bind_result_var(v, holder) for k, v in node.items()}
+
+
+def _declared_undo_as_fn(undo: dict, holder: str) -> dict:
+    """The extern-IR undo node (`kind: "call"`, callee a `var`) as the `fn`
+    shape `_t_expr` renders, with `result` bound to `holder.value`."""
+    node = _bind_result_var(undo, holder)
+    if (node.get("kind") == "call" and isinstance(node.get("callee"), dict)
+            and node["callee"].get("kind") == "var"):
+        return {"kind": "fn", "name": node["callee"].get("name"),
+                "args": node.get("args") or []}
+    return node
+
+
 # ------------------------------------------------- evidence-derived retries
 
 def _forward_register(call: dict, comp: dict, index: "_Index") -> str | None:
@@ -685,6 +711,17 @@ class _Index:
     def is_emission_extern(self, name: object) -> bool:
         return (self.externs.get(name) or {}).get("class") == "emission"
 
+    def declared_undo(self, name: object) -> dict | None:
+        """The `undo` node a `witnessed` extern DECLARES (item 243), or None.
+        On this target the saga pushes it on the forward's `Ok` branch
+        (docs/design/253-temporal-target.md table row 2: `effect X undo Y` maps
+        to activity `X` plus inverse `Y` on the saga stack)."""
+        decl = self.externs.get(name) or {}
+        if decl.get("class") != "witnessed":
+            return None
+        undo = decl.get("undo")
+        return undo if isinstance(undo, dict) else None
+
     def is_validated(self, call: dict, comp: dict) -> bool:
         """item 257: does this crossing reach a `validated` declaration?"""
         if call.get("kind") == "fn":
@@ -755,7 +792,9 @@ def _render_component(comp: dict, ir: dict, ctx: "_Ctx", index: "_Index",
             seen.retry = _AT_MOST_ONCE
 
     def register_reachable(node: Any) -> None:
-        """Register every emission-extern crossing reachable in `node`.
+        """Register every EXTERN crossing reachable in `node`, any class
+        (issues #3386/#3393: acquire/witnessed/pure externs reached in
+        effect position were emitted as free calls and never bound).
 
         An `effect`/`undo` slot reaches its crossing through a plain `fn` node
         rather than an `emit` step, and `_t_expr` renders that node as a bare
@@ -768,13 +807,14 @@ def _render_component(comp: dict, ir: dict, ctx: "_Ctx", index: "_Index",
             return
         if not isinstance(node, dict):
             return
-        if node.get("kind") == "fn" and index.is_emission_extern(node.get("name")):
+        if node.get("kind") == "fn" and node.get("name") in index.externs:
             register(node)
         for value in node.values():
             if isinstance(value, (dict, list)):
                 register_reachable(value)
 
     body: list[str] = []
+    wit = [0]  # witnessed-inverse holders (wit1, wit2, ...), issues #3386/#3393
 
     def emit_steps(steps: list, indent: str) -> None:
         for step in steps or []:
@@ -791,7 +831,7 @@ def _render_component(comp: dict, ir: dict, ctx: "_Ctx", index: "_Index",
                     # compensation is a safe no-op if the forward never landed.
                     body.append(
                         f"{indent}saga.push({{ name: {_string(_crossing_label(comp_call))}, "
-                        f"run: () => {_activity_call(comp_call, scope)}, "
+                        f"run: async () => {{ await {_activity_call(comp_call, scope)} }}, "
                         f"args: {_redaction_args(comp_call.get('args') or [], scope)} }})  "
                         f"// write-ahead: registered before the forward await")
                 body.append(f"{indent}await {_activity_call(fwd, scope)}")
@@ -799,11 +839,29 @@ def _render_component(comp: dict, ir: dict, ctx: "_Ctx", index: "_Index",
                 acquire = step["acquire"]
                 register_reachable(acquire)
                 register_reachable(step.get("undo"))
+                # issue #3393: a `witnessed` extern's DECLARED inverse (item 243)
+                # is auto-registered on the `Ok` branch - the saga step below.
+                # A component-written `undo` on the step is that same declared
+                # inverse (lower.py marks it `inverse: "declared"`), already
+                # pushed write-ahead above, so this fires only when the step
+                # carries none.
+                wundo = None
+                holder = None
+                undo_fn = None
+                if acquire.get("kind") == "fn" and step.get("undo") is None:
+                    wundo = index.declared_undo(acquire.get("name"))
                 bind = step.get("bind") if kind == "let-effect" else None
                 if bind is not None:
                     bind = scope.bind(bind)
                     if bind in TEMPORAL_BODY_RESERVED:
                         _refuse_reserved(bind, "a binding")
+                if wundo is not None:
+                    holder = bind
+                    if holder is None:
+                        wit[0] += 1
+                        holder = f"wit{wit[0]}"
+                    undo_fn = _declared_undo_as_fn(wundo, holder)
+                    register_reachable(undo_fn)
                 if step.get("undo") is not None and bind is not None:
                     # A bracket whose inverse names the bound result: declare the
                     # holder first (undefined), push a no-op-if-absent inverse
@@ -814,21 +872,33 @@ def _render_component(comp: dict, ir: dict, ctx: "_Ctx", index: "_Index",
                     body.append(
                         f"{indent}saga.push({{ name: {_string(bind + '.undo')}, "
                         f"run: async () => {{ if ({bind} !== undefined) "
-                        f"{{ {_t_expr(step['undo'], scope)} }} }}, "
+                        f"{{ await {_t_expr(step['undo'], scope)} }} }}, "
                         f"args: {_redaction_args(step['undo'], scope)} }})  "
                         f"// write-ahead: no-op if the acquire never landed")
                     body.append(f"{indent}{bind} = await {_t_expr(acquire, scope)}")
                 elif step.get("undo") is not None:
                     body.append(
                         f"{indent}saga.push({{ name: {_string('undo')}, "
-                        f"run: async () => {{ {_t_expr(step['undo'], scope)} }}, "
+                        f"run: async () => {{ await {_t_expr(step['undo'], scope)} }}, "
                         f"args: {_redaction_args(step['undo'], scope)} }})  "
                         f"// write-ahead: registered before the forward await")
                     body.append(f"{indent}await {_t_expr(acquire, scope)}")
                 elif bind is not None:
                     body.append(f"{indent}const {bind} = await {_t_expr(acquire, scope)}")
+                elif wundo is not None:
+                    body.append(f"{indent}const {holder} = await {_t_expr(acquire, scope)}")
                 else:
                     body.append(f"{indent}await {_t_expr(acquire, scope)}")
+                if wundo is not None:
+                    label = str(acquire.get("name")) + ".undo"
+                    body.append(f"{indent}if ({holder}.kind === 'Ok') {{")
+                    body.append(
+                        f"{indent}  saga.push({{ name: {_string(label)}, "
+                        f"run: async () => {{ await {_t_expr(undo_fn, scope)} }}, "
+                        f"args: {_redaction_args(undo_fn, scope)} }})  "
+                        f"// item 243: declared inverse, registered on Ok"
+                    )
+                    body.append(f"{indent}}}")
             elif kind == "if":
                 body.append(f"{indent}if ({_t_expr(step['cond'], scope)}) {{")
                 emit_steps(step.get("then") or [], indent + "  ")
