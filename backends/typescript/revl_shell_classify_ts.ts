@@ -244,6 +244,37 @@ function witnessed(cmd: string, ops: ShellOp[]): ShellPlan {
   return { verdict: 'witnessed', command: cmd, ops }
 }
 
+/** Python `str.isspace()`'s exact code-point set: Unicode White_Space PLUS
+ * U+001C..U+001F (file/group/record/unit separators), and NOT U+FEFF. JS
+ * `String.prototype.trim()` removes U+FEFF and NOT U+001C..U+001F, so the two
+ * tiers disagreed on exactly those characters (issue #3265: `"\x1c"` was
+ * "empty command" on py and `unrecognized command` on ts, `"\ufeff"` the
+ * reverse). The classifier must strip with the PY set, because the py
+ * classifier is the oracle the parity test compares against. */
+function isPySpace(cp: number): boolean {
+  return (cp >= 0x09 && cp <= 0x0d)          // TAB..CR
+    || (cp >= 0x1c && cp <= 0x20)             // FS..US and space
+    || cp === 0x85 || cp === 0xa0 || cp === 0x1680
+    || (cp >= 0x2000 && cp <= 0x200a)
+    || cp === 0x2028 || cp === 0x2029 || cp === 0x202f
+    || cp === 0x205f || cp === 0x3000
+}
+
+/** `str.strip()` for the py oracle's whitespace set (issue #3265). Astral code
+ * points are never in the set, so a lone trailing low surrogate is simply not
+ * whitespace and stops the scan. */
+function pyStrip(s: string): string {
+  let lo = 0
+  while (lo < s.length) {
+    const cp = s.codePointAt(lo)!
+    if (!isPySpace(cp)) break
+    lo += cp > 0xffff ? 2 : 1
+  }
+  let hi = s.length
+  while (hi > lo && isPySpace(s.charCodeAt(hi - 1))) hi -= 1
+  return s.slice(lo, hi)
+}
+
 /** Classify one command line (what would otherwise go to `sh -c`). Total and
  * pure: never throws, never does IO. Returns a plan record identical in shape
  * and content to the py `classify` for the same input. */
@@ -252,7 +283,7 @@ export function classify(cmd: unknown): ShellPlan {
     return emission(String(cmd), 'command is not a string')
   }
 
-  const stripped = cmd.trim()
+  const stripped = pyStrip(cmd)  // py `str.strip()`'s set, not JS trim() (issue #3265)
   if (!stripped) return emission(cmd, 'empty command')
 
   // (1) Safety scan FIRST.
@@ -278,13 +309,13 @@ export function classify(cmd: unknown): ShellPlan {
   if (tokens.length === 0) return emission(cmd, 'empty command')
 
   const name = tokens[0]
-  if (!(name in ARITY)) return emission(cmd, `unrecognized command ${reprStr(name)}`)
+  if (!(name in ARITY)) return emission(cmd, `unrecognized command ${pyReprStr(name)}`)
 
   // (3) Split operands from flags.
   const operands: string[] = []
   for (const tok of tokens.slice(1)) {
     if (tok.startsWith('-')) {
-      return emission(cmd, `flag ${reprStr(tok)} changes semantics; not classifiable`)
+      return emission(cmd, `flag ${pyReprStr(tok)} changes semantics; not classifiable`)
     }
     operands.push(tok)
   }
@@ -320,23 +351,65 @@ export function classify(cmd: unknown): ShellPlan {
     return witnessed(cmd, ops)
   }
 
-  return emission(cmd, `unhandled command ${reprStr(name)}`)
+  return emission(cmd, `unhandled command ${pyReprStr(name)}`)
 }
 
 // `repr`-style single-quoting to match py's `!r`/`{meta!r}` reason strings byte
 // for byte (so the py<->ts reason parity holds). Covers the ASCII cases the
 // classifier actually emits (metachars and command/flag tokens).
 function reprChar(c: string): string {
-  return reprStr(c)
+  return pyReprStr(c)
 }
-function reprStr(s: string): string {
+
+// Python `str.isprintable()` for the categories that can be enumerated without
+// the full Unicode tables: Cc, the BMP Cf list, Zs except U+0020, Zl, Zp, Cs
+// (surrogates) and Co. (Cn - unassigned code points - is NOT enumerable here;
+// such a point is treated as printable where python escapes it. No token in
+// the parity corpus is unassigned; issue #3265's boundary chars are Cc/Cf/Zs,
+// all covered above.)
+function isPyPrintable(cp: number): boolean {
+  if (cp === 0x20) return true
+  if (cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f)) return false            // Cc
+  if (cp === 0xa0 || cp === 0x1680 || (cp >= 0x2000 && cp <= 0x200a)     // Zs
+      || cp === 0x2028 || cp === 0x2029 || cp === 0x202f
+      || cp === 0x205f || cp === 0x3000) return false
+  if (cp === 0xad || (cp >= 0x600 && cp <= 0x605) || cp === 0x61c        // Cf
+      || cp === 0x6dd || cp === 0x70f || cp === 0x8e2 || cp === 0x180e
+      || (cp >= 0x200b && cp <= 0x200f) || (cp >= 0x202a && cp <= 0x202e)
+      || (cp >= 0x2060 && cp <= 0x2064) || (cp >= 0x2066 && cp <= 0x206f)
+      || cp === 0xfeff || (cp >= 0xfff9 && cp <= 0xfffb)) return false
+  if ((cp >= 0xd800 && cp <= 0xdfff) || (cp >= 0xe000 && cp <= 0xf8ff)) return false // Cs, Co
+  return true
+}
+
+// Escape one code point the way python `repr()` does: backslash and the chosen
+// quote always; TAB/LF/CR with their letter forms; every other non-printable
+// as \xXX / \uXXXX / \UXXXXXXXX.
+function pyEscape(ch: string, quote: string): string {
+  const cp = ch.codePointAt(0)!
+  if (cp === 0x5c) return "\\"
+  if (cp === quote.charCodeAt(0)) return "\\" + quote
+  if (cp === 0x09) return "\\t"
+  if (cp === 0x0a) return "\\n"
+  if (cp === 0x0d) return "\\r"
+  if (isPyPrintable(cp)) return ch
+  if (cp < 0x100) return "\\x" + cp.toString(16).padStart(2, "0")
+  if (cp < 0x10000) return "\\u" + cp.toString(16).padStart(4, "0")
+  return "\\U" + cp.toString(16).padStart(8, "0")
+}
+
+// Python `repr()` of a string (issue #3265: the reason strings are compared
+// byte-for-byte across tiers, and repr('\ufeff') is "'\\ufeff'" on py, so the
+// ts side must escape non-printables the same way, not emit the raw char).
+function pyReprStr(s: string): string {
   // Python repr prefers single quotes; a `'` in the string switches to double
-  // quotes (none of the classifier's tokens force the escaped-single form).
+  // quotes when no `"` is present.
   const hasSingle = s.includes("'")
   const hasDouble = s.includes('"')
-  if (hasSingle && !hasDouble) return `"${s}"`
-  const body = s.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
-  return `'${body}'`
+  const quote = hasSingle && !hasDouble ? '"' : "'"
+  let body = ""
+  for (const ch of s) body += pyEscape(ch, quote)
+  return quote + body + quote
 }
 
 // Install on import for the `@ts` classify body to delegate to.
