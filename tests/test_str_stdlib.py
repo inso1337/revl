@@ -45,7 +45,8 @@ CONSUMER = """\
 use "stdlib/str.rvl" {
   is_space, trim, lstrip, rstrip, contains, index_of, last_index_of,
   ident_tokens, split_top, dedent, str_utf8_bytes,
-  str_newline, str_tab, str_char, str_crlf
+  str_newline, str_tab, str_char, str_crlf,
+  lower, upper, lines, slice_from
 }
 
 fn t_str_utf8_bytes(s: Str) -> List[Int] { return str_utf8_bytes(s) }
@@ -69,6 +70,10 @@ fn t_last_index_of(s: Str, sub: Str) -> Int { return last_index_of(s, sub) }
 fn t_ident_tokens(s: Str) -> List[Str] { return ident_tokens(s) }
 fn t_split_top(s: Str, sep: Str) -> List[Str] { return split_top(s, sep) }
 fn t_dedent(s: Str) -> Str { return dedent(s) }
+fn t_lower(s: Str) -> Str { return lower(s) }
+fn t_upper(s: Str) -> Str { return upper(s) }
+fn t_lines(s: Str) -> List[Str] { return lines(s) }
+fn t_slice_from(s: Str, i: Int) -> Str { return slice_from(s, i) }
 
 // a tiny end-to-end use of the kit: normalise a type spelling's argument list
 // (exactly the checker/emit_py hand-rolled `split_type`/`split_types` shape).
@@ -133,7 +138,7 @@ def test_module_imports_and_is_pure_revl(consumer_ir):
     for pub in ("is_space", "trim", "lstrip", "rstrip", "contains", "index_of",
                 "last_index_of", "ident_tokens", "split_top", "dedent",
                 "str_utf8_bytes", "str_newline", "str_tab", "str_char",
-                "str_crlf"):
+                "str_crlf", "lower", "upper", "lines", "slice_from"):
         assert pub in names, pub
     assert consumer_ir["ir_version"] == 3
 
@@ -156,6 +161,10 @@ def test_module_file_is_the_documented_surface():
         "pub fn str_tab() -> Str",
         "pub fn str_char(code: Int) -> Str",
         "pub fn str_crlf() -> Str",
+        "pub fn lower(s: Str) -> Str",
+        "pub fn upper(s: Str) -> Str",
+        "pub fn lines(s: Str) -> List[Str]",
+        "pub fn slice_from(s: Str, i: Int) -> Str",
     ):
         assert sig in text, sig
     # no @py / per-tier extern bodies in CODE — the pure-revl guarantee. (The
@@ -433,6 +442,66 @@ def test_str_char_printable_ascii_round_trips(ns, code):
 def test_str_char_beyond_ascii_round_trips(ns, code):
     assert ns["t_str_char"](code) == chr(code)
     assert ns["t_str_char_code"](code) == code
+
+
+# ------------------------------------------------- issue #3452: case and lines
+
+@pytest.mark.parametrize("s,exp", [
+    ("AbC", "abc"),
+    ("", ""),
+    ("aBc9-_", "abc9-_"),        # digits/punct pass through; ASCII only
+    ("\u00c9A", "\u00c9a"),    # non-ASCII passes through unchanged (stated ASCII)
+])
+def test_lower(ns, s, exp):
+    assert ns["t_lower"](s) == exp
+
+
+@pytest.mark.parametrize("s,exp", [
+    ("aBc9", "ABC9"),
+    ("", ""),
+    ("AbC-_", "ABC-_"),
+])
+def test_upper(ns, s, exp):
+    assert ns["t_upper"](s) == exp
+
+
+def _crlf_text(ns):
+    # real CR and LF code points, built through str_char (a plain revl string
+    # carries no escapes): "a" CR LF "b" CR "c".
+    cr = ns["t_str_char"](13)
+    lf = ns["t_str_char"](10)
+    return "a" + cr + lf + "b" + cr + "c"
+
+
+def test_lines_splits_lf_crlf_and_lone_cr(ns):
+    ls = ns["t_lines"](_crlf_text(ns))
+    assert ls == ["a", "b", "c"]          # the issue's acceptance: three elements
+
+
+def test_lines_semantics_match_splitlines(ns):
+    cr = ns["t_str_char"](13)
+    lf = ns["t_str_char"](10)
+    assert ns["t_lines"]("") == []
+    assert ns["t_lines"]("x" + lf + lf) == ["x", ""]
+    assert ns["t_lines"]("x" + cr) == ["x"]
+    assert ns["t_lines"]("x" + cr + lf) == ["x"]
+
+
+def test_str_char_13_is_a_real_cr(ns):
+    ch = ns["t_str_char"](13)
+    assert len(ch) == 1                   # the issue's acceptance
+    assert ord(ch[0]) == 13
+
+
+@pytest.mark.parametrize("s,i,exp", [
+    ("hello", 2, "llo"),
+    ("hello", 0, "hello"),
+    ("hello", 5, ""),
+    ("hello", 99, ""),                    # clamped, not a fault
+    ("hello", -5, "hello"),               # clamped at 0
+])
+def test_slice_from(ns, s, i, exp):
+    assert ns["t_slice_from"](s, i) == exp
 
 
 @pytest.mark.parametrize("code", [-1, 0xD800, 0xDFFF, 0x110000])

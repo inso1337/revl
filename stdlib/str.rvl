@@ -24,6 +24,7 @@
 //
 //     use "stdlib/str.rvl" { trim, lstrip, rstrip, contains, index_of,
 //                            last_index_of, ident_tokens, split_top, dedent,
+//                            lower, upper, lines, slice_from,
 //                            str_newline, str_char }
 
 // ------------------------------------------------------------ character classes
@@ -247,6 +248,81 @@ pub fn split_top(s: Str, sep: Str) -> List[Str] {
   return parts
 }
 
+// ------------------------------------------------------ case and line helpers
+// issue #3452: the everyday text helpers every caller otherwise re-derives as
+// a ~10-line character loop. ASCII case mapping (stated: A-Z <-> a-z only, every
+// other code point passes through unchanged), `lines` splitting on LF, CRLF and
+// a lone CR (the line ends the compiler's own reader treats as line ends), and
+// `slice_from`, the one-bound slice `slice` does not take. All PURE revl over
+// the frozen base `Str` surface, so they lower on every tier at once.
+
+pub fn lower(s: Str) -> Str {
+  var out = ""
+  var i = 0
+  let n = s.length()
+  while (i < n) {
+    let x = s.charCodeAt(i)
+    if (x >= 65 && x <= 90) {                 // A-Z -> a-z
+      out = out.concat(str_char(x + 32))
+    } else {
+      out = out.concat(s.slice(i, i + 1))
+    }
+    i += 1
+  }
+  return out
+}
+
+pub fn upper(s: Str) -> Str {
+  var out = ""
+  var i = 0
+  let n = s.length()
+  while (i < n) {
+    let x = s.charCodeAt(i)
+    if (x >= 97 && x <= 122) {                // a-z -> A-Z
+      out = out.concat(str_char(x - 32))
+    } else {
+      out = out.concat(s.slice(i, i + 1))
+    }
+    i += 1
+  }
+  return out
+}
+
+// Split on LF, CRLF and a lone CR - Python `splitlines()` semantics: every
+// terminator closes a line (so "a\n\n" is ["a", ""]), a trailing unterminated
+// line is kept, and the empty string yields []. The line ends are the ones the
+// compiler itself treats as line ends, so a source scan split this way sees a
+// `use` line that follows a lone CR.
+pub fn lines(s: Str) -> List[Str] {
+  var out: List[Str] = []
+  var cur = ""
+  var i = 0
+  let n = s.length()
+  while (i < n) {
+    let x = s.charCodeAt(i)
+    if (x == 10 || x == 13) {                 // LF or CR closes the line
+      out = out.push(cur)
+      cur = ""
+      if (x == 13 && i + 1 < n && s.charCodeAt(i + 1) == 10) { i += 1 }  // CRLF is one end
+    } else {
+      cur = cur.concat(s.slice(i, i + 1))
+    }
+    i += 1
+  }
+  if (cur != "") { out = out.push(cur) }
+  return out
+}
+
+// `s.slice(i, s.length())` with `i` clamped into [0, s.length()] - the one-bound
+// slice `slice` does not take, without the `s.slice(2, s.length())` spelling.
+pub fn slice_from(s: Str, i: Int) -> Str {
+  var start = i
+  if (start < 0) { start = 0 }
+  let n = s.length()
+  if (start > n) { start = n }
+  return s.slice(start, n)
+}
+
 // --------------------------------------------------------- control characters
 // (item 181) A plain revl double-quoted string carries NO escapes and cannot
 // hold a control char: `"\n"` is the two chars backslash-n, the lexer ends a
@@ -303,7 +379,9 @@ fn ascii_printable() -> Str {
 // revl; every other code point (CR, NUL and the other control characters,
 // and everything above U+007E) has no pure-revl spelling, because the source
 // reader folds a CR byte to LF and `"..."` carries no escapes, so it goes
-// through the per-tier `Int.to_char` primitive (issue #2285).
+// through the per-tier `Int.to_char` primitive (issue #2285), which covers
+// EVERY scalar value - CR included, so `str_char(13).length() == 1` (issue
+// #3452).
 pub fn str_char(code: Int) -> Str {
   if (code == 9) { return str_tab() }
   if (code == 10) { return str_newline() }
