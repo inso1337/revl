@@ -22092,6 +22092,12 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   let gtys = sig_binds(ts, case_binds(ts, al), al)
   let cfgv = config_data_refusal(ts, pg)
   if (cfgv.v != "") { return { done: true, refs: [cfgv] } }
+  // issue #3396: the typed-EVENT contracts, `_lower_event_decls`, which the
+  // reference runs after `_validate_declared_types` (the config-data walk
+  // closes that function) and before `_refuse_callable_shadowing`, and which
+  // RAISES - so this is a fail-fast phase, alone in the sink.
+  let evdv = event_decls_walk(ts, 0, al)
+  if (evdv.v != "") { return { done: true, refs: [evdv] } }
   // the SHADOWED MODULE CALLABLE (item 391): `_refuse_callable_shadowing` runs
   // after the type section and BEFORE `_lower_fns`, so it precedes the binding
   // discipline below and every phase that follows it.
@@ -22272,6 +22278,99 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   // one, so collecting it here, ahead of the link rows, orders the same.
   refs = append_verds(refs, test_refusals(ts, nr_binds(ts, gtys), al))
   return { done: false, refs: refs }
+}
+
+// issue #3396: the typed-EVENT contract checks, mirroring the reference's
+// `_lower_event_decls` (lower.py), which RAISES on the first bad `event`
+// declaration after `_validate_declared_types` and before
+// `_refuse_callable_shadowing` - so the phase sits in `collect_nonlink` right
+// after the config-data walk and ahead of the shadowed-callable one. Three
+// checks per declaration, in the reference's order: the key names a declared
+// field, the key's type is a serializable scalar, and the event's record is
+// `fully_expressible` (an event handler validates every delivered item at
+// the boundary, so an inexact shape is refused, not shipped vacuous). All
+// three carry code G4; the message is the reference's sentence, with the
+// expressibility one built from `sc_expressible_reason`.
+fn event_decl_refusal(ts: List[Token], i: Int, al: Map[Str, Str]) -> Verd {
+  let line = tkc(ts, i).line
+  let name = tkc(ts, i + 1).text
+  let j = i + 2
+  if (!atk(ts, j, "(")) { return no_verd() }
+  if (!ati(ts, j + 1, "key") || !atk(ts, j + 2, ":") || !atk(ts, j + 3, "ident")) {
+    return no_verd()
+  }
+  let key = tkc(ts, j + 3).text
+  let d = sc_event_decl(ts, i, al)
+  if (d.ty.kind == "") { return no_verd() }
+  let fs = d.ty.fields
+  var names: List[Str] = []
+  var keyTy = ""
+  var found = false
+  var p = 0
+  while (p < fs.length()) {
+    names = names.push(fs[p].name)
+    if (fs[p].name == key) { found = true; keyTy = fs[p].ty }
+    p += 1
+  }
+  if (!found) {
+    let listed = names.length() == 0 ? "(none)" : join_comma(sort_strs(names), 0, "")
+    return mk_verd(tagged("G4", "`event ".concat(name)
+      .concat("` declares `key: ").concat(key)
+      .concat("`, but `").concat(key)
+      .concat("` is not one of its fields (").concat(listed).concat(")")), line)
+  }
+  if (keyTy != "Str" && keyTy != "Int") {
+    return mk_verd(tagged("G4", "`event ".concat(name).concat("` key `")
+      .concat(key).concat("` has type `").concat(keyTy)
+      .concat("`, which is not scalar-serializable")), line)
+  }
+  let env = schema_env(ts, 0, Map.empty(), al)
+  if (!sc_expressible(name, env, [])) {
+    let reason = sc_expressible_reason(name, env, [])
+    let why = reason == "" ? "is not expressible" : reason
+    return mk_verd(tagged("G4", "`event ".concat(name).concat("` ").concat(why)
+      .concat(", so its delivered items cannot be checked against a schema")), line)
+  }
+  return no_verd()
+}
+
+// The top-level walk, stepped exactly as `wf_decls_walk` steps (whole
+// declarations, so an `event`-shaped token inside a body is never mistaken
+// for a declaration head), reporting the first bad `event` in declaration
+// order - the order `_lower_event_decls` iterates `program.event_decls` in.
+fn event_decls_walk(ts: List[Token], i: Int, al: Map[Str, Str]) -> Verd {
+  if (i >= ts.length() || atk(ts, i, "eof")) { return no_verd() }
+  let t = tkc(ts, i)
+  if (at_boot(ts, i)) { return event_decls_walk(ts, i + 1, al) }
+  if (at_event(ts, i)) {
+    let v = event_decl_refusal(ts, i, al)
+    if (v.v != "") { return v }
+    return event_decls_walk(ts, event_decl_end(ts, i), al)
+  }
+  if (t.kind != "kw") { return event_decls_walk(ts, skip_line(ts, i), al) }
+  if (at_pub_prefix(ts, i)) { return event_decls_walk(ts, i + 1, al) }
+  if (t.text == "use") { return event_decls_walk(ts, skip_line(ts, i), al) }
+  if (t.text == "test") {
+    let e = test_block_end(ts, i)
+    if (e != 0 - 1) { return event_decls_walk(ts, e, al) }
+    return event_decls_walk(ts, skip_line(ts, i), al)
+  }
+  if (t.text == "type") { return event_decls_walk(ts, cfg_one_type(ts, i).i, al) }
+  if (t.text == "extern") {
+    let step = p_extern(ts, i, empty_prog())
+    return event_decls_walk(ts, step.i > i ? step.i : skip_line(ts, i), al)
+  }
+  if (t.text == "fn") {
+    let step = p_fn(ts, i, empty_prog())
+    return event_decls_walk(ts, step.i > i ? step.i : skip_line(ts, i), al)
+  }
+  if (t.text == "service") {
+    return event_decls_walk(ts, p_service(ts, i, empty_prog()).i, al)
+  }
+  if (t.text == "component") {
+    return event_decls_walk(ts, p_component(ts, i, empty_prog()).i, al)
+  }
+  return event_decls_walk(ts, skip_line(ts, i), al)
 }
 
 fn collect_refusals(ts: List[Token], pg: Prog) -> List[Verd] {
@@ -26386,6 +26485,72 @@ fn sc_expressible_spec(sp: ScTy, env: ScEnv, seen: List[Str]) -> Bool {
     return true
   }
   return false
+}
+
+// `type_schema.py::expressibility_reason`, phrased for the first offending
+// position exactly as the reference phrases it ("" when expressible). The
+// boolean `sc_expressible` stays authoritative; this only words the refusal,
+// and issue #3396 needs the wording on the event path: the reference builds
+// its G4 sentence as `event <N>` + reason + ", so its delivered items ...".
+fn sc_expressible_reason(ty: Str, env: ScEnv, seen: List[Str]) -> Str {
+  if (ty == "") { return "has no declared type to validate" }
+  if (sc_scalar(ty)) { return "" }
+  let p = ty_parse(ty)
+  if (p.head == "List" && p.args.length() == 1) {
+    return sc_expressible_reason(p.args[0], env, seen)
+  }
+  if (p.head == "Opt" && p.args.length() == 1) {
+    if (sc_admits_null(p.args[0])) {
+      return "reaches `".concat(ty).concat("`, whose inner type `").concat(p.args[0])
+        .concat("` already accepts `null`, so the outer `Opt` has no JSON document")
+        .concat(" of its own and both layers derive the same schema (declare a named")
+        .concat(" variant that gives each absence a tag)")
+    }
+    return sc_expressible_reason(p.args[0], env, seen)
+  }
+  if (p.head == "Map" && p.args.length() == 2) {
+    if (p.args[0] != "Str") {
+      return "reaches `".concat(ty).concat("`, whose key type `").concat(p.args[0])
+        .concat("` is not expressible (JSON object keys are strings; use a `Str` key)")
+    }
+    return sc_expressible_reason(p.args[1], env, seen)
+  }
+  if (p.head == "Result" && p.args.length() == 2) {
+    return "reaches an untagged `".concat(ty)
+      .concat("`, which cannot name its constructor at a validating boundary")
+      .concat(" (declare a named tagged variant instead)")
+  }
+  if (contains(seen, ty)) {
+    return "is recursive (`".concat(ty).concat("` reaches `").concat(ty)
+      .concat("`), which an inline schema cannot express (the `$ref`/`$defs` route")
+      .concat(" is a later slice; §3.3)")
+  }
+  let sp = sc_at(env, ty)
+  if (sp.kind == "") {
+    return "reaches `".concat(ty).concat("`, which has no JSON-Schema derivation")
+  }
+  let inner = seen.concat([ty])
+  if (sp.kind == "record") {
+    var i = 0
+    while (i < sp.fields.length()) {
+      let r = sc_expressible_reason(sp.fields[i].ty, env, inner)
+      if (r != "") { return r }
+      i += 1
+    }
+    return ""
+  }
+  if (sp.kind == "variant") {
+    var i = 0
+    while (i < sp.cases.length()) {
+      if (sp.cases[i].payload != "") {
+        let r = sc_expressible_reason(sp.cases[i].payload, env, inner)
+        if (r != "") { return r }
+      }
+      i += 1
+    }
+    return ""
+  }
+  return "reaches `".concat(ty).concat("`, which has no JSON-Schema derivation")
 }
 
 fn sc_stub(ty: Str) -> Str { return "{\"x-revlType\": ".concat(jstr(ty)).concat("}") }
