@@ -293,6 +293,7 @@ use "./types.rvl" { WfR, check_type_wellformed, int_str }
 type FnD = { name: Str, isEmExtern: Bool, isAsyncExtern: Bool,
              callees: List[Str], asyncSlots: List[Int], asyncParams: List[Str],
              params: List[ParamN], body: List[Stmt], cachePure: Bool,
+             cacheCls: Str, cacheInv: Bool, cacheTtl: Bool,
              line: Int, caps: List[Str],
              inv: Str, isVerified: Bool, totCalls: List[Str], totOpaque: Bool }
 
@@ -1317,6 +1318,7 @@ fn mk_fnd(nm: Str, em: Bool, asy: Bool, cs: List[Str], slots: List[Int],
           cps: List[Str], ver: Bool) -> FnD {
   return { name: nm, isEmExtern: em, isAsyncExtern: asy, callees: cs,
            asyncSlots: slots, asyncParams: aps, params: ps, body: bd, cachePure: false,
+           cacheCls: "", cacheInv: false, cacheTtl: false,
            line: ln, caps: cps, inv: "", isVerified: ver, totCalls: [],
            totOpaque: false }
 }
@@ -1325,7 +1327,8 @@ fn fnd_with_inv(f: FnD, inv: Str) -> FnD {
   return { name: f.name, isEmExtern: f.isEmExtern, isAsyncExtern: f.isAsyncExtern,
            callees: f.callees, asyncSlots: f.asyncSlots,
            asyncParams: f.asyncParams, params: f.params, body: f.body,
-           cachePure: f.cachePure,
+           cachePure: f.cachePure, cacheCls: f.cacheCls,
+           cacheInv: f.cacheInv, cacheTtl: f.cacheTtl,
            line: f.line, caps: f.caps, inv: inv, isVerified: f.isVerified,
            totCalls: f.totCalls, totOpaque: f.totOpaque }
 }
@@ -2939,8 +2942,32 @@ fn p_fn_v(ts: List[Token], i: Int, pg: Prog, ver: Bool) -> PStep {
   if (ati(ts, rti, "ensures")) {
     return mk_step(bad_prog(pg, fn_spec_unsupported()), rti)
   }
-  let cachePure = ati(ts, rti, "cache") && atw(ts, rti + 1, "pure")
-  if (cachePure) { rti += 2 }
+  // issue #3402: read the WHOLE item-310 trailing clause (class plus the
+  // `invalidated_by`/`ttl` freshness sub-clauses), not only `cache pure`. A
+  // plain `fn` carrying `cache capability`/`cache external` used to stop at
+  // the class word and fall through to `expected { after fn signature`; now
+  // the clause is consumed whole and its class rides in the FnD, so
+  // `check_cache_fns` answers with the reference's G4 sentences.
+  var cacheCls = ""
+  var cacheInv = false
+  var cacheTtl = false
+  if (ati(ts, rti, "cache")) {
+    // an unknown class word is the parser's `_cache_clause` refusal, raised
+    // BEFORE the clause is stepped (issue #3402): `cache_class_miss` spells
+    // it with the reference's `found <tok.value!r>`.
+    let cbad0 = cache_class_miss(ts, rti)
+    if (cbad0 != "") { return mk_step(bad_prog(pg, cbad0), rti) }
+    let cend = cache_clause_end(ts, rti)
+    var ck = rti + 2
+    while (ck < cend) {
+      if (ati(ts, ck, "invalidated_by")) { cacheInv = true }
+      if (ati(ts, ck, "ttl")) { cacheTtl = true }
+      ck += 1
+    }
+    cacheCls = tkc(ts, rti + 1).text
+    rti = cend
+  }
+  let cachePure = cacheCls == "pure"
   let dmiss = dp_order_miss(param_defaults_at(ts, fn_params_i(ts, i)), 0, false)
   if (dmiss != "") {
     return mk_step(bad_prog(pg, "parameter `".concat(dmiss)
@@ -2964,7 +2991,7 @@ fn p_fn_v(ts: List[Token], i: Int, pg: Prog, ver: Bool) -> PStep {
                                 callees: body_callees(ebody, 0, []),
                                 asyncSlots: async_slots_of(ps.ps),
                                 asyncParams: async_params_of(ps.ps),
-                                params: ps.ps, body: ebody, cachePure: cachePure,
+                                params: ps.ps, body: ebody, cachePure: cachePure, cacheCls: cacheCls, cacheInv: cacheInv, cacheTtl: cacheTtl,
                                 line: tkc(ts, i).line, caps: [], inv: "",
                                 isVerified: ver, totCalls: calls_in(sh.e, []),
                                 totOpaque: false }), sh.i)
@@ -2983,7 +3010,7 @@ fn p_fn_v(ts: List[Token], i: Int, pg: Prog, ver: Bool) -> PStep {
                               callees: body_callees(body, 0, []),
                               asyncSlots: async_slots_of(ps.ps),
                               asyncParams: async_params_of(ps.ps),
-                              params: ps.ps, body: body, cachePure: cachePure,
+                              params: ps.ps, body: body, cachePure: cachePure, cacheCls: cacheCls, cacheInv: cacheInv, cacheTtl: cacheTtl,
                               line: tkc(ts, i).line, caps: [], inv: "",
                               isVerified: ver, totCalls: tot.calls,
                               totOpaque: !tot.ok }), bend)
@@ -3008,6 +3035,9 @@ fn cache_class_miss(ts: List[Token], k: Int) -> Str {
 // spell (a float, a string, an integer with a leading zero or a separator).
 fn py_word_repr(t: Token) -> Str {
   if (t.kind == "eof") { return "None" }
+  // a punctuation token's kind IS the character ("(" , ")" , "@"), so its
+  // python repr is the quoted char (issue #3402: `found ')'`).
+  if (t.kind.length() == 1) { return "'".concat(t.text).concat("'") }
   if ((t.kind == "ident") || (t.kind == "kw")) { return "'".concat(t.text).concat("'") }
   if ((t.kind != "int") || (t.text == "")) { return "" }
   if ((t.text.length() > 1) && (t.text.charAt(0) == "0")) { return "" }
@@ -4271,8 +4301,13 @@ fn p_top(ts: List[Token], i: Int, pg: Prog) -> Prog {
   // `skip_line`: the reference's top-level loop resumes at the next token.
   if (at_secret(ts, i)) { return p_top(ts, secret_end(ts, i), pg) }
   if (t.kind != "kw") {
+    // issue #3402: the reference's top-level else (parser.py) names the token
+    // with python's `{tok.value!r}`; `py_word_repr` is that repr for every kind
+    // it can spell, punctuation included.
+    let found = py_word_repr(t)
     return p_top(ts, skip_line(ts, i),
-                 bad_prog(pg, "unexpected token at top level"))
+                 bad_prog(pg, found == "" ? "unexpected token at top level"
+                   : "expected a top-level declaration, found ".concat(found)))
   }
   // Issue #3107: `verified fn` and `pub verified fn`, both admitted by the
   // reference (`parser.py::fn_decl`). The prefix is stepped over by every other
@@ -10433,7 +10468,7 @@ fn check_cache_fns(fns: List[FnD]) -> Verd {
   var has_cache = false
   var n = 0
   while (n < fns.length()) {
-    if (fns[n].cachePure) { has_cache = true }
+    if (fns[n].cachePure || fns[n].cacheCls != "") { has_cache = true }
     n += 1
   }
   if (!has_cache) { return no_verd() }
@@ -10441,6 +10476,30 @@ fn check_cache_fns(fns: List[FnD]) -> Verd {
   var i = 0
   while (i < fns.length()) {
     let f = fns[i]
+    // issue #3402: the reference's `_check_cache_freshness` runs on every
+    // cached fn BEFORE the plain-fn class check, and `_check_cache_declarations`
+    // walks `program.fn_decls` in declaration order, so the per-fn order below
+    // is the reference's: freshness rules first (pure+cadence, capability+inval,
+    // external+no-bound), then class-vs-plain-fn.
+    if (f.cacheCls == "pure" && (f.cacheInv || f.cacheTtl)) {
+      return mk_verd(tagged("G4", "`cache pure` on fn `".concat(f.name)
+        .concat("` cannot declare a freshness bound")), f.line)
+    }
+    if (f.cacheCls == "capability" && f.cacheInv) {
+      return mk_verd(tagged("G4", "`cache capability` on fn `".concat(f.name)
+        .concat("` cannot declare `invalidated_by`")), f.line)
+    }
+    if (f.cacheCls == "external" && !f.cacheInv && !f.cacheTtl) {
+      return mk_verd(tagged("G4", "cache external requires a freshness bound: "
+        .concat("declare `invalidated_by <token>` and/or `ttl <duration>`: an ")
+        .concat("external result changes without notice, so an unbounded cache ")
+        .concat("serves the past as the present")), f.line)
+    }
+    if (f.cacheCls == "capability" || f.cacheCls == "external") {
+      return mk_verd(tagged("G4", "`cache ".concat(f.cacheCls)
+        .concat("` on fn `").concat(f.name)
+        .concat("` is not allowed on a plain `fn`")), f.line)
+    }
     let crossed = sort_strs(caps_of(caps, f.name))
     if (f.cachePure && crossed.length() > 0) {
       return mk_verd(tagged("G4", "the reach of fn `".concat(f.name)
@@ -24214,8 +24273,34 @@ fn running_name_folds(ts: List[Token], pg: Prog, svcs: List[Str],
     fold_running("component", comp_decl_lines(pg.comps), kept))
 }
 
+// issue #3402: the reference lexes the whole text before anything else, and
+// `_reject_dollar_interpolation` (src/revl/lexer.py) is a LEXER refusal, so a
+// plain `"..."` carrying a complete `${...}` is refused before the parser
+// runs. This lexer already emits an `error` token for the shape; what was
+// missing is the reference's sentence on the wire (the gate used to fall
+// through to `bad expression body of fn`). The message's `$` and `{` sit in
+// separate literals so this file's own lexer does not read the sentence as
+// the very `${...}` shape it refuses (item 380).
+fn lex_dollar_scan(ts: List[Token]) -> Verd {
+  var i = 0
+  while (i < ts.length()) {
+    let t = tkc(ts, i)
+    if (t.kind == "error" && t.text == "plain string does not interpolate") {
+      return mk_verd(tagged("BAD", "a plain `\"...\"` string does not interpolate "
+        .concat("— the `$").concat("{...}` is emitted as literal text")), t.line)
+    }
+    i += 1
+  }
+  return no_verd()
+}
+
 pub fn admit_src(src: Str) -> Str {
   let ts = lex_src(src)
+  // issue #3402: a lexer-stage refusal runs ahead of every parse-stage one,
+  // including the item-384 foreign redirect (the reference lexes before it
+  // parses at all).
+  let lxd = lex_dollar_scan(ts)
+  if (lxd.v != "") { return lxd.v }
   // item 384: the foreign-construct redirects run first — the reference's
   // parser half fires before any admission check, and no program that reaches
   // an admission refusal carries one of these spellings.
@@ -24275,6 +24360,8 @@ pub fn admit_src(src: Str) -> Str {
 // it unambiguously.
 pub fn admit_all(src: Str) -> Str {
   let ts = lex_src(src)
+  let lxd = lex_dollar_scan(ts)
+  if (lxd.v != "") { return fmt_all([lxd]) }
   let fgn = foreign_scan_ts(ts)
   if (fgn != "") { return fmt_all([mk_verd(tagged("FOREIGN", fgn), 0)]) }
   if (nesting_depth(ts) > nesting_limit()) {

@@ -9199,7 +9199,7 @@ GATE_3107_LOUD_REFUSALS: dict[str, tuple[str, str]] = {
         "recursion (verified totality, syntax-2.0 §7)"),
     "endorse_before_verified": (
         "endorse[web] verified fn f(n: Int) -> Int = n\n",
-        "BAD|unexpected token at top level"),
+        "BAD|expected a top-level declaration, found 'endorse'"),
     "verified_before_endorse": (
         "verified endorse[web] fn f(n: Int) -> Int = n\n",
         "BAD|unexpected declaration"),
