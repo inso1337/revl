@@ -339,6 +339,11 @@ CORPUS = [
     # imported name, a helper or the scaffolding, renamed one rung up at the
     # declaration and at every read (`mangle_module`).
     "module_name_family.rvl",
+    # Issue #3431: a LOCAL/parameter spelled like a name the emitted code
+    # reads bare inside the function (BigInt, revlI64, undefined) inside an
+    # Int-bounded expression, renamed one rung up in both emitters
+    # (`_mangle_local` / `local_ident`), byte-identical.
+    "local_helper_shadow.rvl",
 ]
 
 def _load_reference_emit():
@@ -707,20 +712,14 @@ def test_a_fault_test_section_is_a_reference_refusal_and_a_named_port_marker(
     assert "<<UNSUPPORTED-FAULT-TEST:probe>>" in emitted["emit_ts_src"](ir)
 
 
-def test_local_helper_rename_is_a_recorded_port_divergence(emitted, reference):
-    """Issue #3179: the reference renames a function-local name that would
-    shadow an emitted helper or JS global (`backends/typescript/emit.py::
-    _mangle_local`); the port's `ident` is still the JS-keyword ladder only,
-    like the `EMITTER_RESERVED` rename it also defers, and no CORPUS document
-    binds such a name. This pins the divergence so it cannot widen unseen:
-    when the port learns the rule this test fails, and the document joins the
-    CORPUS instead. In the whole-tree survey
-    (`tools/selfhost_differential_survey.py --tiers ts`) the rule moves three
-    documents from agreement to divergence, each a local the reference now
-    renames: tests/fixtures/emit_go_corpus/accumulator_hygiene.rvl
-    (`_revlSB0` -> `_revlSB0_`), tests/fixtures/emit_go_corpus/inference.rvl
-    and tests/fixtures/emit_wasm_corpus/scratch_names.rvl (`record` ->
-    `record_`)."""
+def test_local_helper_rename_is_ported_and_byte_identical(emitted, reference):
+    """Issue #3179 / #3431: the reference renames a function-local name that
+    would shadow an emitted helper or JS global (`backends/typescript/emit.py::
+    _mangle_local`); the port's `local_ident` now walks the same family (JS
+    keywords, `EMITTER_RESERVED`, the JS globals, the module imports and the
+    `revl*` helper prefix) and escapes one rung of `_`, so both emitters agree
+    byte-for-byte. The corpus document `local_helper_shadow.rvl` pins the same
+    rule inside an Int-bounded expression."""
     from revl import compile_source
     ir = compile_source(
         "pub fn add(a: Int, b: Int) -> Int {\n"
@@ -730,8 +729,7 @@ def test_local_helper_rename_is_a_recorded_port_divergence(emitted, reference):
     want = reference.emit(ir)
     got = emitted["emit_ts_src"](ir)
     assert "const revlI64_ = " in want and "const revlI64 = " not in want
-    assert "const revlI64 = " in got
-    assert got.replace("const revlI64 = ", "const revlI64_ = ") == want
+    assert got == want
 
 
 def test_a_host_identifier_collision_is_refused_by_name(reference):

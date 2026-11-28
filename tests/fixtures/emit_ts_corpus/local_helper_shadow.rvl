@@ -1,0 +1,16 @@
+// Issue #3431: a LOCAL or parameter named like a name the emitted module
+// refers to BARE inside a function - the JS global `BigInt` (checked Int
+// arithmetic reads `BigInt.asIntN`), the helper `revlI64`, the global
+// `undefined` (an Opt test reads it) - is renamed one rung up at its
+// declaration and at every read, in the reference (`_mangle_local`, issue
+// #3179) and in the self-host port (`local_ident`), so both emit the same
+// bytes and the module runs under node. `BigInt_`/`revlI64_`/`undefined_` take
+// the next rung, so the ladder stays injective.
+pub fn big(BigInt: Int) -> Int { return BigInt * 4611686018427387904 }
+pub fn helper_local(revlI64: Int) -> Int { return revlI64 + 1 }
+pub fn opt_read(undefined: Str) -> Bool { return undefined == "x" }
+
+pub fn uses_them(BigInt: Int) -> Int {
+  let revlI64 = BigInt - 1
+  return big(BigInt) + helper_local(revlI64)
+}
