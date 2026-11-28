@@ -36,6 +36,7 @@ import json
 import os
 import signal
 import sys
+import threading
 import time
 import types
 from pathlib import Path
@@ -1238,6 +1239,43 @@ def _loop_has_runnable(loop) -> bool:
         return False
     return any(not timer.cancelled() and timer.when() <= horizon
                for timer in scheduled)
+
+
+def _prompt_line(loop, prompt: str):
+    """One `input()` on a DAEMON thread, bridged to the loop (issue #3437).
+
+    The default executor's workers are non-daemon and joined at interpreter
+    exit, so a prompt blocked on a held-open stdin would hang the process
+    AFTER a signal-driven teardown finished; a daemon thread is not joined,
+    so the process exits once teardown has run. The returned future carries
+    the line, or the read's own error (EOFError) - callers await it raced
+    against the stop event."""
+    fut = loop.create_future()
+
+    def _set_result(value):
+        if not fut.done():
+            fut.set_result(value)
+
+    def _set_exc(exc):
+        if not fut.done():
+            fut.set_exception(exc)
+
+    def _read():
+        try:
+            value = input(prompt)
+        except BaseException as exc:  # noqa: BLE001 - EOFError and friends ride the future
+            try:
+                loop.call_soon_threadsafe(_set_exc, exc)
+            except RuntimeError:  # loop already closed: nothing to report to
+                pass
+        else:
+            try:
+                loop.call_soon_threadsafe(_set_result, value)
+            except RuntimeError:
+                pass
+
+    threading.Thread(target=_read, daemon=True, name="revl-prompt").start()
+    return fut
 
 
 class _Driver:
@@ -2751,10 +2789,28 @@ class _Driver:
                   "`:forward k`, `:bisect <expr>` (see docs/replay.md)")
         self._print_keys()
         loop = asyncio.get_running_loop()
+        # issue #3437: SIGTERM and SIGINT stop the run like `:q` - the same
+        # teardown (every undo in order, then the residue proof), then exit.
+        # The handlers replace the defaults (SIGTERM's terminate, asyncio's
+        # KeyboardInterrupt) while the loop runs, so the signal reaches the
+        # loop instead of killing the process mid-prompt.
+        stop = asyncio.Event()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, stop.set)
+            except (NotImplementedError, RuntimeError, ValueError):  # pragma: no cover - non-unix
+                pass
+        stop_wait = asyncio.ensure_future(stop.wait())
         try:
-            while True:
+            while not stop.is_set():
                 try:
-                    line = (await loop.run_in_executor(None, input, "revl> ")).strip()
+                    read = _prompt_line(loop, "revl> ")
+                    await asyncio.wait({read, stop_wait},
+                                       return_when=asyncio.FIRST_COMPLETED)
+                    if stop.is_set():
+                        print()
+                        break
+                    line = read.result().strip()
                 except (EOFError, KeyboardInterrupt):
                     print()
                     break
@@ -2806,10 +2862,11 @@ class _Driver:
         seen = {p: p.stat().st_mtime_ns for p in paths if p.exists()}
         loop = asyncio.get_running_loop()
         stop = asyncio.Event()
-        try:
-            loop.add_signal_handler(signal.SIGINT, stop.set)
-        except (NotImplementedError, RuntimeError):  # pragma: no cover — non-unix
-            pass
+        for sig in (signal.SIGINT, signal.SIGTERM):  # issue #3437: SIGTERM stops the watch too
+            try:
+                loop.add_signal_handler(sig, stop.set)
+            except (NotImplementedError, RuntimeError, ValueError):  # pragma: no cover — non-unix
+                pass
         try:
             while not stop.is_set():
                 try:
