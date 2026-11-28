@@ -88,6 +88,16 @@ _WITNESSED = [
 _EMISSION = [
     "",
     "   ",
+    # issue #3265: the JS trim() / python strip() whitespace-set boundary.
+    # python strips U+001C..U+001F (and U+0085), JS trim() strips U+FEFF and
+    # not the separators - the classifier must strip with the PY set, so these
+    # all classify identically on both tiers now.
+    "\x1c",
+    "\x1f",
+    "\x85",
+    "\xa0",
+    "\ufeff",
+    "\x1c rm a",   # edge-stripped to a witnessed rm on both tiers
     "rm -rf /",
     "rm -rf .",
     "rm -f secret",
